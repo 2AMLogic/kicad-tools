@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from . import wall_deadline as _wall_deadline
 from .pad_landing import pad_landing_geometry
 from .resource_guard import reraise_if_resource_exhaustion
+from .route_via_gap import route_own_via_slit
 from .search_radius import search_radius_cells
 
 if TYPE_CHECKING:
@@ -4168,6 +4169,9 @@ class CppPathfinder:
             post-checks), or None if route is valid.  Tuple-compatible with
             the historical ``(x, y)`` return.
         """
+        slit = route_own_via_slit(route, self._rules.same_net_trace_gap_band_edge_mm)
+        if slit is not None:
+            return RouteClearanceViolation(*slit, "own_via_trace_gap")
         py_grid = getattr(self._grid, "_py_grid", None)
         if py_grid is None:
             return None

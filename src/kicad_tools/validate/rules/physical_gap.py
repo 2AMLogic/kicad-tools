@@ -28,6 +28,7 @@ though it never calls the kernel module directly.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -73,6 +74,19 @@ class CopperSource:
     # only; "" for tracks/vias/zones).  An index, not the reference or uuid, so
     # two footprints sharing a reference or a hand-duplicated uuid never alias.
     footprint: str = ""
+
+
+@dataclass(frozen=True)
+class CopperGap:
+    """An open facing-edge gap, including the sources that own its two ends."""
+
+    distance: float
+    nets: tuple[str, ...]
+    ids: tuple[str, ...]
+    kinds: set[str]
+    a: Any
+    b: Any
+    layer: str
 
 
 @dataclass(frozen=True)
@@ -647,13 +661,6 @@ def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
     the finding (e.g. a gap the fab does not judge); a returned violation
     replaces any earlier one for the same copper pair when it measures closer.
     """
-    import numpy as np
-    import shapely
-    from shapely import STRtree, union_all
-    from shapely.geometry import LineString
-    from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
-    from shapely.ops import nearest_points  # type: ignore[import-untyped]
-
     if not math.isfinite(minimum_mm) or minimum_mm <= 0:
         raise ValueError("Physical copper gap must be finite and positive")
     sources, unsupported = _collect(pcb)
@@ -670,6 +677,38 @@ def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
                 f"Physical gap coverage incomplete: {detail}",
             )
         )
+    findings: dict[tuple[str, tuple[str, ...], tuple[str, ...]], DRCViolation] = {}
+    for gap in iter_source_gaps(sources, minimum_mm):
+        key = gap.layer, gap.ids, gap.nets
+        if key in findings and (findings[key].actual_value or 0) <= gap.distance:
+            continue
+        violation = make_finding(
+            distance=gap.distance,
+            nets=gap.nets,
+            ids=gap.ids,
+            kinds=gap.kinds,
+            a=gap.a,
+            b=gap.b,
+            layer=gap.layer,
+            ox=ox,
+            oy=oy,
+        )
+        if violation is not None:
+            findings[key] = violation
+    for key in sorted(findings):
+        results.add(findings[key])
+    return results
+
+
+def iter_source_gaps(sources: list[CopperSource], minimum_mm: float) -> Iterator[CopperGap]:
+    """Measure open slits on the copper union, excluding shoulders at actual joins."""
+    import numpy as np
+    import shapely
+    from shapely import STRtree, union_all
+    from shapely.geometry import LineString
+    from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
+    from shapely.ops import nearest_points  # type: ignore[import-untyped]
+
     for layer in sorted({source.layer for source in sources}):
         local = [s for s in sources if s.layer == layer and not s.geometry.is_empty]
         union = union_all([s.geometry for s in local])
@@ -691,7 +730,6 @@ def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
         prepared = np.asarray([s.geometry for s in local], dtype=object)
         shapely.prepare(prepared)
         boundaries = [s.geometry.boundary for s in local]
-        findings: dict[tuple[tuple[str, ...], tuple[str, ...]], DRCViolation] = {}
         # One vectorised bulk query + numpy normal screen replaces ~one STRtree
         # query and a Python dot product per edge (Issue #8843: this pass is
         # now default-on under jlcpcb, and was ~24 s on board 07). Same pair
@@ -767,25 +805,7 @@ def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
                 ids = tuple(sorted({identity for side in owners for identity, _ in side}))
                 nets = tuple(sorted({net for side in owners for _, net in side}))
                 kinds = {local[k].kind for side in owner_indices for k in side}
-                key = ids, nets
-                if key in findings and (findings[key].actual_value or 0) <= distance:
-                    continue
-                violation = make_finding(
-                    distance=distance,
-                    nets=nets,
-                    ids=ids,
-                    kinds=kinds,
-                    a=a,
-                    b=b,
-                    layer=layer,
-                    ox=ox,
-                    oy=oy,
-                )
-                if violation is not None:
-                    findings[key] = violation
-        for key in sorted(findings):
-            results.add(findings[key])
-    return results
+                yield CopperGap(distance, nets, ids, kinds, a, b, layer)
 
 
 def check_physical_copper_gap(
