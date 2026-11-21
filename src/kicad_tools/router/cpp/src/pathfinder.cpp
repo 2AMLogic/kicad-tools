@@ -1738,6 +1738,54 @@ static float landing_cost(const PadBounds& pb, int ax, int ay, int bx, int by,
     return 2.0f * rules.cost_turn + rules.cost_straight * off;
 }
 
+bool Pathfinder::trace_step_vias_clear(const AStarNode& current, const Segment& step,
+                                       float start_x, float start_y) const {
+    if (grid_.stored_via_count() == 0) return true;
+    const float edge = rules_.same_net_trace_gap_band_edge_mm;
+    Grid3D::TraceViaBand band{edge, current.via_from_parent ? 0.0f : static_cast<float>(current.dx),
+                              current.via_from_parent ? 0.0f : static_cast<float>(current.dy)};
+    if (current.parent_idx < 0 && edge > 0.0f) {
+        // The reconstructed trace starts at the pad center. Include its initial
+        // stub and remember its direction when grading the join at this seed.
+        band.incoming_dx = step.x1 - start_x;
+        band.incoming_dy = step.y1 - start_y;
+        if (std::abs(band.incoming_dx) > 0.01f || std::abs(band.incoming_dy) > 0.01f) {
+            const Segment stub{start_x, start_y, step.x1, step.y1, step.width, step.layer, step.net};
+            if (!grid_.search_trace_vias_clear(stub, std::nullopt, 0.0f, {edge})) return false;
+        } else if (band.incoming_dx != 0.0f || band.incoming_dy != 0.0f) {
+            // The tiny stub is omitted. Check the actual first segment, while
+            // retaining the existing foreign-barrel check on the grid step.
+            Segment first = step;
+            first.x1 = start_x;
+            first.y1 = start_y;
+            if (!grid_.search_trace_vias_clear(first, std::nullopt, 0.0f, {edge})) return false;
+            band = {};
+        }
+    }
+    const float clearance = trace_via_clearance(
+        search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+        search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance);
+    return grid_.search_trace_vias_clear(step, clearance, physical_partner_clearance_, band);
+}
+
+bool Pathfinder::goal_stub_vias_clear(const AStarNode& node, float end_x, float end_y,
+                                      int net, float emit_trace_width) const {
+    const float edge = rules_.same_net_trace_gap_band_edge_mm;
+    if (edge <= 0.0f || grid_.stored_via_count() == 0) return true;
+    const auto [wx, wy] = grid_.grid_to_world(node.x, node.y);
+    // An omitted tail still has a round end cap at the last emitted vertex.
+    if (std::abs(end_x - wx) <= 0.01f && std::abs(end_y - wy) <= 0.01f) {
+        end_x = wx;
+        end_y = wy;
+        if (node.via_from_parent) return true;  // the trace ends in its new via
+    }
+    const Segment tail{wx, wy, end_x, end_y,
+                       emit_trace_width > 0.0f ? emit_trace_width : rules_.trace_width, node.layer, net};
+    return grid_.search_trace_vias_clear(tail, std::nullopt, 0.0f,
+        {edge, node.via_from_parent ? 0.0f : static_cast<float>(node.dx),
+               node.via_from_parent ? 0.0f : static_cast<float>(node.dy), true});
+}
+
 RouteResult Pathfinder::route(
     float start_x, float start_y, int start_layer,
     float end_x, float end_y, int end_layer,
@@ -1961,13 +2009,7 @@ RouteResult Pathfinder::route(
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = emit_trace_width > 0 ? emit_trace_width : rules_.trace_width;
                 edge.layer = nlayer; edge.net = net;
-                // Issue #6272: the trace/via floor, not the bare trace floor,
-                // so search and commit agree in either insertion order.
-                if (!grid_.trace_stored_vias_clear(edge,
-                        trace_via_clearance(
-                            search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
-                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
-                        physical_partner_net_, physical_partner_clearance_)) continue;
+                if (!trace_step_vias_clear(current, edge, start_x, start_y)) continue;
                 // Issue #6243: authored per-net minimum on the swept step,
                 // before any pad-exit / sharing / partner relief below.
                 if (grid_.authored_active() &&
@@ -2319,12 +2361,16 @@ RouteResult Pathfinder::route(
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
-                g_scores[neighbor_key] = new_g;
                 float h = heuristic(nx, ny, nlayer, end_gx, end_gy, valid_end_layers[0]);
                 float f = new_g + weight * h;
 
                 AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy,
                                    seq_counter++};
+                // Refuse the incoming edge before recording its score: another
+                // direction can reach the same goal with continuous copper.
+                if (is_in_end_metal &&
+                    !goal_stub_vias_clear(neighbor, end_x, end_y, net, emit_trace_width)) continue;
+                g_scores[neighbor_key] = new_g;
                 open_set.push(neighbor);
             }
         }
@@ -2411,7 +2457,6 @@ RouteResult Pathfinder::route(
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
-                g_scores[neighbor_key] = new_g;
                 float h = heuristic(current.x, current.y, new_layer,
                                     end_gx, end_gy, valid_end_layers[0]);
                 float f = new_g + weight * h;
@@ -2419,6 +2464,10 @@ RouteResult Pathfinder::route(
                 AStarNode neighbor{f, new_g, current.x, current.y, new_layer,
                                    current_idx, true, current.dx, current.dy,
                                    seq_counter++};
+                if (in_end_metal &&
+                    std::find(valid_end_layers.begin(), valid_end_layers.end(), new_layer) != valid_end_layers.end() &&
+                    !goal_stub_vias_clear(neighbor, end_x, end_y, net, emit_trace_width)) continue;
+                g_scores[neighbor_key] = new_g;
                 open_set.push(neighbor);
             }
         }
@@ -2755,13 +2804,7 @@ RouteResult Pathfinder::run_astar_loop() {
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = search_emit_trace_width_ > 0 ? search_emit_trace_width_ : rules_.trace_width;
                 edge.layer = nlayer; edge.net = search_net_;
-                // Issue #6272: the trace/via floor, not the bare trace floor,
-                // so search and commit agree in either insertion order.
-                if (!grid_.trace_stored_vias_clear(edge,
-                        trace_via_clearance(
-                            search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
-                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
-                        physical_partner_net_, physical_partner_clearance_)) continue;
+                if (!trace_step_vias_clear(current, edge, search_start_x_, search_start_y_)) continue;
                 // Issue #6243: authored per-net minimum on the swept step,
                 // before any pad-exit / sharing / partner relief below.
                 if (grid_.authored_active() &&
@@ -3131,13 +3174,16 @@ RouteResult Pathfinder::run_astar_loop() {
             // so the ``new_g < ...`` compare matches the pre-#3309 semantics
             // of the ``find() == end()`` branch.
             if (new_g < g_score_at(nbr_idx)) {
-                set_g_score(nbr_idx, new_g);
                 float h = heuristic(nx, ny, nlayer, search_end_gx_, search_end_gy_,
                                     search_valid_end_layers_[0]);
                 float f = new_g + search_weight_ * h;
 
                 AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy,
                                    search_seq_counter_++};
+                if (is_in_end_metal && !rejected_goals_.count(std::make_tuple(nx, ny, nlayer)) &&
+                    !goal_stub_vias_clear(neighbor, search_end_x_, search_end_y_,
+                                          search_net_, search_emit_trace_width_)) continue;
+                set_g_score(nbr_idx, new_g);
                 search_open_set_.push(neighbor);
             }
         }
@@ -3223,7 +3269,6 @@ RouteResult Pathfinder::run_astar_loop() {
 
             // Issue #3309: flat-array g_score relax for via expansion.
             if (new_g < g_score_at(via_idx)) {
-                set_g_score(via_idx, new_g);
                 float h = heuristic(current.x, current.y, new_layer,
                                     search_end_gx_, search_end_gy_,
                                     search_valid_end_layers_[0]);
@@ -3232,6 +3277,13 @@ RouteResult Pathfinder::run_astar_loop() {
                 AStarNode neighbor{f, new_g, current.x, current.y, new_layer,
                                    current_idx, true, current.dx, current.dy,
                                    search_seq_counter_++};
+                if (in_end_metal &&
+                    std::find(search_valid_end_layers_.begin(), search_valid_end_layers_.end(), new_layer)
+                        != search_valid_end_layers_.end() &&
+                    !rejected_goals_.count(std::make_tuple(current.x, current.y, new_layer)) &&
+                    !goal_stub_vias_clear(neighbor, search_end_x_, search_end_y_,
+                                          search_net_, search_emit_trace_width_)) continue;
+                set_g_score(via_idx, new_g);
                 search_open_set_.push(neighbor);
             }
         }

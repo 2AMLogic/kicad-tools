@@ -1590,17 +1590,28 @@ int Grid3D::segment_pads_pairwise_blocker(const Segment& seg, int exclude_net,
     return blocker;
 }
 
-bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
-                                    int partner_net, float partner_clearance) const {
-    // Issue #5661 (Epic #5509 Phase 3b): the copper verdict is delegated to
-    // the shared kernel rather than a private ``hypot(...) - (s.width +
-    // via.diameter) / 2`` subtraction.  ``ck`` (not ``clearance``, the
-    // namespace's own name) because this function already has a parameter
-    // named ``clearance`` that would otherwise shadow it; the leading ``::``
-    // reaches the namespace regardless of that shadowing.
+// A routed leg is emitted one grid step at a time. Grade the closest
+// approaches of the continuous trace, not the cap of every 0.05 mm step:
+// a trace entering the annulus must be able to cross the open band to join it.
+static bool trace_leaves_via_slit(const Segment& s, const StoredVia& via,
+                                  const Grid3D::TraceViaBand& band) {
+    const double dx = static_cast<double>(s.x2) - s.x1, dy = static_cast<double>(s.y2) - s.y1;
+    const double vx = static_cast<double>(via.x) - s.x1, vy = static_cast<double>(via.y) - s.y1;
+    const double along = vx * dx + vy * dy;
+    if (along <= 0.0 && vx * band.incoming_dx + vy * band.incoming_dy < 0.0)
+        return false;  // the incoming leg was already closer
+    if (!band.terminal && along >= dx * dx + dy * dy)
+        return false;  // still approaching: assess the join on the next step
+    return same_net_segment_gap_in_band(via.x, via.y, via.diameter / 2.0, s, band.edge_mm);
+}
+
+bool Grid3D::search_trace_vias_clear(const Segment& s, std::optional<float> foreign_clearance,
+                                     float partner_clearance, const TraceViaBand& band) const {
+    // Issue #5661: foreign-net copper uses the shared clearance kernel.
     namespace ck = ::router::clearance;
     if (stored_vias_.empty()) return true;
-    const float margin = s.width / 2 + std::max({clearance, partner_clearance, max_pairwise_clearance_});
+    const float margin = s.width / 2 + std::max({foreign_clearance.value_or(0.0f),
+        partner_clearance, max_pairwise_clearance_, band.edge_mm});
     // Issue #5617: vias only -- this runs on every A* neighbour step, and it
     // used to gather and sort the stored-segment bins too, then discard them
     // (docs/diagnostics/issue-5617/phase4-native-astar-profile.md).
@@ -1610,12 +1621,17 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
     const ck::KSegment candidate{s.x1, s.y1, s.x2, s.y2, s.width, s.layer};
     for (size_t i : via_candidates) {
         const auto& via = stored_vias_[i];
-        if (via.net == s.net || s.layer < via.layer_from || s.layer > via.layer_to) continue;
+        if (s.layer < via.layer_from || s.layer > via.layer_to) continue;
+        if (via.net == s.net) {
+            if (s.net > 0 && band.edge_mm > 0.0f && trace_leaves_via_slit(s, via, band)) return false;
+            continue;
+        }
+        if (!foreign_clearance) continue;
         const auto cp = closest_point_on_segment(via.x, via.y, s.x1, s.y1, s.x2, s.y2);
         // Issue #6272: ``clearance`` is the trace/via floor.  A diff-pair
         // partner's intra-pair gap covers trace/trace only, never a drilled
         // barrel, so only the pairwise HV matrix may widen it here.
-        float required = clearance;
+        float required = *foreign_clearance;
         const float pair = pairwise_required_clearance(s.net, via.net);
         if (pair > required && !attach_zone_exempts((via.x + cp.first) / 2,
                 (via.y + cp.second) / 2, s.net, via.net, s.layer)) required = pair;

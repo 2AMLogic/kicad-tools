@@ -174,7 +174,8 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # ``primitives.pad_half_extents``) instead of raw ``width/2``/``height/2``.  A
 # v74 .so under-sizes a non-cardinally rotated pad and silently accepts a leg
 # in the band the Python gate refuses (parity break on such boards).
-_REQUIRED_CPP_BUILD_VERSION = 75
+# v76 (Issue #9273): the native trace search also guards stored same-net vias.
+_REQUIRED_CPP_BUILD_VERSION = 76
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``

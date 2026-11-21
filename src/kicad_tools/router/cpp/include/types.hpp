@@ -398,7 +398,9 @@ namespace router {
 // v75 (Issue #9461): ``own_net_band_step_ok`` builds each own-net pad box
 // from the rotation-aware AABB (twin of Python ``pad_half_extents``); a v74
 // .so under-sizes a non-cardinally rotated pad and accepts a leg in the band.
-constexpr int ROUTER_CPP_BUILD_VERSION = 75;
+// v76 (Issue #9273): single-ended trace searches check their closest approach
+// to an already stored same-net via against the trace-population slit band.
+constexpr int ROUTER_CPP_BUILD_VERSION = 76;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -991,8 +993,9 @@ struct StoredSegment {
 // annulus is the ``gap == 0`` case) and ``gap >= edge`` are both ACCEPTED, with
 // the same 1e-9 float-noise slack.  The caller owns the own-net / layer
 // filter.  A zero-length segment degenerates to point-vs-point distance.
+template <typename TraceSegment>
 inline bool same_net_segment_gap_in_band(double wx, double wy, double annulus_half_mm,
-                                         const StoredSegment& seg, double edge_mm) {
+                                         const TraceSegment& seg, double edge_mm) {
     const double ax = seg.x1, ay = seg.y1;
     const double dx = static_cast<double>(seg.x2) - ax;
     const double dy = static_cast<double>(seg.y2) - ay;
