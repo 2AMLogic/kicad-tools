@@ -38,13 +38,13 @@ from __future__ import annotations
 
 import contextlib
 import math
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
-from kicad_tools.core.board_outline import board_outline_bounds
+from kicad_tools.core.board_outline import board_outline_bounds, outline_graphics
 from kicad_tools.core.sexp_file import save_pcb
 from kicad_tools.geometry.courtyard import _courtyard_polygon, _fp_transform, _side_has_geometry
 from kicad_tools.schema.pcb import PCB, _is_footprint_tag
@@ -63,6 +63,7 @@ from kicad_tools.silkscreen._silk_defaults import (
     SILK_EDGE_CLEARANCE_MM,
 )
 from kicad_tools.validate.rules.silkscreen import (
+    _footprint_text_drawn_angle,
     _iter_graphic_mask_apertures,
     _iter_pad_apertures,
     _iter_via_apertures,
@@ -83,12 +84,9 @@ _EPSILON_MM = 1e-4
 #: (Issue #8628; the value the reporter's post-pass used).
 ASSOCIATION_MARGIN_MM = 0.4
 
-#: Extra spacing (mm) the planner adds to pad/silk clearance because the shared
-#: text box (``_text_bbox_geometry``) under-sizes KiCad's real stroke-font
-#: extents. Measured against ``kicad-cli pcb drc`` on a probe board (10.0.x,
-#: 1 mm / 0.15 mm text beside a 1 mm pad, no clearance): "C22" and "LED4" both
-#: needed 0.225 mm more gap than the box model, independent of text length.
-#: Planner-only; ``kct check`` semantics are unchanged (Issue #8628).
+#: Planner allowance for KiCad DRC's clearance-inflated text extents. Retain
+#: the 0.225 mm margin established by the C22/LED4 pad probes (#8628).
+#: The Gerber measurements in #9515 calibrate ink extents only.
 KICAD_TEXT_EXTENT_SLACK_MM = 0.225
 
 
@@ -119,7 +117,7 @@ def _iter_npth_apertures(pcb: PCB, mask_clearance_mm: float):
                 yield side, geom, label
 
 
-def _iter_drill_obstacles(pcb: PCB):
+def _iter_drill_obstacles(pcb: PCB, include_vias: bool = True):
     """Yield ``(side, geom, label)`` for every drilled hole, per pierced side.
 
     Issue #9054: :func:`_iter_via_apertures` only sees *untented* vias, so a
@@ -131,17 +129,29 @@ def _iter_drill_obstacles(pcb: PCB):
     layers name and a buried via neither (#9076).  Labels are sheet-absolute
     like the other aperture sources: pass the board origin so the drill
     coordinates match the text positions the report prints (#9327).
+
+    With *include_vias* ``False`` via drills are skipped -- the
+    ``legalize_silk`` shared pass keeps references off pads and PTH/NPTH
+    holes but, per the #9795 operator ruling, leaves them free to sit over
+    vias (#9797).
     """
     for geom, label, sides in iter_drill_holes(
         pcb.vias, pcb.footprints, getattr(pcb, "_board_origin", (0.0, 0.0))
     ):
+        if not include_vias and label.startswith("via at"):
+            continue
         label = f"drill {label}"
         for side in ("F", "B"):
             if side in sides:
                 yield side, geom, label
 
 
-def collect_apertures(pcb: PCB, mask_clearance_mm: float) -> dict[str, list[tuple[Any, str]]]:
+def collect_apertures(
+    pcb: PCB,
+    mask_clearance_mm: float,
+    *,
+    include_via_obstacles: bool = True,
+) -> dict[str, list[tuple[Any, str]]]:
     """Every obstacle silk must stay off, as ``{"F"|"B": [(geom, label), ...]}``.
 
     The one definition shared by :meth:`SilkRefPlacer.plan` and
@@ -150,15 +160,21 @@ def collect_apertures(pcb: PCB, mask_clearance_mm: float) -> dict[str, list[tupl
     drill, tented or not (#9054), and ``gr_*``/``fp_*`` shapes drawn on
     ``F.Mask``/``B.Mask`` (#8862). Geometry is board-relative; label
     coordinates are sheet-absolute.
+
+    With *include_via_obstacles* ``False`` both via sources (untented-via
+    mask openings and via drills) are skipped: the ``legalize_silk`` shared
+    pass may leave silk over vias (#9795 ruling, Issue #9797).
     """
-    apertures: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
-    for iterator_result in (
+    sources = [
         _iter_pad_apertures(pcb, mask_clearance_mm),
-        _iter_via_apertures(pcb, mask_clearance_mm),
         _iter_npth_apertures(pcb, mask_clearance_mm),
-        _iter_drill_obstacles(pcb),
+        _iter_drill_obstacles(pcb, include_vias=include_via_obstacles),
         _iter_graphic_mask_apertures(pcb),
-    ):
+    ]
+    if include_via_obstacles:
+        sources.insert(1, _iter_via_apertures(pcb, mask_clearance_mm))
+    apertures: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+    for iterator_result in sources:
         for side, geom, label in iterator_result:
             apertures[side].append((geom, label))
     return apertures
@@ -172,20 +188,12 @@ def references_over_holes(pcb: PCB) -> set[str]:
     leaving every reviewed position that is already clear where it is.  Read
     from the rule's own findings, so it can never name a different set.
     """
-    from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
 
-    rules = DesignRules(
-        min_trace_width_mm=0.0,
-        min_clearance_mm=0.0,
-        min_via_drill_mm=0.0,
-        min_via_diameter_mm=0.0,
-        min_annular_ring_mm=0.0,
-    )
     suffix = " (reference)"
     return {
         violation.items[0][: -len(suffix)]
-        for violation in check_silk_hole_overlap(pcb, rules).violations
+        for violation in check_silk_hole_overlap(pcb).violations
         if violation.items and violation.items[0].endswith(suffix)
     }
 
@@ -246,6 +254,7 @@ def _oriented_text_geometry(
     thickness: float,
     center: tuple[float, float],
     angle: float,
+    justify: Sequence[str] = (),
 ) -> Any:
     """Rotate the complete text envelope, retaining glyph dimensions.
 
@@ -253,7 +262,7 @@ def _oriented_text_geometry(
     the footprint orientation before its position transform). Do not add the
     footprint angle again. KiCad positive angles turn toward negative board y.
     """
-    return _text_bbox_geometry(text, font_size, thickness, center, angle)
+    return _text_bbox_geometry(text, font_size, thickness, center, angle, justify)
 
 
 def _set_text_at(ref_node: SExp, x: float, y: float, angle: float) -> None:
@@ -296,7 +305,8 @@ def _visible_reference(footprint: Footprint):
         ref_text.font_size,
         ref_text.font_thickness,
         center,
-        _read_text_angle(ref_node),
+        _footprint_text_drawn_angle(_read_text_angle(ref_node), ref_text.keep_upright),
+        ref_text.justify,
     )
     if geom is None:
         return None
@@ -351,7 +361,12 @@ def _iter_owned_static_silk(pcb: PCB):
                 continue
             center = transform(fp_text.position)
             geom = _oriented_text_geometry(
-                fp_text.text, fp_text.font_size, fp_text.font_thickness, center, fp_text.rotation
+                fp_text.text,
+                fp_text.font_size,
+                fp_text.font_thickness,
+                center,
+                _footprint_text_drawn_angle(fp_text.rotation, fp_text.keep_upright),
+                fp_text.justify,
             )
             if geom is None:
                 continue
@@ -383,7 +398,12 @@ def _iter_owned_static_silk(pcb: PCB):
         if side is None or text.hidden:
             continue
         geom = _oriented_text_geometry(
-            text.text, text.font_size, text.font_thickness, to_board(text.position), text.rotation
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            to_board(text.position),
+            text.rotation,
+            text.justify,
         )
         if geom is None:
             continue
@@ -498,29 +518,24 @@ def _board_material(pcb: _SilkscreenPCB, Polygon: Any) -> tuple[list, Any | None
         return [], None, pcb.outline_error
     segments = pcb.get_board_outline_segments()
     ox, oy = pcb._board_origin
-    for node in pcb._sexp.children:
-        if node.is_atom:
-            continue
-        if _is_footprint_tag(node.name):
-            for element in node.iter_all():
-                element_layer = element.find("layer")
-                if element_layer is not None and element_layer.get_string(0) == "Edge.Cuts":
-                    return segments, None, "board outline unavailable: footprint-local Edge.Cuts"
-        layer = node.find("layer")
-        if layer is None or layer.get_string(0) != "Edge.Cuts":
-            continue
-        if node.name not in {"gr_line", "gr_rect", "gr_poly"}:
-            return segments, None, f"board outline unavailable: unsupported {node.name}"
-        if node.name in {"gr_line", "gr_rect"}:
+    # Walk the shared outline node stream: top-level gr_* plus footprint-local
+    # Edge.Cuts re-emitted in board coordinates. Curved geometry is still
+    # refused here (the two-chord arc approximation is not accurate enough to
+    # prove containment), exactly as it is for board-level graphics.
+    for node in outline_graphics(pcb._sexp):
+        name = node.tag or ""
+        if name not in {"gr_line", "gr_rect", "gr_poly"}:
+            return segments, None, f"board outline unavailable: unsupported {name}"
+        if name in {"gr_line", "gr_rect"}:
             for endpoint in ("start", "end"):
-                point = node.find(endpoint)
+                point = node.find_child(endpoint)
                 if point is None or len(point.get_atoms()) != 2:
                     return segments, None, "board outline unavailable: malformed endpoint"
                 for coordinate in (point.get_float(0), point.get_float(1)):
                     if coordinate is None or not math.isfinite(coordinate):
                         return segments, None, "board outline unavailable: malformed endpoint"
-        if node.name == "gr_poly":
-            pts = node.find("pts")
+        if name == "gr_poly":
+            pts = node.find_child("pts")
             vertices = []
             if pts is not None:
                 for xy in pts.children:
@@ -534,7 +549,11 @@ def _board_material(pcb: _SilkscreenPCB, Polygon: Any) -> tuple[list, Any | None
                 vertices.pop()
             if len(vertices) < 3:
                 return segments, None, "board outline unavailable: malformed polygon"
-            segments.extend(zip(vertices, vertices[1:] + vertices[:1], strict=True))
+            # The polygon's boundary edges are already in ``segments``:
+            # ``get_board_outline_segments`` is their single owner. Adding
+            # them here too duplicated every edge and the strict
+            # one-mate-per-endpoint walk below saw a branched contour
+            # (#9593 review).
     if not segments:
         return segments, None, "board outline unavailable: missing Edge.Cuts"
     if any(not math.isfinite(v) for segment in segments for point in segment for v in point):
@@ -721,7 +740,7 @@ def _report_fixed_text_over_openings(
 
         def geom_at(point: tuple[float, float], text: Any = text) -> Any:
             return _oriented_text_geometry(
-                text.text, text.font_size, text.font_thickness, point, text.rotation
+                text.text, text.font_size, text.font_thickness, point, text.rotation, text.justify
             )
 
         geom = geom_at(center)
@@ -915,10 +934,19 @@ def _render_svg(
         font_size = ref_text.font_size if ref_text is not None else (1.0, 1.0)
         font_thickness = ref_text.font_thickness if ref_text is not None else 0.15
         text = ref_text.text if ref_text is not None else placement.footprint_ref
+        justify = ref_text.justify if ref_text is not None else ()
 
         if placement.status == "moved":
             old_geom = _oriented_text_geometry(
-                text, font_size, font_thickness, placement.old_position, placement.old_rotation
+                text,
+                font_size,
+                font_thickness,
+                placement.old_position,
+                _footprint_text_drawn_angle(
+                    placement.old_rotation,
+                    ref_text.keep_upright if ref_text is not None else True,
+                ),
+                justify,
             )
             if old_geom is not None:
                 points = " ".join(
@@ -942,7 +970,15 @@ def _render_svg(
             color = "#cc3333"
 
         geom = _oriented_text_geometry(
-            text, font_size, font_thickness, placement.new_position, placement.new_rotation
+            text,
+            font_size,
+            font_thickness,
+            placement.new_position,
+            _footprint_text_drawn_angle(
+                placement.new_rotation,
+                ref_text.keep_upright if ref_text is not None else True,
+            ),
+            justify,
         )
         if geom is not None:
             points = " ".join(f"{x * scale:.2f},{y * scale:.2f}" for x, y in geom.exterior.coords)
@@ -1007,6 +1043,7 @@ class SilkRefPlacer:
         step_mm: float = DEFAULT_STEP_MM,
         allow_rotate: bool = False,
         only: Collection[str] | None = None,
+        include_via_obstacles: bool = True,
     ) -> PlaceSilkRefsResult:
         """Compute a per-reference move plan without mutating the tree.
 
@@ -1025,6 +1062,9 @@ class SilkRefPlacer:
                 (issue #6256). Every other visible reference is left out of
                 the result -- never moved -- but still blocks the planned
                 ones at its current position.
+            include_via_obstacles: If False, via mask openings and via
+                drills are not obstacles: a reference may stay over a via
+                (#9795 ruling, the ``legalize_silk`` shared pass, #9797).
 
         Returns:
             A :class:`PlaceSilkRefsResult` with one :class:`RefPlacement`
@@ -1070,7 +1110,9 @@ class SilkRefPlacer:
         placement_origin = tuple(getattr(pcb, "_board_origin", (0.0, 0.0)))
 
         # --- Static obstacles (never move) ---
-        apertures = collect_apertures(pcb, mask_clearance_mm)
+        apertures = collect_apertures(
+            pcb, mask_clearance_mm, include_via_obstacles=include_via_obstacles
+        )
 
         _report_fixed_text_over_openings(
             pcb,
@@ -1202,7 +1244,8 @@ class SilkRefPlacer:
                         ref_text.font_size,
                         ref_text.font_thickness,
                         point,
-                        rotation,
+                        _footprint_text_drawn_angle(rotation, ref_text.keep_upright),
+                        ref_text.justify,
                     )
                     ok, why = clears(geom)
                     if not ok:

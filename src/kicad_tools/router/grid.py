@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     from kicad_tools.performance import PerformanceConfig
     from kicad_tools.schema.pcb import Zone
 
+    from .body_surcharge import BodySurchargeRegion
     from .cpp_backend import CppGrid
 
 from kicad_tools.acceleration import (
@@ -1319,6 +1320,11 @@ class RoutingGrid:
         # ``add_pad`` so late pad additions re-measure.
         self._component_pitch_cache: dict[str, float] | None = None
 
+        # Issue #9622: lazy cache for the under-body surcharge regions
+        # (``under_body_surcharges``).  Same invalidation contract as the
+        # pitch cache: ``add_pad`` drops it so late pad additions re-derive.
+        self._under_body_cache: list[BodySurchargeRegion] | None = None
+
         # Issue #3371 (P_FP2): Fine-pitch escape regions detected on this
         # board.  Populated by the autorouter (or test fixture) once after
         # all pads are added via :meth:`set_fine_pitch_regions`.  Consumed
@@ -2536,6 +2542,25 @@ class RoutingGrid:
         """
         return tuple(self._pads)
 
+    @property
+    def under_body_surcharges(self) -> list[BodySurchargeRegion]:
+        """Per-component under-body surcharge regions (Issue #9622).
+
+        Computed once from the registered pads via
+        :func:`kicad_tools.router.body_surcharge.compute_under_body_regions`
+        and cached until ``add_pad`` invalidates it.  Empty when the board
+        has no qualifying fine-pitch component, so both engines' hot paths
+        stay dormant.
+
+        Consumers: the pure-Python A* mirror in ``pathfinder.Router`` and
+        the per-net budget adapter in ``cpp_backend.CppPathfinder``.
+        """
+        if self._under_body_cache is None:
+            from .body_surcharge import compute_under_body_regions
+
+            self._under_body_cache = compute_under_body_regions(self)
+        return self._under_body_cache
+
     def _add_pad_unsafe(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
@@ -2567,6 +2592,9 @@ class RoutingGrid:
             self._component_pads.setdefault(pad.component_key, []).append(pad)
             # Issue #3545: pitch cache is stale once a new pad lands.
             self._component_pitch_cache = None
+            # Issue #9622: the under-body regions derive from the same
+            # pad registry, so they go stale with it.
+            self._under_body_cache = None
 
         # Issue #2604 follow-up: remember the pin_pitch this pad was added
         # with so ``find_pad_ref_at`` can reproduce the reduced fine-pitch
@@ -8149,13 +8177,26 @@ class RoutingGrid:
         from kicad_tools.schema.pcb import Zone as ZoneType  # noqa: F401
 
         with self._acquire_lock():
+            # Issue #9597: collect the marks so the paired C++ grid can be
+            # updated in one bulk call -- the C++ A* charges foreign plane
+            # zone cells a cost, so both backends must see the same marks.
+            xs: list[int] = []
+            ys: list[int] = []
+            nets: list[int] = []
             for gx, gy in filled_cells:
                 if 0 <= gx < self.cols and 0 <= gy < self.rows:
                     cell = self.cell_at(layer_index, gy, gx)
                     cell.is_zone = True
                     cell.zone_id = zone.uuid
                     cell.net = zone.net_number
+                    xs.append(gx)
+                    ys.append(gy)
+                    nets.append(int(zone.net_number))
                     # Zone copper is not an obstacle - routes can pass through same-net zones
+            cpp_grid = getattr(self, "_cpp_grid", None)
+            impl = getattr(cpp_grid, "_impl", None) if cpp_grid is not None else None
+            if impl is not None and xs and hasattr(impl, "mark_zone_cells"):
+                impl.mark_zone_cells(xs, ys, [layer_index] * len(xs), nets)
 
     def clear_zones(self, layer_index: int | None = None) -> None:
         """Remove all zone markings from the grid.
@@ -8189,6 +8230,15 @@ class RoutingGrid:
                 keys_to_remove = [k for k in self._zone_ids if k[0] == layer_idx]
                 for key in keys_to_remove:
                     del self._zone_ids[key]
+
+            # Issue #9597: mirror the clear onto the paired C++ grid so its
+            # zone-cost marks cannot outlive the Python ones.  Issue #9826:
+            # same layer scope, and the C++ clear resets ``net`` on unblocked
+            # former zone cells exactly as the loop above does.
+            cpp_grid = getattr(self, "_cpp_grid", None)
+            impl = getattr(cpp_grid, "_impl", None) if cpp_grid is not None else None
+            if impl is not None and hasattr(impl, "clear_zone_cells"):
+                impl.clear_zone_cells(-1 if layer_index is None else int(layer_index))
 
     def get_zone_cells(self, layer_index: int, zone_id: str | None = None) -> set[tuple[int, int]]:
         """Get all cells belonging to zones on a layer.

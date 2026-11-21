@@ -197,7 +197,8 @@ REFUSES_CHAIN_WHEN_GOVERNED = {
 # the rules it places copper under; the pass runs with the option's default
 # whatever the outer run was given.  Issue #8694 reviewed the clearance/layer,
 # pour, post-route and coupled-routing families above; what remains is the
-# search/budget/bus flags (--length-match-groups is now forwarded).  Moving an entry out of this
+# search/budget flags (--length-match-groups is now forwarded, and Issue #9621
+# forwarded the bus family with it).  Moving an entry out of this
 # group means forwarding it AND checking that the lattice completion honours
 # it; do not move one to another group to make this test pass.
 NOT_FORWARDED_UNREVIEWED = {
@@ -207,16 +208,13 @@ NOT_FORWARDED_UNREVIEWED = {
     "--native-zone-clearance",
     "--reserve-skipped-plane-vias",
     "--reserve-pour-only-passives",  # the default; its negation IS forwarded
-    # Coupled routing and buses.
+    "--no-protect-plane-zones",  # the default; --protect-plane-zones IS forwarded (#9597)
+    # Coupled routing.
     "--auto-analog",
     "--diffpair-max-delta",
     "--diffpair-per-pair-timeout",
     "--length-match-diffpairs",
     "--tighten-diffpair-gap",
-    "--bus-routing",
-    "--bus-mode",
-    "--bus-spacing",
-    "--bus-min-width",
     # Search behaviour and budget.
     "--preserve-existing",  # --complete implies it
     "--oracle-rounds",
@@ -297,7 +295,17 @@ MUST_FORWARD = {
     "--no-reserve-plane-layers",
     "--no-auto-pour",
     "--no-optimize",
+    "--protect-plane-zones",  # Issue #9597: hard constraint on zone splits
     "--raw",  # implies --no-optimize, which is what reaches the pass
+    # Issue #9621: the bus family rides together -- the length window is a
+    # no-op without --bus-routing (the pass would only print the
+    # "requires --bus-routing" warning), so the family is forwarded as one
+    # unit and pinned here against regression.
+    "--bus-routing",
+    "--bus-mode",
+    "--bus-spacing",
+    "--bus-min-width",
+    "--group-length-window",
 }
 
 

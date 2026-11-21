@@ -832,28 +832,51 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     dry_run = getattr(args, "dry_run", False)
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
 
+    # Issue #9747: the sidecar a `kct check` on this board would load -- an
+    # explicit --current-paths wins, else auto-discovery like `kct check`
+    # (with --no-current-paths to suppress it) -- feeds prune's planning
+    # inputs too, so a declared net's parallel copper is never cut below its
+    # declared current's IPC-2221 width.
     declared_nets: set[str] | None = None
     required_widths: dict[str, dict[str, float]] = {}
-    specs = None
-    if getattr(args, "current_paths", None):
-        from kicad_tools.pcb_prune import required_widths_for
-        from kicad_tools.router.current_paths import load_current_path_specs
-        from kicad_tools.schema.pcb import PCB
+    specs: list | None = None
+    explicit_sidecar = getattr(args, "current_paths", None)
+    if explicit_sidecar is not None and getattr(args, "no_current_paths", False):
+        print(
+            "Error: --no-current-paths cannot be combined with "
+            f"--current-paths {explicit_sidecar!r}: one disables sidecar "
+            "auto-discovery, the other names a sidecar to load. Pass exactly "
+            "one of them.",
+            file=sys.stderr,
+        )
+        return 1
+    sidecar = Path(explicit_sidecar) if explicit_sidecar else None
+    if sidecar is None and not getattr(args, "no_current_paths", False):
+        from kicad_tools.router.current_paths import discover_current_paths_sidecar
+
+        sidecar = discover_current_paths_sidecar(pcb_path)
+    if sidecar is not None:
+        from kicad_tools.pcb_prune import current_path_declarations
 
         try:
-            specs = load_current_path_specs(args.current_paths)
-            declared_nets = {spec.net_name for spec in specs}
-            # Issue #8368: per copper layer, at the board's stackup copper
-            # weight (outer layers external, inner layers internal).
-            board = PCB.load(pcb_path)
-            for spec in specs:
-                need = required_widths_for(board, spec.thermal_design_current().current_a)
-                have = required_widths.setdefault(spec.net_name, {})
-                for layer, width in need.items():
-                    have[layer] = max(have.get(layer, 0.0), width)
+            specs, declared_nets, required_widths = current_path_declarations(pcb_path, sidecar)
         except Exception as e:
-            print(f"Error loading current paths: {e}", file=sys.stderr)
-            return 1
+            if explicit_sidecar:
+                print(f"Error loading current paths: {e}", file=sys.stderr)
+                return 1
+            # Same degrade-gracefully contract as `kct check`'s auto-discovered
+            # sidecar: warn and prune without declarations.
+            print(
+                f"WARNING: ignoring malformed current-paths sidecar {sidecar}: {e}",
+                file=sys.stderr,
+            )
+        else:
+            if not explicit_sidecar:
+                print(f"[INFO] auto-loaded current-paths sidecar: {sidecar}", file=sys.stderr)
+    if specs is None:
+        # Resolved to nothing: an empty sequence, so prune_board's audit gate
+        # does not re-discover what was suppressed or already probed (#9747).
+        specs = []
 
     nets: list[str] | None = None
     if getattr(args, "nets", None):
@@ -1370,6 +1393,81 @@ def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int
     return 0
 
 
+def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
+    """``pcb reinforce --adopt``: record wires already on the board (#9419).
+
+    Reads each solder-mask strip chain and its anchor holes back into
+    ``<board>.reinforcement.json``. Nothing on the board moves and the board is
+    not written; wires the sidecar already records are kept as they are, so a
+    re-run is a no-op.
+    """
+    from kicad_tools.pcb.reinforcement_sidecar import (
+        adopt_wire_records,
+        already_recorded,
+        load_wires,
+        sidecar_path,
+        write_sidecar,
+    )
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:  # noqa: BLE001 - surfaced to the user, exit 1
+        print(f"Error loading {pcb_path}: {e}", file=sys.stderr)
+        return 1
+    if net_name and pcb.get_net_by_name(net_name) is None:
+        print(f"Error: net {net_name!r} not found on {pcb_path}", file=sys.stderr)
+        return 1
+    path = sidecar_path(pcb_path)
+    try:
+        existing = load_wires(path) if path.is_file() else []
+    except (OSError, ValueError) as e:
+        print(f"Error reading {path}: {e}", file=sys.stderr)
+        return 1
+    adopted = adopt_wire_records(pcb, net_name)
+    fresh = [r for r in adopted.records if not already_recorded(existing, r)]
+    kept = len(adopted.records) - len(fresh)
+    dry_run = getattr(args, "dry_run", False)
+    written = None
+    if fresh and not dry_run:
+        try:
+            written = str(write_sidecar(pcb_path, fresh))
+        except (OSError, ValueError) as e:
+            print(f"Error writing reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+    if getattr(args, "format", "text") == "json":
+        print(
+            json.dumps(
+                {
+                    "sidecar": written,
+                    "adopted": fresh,
+                    "already_recorded": kept,
+                    "unresolved": [
+                        {"net": n, "layer": layer, "at": {"x": at[0], "y": at[1]}, "reason": why}
+                        for n, layer, at, why in adopted.unresolved
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    verb = "Would adopt" if dry_run else "Adopted"
+    print(
+        f"{verb} {len(fresh)} wire(s) from {pcb_path.name}" + (f" -> {written}" if written else "")
+    )
+    if kept:
+        print(f"  {kept} wire(s) already in the sidecar were kept")
+    for record in fresh:
+        a = ", ".join(f"({p['x']:.2f}, {p['y']:.2f})" for p in record["anchors"])
+        print(
+            f"  {record['net']} {record['layer']} {record['length_mm']:.1f} mm "
+            f"{record['wire_gauge_awg']} AWG anchors: {a}"
+        )
+    for n, layer, at, why in adopted.unresolved:
+        print(f"  Not adopted: {n or '?'} {layer} strip at ({at[0]:.2f}, {at[1]:.2f}): {why}")
+    return 0
+
+
 def _run_reinforce_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb reinforce' command (Unit A of #4218; issues #4220, #8742).
 
@@ -1392,6 +1490,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     net_name = getattr(args, "net", None)
     if getattr(args, "list_wires", False):
         return _run_reinforce_list_wires(args, pcb_path, net_name)
+    if getattr(args, "adopt", False):
+        return _run_reinforce_adopt(args, pcb_path, net_name)
     if not net_name:
         print("Error: --net is required", file=sys.stderr)
         return 1
@@ -1497,6 +1597,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             build_pairwise_clearance_table,
             load_pair_bounds,
             load_signed_voltage_map,
+            load_voltage_intervals,
         )
 
         vm_path = Path(voltage_map_arg)
@@ -1512,6 +1613,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 material_group=getattr(args, "material_group", "IIIa"),
                 hv_threshold=getattr(args, "hv_threshold", 30.0),
                 pair_bounds=load_pair_bounds(vm_path) or None,
+                net_intervals=load_voltage_intervals(vm_path),
             )
         except (ValueError, OSError, StandardLookupError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
@@ -1605,6 +1707,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "required_mm": round(r.required_mm, 4),
                 "actual_mm": round(r.actual_mm, 4),
                 "obstacle_net": r.obstacle_net,
+                # Issue #9815: the courtyard an ``anchor_courtyard`` refusal names.
+                "obstacle_footprint": r.obstacle_footprint,
+                "obstacle_side": r.obstacle_side,
             }
             for r in outcome.refused
         ],
@@ -1700,6 +1805,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "required_mm": round(r.required_mm, 4),
                 "actual_mm": round(r.actual_mm, 4),
                 "obstacle_net": r.obstacle_net,
+                # Issue #9649: locate the blocking obstacle (additive).
+                "obstacle_layer": r.obstacle_layer,
+                "obstacle_kind": r.obstacle_kind,
+                "obstacle_at": (
+                    [round(r.obstacle_at[0] + origin_x, 4), round(r.obstacle_at[1] + origin_y, 4)]
+                    if r.obstacle_at is not None
+                    else None
+                ),
             }
             for r in outcome.refused_openings
         ],
@@ -1827,6 +1940,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             detail = (
                 f" [{r.rule}: need {r.required_mm:.3f} mm, have {r.actual_mm:.3f} mm"
                 + (f", vs {r.obstacle_net}" if r.obstacle_net else "")
+                + (f", in {r.obstacle_footprint}" if r.obstacle_footprint else "")
                 + "]"
                 if r.rule
                 else ""
@@ -1861,10 +1975,22 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                         f" width {o.width_mm:.3f} mm" + (" [already present]" if o.existing else "")
                     )
                 for ro in outcome.refused_openings:
+                    at = ""
+                    if ro.obstacle_at is not None:
+                        at = (
+                            f" at ({ro.obstacle_at[0] + origin_x:.2f}, "
+                            f"{ro.obstacle_at[1] + origin_y:.2f})"
+                        )
+                    obstacle = (
+                        f"; obstacle: {ro.obstacle_kind} on {ro.obstacle_layer}{at}"
+                        if ro.obstacle_kind
+                        else ""
+                    )
                     print(
                         f"    opening refused on {ro.copper_layer} [{ro.rule}: need "
                         f"{ro.required_mm:.3f} mm, have {ro.actual_mm:.3f} mm"
                         + (f", vs {ro.obstacle_net}" if ro.obstacle_net else "")
+                        + obstacle
                         + "]"
                     )
                 if outcome.openings:
@@ -2000,12 +2126,13 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                         "from_layer": c.from_layer,
                         "to_layer": c.to_layer,
                         "via_count": c.count,
+                        "tie_via_count": len(c.tie_vias),
                         "drill_mm": c.drill,
                         "pad_diameter_mm": c.pad_diameter,
                         "capacity_a": round(c.current_capacity_a(), 4),
                         "vias": [
                             {"position": _sheet(v[0]), "drill_mm": v[1], "pad_diameter_mm": v[2]}
-                            for v in c.vias
+                            for v in (*c.vias, *c.tie_vias)
                         ],
                     }
                     for c in r.layer_changes
@@ -2065,9 +2192,14 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 narrowest = r.min_width
                 if narrowest is not None:
                     nx, ny = _sheet(narrowest.position)
-                    # Say when the figure is a group's summed width, so
-                    # 2.0 mm is not misread as one trace's width (#8917).
-                    doubled = " (summed parallel group)" if narrowest.parallel_group else ""
+                    # Say when the figure is a group's effective width, so
+                    # 2.0 mm is not misread as one trace's width (#8917) --
+                    # naming the shape: merged same-layer copper, a sum
+                    # across layers, or both at once (#9557, #9560).
+                    if narrowest.parallel_group:
+                        doubled = f" ({narrowest.shape} parallel group)"
+                    else:
+                        doubled = ""
                     print(
                         f"      min width {narrowest.width_mm:.3f} mm on "
                         f"{narrowest.layer} at ({nx:.3f}, {ny:.3f}){doubled}"

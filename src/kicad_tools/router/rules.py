@@ -356,6 +356,14 @@ class DesignRules:
     congestion_threshold: float = 0.3  # Density above which region is congested
     congestion_grid_size: int = 10  # Cells per congestion region
 
+    # Under-body surcharge (Issue #9622, audit row 9): per-cell cost
+    # multiplier on ``cost_straight`` charged to a net with NO pad on a
+    # fine-pitch component for each A* step inside that component's body
+    # bbox on an outer layer (see ``router.body_surcharge``).  Soft and
+    # additive -- it steers non-local trunks around the body while a board
+    # whose only path runs under the body still routes.  0.0 disables.
+    cost_under_body: float = 2.0
+
     # Layer utilization balancing (Issue #2275)
     # Penalizes routing on heavily-utilized layers to encourage spreading traces
     # across all available layers.  The cost added per same-layer move or via
@@ -457,6 +465,14 @@ class DesignRules:
     # Zone routing costs
     cost_zone_same_net: float = 0.1  # Low cost - encourage using zone copper
     cost_zone_clearance: float = 2.0  # Cost near zone boundaries
+    # Issue #9597: per-cell added cost for entering a foreign net's zone on a
+    # plane layer the routing net may use (a class's ``allow_plane_layers``
+    # opt-in, or ``--no-reserve-plane-layers``).  A soft cost, never a block:
+    # KiCad pours flow around a legal trace, but a route that slices a plane
+    # into pieces is almost never what the designer wants, so A* pays this per
+    # grid cell inside the zone and prefers an around-path at equal length.
+    # Both backends charge it (the C++ A* reads the same zone-cell marks).
+    cost_zone_foreign_plane: float = 10.0
 
     # Hard layer constraints (Issue #715)
     # When set, only these layers are allowed for routing (blocks all others)
