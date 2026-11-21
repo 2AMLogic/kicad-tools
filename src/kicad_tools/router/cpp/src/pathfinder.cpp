@@ -1738,6 +1738,12 @@ static float landing_cost(const PadBounds& pb, int ax, int ay, int bx, int by,
     return 2.0f * rules.cost_turn + rules.cost_straight * off;
 }
 
+// Search and reconstruction must agree on which short pad-center stubs
+// become copper on the board.
+static bool emits_trace_segment(float dx, float dy) {
+    return std::abs(dx) > 0.01f || std::abs(dy) > 0.01f;
+}
+
 bool Pathfinder::trace_step_vias_clear(const AStarNode& current, const Segment& step,
                                        float start_x, float start_y) const {
     if (grid_.stored_via_count() == 0) return true;
@@ -1749,7 +1755,7 @@ bool Pathfinder::trace_step_vias_clear(const AStarNode& current, const Segment& 
         // stub and remember its direction when grading the join at this seed.
         band.incoming_dx = step.x1 - start_x;
         band.incoming_dy = step.y1 - start_y;
-        if (std::abs(band.incoming_dx) > 0.01f || std::abs(band.incoming_dy) > 0.01f) {
+        if (emits_trace_segment(band.incoming_dx, band.incoming_dy)) {
             const Segment stub{start_x, start_y, step.x1, step.y1, step.width, step.layer, step.net};
             if (!grid_.search_trace_vias_clear(stub, std::nullopt, 0.0f, {edge})) return false;
         } else if (band.incoming_dx != 0.0f || band.incoming_dy != 0.0f) {
@@ -1774,7 +1780,7 @@ bool Pathfinder::goal_stub_vias_clear(const AStarNode& node, float end_x, float 
     if (edge <= 0.0f || grid_.stored_via_count() == 0) return true;
     const auto [wx, wy] = grid_.grid_to_world(node.x, node.y);
     // An omitted tail still has a round end cap at the last emitted vertex.
-    if (std::abs(end_x - wx) <= 0.01f && std::abs(end_y - wy) <= 0.01f) {
+    if (!emits_trace_segment(end_x - wx, end_y - wy)) {
         end_x = wx;
         end_y = wy;
         if (node.via_from_parent) return true;  // the trace ends in its new via
@@ -3420,7 +3426,7 @@ RouteResult Pathfinder::reconstruct_path(
             current_layer = layer;
         } else {
             // Add segment if position changed
-            if (std::abs(wx - current_x) > 0.01f || std::abs(wy - current_y) > 0.01f) {
+            if (emits_trace_segment(wx - current_x, wy - current_y)) {
                 Segment seg;
                 seg.x1 = current_x;
                 seg.y1 = current_y;
@@ -3438,7 +3444,7 @@ RouteResult Pathfinder::reconstruct_path(
     }
 
     // Final segment to end
-    if (std::abs(end_x - current_x) > 0.01f || std::abs(end_y - current_y) > 0.01f) {
+    if (emits_trace_segment(end_x - current_x, end_y - current_y)) {
         Segment seg;
         seg.x1 = current_x;
         seg.y1 = current_y;

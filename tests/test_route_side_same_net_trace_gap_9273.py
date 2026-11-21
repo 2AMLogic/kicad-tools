@@ -26,7 +26,7 @@ def _route(method, start, end, *, band=EDGE, layer=0, via_span=(0, 3), via_net=N
     rules.trace_width = 0.125  # the emitted per-net override below owns the gap
     rules.trace_clearance = rules.via_clearance = 0.0625
     rules.same_net_trace_gap_band_edge_mm = band
-    finder = router_cpp.Pathfinder(grid, rules, False)
+    finder = router_cpp.Pathfinder(grid, rules, True)
     finder.set_routable_layers([layer])
     result = getattr(finder, method)(
         *start, layer, *end, layer, NET, negotiated_mode=True, emit_trace_width=WIDTH
@@ -80,3 +80,13 @@ def test_an_endpoint_inside_the_band_can_connect_through_the_annulus(method, sta
     # The direct segment ends 0.125 mm short. A legal route visits the
     # annulus and approaches this endpoint from the other side.
     assert _minimum_gap(_route(method, start, end)) <= 1e-9
+
+
+@pytest.mark.parametrize("method", ["route", "route_resumable"])
+def test_diagonal_closest_approach_falls_between_grid_vertices(method):
+    # The normal from (5,5) meets this diagonal halfway through a grid edge.
+    start, end = (2, 2.625), (8, 8.625)
+    original_gap = _minimum_gap(_route(method, start, end, band=0))
+    assert 0 < original_gap < EDGE
+    gap = _minimum_gap(_route(method, start, end))
+    assert gap <= 1e-9 or gap >= EDGE - 1e-9
