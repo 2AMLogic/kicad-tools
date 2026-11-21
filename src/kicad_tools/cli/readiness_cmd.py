@@ -4041,7 +4041,8 @@ def build_report(
         resolved = Path(path).resolve()
         if not resolved.is_file() or not resolved.is_relative_to(root):
             raise ValueError(f"extra readiness input is not a board file: {path}")
-        hashed.add(resolved)
+        if not _is_render_artifact(resolved.relative_to(root)):
+            hashed.add(resolved)
     report["inputs"] = {
         _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
         for path in sorted(hashed)

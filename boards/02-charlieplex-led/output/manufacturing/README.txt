@@ -2,7 +2,7 @@ Manufacturing package for charlieplex_3x3_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-11-20T11:45:40.918145+00:00
+Generated        : 2026-11-21T23:05:35.866719+00:00
 
 Assembly package: BOM and CPL are included.
 
@@ -58,13 +58,13 @@ Copper cleanup
   copper_cleanup: applied; exact-duplicate copper removed: 0 segment(s), 0 via(s)
   step dedupe: applied (segments=0, vias=0)
   step prune: applied (segments_removed=0, ends_snapped=0)
-  step optimize_traces: applied (segments_before=143, segments_after=143, corners_before=114, corners_after=114, layers=2, copper_oz=1.0)
+  step optimize_traces: applied (segments_before=152, segments_after=152, corners_before=122, corners_after=122, layers=2, copper_oz=1.0)
 
 LCSC stock order
 ----------------
   order size: 5 board(s)
   no parts declared as held in operator inventory
-  stock check WARN: Stock not verified: 8 assigned LCSC number(s) found in neither the parts cache nor the offline catalog
+  stock check WARN: 1 LCSC part(s) show insufficient stock for 5 board(s) on unverified data (stale cache/offline catalog)
 
 Assembly prep
 -------------
