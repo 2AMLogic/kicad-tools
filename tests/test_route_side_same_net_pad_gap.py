@@ -34,6 +34,7 @@ from shapely.geometry import Point, box  # noqa: E402
 from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge  # noqa: E402
 from kicad_tools.router.core import RoutingGrid  # noqa: E402
 from kicad_tools.router.escape import EscapeRouter  # noqa: E402
+from kicad_tools.router.lattice.pathfinder import LatticePathfinder  # noqa: E402
 from kicad_tools.router.layers import Layer  # noqa: E402
 from kicad_tools.router.link_router import (  # noqa: E402
     LinkRouteRules,
@@ -137,6 +138,24 @@ def test_candidate_overlapping_pad_is_accepted():
     assert router._can_place_via(
         0.0, y, net=1, foreign_pads=[_own_pad(), _foreign_pad()], clearance=0.05
     )
+
+
+@pytest.mark.parametrize(("shape", "expected"), [("rect", True), ("circle", False)])
+def test_board06_corner_seat_uses_pad_shape_in_both_python_routes(shape, expected):
+    # Board 06 U2.B3: the annulus overlaps the square corner but leaves a
+    # narrow air gap to a circular pad with the same bounding box (#9424).
+    pad = Pad(10, 10, 0.45, 0.45, 1, "SIG", shape=shape)
+    seat = (9.52, 10.34)
+    escape = _router(EDGE_1OZ)
+    outline = [(8, 8), (12, 8), (12, 12), (8, 12)]
+    lattice = LatticePathfinder(outline, [pad], _rules(EDGE_1OZ))
+    escape_ok = escape._can_place_via(*seat, net=pad.net, foreign_pads=[pad])
+    # Allow pad overlap here to exercise the union test independently of the
+    # manufacturer's separate via-in-pad prohibition.
+    lattice_ok = lattice._via_ok_at(
+        seat, pad.net, lattice._fresh_committed(), via_in_pad_override=True
+    )
+    assert (escape_ok, lattice_ok) == (expected, expected)
 
 
 def test_candidate_beyond_edge_is_accepted():

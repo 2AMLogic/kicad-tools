@@ -71,7 +71,7 @@ from ..pairplan.via_pair import ViaPair, via_pair_sites
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules, layer_permitted
-from ..via_clearance import same_net_pad_gap_acceptable, via_annulus_trace_band_ok
+from ..via_clearance import SameNetPadBox, same_net_pad_gap_acceptable, via_annulus_trace_band_ok
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_pt_dist, seg_seg_dist
@@ -2861,14 +2861,7 @@ class LatticePathfinder:
                         point[0],
                         point[1],
                         self.rules.via_diameter,
-                        [
-                            (
-                                pad.x - half_w,
-                                pad.y - half_h,
-                                pad.x + half_w,
-                                pad.y + half_h,
-                            )
-                        ],
+                        [SameNetPadBox.from_router_pad(pad, half_w, half_h)],
                         band_edge_mm,
                     ):
                         return False

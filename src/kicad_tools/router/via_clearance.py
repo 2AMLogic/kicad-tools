@@ -35,10 +35,13 @@ import functools
 import logging
 import math
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
+
+if TYPE_CHECKING:
+    from .primitives import Pad
 
 logger = logging.getLogger(__name__)
 
@@ -559,22 +562,32 @@ class SameNetPadBox(tuple[float, float, float, float]):
         obj.corner_radius = corner_radius
         return obj
 
+    @classmethod
+    def from_router_pad(cls, pad: Pad, half_w: float, half_h: float) -> SameNetPadBox:
+        """Attach the pad's copper corner to its board-space half extents."""
+        return cls(
+            pad.x - half_w,
+            pad.y - half_h,
+            pad.x + half_w,
+            pad.y + half_h,
+            _router_pad_corner_radius(pad),
+        )
 
-def cpp_pad_copper_corner_radius(pad: Any) -> float:
-    """``add_pad``'s ``copper_corner_radius`` for a router ``Pad`` (#9424).
 
-    :func:`pad_union_corner_radius` of the pad's shape, size, residual
-    rotation and roundrect ratio, with "unknown" encoded as ``-1.0`` (the C++
-    side then uses the inscribed stadium).
-    """
-    radius = pad_union_corner_radius(
+def _router_pad_corner_radius(pad: Any) -> float | None:
+    return pad_union_corner_radius(
         getattr(pad, "shape", None),
         getattr(pad, "width", 0.0),
         getattr(pad, "height", 0.0),
         getattr(pad, "rotation", 0.0),
         getattr(pad, "roundrect_rratio", None),
     )
-    return -1.0 if radius is None else float(radius)
+
+
+def cpp_pad_copper_corner_radius(pad: Any) -> float:
+    """Encode the router pad's unknown radius as ``-1.0`` for native ``add_pad``."""
+    radius = _router_pad_corner_radius(pad)
+    return -1.0 if radius is None else radius
 
 
 def _pad_union_ok(
