@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-21
 
+- **Issue #9843** (closed): Accept trailing -q/--quiet on kct zones add, list, batch, hv-keepout, and fill
+- **PR #9860**: fix: accept trailing -q/--quiet on kct zones add, list, batch, hv-keepout, and fill
+- **Issue #9759** (closed): Footprint Edge.Cuts stroke reader still drops fp_poly (arc ...) segments and ignores fp_rect (radius N)
+- **PR #9840**: fix: footprint Edge.Cuts stroke reader honours fp_poly arcs and fp_rect radius
+- **Issue #9817** (closed): redundant_copper_staircase suggests illegal paths (fab-min clearance, no mask check, walks through pad centres)
 - **Issue #9818** (closed): SExp float formatting (.6g) drops sub-10um precision past 100 mm, skewing 45-degree copper
 - **PR #9841**: fix(sexp): keep 0.0001 mm precision when writing new floats past 100 mm
 - **PR #9842**: fix(validate): redundant_copper_staircase suggests only legal shortcuts
