@@ -159,7 +159,9 @@ BOARD07_MASK_NETS = (
 # #9124 drained the PCIE_RX+ face-aligned corner wedge (a tangent via seat)
 # alongside board 07's six; #9208 drained the USB2_D- annulus-vs-own-net-TRACE
 # slit (via re-seated 0.1 mm further out, C++ own-net-trace band check).
-BOARD06_GAP_NETS = ("GND", "MIPI_CLK+")
+# The #9019 taper repair cleared the U4.1 MIPI_CLK+ gap. The two remaining
+# GND gaps share one identity in the seed-42 allowance.
+BOARD06_GAP_NETS = ("GND",)
 
 # Issue #8858 (measured 2026-11-18, pinned image, seed-42 regen at main
 # 304c70e2c): every ``mask_to_copper`` error net signature the regeneration
@@ -546,6 +548,10 @@ def test_board06_measured_mask_population_passes_and_drains():
     assert gate.unexpected_baseline_errors(BOARD06_KEY, rule_counts(found), ids) == {}
     assert gate.unallowed_blocking(BOARD06_KEY, found) == []
     assert gate.stale_allowances(BOARD06_KEY, ids) == []
+    recurring_gap = found + [gap_violation(("MIPI_CLK+",))]
+    assert gate.unallowed_blocking(BOARD06_KEY, recurring_gap) == [
+        ("physical_copper_gap", "MIPI_CLK+")
+    ]
     regressed = found + [mask_violation("ADDR_BUS")]
     assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", "ADDR_BUS")]
     last_mask_net = BOARD06_MASK_NETS[-1]
