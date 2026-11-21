@@ -1,5 +1,6 @@
 """PCB (pcb) subcommand handlers."""
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -826,11 +827,31 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     holds over those body-touching neighbours. Collinear grid-step runs are
     not merged (tracked in issue #8236).
     """
+    with contextlib.ExitStack() as files:
+        return _prune(args, pcb_path, files)
+
+
+def _prune(args, pcb_path: Path, files: contextlib.ExitStack) -> int:
     from kicad_tools.pcb_prune import prune_board
 
     output_format = getattr(args, "format", "text")
     dry_run = getattr(args, "dry_run", False)
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
+
+    def refuse(message: str, *, creepage: dict | None = None, code: int = 1) -> int:
+        print(message, file=sys.stderr)
+        if output_format == "json":
+            error: dict[str, Any] = {
+                "input": str(pcb_path),
+                "output": None,
+                "error": message,
+                "saved": False,
+                "success": False,
+            }
+            if creepage is not None:
+                error["creepage"] = creepage
+            print(json.dumps(error, indent=2))
+        return code
 
     # Issue #9747: the sidecar a `kct check` on this board would load -- an
     # explicit --current-paths wins, else auto-discovery like `kct check`
@@ -842,14 +863,12 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     specs: list | None = None
     explicit_sidecar = getattr(args, "current_paths", None)
     if explicit_sidecar is not None and getattr(args, "no_current_paths", False):
-        print(
+        return refuse(
             "Error: --no-current-paths cannot be combined with "
             f"--current-paths {explicit_sidecar!r}: one disables sidecar "
             "auto-discovery, the other names a sidecar to load. Pass exactly "
-            "one of them.",
-            file=sys.stderr,
+            "one of them."
         )
-        return 1
     sidecar = Path(explicit_sidecar) if explicit_sidecar else None
     if sidecar is None and not getattr(args, "no_current_paths", False):
         from kicad_tools.router.current_paths import discover_current_paths_sidecar
@@ -862,8 +881,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             specs, declared_nets, required_widths = current_path_declarations(pcb_path, sidecar)
         except Exception as e:
             if explicit_sidecar:
-                print(f"Error loading current paths: {e}", file=sys.stderr)
-                return 1
+                return refuse(f"Error loading current paths: {e}")
             # Same degrade-gracefully contract as `kct check`'s auto-discovered
             # sidecar: warn and prune without declarations.
             print(
@@ -882,35 +900,49 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     if getattr(args, "nets", None):
         nets = [n.strip() for n in args.nets.split(",") if n.strip()]
         if not nets:
-            print("Error: --nets requires at least one net name", file=sys.stderr)
-            return 1
+            return refuse("Error: --nets requires at least one net name")
         try:
             from kicad_tools.schema.pcb import PCB as _PCB
 
             known = {n.name for n in _PCB.load(pcb_path).nets.values()}
         except Exception as e:
-            print(f"Error loading PCB: {e}", file=sys.stderr)
-            return 1
+            return refuse(f"Error loading PCB: {e}")
         unknown = sorted(set(nets) - known)
         if unknown:
-            print(f"Error: unknown net(s) in --nets: {', '.join(unknown)}", file=sys.stderr)
-            return 1
+            return refuse(f"Error: unknown net(s) in --nets: {', '.join(unknown)}")
     region, region_err = _parse_region_arg(getattr(args, "region", None))
     if region_err:
-        print(region_err, file=sys.stderr)
-        return 1
+        return refuse(region_err)
 
     # Issue #9640: with --voltage-map each net's plan is also vetted by the
     # whole-board creepage audit, against the board as it was handed in (so
     # successive passes cannot ratchet a pair under its requirement).
     creepage_kwargs: dict[str, Any] = {}
+    candidate = output_path
     if getattr(args, "voltage_map", None):
-        from kicad_tools.cli.route_cmd import _preload_voltage_map
-        from kicad_tools.creepage.output_audit import CreepageAudit
+        import io
+        import tempfile
 
-        rc = _preload_voltage_map(args)
-        if rc != 0:
-            return rc
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+        from kicad_tools.creepage.output_audit import CreepageAudit, staged_board
+
+        diagnostics = io.StringIO()
+        with contextlib.redirect_stderr(diagnostics):
+            rc = _preload_voltage_map(args)
+        if rc:
+            return refuse(diagnostics.getvalue().strip(), code=rc)
+        if diagnostics.getvalue():
+            print(diagnostics.getvalue(), end="", file=sys.stderr)
+        try:
+            if dry_run:
+                scratch = files.enter_context(
+                    tempfile.TemporaryDirectory(prefix="kct_prune_creep_")
+                )
+                candidate = Path(scratch) / pcb_path.name
+            else:
+                candidate = files.enter_context(staged_board(pcb_path, output_path))
+        except OSError as exc:
+            return refuse(f"Error staging PCB: {exc}")
         _audit = CreepageAudit(
             voltage_map=args.voltage_map,
             standard=getattr(args, "creepage_standard", "iec60664"),
@@ -936,7 +968,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         # Issue #8730: one invocation iterates to a fixed point -- a pass can
         # expose more redundant copper (a split container's piece is frozen
         # for the rest of its own pass), so re-plan on the edited board until
-        # a pass changes nothing.  Intermediate passes go to the output file.
+        # a pass changes nothing. In a gated run all passes stay in scratch.
         for pass_no in range(_PRUNE_MAX_PASSES):
             pcb, step = prune_board(
                 src_path,
@@ -974,54 +1006,64 @@ def _run_prune_command(args, pcb_path: Path) -> int:
                 break
             if pass_no + 1 == _PRUNE_MAX_PASSES:
                 break
-            pcb.save(output_path)
-            if output_path != pcb_path:
+            pcb.save(candidate)
+            if candidate == output_path and output_path != pcb_path:
                 _carry_sidecars(pcb_path, output_path)
-            src_path = output_path
+            src_path = candidate
     except Exception as e:
-        print(f"Error pruning PCB: {e}", file=sys.stderr)
-        return 1
+        return refuse(f"Error pruning PCB: {e}")
     assert res is not None  # _PRUNE_MAX_PASSES >= 1, so the loop ran at least once
 
-    # Issue #9640 review: the report is the whole run's, computed once here
-    # from the board this command actually writes.  Folding the passes kept
-    # only the last pass's report, and the last pass of a board-changing run
-    # is the no-op one ("unchanged", no pairs block), so the output lost
-    # creepage_pairs_checked/_unchecked and the before/after counts exactly
-    # when edits landed.  The per-pass gate above is untouched: it still
-    # vets every edit against the input baseline.
+    changed = (
+        res.stats["segments_removed"]
+        or res.stats.get("vias_removed", 0)
+        or res.stats["ends_snapped"]
+    )
+    # Compare the full run, including every fixed-point pass, to the original.
+    # Publish this exact staged serialization only once the census has succeeded.
     if creepage_kwargs:
-        import tempfile
+        from kicad_tools.creepage.output_audit import audit_summary, worse_pairs
 
-        from kicad_tools.creepage.output_audit import audit_summary
+        audit = creepage_kwargs["creepage_audit"]
+        before = creepage_kwargs["creepage_baseline_text"]
+        after = before
+        if changed:
+            after_pcb = pcb
+            if dry_run:
+                from kicad_tools.pcb_prune import apply_plans
+                from kicad_tools.schema.pcb import PCB
 
-        after_pcb = pcb
-        if dry_run:
-            # Nothing is written; report the would-be board instead (this
-            # run's single pass with its kept plans applied).
-            from kicad_tools.pcb_prune import apply_plans
-            from kicad_tools.schema.pcb import PCB
-
-            after_pcb = PCB.load(pcb_path)
-            if res.accepted:
+                after_pcb = PCB.load(pcb_path)
                 apply_plans(after_pcb, res.accepted)
-        with tempfile.TemporaryDirectory(prefix="kct_prune_creep_") as tmp:
-            after_path = Path(tmp) / "final.kicad_pcb"
-            after_pcb.save(after_path)
-            after_text = after_path.read_text()
-        summary = audit_summary(
-            creepage_kwargs["creepage_audit"],
-            creepage_kwargs["creepage_baseline_text"],
-            after_text,
-            creepage_kwargs["creepage_required_pairs"],
-        )
-        whole_run: dict[str, Any] = {
+            try:
+                after_pcb.save(candidate)
+                after = candidate.read_text()
+            except OSError as exc:
+                return refuse(f"Error staging final PCB: {exc}")
+        summary = audit_summary(audit, before, after, creepage_kwargs["creepage_required_pairs"])
+        excess = worse_pairs(audit, before, after)
+        unavailable = "unverifiable" in excess or summary["creepage_pairs_checked"] is None
+        whole_run = {
             "creepage_gate": "active",
-            "creepage_audit": (
-                "unavailable" if summary["creepage_pairs_checked"] is None else "ran"
-            ),
+            "creepage_audit": "unavailable" if unavailable else "ran",
+            **summary,
         }
-        whole_run.update(summary)
+        if unavailable:
+            return refuse(
+                "Refusing to write: the final creepage census could not run. "
+                "Run kct creepage to diagnose.",
+                creepage=whole_run,
+            )
+        if excess:
+            whole_run.update(
+                audit_summary(audit, before, before, creepage_kwargs["creepage_required_pairs"])
+            )
+            whole_run["rejected_pairs"] = sorted(excess)
+            return refuse(
+                "Refusing to write: the final board worsens creepage for "
+                + ", ".join(sorted(excess)),
+                creepage=whole_run,
+            )
         res = _replace(res, creepage=whole_run)
 
     # Quote sheet positions like the sibling commands and kct check (#8954);
@@ -1068,11 +1110,6 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             ]
         return out
 
-    changed = (
-        res.stats["segments_removed"]
-        or res.stats.get("vias_removed", 0)
-        or res.stats["ends_snapped"]
-    )
     result: dict[str, Any] = {
         "input": str(pcb_path),
         "output": str(output_path) if not dry_run else None,
@@ -1097,9 +1134,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     if res.creepage is not None:
         result["creepage"] = res.creepage
         result["rejected_by_creepage"] = [_net(p) for p in res.creepage_rejected]
-    if output_format == "json":
-        print(json.dumps(result, indent=2))
-    else:
+    if output_format != "json":
         print(f"PCB Prune {'(dry run)' if dry_run else ''}")
         print(f"  Input:  {pcb_path}")
         print(f"  DRC:    {res.drc_note}")
@@ -1139,33 +1174,31 @@ def _run_prune_command(args, pcb_path: Path) -> int:
                 f"min width {u['min_width']} mm, {len(u['segments'])} segments)"
             )
 
-    if res.creepage is not None and res.creepage.get("creepage_audit") == "unavailable":
-        print(
-            "Refusing to write: the creepage audit could not run, so no edit was "
-            "verified against --voltage-map. Run `kct creepage` on the board to see why.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if not dry_run and changed and not res.drc_verified and not getattr(args, "unverified", False):
-        # Never write an unverified edit by default (issue #8216 review).
-        print(
+    if not dry_run and changed and not res.drc_verified and not unverified:
+        return refuse(
             "Refusing to write: edits were not verified with kicad-cli DRC "
             f"({res.drc_note}). Re-run with kicad-cli available, or pass "
-            "--unverified to write anyway.",
-            file=sys.stderr,
+            "--unverified to write anyway."
         )
-        return 1
 
-    if not dry_run and changed:
+    saved = bool(not dry_run and changed)
+    if saved:
         try:
-            pcb.save(output_path)
-            _carry_sidecars(pcb_path, output_path)
+            if creepage_kwargs:
+                from kicad_tools.creepage.output_audit import publish_board
+
+                _carry_sidecars(pcb_path, output_path)
+                publish_board(candidate, output_path)
+            else:
+                pcb.save(output_path)
+                _carry_sidecars(pcb_path, output_path)
             if output_format == "text":
                 print(f"\n  Saved to: {output_path}")
         except Exception as e:
-            print(f"Error saving PCB: {e}", file=sys.stderr)
-            return 1
+            return refuse(f"Error saving PCB: {e}")
+    if output_format == "json":
+        result.update(success=True, saved=saved, written_to=str(output_path) if saved else None)
+        print(json.dumps(result, indent=2))
 
     if changed:
         # Issue #9331: a collinear merge or snap moves copper that waiver keys

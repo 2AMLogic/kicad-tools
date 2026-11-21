@@ -14,8 +14,9 @@ import contextlib
 import hashlib
 import io
 import json
+import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,6 +30,35 @@ from typing import Any
 SHORTFALL_STEP_MM = 0.0001
 
 _CACHE_LIMIT = 16
+
+
+@contextlib.contextmanager
+def staged_board(input_path: Path, destination: Path) -> Iterator[Path]:
+    """Stage copper beside its destination until the final census accepts it."""
+    from kicad_tools.sidecars import PROJECT_SIDECAR_SUFFIXES, stage_project_rules
+
+    with tempfile.TemporaryDirectory(
+        prefix=".kct-creepage-", dir=destination.resolve().parent
+    ) as tmp:
+        candidate = Path(tmp) / destination.name
+        # Refill and prune's next DRC pass must use the rules that will actually
+        # sit beside the published board. Existing output sidecars take priority.
+        rules = []
+        for suffix in PROJECT_SIDECAR_SUFFIXES:
+            rule = destination.with_suffix(suffix)
+            if not rule.is_file():
+                rule = input_path.with_suffix(suffix)
+            if rule.is_file():
+                rules.append(rule)
+        stage_project_rules(rules, candidate)
+        yield candidate
+
+
+def publish_board(candidate: Path, destination: Path) -> None:
+    """Atomically publish the bytes that passed the audit, preserving file mode."""
+    if destination.exists():
+        shutil.copymode(destination, candidate)
+    candidate.replace(destination.resolve())
 
 
 def pair_key(pair: Mapping[str, Any]) -> str:

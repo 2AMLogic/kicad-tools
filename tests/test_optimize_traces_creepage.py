@@ -384,10 +384,14 @@ def test_ranged_ghost_net_pairs_are_reported_unchecked(pcb, tmp_path, capsys):
     assert {frozenset(("GHOST", "HV")), frozenset(("GHOST", "LV"))} <= ghost
 
 
-def test_finished_board_that_regresses_after_refill_reverts_to_input(pcb, vmap, tmp_path, capsys):
+@pytest.mark.parametrize("in_place", [False, True])
+def test_finished_board_that_regresses_after_refill_reverts_to_input(
+    pcb, vmap, tmp_path, capsys, in_place
+):
     """A post-write step (zone refill) that breaks creepage must not ship."""
-    out = tmp_path / "out.kicad_pcb"
-    original = pcb.read_text()
+    out = pcb if in_place else tmp_path / "out.kicad_pcb"
+    original = pcb.read_bytes().replace(b"\n", b"\r\n")
+    pcb.write_bytes(original)
 
     def fake_refill(path):
         text = Path(path).read_text()
@@ -395,10 +399,39 @@ def test_finished_board_that_regresses_after_refill_reverts_to_input(pcb, vmap, 
         Path(path).write_text(text[: text.rindex(")")] + _seg(110.5, 98, 110.5, 108, 2) + ")\n")
         return True, None
 
-    with patch("kicad_tools.cli.optimize_cmd._refill_written_board", side_effect=fake_refill):
-        assert main([str(pcb), "-o", str(out), "--format", "json", "--voltage-map", str(vmap)]) == 0
+    output_args = [] if in_place else ["-o", str(out)]
+    with (
+        patch("kicad_tools.cli.optimize_cmd._refill_written_board", side_effect=fake_refill),
+        patch("kicad_tools.cli.optimize_cmd._run_pour_slot_pass", return_value={"spread": 3}),
+    ):
+        assert (
+            main(
+                [
+                    str(pcb),
+                    *output_args,
+                    "--pour-slots",
+                    "--format",
+                    "json",
+                    "--voltage-map",
+                    str(vmap),
+                ]
+            )
+            == 0
+        )
     data = json.loads(capsys.readouterr().out)
-    assert out.read_text() == original
+    assert out.read_bytes() == pcb.read_bytes() == original
+    assert data["success"] and data["saved"] == (not in_place)
+    assert data["written_to"] == (None if in_place else str(out))
+    assert data["zones_refilled"] is None and data["pour_slots"] is None
+    stats = data["stats"]
+    assert stats["nets_touched"] == [] and stats["nets_kept"] == 0
+    for key in ("length", "segments", "corners"):
+        suffix = "_mm" if key == "length" else ""
+        assert stats[f"{key}_before{suffix}"] == stats[f"{key}_after{suffix}"]
+    assert all(
+        not row["changed"] and row["length_after_mm"] == row["length_before_mm"]
+        for row in stats["per_net"]
+    )
     assert data["creepage_final_reverted_to_input"] is True
     assert data["output_verify_rolled_back"]["creepage_final"]
     assert data["creepage_unwaived_failures_after"] == data["creepage_unwaived_failures_before"]
@@ -449,3 +482,18 @@ def test_final_census_failure_preserves_boards(
     assert rc != 0
     assert data["success"] is False and data["saved"] is False
     assert data["creepage_audit"] == "unavailable"
+
+
+def test_unavailable_census_in_dry_run_returns_one_failure_document(pcb, vmap, capsys, monkeypatch):
+    from kicad_tools.cli import main as public_main
+    from kicad_tools.creepage.output_audit import CreepageAudit
+
+    original = pcb.read_bytes()
+    monkeypatch.setattr(CreepageAudit, "census", lambda self, text: None)
+    rc = public_main(
+        ["optimize-traces", str(pcb), "--dry-run", "--voltage-map", str(vmap), "--format", "json"]
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert rc != 0 and not data["success"] and not data["saved"]
+    assert data["creepage_audit"] == "unavailable"
+    assert pcb.read_bytes() == original

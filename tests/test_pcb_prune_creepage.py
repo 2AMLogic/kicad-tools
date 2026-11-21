@@ -252,3 +252,35 @@ def test_failed_final_cli_census_does_not_publish_intermediate_pass(
     assert rc != 0
     assert data["success"] is False and data["saved"] is False
     assert data["creepage"]["creepage_audit"] == "unavailable"
+
+
+def test_cli_rejects_a_worse_final_board_after_an_accepted_pass(board, vmap, capsys, monkeypatch):
+    from kicad_tools import pcb_prune
+    from kicad_tools.creepage.output_audit import CreepageAudit
+
+    board.write_text(board.read_text().replace("110.5 98", "110.5 80"))
+    original = board.read_text()
+    passes = []
+    real_prune = pcb_prune.prune_board
+    real_census = CreepageAudit.census
+
+    def record_pass(*args, **kwargs):
+        result = real_prune(*args, **kwargs)
+        passes.append(result[1].stats["ends_snapped"])
+        return result
+
+    def worse_final_census(audit, text):
+        rows = real_census(audit, text)
+        if len(passes) >= 2 and text != original:
+            return [
+                dict(row, **{"pass": False, "margin_mm": -1.0, "waived": False}) for row in rows
+            ]
+        return rows
+
+    monkeypatch.setattr(pcb_prune, "prune_board", record_pass)
+    monkeypatch.setattr(CreepageAudit, "census", worse_final_census)
+    rc, data = _cli(board, "--voltage-map", str(vmap), capsys=capsys)
+    assert rc != 0 and not data["success"] and not data["saved"]
+    assert passes == [1, 0] and board.read_text() == original
+    assert data["creepage"]["rejected_pairs"] == ["HV|LV|F.Cu"]
+    assert data["creepage"]["creepage_unwaived_failures_after"] == 0
