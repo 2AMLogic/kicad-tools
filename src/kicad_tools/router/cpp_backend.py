@@ -169,7 +169,12 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # PLANE layers only and a foreign zone on any other layer is blocked (Python
 # parity) -- plus a layer-scoped ``clear_zone_cells(layer)`` that zeroes the
 # net of unblocked former zone cells like ``RoutingGrid.clear_zones``.
-_REQUIRED_CPP_BUILD_VERSION = 74
+# v75 (Issue #9461): the own-net slit-band gate (``own_net_band_step_ok``)
+# builds each pad box from the rotation-aware board-space AABB (the twin of
+# ``primitives.pad_half_extents``) instead of raw ``width/2``/``height/2``.  A
+# v74 .so under-sizes a non-cardinally rotated pad and silently accepts a leg
+# in the band the Python gate refuses (parity break on such boards).
+_REQUIRED_CPP_BUILD_VERSION = 75
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -970,7 +975,10 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
     """Format a human-readable backend status string for CLI output.
 
     Provides actionable guidance when the C++ backend is not available,
-    especially when routing large grids where performance matters.
+    especially when routing large grids where performance matters.  When the
+    extension is absent the status also names the capability gap, not just the
+    speed gap: the differential-pair centerline trunk rescue (Issue #5786) is
+    C++-only, and without it the router falls back to independent legs.
 
     Args:
         backend_info: Dictionary from get_backend_info().
@@ -992,6 +1000,10 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
 
     if not available:
         parts.append("C++ backend not installed")
+        parts.append(
+            "Differential-pair centerline trunk rescue requires C++. "
+            "If the coupled search fails, routing falls back to independent legs"
+        )
         if grid_cells > LARGE_GRID_THRESHOLD:
             parts.append(
                 f"WARNING: Routing {grid_cells:,} grid cells with Python backend "
@@ -3712,19 +3724,19 @@ class CppPathfinder:
         ) -> list[tuple[float, float, float, float]]:
             hit = _band_cache.get(layer_value)
             if hit is None:
+                from .primitives import pad_half_extents
+
                 py_grid = getattr(self._grid, "_py_grid", None)
+                # Issue #9461: board-space AABB (rotation-aware), the same box
+                # ``Router._own_net_band_bboxes`` and the native gate build.
                 hit = [
-                    (
-                        p.x - p.width / 2.0,
-                        p.y - p.height / 2.0,
-                        p.x + p.width / 2.0,
-                        p.y + p.height / 2.0,
-                    )
+                    (p.x - hw, p.y - hh, p.x + hw, p.y + hh)
                     for p in (py_grid._pads if py_grid is not None else ())
                     if p.net == net
                     and not p.through_hole
                     and not getattr(p, "drill", 0.0) > 0
                     and p.layer.value == layer_value
+                    for hw, hh in (pad_half_extents(p),)
                 ]
                 _band_cache[layer_value] = hit
             return hit
