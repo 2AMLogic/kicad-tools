@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, router_cpp
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerDefinition, LayerStack, LayerType
 from kicad_tools.router.neck_down import band_safe_width
@@ -36,11 +36,6 @@ from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.via_clearance import same_net_segment_pad_gap_acceptable
-
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
 
 EDGE = 0.15  # jlcpcb pad_spacing detection edge (#9016)
 WIDTH = 0.2
@@ -216,7 +211,7 @@ class TestRoutedFixture:
         # it a via.
         assert not guarded.vias
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_python_and_cpp_emit_identical_routes(self) -> None:
         grid, rules, a, b = _fixture(EDGE)
         py_route = Router(grid, rules, diagonal_routing=True).route(a, b)
@@ -228,7 +223,7 @@ class TestRoutedFixture:
         assert not _band_segments(cpp_route, [_pad(6.0, 2.47)])
         assert _signature(cpp_route) == _signature(py_route)
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_cpp_guard_off_without_an_edge(self) -> None:
         grid, rules, a, b = _fixture(None)
         py_route = Router(grid, rules, diagonal_routing=True).route(a, b)
@@ -238,7 +233,7 @@ class TestRoutedFixture:
         assert _signature(cpp_route) == _signature(py_route)
 
 
-@requires_cpp
+@pytest.mark.requires_router_cpp
 class TestStepPredicateParity:
     """Native ``own_net_band_step_ok`` == Python ``_own_net_band_step_ok``."""
 
@@ -312,7 +307,7 @@ class TestRoutedPlanarity:
         # The fix is the exemption, not the gate-off retry: no fallback ran.
         assert router._own_net_band_fallbacks == 0
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     @pytest.mark.parametrize("three_pads", [False, True], ids=["two-pad", "three-pad"])
     def test_guarded_route_keeps_vias_zero_cpp(self, three_pads: bool) -> None:
         grid, rules, a, b, pads = self._fixture(three_pads)
@@ -372,7 +367,7 @@ class TestBandSafeTaperWidths:
         router._convert_path_to_route(self._row_path(), route, a, b)
         _assert_band_safe_taper(route, c)
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_cpp_conversion_keeps_base_width_over_the_pad(self) -> None:
         _grid, rules, a, b, c = self._fixture()
         pitches = {"U1": 0.6}
@@ -498,7 +493,7 @@ class TestBandFallbackRetry:
         assert router._own_net_band_fallbacks == 0
         assert not any("gate suspended" in r.message for r in caplog.records)
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_retry_rescues_a_gate_blocked_net_and_counts_cpp(self, caplog) -> None:
         grid, rules, a, b = self._wall_fixture(EDGE)
         cpp = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
@@ -508,7 +503,7 @@ class TestBandFallbackRetry:
         assert getattr(cpp, "_own_net_band_fallbacks", 0) == 1
         assert any("gate suspended" in r.message for r in caplog.records)
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_no_retry_when_the_gate_never_refused_cpp(self, caplog) -> None:
         grid, rules, a, b = self._walled_target_fixture(EDGE)
         cpp = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
@@ -517,3 +512,134 @@ class TestBandFallbackRetry:
         assert route is None, "the foreign wall is unroutable regardless of the gate"
         assert getattr(cpp, "_own_net_band_fallbacks", 0) == 0
         assert not any("gate suspended" in r.message for r in caplog.records)
+
+    # Issue #9696: the gate-off retry must agree with Python's deadline
+    # guard -- a first search that ended on its wall-clock budget is a
+    # drained budget, not a gate-caused failure, so neither backend may
+    # retry it gate-off (Python: ``last_route_deadline_hit``; C++ wrapper:
+    # ``failure_reason == FAILURE_TIMEOUT``).  Outcomes are injected so the
+    # tests are independent of machine speed.
+
+    def test_deadline_hit_first_search_is_not_retried_gate_off_python(
+        self, monkeypatch, caplog
+    ) -> None:
+        grid, rules, a, b = self._wall_fixture(EDGE)
+        router = Router(grid, rules, diagonal_routing=True)
+        calls: list[int] = []
+
+        def fake_route_impl(*args, **kwargs):
+            calls.append(1)
+            router._own_net_band_refusals += 1  # the gate DID refuse a step ...
+            router.last_route_deadline_hit = True  # ... but the budget drained
+            return None
+
+        monkeypatch.setattr(router, "_route_impl", fake_route_impl)
+        with caplog.at_level(logging.INFO, logger="kicad_tools.router.pathfinder"):
+            route = router.route(a, b)
+        assert route is None
+        assert len(calls) == 1, "a deadline-hit search must not be retried gate-off"
+        assert router._own_net_band_fallbacks == 0
+        assert not any("gate suspended" in r.message for r in caplog.records)
+
+    def test_exhaustion_with_refusals_retries_exactly_once_python(
+        self, monkeypatch, caplog
+    ) -> None:
+        grid, rules, a, b = self._wall_fixture(EDGE)
+        router = Router(grid, rules, diagonal_routing=True)
+        calls: list[int] = []
+
+        def fake_route_impl(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                router._own_net_band_refusals += 1
+            router.last_route_deadline_hit = False
+            return None
+
+        monkeypatch.setattr(router, "_route_impl", fake_route_impl)
+        with caplog.at_level(logging.INFO, logger="kicad_tools.router.pathfinder"):
+            route = router.route(a, b)
+        assert route is None
+        assert len(calls) == 2, "ordinary no-path exhaustion retries gate-off exactly once"
+        assert router._own_net_band_fallbacks == 1
+        assert any("gate suspended" in r.message for r in caplog.records)
+
+    @pytest.mark.requires_router_cpp
+    def test_deadline_hit_first_search_is_not_retried_gate_off_cpp(
+        self, monkeypatch, caplog
+    ) -> None:
+        grid, rules, a, b = self._wall_fixture(EDGE)
+        cpp = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+        impl = cpp._impl
+        calls: list[tuple] = []
+
+        class DeadlineHitImpl:
+            """Real native pathfinder with the search outcome injected.
+
+            ``route_resumable`` reports a wall-clock ``FAILURE_TIMEOUT``
+            (the deadline guard's trigger) while the band counter reports
+            one refusal, so the retry predicate sees exactly the divergent
+            case: drained budget AND a gate refusal.
+            """
+
+            def __getattr__(self, name):
+                return getattr(impl, name)
+
+            def route_resumable(self, *args, **kwargs):
+                calls.append(args)
+                return SimpleNamespace(
+                    success=False,
+                    failure_reason=int(router_cpp.FAILURE_TIMEOUT),
+                )
+
+            def own_net_band_rejects(self) -> int:
+                return 1
+
+        cpp._impl = DeadlineHitImpl()
+        with caplog.at_level(logging.INFO, logger="kicad_tools.router.cpp_backend"):
+            route = cpp.route(a, b)
+        assert route is None
+        assert len(calls) == 1, "a deadline-hit search must not be retried gate-off"
+        assert getattr(cpp, "_own_net_band_fallbacks", 0) == 0
+        assert not any("gate suspended" in r.message for r in caplog.records)
+
+    @pytest.mark.requires_router_cpp
+    def test_exhaustion_with_refusals_retries_exactly_once_cpp(self, monkeypatch, caplog) -> None:
+        grid, rules, a, b = self._wall_fixture(EDGE)
+        cpp = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+        impl = cpp._impl
+        calls: list[tuple] = []
+        fallback_calls: list[int] = []
+
+        class NoPathImpl:
+            """Real native pathfinder with every search ending exhausted.
+
+            ``FAILURE_NO_PATH`` is ordinary open-set exhaustion -- the
+            deadline guard must NOT suppress the one gate-off retry.
+            """
+
+            def __getattr__(self, name):
+                return getattr(impl, name)
+
+            def route_resumable(self, *args, **kwargs):
+                calls.append(args)
+                return SimpleNamespace(
+                    success=False,
+                    failure_reason=int(router_cpp.FAILURE_NO_PATH),
+                )
+
+            def own_net_band_rejects(self) -> int:
+                return 1
+
+        def fake_fallback(*args, **kwargs):
+            fallback_calls.append(1)
+            return None
+
+        cpp._impl = NoPathImpl()
+        monkeypatch.setattr(cpp, "_try_python_fallback", fake_fallback)
+        with caplog.at_level(logging.INFO, logger="kicad_tools.router.cpp_backend"):
+            route = cpp.route(a, b)
+        assert route is None
+        assert len(calls) == 2, "ordinary no-path exhaustion retries gate-off exactly once"
+        assert getattr(cpp, "_own_net_band_fallbacks", 0) == 1
+        assert sum("gate suspended" in r.message for r in caplog.records) == 1
+        assert len(fallback_calls) == 1
