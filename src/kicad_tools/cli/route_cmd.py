@@ -23526,7 +23526,7 @@ def _chain_complete_argv(
       ``--net-class-map`` -- the fab tier, determinism and net classes.
     * ``--complete-exclude-nets`` -- rebuilt from ``excluded_nets``.
     * ``--per-net-iterations``, ``--deterministic-budget`` -- the search budget.
-    * ``--quiet``, ``--skip-drc``, ``--allow-offboard``,
+    * ``--quiet``, ``--skip-drc``, ``--no-silk-fix``, ``--allow-offboard``,
       ``--no-plane-via-reservation``, ``--no-reserve-pour-only-passives``.
     * ``--layers`` (Issue #8674) unless it is ``auto``: the operator's stack is
       passed by name, so the inner pass builds the same explicit stack instead
@@ -23678,6 +23678,7 @@ def _chain_complete_argv(
     for flag, attr in (
         ("--quiet", "quiet"),
         ("--skip-drc", "skip_drc"),
+        ("--no-silk-fix", "no_silk_fix"),
         ("--allow-offboard", "allow_offboard"),
         ("--no-plane-via-reservation", "no_plane_via_reservation"),
         ("--deterministic-budget", "deterministic_budget"),

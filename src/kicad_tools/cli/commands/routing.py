@@ -652,6 +652,7 @@ def run_route_auto_command(args) -> int:
     working = passes.working
 
     routed_so_far = 0
+    silk_fix_doc = None
     try:
         for net_name in net_list:
             skip_doc = passes.resumed_skip(net_name)
@@ -677,25 +678,26 @@ def run_route_auto_command(args) -> int:
             if net_rc != 0:
                 overall_rc = 1
         passes.finish()
+        # A resume that skipped every net or a run which wrote no copper
+        # must preserve the seeded board, including its authored silk.
+        wrote_output = (
+            passes.accepted_pass > 0
+            if passes.active
+            else any(d.get("output_path") for d in net_docs)
+        )
+        if wrote_output and args.output and not getattr(args, "no_silk_fix", False):
+            from ..silk_default_pass import run_default_silk_pass
+
+            quiet = bool(getattr(args, "quiet", False) or getattr(args, "global_quiet", False))
+            with stdout_to_stderr_when(as_json):
+                silk_fix_doc = run_default_silk_pass(
+                    args.output, mfr=_resolve_route_auto_mfr(args.output), quiet=quiet or as_json
+                )
     except BaseException:
         if gate is not None:
             gate.abort()
             _unstage_args()
         raise
-    # Issue #9799 (#9795 phase 3): the shared silk legalisation pass runs
-    # once on the surviving output -- after per-net rollback has settled
-    # what ships and before gate.finish() judges it.  With a lint gate the
-    # staged board is judged and promoted with these same bytes; with no
-    # --output nothing was published, so the input stays untouched.
-    silk_fix_doc = None
-    if args.output and not getattr(args, "no_silk_fix", False):
-        from ..silk_default_pass import run_default_silk_pass
-
-        quiet = bool(getattr(args, "quiet", False) or getattr(args, "global_quiet", False))
-        with stdout_to_stderr_when(as_json):
-            silk_fix_doc = run_default_silk_pass(
-                args.output, mfr=_resolve_route_auto_mfr(args.output), quiet=quiet or as_json
-            )
     gate_doc = None
     if gate is not None:
         try:
@@ -707,10 +709,15 @@ def run_route_auto_command(args) -> int:
         gate_doc = outcome.to_dict()
         if outcome.rolled_back:
             # None of this run's copper shipped.
+            silk_fix_doc = None
             for entry in net_docs:
                 if entry.get("success") and not entry.get("resumed"):
                     entry["success"] = False
                     entry["lint_gate_rolled_back"] = True
+        elif silk_fix_doc is not None:
+            silk_fix_doc = gate.relocate(silk_fix_doc)
+    if silk_fix_doc and silk_fix_doc.get("total_fixed"):
+        passes.finish_checkpoint(args.output)
     if as_json:
         _emit(net_docs, overall_rc, gate_doc, silk_fix_doc)
     return overall_rc
@@ -981,6 +988,21 @@ class _RouteAutoPasses:
         if self.writer is not None:
             self._offer(score, pass_index, text, label)
         return False
+
+    def finish_checkpoint(self, output: str) -> None:
+        """Keep the selected best checkpoint in sync with final silk edits."""
+        from pathlib import Path
+
+        from kicad_tools.core.atomic_write import atomic_write_text
+
+        if self.writer is None or self.writer.best_pass != self.accepted_pass:
+            return
+        published = Path(output)
+        try:
+            if self.writer.path.resolve() != published.resolve():
+                atomic_write_text(self.writer.path, published.read_text(encoding="utf-8"))
+        except OSError as e:
+            self._err(f"  checkpoint: final silk update failed ({e}); continuing")
 
     def finish(self) -> None:
         import os

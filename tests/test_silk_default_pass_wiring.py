@@ -315,6 +315,22 @@ def test_route_auto_without_output_leaves_input_alone(tmp_path: Path, capsys):
     assert board.read_bytes() == before
 
 
+def test_failed_route_auto_preserves_previous_output(tmp_path: Path, capsys):
+    board = _defect_board(tmp_path / "run")
+    out = _defect_board(tmp_path / "previous")
+    before = out.read_bytes()
+
+    rc = kct_main(
+        ["route-auto", str(board), "--net", "MISSING", "-o", str(out), "--format", "json"]
+    )
+
+    assert rc == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["nets"][0]["success"] is False
+    assert "silk_fix" not in doc
+    assert out.read_bytes() == before
+
+
 # ---------------------------------------------------------------------------
 # kct optimize-placement
 # ---------------------------------------------------------------------------
