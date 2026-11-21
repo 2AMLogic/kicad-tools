@@ -522,6 +522,32 @@ def non_hv_nets_from_path(path: str | Path) -> dict[str, str]:
     return non_hv_nets_from_dict(json.loads(Path(path).read_text()))
 
 
+def load_voltage_sidecar(path: str | Path) -> dict[Any, Any]:
+    """Read a ``--voltage-map`` JSON sidecar and require a top-level object (#9755).
+
+    Shared read + object-check preamble of every voltage-map file loader
+    (:func:`kicad_tools.placement.hv_domains.load_voltage_map` and the
+    ``kicad_tools.router.pairwise_clearance`` ``load_*`` family), so the
+    non-object error contract lives in exactly one place.  Parsing stays with
+    the callers (:func:`voltage_map_from_dict` /
+    :func:`pair_bounds_from_dict`).
+
+    Returns the raw decoded object.
+
+    Raises:
+        ValueError: if the file's top level is not a JSON object
+            (:func:`voltage_map_from_dict` itself raises :class:`TypeError`
+            for a non-dict; the file loaders keep the historical
+            :class:`ValueError` their CLI callers catch).
+    """
+    import json
+
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    return raw
+
+
 def mains_suspect_nets(pcb: PCB) -> list[str]:
     """Sorted board net names that strongly imply a mains/HV conductor.
 
@@ -792,7 +818,8 @@ class CreepageReport:
     # are not counted or used.
     netless_items: int = 0
     # Board thickness used by cross-face bore/edge paths (#9704) and where it
-    # came from (``"stackup"`` strata sum | ``"default"`` 1.6 mm).  ``None``
+    # came from (``"stackup"`` strata sum | ``"general"`` header
+    # ``(general (thickness X))``, #9746 | ``"default"`` 1.6 mm).  ``None``
     # (and omitted from JSON) when the census evaluated no cross-face candidate
     # -- e.g. every conductor sits on one face -- so such boards serialise
     # exactly as before #9704.
@@ -1723,13 +1750,18 @@ def _board_thickness_mm(pcb: PCB) -> tuple[float, str]:
 
     The stackup strata sum (copper + dielectric + mask, every ``StackupLayer``
     carries its mm) is the board's total thickness when the file declares one;
-    otherwise the 1.6 mm two-layer default is assumed and reported as such.
+    otherwise the board header's ``(general (thickness X))`` is used (#9746);
+    only when neither is present is the 1.6 mm two-layer default assumed and
+    reported as such.
     """
     setup = getattr(pcb, "setup", None)
     stackup = getattr(setup, "stackup", None) or []
     total = sum(float(getattr(stratum, "thickness", 0.0) or 0.0) for stratum in stackup)
     if total > 0.0:
         return total, "stackup"
+    general = getattr(pcb, "general_thickness", None)
+    if general is not None and float(general) > 0.0:
+        return float(general), "general"
     return _DEFAULT_BOARD_THICKNESS_MM, "default"
 
 
