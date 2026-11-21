@@ -550,6 +550,22 @@ def test_overlap_via_spanning_shortcut_with_contact_reported():
     assert "(0.00, 0.00) -> (1.10, 1.10) -> (6.00, 1.10)" in finding.message
 
 
+@pytest.mark.parametrize("via_y", [0.08, -0.02])
+def test_spanning_shortcut_preserves_via_along_removed_segment(tmp_path, via_y):
+    """The second via touches the first trace between its endpoints.
+
+    At y=-0.02 only the trace's width reaches the via. The diagonal
+    shortcut would preserve the first via and disconnect the second.
+    """
+    body = _seg_text(_SPAN_CHAIN, width=0.2)
+    body += '  (via (at 1.0 0.55) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n'
+    (finding,) = _checker_stairs(_board(tmp_path, body))
+    assert "(0.00, 0.00) -> (1.10, 1.10) -> (6.00, 1.10)" in finding.message
+
+    body += f'  (via (at 0.6 {via_y}) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1))\n'
+    assert _checker_stairs(_board(tmp_path, body)) == []
+
+
 # The interior node joins the via by overlap where BOTH candidates miss the
 # disc: the spanning shortcut is ineligible and the pieces keep their own
 # findings (the pre-#9848 outcome).
@@ -558,9 +574,13 @@ _MISS_CHAIN = [(0, 0), (0.5, 1.5), (2, 1.5), (2.5, 3), (6, 3)]
 
 def test_overlap_via_missing_contact_falls_back_to_pieces():
     segs = [_Seg(a, b) for a, b in zip(_MISS_CHAIN, _MISS_CHAIN[1:], strict=False)]
-    (finding,) = _stair_findings(_run(segs, [_Via((0.6, 1.42))]))
+    split_via = _Via((0.6, 1.42))
+    (finding,) = _stair_findings(_run(segs, [split_via]))
     assert finding.location == (0.5, 1.5)
     assert "(0.50, 1.50) -> (2.00, 3.00) -> (6.00, 3.00)" in finding.message
+    # The shorter piece must also preserve contacts along its own copper.
+    mid_segment_via = _Via((2.25, 2.25), size=0.4)
+    assert _stair_findings(_run(segs, [split_via, mid_segment_via])) == []
 
 
 def test_overlap_pad_bypass_rejected_falls_back_to_pieces(tmp_path):
