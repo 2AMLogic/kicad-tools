@@ -209,3 +209,46 @@ def test_cli_missing_voltage_map_is_an_error(board, tmp_path, capsys):
     rc = main(["pcb", "prune", str(board), "--voltage-map", str(tmp_path / "nope.json")])
     assert rc == 1
     assert "voltage-map file not found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("destination", ["in_place", "existing", "new"])
+def test_failed_final_cli_census_does_not_publish_intermediate_pass(
+    board, vmap, tmp_path, capsys, monkeypatch, destination
+):
+    from kicad_tools import pcb_prune
+    from kicad_tools.creepage.output_audit import CreepageAudit
+
+    # Move the HV pad far enough away that pass one accepts the LV snap.
+    original = board.read_bytes().replace(b"110.5 98", b"110.5 80").replace(b"\n", b"\r\n")
+    board.write_bytes(original)
+    out = board if destination == "in_place" else tmp_path / "out.kicad_pcb"
+    prior_output = b"previous output\r\n"
+    if destination == "existing":
+        out.write_bytes(prior_output)
+    passes = []
+    real_prune = pcb_prune.prune_board
+    real_census = CreepageAudit.census
+
+    def record_pass(*args, **kwargs):
+        pcb, result = real_prune(*args, **kwargs)
+        passes.append(result.stats["ends_snapped"])
+        return pcb, result
+
+    def failed_final_census(audit, text):
+        if len(passes) >= 2:
+            return None
+        return real_census(audit, text)
+
+    monkeypatch.setattr(pcb_prune, "prune_board", record_pass)
+    monkeypatch.setattr(CreepageAudit, "census", failed_final_census)
+    output_args = [] if destination == "in_place" else ["-o", str(out)]
+    rc, data = _cli(board, "--voltage-map", str(vmap), *output_args, capsys=capsys)
+    assert passes == [1, 0]
+    assert board.read_bytes() == original
+    if destination == "existing":
+        assert out.read_bytes() == prior_output
+    elif destination == "new":
+        assert not out.exists()
+    assert rc != 0
+    assert data["success"] is False and data["saved"] is False
+    assert data["creepage"]["creepage_audit"] == "unavailable"

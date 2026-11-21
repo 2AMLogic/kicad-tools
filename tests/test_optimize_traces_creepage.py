@@ -402,3 +402,50 @@ def test_finished_board_that_regresses_after_refill_reverts_to_input(pcb, vmap, 
     assert data["creepage_final_reverted_to_input"] is True
     assert data["output_verify_rolled_back"]["creepage_final"]
     assert data["creepage_unwaived_failures_after"] == data["creepage_unwaived_failures_before"]
+
+
+@pytest.mark.parametrize("failure", ["baseline", "after_refill"])
+@pytest.mark.parametrize("destination", ["in_place", "existing", "new"])
+def test_final_census_failure_preserves_boards(
+    pcb, vmap, tmp_path, capsys, monkeypatch, failure, destination
+):
+    from kicad_tools.cli import main as public_main
+    from kicad_tools.creepage.output_audit import CreepageAudit
+
+    original = pcb.read_bytes().replace(b"\n", b"\r\n")
+    pcb.write_bytes(original)
+    baseline = pcb.read_text()
+    out = pcb if destination == "in_place" else tmp_path / "out.kicad_pcb"
+    prior_output = b"previous output\r\n"
+    if destination == "existing":
+        out.write_bytes(prior_output)
+    finished = False
+    real_census = CreepageAudit.census
+
+    def finish(path):
+        nonlocal finished
+        assert Path(path).read_text() != baseline
+        finished = True
+        return True, None
+
+    def failed_census(audit, text):
+        if finished and (text == baseline) == (failure == "baseline"):
+            return None
+        return real_census(audit, text)
+
+    monkeypatch.setattr("kicad_tools.cli.optimize_cmd._refill_written_board", finish)
+    monkeypatch.setattr(CreepageAudit, "census", failed_census)
+    args = ["optimize-traces", str(pcb), "--format", "json", "--voltage-map", str(vmap)]
+    if destination != "in_place":
+        args.extend(["-o", str(out)])
+    rc = public_main(args)
+    data = json.loads(capsys.readouterr().out)
+    assert finished
+    assert pcb.read_bytes() == original
+    if destination == "existing":
+        assert out.read_bytes() == prior_output
+    elif destination == "new":
+        assert not out.exists()
+    assert rc != 0
+    assert data["success"] is False and data["saved"] is False
+    assert data["creepage_audit"] == "unavailable"
