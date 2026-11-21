@@ -3043,9 +3043,11 @@ def _add_pcb_parser(subparsers) -> None:
         "--no-current-paths",
         dest="no_current_paths",
         action="store_true",
-        help="Suppress current-paths sidecar auto-discovery for 'pcb prune', "
-        "restoring the pre-#9747 behaviour of ignoring a sidecar unless "
-        "--current-paths names one. Cannot be combined with --current-paths.",
+        help="Suppress current-paths sidecar auto-discovery for 'pcb prune': "
+        "no sidecar is loaded (only an explicit --current-paths names one), "
+        "so declared nets get no declared-current width test in planning "
+        "and the post-plan current-path audit gate (Issue #8687) is "
+        "disabled. Cannot be combined with --current-paths.",
     )
     pcb_prune.add_argument(
         "--wide",
@@ -4337,12 +4339,19 @@ def _add_zones_parser(subparsers) -> None:
     zones_add.add_argument("--min-thickness", type=float, default=0.25, help="Min thickness in mm")
     zones_add.add_argument("-v", "--verbose", action="store_true")
     zones_add.add_argument("--dry-run", action="store_true")
+    zones_add.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_add)
 
     # zones list
     zones_list = zones_subparsers.add_parser("list", help="List existing zones")
     zones_list.add_argument("pcb", help="Path to .kicad_pcb file")
     zones_list.add_argument("--format", choices=["text", "json"], default="text")
+    zones_list.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Accepted for consistency; the listing is always printed",
+    )
 
     # zones batch
     zones_batch = zones_subparsers.add_parser("batch", help="Add multiple zones from spec")
@@ -4360,6 +4369,7 @@ def _add_zones_parser(subparsers) -> None:
     zones_batch.add_argument("--clearance", type=float, default=0.3, help="Clearance in mm")
     zones_batch.add_argument("-v", "--verbose", action="store_true")
     zones_batch.add_argument("--dry-run", action="store_true")
+    zones_batch.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_batch)
 
     # zones hv-keepout
@@ -4398,6 +4408,7 @@ def _add_zones_parser(subparsers) -> None:
     )
     zones_hv.add_argument("-v", "--verbose", action="store_true")
     zones_hv.add_argument("--dry-run", action="store_true")
+    zones_hv.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_hv)
 
     # zones fill
@@ -4409,6 +4420,7 @@ def _add_zones_parser(subparsers) -> None:
     zones_fill.add_argument(
         "--dry-run", action="store_true", help="Show what would be done, no output"
     )
+    zones_fill.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_fill)
 
 
@@ -5355,7 +5367,16 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
         type=float,
         default=None,
         metavar="MM",
-        help="Silk-to-hole clearance for --clip-to-holes (default: the silk_hole_overlap rule's, 0)",
+        help="Silk-to-hole clearance for --clip-to-holes/--all (default: the silk_hole_overlap rule's, 0)",
+    )
+    fix_silk_parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "One shared legalisation pass (legalize_silk, #9795 phase 1): widen, "
+            "rescale, thicken, clip off pads and PTH/NPTH holes (vias untouched) "
+            "and relocate obscured references"
+        ),
     )
     fix_silk_parser.add_argument(
         "--min-width",
