@@ -63,7 +63,6 @@ def _load_board_recipe_module():
 BOARD07_MASK_NETS: tuple[str, ...] = (
     # Issue #8858 (board 07 increment, seed-42 regen): every ``mask_to_copper``
     # error net signature the regeneration carries, each entry citing #8858.
-    "+1V8",
     "A0",
     "A2",
     "A3",

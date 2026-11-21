@@ -571,6 +571,13 @@ CI-exact environment — the pinned image `kicad/kicad@sha256:18693567392b…`
 The remaining two skips stay: `check_routed_drc.py` (the release surface)
 and `board_05_unattended.py` await their own per-board increments.
 
+Issue #9436 changes the Board 07 fixture baseline. On both routed boards from
+the match-group and end-to-end jobs, the pinned KiCad 10.0.6 check identified
+18 solid own-pour connections on 18 distinct `+1V8` pads. All 18 are info.
+The other 36 blocking findings cover the remaining 18 net signatures. Removing
+the `+1V8` entry makes a future blocking finding on that net fail the gate.
+[CI artifacts for run 44792709384](https://github.com/2AMLogic/kicad-tools/actions/runs/44792709384)
+
 
 ## 2026-11-18: the release-surface increment — `check_routed_drc.py` drops the skip
 
