@@ -203,6 +203,27 @@ def test_unmodeled_via_pad_on_the_bar_rejects_the_group():
     assert not result.ok
 
 
+@pytest.mark.parametrize(
+    "extra_via_y,expected", [(None, "resolved"), (42, "ambiguous"), (46, "resolved")]
+)
+def test_via_group_contact_uses_width_of_touched_span(extra_via_y, expected):
+    pcb = PCB.create(layers=2)
+    _add_pad_footprint(pcb, ref="J1", x=30, y=10, net="P")
+    _add_pad_footprint(pcb, ref="J2", x=200, y=48, net="P")
+    for y in (40, 44, 48):
+        pcb.add_via(30, y, size=PAD, drill=DRILL, net="P")
+    pcb.add_trace((30, 10), (30, 48), width=1, layer="F.Cu", net="P")
+    pcb.add_trace((30, 40), (30, 44), width=4, layer="B.Cu", net="P")
+    pcb.add_trace((30, 44), (30, 48), width=1, layer="B.Cu", net="P")
+    pcb.add_trace((30, 48), (200, 48), width=3, layer="B.Cu", net="P")
+    if extra_via_y is not None:
+        pcb.add_via(32, extra_via_y, size=1, drill=0.5, net="P")
+
+    result = resolve_current_path(pcb, _spec())
+    assert result.status == expected
+    assert [change.count for change in result.layer_changes] == ([3] if result.ok else [])
+
+
 def test_bars_on_both_layers_continuing_are_a_doubled_run_not_a_change():
     """Both layers run on past both ends: stitching, never a credited change."""
     pcb = PCB.create(layers=2)

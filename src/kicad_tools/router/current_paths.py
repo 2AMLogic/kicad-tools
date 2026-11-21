@@ -2375,8 +2375,8 @@ def _mid_path_via_groups(
             continue
         if len(exits[la]) >= 2 and len(exits[lb]) >= 2:
             continue
-        bars = [
-            edge.segment
+        bar_spans = [
+            (pair, edge.segment)
             for layer in (la, lb)
             for pair in group_pairs
             for edge in links[layer][pair]
@@ -2388,11 +2388,10 @@ def _mid_path_via_groups(
             for layer in spans[pos]
             if layer not in (la, lb)
         ]
-        if not _via_group_contacts_modeled(
-            pcb, net_name, group, group_pairs, bars, (la, lb), other_rings
-        ):
+        if not _via_group_contacts_modeled(pcb, net_name, group, bar_spans, other_rings):
             continue
-        result.append(_ViaArray(nodes, edges, list({id(s): s for s in bars}.values())))
+        members = {id(segment): segment for _, segment in bar_spans}
+        result.append(_ViaArray(nodes, edges, list(members.values())))
     return result
 
 
@@ -2423,15 +2422,13 @@ def _via_group_contacts_modeled(
     pcb: PCB,
     net_name: str,
     group: set[tuple[float, float]],
-    pairs: list[frozenset[tuple[float, float]]],
-    bars: list[Segment],
-    layers: tuple[str, str],
+    bar_spans: list[tuple[frozenset[tuple[float, float]], Segment]],
     other_rings: list[tuple[tuple[float, float], str, float]],
 ) -> bool:
     """Reject unmodeled bar contacts and any contact on another ring (#9725).
 
     The bar span between two linked barrels is the straight stroke between
-    their centres at the narrowest bar width on that layer. A non-member
+    their centres at the width of the segment that joins them. A non-member
     same-net via whose pad reaches it, or a same-net pad whose copper does,
     is a contact the centreline graph never saw: the group is not proved.
     """
@@ -2440,12 +2437,10 @@ def _via_group_contacts_modeled(
     from kicad_tools.validate.rules.clearance import _pad_on_layer, _pad_polygon
 
     net = pcb.get_net_by_name(net_name)
-    strokes = []
-    for layer in layers:
-        width = min((s.width for s in bars if s.layer == layer), default=0.0)
-        for pair in pairs:
-            a, b = tuple(pair)
-            strokes.append((layer, LineString((a, b)).buffer(width / 2.0)))
+    strokes = [
+        (segment.layer, LineString(tuple(pair)).buffer(segment.width / 2.0))
+        for pair, segment in bar_spans
+    ]
     # An offset track can touch a ring without meeting its centre. Pads
     # and non-member vias must clear these same rings as well as the bars.
     for pos, layer, radius in other_rings:
