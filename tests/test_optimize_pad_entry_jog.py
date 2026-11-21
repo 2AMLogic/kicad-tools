@@ -158,15 +158,33 @@ class TestMaskEscapeGuard9748:
         # Line through the pad centre at slope 0.6 (atan(0.6) ~ 31 degrees),
         # ending inside the copper past the centre.
         off_axis = [_seg(99.1, 49.46, 100.3, 50.18)]
-        assert rewrite_keeps_pad_escapes(on_axis, on_axis, zones, TOL)
-        assert not rewrite_keeps_pad_escapes(on_axis, off_axis, zones, TOL)
+        assert rewrite_keeps_pad_escapes(on_axis, on_axis, zones, TOL, 0.0)
+        assert not rewrite_keeps_pad_escapes(on_axis, off_axis, zones, TOL, 0.0)
+
+    def test_without_policy_the_pre_9748_guard_applies(self):
+        """Out-of-scope modes (no ``--drc-aware --mfr``) pass no clearance:
+        the re-angled terminating entry keeps its old exemption."""
+        zones = [_zone_9748()]
+        on_axis = [_seg(97.0, 50.0, 100.2, 50.0)]
+        off_axis = [_seg(99.1, 49.46, 100.3, 50.18)]
+        assert rewrite_keeps_pad_escapes(on_axis, off_axis, zones, TOL)
+        assert rewrite_keeps_pad_escapes(on_axis, off_axis, zones, TOL, None)
+
+    def test_clean_entry_does_not_depend_on_endpoint_order(self):
+        """One 45-degree crossing is clean whichever end KiCad stores first."""
+        zones = [_zone_9748()]
+        old = [_seg(97.0, 50.0, 100.0, 50.0)]
+        forward = [_seg(102.0, 52.0, 100.0, 50.0)]
+        reverse = [_seg(100.0, 50.0, 102.0, 52.0)]
+        assert rewrite_keeps_pad_escapes(old, forward, zones, TOL, 0.09)
+        assert rewrite_keeps_pad_escapes(old, reverse, zones, TOL, 0.09)
 
     def test_clean_45_degree_entry_is_still_allowed(self):
         """45 degrees is the one-clean-entry boundary, not a veto."""
         zones = [_zone_9748()]
         old = [_seg(97.0, 52.05, 100.0, 50.0)]
         new = [_seg(98.0, 52.05, 100.05, 50.0)]
-        assert rewrite_keeps_pad_escapes(old, new, zones, TOL)
+        assert rewrite_keeps_pad_escapes(old, new, zones, TOL, 0.0)
 
     def test_same_net_track_not_moved_into_mask_clearance_band(self):
         """The #9748 disjoint class: a same-net track slid to ~0.05 mm from a

@@ -316,27 +316,24 @@ def _drc_summary_suffix(stats, cli_drc: dict | None) -> str:
         "screened": "incl. mask_to_copper screen",
         "not_evaluated": "mask_to_copper not evaluated",
     }.get(getattr(stats, "drc_mask_screen", "off"))
+    tail = f"; {mask_note}" if mask_note else ""
     if cli_regressed:
         # Never claim "no regressions" on the in-process referee alone.
-        return "(in-process referee only; see kicad-cli line below)"
+        return f"(in-process referee only; see kicad-cli line below{tail})"
     if cli_unchecked:
-        return "(DRC referee does not evaluate project .kicad_dru rules)"
+        return f"(DRC referee does not evaluate project .kicad_dru rules{tail})"
     if delta > 0 and cli_drc and cli_drc["available"]:
         # kicad-cli arbitrated and found no regression: the in-process delta
         # is advisory only, never "N new errors".
         return (
             f"(in-process advisory: {delta} more; kicad-cli reports no regression, "
-            f"{stats.nets_rolled_back} nets rolled back)"
+            f"{stats.nets_rolled_back} nets rolled back{tail})"
         )
     if delta > 0:
-        suffix = f"({delta} new errors, {stats.nets_rolled_back} nets rolled back)"
-        return f"{suffix}; {mask_note}" if mask_note else suffix
+        return f"({delta} new errors, {stats.nets_rolled_back} nets rolled back{tail})"
     if stats.nets_rolled_back > 0:
-        suffix = f"(no regressions, {stats.nets_rolled_back} nets rolled back)"
-        return f"{suffix[:-1]}; {mask_note})" if mask_note else suffix
-    if mask_note:
-        return f"(no regressions; {mask_note})"
-    return "(no regressions)"
+        return f"(no regressions, {stats.nets_rolled_back} nets rolled back{tail})"
+    return f"(no regressions{tail})"
 
 
 def _kicad_cli_drc_counts(board: Path, rules_from: Path | None = None) -> dict[str, int] | None:
@@ -1148,12 +1145,13 @@ Examples:
     # either -- the same policy floor ``kct check --mfr`` enforces.
     from kicad_tools.validate.mask_copper import default_request_for_manufacturer
 
-    mask_request = default_request_for_manufacturer(args.mfr)
-    mask_clearance = (
-        mask_request.policy.clearance_mm
-        if mask_request is not None and mask_request.policy is not None
-        else 0.0
-    )
+    # Only ``--drc-aware`` runs with a manufacturer are in scope; every other
+    # mode keeps the pre-#9748 guard (``None``).
+    mask_clearance: float | None = None
+    if args.drc_aware and args.mfr:
+        mask_request = default_request_for_manufacturer(args.mfr)
+        if mask_request is not None and mask_request.policy is not None:
+            mask_clearance = mask_request.policy.clearance_mm
     optimizer.set_pad_zones(
         [
             dataclasses.replace(zone, x=zone.x + origin_x, y=zone.y + origin_y)

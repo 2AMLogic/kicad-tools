@@ -313,3 +313,46 @@ class TestSummaryLine:
         suffix = _drc_summary_suffix(stats, None)
         assert "2 nets rolled back" in suffix
         assert "mask_to_copper not evaluated" in suffix
+
+
+class TestSummaryLineWithCliSummary:
+    """Every return path of the suffix carries the mask status (Issue #9748)."""
+
+    @staticmethod
+    def _stats(*, before=3, after=3, rolled=0):
+        stats = OptimizationStats(drc_errors_before=before, drc_errors_after=after)
+        stats.drc_mask_screen = "not_evaluated"
+        stats.nets_rolled_back = rolled
+        return stats
+
+    @staticmethod
+    def _cli(*, available=True, regression=False, dru=False):
+        return {
+            "available": available,
+            "clearance_errors_before": 0,
+            "clearance_errors_after": 1 if regression else 0,
+            "regression": regression,
+            "dru_not_evaluated": dru,
+            "reason": None,
+        }
+
+    def test_dru_not_evaluated_keeps_mask_status(self):
+        from kicad_tools.cli.optimize_cmd import _drc_summary_suffix
+
+        suffix = _drc_summary_suffix(self._stats(), self._cli(available=False, dru=True))
+        assert ".kicad_dru" in suffix
+        assert "mask_to_copper not evaluated" in suffix
+
+    def test_cli_regression_keeps_mask_status(self):
+        from kicad_tools.cli.optimize_cmd import _drc_summary_suffix
+
+        suffix = _drc_summary_suffix(self._stats(), self._cli(regression=True))
+        assert "in-process referee only" in suffix
+        assert "mask_to_copper not evaluated" in suffix
+
+    def test_cli_clean_with_in_process_increase_keeps_mask_status(self):
+        from kicad_tools.cli.optimize_cmd import _drc_summary_suffix
+
+        suffix = _drc_summary_suffix(self._stats(after=5), self._cli())
+        assert "kicad-cli reports no regression" in suffix
+        assert "mask_to_copper not evaluated" in suffix

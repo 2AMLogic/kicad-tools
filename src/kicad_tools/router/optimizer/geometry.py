@@ -529,7 +529,12 @@ def _clean_pad_entry(seg: Segment, zone: PadMaskZone) -> bool:
     length = math.hypot(dx, dy)
     ux, uy = (dx / length, dy / length) if length > 0.0 else (0.0, 0.0)
     t0, t1 = 0.0, 1.0
-    crossings: list[tuple[str, float]] = []
+    # Side that bounds each end of the clipped interval, or None while that
+    # end is still the segment's own endpoint.  Tightening an end replaces
+    # its side, so the crossings are read from the *final* interval and do
+    # not depend on which endpoint KiCad stores first.
+    enter_side: str | None = None
+    exit_side: str | None = None
     for side, p, q in (
         ("x", -dx, seg.x1 - zone.x + hw),
         ("x", dx, zone.x + hw - seg.x1),
@@ -546,16 +551,17 @@ def _clean_pad_entry(seg: Segment, zone: PadMaskZone) -> bool:
                     return True
                 if r > t0:
                     t0 = r
-                    crossings = [(side, r)]
+                    enter_side = side
             else:
                 if r < t0:
                     return True
                 if r < t1:
                     t1 = r
-                    crossings.append((side, r))
+                    exit_side = side
+    crossings = [side for side in (enter_side, exit_side) if side is not None]
     if len(crossings) > 1:
         return False  # enters and exits: a straddle is never one clean entry
-    for side, t in crossings:
+    for side in crossings:
         # Steep against the crossed side: the direction component along the
         # side's normal is at least the component along the side itself.
         along, normal = (uy, ux) if side == "x" else (ux, uy)
@@ -569,7 +575,7 @@ def rewrite_keeps_pad_escapes(
     new: Sequence[Segment],
     zones: Sequence[PadMaskZone],
     tolerance: float,
-    danger_clearance: float = 0.0,
+    danger_clearance: float | None = None,
 ) -> bool:
     """Would the chain rewrite *old* -> *new* break a pad's mask-clean escape?
 
@@ -617,9 +623,12 @@ def rewrite_keeps_pad_escapes(
         new: The chain after the pass.
         zones: All pads' :class:`PadMaskZone` records.
         tolerance: Coordinate tolerance (mm), the optimizer's own.
-        danger_clearance: Mask-to-copper clearance around an opening that
-            new copper must keep out of unless it terminates on that pad
-            (mm); ``0`` guards the openings only.
+        danger_clearance: ``None`` (the default) keeps the pre-#9748 guard
+            -- openings only, any terminating entry exempt.  A number (mm)
+            engages the ``--drc-aware --mfr`` policy checks: the
+            mask-to-copper clearance band beside each opening, and the
+            one-clean-steep-entry test on terminating entries (``0``
+            adds those two checks with no band).
 
     Returns:
         True when the rewrite may be kept.
@@ -663,14 +672,13 @@ def rewrite_keeps_pad_escapes(
         for zone in zones_for(layer):
             # The band is copper-to-opening: the capsule's edge leads the
             # centre-line by half the trace width, so grow by both.
-            if not zone.segment_intersects(
-                seg.x1, seg.y1, seg.x2, seg.y2, grow=danger_clearance + seg.width / 2.0
-            ):
+            grow = 0.0 if danger_clearance is None else danger_clearance + seg.width / 2.0
+            if not zone.segment_intersects(seg.x1, seg.y1, seg.x2, seg.y2, grow=grow):
                 continue
             if (
                 zone.net_name == net_name
                 and _terminates_on_pad(seg, zone, tolerance)
-                and _clean_pad_entry(seg, zone)
+                and (danger_clearance is None or _clean_pad_entry(seg, zone))
             ):
                 continue
             return False

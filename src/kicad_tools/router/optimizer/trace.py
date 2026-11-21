@@ -504,7 +504,7 @@ class TraceOptimizer:
         self._pad_zones: list[PadMaskZone] = []
         # Issue #9748: the fab mask-to-copper clearance carried with the
         # zones (0 guards the openings only).
-        self._pad_zone_clearance: float = 0.0
+        self._pad_zone_clearance: float | None = None
         # True only inside :meth:`defer_pad_guard`: the Kelvin board gate
         # (#6889) vets a branch rewrite before the pad guard re-applies to
         # what it accepts, so its report still fires when both would refuse.
@@ -550,7 +550,9 @@ class TraceOptimizer:
         """
         self._pad_points = points_by_net_name
 
-    def set_pad_zones(self, zones: list[PadMaskZone], danger_clearance: float = 0.0) -> None:
+    def set_pad_zones(
+        self, zones: list[PadMaskZone], danger_clearance: float | None = None
+    ) -> None:
         """Register every pad's mask-opening zone (Issue #9524).
 
         While zones are set, each pass's rewrite of a chain is vetoed when it
@@ -560,7 +562,8 @@ class TraceOptimizer:
         the pre-#9524 behaviour.
 
         ``danger_clearance`` (Issue #9748) is the fab's mask-to-copper
-        clearance (0 when no cited policy exists): new copper may not enter
+        clearance, passed only for ``--drc-aware --mfr`` runs (``None`` keeps
+        the pre-#9748 guard): new copper may not enter
         the clearance band beside an opening either, unless it terminates on
         that pad with one clean, steep crossing.
         """
