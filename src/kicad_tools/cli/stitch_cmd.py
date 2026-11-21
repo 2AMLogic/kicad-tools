@@ -1091,40 +1091,43 @@ def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
     return pads
 
 
-def _pad_copper_layer(pad: SExp, fp_layer: str) -> str:
-    """The copper layer an SMD pad lives on (Issue #9846).
+def _pad_copper_layers(pad: SExp, fp_layer: str) -> tuple[str, ...]:
+    """Every copper layer an SMD pad occupies (Issue #9846).
 
-    Reads the pad's own ``(layers ...)`` node and returns its first
-    concrete copper spec (``F.Cu`` / ``B.Cu`` / ``In*.Cu``); falls back to
-    the footprint's layer for wildcard or missing specs (an SMD pad sits
-    on its footprint's side).
+    Reads the pad's own ``(layers ...)`` node and returns ALL of its
+    copper specs in order (``F.Cu`` / ``B.Cu`` / ``In*.Cu``), so a pad
+    listing copper on more than one layer is seen on each of them
+    regardless of the order the layers are written.  The wildcards
+    ``F&B.Cu`` and ``*.Cu`` expand to both outer layers.  Falls back to
+    the footprint's layer when the pad lists no copper spec (an SMD pad
+    sits on its footprint's side).
     """
+    found: list[str] = []
     layers_node = pad.find_child("layers")
     if layers_node:
         for child in layers_node.children:
             spec = child.value if child.name is None else None
-            if (
-                isinstance(spec, str)
-                and spec.endswith(".Cu")
-                and "*" not in spec
-                and "&" not in spec
-            ):
-                return spec
-    return fp_layer
+            if not isinstance(spec, str) or not spec.endswith(".Cu"):
+                continue
+            expanded = ("F.Cu", "B.Cu") if ("*" in spec or "&" in spec) else (spec,)
+            for layer in expanded:
+                if layer not in found:
+                    found.append(layer)
+    return tuple(found) if found else (fp_layer,)
 
 
 def _iter_smd_pad_bbox_records(
     sexp: SExp,
     net_numbers: set[int],
-) -> list[tuple[int, float, float, float, float, str]]:
-    """Per-pad ``(net, min_x, min_y, max_x, max_y, layer)`` SMD records.
+) -> list[tuple[int, float, float, float, float, tuple[str, ...]]]:
+    """Per-pad ``(net, min_x, min_y, max_x, max_y, layers)`` SMD records.
 
     The shared scan behind :func:`find_smd_pad_bboxes_on_nets` and (Issue
     #9846) :func:`find_smd_pad_bboxes_with_layer_on_nets`; geometry mirrors
     ``via_in_pad._pad_absolute_bbox`` (cardinal rotations swap dimensions,
     other rotations use the conservative AABB of the rotated rect).
     """
-    records: list[tuple[int, float, float, float, float, str]] = []
+    records: list[tuple[int, float, float, float, float, tuple[str, ...]]] = []
     name_to_num = get_name_to_net_map(sexp)
 
     for fp in sexp.iter_children():
@@ -1197,7 +1200,7 @@ def _iter_smd_pad_bbox_records(
                     board_y - half_h,
                     board_x + half_w,
                     board_y + half_h,
-                    _pad_copper_layer(pad, fp_layer),
+                    _pad_copper_layers(pad, fp_layer),
                 )
             )
 
@@ -1249,12 +1252,19 @@ def find_smd_pad_bboxes_with_layer_on_nets(
     """Per-layer SMD pad bboxes on the given nets (Issue #9846).
 
     Same records as :func:`find_smd_pad_bboxes_on_nets` but each entry
-    keeps the pad's copper layer as its sixth element, so the stitcher's
+    keeps the pad's copper layer as its sixth element (one record per
+    copper layer a multi-layer pad occupies), so the stitcher's
     STUB-track slit-band check can see only the same-net SMD pads that
     share copper with the emitted trace -- a pad on the opposite outer
     layer never shares copper with an F.Cu track and must not reject it.
     """
-    return _iter_smd_pad_bbox_records(sexp, net_numbers)
+    return [
+        (net_num, min_x, min_y, max_x, max_y, layer)
+        for net_num, min_x, min_y, max_x, max_y, layers in _iter_smd_pad_bbox_records(
+            sexp, net_numbers
+        )
+        for layer in layers
+    ]
 
 
 def find_all_pad_bboxes(

@@ -30,6 +30,7 @@ from kicad_tools.cli.stitch_cmd import (
     _resolve_mfr_pad_gap_edge,
     calculate_via_stub,
     find_smd_pad_bboxes_on_nets,
+    find_smd_pad_bboxes_with_layer_on_nets,
     run_stitch,
 )
 from kicad_tools.manufacturers.base import load_dfm_thresholds
@@ -246,7 +247,18 @@ def _pcb_text(extra: str = "") -> str:
 
 def _smd_pad_bboxes(pcb: Path) -> list[tuple[float, float, float, float]]:
     sexp = parse_string(pcb.read_text())
-    return [(b[0], b[1], b[2], b[3]) for b in find_smd_pad_bboxes_on_nets(sexp, {1})]
+    # Records are (net, min_x, min_y, max_x, max_y): drop the net number.
+    return [(b[1], b[2], b[3], b[4]) for b in find_smd_pad_bboxes_on_nets(sexp, {1})]
+
+
+def _smd_pad_bboxes_on_layer(pcb: Path, layer: str) -> list[tuple[float, float, float, float]]:
+    """True ``(min_x, min_y, max_x, max_y)`` of GND SMD pads occupying ``layer``."""
+    sexp = parse_string(pcb.read_text())
+    return [
+        (b[1], b[2], b[3], b[4])
+        for b in find_smd_pad_bboxes_with_layer_on_nets(sexp, {1})
+        if b[5] == layer
+    ]
 
 
 def _band_violations(pcb: Path, result, edge: float) -> list[float]:
@@ -418,8 +430,21 @@ _FOREIGN_EAST_WALL = """  (footprint "Test:Wall" (layer "F.Cu") (uuid "00000000-
 """
 
 
-def _track_pcb(neighbor_layer: str = "F.Cu", neighbor_via: bool = False) -> str:
-    extra = _TRACK_NEIGHBOR_FOOTPRINT.format(layer=neighbor_layer)
+def _track_pcb(
+    neighbor_layer: str = "F.Cu",
+    neighbor_via: bool = False,
+    neighbor_pad_layers: str | None = None,
+    neighbor: bool = True,
+) -> str:
+    """``neighbor_pad_layers`` overrides B1's pad ``(layers ...)`` payload;
+    ``neighbor=False`` drops B1 entirely (the oracle's absent-neighbor control)."""
+    extra = ""
+    if neighbor:
+        extra = _TRACK_NEIGHBOR_FOOTPRINT.format(layer=neighbor_layer)
+        if neighbor_pad_layers is not None:
+            extra = extra.replace(
+                f'(layers "{neighbor_layer}" "F.Mask")', f"(layers {neighbor_pad_layers})"
+            )
     if neighbor_via:
         extra += _NEIGHBOR_VIA
     extra += _FOREIGN_EAST_WALL
@@ -442,7 +467,8 @@ def _leg_band_violations(pcb: Path, result, edge: float) -> list[float]:
     so the measurement sees the copper that reaches the board.
     """
     bad = []
-    for b in _smd_pad_bboxes(pcb):
+    # The emitted stubs are F.Cu: only pads with copper on F.Cu bound them.
+    for b in _smd_pad_bboxes_on_layer(pcb, "F.Cu"):
         for trace in result.traces_added:
             pts = trace_points(trace)
             for leg in zip(pts, pts[1:], strict=False):
@@ -517,3 +543,60 @@ def test_run_stitch_track_band_applies_to_connected_pads(tmp_path):
         "same_net_pad_gap" in reason for _pad, reason in guard.pads_skipped
     )
     assert _leg_band_violations(pcb, guard, EDGE_1OZ) == []
+
+
+# A pad with copper on both outer layers shares copper with the F.Cu stub no
+# matter which layer is written first, or whether a wildcard is used.
+_MULTI_LAYER_SPECS = [
+    pytest.param('"F.Cu" "B.Cu" "F.Mask"', id="front-first"),
+    pytest.param('"B.Cu" "F.Cu" "F.Mask"', id="back-first"),
+    pytest.param('"F&B.Cu" "F.Mask"', id="wildcard"),
+]
+
+
+def _neighbor_gap_to_stub(pcb: Path, result) -> list[float]:
+    """Every emitted-leg gap to B1 (the intended neighbor), in-band or not."""
+    b1 = [
+        b
+        for b in _smd_pad_bboxes_on_layer(pcb, "F.Cu")
+        if b[1] > 110.5  # B1 sits north of C1's pad at y=110.96
+    ]
+    assert len(b1) == 1, "B1 must be seen on F.Cu"
+    gaps = []
+    for trace in result.traces_added:
+        pts = trace_points(trace)
+        for leg in zip(pts, pts[1:], strict=False):
+            gaps.append(_leg_gap(leg, b1[0]))
+    return gaps
+
+
+@pytest.mark.parametrize("pad_layers", _MULTI_LAYER_SPECS)
+def test_run_stitch_track_band_sees_multi_layer_neighbor(tmp_path, pad_layers):
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(_track_pcb(neighbor_pad_layers=pad_layers))
+    # The pool must hold B1 on F.Cu whatever the layer order.
+    assert len(_smd_pad_bboxes_on_layer(pcb, "F.Cu")) == 2
+    # Control: guard off seats the 0.100 mm slit beside B1.
+    control = _stitch_tracks(pcb, 0.0)
+    assert control.vias_added
+    gaps = _neighbor_gap_to_stub(pcb, control)
+    assert any(g == pytest.approx(0.1, abs=1e-6) for g in gaps), gaps
+    assert _leg_band_violations(pcb, control, EDGE_1OZ), "control must seat a track slit"
+    # Guard on: no leg lands in the band against B1.
+    guard = _stitch_tracks(pcb, EDGE_1OZ)
+    assert guard.vias_added or any(
+        "same_net_pad_gap" in reason for _pad, reason in guard.pads_skipped
+    )
+    assert _leg_band_violations(pcb, guard, EDGE_1OZ) == []
+    assert all(not (1e-9 < g < EDGE_1OZ - 1e-9) for g in _neighbor_gap_to_stub(pcb, guard))
+
+
+def test_run_stitch_track_band_oracle_neighbor_absent_control(tmp_path):
+    # Without B1 the only GND pad is C1's own: the oracle must report nothing
+    # (a segment starting at C1's center is a copper union, gap 0).
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(_track_pcb(neighbor=False))
+    assert len(_smd_pad_bboxes_on_layer(pcb, "F.Cu")) == 1
+    result = _stitch_tracks(pcb, 0.0)
+    assert result.vias_added
+    assert _leg_band_violations(pcb, result, EDGE_1OZ) == []
