@@ -977,9 +977,9 @@ class StaircaseSlitOracle:
         """
         from shapely.geometry import LineString
 
+        local = self._layer_sources(layer)
         if self._unsupported:
             return True
-        local = self._layer_sources(layer)
         origin = board_origin(self._pcb)
         removed = {segment_ref(seg, origin) for seg in chain}
         net = chain[0].net_number

@@ -386,6 +386,12 @@ def test_unrelated_preexisting_gap_does_not_block():
     assert DIAGONAL_FIRST in found[0].message
 
 
+def test_unfilled_zone_blocks_even_the_first_staircase_shortcut():
+    zone = """(zone (net 1) (net_name "SIG") (layer "F.Cu")
+      (polygon (pts (xy 0 0) (xy 8 0) (xy 8 4) (xy 0 4))))"""
+    assert _staircase_findings(_checker(_stair_pcb(zone), gap_mm=0.1016)) == []
+
+
 def test_zone_slit_rejects_under_explicit_threshold():
     found = _staircase_findings(_checker(_stair_pcb(_zone_strip()), gap_mm=0.1016))
     assert len(found) == 1
