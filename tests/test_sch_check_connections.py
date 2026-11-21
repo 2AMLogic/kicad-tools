@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli.sch_check_connections import (
     check_symbol_connections,
 )
@@ -516,6 +518,31 @@ PIN_MID_WIRE_NO_DOT = """\
 
 _JUNCTION_AT_PIN = '  (junction (at 100 46.19) (diameter 0) (color 0 0 0 0) (uuid "j-pin"))\n'
 
+MULTI_UNIT_MID_WIRE = """\
+(kicad_sch
+  (version 20231120) (generator "eeschema")
+  (uuid "00000000-0000-4000-8000-000000000001") (paper "A4")
+  (lib_symbols
+    (symbol "Test:Multi"
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "Multi" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (symbol "Multi_0_1"
+        (pin passive line (at -5.08 0 0) (length 1.27) (name "COMMON") (number "4")))
+      (symbol "Multi_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "A") (number "1"))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "B") (number "2")))
+      (symbol "Multi_2_1"
+        (pin passive line (at 5.08 0 180) (length 1.27) (name "C") (number "3")))))
+  (symbol (lib_id "Test:Multi") (at 100 50 0) (unit {unit})
+    (in_bom yes) (on_board yes) (uuid "00000000-0000-4000-8000-000000000002")
+    (property "Reference" "U1" (at 100 45 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "Multi" (at 100 55 0) (effects (font (size 1.27 1.27))))
+    (instances (project "multi" (path "/00000000-0000-4000-8000-000000000001"
+      (reference "U1") (unit {unit})))))
+  (wire (pts (xy 90 50) (xy 110 50)) (stroke (width 0) (type default))
+    (uuid "00000000-0000-4000-8000-000000000003")))
+"""
+
 # A power:GND symbol on the bus interior at (120, 40).
 POWER_MID_WIRE = """\
 (kicad_sch
@@ -613,6 +640,23 @@ class TestMidWireAttachmentWarnings:
         warnings = check_mid_wire_attachments(sch)
         kinds = {w.kind for w in warnings}
         assert "power_mid_wire" in kinds
+
+    @pytest.mark.parametrize(
+        ("unit", "pins", "mid_wire_x"),
+        [(1, {"1", "2", "4"}, {94.9}), (2, {"3", "4"}, {94.9, 105.1})],
+    )
+    def test_only_placed_unit_and_common_pins_warn(self, tmp_path, capsys, unit, pins, mid_wire_x):
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        sch_file = tmp_path / "multi.kicad_sch"
+        sch_file.write_text(MULTI_UNIT_MID_WIRE.format(unit=unit))
+        connections_main([str(sch_file), "--format", "json", "--verbose"])
+        doc = json.loads(capsys.readouterr().out)
+        assert {tuple(w["position"]) for w in doc["warnings"] if w["kind"] == "pin_mid_wire"} == {
+            (x, 50) for x in mid_wire_x
+        }
+        assert {p["pin_number"] for p in doc["pins"]} == pins
+        assert set(resolve_pin_map(Schematic.load(str(sch_file)))["U1"]["pins"]) == pins
 
     def test_json_output_includes_warnings(self, tmp_path, capsys):
         sch_file = tmp_path / "tconn.kicad_sch"

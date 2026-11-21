@@ -107,6 +107,7 @@ def resolve_pin_map(
             instance_pos=symbol.position,
             instance_rot=symbol.rotation,
             mirror=symbol.mirror,
+            unit=symbol.unit,
         )
 
         coords: set[Coord] = set()
@@ -180,7 +181,7 @@ def resolve_pin_map(
         barrier_pins = all_pin_coords - ref_pin_coords[symbol.reference] - nettie_pin_coords
 
         pins_data: dict[str, dict] = {}
-        for lib_pin in lib_sym.pins:
+        for lib_pin in lib_sym.get_pins_for_unit(symbol.unit):
             if lib_pin.number not in pin_positions:
                 continue
 

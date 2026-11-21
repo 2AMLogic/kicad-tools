@@ -168,6 +168,7 @@ def check_symbol_connections(
             instance_pos=symbol.position,
             instance_rot=symbol.rotation,
             mirror=symbol.mirror,
+            unit=symbol.unit,
         )
 
         coords: set[Coord] = set()
@@ -196,7 +197,7 @@ def check_symbol_connections(
         # Barrier = all pin coords except this symbol's own pins
         barrier_pins = all_pin_coords - ref_pin_coords[symbol.reference]
 
-        for lib_pin in lib_sym.pins:
+        for lib_pin in lib_sym.get_pins_for_unit(symbol.unit):
             if lib_pin.number not in pin_positions:
                 continue
 
@@ -285,6 +286,7 @@ def check_mid_wire_attachments(
             instance_pos=symbol.position,
             instance_rot=symbol.rotation,
             mirror=symbol.mirror,
+            unit=symbol.unit,
         )
         pin_coords.update(_to_coord(*pos) for pos in pin_positions.values())
 
