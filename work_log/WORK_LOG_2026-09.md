@@ -2,6 +2,40 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-21
+
+- **PR #5647**: chore(release): bump version to 0.21.1
+- **PR #5646**: fix(router): engage the within-pair clearance override only when it relaxes
+- **PR #5643**: test(conformance): Epic #5509 Phase 1c -- oracle adapters for 18 of 19 consumer groups, kernel control row, CI wiring (#5515)
+- **PR #5642**: fix(router): write access-witness sidecar on deadline kill, fix verdict-shape and net0 defects
+- **PR #5641**: perf(router): reject far copper by bounding box before the exact halo distance
+- **PR #5640**: docs(diagnostics): Phase 1c access-loss witness runs on boards 05/06/07 (evidence only)
+- **Issue #5639** (closed): access-witness (1a/1b): no sidecar on deadline-terminated routes, plus two verdict-shape defects
+- **PR #5638**: test(board06): pin _path_ok's foreign drill-hole rejection (#5608 follow-up)
+- **PR #5637**: perf(stitch): index filled-polygon edges + add phase-level profiling to the diff-pair re-route step
+- **PR #5636**: feat(router): honest plan capacity — per-class pitch, plane exclusion, keepout/preserved-copper blockage (#5575)
+- **PR #5635**: fix(board06): name a foreign --step route input instead of letting it look like a regression (#5628)
+- **PR #5634**: perf(ci): raise KCT_NATIVE_MAX_CONCURRENCY from 1 to 2
+- **PR #5633**: fix(release): uv's idempotent-publish flag is --check-url, not --skip-existing
+- **PR #5632**: fix(release): idempotent PyPI publish via --skip-existing
+- **Issue #5631** (closed): board06: add dedicated regression test for _path_ok's hole-clearance rejection (#5608 follow-up)
+- **PR #5630**: fix(release): slim the sdist under PyPI's 100MB limit
+- **PR #5629**: fix(board06): enforce hole_clearance in pour-repair path acceptance (#5608)
+- **Issue #5628** (closed): board06: --step route on main now leaves +3V3 U3.1 UNREPAIRED (6 lines) and produces 0 hole_clearance errors — route outcome shifted from the #5606-era baseline
+- **PR #5627**: fix(zones): coverage-gate the queued-vs-queued overlap warning (#5618)
+- **PR #5624**: perf(ci): exclude kicad-cli --help/--version probes from the native permit gate
+- **PR #5623**: chore(release): bump version to 0.21.0
+- **PR #5622**: fix(board07): frame-independent pour-repair bounds + refill stability
+- **Issue #5618** (closed): zones: coverage-gate the queued-vs-queued overlap warning like existing-vs-new (follow-up to #5590)
+- **Issue #5616** (closed): perf(ci): recover the +4.7 min Test-job median regression from KCT_NATIVE_MAX_CONCURRENCY=1 without reintroducing the cgroup OOM
+- **Issue #5608** (closed): board06: pour-repair bridge can land 3um inside the hole_clearance floor vs a GND via
+- **Issue #5603** (closed): perf(ci): cache kicad-cli capability probes so --help launches stop taking native permits
+- **Issue #5575** (closed): [Epic #5510] router: honest plan capacity — per-class pitch, plane exclusion, keepout/preserved-copper blockage, channel fixture (#5520 PR-B)
+- **Issue #5520** (closed): [Epic #5510] router: run the plan stage on every default kct route with honest capacity (per-class pitch, plane exclusion, zone/keepout blockage, --no-routing-plan)
+- **Issue #5518** (closed): [Epic #5508] Phase 1c: access-loss witness runs on boards 05 / 06 / 07 with DQ3 as negative control (evidence only)
+- **Issue #5515** (closed): [Epic #5509] Phase 1c: oracle adapters for the remaining 14 consumer groups, kernel adapter, CI wiring, full disagreement table
+- **Issue #5507** (closed): router: preserve power-pad access for Board07 U4.C2 (+1V2)
+
 ### 2026-09-20
 
 - **PR #5621**: chore(changelog): reconcile [Unreleased] since v0.20.0
