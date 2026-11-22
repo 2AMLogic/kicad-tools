@@ -53,10 +53,10 @@ pads, and narrow same-net wedges at U2.50 (DQ13), U2.39 (UDQM) and U2.53
 Every `SDRAM_BYTE1` length is unchanged to 1 µm. DQ7 gains 0.145 mm. Run the
 script with `--verify-from-git 89c2ee058` to reproduce both PCBs byte for byte.
 
-The files under `evidence/` and the published `../../output/` release still
-describe the copper as it was before the November 2026 prune (95c4c7eaf).
-`build.py` cannot re-issue them yet. Its full `kct check` gate still fails on
-`mask_to_copper` (#8858) and on warnings that already existed.
+The files under `evidence/` now describe the adopted #8603 copper (see the
+section below); `refill-stability.json` and the published `../../output/`
+release still describe the copper as it was before the November 2026 prune
+(95c4c7eaf), until #8604's evidence refresh re-issues them.
 
 ## SDRAM_BYTE0 same-net loops (Issue #9118)
 
@@ -86,3 +86,49 @@ the per-net lengths by measuring each with `measure_net_path` the way
 violations, 0 unconnected items, clean label and copper LVS, and only its full
 `kct check` gate failing on `mask_to_copper` (#8858). `../../output/` is
 therefore not re-issued here.
+
+## Six-layer warning-free re-issue (Issue #8603)
+
+After the November 2026 prune the reviewed copper still failed the full
+`kct check` gate with 210 warnings (163 `redundant_copper_fragments`, 30
+covered tracks, 14 detours and 3 silk findings), all traced to 0.05 mm
+optimizer staircases that `kct pcb prune` cannot collapse. The #8603
+operator ruling (option 2, 2026-11-10) authorized re-optimizing the
+reviewed copper instead of accepting them.
+
+`../engineering/retune_8603.py` optimizes the release build against the
+board's own generated `.kicad_pro`/`.kicad_dru` (JLCPCB six-layer profile),
+retunes the four match groups and re-derives the 14 pad-to-via authored
+escapes. `../engineering/cleanup_8603.py` then simplifies the remaining
+sub-0.1 mm fragment runs between their original terminals, removes covered
+tracks, adds 21 same-net layer-handoff vias and stages the assembly
+artwork. Both scripts refuse any input whose SHA-256 differs from the
+recorded digest, and the recipe reproduces both committed PCBs byte for
+byte from Git inputs:
+
+```sh
+KCT_KICAD_DOCKER=1 uv run python boards/07-matchgroup-test/real_design/engineering/cleanup_8603.py OUT
+```
+
+`sdram_demo.kicad_pcb` here is
+`45943c244519945ee5d51c4b58a28a901cf67b092129c64dcd2ea90a11d2bc84` and the
+authored source is
+`ebff1f52709d4cb1a56d6b1558ca1051c223b746c37825ecd93c38ea81bc7575`
+(`reviewed_on` 2026-11-22; the authored manifest also declares the six
+board-only fiducial marks that `../build.py` and `../build_source.py` now
+verify). The full gate this build repeats reports 0 errors and 0 warnings:
+every `redundant_copper_*` class is 0, native DRC and ERC report no
+violations, both LVS checks bind all 216 pads, the byte-0 / byte-1 /
+address / command spreads are 1.952 / 4.605 / 3.648 / 4.027 mm against the
+5.0 mm limit, the largest clock-relative difference is 9.881 mm and the
+smallest non-pad clock gap is 0.560 mm against the 0.54 mm screen.
+
+The files under `evidence/` come from that passing build, except
+`refill-stability.json`, which #8604's manufacturing evidence refresh
+re-issues together with `../../output/` and the independent routing
+recheck. The redundant-copper census above is the release gate's: it runs
+on the validated artifact with the board's generated `.kicad_pro` net
+classes beside it. Checking the raw committed file without that project
+context instead flags five candidate staircases (BOOT0, DQ1 and three
+more) whose one-bend shortcuts would violate the 0.175 mm class
+clearances, so the gate context is the authoritative one.
