@@ -1093,6 +1093,8 @@ def _finalize_candidate(path, schematic):
 
 def finalize_routing(path: Path, schematic_path: Path | None = None) -> bool:
     """Commit only a fully qualified scratch result; failures retain original bytes."""
+    from kicad_tools.cli.route_cmd import _publish_transaction
+
     path = Path(path).resolve()
     schematic = schematic_path or path.with_name(path.stem.removesuffix("_routed") + ".kicad_sch")
     try:
@@ -1106,12 +1108,18 @@ def finalize_routing(path: Path, schematic_path: Path | None = None) -> bool:
             relocations = _finalize_candidate(candidate, schematic)
             if relocations is False:
                 return False
-            # The scratch directory is on the same filesystem; replacement is atomic.
-            candidate.replace(path)
             record = path.parent / "readiness" / "drill-relocations.json"
             record.parent.mkdir(parents=True, exist_ok=True)
-            record.write_text(json.dumps(relocations, indent=2) + "\n")
+            with tempfile.TemporaryDirectory(prefix=".board02-evidence-", dir=record.parent) as tmp:
+                staged_record = Path(tmp) / record.name
+                if record.exists():
+                    # Keep the existing evidence permissions, including a read-only record.
+                    shutil.copy2(record, staged_record)
+                staged_record.write_text(json.dumps(relocations, indent=2) + "\n")
+                # Each file was staged on its destination filesystem. Publish the board
+                # last and restore its old evidence if that final replacement fails.
+                _publish_transaction([(record, staged_record), (path, candidate)])
             return True
     except Exception as exc:
-        print(f"Board02 finalization failed; original PCB retained: {exc}", file=sys.stderr)
+        print(f"Board02 finalization failed: {exc}", file=sys.stderr)
         return False
