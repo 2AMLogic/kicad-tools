@@ -106,23 +106,59 @@ def test_shared_pass_preserves_printed_mark_and_route_in_one_save(tmp_path):
     assert path.read_bytes() == saved
 
 
+@pytest.mark.parametrize("kind", ["line", "text_box", "unmeasured_text_box"])
 @pytest.mark.parametrize(("layer", "can_move"), [("F.SilkS", False), ("B.SilkS", True)])
-def test_joined_marker_respects_other_ink_on_its_own_side(tmp_path, layer, can_move):
+def test_joined_marker_respects_other_ink_on_its_own_side(
+    tmp_path, monkeypatch, layer, can_move, kind
+):
     path = _board(tmp_path)
     doc = parse_file(path)
-    # The marker's top bar can move away from the pads only toward this line.
-    fp = next(f for f in PCB.load(path).footprints if f.reference == "J3")
-    ox, oy = PCB.load(path).board_origin
-    x, y = fp.position[0] + ox, fp.position[1] + oy - 4.10
-    doc.add(
-        parse_string(
-            f"(gr_line (start {x - 1} {y}) (end {x + 1} {y}) "
-            f'(stroke (width 0.15) (type solid)) (layer "{layer}") (uuid "other-ink"))'
+    pcb = PCB.load(path)
+    fp = next(f for f in pcb.footprints if f.reference == "J3")
+    ox, oy = pcb.board_origin
+    x, y = fp.position[0] + ox, fp.position[1] + oy
+    if kind == "line":
+        item = f"(gr_line (start {x - 1} {y - 4.10}) (end {x + 1} {y - 4.10})"
+    else:
+        item = (
+            f'(gr_text_box "PIN" (start {x - 1.35} {y - 6.45}) (end {x + 1.35} {y - 4.18}) '
+            "(effects (font (size 0.6 0.6) (thickness 0.15))) (border yes)"
         )
-    )
+    if kind == "unmeasured_text_box":
+
+        def unavailable(*_args):
+            raise RuntimeError("KiCad geometry unavailable")
+
+        monkeypatch.setattr("kicad_tools.validate.native_silk_text._native_shapes", unavailable)
+    item += f' (stroke (width 0.15) (type solid)) (layer "{layer}") (uuid "87715f12-69bb-482f-b390-22d5f310d532"))'
+    doc.add(parse_string(item))
     save_pcb(doc, path)
     report = legalize_silk(path, get_profile("jlcpcb-tier1").get_design_rules(layers=4))
     assert sum(e.action == "moved_marker" for e in report.footprint_line_edits) == (
         4 if can_move else 0
     )
     assert bool([s for s in report.pads.skipped if s.footprint_ref == "J3"]) == (not can_move)
+
+
+def test_joined_marker_can_move_in_the_blank_space_inside_a_printed_box(tmp_path):
+    from kicad_tools.validate.mask_copper_geometry import _resolve_native_python_command
+
+    if _resolve_native_python_command(None, tmp_path)[0] is None:
+        pytest.skip("Measuring the printed border requires KiCad")
+    path = _board(tmp_path)
+    pcb = PCB.load(path)
+    marker = next(fp for fp in pcb.footprints if fp.reference == "J3")
+    x = marker.position[0] + pcb.board_origin[0]
+    y = marker.position[1] + pcb.board_origin[1]
+    doc = parse_file(path)
+    doc.add(
+        parse_string(
+            f'(gr_text_box "" (start {x - 8} {y - 10}) (end {x + 8} {y + 4}) '
+            '(layer "F.SilkS") (uuid "87715f12-69bb-482f-b390-22d5f310d532") '
+            "(effects (font (size 0.6 0.6) (thickness 0.15))) "
+            "(stroke (width 0.15) (type solid)) (border yes))"
+        )
+    )
+    save_pcb(doc, path)
+    report = legalize_silk(path, get_profile("jlcpcb-tier1").get_design_rules(layers=4))
+    assert sum(e.action == "moved_marker" for e in report.footprint_line_edits) == 4

@@ -16,6 +16,7 @@ from kicad_tools.schema.pcb import PCB, FootprintGraphic
 from kicad_tools.sexp.parser import SExp
 from kicad_tools.silkscreen._silk_defaults import SILK_EDGE_CLEARANCE_MM, SILK_HOLE_CLEARANCE_MM
 from kicad_tools.silkscreen.place_refs import _inverse_fp_transform, collect_apertures
+from kicad_tools.validate.native_silk_text import text_keepout_shapes
 from kicad_tools.validate.rules.factory_clearance import silk_pad_apertures
 from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
 from kicad_tools.validate.rules.silkscreen import (
@@ -100,7 +101,7 @@ def _shift_marker(fp, graphics, group, apertures, obstacles, outline, clearance,
         if outline is not None and shifted.distance(outline) < SILK_EDGE_CLEARANCE_MM:
             continue
         # A mark joined to other silk, or one that would hit it, stays put.
-        if any(ink.intersects(g) or shifted.intersects(g) for g in obstacles):
+        if any(g is None or ink.intersects(g) or shifted.intersects(g) for g in obstacles):
             continue
         lx, ly = inverse((fp.position[0] + dx, fp.position[1] + dy))
         trial = list(graphics)
@@ -221,7 +222,7 @@ def _trim_free_ends(fp, nodes, graphics, outline, printed_silk, markers):
             ink[key][0].intersection(cut_region).difference(_stroke_geometry(trimmed, forward))
         )
         if any(
-            removed_ink.intersects(shape)
+            shape is None or removed_ink.intersects(shape)
             for other, shapes in ink.items()
             if other[0] == side and other != key
             for shape in shapes
@@ -254,6 +255,13 @@ def repair_footprint_lines(
         by_item = defaultdict(list)
         for side, geom, _, _, _, uid, item in _iter_silk_elements(pcb):
             by_item[(side, item, uid)].append(geom)
+        types = {(side, kind) for side in ("F", "B") for kind in ("text box", "table", "text")}
+        for side, kind, label, _, shape, _, _ in text_keepout_shapes(
+            pcb, types, dru_path.with_suffix(".kicad_pcb")
+        ):
+            # An unmeasured item's extent is unknown. Preserve edits on the
+            # opposite face and leave the artwork on this face in place.
+            by_item[(side, kind, label)].append(shape)
         return by_item
 
     skipped_pad_refs = {ref for ref, _ in skipped_markers}
