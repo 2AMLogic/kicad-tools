@@ -107,6 +107,7 @@ def resolve_pin_map(
             instance_pos=symbol.position,
             instance_rot=symbol.rotation,
             mirror=symbol.mirror,
+            unit=symbol.unit,
         )
 
         coords: set[Coord] = set()
@@ -131,9 +132,24 @@ def resolve_pin_map(
 
     # Inject virtual edges for net-tie pin pairs so BFS can traverse
     # through the net-tie body (which has no explicit wire in the schematic).
+    # A net-tie pin can sit a fraction of a grid step off the wire end it
+    # bridges (pin offsets snap to the 1.27 mm library grid, e.g. 99.92 vs
+    # 100), so snap each pin to the nearest wire-graph node and bridge the
+    # snapped nodes.  Issue #9833: pins no longer split a wire's interior.
+    wire_graph_nodes = {n for n, nbrs in adjacency.items() if nbrs}
     for a, b in nettie_edges:
-        adjacency.setdefault(a, set()).add(b)
-        adjacency.setdefault(b, set()).add(a)
+        a_node = _snap_coord(a, wire_graph_nodes)
+        b_node = _snap_coord(b, wire_graph_nodes)
+        if a_node != a:
+            adjacency.setdefault(a, set()).add(a_node)
+            adjacency.setdefault(a_node, set()).add(a)
+        if b_node != b:
+            adjacency.setdefault(b, set()).add(b_node)
+            adjacency.setdefault(b_node, set()).add(b)
+        if a_node == b_node:
+            continue
+        adjacency.setdefault(a_node, set()).add(b_node)
+        adjacency.setdefault(b_node, set()).add(a_node)
 
     # ------------------------------------------------------------------
     # Pre-pass: propagate net names to all wire-connected nodes.
@@ -165,7 +181,7 @@ def resolve_pin_map(
         barrier_pins = all_pin_coords - ref_pin_coords[symbol.reference] - nettie_pin_coords
 
         pins_data: dict[str, dict] = {}
-        for lib_pin in lib_sym.pins:
+        for lib_pin in lib_sym.get_pins_for_unit(symbol.unit):
             if lib_pin.number not in pin_positions:
                 continue
 

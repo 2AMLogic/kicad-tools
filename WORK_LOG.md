@@ -16,6 +16,21 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-21
 
+- **PR #9867**: fix: report the active silkscreen repair rules
+- **PR #9858**: fix: run pure-Python diff-pair guide probes bounded-suboptimal
+- **PR #9856**: feat: name the C++-only centerline rescue in route backend status
+- **PR #9312**: ci: drop single-value matrices so regression check-runs keep their job names
+- **Issue #9853** (closed): Show the native centerline rescue requirement in the kct route backend status
+- **Issue #9852** (closed): Restore bounded Python guide routes for the four board 06 USB3 pairs
+- **Issue #9831** (closed): legalize_silk: unresolved report is silent about silk findings outside the pass's own scope
+- **Issue #9338** (closed): 29 open PRs still carry the pre-#9316 broken uv.lock, so their CI dies at Install dependencies
+- **Issue #9306** (closed): Merge-queue rollout: two required contexts are matrix-expanded names the audit cannot match
+- **Issue #8620** (closed): Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS
+- **Issue #9843** (closed): Accept trailing -q/--quiet on kct zones add, list, batch, hv-keepout, and fill
+- **PR #9860**: fix: accept trailing -q/--quiet on kct zones add, list, batch, hv-keepout, and fill
+- **Issue #9759** (closed): Footprint Edge.Cuts stroke reader still drops fp_poly (arc ...) segments and ignores fp_rect (radius N)
+- **PR #9840**: fix: footprint Edge.Cuts stroke reader honours fp_poly arcs and fp_rect radius
+- **Issue #9817** (closed): redundant_copper_staircase suggests illegal paths (fab-min clearance, no mask check, walks through pad centres)
 - **Issue #9818** (closed): SExp float formatting (.6g) drops sub-10um precision past 100 mm, skewing 45-degree copper
 - **PR #9841**: fix(sexp): keep 0.0001 mm precision when writing new floats past 100 mm
 - **PR #9842**: fix(validate): redundant_copper_staircase suggests only legal shortcuts
