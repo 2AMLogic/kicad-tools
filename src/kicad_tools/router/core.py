@@ -15026,16 +15026,15 @@ class Autorouter:
                     else:
                         iter_per_net_cap = derive_iter_per_net_cap(per_net_timeout, iter_remaining)
 
-                    # Issue #8486: the seal each still-unrouted net enters this
-                    # iteration under.  Keys the per-net search back-off below
-                    # and drops every known-failure memo of a net routed since.
+                    # Track only entry-unrouted nets. Sample their seal or
+                    # copper when searched, after any intervening rip-ups.
                     ripup_guard.begin_iteration(
                         iteration,
-                        {
-                            n: self._relief_witness_signature(n, net_routes)
+                        dict.fromkeys(
+                            n
                             for n in net_order
                             if not net_routes.get(n) and len(pads_by_net.get(n, [])) >= 2
-                        },
+                        ),
                     )
 
                     # Issue #2540 + #2803: Snapshot state at top of each iteration
@@ -18441,18 +18440,19 @@ class Autorouter:
     ) -> list[Route]:
         """The main reroute's negotiated search, with the #8486 back-off.
 
-        A net that ran to its per-net cap with no path in consecutive
-        iterations under an unchanged entry seal gets a shrinking cap
-        (:meth:`RipupCycleGuard.search_cap`); the outcome is fed back so the
-        streak resets the moment the net routes, fails fast, or its seal
-        changes.  ``cap is None`` (the deterministic arm) is passed through.
+        Sample the live routes immediately before the search. A full reorder
+        can remove a blocker after an earlier attempt in the same iteration.
+        Healthy nets and searches without a wall-clock budget need no witness.
         """
+        if cap is not None and net in guard.entry_signature:
+            guard.entry_signature[net] = self._relief_witness_signature(
+                net, self._build_net_routes_map()
+            )
         used = guard.search_cap(net, iteration, cap)
         if used is not None and cap is not None and used < cap:
             print(
                 f"      back-off: {self.net_names.get(net, f'Net_{net}')} search capped at "
-                f"{used:.1f}s (was {cap:.1f}s) -- ran to its cap with no path under "
-                f"an unchanged seal (issue #8486)",
+                f"{used:.1f}s (was {cap:.1f}s) after repeated no-path searches (issue #8486)",
                 flush=True,
             )
         t0 = time.time()

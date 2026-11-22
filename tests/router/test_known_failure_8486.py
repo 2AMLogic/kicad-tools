@@ -132,7 +132,7 @@ def test_reroute_wrapper_passes_the_backed_off_cap_and_feeds_the_outcome():
         patch("kicad_tools.router.core.time", fake_time),
     ):
         for it in (1, 2, 3, 4):
-            g.begin_iteration(it, {VICTIM: SEAL})
+            g.begin_iteration(it, {VICTIM: None})
             assert router._route_net_known_failure_aware(VICTIM, 1.0, 30.0, g, it) == []
     assert seen == [30.0, 30.0, 15.0, 7.5]
 
@@ -357,7 +357,7 @@ def test_reroute_wrapper_reports_a_setup_stop_to_the_guard():
         patch("kicad_tools.router.core.time", SimpleNamespace(time=lambda: clock[0])),
     ):
         for it in (1, 2, 3, 4):
-            g.begin_iteration(it, {VICTIM: SEAL})
+            g.begin_iteration(it, {VICTIM: None})
             router._route_net_known_failure_aware(VICTIM, 1.0, 30.0, g, it)
     assert g.setup_floor_s[VICTIM] > KNOWN_FAILURE_BACKOFF_FLOOR_S
 
@@ -379,7 +379,7 @@ def test_reroute_wrapper_reads_setup_stop_from_cpp_backend_py_router():
         patch("kicad_tools.router.core.time", SimpleNamespace(time=lambda: clock[0])),
     ):
         for it in (1, 2, 3, 4):
-            g.begin_iteration(it, {VICTIM: SEAL})
+            g.begin_iteration(it, {VICTIM: None})
             router._route_net_known_failure_aware(VICTIM, 1.0, 30.0, g, it)
     assert g.setup_floor_s[VICTIM] > KNOWN_FAILURE_BACKOFF_FLOOR_S
 
@@ -432,6 +432,20 @@ def test_copper_backoff_reprobes_at_full_cap_every_k_iterations():
     # above: [30, 30, 15, 7.5, 5, 5] with no re-probe).
 
 
+def test_removing_copper_present_at_the_first_failure_restarts_the_streak():
+    g = RipupCycleGuard()
+    for it in (1, 2):
+        _fail_capped(g, it, 30.0, sig=COPPER_A)
+    assert _fail_capped(g, 3, 30.0, sig=COPPER_B) == 15.0
+    # Net 3 is still present, but net 2 no longer occupies its original layer.
+    changed = ("copper", ((2, "B.Cu"), (3, "F.Cu")))
+    assert _fail_capped(g, 3, 30.0, sig=changed) == 30.0
+    assert g.capped_streak[7] == (3, changed, 1)
+    assert g.known_fail_seconds[3] == 15.0
+    assert _fail_capped(g, 4, 30.0, sig=changed) == 30.0
+    assert _fail_capped(g, 5, 30.0, sig=changed) == 15.0
+
+
 def test_both_per_iteration_searches_of_a_copper_net_are_capped():
     """The loop searches a failed net twice in one iteration (zero-overflow
     recovery, then the reroute pass).  Both get backed-off caps -- the second
@@ -463,7 +477,7 @@ def test_seal_copper_regime_change_resets_the_streak():
     # The witness disappears again (seal -> copper).
     assert _fail_capped(g, 6, 30.0, sig=COPPER_A) == 30.0
     assert _fail_capped(g, 7, 30.0, sig=COPPER_B) == 30.0
-    assert _fail_capped(g, 8, 30.0, sig=COPPER_A) == 15.0
+    assert _fail_capped(g, 8, 30.0, sig=COPPER_A) == 15.0  # original copper still present
 
 
 # --- negotiated-loop reproduction (Nov 2026 maintainer decision) ---------------
@@ -538,13 +552,71 @@ def _run_wall_board(gap: bool = False):
 
 
 @pytest.mark.requires_router_cpp
+def test_reopening_a_live_corridor_restores_the_first_search_budget():
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment, Via
+
+    router = _wall_board(gap=True)
+    layers = (Layer.F_CU, Layer.B_CU)
+    blocker = Route(
+        99,
+        "wall",
+        segments=[Segment(15, 0.35, 15, 19.75, 0.90, layer, 99) for layer in layers],
+        vias=[Via(15, y, 0.5, 1.2, layers, 99) for y in (9.70, 10.55)],
+    )
+    remote = Route(101, "remote", segments=[Segment(8, 12, 8.5, 12, 0.2, Layer.F_CU, 101)])
+    router.routes.append(blocker)
+    router.grid.mark_route(blocker)
+    guard = RipupCycleGuard()
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for it in range(1, 6):
+            if it == 3:
+                router.routes.append(remote)
+                router.grid.mark_route(remote)
+            guard.begin_iteration(it, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+        caps = [call.kwargs["per_net_timeout"] for call in run.call_args_list]
+        assert caps[:2] == [30.0, 30.0]
+        assert all(5.0 <= cap <= 15.0 for cap in caps[2:4])
+        assert caps[4] == 30.0  # Periodic full re-probe, with the wall still in place.
+
+        # Full reorder can clear a corridor between two searches in one iteration.
+        # The remote segment remains on the live board when the wall is ripped.
+        router.grid.unmark_route(blocker)
+        router.routes.remove(blocker)
+        routed = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+        assert run.call_args.kwargs["per_net_timeout"] == 30.0
+        assert routed and any(route.segments for route in routed)
+        assert 1 not in guard.capped_streak
+
+    open_board = _wall_board(gap=True)
+    open_board.routes.append(remote)
+    open_board.grid.mark_route(remote)
+    expected = open_board._route_net_negotiated(1, 1.0, per_net_timeout=30.0)
+    assert [(r.segments, r.vias) for r in routed] == [(r.segments, r.vias) for r in expected]
+
+
+@pytest.mark.requires_router_cpp
 def test_stalled_corridor_nets_full_budget_searches_now_back_off():
     """The reproduction: a permanently corridor-failed unsealed net keeps a
     copper-keyed streak, its twice-per-iteration searches are assigned backed
     off caps (previously they stayed at the full per-net cap, invisible to
     the guard), the seconds land in the per-iteration known-fail report, and
     the net is still reported unrouted -- never silently dropped."""
-    router, routed_nets = _run_wall_board(gap=False)
+    witnesses = []
+    note_search = RipupCycleGuard.note_search
+
+    def record_witness(guard, net, *args, **kwargs):
+        if net == 1:
+            witnesses.append(guard.entry_signature[net])
+        note_search(guard, net, *args, **kwargs)
+
+    with patch.object(RipupCycleGuard, "note_search", record_witness):
+        router, routed_nets = _run_wall_board(gap=False)
+    # The full reorder removes the eight healthy nets between the recovery
+    # attempt and the second search of iteration 1.
+    assert witnesses[0][0] == "copper" and witnesses[0][1]
+    assert witnesses[1] == ("copper", ())
     g = router._ripup_cycle_guard
     rec = g.capped_streak.get(1)
     assert rec is not None and rec[1][0] == "copper"  # unsealed: coarse key
