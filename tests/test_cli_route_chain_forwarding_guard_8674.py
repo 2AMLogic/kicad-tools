@@ -295,6 +295,7 @@ MUST_FORWARD = {
     "--no-reserve-plane-layers",
     "--no-auto-pour",
     "--no-optimize",
+    "--no-silk-fix",
     "--protect-plane-zones",  # Issue #9597: hard constraint on zone splits
     "--raw",  # implies --no-optimize, which is what reaches the pass
     # Issue #9621: the bus family rides together -- the length window is a
