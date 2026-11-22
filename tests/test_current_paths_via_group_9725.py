@@ -198,17 +198,21 @@ def test_saved_via_row_attaches_by_pad_overlap(tmp_path, capsys, offsets, expect
 
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize(
-    "front_joints,back_joints,offset,return_x",
+    "front_joints,back_joints,offset,return_x,overlap,width_step",
     [
-        ((41.2,), (), 0.25, None),
-        ((), (41.2,), 0.25, None),
-        ((41.2, 43.6), (41.2, 43.6), 0.0, None),
-        ((41.2,), (43.6,), 0.25, None),
-        ((41.2,), (43.6,), 0.25, 31.4),
+        ((41.2,), (), 0.25, None, 0, 0),
+        ((), (41.2,), 0.25, None, 0, 0),
+        ((41.2, 43.6), (41.2, 43.6), 0.0, None, 0, 0),
+        ((41.2,), (43.6,), 0.25, None, 0, 0),
+        ((41.2,), (43.6,), 0.25, 31.4, 0, 0),
+        ((41.2, 43.6), (41.2, 43.6), 0.25, None, 0.025, 0),
+        ((41.2,), (), 0.25, None, 0, 0.001),
+        ((41.2, 43.6), (41.2,), 0.25, None, 0.4, 0.3),
+        ((41.2,), (43.6,), 0.25, 31.4, 0.025, 0.001),
     ],
 )
 def test_subdividing_bars_preserves_public_audit_and_written_anchors(
-    tmp_path, capsys, front_joints, back_joints, offset, return_x, reverse
+    tmp_path, capsys, front_joints, back_joints, offset, return_x, overlap, width_step, reverse
 ):
     import argparse
     import json
@@ -273,10 +277,16 @@ def test_subdividing_bars_preserves_public_audit_and_written_anchors(
         (seg,) = [s for s in pcb.segments if s.layer == layer and s.start[0] == s.end[0] == 30]
         pcb.remove_segments([seg])
         ends = [seg.start[1], *joints, seg.end[1]]
-        for y0, y1 in zip(ends, ends[1:], strict=False):
-            # Alternate the authored direction without changing copper.
-            pcb.add_trace((30, y1), (30, y0), width=seg.width, layer=layer, net="P")
+        for i, (y0, y1) in enumerate(zip(ends, ends[1:], strict=False)):
+            start = y0 - overlap / 2 if i else y0
+            end = y1 + overlap / 2 if i < len(joints) else y1
+            width = seg.width - width_step if i and layer == "F.Cu" else seg.width
+            pcb.add_trace((30, end), (30, start), width=width, layer=layer, net="P")
     assert measure(tmp_path / "divided.kicad_pcb") == joined
+    if width_step and return_x is None:
+        path = resolve_current_path(pcb, spec)
+        assert path.min_width is not None
+        assert path.min_width.width_mm == pytest.approx(3.0 - width_step)
 
 
 def test_fine_bar_subdivision_connects_distinct_offset_track_contacts(tmp_path):

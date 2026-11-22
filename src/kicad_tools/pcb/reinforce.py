@@ -76,12 +76,13 @@ and mask-open anchors (#8743), wire-list sidecar (#8744), net-class
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from kicad_tools.core.geometry import point_in_polygon, rotate_pad_offset
 from kicad_tools.core.types import CopperLayer
+from kicad_tools.geometry.copper import collinear_overlap_length
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.physics.wire_gauge import (
     DEFAULT_WIRE_GAUGE_AWG,
@@ -2054,6 +2055,52 @@ def _vertex(p: tuple[float, float]) -> tuple[float, float]:
     return (round(p[0], 4), round(p[1], 4))
 
 
+def _physical_leg_spans(
+    segments: list[Segment], sources: dict[int, tuple[int, ...]]
+) -> list[Segment]:
+    """Count overlapping collinear strokes once when walking one layer of eligible copper."""
+    from shapely import LineString, STRtree  # type: ignore[import-untyped]
+
+    from kicad_tools.router.connectivity import _UnionFind
+
+    if len(segments) < 2:
+        return segments
+    lines = [LineString((seg.start, seg.end)) for seg in segments]
+    overlaps = _UnionFind()
+    for i, j in STRtree(lines).query(lines).T:
+        if i >= j:
+            continue
+        a, b = segments[i], segments[j]
+        length = collinear_overlap_length(a.start, a.end, b.start, b.end)
+        if length is not None and length > 1e-6:
+            overlaps.union(i, j)
+    groups: dict[int, list[Segment]] = {}
+    for index, segment in enumerate(segments):
+        groups.setdefault(overlaps.find(index), []).append(segment)
+    result = []
+    for group in groups.values():
+        if len(group) == 1:
+            result.extend(group)
+            continue
+        first = group[0]
+        axis = 0 if abs(first.end[0] - first.start[0]) >= abs(first.end[1] - first.start[1]) else 1
+        points = sorted({p for s in group for p in (s.start, s.end)}, key=lambda p: p[axis])
+        intervals = [
+            (min(s.start[axis], s.end[axis]), max(s.start[axis], s.end[axis]), s) for s in group
+        ]
+        for start, end in zip(points, points[1:], strict=False):
+            if end[axis] - start[axis] <= 1e-9:
+                continue
+            station = (start[axis] + end[axis]) / 2
+            covering = [s for low, high, s in intervals if low <= station <= high]
+            if covering:
+                # On a common centreline the widest stroke occupies this interval.
+                span = replace(max(covering, key=lambda s: s.width), start=start, end=end)
+                sources[id(span)] = tuple(id(s) for s in covering)
+                result.append(span)
+    return result
+
+
 def _derive_legs(
     segments: list[Segment], layer: str, original_ids: dict[int, int]
 ) -> list[_LegCandidate]:
@@ -3112,12 +3159,20 @@ def _reinforce_ends(
     candidates: list[_LegCandidate] = []
     excluded_runs: list[list[Segment]] = []
     path_names: dict[int, list[str]] = {}
+    span_sources: dict[int, tuple[int, ...]] = {}
+
+    def leg_sources(run: list[Segment]) -> Iterator[int]:
+        for seg in run:
+            source = original_ids.get(id(seg), id(seg))
+            yield from span_sources.get(source, (source,))
+
     # Declared design current per path name (#8950): an SMD end's tie row is
     # sized from the largest current declared over the leg.
     declared_current_a: dict[str, float] = {}
     target_layer: str | None = layer
 
     if gated:
+        leg_spans: dict[str, list[Segment]] = {}
         for res in eligible_resolutions or ():
             for seg in res.segments:
                 covering = path_names.setdefault(id(seg), [])
@@ -3128,7 +3183,11 @@ def _reinforce_ends(
             segs = by_layer[lay]
             eligible = [s for s in segs if id(s) in path_names]
             excluded_runs.extend(_chain_polylines([s for s in segs if id(s) not in path_names]))
-            legs = _derive_legs(eligible, lay, original_ids)
+            # Chained copies refer back to these spans. End-clearance checks
+            # below still need every original track on the layer, including
+            # copper excluded from the declared path.
+            leg_spans[lay] = _physical_leg_spans(eligible, span_sources)
+            legs = _derive_legs(leg_spans[lay], lay, original_ids)
             if layer is not None and lay != layer:
                 for c in legs:
                     if c.status is None:
@@ -3469,8 +3528,8 @@ def _reinforce_ends(
         from kicad_tools.physics.ampacity import via_barrel_current_capacity
 
         names: list[str] = []
-        for s in cand.run:
-            for name in path_names.get(original_ids.get(id(s), id(s)), ()):
+        for source in leg_sources(cand.run):
+            for name in path_names.get(source, ()):
                 if name not in names:
                     names.append(name)
         row_current_a = max(
@@ -3797,8 +3856,8 @@ def _reinforce_ends(
         cand = candidates[index]
         g = geoms[index]
         names: list[str] = []
-        for s in cand.run:
-            for name in path_names.get(original_ids.get(id(s), id(s)), ()):
+        for source in leg_sources(cand.run):
+            for name in path_names.get(source, ()):
                 if name not in names:
                     names.append(name)
         leg = LegSummary(
@@ -3844,7 +3903,7 @@ def _reinforce_ends(
             points = g.points
             cum = _cumulative_arc(points)
             total = cum[-1]
-            own = {original_ids.get(id(s), id(s)) for s in cand.run}
+            own = set(leg_sources(cand.run))
             tracks = _track_components([s for s in by_layer[cand.layer] if id(s) not in own])
             c0 = _end_copper(points, cand.layer, features, tracks, cand.run[0].width / 2.0)
             c1 = _end_copper(points[::-1], cand.layer, features, tracks, cand.run[-1].width / 2.0)

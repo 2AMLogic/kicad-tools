@@ -230,7 +230,7 @@ from typing import TYPE_CHECKING, cast
 
 from kicad_tools.core.geometry import point_to_segment_distance, segments_intersect
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
-from kicad_tools.geometry.copper import extends_collinear
+from kicad_tools.geometry.copper import collinear_overlap_length, extends_collinear
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -1616,30 +1616,33 @@ def _track_station(seg: Segment, point: tuple[float, float]) -> tuple[float, flo
     return x + t * dx, y + t * dy
 
 
+def _continuous_bar(first: Segment, second: Segment) -> bool:
+    """Whether two same-layer track centrelines share an endpoint or interval on one line."""
+    return (
+        first.layer == second.layer
+        and collinear_overlap_length(first.start, first.end, second.start, second.end, _PAD_EPS)
+        is not None
+    )
+
+
 def _straight_bar_tracks(pcb: PCB, copper: CopperContactGraph) -> dict[int, int]:
-    """Group equal-width track pieces meeting along one straight centreline."""
+    """Group physically bonded pieces whose centrelines form one straight bar."""
     from kicad_tools.validate.copper_contact import TRACK
 
     from .connectivity import _UnionFind
 
     runs = _UnionFind()
-    joints: dict[_Node, list[tuple[int, tuple[float, float]]]] = {}
-    tracks = [
-        item.key[1] for item in copper.items if item.kind == TRACK and item.key[0] == "segment"
-    ]
-    for index in tracks:
-        segment = pcb.segments[index]
-        for joint, far in ((segment.start, segment.end), (segment.end, segment.start)):
-            joints.setdefault(_copper_node(joint, segment.layer), []).append((index, far))
-    for joint, ends in joints.items():
-        if len(ends) != 2:
-            continue
-        (i, start), (j, end) = ends
-        if pcb.segments[i].width == pcb.segments[j].width and extends_collinear(
-            start, joint[:2], joint[:2], end, _PAD_EPS
-        ):
-            runs.union(i, j)
-    return {i: runs.find(i) for i in tracks}
+    tracks = {
+        i: item.key[1]
+        for i, item in enumerate(copper.items)
+        if item.kind == TRACK and item.key[0] == "segment"
+    }
+    for a, b in copper.bonds:
+        if a in tracks and b in tracks:
+            i, j = tracks[a], tracks[b]
+            if _continuous_bar(pcb.segments[i], pcb.segments[j]):
+                runs.union(i, j)
+    return {i: runs.find(i) for i in tracks.values()}
 
 
 def _via_row_ports(
@@ -2438,13 +2441,34 @@ def _barrel_links(
     """Follow the original track edges across ordinary straight, two-ended joints."""
     links: dict[str, dict[frozenset[tuple[float, float]], _BarPath]] = {}
     terminals = taken.union(graph.pads.values())
+
+    @cache
+    def steps(node: _Node) -> list[tuple[_Node, list[_GraphEdge]]]:
+        # The graph splits at every authored endpoint. Two overlapping strokes
+        # therefore have duplicate edges on their common centreline interval.
+        # Keep both originals as width and contact evidence for that one span.
+        by_end: dict[_Node, list[_GraphEdge]] = {}
+        for end, edge in graph.adjacency[node]:
+            by_end.setdefault(end, []).append(edge)
+        result = []
+        for end, edges in by_end.items():
+            first = edges[0].segment
+            if first is not None and all(
+                edge.segment is not None and _continuous_bar(first, edge.segment)
+                for edge in edges[1:]
+            ):
+                result.append((end, edges))
+            else:
+                result.extend((end, [edge]) for edge in edges)
+        return result
+
     for pos, layers in spans.items():
         for layer in layers:
             start = _copper_node(pos, layer)
-            for first, edge in graph.adjacency[start]:
-                if edge.segment is None or first[2] != layer:
+            for first, edges in steps(start):
+                if edges[0].segment is None or first[2] != layer:
                     continue
-                path = [(start, edge, first)]
+                path = [(start, edges, first)]
                 visited = {start}
                 while True:
                     previous, incoming, current = path[-1]
@@ -2456,13 +2480,17 @@ def _barrel_links(
                         if pos < current[:2] and layer in spans[current[:2]]:
                             same_layer = links.setdefault(layer, {})
                             pair = frozenset((pos, current[:2]))
-                            same_layer.setdefault(pair, []).extend(path)
+                            same_layer.setdefault(pair, []).extend(
+                                (begin, edge, end)
+                                for begin, span_edges, end in path
+                                for edge in span_edges
+                            )
                         break
-                    adjacent = graph.adjacency[current]
+                    adjacent = steps(current)
                     if len(adjacent) != 2:
                         break
-                    nxt, outgoing = adjacent[1] if adjacent[0][1] is incoming else adjacent[0]
-                    src, dest = incoming.segment, outgoing.segment
+                    nxt, outgoing = adjacent[1] if adjacent[0][0] == previous else adjacent[0]
+                    src, dest = incoming[0].segment, outgoing[0].segment
                     if src is None or dest is None or nxt[2] != layer:
                         break
                     if not extends_collinear(

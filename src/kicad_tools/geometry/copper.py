@@ -374,6 +374,28 @@ def segment_copper_polygon(
     return line.buffer(width / 2)
 
 
+def collinear_overlap_length(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+    tol: float = 1e-6,
+) -> float | None:
+    """Length shared by two finite collinear centrelines, or None for a gap or bend."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length <= tol or math.dist(c, d) <= tol:
+        return None
+    stations = []
+    for x, y in (c, d):
+        x, y = x - a[0], y - a[1]
+        if abs(dx * y - dy * x) > tol * length:
+            return None
+        stations.append((dx * x + dy * y) / length)
+    overlap = min(length, max(stations)) - max(0.0, min(stations))
+    return max(0.0, overlap) if overlap >= -tol else None
+
+
 def extends_collinear(
     prev_start: tuple[float, float],
     prev_end: tuple[float, float],
