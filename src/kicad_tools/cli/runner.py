@@ -1401,19 +1401,30 @@ def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict 
     os.close(fd)
     report_path = Path(report_name)
     try:
-        cmd = [
-            str(kicad_cli),
-            "pcb",
-            "drc",
-            "--output",
-            str(report_path),
-            "--format",
-            "json",
-        ]
-        if refill and _kicad_drc_supports_refill(kicad_cli):
-            cmd.extend(["--refill-zones", "--save-board"])
-        cmd.append(str(pcb_path))
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+
+        def build_cmd(use_refill: bool) -> list[str]:
+            cmd = [
+                str(kicad_cli),
+                "pcb",
+                "drc",
+                "--output",
+                str(report_path),
+                "--format",
+                "json",
+            ]
+            if use_refill:
+                cmd.extend(["--refill-zones", "--save-board"])
+            cmd.append(str(pcb_path))
+            return cmd
+
+        # Issue #9946: an inconclusive capability probe must not silently
+        # degrade the requested refill to a read-only DRC.  Passing the flags
+        # unless the probe *definitively* said "no" -- and retrying once
+        # without them when kicad-cli rejects the option -- is exactly
+        # run_kicad_drc_command's policy (Issue #6775), so reuse it.
+        proc, _refilled = run_kicad_drc_command(
+            build_cmd, kicad_cli, refill_zones=refill, text=True
+        )
         _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
         # Issue #6724: a killed kicad-cli (negative status) or a missing,
         # empty or truncated report is "no report", never an empty one.
