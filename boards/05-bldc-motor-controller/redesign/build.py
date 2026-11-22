@@ -41,6 +41,27 @@ ROUTER_NETCLASSES = (
     "Power",
 )
 
+#: Board-specific pour standoff (issue #9921).  The fills otherwise keep only
+#: the 0.1016 mm fab floor from foreign pads, so every pad opening sits
+#: 0.102 mm from pour copper -- inside mask_to_copper's 0.15 mm warning band
+#: (96 findings on the staged baseline).  A custom-rule clearance minimum is
+#: the one knob kicad-cli's fill honours (netclass assignment and
+#: ``connect_pads`` clearance do not widen it), so the recipe pins the pours
+#: at 0.2 mm; measured fill distance 0.2005 mm on the pinned toolchain.
+POUR_STANDOFF_RULE = (
+    '(rule "board05 pour mask standoff"'
+    ' (condition "A.Type == \'Zone\'")'
+    " (constraint clearance (min 0.2mm)))"
+)
+
+
+def declare_pour_standoff(routed):
+    """Append the reviewed pour-standoff rule to the routed DRU sidecar."""
+    dru = routed.with_suffix(".kicad_dru")
+    text = dru.read_text()
+    if POUR_STANDOFF_RULE not in text:
+        dru.write_text(text.rstrip("\n") + "\n" + POUR_STANDOFF_RULE + "\n")
+
 
 def declare_router_netclasses(routed):
     """Declare the router's net classes in the routed sidecars (#6390, #7391).
@@ -121,6 +142,7 @@ def build(output):
     shutil.copy2(output / "bldc_controller.kicad_pro", routed.with_suffix(".kicad_pro"))
     fingerprint = apply_routing(routed)
     declare_router_netclasses(routed)
+    declare_pour_standoff(routed)
     # Issue #8532: every board carries global fiducials and a board-ID
     # silkscreen.  Added after the reviewed copper recipe is applied (the
     # recipe's pad/placement fingerprint is checked before this) and before
