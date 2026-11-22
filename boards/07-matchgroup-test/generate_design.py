@@ -938,6 +938,11 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         KVia,
         copper_gap,
     )
+    from kicad_tools.router.via_clearance import (
+        same_net_band_edges,
+        same_net_band_seat_ok,
+        same_net_trace_band_clear,
+    )
     from kicad_tools.validate.clearance_shapes import pad_shape as kernel_pad_shape
     from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
@@ -1009,6 +1014,30 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     bound_r,
                 )
             )
+
+    # Issue #8975: same-net SMD pad bboxes for the fab-view slit-band test in
+    # ``_via_ok`` (``same_net_pad_gap_acceptable``, #8957's predicate).  True
+    # copper extents: the kernel decomposes a pad into a Minkowski core plus
+    # ``corner_radius``, so the exact AABB is the core's AABB grown by the
+    # radius on every side -- NOT the ``half_diag`` obstacle circle above,
+    # which inflates the box past the pad and would read a seat overlapping
+    # its own pad as a positive gap.  SMD only: a through-hole pad's barrel
+    # joins every layer, so no fab-view slit can open beside one.
+    smd_bboxes_by_net: dict[str, list[tuple[float, float, float, float]]] = {}
+    for entry in pad_index:
+        _geom, pnet, _layers, drill_r, _center, _name, is_th, _insc, kpad, _br = entry
+        if is_th or drill_r > 0 or not kpad.core:
+            continue
+        xs = [cx for cx, _ in kpad.core]
+        ys = [cy for _, cy in kpad.core]
+        cr = kpad.corner_radius
+        smd_bboxes_by_net.setdefault(pnet, []).append(
+            (min(xs) - cr, min(ys) - cr, max(xs) + cr, max(ys) + cr)
+        )
+    # Issue #8975 / #9150: the same-net band edges the fab-view grader
+    # resolves for this board's stackup, from the one shared resolver (never
+    # literals; a missing profile entry disables the band, 0.0).
+    SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
 
     # Segments: (geom, net, layer)
     seg_index: list[tuple] = []
@@ -1153,7 +1182,26 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 return False
             if vnet != net and vgeom.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
-        return True
+        # Issue #8975 / #9150: fab-view same-net slit band, the one shared
+        # predicate.  The annulus exists on every layer, so any-layer
+        # same-net copper counts (segments + via annuli, trace population's
+        # edge); same-net SMD pads grade on the pad population's edge.  A
+        # via seated a hair outside its own pad leaves wedge-shaped notches
+        # of air that the fab-view ``physical_copper_gap`` grading reports
+        # regardless of nets (#8938).  The via-in-pad ban above already
+        # rejects every overlapping seat, so the ladder walks outward to the
+        # first rung at/beyond the fab error edge.
+        same_net_copper = [geom for geom, snet, _lay in seg_index if snet == net]
+        same_net_copper += [pt.buffer(radius) for pt, vnet, radius, _dr in via_index if vnet == net]
+        return same_net_band_seat_ok(
+            vx,
+            vy,
+            2 * VIA_R,
+            same_net_copper,
+            smd_bboxes_by_net.get(net),
+            SAME_NET_PAD_GAP_MM,
+            SAME_NET_TRACE_GAP_MM,
+        )
 
     def _path_ok(
         net: str,
@@ -1180,7 +1228,13 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for pt, vnet, radius, _drill_r in via_index:
             if vnet != net and path.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
-        return True
+        # Issue #8975 / #9150: same-net slit band on the path's own layer
+        # (segments) plus annuli (every layer) on the trace population's
+        # edge -- a stub/bridge leg grazing own-net copper at a sub-edge gap
+        # is a fab-view finding; overlap is one union.
+        same_net_copper = [geom for geom, snet, lay in seg_index if snet == net and lay == layer]
+        same_net_copper += [pt.buffer(radius) for pt, vnet, radius, _dr in via_index if vnet == net]
+        return same_net_trace_band_clear(path, same_net_copper, SAME_NET_TRACE_GAP_MM)
 
     directions = [(math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)]
     # Near offsets first (the BGA diagonal hollow sits at 0.898 mm); the

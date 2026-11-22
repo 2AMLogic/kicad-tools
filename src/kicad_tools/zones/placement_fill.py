@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -37,16 +38,31 @@ class NativeFillWorkerError(RuntimeError):
 _PROBE_TIMEOUT_S = 20
 _PROBE_ATTEMPTS = 2
 
+#: The full ``python -c`` expression each candidate must pass. The default is
+#: the selective-fill requirement (wx off Linux plus the fill API, #6213);
+#: callers with other native needs pass their own expression -- e.g. the mask
+#: per-object worker probes a plain ``import pcbnew`` (#8946).
+_SELECTIVE_FILL_PROBE = (
+    "import sys, pcbnew; "
+    "__import__('wx') if sys.platform != 'linux' else None; "
+    "assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')"
+)
+
 
 class MultilayerFillUnsupportedError(RuntimeError):
     """pcbnew is too old to fill multilayer zones; it would yield empty copper."""
 
 
-def find_kicad_python() -> Path | None:
-    """Find an interpreter with the native APIs this selective fill needs.
+def find_kicad_python(probe: str = _SELECTIVE_FILL_PROBE) -> Path | None:
+    """Find an interpreter whose ``python -c probe`` exits zero.
 
-    A probe that times out is retried once (cold-start tolerance) before the
-    candidate is given up on.
+    Candidates are probed in order: ``sys.executable``, KiCad.app's
+    Python.framework on darwin, ``PROGRAMFILES`` KiCad installs on win32,
+    ``/usr/bin/python3``, then ``python3`` from ``PATH``. A probe that times
+    out is retried once (cold-start tolerance) before the candidate is given
+    up on. Only exact repeated paths are skipped: differently-named links to
+    one interpreter are each probed, because a failing link (a venv) says
+    nothing about the interpreter it points to.
     """
     candidates = [Path(sys.executable)]
     if sys.platform == "darwin":
@@ -56,8 +72,6 @@ def find_kicad_python() -> Path | None:
             )
         )
     elif sys.platform == "win32":
-        import os
-
         for location in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)")):
             if location:
                 candidates.extend(
@@ -69,20 +83,19 @@ def find_kicad_python() -> Path | None:
         candidates.append(Path(located))
     seen = set()
     for candidate in candidates:
-        if not candidate.is_file() or candidate.resolve() in seen:
+        # Dedup on the path as listed, never its symlink target: a venv
+        # interpreter and the system interpreter it links to share a real
+        # path but not a site-packages, so a failed venv probe says nothing
+        # about the system python (Issue #9086).
+        key = os.path.abspath(candidate)
+        if not candidate.is_file() or key in seen:
             continue
-        seen.add(candidate.resolve())
+        seen.add(key)
         result = None
         for _attempt in range(_PROBE_ATTEMPTS):
             try:
                 result = subprocess.run(
-                    [
-                        str(candidate),
-                        "-c",
-                        "import sys, pcbnew; "
-                        "__import__('wx') if sys.platform != 'linux' else None; "
-                        "assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')",
-                    ],
+                    [str(candidate), "-c", probe],
                     capture_output=True,
                     text=True,
                     timeout=_PROBE_TIMEOUT_S,

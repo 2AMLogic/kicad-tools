@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     from kicad_tools.performance import PerformanceConfig
     from kicad_tools.schema.pcb import Zone
 
+    from .body_surcharge import BodySurchargeRegion
     from .cpp_backend import CppGrid
 
 from kicad_tools.acceleration import (
@@ -482,6 +483,7 @@ def _sync_pad_to_cpp_grid(
     )
     ref_hash = router_cpp.fnv1a_hash(pad.component_key) if pad.component_key else 0
     is_plane_net = _is_plane_net_pad(pad)
+    from .via_clearance import cpp_pad_copper_corner_radius
 
     try:
         cpp_grid._impl.add_pad(
@@ -496,6 +498,7 @@ def _sync_pad_to_cpp_grid(
             is_plane_net,
             pad.rotation,
             pad.shape == "circle",
+            cpp_pad_copper_corner_radius(pad),
         )
     except (AttributeError, TypeError):
         # Older C++ binding without is_plane_net argument; ignore -- the
@@ -996,6 +999,16 @@ class _CellView:
         self._grid._history_cost[self._layer, self._y, self._x] = value
 
     @property
+    def airwire_count(self) -> int:
+        """Issue #8999: how many still-unrouted nets' desire lines cover this cell.
+
+        Read-only: the plane is owned by
+        :mod:`kicad_tools.router.airwire_cost`, which recomputes it as a
+        pure function of the committed set (never mutated per-cell).
+        """
+        return int(self._grid._airwire_cost[self._y, self._x])
+
+    @property
     def is_obstacle(self) -> bool:
         return bool(self._grid._is_obstacle[self._layer, self._y, self._x])
 
@@ -1309,6 +1322,11 @@ class RoutingGrid:
         # ``add_pad`` so late pad additions re-measure.
         self._component_pitch_cache: dict[str, float] | None = None
 
+        # Issue #9622: lazy cache for the under-body surcharge regions
+        # (``under_body_surcharges``).  Same invalidation contract as the
+        # pitch cache: ``add_pad`` drops it so late pad additions re-derive.
+        self._under_body_cache: list[BodySurchargeRegion] | None = None
+
         # Issue #3371 (P_FP2): Fine-pitch escape regions detected on this
         # board.  Populated by the autorouter (or test fixture) once after
         # all pads are added via :meth:`set_fine_pitch_regions`.  Consumed
@@ -1525,6 +1543,14 @@ class RoutingGrid:
         self._net = xp.zeros(grid_shape, dtype=np.int32)
         self._usage_count = xp.zeros(grid_shape, dtype=np.int16)
         self._history_cost = xp.zeros(grid_shape, dtype=np.float32)
+        # Issue #8999: airwire-separation crossing-count plane.  2-D
+        # (rows, cols) -- a desire line is layer-less, so the same count
+        # column applies to every layer.  Integer counts (deterministic
+        # accumulation); the float weight is applied at read time in
+        # ``get_negotiated_cost``.  All-zero unless the
+        # ``--airwire-separation-weight`` flag builds it.
+        self._airwire_cost = xp.zeros((grid_shape[1], grid_shape[2]), dtype=np.int16)
+        self._airwire_weight = 0.0
         self._present_cost_ema: np.ndarray | None = (
             None  # Lazy; allocated on first use (Issue #2333)
         )
@@ -1863,6 +1889,7 @@ class RoutingGrid:
         self._net = empty_i32
         self._usage_count = xp.zeros((0, 0, 0), dtype=np.int16)
         self._history_cost = xp.zeros((0, 0, 0), dtype=np.float32)
+        self._airwire_cost = xp.zeros((0, 0), dtype=np.int16)  # Issue #8999
         self._is_obstacle = xp.zeros((0, 0, 0), dtype=np.bool_)
         self._is_zone = xp.zeros((0, 0, 0), dtype=np.bool_)
         self._pad_blocked = empty_bool
@@ -1892,6 +1919,7 @@ class RoutingGrid:
         self._net = to_numpy(self._net)
         self._usage_count = to_numpy(self._usage_count)
         self._history_cost = to_numpy(self._history_cost)
+        self._airwire_cost = to_numpy(self._airwire_cost)  # Issue #8999
         if self._present_cost_ema is not None:
             self._present_cost_ema = to_numpy(self._present_cost_ema)
         self._is_obstacle = to_numpy(self._is_obstacle)
@@ -1974,6 +2002,7 @@ class RoutingGrid:
             self._net = backend.asarray(self._net)
             self._usage_count = backend.asarray(self._usage_count)
             self._history_cost = backend.asarray(self._history_cost)
+            self._airwire_cost = backend.asarray(self._airwire_cost)  # type: ignore[attr-defined]  # Issue #8999; same known ArrayBackend FP as the neighbours
             if self._present_cost_ema is not None:
                 self._present_cost_ema = backend.asarray(self._present_cost_ema)
             self._is_obstacle = backend.asarray(self._is_obstacle)
@@ -2515,6 +2544,25 @@ class RoutingGrid:
         """
         return tuple(self._pads)
 
+    @property
+    def under_body_surcharges(self) -> list[BodySurchargeRegion]:
+        """Per-component under-body surcharge regions (Issue #9622).
+
+        Computed once from the registered pads via
+        :func:`kicad_tools.router.body_surcharge.compute_under_body_regions`
+        and cached until ``add_pad`` invalidates it.  Empty when the board
+        has no qualifying fine-pitch component, so both engines' hot paths
+        stay dormant.
+
+        Consumers: the pure-Python A* mirror in ``pathfinder.Router`` and
+        the per-net budget adapter in ``cpp_backend.CppPathfinder``.
+        """
+        if self._under_body_cache is None:
+            from .body_surcharge import compute_under_body_regions
+
+            self._under_body_cache = compute_under_body_regions(self)
+        return self._under_body_cache
+
     def _add_pad_unsafe(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
@@ -2546,6 +2594,9 @@ class RoutingGrid:
             self._component_pads.setdefault(pad.component_key, []).append(pad)
             # Issue #3545: pitch cache is stale once a new pad lands.
             self._component_pitch_cache = None
+            # Issue #9622: the under-body regions derive from the same
+            # pad registry, so they go stale with it.
+            self._under_body_cache = None
 
         # Issue #2604 follow-up: remember the pin_pitch this pad was added
         # with so ``find_pad_ref_at`` can reproduce the reduced fine-pitch
@@ -7792,6 +7843,22 @@ class RoutingGrid:
             present_cost = present_cost_factor * cell.usage_count
         history_cost = cell.history_cost
 
+        # Issue #8999: prospective airwire-separation term -- how many
+        # still-unrouted nets' desire lines cover this cell, weighted by
+        # the flag-supplied scalar.  All-zero (and the multiply a no-op
+        # ``+0.0``) unless ``--airwire-separation-weight`` built the
+        # plane, so the flag-off value is byte-identical to
+        # ``present_cost + history_cost``.  Read through ``getattr`` so
+        # ``__new__``-constructed stand-in grids (issue #5240) without the
+        # plane keep the legacy value.
+        airwire_plane = getattr(self, "_airwire_cost", None)
+        if airwire_plane is not None:
+            return (
+                present_cost
+                + history_cost
+                + float(self._airwire_weight) * int(airwire_plane[gy, gx])
+            )
+
         return present_cost + history_cost
 
     def get_layer_fill_ratios(self) -> np.ndarray:
@@ -8112,13 +8179,26 @@ class RoutingGrid:
         from kicad_tools.schema.pcb import Zone as ZoneType  # noqa: F401
 
         with self._acquire_lock():
+            # Issue #9597: collect the marks so the paired C++ grid can be
+            # updated in one bulk call -- the C++ A* charges foreign plane
+            # zone cells a cost, so both backends must see the same marks.
+            xs: list[int] = []
+            ys: list[int] = []
+            nets: list[int] = []
             for gx, gy in filled_cells:
                 if 0 <= gx < self.cols and 0 <= gy < self.rows:
                     cell = self.cell_at(layer_index, gy, gx)
                     cell.is_zone = True
                     cell.zone_id = zone.uuid
                     cell.net = zone.net_number
+                    xs.append(gx)
+                    ys.append(gy)
+                    nets.append(int(zone.net_number))
                     # Zone copper is not an obstacle - routes can pass through same-net zones
+            cpp_grid = getattr(self, "_cpp_grid", None)
+            impl = getattr(cpp_grid, "_impl", None) if cpp_grid is not None else None
+            if impl is not None and xs and hasattr(impl, "mark_zone_cells"):
+                impl.mark_zone_cells(xs, ys, [layer_index] * len(xs), nets)
 
     def clear_zones(self, layer_index: int | None = None) -> None:
         """Remove all zone markings from the grid.
@@ -8152,6 +8232,15 @@ class RoutingGrid:
                 keys_to_remove = [k for k in self._zone_ids if k[0] == layer_idx]
                 for key in keys_to_remove:
                     del self._zone_ids[key]
+
+            # Issue #9597: mirror the clear onto the paired C++ grid so its
+            # zone-cost marks cannot outlive the Python ones.  Issue #9826:
+            # same layer scope, and the C++ clear resets ``net`` on unblocked
+            # former zone cells exactly as the loop above does.
+            cpp_grid = getattr(self, "_cpp_grid", None)
+            impl = getattr(cpp_grid, "_impl", None) if cpp_grid is not None else None
+            if impl is not None and hasattr(impl, "clear_zone_cells"):
+                impl.clear_zone_cells(-1 if layer_index is None else int(layer_index))
 
     def get_zone_cells(self, layer_index: int, zone_id: str | None = None) -> set[tuple[int, int]]:
         """Get all cells belonging to zones on a layer.
@@ -8557,6 +8646,7 @@ class RoutingGrid:
                 self._net,
                 self._usage_count,
                 self._history_cost,
+                self._airwire_cost,  # Issue #8999
                 self._is_obstacle,
                 self._is_zone,
                 self._pad_blocked,

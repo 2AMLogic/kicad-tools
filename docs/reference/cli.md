@@ -39,11 +39,11 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `net-status` | Report net connectivity status for a PCB |
 | | `constraints` | Constraint conflict detection and management |
 | | `detect-mistakes` | Detect common PCB design mistakes |
-| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill) |
+| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper + copper-gap) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
-| | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads |
-| | `place-silk-refs` | Move readable reference designators to clear silk/pad/edge collisions |
+| | `fix-silkscreen` | Repair silk widths and text heights. After routing, `--clip-to-pads` trims lines near pads and `--clip-to-holes` clips graphics off drilled holes. `--all` combines width, text, pad and drilled-pad repairs with reference placement. Its JSON `rules_covered` lists the repair scope. Use `kct check <board> --only silkscreen` for a full silk check. |
+| | `place-silk-refs` | Move readable reference designators to clear silk/pad/drill/edge collisions; `--over-holes` moves only those over a drilled hole |
 | | `fix-footprints` | Fix footprint pad spacing issues |
 | | `repair-clearance` | Repair clearance violations by nudging traces |
 | | `pipeline` | End-to-end repair pipeline for existing PCBs |
@@ -70,6 +70,8 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `datasheet` | Datasheet search and PDF parsing |
 | **PCB Operations** | `route` | Autoroute a PCB |
 | | `route-auto` | Route a net with smart strategy selection |
+| | `probe` | Check a batch of proposed tracks/vias/arcs against a board; write nothing (#9590) |
+| | `apply` | Apply proposed copper `--checked`: probe first, write only if all pass (#9590) |
 | | `retune-lengths` | Length-tune selected match groups / diff pairs on an already-routed PCB |
 | | `zones` | Add copper pour zones |
 | | `placement` | Detect and fix placement conflicts |
@@ -217,6 +219,41 @@ kct pcb <subcommand> <pcb_file> [options]
 | `model-audit` | Classify every footprint's 3D model coverage (`resolved`, `embedded`, `dangling`, `no_ref`, `unresolved_var`, `hidden_only`, `lcsc_cache_miss`, `lcsc_content_changed`, `placeholder`, `exempt`); `--env host\|pinned`, `--model-dir DIR`, `--format json`. A report: exits 0 regardless of coverage (see [3D model coverage](../guides/lcsc-3d-models.md#3d-model-coverage-audit)) |
 | `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
 | `reinforce` | Place same-net PTH buttress-wire anchors on a routed net: by default two per single-layer wire leg, at its ends (see below) |
+| `prune` | Remove redundant copper (branches, loops) and snap off-centre ends onto same-net via/pad centres; with a current-paths sidecar it also breaks declared loops so `reinforce` can anchor the run (see below) |
+
+**`move-footprint --map` and the `side` key.** A batch entry takes `x`, `y`,
+optional `rotation` and optional `"side": "front" | "back"`. A part not already
+on the requested side is flipped first (the same transform as `pcb-modify flip`,
+about the footprint anchor), then `x`/`y`/`rotation` are applied; the board is
+loaded and saved once. A part already on that side is not touched, an entry
+without `side` never flips, and any other value (or a footprint on a
+non-`F.*`/`B.*` layer) is rejected before anything is changed. `--dry-run` and
+`--format json` report `old_side` / `new_side` / `side_changed` per reference.
+`--drag-endpoints` is skipped (with a warning) for a footprint whose side
+changes, as for a rotation change.
+
+`rotation` is the **stored KiCad footprint angle written after the flip**, which
+is what KiCad's Properties dialog shows for the back-side part. It is not an
+angle as seen from the front. The flip mirrors about the footprint anchor, not
+the part's centre. With an explicit `rotation` the pads land at the same board
+coordinates that stored angle gives on the front; with `rotation` omitted the
+flip rewrites the stored angle `theta -> 180 - theta`, which mirrors the pads
+about the anchor. For a two-pad through-hole part whose anchor is pad 1
+(pad 2 at local `+7.62, 0`) moved to `(50, 40)`:
+
+```bash
+# D1: anchor = pad 1, pad 2 at local (7.62, 0); currently on F.Cu at angle 0.
+# rotation omitted -> flip rewrites the angle to 180: pad 1 at (50, 40),
+# pad 2 at (42.38, 40), mirrored about the anchor
+kct pcb move-footprint board.kicad_pcb --map '{"D1": {"x": 50, "y": 40, "side": "back"}}'
+# rotation 0 -> pad 1 at (50, 40), pad 2 at (57.62, 40), the same pad layout as on the front
+kct pcb move-footprint board.kicad_pcb --map '{"D1": {"x": 50, "y": 40, "rotation": 0, "side": "back"}}'
+```
+
+Confirm a polarised part by reading pad positions back in Python:
+`PCB.load("board.kicad_pcb").get_pad_position("D1", "2")` returns the pad's
+board-relative coordinate (`kct pcb footprints --format json` reports the pad
+count and the footprint anchor, not each pad position).
 
 **`add-zone` output-path behavior:** `-o`/`--output` is optional and
 **defaults to overwriting the input in place** — consistent with `zones add`,
@@ -339,7 +376,10 @@ Two placement modes:
   A refused end anchor is nudged inward along the leg only, by at most
   2 mm, and never past the other anchor; otherwise it is listed under
   `refused` with the rule that refused it (including `hole_to_hole` /
-  `anchor_spacing` against another leg's anchor) and the leg is
+  `anchor_spacing` against another leg's anchor, and `anchor_courtyard`
+  when the end hole plus fillet clearance would sit in a courtyard on
+  either side -- the `wire_run_courtyard_overlap` end-hole test, naming the
+  footprint in `obstacle_footprint`) and the leg is
   `partial` (one anchor, the other rule-refused) or `unanchored`. One
   anchor can't hold a two-ended wire, so treat `partial` as a placement to
   fix.
@@ -420,6 +460,15 @@ timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
 embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
 [--format json]` prints it read-only from the sidecar.
 
+`kct pcb reinforce BOARD --adopt [--net NET] [--dry-run]` records wires that are
+already on the board (e.g. hand-adjusted after a Gerber review) without moving
+copper or writing the board: each solder-mask strip chain running between two
+same-net anchor holes of a wire gauge's drill becomes a sidecar record, which
+`mask_to_copper` then uses to excuse the run's strip, anchors and end holes on
+both mask sides. Wires the sidecar already records are kept, so a re-run changes
+nothing; strips that cannot be resolved (branched, or an end with no anchor hole)
+are reported, never guessed.
+
 Declared current paths that do not resolve (moved/removed pad, ambiguous
 loop) are listed under `unresolved_paths` and warned about on stderr; they
 get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
@@ -449,6 +498,70 @@ adds `mask_opening`, `mask_width_mm`, `openings` (`layer`, `start`, `end`,
 `width_mm`, `existing`), `refused_openings` and per-leg `mask_status` /
 `mask_reason`. Refill zone pours afterwards
 (`kicad-cli pcb drc --refill-zones`).
+
+#### `kct pcb prune BOARD`
+
+Remove copper that adds no connectivity — redundant branches, same-layer
+loops — and snap off-centre segment ends onto the same-net via/pad centre
+(#8216). Connectivity follows KiCad (endpoint-anchored track joins, ends
+inside a pad/via/zone): a segment is removed only if every pad and zone
+terminal stays in the same component and no joint becomes overlap-only;
+copper that touches other same-net copper away from a shared endpoint (a
+spur beside a via) is removed only when connectivity also holds over those
+body-touching neighbours; straight end-to-end runs of same-width segments
+are merged into one; locked tracks are never touched. When applying edits,
+prune repeats until a pass makes no changes or it reaches the 10-pass limit
+(#8730). A dry run previews only the first pass, so it can undercount edits
+when that pass exposes more redundant copper. With kicad-cli
+available each net's edits are checked with `pcb drc --refill-zones` and
+dropped if they add violations; without that check the file is only written
+with `--unverified`. In-place by default; use `-o` to write elsewhere.
+
+```bash
+kct pcb prune board.kicad_pcb --dry-run
+kct pcb prune board.kicad_pcb --nets VBUS,GND --region 10,10,90,60
+kct pcb prune board.kicad_pcb --current-paths current_paths.json --wide 1.0
+kct pcb prune board.kicad_pcb --voltage-map voltages.json --dry-run --format json
+```
+
+| Option | Description |
+|--------|-------------|
+| `BOARD` | Path to `.kicad_pcb` file |
+| `-o`, `--output` `PATH` | Output file path (default: overwrite the board in place) |
+| `--format` `{text,json}` | Output format (default: `text`) |
+| `--dry-run` | Preview first-pass edits without writing the board |
+| `--nets` `NET[,NET...]` | Only prune these nets (comma-separated names); other copper is untouched |
+| `--region` `x1,y1,x2,y2` | Only apply a net's plan when every edit lies inside this box (board-relative mm); plans straddling it are skipped and reported as `region_skipped` |
+| `--no-drc` | Skip kicad-cli DRC verification |
+| `--project` `PATH.kicad_pro` | Project whose rules (`.kicad_pro` and sibling `.kicad_dru`) DRC verifies under (default: the files beside the board) |
+| `--allow-default-rules` | Verify against KiCad default rules when no project rules are found (otherwise that is an error) |
+| `--current-paths` `FILE` | Declared current-path sidecar. Auto-discovered next to the board exactly as `kct check` auto-loads it (#9747); on the nets it names, also break copper loops (including loops closed through vias) by removing each loop's narrowest segment below `--wide`, so `pcb reinforce` can anchor the run |
+| `--no-current-paths` | Suppress sidecar auto-discovery: no sidecar is loaded (only an explicit `--current-paths` names one), so declared nets get no declared-current width test in planning and the post-plan current-path audit gate (#8687) is disabled. Cannot be combined with `--current-paths` |
+| `--wide` `MM` | With a declared sidecar: width at/above which a segment is never cut. Default (unset): net-relative — cut each loop's narrowest segment whatever its width, provided the branch left behind still meets the declared current's IPC-2221 width on its own layer; refused cuts are reported |
+| `--voltage-map` `FILE` | Enable the pairwise creepage check with a JSON map of net voltages in volts. Accepts the same voltages, ranges and `_pair_bounds` as `kct creepage`. The check is off by default. |
+| `--creepage-standard` | IEC table used to calculate required creepage distances in millimetres. Accepts `iec60664` (default) or `iec62368`. |
+| `--pollution-degree` | Pollution degree for the creepage table. Accepts `1`, `2` (default) or `3`. |
+| `--material-group` | Insulation material group for the creepage table. Accepts `I`, `II`, `IIIa` (default) or `IIIb`. |
+| `--hv-threshold` `VOLTS` | Minimum voltage difference for the list of required pairs (default 30 V). The audit selects mapped nets whose worst-case voltage differs from the board-edge potential by at least this amount. It also includes nets with recognized mains or HV names. |
+| `--unverified` | Write the result even when it was not verified with kicad-cli DRC (`--no-drc`, or kicad-cli missing). Without this the file is left untouched |
+
+With a voltage map, prune compares each net's proposed edits with the input
+board. It rejects the net's entire plan if any pair develops a creepage
+shortfall or an existing shortfall increases. JSON lists the rejected plans
+in `rejected_by_creepage` and reports `creepage_pairs_checked` and
+`creepage_pairs_unchecked` under `creepage`. The final board must pass the
+same comparison before prune writes the output. An unavailable audit also
+prevents the write.
+
+The `--no-current-paths` row mirrors the parser help as corrected in #9777
+(on `kct route` the same flag only keeps `path_ampacity` inactive — see
+[Declared branch current paths](#declared-branch-current-paths---current-paths)).
+A loop whose segments are all at or above `--wide` is reported, not cut, as
+is any loop the current-path audit still sees afterwards (with its witness).
+Prune exits with `0` on success, including a dry run or a board with nothing
+to remove. Command-level validation errors, I/O failures and refused writes
+return `1`. Argument parsing errors such as an invalid `--format` choice or
+a nonnumeric `--wide` value return `2`.
 
 ---
 
@@ -638,7 +751,20 @@ kct check <pcb_file> [options]
 
 `kct check --format json` carries top-level `verdict` (`pass`|`fail`|`incomplete`)
 and `exit_code` (the process exit code). `summary.passed` is DRC-only: it can be
-`true` while `verdict` is `incomplete` (#7230).
+`true` while `verdict` is `incomplete` (#7230). `meta_checks.incomplete_categories`
+lists every category whose check did not complete on this run (`mask_to_copper`,
+`dfm_table`, `fab_dfm_parity`), agreeing with `coverage.*.state` — it can be
+non-empty while `verdict` is `fail` (#9062). `mask_to_copper` is keyed on
+`assessment.coverage`, never `assessment.passed`: a mask check that completed and
+found a real violation is a checked row and is not named. One deliberate exception
+to full agreement (#8949): an *explicitly requested* mask check that cannot run is
+FAILED, so `coverage.mask_to_copper` is `unknown` (and in
+`summary.coverage_blocking_unknown`) while the list does not name it — the list is
+exhaustive only for default-applied checks. `fab_dfm_parity.incomplete_categories`
+names the danger-capable JLCDFM categories with no kct rule (static table data)
+plus, since #9234, the categories whose kct check did not complete this run
+(`solder_mask_opening_exposing_trace` whenever a default-applied
+`mask_to_copper` assessment is incomplete).
 
 Exit codes: `0` pass (or `incomplete` with `--allow-incomplete`); `2` the check
 ran and the board fails (DRC errors, warnings with `--strict`, an ERC/LVS/manifest
@@ -719,6 +845,67 @@ not run (file not found, wrong file type, audit crash). `--format json` keeps
 the top-level `verdict` (`ready`|`warning`|`not_ready`) and adds `gate_verdict`
 (`pass`|`fail`) and `exit_code`, the process exit code (#7230). See
 [Sign-off exit codes](#sign-off-exit-codes).
+
+---
+
+## Repair Commands
+
+### `fix-drc`
+
+Automated DRC violation repair. By default it repairs clearance violations by
+nudging traces, drill-clearance violations by de-duplicating or sliding vias,
+mask-to-copper findings when the report carries them, and same-net
+`physical_copper_gap` slits when the report carries them. `--only` restricts
+the run to a single repair pass:
+
+| `--only` value | Repairs |
+|----------------|---------|
+| `clearance` | Copper-clearance violations between tracks, vias and pads (nudge traces) |
+| `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
+| `mask-copper` | A track entering its own pad's opening off-centre (see below) |
+| `copper-gap` | Same-net `physical_copper_gap` slits: a via beside its own pad, or a track tangent to its own via (see below) |
+
+```bash
+kct fix-drc board.kicad_pcb --only mask-copper --dry-run
+kct fix-drc board.kicad_pcb --only copper-gap --dry-run
+```
+
+Without `--drc-report`, the mask-copper and copper-gap passes detect their
+findings themselves by running the pure-Python `kct check` on the board. For
+the other `--only` values (and the default set), detection resolves in order:
+`--drc-report` if given, else kicad-cli's DRC if it is installed, else the
+pure-Python checker.
+
+`mask-copper` addresses the `same-net own-pad entry` class of the
+`mask_to_copper` check (see the [mask-to-copper guide](../guides/mask-to-copper.md)):
+the offending track is re-centred. Detection uses `kct check`'s rules, not
+kicad-cli, and the pass also runs in the default set when the report carries
+such findings. Because the repairer cannot run the native mask assessment, a
+move is kept only when a post-save `kct check` re-check confirms it; otherwise
+it is reverted and reported as unrepaired with a reason:
+`finding_not_cleared` (the finding is still present), `new_mask_finding` (the
+move exposed a new finding on the moved segment or its pad) or
+`recheck_unavailable` (the re-check could not run — an unverified move is
+never kept).
+
+`copper-gap` addresses the same-net classes of `physical_copper_gap` (the fab
+cannot see nets, so a sub-spacing slit between two shapes of one net still
+fails the board): a via beside its own pad is moved along the pad-centre ray
+until the gap clears the finding's required value (or snapped to the pad
+centre when the profile declares a via-in-pad process), and a track tangent
+to its own via has the via snapped onto the track's centreline so the copper
+fully merges. Different-net gaps, zone fills and pad-pad / track-track pairs
+are never touched and are listed as unrepaired with a reason; a move that
+would crowd foreign copper or drill too close to another hole is declined,
+and same-net track ends anchored at the via move with it. A via move
+therefore changes the length of the tracks attached to it, so a net under a
+length or skew constraint (a differential pair or match group sitting at its
+limit) can flip a timing check even though the slit itself is repaired — the
+per-move validation checks clearance and hole-to-hole spacing only and cannot
+see a pair-level property such as skew. Detection and the
+post-repair re-check use `kct check`'s rules with the stackup's fab-view gap
+bands resolved (kicad-cli has no such rule), and the pass also runs in the
+default set when the report carries such findings.
 
 ---
 
@@ -905,6 +1092,13 @@ declares an `HV` net class) runs the same measured creepage/clearance audit
 (`kicad_tools.audit.check_isolation`) against the checked PCB — a description
 of the requirement is recorded in the report but can never by itself produce
 `passed`; only a thresholded census bound to that PCB and net-class-map can.
+
+**Cross-face creepage.** Use `kct creepage board.kicad_pcb --min 3.3
+--order-thickness-mm 0.80` when ordering a board with a nominal finished
+thickness of 0.80 mm. The census uses this value for paths through a bore or
+around a slot or board edge. When the PCB header and stackup disagree, the
+command reports both declarations and requires the purchase thickness to
+resolve a cross-face measurement. Single-face geometry uses no board thickness.
 
 **Derived clearance (IEC 60664-1, issue #7057).** With `--standard` /
 `--hv-standard`, the required clearance is
@@ -1532,8 +1726,8 @@ results are unchanged.
 | `--current-paths PATH` | Declared branch current-path sidecar. Auto-discovered next to the board as `<board-stem>.current_paths.json` or `current_paths.json` (board dir, then `output/`, then `../output/`) when omitted. |
 | `--no-current-paths` | Suppress auto-discovery; `path_ampacity` stays inactive. Cannot be combined with `--current-paths`. |
 
-The same flags exist on `kct check` and `kct pcb reinforce`, so one sidecar
-drives all three consumers:
+All four commands accept the same sidecar via `--current-paths`. Only
+`kct route`, `kct check` and `kct pcb prune` accept `--no-current-paths`.
 
 - **`kct route`** runs the `path_ampacity` rule in the post-route DRC against
   each declared branch's *own* current, then re-emits the declarations as
@@ -1545,6 +1739,11 @@ drives all three consumers:
 - **`kct pcb reinforce --current-paths`** treats the declarations as an
   *allow-list*: only copper covered by a resolved, reinforcement-eligible path
   may be anchored, so a Kelvin sense tap is never bridged to its force path.
+- **`kct pcb prune`** auto-discovers the sidecar exactly like `kct check`
+  (#9747); on the declared nets it also breaks copper loops (each loop's
+  narrowest segment below `--wide`) so `reinforce` can anchor the run. Its
+  `--no-current-paths` means more than route's "keep `path_ampacity`
+  inactive" — see [`pcb prune`](#kct-pcb-prune-board).
 
 Resolution **fails closed**. A declared pad that was moved, removed, or no
 longer resolves onto its declared net is reported as `unresolved`, and a net
@@ -1696,7 +1895,7 @@ coerced to `basic` with a printed notice). It is mutually exclusive with
 |--------|-------------|
 | `--complete` | Route only the unconnected links; all other copper is a fixed obstacle |
 | `--complete-exclude-nets NAMES` | Comma-separated nets `--complete` must not route even when reported unconnected — for pour/plane-carried nets (`GND`, `+3V3`, phase nets) whose connectivity comes from a filled zone. Ignored without `--complete`. |
-| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, elapsed vs the per-link deadline, blocking copper) as JSON. Link details are written when links remain unroutable. For boards with placement-invalid nets, also records attempt disposition during ordinary routing and early exits. |
+| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, whether the search reached each link in any negotiation pass (`attempted`; `deadline_hit` marks links whose reported reason is the deadline stamp, meaning the deadline kept them out of the best pass), blocking copper) as JSON. Link details are written when links remain unroutable. For boards with placement-invalid nets, also records attempt disposition during ordinary routing and early exits. |
 | `--via-in-pad-last-resort` | On the lattice engine, stage a same-net via-in-pad attach as a last resort instead of an opportunistic one: the search first tries an in-layer route or an off-pad via layer change, and only retries with the pad-site via admitted when no such route exists (and only on a fab tier that supports via-in-pad). |
 
 Each link gets a bounded per-link deadline, so a single pathological net cannot
@@ -1816,6 +2015,93 @@ kct route board.kicad_pcb --resume best.kicad_pcb --checkpoint best.kicad_pcb -o
 # that routes the same copper (keys are geometry-based, not UUID-based).
 kct route board.kicad_pcb --lint-gate --seed 7 -o routed.kicad_pcb
 ```
+
+---
+
+### `probe`
+
+Check a batch of proposed tracks, arcs and vias against a board without
+writing anything (Issue #9590). Implemented in
+[`src/kicad_tools/cli/probe_cmd.py`](../../src/kicad_tools/cli/probe_cmd.py).
+
+```bash
+kct probe <pcb_file> <items.json> [options]
+```
+
+The items file is JSON in absolute board millimetres (the file's literal
+sheet coordinates, as KiCad shows them):
+
+```json
+{"items": [
+  {"type": "segment", "net": "GND", "layer": "F.Cu", "width": 0.2,
+   "start": [10.0, 10.0], "end": [20.0, 10.0]},
+  {"type": "arc", "net": "GND", "layer": "F.Cu", "width": 0.2,
+   "start": [20.0, 10.0], "mid": [22.5, 12.5], "end": [25.0, 10.0]},
+  {"type": "via", "net": "GND", "at": [25.0, 12.0], "size": 0.6,
+   "drill": 0.3, "layers": ["F.Cu", "B.Cu"]}
+]}
+```
+
+The items are appended to an in-memory copy of the board and checked with
+the same rule set `kct check` runs (pairwise clearances and shorts, the
+net-agnostic copper-gap and thin-copper-sliver fab passes, zone fills,
+board edge, trace/via dimensions, authored net-class clearances, via
+placement, THT-to-SMD pad spacing). The copper-gap pass is net-agnostic: a
+same-net parallel track can fail a probe through it even when no pairwise
+clearance rule objects. Only findings the batch **adds** are reported, so
+pre-existing board problems never fail a probe. Arcs are checked through a
+1 um-sagitta tessellation. Exit `1` on any added error finding or
+items-file problem; warnings are reported but do not fail. `--format json`
+emits the full report (`ok`, `problems`, `warnings`, per-item attribution).
+
+| Option | Description |
+|--------|-------------|
+| `--mfr` `NAME` | Manufacturer rules (default: resolved like `kct check` — `fab_profile.json` > `project.kct` > `jlcpcb`) |
+| `--format` `{text,json}` | Output format (default: `text`) |
+
+---
+
+### `apply`
+
+Apply a batch of proposed copper **checked**: probe first (exactly `kct
+probe`), then write the board only when every item passes (Issue #9590).
+Implemented in
+[`src/kicad_tools/cli/probe_cmd.py`](../../src/kicad_tools/cli/probe_cmd.py).
+
+```bash
+kct apply <pcb_file> <items.json> --checked [options]
+```
+
+The write is atomic (sibling temp file + rename, the `kct route` output
+discipline) and the previous bytes are kept beside the board. Before the
+rename the board's `st_mtime_ns` / `st_size` are re-checked against the
+read; a board that changed underneath is refused with nothing written.
+A failed probe never writes: the board stays byte-identical. Exit `0`
+written; `1` probe problems; `2` refused (concurrent modification, or a
+KiCad lock under the `error` policy) — nothing is written on `1` or `2`.
+
+An item whose dedupe key is already on the board (net, layer, unordered
+endpoints and width for a track; net, position and layers for a via) is
+skipped by deduplication rather than written — for those items the copper
+the batch asked for is there. The report distinguishes them:
+`items_written` and `items_skipped_as_duplicate` in JSON, and a text line
+that says how many were skipped, so an all-duplicate batch reports `wrote 0
+item(s)` instead of claiming a write that did not happen (Issue #9674).
+
+A via's size and drill are **outside** its dedupe key. A skipped via counts as a
+duplicate if any via sharing its key has the requested size and drill.
+Otherwise it is not written, is counted separately under
+`items_skipped_conflicting`, and the text output names the existing and
+requested size/drill, so an agent that (say) upsizes a via cannot read the
+report as success. Arcs have no deduplication path: each successful apply
+appends them again, and each copy counts as written.
+
+| Option | Description |
+|--------|-------------|
+| `--checked` | Required. Probe first and write only if every item passes (the only mode) |
+| `--backup` `PATH` | Backup path for the previous bytes (default: `<pcb>.kicad_pcb.bak`) |
+| `--mfr` `NAME` | Manufacturer rules (default: resolved like `kct check` — `fab_profile.json` > `project.kct` > `jlcpcb`) |
+| `--format` `{text,json}` | Output format (default: `text`) |
 
 ---
 
@@ -2314,6 +2600,36 @@ kct net-status board.kicad_pcb --by-class
 kct net-status board.kicad_pcb --net DAC_CLK --why   # only DAC_CLK's diagnosis
 ```
 
+#### `--net`: the per-piece listing
+
+A net in several disconnected pieces gets a piece-by-piece listing under
+`--net` (issue #9598): the largest pad island is `piece 1`, smaller islands
+follow, and pad-less track/via fragments come last, marked `[no pads]`.
+
+```
+[!] GND (1 pads unconnected)
+  R3.1     @ (9.50, 20.00) -- needs routing
+  -> Fix: Route traces to connect 1 pads
+  Pieces (3 disconnected):
+    piece 1: R1.1, R2.1
+    piece 2: R3.1, via @ 9.50,20.00
+    piece 3: via @ 30.00,30.00 [no pads]
+```
+
+In `--format json` the same data appears as a `pieces` list on the net:
+each entry carries `piece`, `pads[]` (`name` / `position`), `vias[]` as
+`[x, y]`, and `stranded_items[]` (track/via labels) for a pad-less
+fragment. The key is **absent** (not null) for a single-piece net and in
+the board-wide view — per
+[`machine-output.md`](machine-output.md) the field is additive, so
+`schema_version` is unchanged.
+
+`--net X --why` shows the same block for a `POUR_DISCONTINUOUS` diagnosis
+(issue #9612) — the class where a split pour net is actionable — printed
+after the `evidence` line, and the net's JSON payload carries the same
+`pieces` key. Other classifications and `--why` without `--net` never
+print it.
+
 #### `--why`: the access witness
 
 `--why` classifies each incomplete net into the `ESCAPE_BLOCKED` /
@@ -2503,6 +2819,51 @@ kct interactive [pcb_file]
 ```
 
 Provides an interactive shell for exploring and modifying PCB files.
+
+---
+
+### `voltage-map-merge`
+
+Merge two or more per-scenario voltage maps into one **envelope map** for the
+interval-aware `--voltage-map` consumers (`kct creepage`, `kct audit`,
+`kct repair-creepage`, `kct route-link`). Author one map per operating
+scenario of the board (e.g. mains forward vs. reverse) and merge, instead of
+hand-writing an envelope of ranges plus one `_pair_bounds` entry per
+varying-net pair:
+
+```bash
+kct voltage-map-merge forward.json reverse.json -o envelope.json
+```
+
+Each net becomes the span of its per-scenario potentials (`{"min": …, "max": …}`;
+a plain scalar when every scenario agrees). For every net pair whose envelope
+span overstates its real difference — nets that move together across scenarios
+(a follower bank riding the line) but not in the envelope — a generated
+`_pair_bounds` entry caps the pair back to its worst per-scenario |ΔV|
+("always the same potential" is `max_dv: 0`). A net present in only one
+scenario is treated as 0 V in the others (the consumers' own unmapped-net
+default). The scenarios must agree on `_edge_voltage` and must not carry
+their own `_pair_bounds` (issue #9582).
+
+`--format json` (see [Machine output](machine-output.md)) emits one JSON
+document on stdout — the input/output paths, the net and generated
+`_pair_bounds` counts, and the `route_understated_pairs` array (below) — so
+machine consumers need not scrape stderr; failure paths emit
+`{"error": …}` with unchanged exit codes.
+
+> **Route-time limitation (#4411):** `kct route` and `kct pcb` read the map
+> through `load_signed_voltage_map`, which collapses each net's range to its
+> largest-magnitude endpoint *with its sign*. On a merged envelope a
+> sign-flipping net and its opposite bank can collapse to the same endpoint,
+> scoring those pairs **below** the census value — down to 0 V, dropping them
+> from the route widening matrix entirely. When the merged map contains such
+> pairs the command warns on stderr, naming them, and the `--format json`
+> document carries them in its `route_understated_pairs` array. For
+> route-time spacing,
+> drive `kct route` / `kct pcb` with a **per-scenario** map (correct within
+> each scenario) and use the merged envelope for the `kct creepage` /
+> `kct audit` gate. Teaching the route consumers to difference intervals is
+> #4411 follow-up work.
 
 ---
 
@@ -2809,6 +3170,15 @@ text envelopes; review it and use native DRC before relying on the placement.
 
 Footprint references must be unique, including hidden references. Duplicate
 references are rejected before planning; assign unique references first.
+
+Coordinate frames: reported positions (`old/new_position_mm` in JSON, the
+moved positions in the text report) are board-relative, while a `reason`
+obstacle label quotes sheet-absolute coordinates — the frame the KiCad
+editor shows — when it carries any, e.g. `pad aperture drill via at
+(130.000, 80.000)` (#9364). The text report labels each frame
+(`[board-relative]` / `[sheet coords]`), and the JSON output carries `frame`
+plus `origin_mm`, so `origin_mm + position_mm` recovers the sheet point a
+reason quotes.
 
 Search spacing must be finite and positive, distances finite and nonnegative,
 and the search is limited to 4096 rings. An explicit `--output` is written even

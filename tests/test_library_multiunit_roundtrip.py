@@ -18,9 +18,10 @@ multi-unit structure.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
-from kicad_tools.schema.library import SymbolLibrary
+from kicad_tools.schema.library import LibrarySymbol, SymbolLibrary
 
 FIXTURE = Path(__file__).parent / "fixtures" / "multiunit_test.kicad_sym"
 
@@ -55,6 +56,23 @@ class TestMultiUnitRoundtrip:
             "5": 3,
             "6": 3,
         }
+
+    def test_shared_and_repeated_pin_numbers_keep_their_unit_positions(self):
+        symbol = SymbolLibrary.load(str(FIXTURE)).symbols["MultiUnitPart"]
+        pin = symbol.pins[0]
+        symbol.pins.extend(
+            [replace(pin, unit=0, number="COMMON"), replace(pin, unit=2, position=(2.54, 0))]
+        )
+        rebuilt = LibrarySymbol.from_sexp(symbol.to_sexp_node())
+        assert rebuilt.get_pin("COMMON").unit == 0
+        for unit, position in [(1, (-7.62, -2.54)), (2, (2.54, 0))]:
+            positions = rebuilt.get_all_pin_positions((0, 0), snap_to_grid=False, unit=unit)
+            assert positions["COMMON"] == (-7.62, -2.54)
+            assert positions[pin.number] == position
+        assert rebuilt.get_all_pin_positions((0, 0), snap_to_grid=False)[pin.number] == (
+            -7.62,
+            -2.54,
+        )
 
     def test_from_scratch_save_preserves_units(self, tmp_path):
         """Clearing _sexp and saving reparses to an equivalent model."""

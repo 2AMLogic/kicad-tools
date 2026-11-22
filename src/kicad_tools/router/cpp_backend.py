@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from . import wall_deadline as _wall_deadline
 from .pad_landing import pad_landing_geometry
 from .resource_guard import reraise_if_resource_exhaustion
+from .route_via_gap import route_own_via_slit
 from .search_radius import search_radius_cells
 
 if TYPE_CHECKING:
@@ -134,7 +135,54 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # v65 (Issue #7887): the own-pad step gate attributes a refusal decided by the
 # pairwise (HV) floor alone, so an HV pad walled in by LV pads drains as
 # ``FAILURE_PAIRWISE_BLOCKED``.  A v64 .so still reports a bare NO_PATH.
-_REQUIRED_CPP_BUILD_VERSION = 65
+# v66 (Issue #8994): ``DesignRules.same_net_pad_gap_band_edge_mm`` + the
+# same-net pad slit-band refusal in both A* via checks.  A v65 .so seats via
+# annuli in the (0, edge) slit band beside their own SMD pads (board 06's
+# d0.25/s0.6 PCIE_RX+/USB2_D- population).
+# v67 (Issue #8999): ``GridCell::airwire_cost`` + the ``clear_airwire_costs``
+# / ``set_airwire_cells`` verbs -- the prospective airwire-separation term
+# summed inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated
+# cells without the term, silently breaking Python/C++ cost parity.
+# v68 (Issue #9124): the same-net pad slit-band predicate rejects the tangent
+# ``gap == 0`` seat (face-aligned corner wedge) it used to accept.  (Number
+# reserved while #9124 / PR #9209 was open.)
+# v69 (Issue #9208): ``DesignRules.same_net_trace_gap_band_edge_mm`` + the
+# same-net via-annulus-vs-own-trace slit-band refusal in both A* via checks.  A
+# v67 .so seats via annuli in the (0, edge) slit band beside their own net's
+# committed trace copper (board 06's USB2_D- annulus-vs-trace finding).
+# v70 (Issues #9124 + #9208, merged): the first build carrying BOTH fixes -- a
+# v69 .so still seats the tangent wedge, a v68 .so lacks the trace-slit
+# refusal; both must be rejected.
+# v71 (Issue #9019): ``Pathfinder::set_search_own_net_band`` -- the A* refuses
+# a planar step whose swept copper parks in the fab ``pad_spacing`` slit band
+# beside an own-net SMD pad.  A v70 .so has no such gate.
+# v72 (Issue #9019 review): the band gate exempts the search's own start/end
+# pads (the leg is unioned with them through the path -- a v71 .so refused
+# every planar pad exit and pushed routes through pad-edge via pairs) and
+# ``own_net_band_rejects()`` counts refusals so the Python side retries only
+# gate-caused failures and logs every gate-off fallback.
+# v73 (Issue #9597, rebased over v71/v72 of #9019): ``DesignRules::cost_zone_foreign_plane`` plus the
+# ``Grid3D::mark_zone_cells`` / ``clear_zone_cells`` verbs -- the soft
+# foreign plane-zone crossing cost both A* step-cost loops charge.  A v70
+# .so has neither, so the native search would cross plane zones for free
+# while the Python pathfinder pays the cost (silent parity break); reject.
+# v74 (Issue #9826): ``Grid3D::set_plane_layers`` -- the zone cost applies on
+# PLANE layers only and a foreign zone on any other layer is blocked (Python
+# parity) -- plus a layer-scoped ``clear_zone_cells(layer)`` that zeroes the
+# net of unblocked former zone cells like ``RoutingGrid.clear_zones``.
+# v75 (Issue #9461): the own-net slit-band gate (``own_net_band_step_ok``)
+# builds each pad box from the rotation-aware board-space AABB (the twin of
+# ``primitives.pad_half_extents``) instead of raw ``width/2``/``height/2``.  A
+# v74 .so under-sizes a non-cardinally rotated pad and silently accepts a leg
+# in the band the Python gate refuses (parity break on such boards).
+# v76 (Issue #9424): ``same_net_pad_gap_in_band`` takes a via annulus as a
+# union with its own SMD pad only at the union depth into the AABB's inscribed
+# stadium (``via_clearance.same_net_pad_union_depth_mm``).  A v75 .so seats
+# vias in a roundrect pad's corner air and in shallow overlap wedges that the
+# fab-view checker grades as ``physical_copper_gap``; reject it.
+# v77 (Issue #9273): the native trace search also guards stored same-net vias.
+# v78 (Issue #9273): a leg cannot skim a stored barrel and rely on a later weld.
+_REQUIRED_CPP_BUILD_VERSION = 78
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -935,7 +983,10 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
     """Format a human-readable backend status string for CLI output.
 
     Provides actionable guidance when the C++ backend is not available,
-    especially when routing large grids where performance matters.
+    especially when routing large grids where performance matters.  When the
+    extension is absent the status also names the capability gap, not just the
+    speed gap: the differential-pair centerline trunk rescue (Issue #5786) is
+    C++-only, and without it the router falls back to independent legs.
 
     Args:
         backend_info: Dictionary from get_backend_info().
@@ -957,6 +1008,10 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
 
     if not available:
         parts.append("C++ backend not installed")
+        parts.append(
+            "Differential-pair centerline trunk rescue requires C++. "
+            "If the coupled search fails, routing falls back to independent legs"
+        )
         if grid_cells > LARGE_GRID_THRESHOLD:
             parts.append(
                 f"WARNING: Routing {grid_cells:,} grid cells with Python backend "
@@ -1010,6 +1065,34 @@ class CppGrid:
         self._stored_route_floor_version: int = 0
         # Issue #6243: what ``sync_authored_floors`` last installed.
         self._authored_key: tuple | None = None
+
+    def sync_zone_marks_from(self, grid: RoutingGrid) -> int:
+        """Mirror ``grid``'s PLANE-layer mask and zone marks (Issue #9826).
+
+        Installs the per-layer PLANE mask (foreign zones are costed there and
+        blocked elsewhere, like the Python pathfinder), clears any zone marks
+        already on this grid, then bulk-writes every ``_is_zone`` cell with its
+        net.  Returns the number of zone cells written.
+        """
+        import numpy as np
+
+        from ..acceleration.backend import to_numpy
+        from .layer_advisories import grid_plane_layer_indices
+
+        impl = self._impl
+        if hasattr(impl, "set_plane_layers"):
+            impl.set_plane_layers(grid_plane_layer_indices(grid))
+        if hasattr(impl, "clear_zone_cells"):
+            impl.clear_zone_cells()
+        is_zone_np = to_numpy(grid._is_zone)
+        if not is_zone_np.size or not hasattr(impl, "mark_zone_cells"):
+            return 0
+        zl, zy, zx = np.nonzero(is_zone_np)
+        if not zx.shape[0]:
+            return 0
+        nets = to_numpy(grid._net)[zl, zy, zx]
+        impl.mark_zone_cells(zx.tolist(), zy.tolist(), zl.tolist(), nets.tolist())
+        return int(zx.shape[0])
 
     def install_fixed_fills(self, fills) -> None:
         if not hasattr(self._impl, "add_fixed_fill"):
@@ -1134,6 +1217,15 @@ class CppGrid:
                 ):
                     mark_blocked(x, y, layer, net, is_obstacle, pad_blocked)
 
+        # Issue #9826: install the PLANE-layer mask and copy the zone marks.
+        # ``RoutingGrid.add_zone_cells`` mirrors marks only onto the CppGrid
+        # paired at marking time, so a CppGrid built later (relaxed-clearance
+        # retry, fine-grid pass, trial reset, diff-pair pre-phase) would
+        # otherwise route across foreign plane zones for free while a Python
+        # router on the same grid pays ``cost_zone_foreign_plane``.  Sparse
+        # over zone cells only (#5240): no zones => one ``nonzero`` and done.
+        cpp_grid.sync_zone_marks_from(grid)
+
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
         # net frozenset, written by ``EscapeRouter``'s reservation helpers
@@ -1169,6 +1261,7 @@ class CppGrid:
         # the same carve-out as the Python ``_is_plane_net_pad`` helper.
         from .fine_pitch_escape import resolve_clearance_with_escape_region
         from .grid import _is_plane_net_pad
+        from .via_clearance import cpp_pad_copper_corner_radius
 
         component_pitches = grid.compute_component_pitches()
         grid._component_pitch_cache = component_pitches
@@ -1240,6 +1333,7 @@ class CppGrid:
                 is_plane_net,
                 pad.rotation,
                 pad.shape == "circle",
+                cpp_pad_copper_corner_radius(pad),
             )
 
         cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)
@@ -1483,6 +1577,15 @@ class CppPathfinder:
         cpp_rules.min_hole_to_hole = rules.min_hole_to_hole
         # Issue #7296: the mask-dam floor for the single-ended via check.
         cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
+        # Issue #8994: the caller-resolved same-net pad slit-band edge for the
+        # single-ended via check (``None`` collapses to 0.0 = guard off).
+        cpp_rules.same_net_pad_gap_band_edge_mm = float(
+            getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
+        # Issue #9208: the trace-population twin (``None`` -> 0.0 = guard off).
+        cpp_rules.same_net_trace_gap_band_edge_mm = float(
+            getattr(rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0
+        )
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
         cpp_rules.cost_turn = rules.cost_turn
@@ -1491,6 +1594,8 @@ class CppPathfinder:
         cpp_rules.congestion_threshold = rules.congestion_threshold
         # Issue #4071: soft corridor-attractor bonus (default 3.0).
         cpp_rules.cost_corridor_attractor = rules.cost_corridor_attractor
+        # Issue #9597: soft foreign plane-zone crossing cost (default 10.0).
+        cpp_rules.cost_zone_foreign_plane = rules.cost_zone_foreign_plane
 
         self._impl = router_cpp.Pathfinder(grid._impl, cpp_rules, diagonal_routing)
         self._grid = grid
@@ -1823,6 +1928,45 @@ class CppPathfinder:
             for b in (*self._pad_channel_budgets, *self._pad_lane_budgets)
             if getattr(b, "source_net", 0) != net
         ]
+
+    def _under_body_budgets_for_net(self, net: int) -> list:
+        """Per-net under-body surcharge budgets (Issue #9622).
+
+        The regions are computed once on the shared Python grid
+        (``RoutingGrid.under_body_surcharges``); a net with a pad on the
+        component ("local") is exempt.  Each region becomes one
+        ``PadChannelBudget`` per outer layer, so the C++ search prices the
+        surcharge through the existing #3143 per-cell lookup
+        (``get_pad_channel_cost``) on every cost site -- trace steps and
+        via drops alike -- with no new C++ code.  The penalty rides the
+        same additive, never-blocking semantics as the escape-channel
+        budgets: a board whose only path runs under the body still routes.
+
+        Returns an empty list when the board has no qualifying fine-pitch
+        component (the default), keeping the C++ cost function identical
+        to pre-#9622 behaviour.
+        """
+        if self._rules.cost_under_body <= 0.0:
+            return []
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is None:
+            return []
+        regions = getattr(py_grid, "under_body_surcharges", None) or []
+        penalty = float(self._rules.cost_under_body * self._rules.cost_straight)
+        budgets: list = []
+        for region in regions:
+            if net in region.local_nets:
+                continue
+            for layer in region.layers:
+                budget = router_cpp.PadChannelBudget()
+                budget.gx1 = region.gx1
+                budget.gy1 = region.gy1
+                budget.gx2 = region.gx2
+                budget.gy2 = region.gy2
+                budget.layer = int(layer)
+                budget.overflow_penalty = penalty
+                budgets.append(budget)
+        return budgets
 
     def set_pad_channel_budgets(self, budgets: list | None) -> None:
         """Inject the per-pad lateral-channel budget list (Issue #3143).
@@ -2744,6 +2888,10 @@ class CppPathfinder:
             via_size=net_via_size,
         )
         fence_state = {"on": bool(escape_fences)}
+        # Issue #9019: the own-net slit-band gate is a hard step refusal; like
+        # the fence it must never lose a connection, so a failed gated search
+        # retries once with it off.
+        band_state = {"on": True}
 
         def _run_fresh_search(timeout_s: float, max_iters: int):
             self._sync_pairwise_domains_to_cpp()
@@ -2790,6 +2938,16 @@ class CppPathfinder:
                     gate_exclude,
                     gate_clamp,
                     self._narrowest_emit_width(start, end, net_trace_width),
+                )
+
+            if hasattr(self._impl, "set_search_own_net_band"):
+                # Issue #9019: own-net pad slit-band step gate -- the fab
+                # detection edge the caller resolved (0 = off; relief probes
+                # skip it, as the Python search does).
+                self._impl.set_search_own_net_band(
+                    0.0
+                    if self._relief_mode or not band_state["on"]
+                    else float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
                 )
 
             if self._grid._py_grid is not None:
@@ -2850,6 +3008,10 @@ class CppPathfinder:
                 # OWN escape endpoint -- only contention from OTHER nets
                 # is shaped.
                 self._filter_pad_channel_budgets_for_net(start.net)
+                # Issue #9622: under-body surcharge budgets for nets with
+                # no pad on the fine-pitch component (empty on boards
+                # without one -- pre-#9622 behaviour).
+                + self._under_body_budgets_for_net(start.net)
                 + (escape_fences if fence_state["on"] else []),
             )
 
@@ -2858,6 +3020,43 @@ class CppPathfinder:
                 saved_routable_layers = list(self._routable_layers)
                 self.set_routable_layers(pending_routable)
             result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
+            # Issue #9696: Python's band-relaxed wrapper returns a deadline-hit
+            # search as-is (``last_route_deadline_hit``), so the two backends
+            # stay behaviourally identical -- a wall-clock FAILURE_TIMEOUT is
+            # a drained budget, not a gate-caused failure, and a gate-off
+            # retry would burn a second full budget to fail the same way.
+            # ``getattr`` keeps a stale .so without ``failure_reason`` retrying
+            # as before.
+            first_search_hit_deadline = router_cpp is not None and int(
+                getattr(result, "failure_reason", router_cpp.FAILURE_NONE)
+            ) == int(router_cpp.FAILURE_TIMEOUT)
+            if (
+                not result.success
+                and not self._relief_mode
+                and float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0) > 0.0
+                and hasattr(self._impl, "own_net_band_rejects")
+                and self._impl.own_net_band_rejects() > 0
+                and not first_search_hit_deadline
+            ):
+                # Issue #9019: a fence/band reshape must never lose a
+                # connection.  The retry fires ONLY when the gated search
+                # actually refused a step for the slit band (the counter is
+                # reset on every arming, i.e. every fresh search) -- a
+                # failure the gate never influenced (drained budget,
+                # unrelated blockage) is returned as-is instead of paying a
+                # second full search that would fail the same way (9019
+                # review).  The fallback is counted and logged, never silent.
+                band_rejects = self._impl.own_net_band_rejects()
+                self._own_net_band_fallbacks = getattr(self, "_own_net_band_fallbacks", 0) + 1
+                logger.info(
+                    "own-net pad slit-band gate suspended for one retry "
+                    "(fallback #%d, net=%d): gated search rejected %d step(s)",
+                    self._own_net_band_fallbacks,
+                    start.net,
+                    band_rejects,
+                )
+                band_state["on"] = False
+                result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
             if not result.success and fence_state["on"]:
                 # Issue #6761: a fence reshapes an escape, it must never lose
                 # a connection -- when the fenced search finds nothing (e.g.
@@ -3525,54 +3724,133 @@ class CppPathfinder:
                 )
             return min_width
 
+        # Issue #9019: the own-net pad slit-band edge (0 = guard off) and the
+        # net's own SMD pad boxes per layer (built lazily, once per route).
+        band_edge_mm = float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        _band_cache: dict[int, list[tuple[float, float, float, float]]] = {}
+
+        def _own_net_band_bboxes(
+            net: int, layer_value: int
+        ) -> list[tuple[float, float, float, float]]:
+            hit = _band_cache.get(layer_value)
+            if hit is None:
+                from .primitives import pad_half_extents
+
+                py_grid = getattr(self._grid, "_py_grid", None)
+                # Issue #9461: board-space AABB (rotation-aware), the same box
+                # ``Router._own_net_band_bboxes`` and the native gate build.
+                hit = [
+                    (p.x - hw, p.y - hh, p.x + hw, p.y + hh)
+                    for p in (py_grid._pads if py_grid is not None else ())
+                    if p.net == net
+                    and not p.through_hole
+                    and not getattr(p, "drill", 0.0) > 0
+                    and p.layer.value == layer_value
+                    for hw, hh in (pad_half_extents(p),)
+                ]
+                _band_cache[layer_value] = hit
+            return hit
+
+        from .neck_down import band_safe_taper, band_safe_width, taper_points
+
+        # Issue #9019: the native adapter hands over one segment per grid
+        # cell, so taper pieces are collected per (layer, net) block of
+        # consecutive segments and fused over the whole block -- the same
+        # straight runs ``PathFinder._convert_path_to_route`` sees after its
+        # inline collinear merge.
+        pending: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+        pending_key: tuple[int, int] | None = None
+
+        def _flush() -> None:
+            if pending_key is None or not pending:
+                return
+            layer_value, net = pending_key
+            band_bboxes = (
+                _own_net_band_bboxes(start.net, layer_value)
+                if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
+                else None
+            )
+            for (sx, sy), (ex, ey), seg_width in band_safe_taper(
+                pending, band_bboxes, band_edge_mm
+            ):
+                route.segments.append(
+                    Segment(
+                        x1=sx,
+                        y1=sy,
+                        x2=ex,
+                        y2=ey,
+                        width=seg_width,
+                        layer=Layer(layer_value),
+                        net=net,
+                        net_name=start.net_name,
+                    )
+                )
+            pending.clear()
+
         for cpp_seg in result.segments:
             layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
+            if pending_key != (layer_enum_value, cpp_seg.net):
+                _flush()
+                pending_key = (layer_enum_value, cpp_seg.net)
             # Issue #3532: the C++ ``reconstruct_path`` connects the
             # exact (off-grid) pad centres to the first/last grid cell
             # with a single straight tail, which is off the 0/45/90/135
             # angle set in general.  Split such segments into an exact
-            # two-leg dogleg HERE, in float64 -- the C++ side stores
-            # float32 coordinates whose ulp at board scale (~1.5e-5 mm)
-            # is too coarse to construct exactly-aligned legs.
+            # two-leg dogleg HERE, in float64.
+            #
+            # Issue #9734: the C++ ``Segment`` stores float32 coordinates,
+            # whose ulp at board scale (~1.5e-5 mm at 130 mm) round-trips a
+            # grid-exact 132.855 as 132.854996.  Feeding those to the exact
+            # float64 clearance gates turns pairs DESIGNED to sit exactly at
+            # ``(w_a + w_b) / 2 + trace_clearance`` into sub-clearance by a
+            # few nm, and the finalize seg-seg SHORT gate correctly refuses
+            # to ship them (board 05: VCP's escape stub vs VM's committed
+            # trace at 0.324997 vs 0.325 required -- VCP demoted to
+            # unrouted, exit 3).  Snap every received coordinate back onto
+            # the 4-decimal (0.1 um) lattice -- the same contract
+            # ``RoutingGrid.grid_to_world`` already applies to every
+            # Python-backend cell coordinate -- so both backends emit
+            # identical, lattice-exact geometry.  (The width sibling of
+            # this fix is the #3456 float64 echo.)
             points = dogleg_points(
-                float(cpp_seg.x1),
-                float(cpp_seg.y1),
-                float(cpp_seg.x2),
-                float(cpp_seg.y2),
+                round(float(cpp_seg.x1), 4),
+                round(float(cpp_seg.y1), 4),
+                round(float(cpp_seg.x2), 4),
+                round(float(cpp_seg.y2), 4),
             )
-            from .neck_down import taper_points
-
             centers = []
             if start_needs_neckdown:
                 centers.append((start.x, start.y))
             if end_needs_neckdown:
                 centers.append((end.x, end.y))
-            split_points = [points[0]]
+            # Issue #9019: mirror ``PathFinder._convert_path_to_route`` -- a
+            # taper must not open an air gap beside the net's own pad.
+            band_bboxes = (
+                _own_net_band_bboxes(start.net, layer_enum_value)
+                if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
+                else None
+            )
             for a, b in zip(points, points[1:], strict=False):
-                split_points.extend(
-                    taper_points(
-                        a,
-                        b,
-                        centers,
-                        self._rules.neck_down_distance,
-                        self._rules.grid_resolution,
-                    )[1:]
+                piece_points = taper_points(
+                    a,
+                    b,
+                    centers,
+                    self._rules.neck_down_distance,
+                    self._rules.grid_resolution,
                 )
-            for (sx, sy), (ex, ey) in zip(split_points, split_points[1:], strict=False):
-                seg_width = _segment_width(sx, sy, ex, ey)
-                if sx == ex and sy == ey:
-                    continue
-                seg = Segment(
-                    x1=sx,
-                    y1=sy,
-                    x2=ex,
-                    y2=ey,
-                    width=seg_width,
-                    layer=Layer(layer_enum_value),
-                    net=cpp_seg.net,
-                    net_name=start.net_name,
-                )
-                route.segments.append(seg)
+                for (sx, sy), (ex, ey) in zip(piece_points, piece_points[1:], strict=False):
+                    seg_width = _segment_width(sx, sy, ex, ey)
+                    if band_bboxes:
+                        seg_width = band_safe_width(
+                            (sx, sy),
+                            (ex, ey),
+                            seg_width,
+                            base_trace_width,
+                            band_bboxes,
+                            band_edge_mm,
+                        )
+                    pending.append(((sx, sy), (ex, ey), seg_width))
+        _flush()
 
         # Issue #3130: Mirror the segment-width override for via diameter.
         # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``
@@ -3621,8 +3899,11 @@ class CppPathfinder:
 
         for cpp_via in result.vias:
             via = Via(
-                x=cpp_via.x,
-                y=cpp_via.y,
+                # Issue #9734: snap via centres onto the same 0.1 um
+                # lattice as segment endpoints (float32 round-trip
+                # recovery; see the segment loop above).
+                x=round(float(cpp_via.x), 4),
+                y=round(float(cpp_via.y), 4),
                 drill=via_drill,
                 diameter=via_diameter,
                 layers=(physical_top_layer, physical_bottom_layer),
@@ -3920,6 +4201,9 @@ class CppPathfinder:
             post-checks), or None if route is valid.  Tuple-compatible with
             the historical ``(x, y)`` return.
         """
+        slit = route_own_via_slit(route, self._rules.same_net_trace_gap_band_edge_mm)
+        if slit is not None:
+            return RouteClearanceViolation(*slit, "own_via_trace_gap")
         py_grid = getattr(self._grid, "_py_grid", None)
         if py_grid is None:
             return None
@@ -4195,6 +4479,26 @@ class CppPathfinder:
         on the same net.
         """
         self._grid._impl.clear_avoidance_costs()
+
+    def clear_airwire_costs(self) -> None:
+        """Zero the C++ airwire-separation plane (Issue #8999).
+
+        Thin passthrough for ``Grid3D::clear_airwire_costs``; the plane is
+        normally managed end-to-end by
+        :func:`kicad_tools.router.airwire_cost.refresh_airwire_cost`.
+        """
+        self._grid._impl.clear_airwire_costs()
+
+    def set_airwire_cells(self, xs: list[int], ys: list[int], costs: list[float]) -> None:
+        """Push the weighted sparse airwire plane onto the C++ grid (Issue #8999).
+
+        ``xs``/``ys``/``costs`` are parallel lists; each column is written to
+        every layer (a desire line is layer-less).  Callers must
+        ``clear_airwire_costs()`` first -- the refresh contract is a full
+        clear + rewrite, never an increment, so the native plane stays a
+        pure function of the committed set.
+        """
+        self._grid._impl.set_airwire_cells(xs, ys, costs)
 
     def _try_python_fallback(
         self,
@@ -4807,7 +5111,17 @@ class CppPathfinder:
     # #6098 memo without making it any safer.  ``_saved_*`` are rip-up
     # snapshots the search never reads.
     _COST_ONLY_GRID_ARRAYS = frozenset(
-        {"_history_cost", "_congestion", "_congestion_counted", "_present_cost_ema"}
+        {
+            "_history_cost",
+            "_congestion",
+            "_congestion_counted",
+            "_present_cost_ema",
+            # Issue #8999: the airwire-separation crossing-count plane feeds
+            # negotiated-cell COSTS only (never passability) and is rewritten
+            # on every negotiated refresh, so fingerprinting it would churn
+            # the #6098 fallback memo for no safety benefit.
+            "_airwire_cost",
+        }
     )
 
     def _py_grid_state_stamp(self, py_grid) -> tuple:
@@ -5777,6 +6091,16 @@ class CppCoupledPathfinder:
         # Issue #7296: the mask-dam floor, so the coupled via move refuses a
         # drill edge within the fab's dam of an SMD pad.
         cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
+        # Issue #8994: the same-net pad slit-band edge, so the coupled via
+        # move keeps each rail's annulus out of the band beside its own SMD
+        # pads (``None`` collapses to 0.0 = guard off).
+        cpp_rules.same_net_pad_gap_band_edge_mm = float(
+            getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
+        # Issue #9208: the trace-population twin (``None`` -> 0.0 = guard off).
+        cpp_rules.same_net_trace_gap_band_edge_mm = float(
+            getattr(rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0
+        )
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,

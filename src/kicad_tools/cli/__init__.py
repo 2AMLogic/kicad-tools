@@ -35,7 +35,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools pipeline <pcb>          - End-to-end repair pipeline for existing PCBs
     kicad-tools create-pcb <schematic>  - Create PCB from schematic
     kicad-tools readiness <board>      - Manufacturing-readiness sign-off + readiness.json
-    kicad-tools submit-jlcpcb <bundle> - Prepare JLCPCB PCBA submission (never orders)
+    kicad-tools submit-jlcpcb <bundle> - Prepare JLCPCB PCBA submission (orders only via opt-in attended --checkout)
     kicad-tools tapeout-sign-off <bundle> - Record human sign-off in a tapeout manifest
     kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools run <script>           - Run Python script with kicad-tools interpreter
@@ -406,6 +406,11 @@ def _dispatch_command(args) -> int:
 
         return run_creepage_export_rules_command(args)
 
+    elif args.command == "voltage-map-merge":
+        from .commands.voltage_map_merge import run_voltage_map_merge_command
+
+        return run_voltage_map_merge_command(args)
+
     elif args.command == "sch":
         from .commands.schematic import run_sch_command
 
@@ -463,6 +468,16 @@ def _dispatch_command(args) -> int:
         from .route_link_cmd import run_route_link_command
 
         return run_route_link_command(args)
+
+    elif args.command == "probe":
+        from .probe_cmd import run_probe_command
+
+        return run_probe_command(args)
+
+    elif args.command == "apply":
+        from .probe_cmd import run_apply_command
+
+        return run_apply_command(args)
 
     elif args.command == "retune-lengths":
         from .commands.routing import run_retune_lengths_command
@@ -1137,6 +1152,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-project-zip")
     if getattr(args, "export_no_ampacity_rules", False):
         sub_argv.append("--no-ampacity-rules")
+    if getattr(args, "export_no_silk_fix", False):
+        sub_argv.append("--no-silk-fix")
     if getattr(args, "export_no_auto_lcsc", False):
         sub_argv.append("--no-auto-lcsc")
     if getattr(args, "export_no_spec", False):

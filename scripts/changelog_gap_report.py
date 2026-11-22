@@ -184,6 +184,7 @@ INTERNAL_ISSUES: dict[int, str] = {
     5973: "vendored Loom post-worktree hook timeout parsing; orchestration tooling only",
     6170: "test-only: call _py_grid_state_stamp as an instance method after #6152; dev tests",
     7472: "mypy baseline nanobind signature restore after a --update drop; repo CI only",
+    9762: "board 04 readiness evidence refresh; no package-observable change",
 }
 
 #: Commits (by SHA prefix) that carry a user-visible-looking subject, resolve to no
@@ -854,9 +855,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"error: `gh pr view {args.pr}` failed", file=sys.stderr)
                 return 2
             pr = PullRequest.from_gh(json.loads(out))
-        # Only a commit whose subject ends in ``(#PR)`` triggers a gh lookup, so
-        # the usual CI run stays offline; a failed lookup falls back to its
-        # ``Part of`` lines, which is stricter, never laxer, than the release gate.
+        # Only a commit whose subject ends in ``(#PR)`` triggers a gh lookup of
+        # its own, on top of the ``gh pr view`` above; a failed lookup falls
+        # back to its ``Part of`` lines, which is stricter, never laxer, than
+        # the release gate.
         pr_resolver = _BranchResolver(args.repo or default_repo_slug(), args.offline)
         return run_pr_mode(
             pr,

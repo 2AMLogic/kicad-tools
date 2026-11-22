@@ -89,6 +89,10 @@ Before Gate 1, run, in order and in place: `kct pcb dedupe <pcb>` (#8218), `kct 
 
 After Gate 0 and before Gate 1, run `kct pcb add-fiducials <pcb> --sides populated` and `kct pcb add-board-info <pcb> --auto` (issue #8532) so the checks judge the finished board. Both are idempotent. `kct check` reports what remains missing as `fiducials_missing` (fewer than 3 global fiducials on a populated side) and `board_id_missing` (no silkscreen text naming the revision); both are **assembly-affecting** warnings, so Gate 4b refuses `--assembly` unless they are zero or acknowledged via `--ack-warnings`. `kct readiness --generate` performs the same step (`--skip-fiducials` / `--skip-board-info` to opt out); `--verify` never regenerates or mutates the board.
 
+### Gate 0c — silk legalisation (default; `--no-silk-fix` opts out)
+
+The board-producing commands legalise silk by default (issue #9799): `kct route` / `route-auto` and `kct optimize-placement` run the shared `legalize_silk` pass on the board they write, and Gate 3's `kct export` (plus `kct readiness --generate`, before Gate 1) runs it on the board the checks, plots and hashes consume. The pass names every edit and each item it could not fix — those stay `kct check` findings, never waivers — so Gate 4b's per-rule table is the authoritative silk verdict, not the pass's summary. A repair first attempted after a failed pre-gate would be too late, which is why the delegated readiness path repairs before Gate 1. Keep authored (illegal) silk only by passing `--no-silk-fix` to the producing commands AND `kct readiness --generate --no-silk-fix`; the flag on one command alone lets the next pipeline stage repair anyway.
+
 ### Pre-gates (Gates 1–3): delegate to `{{skill:manufacturing-readiness}}`, do not re-describe
 
 `tapeout` is a **superset** of `{{skill:manufacturing-readiness}}` — it does **not** re-invent the sign-off gates. Before generating any package, run the `# sign-off gate 1`, `# sign-off gate 2` and `# sign-off gate 3` command blocks in **`{{skill-file:manufacturing-readiness}}`** exactly as written, in order, at the resolved tier and with `<dir>` set to this tapeout's output directory. Each block's exit code is its verdict; a non-zero block is a refusal. Do not restate, paraphrase, reorder or relax those blocks here — the sibling skill is the single source of truth for the commands and the pass rules:
@@ -149,8 +153,8 @@ The distinction is load-bearing: **matcher-broken → refuse the whole tapeout**
    - `silkscreen_line_width` — the compared floor comes from the manufacturer profile, so every warning is a hard fab-constraint violation, not a preference
    - `silk_edge_clearance`
    - `silk_overlap`
-   - `silk_ref_obscured` — mirrors `ASSEMBLY_AFFECTING_RULES` (`kct readiness` refuses it without an ack)
-   - `thermal_asymmetry` — a 2-pad passive with one solid and one relieved terminal (tombstoning) or a PTH pin solid on 2+ layers (barrel fill) is an assembly defect; `kct zones relieve` is the fixer (Issue #8659)
+   - `silk_ref_obscured` — mirrors `ASSEMBLY_AFFECTING_RULES` (`kct readiness` refuses it without an ack); a hidden reference replaced by a visible same-side `gr_text` centred in the courtyard (a function label) is not reported (Issue #9435)
+   - `thermal_asymmetry` — a 2-pad passive with one solid and one relieved terminal (tombstoning), a small (≤0402-class) 2-pad passive with both terminals solid to pours (cold joints, rework), or a PTH pin solid on 2+ layers (barrel fill) is an assembly defect; `kct zones relieve` is the fixer (Issues #8659, #9796)
 
 3. **Require explicit acknowledgement of any nonzero count in that set.** A nonzero assembly-affecting warning count is acceptable **only** when explicitly acknowledged: the caller passed `--ack-warnings` naming that exact rule, or a human-authored accepted-risk decision exists and you record it as one accepted-risk line **per rule** in `README.txt` (Gate 7). Silence is not acknowledgement, and a passing Gate 1 exit code is not acknowledgement. **Unacknowledged assembly-affecting warnings ⇒ TAPEOUT REFUSED** — never exit 0, never write the final manifest. Warnings outside the assembly-affecting set appear in the table but do not require acknowledgement.
 

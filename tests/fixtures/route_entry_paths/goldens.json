@@ -19,6 +19,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation"
       ],
       "files": [
@@ -51,6 +52,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation"
       ],
       "files": [
@@ -84,6 +86,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation"
       ],
       "files": [
@@ -117,6 +120,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation"
       ],
       "files": [
@@ -135,16 +139,6 @@
   "partial": {
     "layer_escalation": {
       "exit_code": 2,
-      "copper": {
-        "present": true,
-        "segments": 11,
-        "vias": 4,
-        "arcs": 0,
-        "sha256": {
-          "arm64": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b",
-          "x86_64": "89a3320571cef16e5c0acb1ca638d1d4409b21d23394a1474f740fd5006f57dd"
-        }
-      },
       "headers": [
         "Auto-selecting grid resolution",
         "KiCad PCB Autorouter - Layer Escalation Mode",
@@ -156,8 +150,10 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation",
-        "Routing Suggestions"
+        "Routing Suggestions",
+        "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
       ],
       "files": [
         "failed_nets.json",
@@ -171,20 +167,26 @@
         "out.route.json",
         "out.routing_plan.json",
         "out.search_failures.json"
-      ]
+      ],
+      "copper_by_arch": {
+        "arm64": {
+          "present": true,
+          "segments": 5,
+          "vias": 2,
+          "arcs": 0,
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+        },
+        "x86_64": {
+          "present": true,
+          "segments": 5,
+          "vias": 2,
+          "arcs": 0,
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+        }
+      }
     },
     "rule_relaxation": {
       "exit_code": 2,
-      "copper": {
-        "present": true,
-        "segments": 11,
-        "vias": 4,
-        "arcs": 0,
-        "sha256": {
-          "arm64": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b",
-          "x86_64": "89a3320571cef16e5c0acb1ca638d1d4409b21d23394a1474f740fd5006f57dd"
-        }
-      },
       "headers": [
         "Auto-selecting grid resolution",
         "KiCad PCB Autorouter - Adaptive Rules Mode",
@@ -195,8 +197,10 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation",
-        "Routing Suggestions"
+        "Routing Suggestions",
+        "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
       ],
       "files": [
         "failed_nets.json",
@@ -210,20 +214,26 @@
         "out.route.json",
         "out.routing_plan.json",
         "out.search_failures.json"
-      ]
+      ],
+      "copper_by_arch": {
+        "arm64": {
+          "present": true,
+          "segments": 5,
+          "vias": 2,
+          "arcs": 0,
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+        },
+        "x86_64": {
+          "present": true,
+          "segments": 5,
+          "vias": 2,
+          "arcs": 0,
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+        }
+      }
     },
     "combined": {
       "exit_code": 2,
-      "copper": {
-        "present": true,
-        "segments": 11,
-        "vias": 4,
-        "arcs": 0,
-        "sha256": {
-          "arm64": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b",
-          "x86_64": "89a3320571cef16e5c0acb1ca638d1d4409b21d23394a1474f740fd5006f57dd"
-        }
-      },
       "headers": [
         "Auto-selecting grid resolution",
         "KiCad PCB Autorouter - Combined Escalation Mode",
@@ -235,8 +245,10 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation",
-        "Routing Suggestions"
+        "Routing Suggestions",
+        "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
       ],
       "files": [
         "failed_nets.json",
@@ -250,21 +262,27 @@
         "out.route.json",
         "out.routing_plan.json",
         "out.search_failures.json"
-      ]
+      ],
+      "copper_by_arch": {
+        "arm64": {
+          "present": true,
+          "segments": 5,
+          "vias": 2,
+          "arcs": 0,
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+        },
+        "x86_64": {
+          "present": true,
+          "segments": 5,
+          "vias": 2,
+          "arcs": 0,
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+        }
+      }
     },
     "single_attempt": {
       "_note": "#7377 D7: only path writing the out_partial.* snapshot (undecided)",
       "exit_code": 2,
-      "copper": {
-        "present": true,
-        "segments": 11,
-        "vias": 4,
-        "arcs": 0,
-        "sha256": {
-          "arm64": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b",
-          "x86_64": "89a3320571cef16e5c0acb1ca638d1d4409b21d23394a1474f740fd5006f57dd"
-        }
-      },
       "headers": [
         "Auto-selecting grid resolution",
         "KiCad PCB Autorouter",
@@ -276,8 +294,10 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation",
-        "Routing Suggestions"
+        "Routing Suggestions",
+        "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
       ],
       "files": [
         "failed_nets.json",
@@ -297,7 +317,23 @@
         "out_partial.route.json",
         "out_partial.routing_plan.json",
         "out_partial.search_failures.json"
-      ]
+      ],
+      "copper_by_arch": {
+        "arm64": {
+          "present": true,
+          "segments": 5,
+          "vias": 2,
+          "arcs": 0,
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+        },
+        "x86_64": {
+          "present": true,
+          "segments": 5,
+          "vias": 2,
+          "arcs": 0,
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+        }
+      }
     }
   }
 }

@@ -769,18 +769,26 @@ def _build_hv_context(
         build_required_by_domain_pair,
         derive_ref_domains_from_declaration,
         derive_ref_domains_from_voltage_map,
+        domain_intervals_for,
         load_hv_domains,
-        load_voltage_map,
+        load_voltage_intervals,
     )
 
+    domain_intervals: dict[str, tuple[float, float]] | None = None
     if voltage_map_path is not None:
-        voltage_map = load_voltage_map(voltage_map_path)
-        ref_domains, domain_voltages = derive_ref_domains_from_voltage_map(nets, voltage_map)
-        source = f"voltage map ({len(voltage_map)} nets)"
+        # Issue #9710: keep each net's SIGNED [lo, hi] interval.  The domain is
+        # still selected by largest |V| (first-seen ties), but the pair stress
+        # is differenced end-to-end on the selected nets' intervals -- the
+        # magnitude view would read +150 V / -150 V as a 0 V pair.
+        net_intervals = load_voltage_intervals(voltage_map_path)
+        ref_domains, domain_voltages = derive_ref_domains_from_voltage_map(nets, net_intervals)
+        domain_intervals = domain_intervals_for(domain_voltages, net_intervals)
+        source = f"voltage map ({len(net_intervals)} nets)"
     else:
         assert hv_domains_path is not None  # guaranteed by the guards above
         declaration = load_hv_domains(hv_domains_path)
         refs = [c.reference for c in components]
+        # Declared voltages come back signed (issue #9710).
         ref_domains, domain_voltages = derive_ref_domains_from_declaration(refs, declaration)
         source = f"hv-domains declaration ({len(declaration)} domains)"
 
@@ -791,6 +799,7 @@ def _build_hv_context(
             pollution_degree=pollution_degree,
             material_group=material_group,
             hv_threshold=hv_threshold,
+            domain_intervals=domain_intervals,
         )
     except StandardLookupError as e:
         raise ValueError(f"creepage lookup failed: {e}") from e
@@ -1286,6 +1295,7 @@ def run_optimize_placement(
     route_check_budget: int = DEFAULT_ROUTE_CHECK_BUDGET,
     route_check_timeout: float | None = None,
     require_outline: bool = False,
+    silk_fix: bool = True,
 ) -> int:
     """Run placement optimization.
 
@@ -1358,6 +1368,10 @@ def run_optimize_placement(
             route (``--per-net-iterations``), so the verdict is reproducible.
         route_check_timeout: Wall-clock safety backstop per check route in
             seconds (Python-API only; ``None`` = the module default).
+        silk_fix: Run the shared silk legalisation pass (``legalize_silk``,
+            #9795 phase 1) on the written board and the snap reference
+            repair it augments (Issue #9799). ``False`` (the
+            ``--no-silk-fix`` CLI flag) leaves authored silk byte-identical.
 
     Returns:
         Exit code:
@@ -2085,7 +2099,13 @@ def run_optimize_placement(
     if not quiet:
         print(f"\nWriting result to: {output_path}")
 
+    silk_mfr = None
+    if silk_fix:
+        from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+        silk_mfr = resolve_cli_manufacturer(None, pcb_path)
     silk_repair: SnapSilkRepair | None = None
+    silk_fix_doc: dict | None = None
     try:
         if route_check_report is not None and route_check_report.accepted_stage == "incumbent":
             # Route check kept the board as read: write it untouched (the
@@ -2096,8 +2116,11 @@ def run_optimize_placement(
                 pcb_path, output_path, best_vector, components, board_origin
             )
             # The snap moved caps by their footprint origin only: re-anchor
-            # the reference text it disturbed (issue #6256).
-            silk_repair = repair_snapped_silk_refs(output_path, snap_moves)
+            # the reference text it disturbed (issue #6256).  Issue #9799:
+            # --no-silk-fix bypasses this reference repair too -- it moves
+            # silk text, so the opt-out leaves authored silk byte-identical.
+            if silk_fix:
+                silk_repair = repair_snapped_silk_refs(output_path, snap_moves)
     except Exception as e:
         rc = _placement_error(
             pcb_path,
@@ -2119,6 +2142,12 @@ def run_optimize_placement(
             for warning in silk_repair.warnings():
                 print(f"WARNING: {warning}", file=sys.stderr)
 
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board.
+    if silk_mfr is not None:
+        from .silk_default_pass import run_default_silk_pass
+
+        silk_fix_doc = run_default_silk_pass(output_path, mfr=silk_mfr, quiet=quiet)
+
     if not quiet:
         print("Done.")
 
@@ -2138,6 +2167,7 @@ def run_optimize_placement(
                     "snap_silk_repair": (
                         silk_repair.as_dict() if silk_repair is not None else None
                     ),
+                    "silk_fix": silk_fix_doc,
                     "scores": {
                         "initial": _score_document(seed_score),
                         "final": _score_document(final_score),

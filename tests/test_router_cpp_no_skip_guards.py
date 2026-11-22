@@ -1,0 +1,532 @@
+"""No test may SKIP over a missing C++ router backend (Issue #9705).
+
+A case that needs the extension must FAIL with the build hint
+(:data:`tests.conftest.ROUTER_CPP_BUILD_HINT`) via the ``requires_router_cpp``
+marker or a ``require_router_cpp()`` call, so a worktree -- or a CI leg --
+whose ``kct build-native`` step broke cannot report a green run with every
+native parity case silently missing. Before this issue, ~116 modules carried
+``skipif(not is_cpp_available())`` / ``importorskip("kicad_tools.router.router_cpp")``
+guards and did exactly that.
+
+This module unit-tests the detector on small source samples (including an
+unrelated backend's identically named probe as a negative control) and then
+runs it over the whole ``tests/`` tree, conftests and nested directories
+included.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from tests.conftest import ROUTER_CPP_BUILD_HINT
+from tests.router_cpp_skip_scanner import scan_source, scan_tree
+
+TESTS_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = TESTS_ROOT.parent
+
+# This guard and its detector necessarily contain the patterns they forbid.
+SELF_EXEMPT = {"test_router_cpp_no_skip_guards.py", "router_cpp_skip_scanner.py"}
+
+
+def _lines(violations):
+    return [v.line for v in violations]
+
+
+def test_flags_multiline_router_skipif():
+    source = (
+        "from kicad_tools.router.cpp_backend import is_cpp_available\n"
+        "import pytest\n"
+        "\n"
+        "requires_cpp = pytest.mark.skipif(\n"
+        '    not is_cpp_available(), reason="C++ router backend not built"\n'
+        ")\n"
+    )
+    assert _lines(scan_source(source)) == [4]
+
+
+def test_flags_inline_importorskip_of_router_cpp():
+    source = "import pytest\n\nrouter_cpp = pytest.importorskip('kicad_tools.router.router_cpp')\n"
+    assert _lines(scan_source(source)) == [3]
+
+
+def test_flags_inline_absence_check_with_pytest_skip():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import is_cpp_available\n"
+        "\n"
+        "\n"
+        "def test_native():\n"
+        "    if not is_cpp_available():\n"
+        '        pytest.skip("native router required")\n'
+    )
+    assert _lines(scan_source(source)) == [7]
+
+
+def test_flags_mixed_parametrize_guard():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import is_cpp_available\n"
+        "\n"
+        "@pytest.mark.parametrize('backend', ['python', 'cpp'])\n"
+        "def test_mixed(backend):\n"
+        "    if backend == 'cpp' and not is_cpp_available():\n"
+        '        pytest.skip("cpp missing")\n'
+    )
+    assert _lines(scan_source(source)) == [7]
+
+
+def test_flags_probe_variable_alias_guard():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import is_cpp_available\n"
+        "\n"
+        "available = is_cpp_available()\n"
+        "\n"
+        "def test_native():\n"
+        "    if not available:\n"
+        '        pytest.skip("native router required")\n'
+    )
+    assert _lines(scan_source(source)) == [8]
+
+
+def test_unrelated_backend_skip_is_not_flagged():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.drc.cpp_backend import is_cpp_available\n"
+        "\n"
+        "requires_drc = pytest.mark.skipif(\n"
+        '    not is_cpp_available(), reason="drc extension not built"\n'
+        ")\n"
+        "\n"
+        "def test_drc():\n"
+        "    if not is_cpp_available():\n"
+        '        pytest.skip("drc missing")\n'
+    )
+    assert scan_source(source) == []
+
+
+def test_placement_probe_alias_is_not_flagged():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.placement.cpp_backend import is_cpp_available\n"
+        "\n"
+        "def test_placement():\n"
+        "    if not is_cpp_available():\n"
+        '        pytest.skip("placement extension missing")\n'
+    )
+    assert scan_source(source) == []
+
+
+def test_unrelated_importorskip_is_not_flagged():
+    source = "shapely = pytest.importorskip('shapely')\n"
+    assert scan_source(source) == []
+
+
+def test_compliant_forms_are_not_flagged():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import is_cpp_available\n"
+        "from tests.conftest import require_router_cpp\n"
+        "\n"
+        "@pytest.mark.requires_router_cpp\n"
+        "def test_native():\n"
+        "    from kicad_tools.router import router_cpp\n"
+        "    assert router_cpp.Grid3D\n"
+        "\n"
+        "@pytest.mark.parametrize('backend', ['python', 'cpp'])\n"
+        "def test_mixed(backend):\n"
+        "    if backend == 'cpp':\n"
+        "        require_router_cpp()\n"
+    )
+    assert scan_source(source) == []
+
+
+_SKIPIF = (
+    "@pytest.mark.skipif(not is_cpp_available(), reason='no cpp')\ndef test_native():\n    pass\n"
+)
+
+
+def test_flags_skipif_with_one_line_import_from_cpp_backend():
+    source = "from kicad_tools.router.cpp_backend import is_cpp_available\n" + _SKIPIF
+    assert len(scan_source(source)) == 1
+
+
+def test_flags_skipif_with_parenthesised_multiline_cpp_backend_import():
+    source = (
+        "from kicad_tools.router.cpp_backend import (\n"
+        "    CppPathfinder,\n"
+        "    is_cpp_available,\n"
+        ")\n" + _SKIPIF
+    )
+    assert len(scan_source(source)) == 1
+
+
+def test_flags_skipif_with_parenthesised_multiline_router_package_import():
+    source = (
+        "from kicad_tools.router import (\n"
+        "    Autorouter,\n"
+        "    is_cpp_available,  # probe\n"
+        ")\n" + _SKIPIF
+    )
+    assert len(scan_source(source)) == 1
+
+
+def test_flags_backend_info_available_skip():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import get_backend_info\n"
+        "\n"
+        "def test_native():\n"
+        '    if not get_backend_info()["available"]:\n'
+        '        pytest.skip("C++ extension unavailable")\n'
+    )
+    assert _lines(scan_source(source)) == [6]
+
+
+def test_flags_import_error_followed_by_pytest_skip():
+    source = (
+        "import pytest\n"
+        "\n"
+        "def test_native():\n"
+        "    try:\n"
+        "        from kicad_tools.router import router_cpp\n"
+        "    except ImportError:\n"
+        '        pytest.skip("C++ extension not built")\n'
+    )
+    assert _lines(scan_source(source)) == [7]
+
+
+def test_unrelated_import_error_skip_is_not_flagged():
+    source = (
+        "import pytest\n"
+        "\n"
+        "def test_other():\n"
+        "    try:\n"
+        "        import shapely\n"
+        "    except ImportError:\n"
+        '        pytest.skip("no shapely")\n'
+    )
+    assert scan_source(source) == []
+
+
+def test_flags_skipif_reading_backend_info_availability():
+    # Reproduction 1 from Issue #9804: rule 1 tested only the is_cpp_available
+    # refs and the router_cpp module name, never the get_backend_info refs.
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import get_backend_info\n"
+        "\n"
+        "requires_cpp = pytest.mark.skipif(\n"
+        '    not get_backend_info()["available"], reason="C++ router backend not built"\n'
+        ")\n"
+    )
+    assert _lines(scan_source(source)) == [4]
+
+
+def test_flags_skipif_with_aliased_backend_info():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import get_backend_info as backend_info\n"
+        "\n"
+        '@pytest.mark.skipif(not backend_info().get("available"), reason="x")\n'
+        "def test_native():\n"
+        "    pass\n"
+    )
+    assert _lines(scan_source(source)) == [4]
+
+
+def test_flags_skipif_on_package_reexported_backend_info_without_not():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router import get_backend_info\n"
+        "\n"
+        '@pytest.mark.skipif(get_backend_info()["available"] is False, reason="x")\n'
+        "def test_native():\n"
+        "    pass\n"
+    )
+    assert _lines(scan_source(source)) == [4]
+
+
+def test_flags_unconditional_skip_mark_on_router_cpp_module():
+    # Reproduction 2 from Issue #9804: no rule looked at unconditional skips.
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router import router_cpp\n"
+        "\n"
+        "@pytest.mark.skip(reason='native parity temporarily disabled')\n"
+        "def test_native():\n"
+        "    assert router_cpp.Grid3D\n"
+    )
+    assert _lines(scan_source(source)) == [4]
+
+
+def test_flags_unconditional_skip_via_pytestmark_and_marks_param():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import is_cpp_available\n"
+        "\n"
+        'pytestmark = pytest.mark.skip(reason="cpp")\n'
+        "\n"
+        "@pytest.mark.parametrize('backend', ['cpp'], marks=pytest.mark.skip)\n"
+        "def test_mixed(backend):\n"
+        "    assert is_cpp_available()\n"
+    )
+    assert _lines(scan_source(source)) == [4, 6]
+
+
+def test_flags_alias_binding_of_skip_mark():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import is_cpp_available\n"
+        "\n"
+        "skip_native = pytest.mark.skip\n"
+    )
+    assert _lines(scan_source(source)) == [4]
+
+
+def test_unrelated_unconditional_skip_is_not_flagged():
+    source = (
+        "import pytest\n"
+        "\n"
+        '@pytest.mark.skip(reason="no fleet schematics")\n'
+        "def test_fleet():\n"
+        "    pass\n"
+    )
+    assert scan_source(source) == []
+
+
+def test_drc_backend_info_skipif_is_not_flagged():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.drc.cpp_backend import get_backend_info\n"
+        "\n"
+        '@pytest.mark.skipif(not get_backend_info()["available"], reason="drc")\n'
+        "def test_drc():\n"
+        "    pass\n"
+    )
+    assert scan_source(source) == []
+
+
+def test_other_backend_unconditional_skip_is_not_flagged():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.placement.cpp_backend import is_cpp_available\n"
+        "\n"
+        '@pytest.mark.skip(reason="placement extension missing")\n'
+        "def test_placement():\n"
+        "    pass\n"
+    )
+    assert scan_source(source) == []
+
+
+# Issue #9821: the ``_CPP_AVAILABLE`` flag and local probe helpers.
+
+
+def test_flags_skipif_on_router_cpp_available_flag():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import (\n"
+        "    _CPP_AVAILABLE,\n"
+        "    CppGrid,\n"
+        ")\n"
+        "\n"
+        '@pytest.mark.skipif(not _CPP_AVAILABLE, reason="backend unavailable")\n'
+        "class TestNative:\n"
+        "    pass\n"
+    )
+    assert _lines(scan_source(source)) == [7]
+
+
+def test_flags_skipif_on_aliased_router_cpp_available_flag():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router import _CPP_AVAILABLE as HAVE_NATIVE\n"
+        "\n"
+        "pytestmark = pytest.mark.skipif(not HAVE_NATIVE, reason='x')\n"
+    )
+    assert _lines(scan_source(source)) == [4]
+
+
+def test_flags_skipif_on_module_alias_cpp_available_flag():
+    source = (
+        "import pytest\n"
+        "import kicad_tools.router.cpp_backend as cb\n"
+        "\n"
+        "@pytest.mark.skipif(not cb._CPP_AVAILABLE, reason='x')\n"
+        "def test_native():\n"
+        "    pass\n"
+    )
+    assert _lines(scan_source(source)) == [4]
+
+
+def test_flags_pytest_skip_guarded_by_cpp_available_flag():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import _CPP_AVAILABLE\n"
+        "\n"
+        "def test_native():\n"
+        "    if not _CPP_AVAILABLE:\n"
+        '        pytest.skip("no native")\n'
+    )
+    assert _lines(scan_source(source)) == [6]
+
+
+def test_drc_cpp_available_flag_skipif_is_not_flagged():
+    # The DRC extension legitimately keeps its own skip guards (#9705 scope).
+    source = (
+        "import pytest\n"
+        "from kicad_tools.drc.cpp_backend import _CPP_AVAILABLE\n"
+        "from kicad_tools.router.cpp_backend import CppGrid\n"
+        "\n"
+        '@pytest.mark.skipif(not _CPP_AVAILABLE, reason="drc extension not built")\n'
+        "def test_drc():\n"
+        "    pass\n"
+    )
+    assert scan_source(source) == []
+
+
+def test_flags_skipif_on_local_helper_importing_router_cpp():
+    source = (
+        "import pytest\n"
+        "\n"
+        "def _cpp_available() -> bool:\n"
+        "    try:\n"
+        "        import kicad_tools.router.router_cpp  # noqa: F401\n"
+        "\n"
+        "        return True\n"
+        "    except ImportError:\n"
+        "        return False\n"
+        "\n"
+        "\n"
+        "@pytest.mark.skipif(\n"
+        "    not _cpp_available(),\n"
+        '    reason="native extension not built",\n'
+        ")\n"
+        "class TestNative:\n"
+        "    pass\n"
+    )
+    assert _lines(scan_source(source)) == [12]
+
+
+def test_flags_skipif_on_local_helper_using_from_import_and_variable():
+    source = (
+        "import pytest\n"
+        "\n"
+        "def _have_native():\n"
+        "    try:\n"
+        "        from kicad_tools.router import router_cpp  # noqa: F401\n"
+        "    except ImportError:\n"
+        "        return False\n"
+        "    return True\n"
+        "\n"
+        "HAVE = _have_native()\n"
+        "\n"
+        "@pytest.mark.skipif(not HAVE, reason='x')\n"
+        "def test_native():\n"
+        "    pass\n"
+    )
+    assert _lines(scan_source(source)) == [12]
+
+
+def test_flags_skipif_on_local_helper_wrapping_the_probe():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import is_cpp_available\n"
+        "\n"
+        "def _native():\n"
+        "    return is_cpp_available()\n"
+        "\n"
+        "def _native_ok():\n"
+        "    return _native()\n"
+        "\n"
+        "@pytest.mark.skipif(not _native_ok(), reason='x')\n"
+        "def test_native():\n"
+        "    pass\n"
+    )
+    assert _lines(scan_source(source)) == [10]
+
+
+def test_local_helper_probing_another_backend_is_not_flagged():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import CppGrid\n"
+        "\n"
+        "def _drc_available():\n"
+        "    try:\n"
+        "        import kicad_tools.drc.drc_cpp  # noqa: F401\n"
+        "    except ImportError:\n"
+        "        return False\n"
+        "    return True\n"
+        "\n"
+        "@pytest.mark.skipif(not _drc_available(), reason='drc')\n"
+        "def test_drc():\n"
+        "    pass\n"
+    )
+    assert scan_source(source) == []
+
+
+def test_no_router_cpp_skip_guards_anywhere_in_the_test_tree():
+    violations = scan_tree(str(TESTS_ROOT), skip=SELF_EXEMPT)
+    assert not violations, (
+        "C++-router-backend skip guards are forbidden (Issue #9705); a case "
+        "that needs the extension must fail with the build hint via the "
+        "`requires_router_cpp` marker or require_router_cpp():\n"
+        + "\n".join(str(v) for v in violations)
+    )
+
+
+def test_runtime_backstop_fails_router_reasoned_skips(tmp_path):
+    """The conftest backstop (#9804): router-C++-reasoned skips become failures.
+
+    Runs a scratch pytest in a subprocess whose conftest re-exports the
+    ``pytest_runtest_makereport`` hookwrapper from ``tests/conftest.py``: a
+    skip whose reason mentions the router C++ backend fails with the build
+    hint, while a drc-reasoned skip still skips and an xfail whose reason
+    names the backend stays an xfail.
+    """
+    (tmp_path / "conftest.py").write_text(
+        "from tests.conftest import pytest_runtest_makereport  # noqa: F401\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_backstop.py").write_text(
+        "import pytest\n"
+        "\n"
+        "def test_skip_reasoning_router_cpp():\n"
+        "    pytest.skip('router_cpp not built')\n"
+        "\n"
+        "def test_skip_reasoning_cpp_backend():\n"
+        "    pytest.skip('cpp backend unavailable')\n"
+        "\n"
+        "def test_drc_reasoned_skip_still_skips():\n"
+        "    pytest.skip('drc extension not built')\n"
+        "\n"
+        "\n"
+        "@pytest.mark.xfail(reason='router_cpp too old for this case')\n"
+        "def test_xfail_reasoning_router_cpp_stays_xfail():\n"
+        "    assert False\n",
+        encoding="utf-8",
+    )
+    # The reason is matched, never the report's file path: a benign skip in
+    # a module merely *named* ``test_router_cpp_*`` stays a skip.
+    (tmp_path / "test_router_cpp_named_module.py").write_text(
+        "import pytest\n"
+        "\n"
+        "def test_benign_skip_in_router_named_module():\n"
+        "    pytest.skip('fixture only provisioned on hardware runners')\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+        timeout=300,
+        check=False,
+    )
+    assert "2 failed, 2 skipped, 1 xfailed" in proc.stdout, proc.stdout + proc.stderr
+    assert ROUTER_CPP_BUILD_HINT in proc.stdout

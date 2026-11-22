@@ -386,6 +386,17 @@ def load_board_recipe_module(board_dir: Path):
     term consumes.  Mirrors ``net_class_map_resolver.load_board_recipe_module``
     (kept local to this gate to preserve the byte-for-byte sibling
     convention with ``check_diffpair_coverage.py``).
+
+    Issue #9351: the recipe bare-imports its siblings (``import
+    generate_pcb`` / ``import generate_schematic``), which cache in
+    ``sys.modules`` under those plain names -- keys the unique
+    top-module name does not namespace, so the first board loaded in a
+    process would win them and every later board would silently receive
+    its siblings.  Entries under the board's ``*.py`` stem names are
+    evicted before the import (a stale entry must not be reused) and
+    ``sys.modules`` is restored afterwards, symmetric with the
+    ``sys.path`` restore; the recipe keeps its own attribute references
+    and stays functional.
     """
     script = board_dir / "generate_design.py"
     if not script.is_file():
@@ -396,6 +407,14 @@ def load_board_recipe_module(board_dir: Path):
     # so the import resolves correctly.
     saved_path = list(sys.path)
     sys.path.insert(0, str(board_dir))
+
+    # Issue #9351: the recipe's bare sibling imports resolve through the
+    # plain ``sys.modules`` keys.  Pop any entry under a sibling stem
+    # first (restore-only would let a stale sibling from another board
+    # satisfy the bare import), then in ``finally`` drop the keys the
+    # load added and put the popped originals back.
+    sibling_names = {p.stem for p in board_dir.glob("*.py")}
+    saved_modules = {name: sys.modules.pop(name) for name in sibling_names if name in sys.modules}
     try:
         return _import_module_from_path(
             f"_matchgroup_coverage_generate_design_{board_dir.name.replace('-', '_')}",
@@ -403,6 +422,9 @@ def load_board_recipe_module(board_dir: Path):
         )
     finally:
         sys.path[:] = saved_path
+        for name in sibling_names:
+            sys.modules.pop(name, None)
+        sys.modules.update(saved_modules)
 
 
 def build_net_class_map_for_board(board_dir: Path) -> dict | None:
@@ -529,10 +551,14 @@ def count_errors_via_kct_check(
         str(pcb_path),
         "--mfr",
         "jlcpcb",
-        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
-        # in this gate; skipped until the #8839 threshold table lands.
-        "--skip",
-        "mask_to_copper",
+        # Issue #8858 (board 07 increment): the #8842 ``--skip mask_to_copper``
+        # is gone.  The seed-42 regeneration carries a stable population of
+        # ``mask_to_copper`` errors, baselined by NET SIGNATURE in
+        # MATCHGROUP_FIXTURE_ALLOWED_FINDINGS below (each entry cites #8858),
+        # the same identity model the #8957 slit entries and board 06's
+        # #9358 increment use.  A net that starts carrying mask errors still
+        # fails the gate; a net whose mask findings the router stops leaving
+        # goes stale and forces its entry out.
         "--errors-only",
         "--format",
         "json",
@@ -642,18 +668,113 @@ def count_errors_via_kct_check(
 # which two independent regenerations (the E2E job's and this gate's)
 # reproduced exactly.  A new net starting to carry sub-danger slits still
 # fails the gate; a net whose slits the router stops leaving goes stale and
-# forces its entry out.  The router fix is tracked in #8957; delete entries
-# there as they go stale.
+# forces its entry out.
+# Issue #8975: the recipe repair pass now keeps its offset vias out of the
+# same-net slit band (#8957's predicate in ``_via_ok``), which drained the
+# recipe's own d0.25/s0.45 population to zero (93 -> 0 measured on the
+# first post-fix regen; GND's count dropped 118 -> 25 but its entry stays
+# load-bearing -- allowances are by net, not by producer).
+#
+# The +1V2 entry (PR #8955): #8937's zone arm restores the authored zone
+# ``connect_pads`` clearance (0.3 mm on this board's three pour zones) that
+# the unconditional fab-floor rule (0.1016 mm here) used to replace at
+# refill, so the pour pipeline's stitch/repair rounds place a different
+# via population.  CI run 43688361347 measured the total at 129 (GND
+# 118 -> 110; every other net's count unchanged) and one NEW identity:
+# +1V2, one same-net finding -- a +1V2 via annulus (Via@118.99/60.12,
+# F.Cu-B.Cu) 0.0585 mm from its own +1V2 pad on F.Cu, ``same_net`` true in
+# the violation record.  Reproduced from the run's E2E artifact and
+# identical in both failing jobs; the same fab-view class as the entries
+# above (the fab cannot see nets), so it joins the fab-gap allowance rather
+# than reverting the restored authored clearance.
+#
+# Issue #8974: the route-side d0.3/s0.6 producers (the oracle weld's
+# run_stitch vias, the oracle link router's vias, and the lattice
+# pathfinder's pair vias) now keep their annuli out of the same-net pad
+# slit band.  Measured on the tree merged with main (#8975's recipe fix
+# and #8937's zone arm both present; seed 42, 31/31 reach): 14 findings,
+# all same-net ``physical_copper_gap`` -- TMDS_D0_N and TMDS_D2_N 3 each,
+# MIPI_CLK_N, MIPI_DAT0_N, MIPI_DAT1_N and TMDS_D1_N 2 each.  CI run
+# 43809852277 (this branch before the #8937 merge) measured the same 14
+# total.  No DQS_P, DQS_N, GND or +1V2 finding recurs, so those four
+# entries are deleted (the gate's staleness arm flags each one otherwise);
+# the six surviving nets keep exactly their #8957-era counts.
+# The surviving entries are re-pointed to #8962, the parent tracker for
+# the remaining producers; #8957's own scope ended at the merged stitcher
+# path.
+#
+# Issue #9018: the lattice engine's leg-side band guard landed (stub-scan
+# doglegs, A* body edges, coupled attach/offset legs, gateway fans, the
+# class-pad repair's moved segments -- all held to the two-region rule
+# against own-net SMD pads).  Measured on the seed-42 regen (31/31 reach,
+# both passes): every one of the 14 pad-vs-trace slits above is gone, and
+# the six TMDS entries that remained are gone too.  Those six were the
+# re-sited gateway fan vias sitting TANGENT to their own J2 pad
+# (annulus-to-pad-edge AABB gap exactly 0.0 -- the #8957 union region
+# admitted the site), with the checker's facing-edge slit detector grading
+# the 0.040-0.064 mm wedge beside the tangency point.  Issue #9124 closes
+# that producer: the same-net slit-band predicate rejects a TANGENT seat
+# (``gap == 0``, centre exactly one annulus radius from a pad face or
+# corner) in the Python point predicate, the ring form and the C++ mirror
+# (BUILD_VERSION 70), the findings stopped firing on the fresh seed-42
+# regen (31/31 reach, 0 error violations), and their entries are deleted.
+# The #8962 coordination note (the via-population child re-baselines again
+# when it lands) is retired with them: these wedges were exactly the
+# tangent seats #9124 rejects, so no via-population re-baseline is pending
+# for this population.  At that point board 07's allowance was empty again.
+#
+# Issue #8858 (board 07 increment, measured 2026-11-18 at main 163f4a175,
+# pinned image kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a
+# 6033f5b9c80aa3b19dd3ec -- the digest CI's KICAD_IMAGE pins, kicad-cli
+# 10.0.6, python 3.12): the seed-42 regeneration of this board carried 54
+# ``mask_to_copper`` errors -- 52 violation + 2 uncertain, all same-net
+# (same-net pass-throughs and entries whose copper sits beside the opening
+# beyond the one clean crossing; the fab-danger shapes from #8914) -- across
+# 19 net signatures.  Three independent regenerations (two
+# in this image, one on a worker through KCT_KICAD_DOCKER) reproduced every
+# signature and per-net count exactly; the findings' coordinates shift with
+# the recipe's board origin between environments, but the per-net
+# populations are stable, so the entries are keyed by NET SIGNATURE like the
+# #8957 slits and board 06's #9358 increment (mask_to_copper's items are
+# opening/conductor UUIDs, re-minted by every regeneration; the rule names
+# ``nets`` on each finding).  This is the #9326/#9332 repair-path
+# population: the boards are regenerated from scratch every run and the
+# findings are real residual geometry, so they are baselined here by
+# identity rather than repaired in this increment.  A net that starts
+# carrying mask errors fails the gate; a net the router stops exposing goes
+# stale and forces its entry out.  Each entry's value is the tracking issue
+# number (#8858), the same convention as the physical_copper_gap entries'
+# 8962 -- the gate judges identity, never count; the measured per-net
+# populations (+1V8 18, GND 8, DQ0-DQ7 and DM0 2 each, A0/A7 2 each,
+# A2/A3/A5/MIPI_CLK_P/TMDS_D2_P/TMDS_D2_N 1 each) are recorded in the
+# research note.  Both Board 07 CI artifacts show that the 18 +1V8 pads
+# connect solidly to their own pour and qualify as info under #9436.
+# The 36 remaining errors span the 18 net signatures below.  Verify with:
+#   KCT_KICAD_DOCKER=1 uv run kct check \
+#     boards/07-matchgroup-test/regression-output/matchgroup_test_routed.kicad_pcb \
+#     --mfr jlcpcb --errors-only --format json
+#   (native-in-container rerun for CI parity: the Docker-fallback and
+#   native kicad-cli disagree on the pour-stitch via population but agree
+#   on every mask_to_copper finding.)
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "DQS_N"): 8957,
-    ("physical_copper_gap", "DQS_P"): 8957,
-    ("physical_copper_gap", "GND"): 8957,
-    ("physical_copper_gap", "MIPI_CLK_N"): 8957,
-    ("physical_copper_gap", "MIPI_DAT0_N"): 8957,
-    ("physical_copper_gap", "MIPI_DAT1_N"): 8957,
-    ("physical_copper_gap", "TMDS_D0_N"): 8957,
-    ("physical_copper_gap", "TMDS_D1_N"): 8957,
-    ("physical_copper_gap", "TMDS_D2_N"): 8957,
+    ("mask_to_copper", "A0"): 8858,
+    ("mask_to_copper", "A2"): 8858,
+    ("mask_to_copper", "A3"): 8858,
+    ("mask_to_copper", "A5"): 8858,
+    ("mask_to_copper", "A7"): 8858,
+    ("mask_to_copper", "DM0"): 8858,
+    ("mask_to_copper", "DQ0"): 8858,
+    ("mask_to_copper", "DQ1"): 8858,
+    ("mask_to_copper", "DQ2"): 8858,
+    ("mask_to_copper", "DQ3"): 8858,
+    ("mask_to_copper", "DQ4"): 8858,
+    ("mask_to_copper", "DQ5"): 8858,
+    ("mask_to_copper", "DQ6"): 8858,
+    ("mask_to_copper", "DQ7"): 8858,
+    ("mask_to_copper", "GND"): 8858,
+    ("mask_to_copper", "MIPI_CLK_P"): 8858,
+    ("mask_to_copper", "TMDS_D2_N"): 8858,
+    ("mask_to_copper", "TMDS_D2_P"): 8858,
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key

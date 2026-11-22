@@ -180,6 +180,47 @@ def test_nonzero_origin_avoids_track(tmp_path):
         assert (dx**2 + (y - 3) ** 2) ** 0.5 >= 2.0
 
 
+@pytest.mark.parametrize("owner", ["board", "footprint"])
+@pytest.mark.parametrize(
+    "layers,restrictions,blocked_layers",
+    [
+        ('(layers "F.Cu" "B.Cu")', "(pads not_allowed)", {"F.Cu", "B.Cu"}),
+        ('(layers "F&B.Cu")', "(footprints not_allowed)", {"F.Cu", "B.Cu"}),
+        ('(layer "F.Cu")', "(pads not_allowed) (footprints not_allowed)", {"F.Cu"}),
+        ('(layer "B.Cu")', "(pads not_allowed)", {"B.Cu"}),
+        ('(layers "F.Cu" "B.Cu")', "(vias not_allowed)", set()),
+    ],
+    ids=["pads-both", "footprints-both", "pads-and-footprints-front", "pads-back", "vias-only"],
+)
+def test_rule_area_limits_fiducials_on_its_copper_layers(
+    tmp_path, owner, layers, restrictions, blocked_layers
+):
+    from shapely.geometry import Point, box
+
+    from kicad_tools.cli import main
+    from kicad_tools.cli.pcb_add_fiducials import DEFAULT_KEEPOUT_MM
+
+    # KiCad stores rule-area vertices in board-file coordinates for either owner.
+    zone = f"""(zone (net 0) (net_name "") {layers} (keepout {restrictions})
+        (polygon (pts (xy 100 100) (xy 111 100) (xy 111 111) (xy 100 111))))"""
+    if owner == "footprint":
+        zone = f"""(footprint "RF:Antenna" (layer "F.Cu") (at 105 105)
+            (property "Reference" "AE1" (at 0 0) (layer "F.SilkS")) {zone})"""
+    path = _write(tmp_path, _board(origin=(100, 100), extra=zone))
+    assert main(["pcb", "add-fiducials", str(path), "--sides", "front,back"]) == 0
+
+    fids = _fids(path)
+    region = box(0, 0, 11, 11)  # PCB.load returns board-relative positions.
+    for layer in ("F.Cu", "B.Cu"):
+        sites = [fp.position for fp in fids if fp.layer == layer]
+        assert len(sites) == 3
+        assert not _collinear(sites)
+        if layer in blocked_layers:
+            assert all(region.distance(Point(site)) > DEFAULT_KEEPOUT_MM for site in sites)
+        else:
+            assert (3.5, 3.5) in sites
+
+
 class _FP:
     def __init__(self, name="", reference="", tags=""):
         self.name, self.reference, self.tags = name, reference, tags
@@ -216,3 +257,84 @@ def test_project_library_fiducials_are_idempotent(tmp_path):
     before = len(_fids(path))
     run_add_fiducials(path, sides="front")
     assert len(_fids(path)) == before
+
+
+_THT_BACK_PART = """(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02"
+    (layer "B.Cu")
+    (uuid "fp-j1")
+    (at 10 10)
+    (property "Reference" "J1" (at 0 -1.5 0) (layer "B.SilkS"))
+    (property "Value" "hdr" (at 0 1.5 0) (layer "B.Fab"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 0 ""))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 0 "")))"""
+
+
+def test_populated_skips_side_with_only_through_hole_parts(tmp_path):
+    p = _write(tmp_path, _board(extra=_THT_BACK_PART))
+    assert run_add_fiducials(p, sides="populated") == 0
+    fids = _fids(p)
+    assert len(fids) == 3
+    assert {f.layer for f in fids} == {"F.Cu"}
+
+
+def test_populated_counts_smd_pads_without_attr_token(tmp_path):
+    # ``_board`` footprints carry no ``(attr ...)`` token, only SMD pads.
+    p = _write(tmp_path, _board(back_part=True))
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert {f.layer for f in _fids(p)} == {"B.Cu"}
+
+
+def test_populated_counts_attr_smd_without_smd_pads(tmp_path):
+    part = """(footprint "X:Y" (layer "B.Cu") (uuid "fp-x") (at 10 10) (attr smd)
+    (property "Reference" "U9" (at 0 0 0) (layer "B.SilkS"))
+    (property "Value" "x" (at 0 0 0) (layer "B.Fab")))"""
+    p = _write(tmp_path, _board(extra=part))
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert {f.layer for f in _fids(p)} == {"F.Cu", "B.Cu"}
+
+
+def test_populated_ignores_dnp_style_smd_on_back(tmp_path):
+    part = """(footprint "Resistor_SMD:R_0402" (layer "B.Cu") (uuid "fp-r9") (at 10 10)
+    (attr smd exclude_from_bom)
+    (property "Reference" "R9" (at 0 0 0) (layer "B.SilkS"))
+    (property "Value" "x" (at 0 0 0) (layer "B.Fab"))
+    (pad "1" smd roundrect (at 0 0) (size 0.5 0.5) (layers "B.Cu") (net 0 "")))"""
+    p = _write(tmp_path, _board(extra=part))
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert {f.layer for f in _fids(p)} == {"F.Cu"}
+
+
+_DNP_BACK_PART = """(footprint "Resistor_SMD:R_0402" (layer "B.Cu") (uuid "fp-r8") (at 10 10)
+    (attr smd {attrs})
+    (property "Reference" "R8" (at 0 0 0) (layer "B.SilkS"))
+    (property "Value" "x" (at 0 0 0) (layer "B.Fab"))
+    (pad "1" smd roundrect (at 0 0) (size 0.5 0.5) (layers "B.Cu") (net 0 "")))"""
+
+
+@pytest.mark.parametrize("attrs", ["dnp", "dnp exclude_from_bom"])
+def test_populated_ignores_bom_included_dnp_smd_on_back(tmp_path, attrs):
+    """Issue #9480: an SMD+DNP part is not placed, so it populates no side."""
+    p = _write(tmp_path, _board(extra=_DNP_BACK_PART.format(attrs=attrs)))
+    assert run_add_fiducials(p, sides="populated") == 0
+    fids = _fids(p)
+    assert len(fids) == 3
+    assert {f.layer for f in fids} == {"F.Cu"}
+
+
+def test_populated_dnp_part_does_not_unpopulate_side_with_live_part(tmp_path):
+    """Issue #9480: a second, non-DNP SMD part still populates the face."""
+    live = _DNP_BACK_PART.format(attrs="").replace('"fp-r8"', '"fp-r7"').replace("R8", "R7")
+    p = _write(tmp_path, _board(extra=_DNP_BACK_PART.format(attrs="dnp") + live))
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert {f.layer for f in _fids(p)} == {"F.Cu", "B.Cu"}
+
+
+def test_populated_through_hole_only_board_has_no_populated_side(tmp_path, capsys):
+    body = (
+        _board()
+        .replace("Resistor_SMD:R_0402", "Resistor_THT:R_Axial")
+        .replace("smd roundrect", "thru_hole circle")
+    )
+    p = _write(tmp_path, body)
+    assert run_add_fiducials(p, sides="populated") != 0
+    assert _fids(p) == []
