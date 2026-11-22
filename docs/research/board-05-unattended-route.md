@@ -173,3 +173,34 @@ This was a local container, not a GitHub-hosted runner. A new workflow cannot
 be dispatched until it is on the default branch, so the first hosted-runner
 numbers come from the first `workflow_dispatch` (or the 07:30 UTC schedule)
 after merge. Add them here when they exist.
+
+## Re-measured 2026-11-22: zero copper-gap errors (#9844 acceptance)
+
+`origin/main` @ `7416c1c24` — the merge of #9873 (stored-via check, native
+router build 78), with #9875's within-route guard already in. Linux x86_64
+host, seeds run sequentially, pinned kicad-cli 10.0.6 (`KCT_KICAD_DOCKER=1`),
+same #6508 protocol flags. The host was busy (load average 40.5 falling to
+17.8 during seed 42), but no `stage deadline fired` or `per-net wall clock
+bound` line appears in any route log, so every board is an iteration-bounded
+(machine-independent) result: all three seeds wrote byte-identical boards
+(sha1 `64411406e173...`), 142/142 connections each.
+
+| Seed | Route exit | Nets | kicad-cli DRC err | Unconnected | ERC | `physical_copper_gap` err | kct check err / warn | LVS (copper / label) | Vias | Wall s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 42 | 0 | 37/37 | 0 | 0 | 0 | 0 | 0 / 77 | clean / clean | 124 | 369.6 |
+| 7 | 0 | 37/37 | 0 | 0 | 0 | 0 | 0 / 77 | clean / clean | 124 | 375.6 |
+| 1337 | 0 | 37/37 | 0 | 0 | 0 | 0 | 0 / 77 | clean / clean | 124 | 351.1 |
+
+The #9844 RESET V-turn slit and the residuals the 2026-11-22 combined build
+still carried (one SPEED pad/trace and two IREF trace/trace gaps at native
+build 77) do not occur on this revision: `physical_copper_gap` reports zero
+findings at error or warning severity on every seed. Its two remaining
+findings are info severity (zone-fill clearance; pour copper is not judged,
+#8938).
+
+The harness still exits 1, on the #8073 no-warning gate alone: 77 warnings per
+seed, identical across seeds (51 `pour_slot`, 9 `silk_hole_overlap`, 8
+`redundant_copper_covered`, 4 `redundant_copper_detour`, 2
+`redundant_copper_staircase`, 1 `redundant_copper_fragments`, 1 `plane_split`,
+1 `sharp_trace_corner`). Every error-side gate is green. Warning and mask
+cleanup stays out of #9844's scope.
