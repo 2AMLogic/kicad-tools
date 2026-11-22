@@ -84,6 +84,40 @@ def test_committed_dru_carries_the_attach_zone_block():
     assert has_attach_zone_block((OUTPUT / f"{STEM}.kicad_dru").read_text(encoding="utf-8"))
 
 
+def test_mask_standoff_preserves_fiducial_geometry(tmp_path, monkeypatch):
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+    from kicad_tools.sexp import parse_file
+
+    monkeypatch.syspath_prepend(str(REDESIGN))
+    from routing import geometry_fingerprint
+
+    build = _load_build()
+    routed = tmp_path / f"{STEM}.kicad_pcb"
+    shutil.copy2(OUTPUT / routed.name, routed)
+    assert run_add_fiducials(routed, sides="populated") == 0
+    original = geometry_fingerprint(routed)
+    build.clear_fiducial_openings(routed)
+    assert geometry_fingerprint(routed) == original
+
+    fiducials = [
+        fp
+        for fp in parse_file(routed).find_all("footprint")
+        if fp.get_string(0) == "Fiducial:Fiducial_1mm_Mask2mm"
+    ]
+    assert len(fiducials) == 3
+    for footprint in fiducials:
+        (pad,) = footprint.find_all("pad")
+        copper = pad.find("clearance").get_float(0)
+        mask = pad.find("solder_mask_margin").get_float(0)
+        assert copper - mask == pytest.approx(0.2)
+
+    dru = routed.with_suffix(".kicad_dru")
+    shutil.copy2(OUTPUT / dru.name, dru)
+    build.declare_pour_standoff(routed)
+    build.declare_pour_standoff(routed)
+    assert dru.read_text().count(build.POUR_STANDOFF_RULE) == 1
+
+
 # Default-on fab view (#8843) makes `kct check --mfr jlcpcb` on this dense board
 # several times slower (~8 s on main -> ~40 s, measured on an 8-core host, one
 # run). The global 60 s cap is too tight for the 2-vCPU CI runner, so this gets

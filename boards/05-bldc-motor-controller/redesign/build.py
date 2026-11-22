@@ -11,6 +11,7 @@ from pathlib import Path
 from hardware import ROOT, generate
 from routing import apply_routing
 
+from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
 from kicad_tools.validate.known_warnings import unaccepted_report_warnings
 
 #: Issue #7298: no warning is accepted.  #7296 (the router refuses pad-edge
@@ -50,7 +51,7 @@ ROUTER_NETCLASSES = (
 #: at 0.2 mm; measured fill distance 0.2005 mm on the pinned toolchain.
 POUR_STANDOFF_RULE = (
     '(rule "board05 pour mask standoff"'
-    ' (condition "A.Type == \'Zone\'")'
+    " (condition \"A.Type == 'Zone'\")"
     " (constraint clearance (min 0.2mm)))"
 )
 
@@ -61,6 +62,23 @@ def declare_pour_standoff(routed):
     text = dru.read_text()
     if POUR_STANDOFF_RULE not in text:
         dru.write_text(text.rstrip("\n") + "\n" + POUR_STANDOFF_RULE + "\n")
+
+
+def clear_fiducial_openings(routed):
+    """Leave 0.2 mm of mask between the fiducial apertures and the front pour."""
+    board = parse_file(routed)
+    for footprint in board.find_all("footprint"):
+        if footprint.get_string(0) != "Fiducial:Fiducial_1mm_Mask2mm":
+            continue
+        for pad in footprint.find_all("pad"):
+            # The stock 1 mm copper disk has a 0.5 mm mask margin and a
+            # 0.6 mm local copper clearance, leaving only 0.1 mm of mask.
+            clearance = pad.find("clearance")
+            if clearance is None:
+                pad.append(parse_string("(clearance 0.7)"))
+            elif clearance.get_float(0) < 0.7:
+                clearance.set_value(0, 0.7)
+    routed.write_text(serialize_sexp(board))
 
 
 def declare_router_netclasses(routed):
@@ -153,6 +171,7 @@ def build(output):
 
     if run_add_fiducials(routed, sides="populated") != 0:
         raise RuntimeError("pcb add-fiducials failed")
+    clear_fiducial_openings(routed)
     if run_add_board_info(routed, auto=True) != 0:
         raise RuntimeError("pcb add-board-info failed")
     evidence = output / "readiness"
@@ -287,8 +306,6 @@ def main():
 if __name__ == "__main__":
     from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
 
-    # Issue #6962: every bare ``kicad-cli`` this producer and package.py run
-    # resolves to the pinned evidence toolchain (KCT_KICAD_DOCKER=1 routes it
-    # through CI's image); any other release is refused before anything is
-    # written.
-    raise SystemExit(run_on_evidence_toolchain(main, [ROOT.parents[2]]))
+    # The host-side generator loads stock land patterns before KiCad validates
+    # the board. The footprint library and native checks must use the same release.
+    raise SystemExit(run_on_evidence_toolchain(main, [ROOT.parents[2]], pin_host_footprints=True))
