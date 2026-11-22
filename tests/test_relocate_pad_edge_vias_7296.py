@@ -339,6 +339,18 @@ def test_ring_dam_requires_a_mask_opening_on_the_via_side(tmp_path, mask_layer, 
     assert pcb.vias[0].position == pytest.approx((100.9 if moves else 100.8, 100))
 
 
+@pytest.mark.parametrize("exposed", [False, True])
+def test_ring_dam_and_same_net_copper_slit_can_be_repaired_together(tmp_path, exposed):
+    head = _HEAD if exposed else _HEAD.replace('(layers "F.Cu" "F.Mask")', '(layers "F.Cu")')
+    pcb = _load(tmp_path, _EDGE_VIA.replace("100.65", "100.8"), head=head)
+    # The annulus is tangent to the pad copper on both boards. Only one
+    # has a mask opening. The independent 0.12 mm copper slit sets the exit.
+    result = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09, same_net_pad_gap_mm=0.12)
+    assert len(result.moved) == 1
+    assert pcb.vias[0].position == pytest.approx((100.925, 100))
+    assert not relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09, same_net_pad_gap_mm=0.12).moved
+
+
 @pytest.mark.parametrize("neighbor_exposed", [False, True])
 def test_ring_dam_uses_an_opening_when_accepting_a_candidate(tmp_path, neighbor_exposed):
     # At the first pad's exit (100.9), a second pad has a 0.06 mm ring gap

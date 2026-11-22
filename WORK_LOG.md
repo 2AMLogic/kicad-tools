@@ -16,6 +16,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-22
 
+- **PR #9914**: test(router): exercise seed handling with a writable lock directory
+- **PR #9911**: test: re-pin board 02 route length to 318.78mm after the #9734 lattice snap
+- **PR #9908**: fix(router): refresh clearance context during targeted rip-up
+- **PR #9906**: fix: forward pour-slot cleanup through the public trace optimizer
+- **PR #9895**: fix(drc): make the copper-gap facing test independent of edge order
+- **PR #9861**: fix: route conversions taper the same path into identical segments (per-run taper in the native adapter)
+- **Issue #9913** (closed): test(router): seed fixture exits on its unwritable output-lock path on macOS
+- **Issue #9909** (closed): Historical Board 02 route measures 318.78 mm against its 315.15 mm pin on macOS arm64
+- **Issue #9899** (closed): Trace the failed Board 06 MIPI_RST escape at J4.RST on the Python router
+- **Issue #9886** (closed): fix(check): physical copper gap on unchanged copper depends on facing-edge order
+- **Issue #9851** (closed): Route conversion: Python and C++ backends taper the same path into different segments (per-run vs per-cell taper_points)
+- **Issue #9757** (closed): optimize-traces: JSON after a creepage_final revert describes the discarded candidate, not the written file
 - **PR #9903**: docs: report Board 05 unattended routing on Linux and macOS
 - **PR #9898**: ci(board-05): fail a kct check whose mask coverage silently degraded
 - **PR #9897**: docs: show the JLCPCB assembly workflow on the homepage and in the README
