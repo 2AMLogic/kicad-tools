@@ -43,7 +43,7 @@ report using `kct tapeout-sign-off --stage fab-dfm`, and records a separate
 `--stage fab-review` approval before saving the cart. The optional checkout
 on `main` requires the buyer to run it and approve the exact total before
 payment. End-to-end live cart and payment verification is pending.
-[v0.29.0](https://github.com/2AMLogic/kicad-tools/releases/tag/v0.29.0) · [Attended verification](https://github.com/2AMLogic/kicad-tools/issues/8478)
+[v0.29.0](https://github.com/2AMLogic/kicad-tools/releases/tag/v0.29.0) · [Cart verification](https://github.com/2AMLogic/kicad-tools/issues/8478) · [Checkout verification](https://github.com/2AMLogic/kicad-tools/issues/9240)
 
 ## Offline assembly submission preparation
 
