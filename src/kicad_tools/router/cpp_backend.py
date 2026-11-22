@@ -3698,8 +3698,8 @@ class CppPathfinder:
         # ``neck_down.taper_width_fn`` closure, so a piece's width is
         # bit-identical whichever backend converted the path.
         pitches = self._get_component_pitches()
-        start_pitch = pitches.get(start.ref) if start.ref else None
-        end_pitch = pitches.get(end.ref) if end.ref else None
+        start_pitch = pitches.get(start.component_key)
+        end_pitch = pitches.get(end.component_key)
         segment_width_fn, start_needs_neckdown, end_needs_neckdown = taper_width_fn(
             self._rules, start, end, start_pitch, end_pitch, base_trace_width
         )
@@ -3826,14 +3826,9 @@ class CppPathfinder:
         end_x = round(_roundtrip_f32(end.x), 4)
         end_y = round(_roundtrip_f32(end.y), 4)
 
-        # The final pad tail: ``reconstruct_path`` closes the last grid
-        # node to the exact end-pad centre with one extra segment.  It is
-        # re-derived below by the same extend-or-close tail rule the
-        # Python converter applies, so drop it from run formation.  With
-        # the accepted goal cell exposed on the result (v42, #5599) the
-        # tail is exactly the last segment that does NOT end on the goal
-        # node; without goal fields (test doubles) fall back to
-        # recognising it by its pad-centre endpoint.
+        # Keep the native pad tail separate until the grid runs are formed. A
+        # via on the accepted goal cell can leave this tail as the only copper
+        # on its outgoing layer. Older result doubles have no goal coordinates.
         tail: tuple[float, float, float, float, int, int] | None = None
         if raw:
             goal_gx = int(getattr(result, "goal_gx", -1))
@@ -3849,6 +3844,9 @@ class CppPathfinder:
                 is_tail = (last[2], last[3]) == (end_x, end_y)
             if is_tail:
                 tail = raw.pop()
+            elif abs(end_x - last[2]) > 0.01 or abs(end_y - last[3]) > 0.01:
+                # Some callers supply only grid segments; close their last run to the pad.
+                tail = (last[2], last[3], end_x, end_y, last[4], last[5])
 
         # [x1, y1, x2, y2, layer, net, last-step direction]
         runs: list[list] = []
@@ -3867,39 +3865,23 @@ class CppPathfinder:
                     continue
             runs.append([x1, y1, x2, y2, layer, net, step_dir])
 
-        # Emit every closed run, then the final open run and the pad tail
-        # through the same rule ``PathFinder._convert_path_to_route``
-        # applies: extend the open run through the pad centre when the
-        # tail is collinear with the run's last step AND the EXTENDED run
-        # stays on the 45-degree set (#3532); otherwise close the run and
-        # emit the tail as its own (doglegged) run.
-        for r in runs[:-1]:
-            _emit_run(r[0], r[1], r[2], r[3], r[4], r[5])
-        open_run = runs[-1] if runs else None
-        cur_x = cur_y = 0.0
-        cur_layer: int | None = None
-        cur_net: int | None = None
-        if open_run is not None:
-            cur_x, cur_y, cur_layer, cur_net = open_run[2], open_run[3], open_run[4], open_run[5]
-        elif tail is not None:
-            # No grid runs: the dropped tail was the whole connection
-            # (start-pad centre -> end-pad centre).
-            cur_x, cur_y, cur_layer, cur_net = tail[0], tail[1], tail[4], tail[5]
-        if cur_layer is not None and cur_net is not None:
-            dx, dy = end_x - cur_x, end_y - cur_y
-            extend = False
-            if (abs(dx) > 0.01 or abs(dy) > 0.01) and open_run is not None:
-                end_dir = normalize_direction(dx, dy)
-                extend = same_direction(open_run[6], end_dir) and is_45_aligned(
-                    end_x - open_run[0], end_y - open_run[1]
-                )
-            if open_run is not None and extend:
-                _emit_run(open_run[0], open_run[1], end_x, end_y, cur_layer, cur_net)
-            else:
-                if open_run is not None:
-                    _emit_run(open_run[0], open_run[1], cur_x, cur_y, cur_layer, cur_net)
-                if abs(dx) > 0.01 or abs(dy) > 0.01:
-                    _emit_run(cur_x, cur_y, end_x, end_y, cur_layer, cur_net)
+        # Extend through the pad only when the tail continues the last run on
+        # the same copper and the extended chord remains axial or 45 degrees.
+        if runs and tail is not None:
+            x1, y1, x2, y2, layer, net = tail
+            last_run = runs[-1]
+            if (
+                (last_run[2], last_run[3], last_run[4], last_run[5]) == (x1, y1, layer, net)
+                and same_direction(last_run[6], normalize_direction(x2 - x1, y2 - y1))
+                and is_45_aligned(x2 - last_run[0], y2 - last_run[1])
+            ):
+                last_run[2], last_run[3] = x2, y2
+                tail = None
+
+        for x1, y1, x2, y2, layer, net, _direction in runs:
+            _emit_run(x1, y1, x2, y2, layer, net)
+        if tail is not None:
+            _emit_run(*tail)
 
         # Issue #3130: Mirror the segment-width override for via diameter.
         # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``
@@ -4202,7 +4184,7 @@ class CppPathfinder:
         width = float(base_width)
         pitches = self._get_component_pitches()
         for pad in (start, end):
-            pitch = pitches.get(pad.ref) if pad.ref else None
+            pitch = pitches.get(pad.component_key)
             if self._rules.should_apply_neck_down(pad.ref, pitch):
                 width = min(
                     width,
