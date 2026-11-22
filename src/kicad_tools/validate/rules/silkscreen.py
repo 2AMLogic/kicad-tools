@@ -2798,7 +2798,11 @@ def resolve_silk_keepouts(
     indices = set(pairs_by_zone).union(*ignored_zones.values())
     polygons = {}
     for index in indices:
-        polygon = _Polygon(zones[index].polygon)
+        zone = zones[index]
+        contours = zone.rule_area_contours or [zone.polygon]
+        if any(len(ring) < 3 for ring in contours):
+            continue
+        polygon = _Polygon(contours[0], holes=contours[1:])
         if not polygon.is_valid:
             polygon = polygon.buffer(0)
         if not polygon.is_empty and polygon.area > 0:

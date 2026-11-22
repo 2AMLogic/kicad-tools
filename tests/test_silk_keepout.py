@@ -256,6 +256,103 @@ def _gr_lines(board: Path) -> list[tuple[str, tuple[float, float], tuple[float, 
     return out
 
 
+_AREA_RECT = "(polygon (pts (xy 120 120) (xy 140 120) (xy 140 140) (xy 120 140)))"
+_AREA_HOLE = "(polygon (pts (xy 126 126) (xy 134 126) (xy 134 134) (xy 126 134)))"
+_AREA_ARC = (
+    "(polygon (pts (xy 120 120) (arc (start 130 120) (mid 140 130) (end 130 140)) (xy 120 140)))"
+)
+_AREA_CIRCULAR_HOLE = (
+    "(polygon (pts (arc (start 124 122) (mid 122 124) (end 124 126)) "
+    "(arc (start 124 126) (mid 126 124) (end 124 122))))"
+)
+
+
+@pytest.mark.parametrize("footprint_owned", [False, True], ids=["board", "rotated-footprint"])
+@pytest.mark.parametrize(
+    ("contours", "ignored", "forbidden"),
+    [
+        (_AREA_RECT + _AREA_HOLE, False, {"ring", "lobe"}),
+        (_AREA_ARC, False, {"ring", "center", "lobe"}),
+        (_AREA_RECT + _AREA_HOLE, True, {"center"}),
+        (_AREA_RECT + _AREA_HOLE + _AREA_CIRCULAR_HOLE, False, {"lobe"}),
+        (_AREA_RECT + _AREA_HOLE + _AREA_CIRCULAR_HOLE, True, {"ring", "center"}),
+    ],
+    ids=["cutout", "arc", "ignored-cutout", "two-cutouts", "two-ignored-cutouts"],
+)
+def test_rule_area_contours_match_native_silk(
+    tmp_path: Path, footprint_owned: bool, contours: str, ignored: bool, forbidden: set[str]
+) -> None:
+    # KiCad saves cutouts as sibling polygons and can omit both arc endpoints
+    # from the literal xy vertices. Embedded rule areas already use sheet coordinates.
+    zone = _SILK_ZONE.replace(_AREA_RECT, contours)
+    rules = _DRU
+    if ignored:
+        zone = zone.replace("no_ink", "exception").replace("000000000001", "000000000002")
+        rules += (
+            '(rule "allow ink" (layer "F.SilkS") (condition "A.intersectsArea(\'exception\')") '
+            "(severity ignore) (constraint disallow graphic))"
+        )
+    if footprint_owned:
+        zone = f'(footprint "X:Y" (layer "F.Cu") (at 130 130 90) {zone})'
+    probes = {
+        "ring": (123, 125, 124),
+        "center": (128, 132, 130),
+        "lobe": (135, 136, 129),
+        "outside": (143, 145, 130),
+    }
+    ink = "".join(
+        f"(gr_line (start {x1} {y}) (end {x2} {y}) (stroke (width 0.2) (type solid)) "
+        f'(layer "F.SilkS") (uuid "{name}"))'
+        for name, (x1, x2, y) in probes.items()
+    )
+    board = _board(tmp_path, (_SILK_ZONE if ignored else "") + zone + ink, rules)
+    pcb = PCB.load(board)
+    assert {v.items[0] for v in check_silk_in_keepout(pcb).violations} == {
+        f"gr_line {{{name}}}" for name in forbidden
+    }
+    if contours == _AREA_ARC:
+        (area,) = pcb.footprint_rule_areas if footprint_owned else pcb.rule_areas
+        assert area.polygon == [(20, 20), (20, 40)]
+    repairer = SilkscreenRepairer(board)
+    assert repairer.repair_keepout_clearance().total_fixed == len(forbidden)
+    repairer.save()
+    assert {uid for _, _, _, uid in _gr_lines(board)} == probes.keys() - forbidden
+    assert not check_silk_in_keepout(PCB.load(board)).violations
+
+
+def test_clipping_across_a_rule_area_keeps_the_ink_in_its_cutout(tmp_path: Path) -> None:
+    board = _board(tmp_path, _SILK_ZONE.replace(_AREA_RECT, _AREA_RECT + _AREA_HOLE) + _FRONT_LINE)
+    repairer = SilkscreenRepairer(board)
+    (fix,) = repairer.repair_keepout_clearance().fixes
+    assert fix.pieces == 3
+    repairer.save()
+    spans = sorted((min(a[0], b[0]), max(a[0], b[0])) for _, a, b, _ in _gr_lines(board))
+    left, middle, right = spans
+    assert left[0] == 110 and left[1] < 120
+    assert 126 < middle[0] < 130 < middle[1] < 134
+    assert right[0] > 140 and right[1] == 150
+    assert not check_silk_in_keepout(PCB.load(board)).violations
+
+
+def test_curved_cutouts_move_with_a_repositioned_footprint(tmp_path: Path) -> None:
+    from shapely.geometry import Point
+
+    zone = _SILK_ZONE.replace(_AREA_RECT, _AREA_RECT + _AREA_HOLE + _AREA_CIRCULAR_HOLE)
+    board = _board(tmp_path, f'(footprint "X:Y" (layer "F.Cu") (at 130 130 90) {zone})')
+    pcb = PCB.load(board)
+    fp = pcb.footprints[0]
+    fp.position = (45, 35)
+    fp.rotation = 180
+    pcb.save()
+    for placed in (pcb, PCB.load(board)):
+        (area,) = resolve_silk_keepouts(placed)
+        assert area.polygon.bounds == pytest.approx((35, 25, 55, 45))
+        assert len(area.polygon.interiors) == 2
+        assert not area.polygon.covers(Point(45, 35))  # square cutout
+        assert not area.polygon.covers(Point(39, 41))  # circular cutout
+        assert area.polygon.covers(Point(44, 29))  # solid band beyond both
+
+
 def test_clip_keeps_both_printable_portions_and_is_idempotent(tmp_path: Path) -> None:
     board = _board(tmp_path, _SILK_ZONE + _FRONT_LINE + _BACK_LINE)
 

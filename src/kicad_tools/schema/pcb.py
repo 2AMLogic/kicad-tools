@@ -995,6 +995,7 @@ def keep_footprint_texts_upright(footprint_node: SExp) -> int:
 def _transform_zone_object(zone: Zone, mapper, flip_layers: bool) -> None:
     """Re-place one parsed footprint :class:`Zone` (board-relative coords)."""
     zone.polygon = [mapper(x, y) for x, y in zone.polygon]
+    zone.rule_area_contours = [[mapper(x, y) for x, y in ring] for ring in zone.rule_area_contours]
     zone.filled_polygons = [[mapper(x, y) for x, y in poly] for poly in zone.filled_polygons]
     if flip_layers:
         zone.layer = _flip_side_layer(zone.layer)
@@ -2762,7 +2763,7 @@ class Zone:
     layers: list[str] = field(default_factory=list)
     # Keepout flags when this zone is a rule area; None for pour zones.
     keepout: ZoneKeepout | None = None
-    # Boundary polygon points (x, y) in mm
+    # Literal xy vertices of the first boundary polygon, in mm.
     polygon: list[tuple[float, float]] = field(default_factory=list)
     # Filled polygon regions after DRC (may differ from boundary due to clearances)
     filled_polygons: list[list[tuple[float, float]]] = field(default_factory=list)
@@ -2805,6 +2806,9 @@ class Zone:
     # (Issue #6087).
     parent_reference: str = ""
     parent_uuid: str = ""
+    # For a curved rule area or one with cutouts, the physical exterior followed
+    # by its interior rings. A simple rule area's boundary is already in polygon.
+    rule_area_contours: list[list[tuple[float, float]]] = field(default_factory=list)
 
     def is_stroked_fill(self) -> bool:
         """Whether ``filled_polygons`` are centre-lines rather than final copper.
@@ -3012,6 +3016,10 @@ class Zone:
         # Parse boundary polygon - (polygon (pts (xy X Y) ...))
         if polygon := index.get("polygon"):
             zone.polygon = cls._parse_polygon_pts(polygon)
+            if zone.keepout is not None:
+                contours = sexp.find_children("polygon")
+                if len(contours) > 1 or polygon.find("arc") is not None:
+                    zone.rule_area_contours = [_polygon_arc_chain(contour) for contour in contours]
 
         # Parse filled polygons - (filled_polygon (layer X) (pts (xy X Y) ...))
         for filled_poly in sexp.find_all("filled_polygon"):
@@ -4339,10 +4347,14 @@ class PCB:
                 vx, vy = via.position
                 via.position = (vx - ox, vy - oy)
 
-            # Zones: convert boundary polygon AND every filled polygon.
+            # Zones: convert authored vertices, rule-area contours and copper fills.
             for zone in (*self._zones, *self._footprint_zones):
                 if zone.polygon:
                     zone.polygon = [(x - ox, y - oy) for x, y in zone.polygon]
+                if zone.rule_area_contours:
+                    zone.rule_area_contours = [
+                        [(x - ox, y - oy) for x, y in ring] for ring in zone.rule_area_contours
+                    ]
                 if zone.filled_polygons:
                     zone.filled_polygons = [
                         [(x - ox, y - oy) for x, y in poly] for poly in zone.filled_polygons
