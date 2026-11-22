@@ -65,6 +65,9 @@ OWNED_BY_ONE_INVOCATION = {
 # coerced to basic and ``--auto-layers`` off.  These select or tune the paths it
 # does not take; the #4280 gate rejects the multi-pass strategies on that engine.
 COMPLETE_PICKS_ITS_OWN = {
+    # The completion pass locks copper written by the outer invocation.
+    "--preserve-existing",
+    "--no-preserve-existing",
     "--auto-layers",
     "--no-auto-layers",
     # Issue #8999: the airwire-separation term is priced only by the
@@ -216,7 +219,6 @@ NOT_FORWARDED_UNREVIEWED = {
     "--length-match-diffpairs",
     "--tighten-diffpair-gap",
     # Search behaviour and budget.
-    "--preserve-existing",  # --complete implies it
     "--oracle-rounds",
     "--lattice-iterations",
     "--lattice-optimize",
@@ -368,6 +370,16 @@ def test_issue_8674_constraints_are_forwarded():
     missing = sorted(MUST_FORWARD - _forwarded_options())
     assert not missing, f"_chain_complete_argv no longer forwards {missing}"
     assert not MUST_FORWARD & EXCLUDED
+
+
+def test_completion_locks_partial_board_after_outer_opt_out():
+    parser = route_cmd._route_parser()
+    inner = _chain_argv(parser, ["b.kicad_pcb", "--no-preserve-existing"])
+    assert "--no-preserve-existing" not in inner
+    args = parser.parse_args(inner)
+    assert args.complete
+    route_cmd._apply_complete_mode_defaults(args, parser, inner)
+    assert args.preserve_existing is True
 
 
 def test_exclusion_groups_are_current_and_disjoint():
