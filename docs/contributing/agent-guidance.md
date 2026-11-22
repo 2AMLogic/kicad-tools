@@ -63,6 +63,15 @@ new git worktrees (`.loom/worktrees/issue-N/`) need this step explicitly.
 The C++ backend gives a 10-100x speedup for the A* loop, so a missing
 extension is the most likely cause of multi-minute-per-net routing.
 
+The test suite now **requires** the built backend (Issue #9705). A test case
+that needs the extension fails with `C++ router backend not built: run uv
+run kct build-native` — it no longer silently skips — via the
+`requires_router_cpp` marker or a `require_router_cpp()` call from
+`tests/conftest.py`. Do not add `skipif`/`importorskip` guards for this
+backend; `tests/test_router_cpp_no_skip_guards.py` fails the PR if one
+appears. (DRC and placement extensions keep their own skip guards — the
+ruling covers only the router backend.)
+
 ### Check the acceleration backend before timing routes
 
 The confirmed cause of slow routing under `--all-extras` (#8609 reported
@@ -224,8 +233,11 @@ Eight evaluation notes sat in `docs/research/` unlinked from anywhere before
 issue #5839; grepping `docs/` is no longer the way to find them. The registry
 is `src/kicad_tools/ecosystem/data/projects.toml` and each entry carries the
 paths of our own notes, plus a `license_compat` field that says whether that
-project's code may be reused here at all (**AGPL and unlicensed neighbours are
-ideas-only, in both directions** -- never copy). Agents can reach the same data
+project's code may be reused here at all (**AGPL neighbours' code is never
+copied, but their behaviour may be reimplemented via the two-party clean-room
+protocol**, [`docs/clean-room.md`](docs/clean-room.md); **unlicensed and other
+`copyleft-ideas-only` neighbours are ideas-only, in both directions** -- never
+copy). Agents can reach the same data
 through the `ecosystem_list` / `ecosystem_show` MCP tools.
 
 Adding or editing an entry means re-rendering the README block:

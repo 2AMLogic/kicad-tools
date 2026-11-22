@@ -442,6 +442,8 @@ def _build_collision_checker(pcb_path: Path):
             router_class_floors=False,
             validate_drc=False,
             load_existing_routes=True,
+            # Issue #9597: no A* here; skip the plane-zone marking cost.
+            mark_plane_zones=False,
         )
     # Issue #8250: rule-area keepouts are installed lazily by the route
     # flows, never at load, so install them before the checker reads the grid.
@@ -948,6 +950,13 @@ Examples:
     else:
         args._pairwise_voltages = None
         args._pairwise_required = None
+        # Mirror every stash attr ``_preload_voltage_map`` resets (#9685), so
+        # a namespace that skipped the preload can never carry a stale edge
+        # requirement from an earlier call.
+        args._pairwise_intervals = None
+        args._pairwise_pair_bounds = None
+        args._pairwise_edge_voltage = None
+        args._pairwise_edge_required = None
         # Issue #8433: the gate is silently off without a map; say so on
         # stderr (stdout may carry the table or the JSON document).
         if not args.quiet and not as_json:

@@ -5,6 +5,7 @@ import gc
 import hashlib
 import importlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,96 @@ EXTERNAL_BOARDS_ENV_VAR = "KICAD_TOOLS_EXTERNAL_BOARDS_DIR"
 # bounded even if it never imports ``kicad_tools``. No-op unless
 # ``KCT_NATIVE_MAX_CONCURRENCY`` is set; idempotent with the package import.
 install_from_environment()
+
+# Issue #9705: a test case that needs the C++ router backend FAILS when the
+# extension is not built, never silently skips. Before this, ~116 modules
+# carried per-file availability guards that turned every native case into a
+# silent skip, so a worktree (or a CI leg) whose ``kct build-native`` step
+# broke or was skipped reported a green run with every native parity case
+# missing.
+# Two shared mechanisms, used instead of any per-file guard:
+#
+# * the ``requires_router_cpp`` marker (registered in pyproject.toml): the
+#   ``pytest_runtest_setup`` hook below fails a marked item with the build
+#   hint when the extension is missing;
+#
+# * :func:`require_router_cpp` for runtime gating inside a test body or a
+#   fixture (mixed-parametrize cases, helper functions), replacing the old
+#   inline availability-probe skip guards.
+#
+# ``tests/test_router_cpp_no_skip_guards.py`` scans the tree so a new skip
+# guard on this backend cannot be reintroduced unnoticed.
+ROUTER_CPP_BUILD_HINT = "C++ router backend not built: run uv run kct build-native"
+
+from kicad_tools.router.cpp_backend import is_cpp_available  # noqa: E402
+
+
+def require_router_cpp() -> None:
+    """Fail the current test unless the C++ router extension is loaded.
+
+    The runtime counterpart of the ``requires_router_cpp`` marker, for cases
+    the marker cannot express directly (a ``"cpp"`` parameter of an otherwise
+    mixed parametrization, a shared fixture, a helper called only on the
+    native path). Raises ``Failed`` with :data:`ROUTER_CPP_BUILD_HINT`, so the
+    case shows up as a failure carrying the fix, not as a silent skip.
+    """
+    if not is_cpp_available():
+        pytest.fail(ROUTER_CPP_BUILD_HINT, pytrace=False)
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Fail ``requires_router_cpp`` items when the extension is missing."""
+    if item.get_closest_marker("requires_router_cpp") is not None:
+        require_router_cpp()
+
+
+# Issue #9804: the static scanner (tests/router_cpp_skip_scanner.py) only
+# catches skip guards it can parse. This runtime backstop catches any wording
+# it cannot: a skipped report whose reason mentions the C++ router backend
+# fails with the build hint instead, so no phrasing can restore the silent
+# skip #9705 removed. Skips about other backends (drc, placement) and xfail
+# results (``wasxfail``) pass through untouched.
+_ROUTER_CPP_SKIP_REASONS = re.compile(
+    r"router_cpp|c\+\+\s+router|cpp\s+backend",
+    re.IGNORECASE,
+)
+
+
+def _skip_reason(report) -> str:
+    """Reason text of a skipped *report*, without its file path.
+
+    A call-phase ``pytest.skip()`` stores a ``(path, lineno, reason)`` tuple
+    as ``longrepr``; matching on the whole tuple would trip over any test
+    file *named* ``test_router_cpp_*.py``.
+    """
+    longrepr = getattr(report, "longrepr", None)
+    if isinstance(longrepr, tuple) and len(longrepr) == 3:
+        return str(longrepr[2])
+    return str(longrepr or "")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Fail router-C++-reasoned skips instead of reporting them as skips.
+
+    Runtime backstop for the static scanner (Issue #9804): a skip is only a
+    verdict about test *infrastructure*, but a skip reasoned on the C++
+    router backend means a native case silently went missing -- exactly the
+    green-run-with-no-parity failure mode #9705 closed. Convert it to a
+    failure carrying the build hint so the run is honest about what ran.
+    """
+    outcome = yield
+    report = outcome.get_result()
+    if report.outcome != "skipped" or getattr(report, "wasxfail", False):
+        return
+    reason = _skip_reason(report)
+    if _ROUTER_CPP_SKIP_REASONS.search(reason):
+        report.outcome = "failed"
+        report.longrepr = (
+            f"{ROUTER_CPP_BUILD_HINT} (skipped with a C++-router-backend "
+            f"reason: {reason!r}; Issue #9804)"
+        )
+
 
 # Issue #5240: each test ``kicad-cli pcb drc`` loads only the footprint
 # libraries its board names, not all 155 in the pinned table (~5 CPU-s a

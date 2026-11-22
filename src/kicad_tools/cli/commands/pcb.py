@@ -832,28 +832,51 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     dry_run = getattr(args, "dry_run", False)
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
 
+    # Issue #9747: the sidecar a `kct check` on this board would load -- an
+    # explicit --current-paths wins, else auto-discovery like `kct check`
+    # (with --no-current-paths to suppress it) -- feeds prune's planning
+    # inputs too, so a declared net's parallel copper is never cut below its
+    # declared current's IPC-2221 width.
     declared_nets: set[str] | None = None
     required_widths: dict[str, dict[str, float]] = {}
-    specs = None
-    if getattr(args, "current_paths", None):
-        from kicad_tools.pcb_prune import required_widths_for
-        from kicad_tools.router.current_paths import load_current_path_specs
-        from kicad_tools.schema.pcb import PCB
+    specs: list | None = None
+    explicit_sidecar = getattr(args, "current_paths", None)
+    if explicit_sidecar is not None and getattr(args, "no_current_paths", False):
+        print(
+            "Error: --no-current-paths cannot be combined with "
+            f"--current-paths {explicit_sidecar!r}: one disables sidecar "
+            "auto-discovery, the other names a sidecar to load. Pass exactly "
+            "one of them.",
+            file=sys.stderr,
+        )
+        return 1
+    sidecar = Path(explicit_sidecar) if explicit_sidecar else None
+    if sidecar is None and not getattr(args, "no_current_paths", False):
+        from kicad_tools.router.current_paths import discover_current_paths_sidecar
+
+        sidecar = discover_current_paths_sidecar(pcb_path)
+    if sidecar is not None:
+        from kicad_tools.pcb_prune import current_path_declarations
 
         try:
-            specs = load_current_path_specs(args.current_paths)
-            declared_nets = {spec.net_name for spec in specs}
-            # Issue #8368: per copper layer, at the board's stackup copper
-            # weight (outer layers external, inner layers internal).
-            board = PCB.load(pcb_path)
-            for spec in specs:
-                need = required_widths_for(board, spec.thermal_design_current().current_a)
-                have = required_widths.setdefault(spec.net_name, {})
-                for layer, width in need.items():
-                    have[layer] = max(have.get(layer, 0.0), width)
+            specs, declared_nets, required_widths = current_path_declarations(pcb_path, sidecar)
         except Exception as e:
-            print(f"Error loading current paths: {e}", file=sys.stderr)
-            return 1
+            if explicit_sidecar:
+                print(f"Error loading current paths: {e}", file=sys.stderr)
+                return 1
+            # Same degrade-gracefully contract as `kct check`'s auto-discovered
+            # sidecar: warn and prune without declarations.
+            print(
+                f"WARNING: ignoring malformed current-paths sidecar {sidecar}: {e}",
+                file=sys.stderr,
+            )
+        else:
+            if not explicit_sidecar:
+                print(f"[INFO] auto-loaded current-paths sidecar: {sidecar}", file=sys.stderr)
+    if specs is None:
+        # Resolved to nothing: an empty sequence, so prune_board's audit gate
+        # does not re-discover what was suppressed or already probed (#9747).
+        specs = []
 
     nets: list[str] | None = None
     if getattr(args, "nets", None):
@@ -1684,6 +1707,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "required_mm": round(r.required_mm, 4),
                 "actual_mm": round(r.actual_mm, 4),
                 "obstacle_net": r.obstacle_net,
+                # Issue #9815: the courtyard an ``anchor_courtyard`` refusal names.
+                "obstacle_footprint": r.obstacle_footprint,
+                "obstacle_side": r.obstacle_side,
             }
             for r in outcome.refused
         ],
@@ -1779,6 +1805,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "required_mm": round(r.required_mm, 4),
                 "actual_mm": round(r.actual_mm, 4),
                 "obstacle_net": r.obstacle_net,
+                # Issue #9649: locate the blocking obstacle (additive).
+                "obstacle_layer": r.obstacle_layer,
+                "obstacle_kind": r.obstacle_kind,
+                "obstacle_at": (
+                    [round(r.obstacle_at[0] + origin_x, 4), round(r.obstacle_at[1] + origin_y, 4)]
+                    if r.obstacle_at is not None
+                    else None
+                ),
             }
             for r in outcome.refused_openings
         ],
@@ -1906,6 +1940,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             detail = (
                 f" [{r.rule}: need {r.required_mm:.3f} mm, have {r.actual_mm:.3f} mm"
                 + (f", vs {r.obstacle_net}" if r.obstacle_net else "")
+                + (f", in {r.obstacle_footprint}" if r.obstacle_footprint else "")
                 + "]"
                 if r.rule
                 else ""
@@ -1940,10 +1975,22 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                         f" width {o.width_mm:.3f} mm" + (" [already present]" if o.existing else "")
                     )
                 for ro in outcome.refused_openings:
+                    at = ""
+                    if ro.obstacle_at is not None:
+                        at = (
+                            f" at ({ro.obstacle_at[0] + origin_x:.2f}, "
+                            f"{ro.obstacle_at[1] + origin_y:.2f})"
+                        )
+                    obstacle = (
+                        f"; obstacle: {ro.obstacle_kind} on {ro.obstacle_layer}{at}"
+                        if ro.obstacle_kind
+                        else ""
+                    )
                     print(
                         f"    opening refused on {ro.copper_layer} [{ro.rule}: need "
                         f"{ro.required_mm:.3f} mm, have {ro.actual_mm:.3f} mm"
                         + (f", vs {ro.obstacle_net}" if ro.obstacle_net else "")
+                        + obstacle
                         + "]"
                     )
                 if outcome.openings:

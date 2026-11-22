@@ -146,6 +146,11 @@ _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
         "clearance_segment_segment",
         "clearance_via_via",
         "clearance_pad_via",
+        # Copper-arc pair kinds (Issue #9673) carry the same ``nets`` pair.
+        "clearance_arc_arc",
+        "clearance_arc_pad",
+        "clearance_arc_segment",
+        "clearance_arc_via",
         # Issue #8938: physical_copper_gap findings carry the structured
         # ``same_net`` flag (a same-net slit is one net, so the two-name
         # classifier below sees nothing to compare).
@@ -1167,7 +1172,7 @@ def run_meta_checks(
         schematic_missing=schematic_missing,
         coverage_incomplete=coverage_incomplete,
         incomplete_categories=incomplete_categories,
-        schematic_path=str(resolved_sch) if resolved_sch is not None else None,
+        schematic_path=portable_report_path(resolved_sch) if resolved_sch is not None else None,
         schematic_source=schematic_source,
     )
     result.compute_overall()
