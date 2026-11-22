@@ -989,6 +989,11 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
     extension is absent the status also names the capability gap, not just the
     speed gap: the differential-pair centerline trunk rescue (Issue #5786) is
     C++-only, and without it the router falls back to independent legs.
+    Issue #9900 adds the search-capacity gap: the pure-Python A* shares the
+    per-net node-expansion budget but explores 10-100x less per expansion,
+    so maze-class corridors (the Board 06 USB3 fanout) can exhaust the cap
+    with the frontier still open -- targeted rip-up reports such victims as
+    ``victim_budget``, never as a proven geometric seal.
 
     Args:
         backend_info: Dictionary from get_backend_info().
@@ -1013,6 +1018,12 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
         parts.append(
             "Differential-pair centerline trunk rescue requires C++. "
             "If the coupled search fails, routing falls back to independent legs"
+        )
+        parts.append(
+            "Search-capacity limitation (issue #9900): without C++, a maze-class "
+            "corridor can exceed the per-net node-expansion budget and targeted "
+            "rip-up records such victims as 'victim_budget' -- a budget stop, not "
+            "a proven geometric seal"
         )
         if grid_cells > LARGE_GRID_THRESHOLD:
             parts.append(
@@ -2544,6 +2555,13 @@ class CppPathfinder:
         Returns:
             Route object if successful, None if no path found
         """
+        # A skipped native search or Python fallback must not inherit the
+        # preceding edge's failure evidence (#9900).
+        self._last_failure_info = None
+        if self._py_router is not None:
+            self._py_router.last_route_exhausted = False
+            self._py_router.last_route_deadline_hit = False
+            self._py_router.last_route_iteration_limited = False
         # Issue #5923: inside a bounded excursion (the corridor-yield re-run)
         # no single search may run past the excursion's wall deadline.
         # Identity when no deadline is installed.
@@ -2798,11 +2816,6 @@ class CppPathfinder:
         #
         # Maximum number of resume attempts before giving up.
         max_resume_attempts = 5
-
-        # Issue #2476: Reset failure-info at the start of every route() call
-        # so the negotiated strategy never sees stale diagnostics from a
-        # previous net.
-        self._last_failure_info = None
 
         # Issue #5599: reset the evidence-gated strict foreign-pad kernel at
         # the start of every route() call -- a fresh search keeps the full

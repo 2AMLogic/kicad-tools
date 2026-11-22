@@ -3162,7 +3162,10 @@ class Autorouter:
         from .algorithms.negotiated import (
             RIPUP_BUDGET_EXHAUSTED,
             RIPUP_SIBLING_FAILED,
+            RIPUP_VICTIM_BUDGET,
             RIPUP_VICTIM_GEOMETRIC,
+            RIPUP_VICTIM_REFUSED,
+            RIPUP_VICTIM_UNPROVEN,
         )
 
         return {
@@ -3170,6 +3173,11 @@ class Autorouter:
             PLAN_REFUSE: "refused by rip-up guard",
             RIPUP_BUDGET_EXHAUSTED: "rip skipped, rip-up budget spent",
             RIPUP_VICTIM_GEOMETRIC: "rolled back, no path with blockers ripped",
+            RIPUP_VICTIM_BUDGET: (
+                "rolled back, victim search stopped at its budget (no no-path proof; issue #9900)"
+            ),
+            RIPUP_VICTIM_REFUSED: "rolled back, the victim route was refused at commit",
+            RIPUP_VICTIM_UNPROVEN: "rolled back, victim search returned no route without a no-path proof",
             RIPUP_SIBLING_FAILED: "rolled back, a blocker could not re-land",
         }.get(guard_reason, "targeted rip-up failed")
 
@@ -12338,9 +12346,6 @@ class Autorouter:
         # non-converging rip-up destroyed the failed net's pre-existing
         # partial connectivity.
 
-        def _mark_route(route: Route) -> None:
-            self._mark_route(route)
-
         # Snapshot pre-rip-up state for the failed net so we can detect
         # whether targeted_ripup actually placed new routes for it.
         pre_failed_routes = len(net_routes.get(failed_net, []))
@@ -12376,7 +12381,7 @@ class Autorouter:
                 routes_list=self.routes,
                 pads_by_net=pads_by_net,
                 present_cost_factor=present_cost_factor,
-                mark_route_callback=_mark_route,
+                mark_route_callback=self._mark_route,
                 ripup_history=ripup_history,
                 max_ripups_per_net=max_ripups_per_net,
                 per_net_timeout=per_net_timeout,
@@ -16685,10 +16690,6 @@ class Autorouter:
                                 # external rip, losing the partial connectivity
                                 # on a failed rescue.
                                 if blocking_nets:
-
-                                    def _mark_route_fallback(route: Route) -> None:
-                                        self._mark_route(route)
-
                                     success = self._guarded_targeted_ripup(
                                         neg_router,
                                         ripup_guard,
@@ -16697,7 +16698,7 @@ class Autorouter:
                                         net_routes=net_routes,
                                         pads_by_net=pads_by_net,
                                         present_cost_factor=present_factor,
-                                        mark_route_callback=_mark_route_fallback,
+                                        mark_route_callback=self._mark_route,
                                         ripup_history=ripup_history,
                                         max_ripups_per_net=max_ripups_per_net,
                                         per_net_timeout=iter_per_net_cap,
@@ -18565,10 +18566,6 @@ class Autorouter:
             guard=ripup_guard,
         )
         if blocking_nets:
-
-            def _mark_route_silent(route: Route) -> None:
-                self._mark_route(route)
-
             if self._guarded_targeted_ripup(
                 neg_router,
                 ripup_guard,
@@ -18577,7 +18574,7 @@ class Autorouter:
                 net_routes=net_routes,
                 pads_by_net=pads_by_net,
                 present_cost_factor=present_factor,
-                mark_route_callback=_mark_route_silent,
+                mark_route_callback=self._mark_route,
                 ripup_history=ripup_history,
                 max_ripups_per_net=max_ripups_per_net,
                 per_net_timeout=iter_per_net_cap,
@@ -18629,7 +18626,24 @@ class Autorouter:
         carried through unchanged.  Behaviour is otherwise identical: this
         only sets a label.
         """
-        with self._journal_stage(PASS_RELIEF, self._commit_journal.iteration):
+        from .pathfinder import Router
+
+        # The normal search already failed. On a two-terminal pair leg a
+        # modest goal bias finds the BGA escape within the same search budget
+        # (#9901). Keep it for the normal-mode validation reroute too. Other
+        # nets, including a displaced sibling, retain their search policy.
+        use_goal_bias = (
+            isinstance(self.router, Router)
+            and len(pads_by_net.get(failed_net, ())) == 2
+            and failed_net not in self.router.net_astar_weights
+            and self._diff_pair_partner_net(failed_net) is not None
+        )
+        weight_override = (
+            self.trial_gene_overrides({failed_net: 1.5})
+            if use_goal_bias
+            else contextlib.nullcontext()
+        )
+        with weight_override, self._journal_stage(PASS_RELIEF, self._commit_journal.iteration):
             return self._relief_rescue_txn(
                 failed_net,
                 neg_router,
@@ -19414,7 +19428,7 @@ class Autorouter:
                 [(p.x, p.y, str(p.layer), p.net) for p in pad_objs],
                 reverse_search,
                 None if os.environ.get(_NOGOOD_ENV_IGNORE_PF) else present_cost_factor,
-                search_budget_context(search_router, per_net_timeout),
+                search_budget_context(search_router, per_net_timeout, net),
             )
             ng_win = nogood.window(self.grid, [(p.x, p.y) for p in pad_objs])
             ng_extra = self._nogood_extra_state
