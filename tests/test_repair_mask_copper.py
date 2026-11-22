@@ -823,6 +823,77 @@ def test_mask_nudge_preserves_existing_pad_island_on_incomplete_net(
         assert refusal in (rejected.get("detail") or rejected["reason"])
 
 
+def test_mask_nudges_cannot_trade_pad_connections_on_the_same_partial_net(tmp_path, capsys):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    fixture = Path(__file__).parent / "fixtures" / "mask_pass_through_compensating_opens.kicad_pcb"
+    board = tmp_path / fixture.name
+    original = fixture.read_bytes()
+    board.write_bytes(original)
+    # Losing R4's via contact and gaining R14's both yield four native opens.
+    # One-count-per-net is constant even though R2, R3 and R4 are split.
+    with evidence_toolchain(mounts=[tmp_path]):
+        assert run_geometric_drc(board, refill_zones=False).unconnected_count == 4
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-displacement",
+                "2",
+                "--verify",
+                "--format",
+                "json",
+            ]
+        )
+    result = json.loads(capsys.readouterr().out)
+    assert result["mask_copper"]["repaired"] < 2
+    assert any(
+        entry["reason"] == "pad_connection_lost" for entry in result["mask_copper"]["unrepaired"]
+    )
+    trace = "bb000000-0000-4000-8000-000000000080"
+    assert _end(board, trace) == _end(fixture, trace)
+
+
+@pytest.mark.parametrize("fail_on_read", [1, 2])
+def test_unavailable_native_pad_groups_preserve_prior_output(
+    tmp_path, monkeypatch, capsys, fail_on_read
+):
+    from collections import Counter
+
+    board = _board(tmp_path, PASS)
+    original = board.read_bytes()
+    output = tmp_path / "previous.kicad_pcb"
+    output.write_bytes(b"existing output")
+    calls = 0
+
+    def read_groups(candidate):
+        nonlocal calls
+        calls += 1
+        if calls == fail_on_read:
+            raise RuntimeError("native pad groups unavailable")
+        return [frozenset({"left", "right"})]
+
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", read_groups)
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: (Counter(), 1))
+    _run(
+        monkeypatch,
+        board,
+        [_report(_pt_finding("trk-p")), _report(), _report()],
+        extra=("--output", str(output), "--format", "json"),
+        connectivity=True,
+    )
+    repair = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert calls == fail_on_read and repair["repaired"] == 0
+    assert repair["unrepaired"][-1]["reason"] == "recheck_unavailable"
+    assert "native pad groups unavailable" in repair["unrepaired"][-1]["detail"]
+    assert board.read_bytes() == original
+    assert output.read_bytes() == b"existing output"
+
+
 @pytest.mark.parametrize("outcome", ["saved", "refill_failed", "saved_error", "mask_reappeared"])
 def test_mask_refill_publishes_only_verified_saved_copper(tmp_path, monkeypatch, capsys, outcome):
     from collections import Counter

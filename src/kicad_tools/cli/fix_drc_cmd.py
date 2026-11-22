@@ -33,6 +33,7 @@ import hashlib
 import json
 import math
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections import Counter
@@ -1466,6 +1467,32 @@ def _split_mask_nets(before: dict[str, list[frozenset]], board: Path) -> set[str
     }
 
 
+class _MaskPadConnectionLost(RuntimeError):
+    """A saved repair split a previously connected group of pads."""
+
+
+def _mask_native_pad_groups(board: Path) -> list[frozenset[str]]:
+    """Read KiCad's physical pad groups on the private, project-staged board."""
+    from kicad_tools.drc import _native_pad_groups
+    from kicad_tools.validate.mask_copper_geometry import _resolve_native_python_command
+
+    stage = board.parent.resolve()
+    command, reason = _resolve_native_python_command(None, stage)
+    if command is None:
+        raise RuntimeError(reason)
+    worker = stage / "_native_pad_groups.py"
+    shutil.copyfile(_native_pad_groups.__file__, worker)
+    result = subprocess.run(
+        [*command, str(worker), str(board.resolve())],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode:
+        raise RuntimeError(f"KiCad could not read saved pad connectivity: {result.stderr.strip()}")
+    return [frozenset(group) for group in json.loads(result.stdout)]
+
+
 def _mask_native_state(board: Path) -> tuple[Counter, int]:
     """Read the native errors and opens on the copper actually stored on disk."""
     from kicad_tools.drc.geometric import run_geometric_drc
@@ -1532,6 +1559,13 @@ def _run_mask_pass(
                 isinstance(action, MaskNudgeAction) for action in result.actions
             )
             before_native = _mask_native_state(candidate) if has_zones or check_nudges else None
+            # On a partially connected board one new contact can hide a split,
+            # even on the same net. Keep KiCad's actual pad groups for that case.
+            native_groups = (
+                _mask_native_pad_groups(candidate)
+                if before_native is not None and not args.no_connectivity_check
+                else []
+            )
             proposed = len(result.actions)
             repairer.save(candidate)
             _verify_mask_actions(result, report, args, pcb_path, candidate, pad_islands)
@@ -1549,11 +1583,24 @@ def _run_mask_pass(
                         "saved mask repair introduced native errors or opens "
                         f"({new_errors} new errors, native opens {before_native[1]} to {opens})"
                     )
+                if native_groups:
+                    membership = {
+                        pad: group for group in _mask_native_pad_groups(candidate) for pad in group
+                    }
+                    if any(
+                        not group <= membership.get(next(iter(group)), frozenset())
+                        for group in native_groups
+                    ):
+                        raise _MaskPadConnectionLost(
+                            "saved mask repair disconnected previously connected native pads"
+                        )
             if result.actions and (has_zones or result.repaired < proposed):
                 # Undoing one proposal or refilling a pour changes the actual
                 # final copper after the first per-action check.
                 if pad_islands and _split_mask_nets(pad_islands, candidate):
-                    raise RuntimeError("final saved board disconnected previously connected pads")
+                    raise _MaskPadConnectionLost(
+                        "final saved board disconnected previously connected pads"
+                    )
                 final = _run_python_drc(
                     candidate,
                     manufacturer=args.mfr,
@@ -1587,10 +1634,13 @@ def _run_mask_pass(
                 atomic_write_text(output_path, load_path.read_text())
     except Exception as e:
         print(f"Error during mask-to-copper repair: {e}", file=sys.stderr)
+        reason = (
+            "pad_connection_lost"
+            if isinstance(e, _MaskPadConnectionLost)
+            else "recheck_unavailable"
+        )
         for act in result.actions:
-            result.unrepaired.append(
-                MaskUnrepaired(reason="recheck_unavailable", uuid=act.uuid, detail=str(e))
-            )
+            result.unrepaired.append(MaskUnrepaired(reason=reason, uuid=act.uuid, detail=str(e)))
         result.actions = []
         result.repaired = 0
     return result
