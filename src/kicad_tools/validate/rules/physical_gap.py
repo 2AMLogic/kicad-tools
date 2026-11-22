@@ -48,9 +48,9 @@ TOLERANCE = 0.001
 # Per-end shave of a gap connector for the cheap copper-crossing prefilter; twice
 # this stays within the 1e-8 mm overlap threshold, so results are unchanged.
 _CONNECTOR_SHAVE_MM = 4e-9
-# Facing screen of the slit scan: the first boundary must face the gap within
-# 25 degrees, the second within 60 degrees (cosine 0.5).  The 60-degree side is
-# public because the router derives its same-net union depth from it (issue
+# Both boundaries must face the gap within 60 degrees (cosine 0.5), and at
+# least one within 25 degrees. Either boundary can be the closer-facing one.
+# The router derives its same-net union depth from the public 60-degree threshold (issue
 # #9424, ``router.via_clearance.same_net_pad_union_depth_mm``): a via that
 # barely overlaps its own pad leaves a wedge this screen still grades.
 FACING_COS_FIRST = math.cos(math.radians(25))
@@ -754,10 +754,13 @@ def iter_source_gaps(sources: list[CopperSource], minimum_mm: float) -> Iterator
                 if distance <= TOLERANCE or distance >= minimum_mm - TOLERANCE:
                     continue
                 dx, dy = (b.x - a.x) / distance, (b.y - a.y) / distance
-                # Both boundaries must face the open gap, within 25 degrees.
-                if normals[i][0] * dx + normals[i][1] * dy < FACING_COS_FIRST:
-                    continue
-                if normals[j][0] * -dx + normals[j][1] * -dy < FACING_COS_SECOND:
+                # Pair indices follow the union's edge order, which unrelated copper can change.
+                facing_a = normals[i][0] * dx + normals[i][1] * dy
+                facing_b = -(normals[j][0] * dx + normals[j][1] * dy)
+                if (
+                    min(facing_a, facing_b) < FACING_COS_SECOND
+                    or max(facing_a, facing_b) < FACING_COS_FIRST
+                ):
                     continue
                 connector = LineString([a, b])
                 # The open connector must contain no copper from a third
