@@ -711,6 +711,13 @@ def _add_creepage_parser(subparsers) -> None:
         ),
     )
     creepage_parser.add_argument(
+        "--order-thickness-mm",
+        type=float,
+        metavar="MM",
+        help="Nominal finished board thickness selected for purchase, in mm. "
+        "Required for cross-face measurements when the PCB header and stackup disagree.",
+    )
+    creepage_parser.add_argument(
         "--min",
         type=float,
         default=None,

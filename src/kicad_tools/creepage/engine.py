@@ -818,13 +818,14 @@ class CreepageReport:
     # are not counted or used.
     netless_items: int = 0
     # Board thickness used by cross-face bore/edge paths (#9704) and where it
-    # came from (``"stackup"`` strata sum | ``"general"`` header
+    # came from (``"order"`` finished thickness | ``"stackup"`` strata sum | ``"general"`` header
     # ``(general (thickness X))``, #9746 | ``"default"`` 1.6 mm).  ``None``
     # (and omitted from JSON) when the census evaluated no cross-face candidate
     # -- e.g. every conductor sits on one face -- so such boards serialise
     # exactly as before #9704.
     board_thickness_mm: float | None = None
     board_thickness_source: str | None = None
+    board_thickness_declarations_mm: dict[str, float] | None = None
 
     @property
     def passed(self) -> bool:
@@ -871,10 +872,16 @@ class CreepageReport:
         # serialized so JSON consumers can gate unconditionally on
         # ``gate_passed`` -- without waivers the two are identical.
         waived_count = sum(1 for p in self.pairs if p.waived)
+        thickness: dict[str, Any] = {}
+        if self.board_thickness_mm is not None:
+            thickness["board_thickness_mm"] = round(self.board_thickness_mm, 4)
+            thickness["board_thickness_source"] = self.board_thickness_source
+        if self.board_thickness_declarations_mm is not None:
+            thickness["board_thickness_declarations_mm"] = self.board_thickness_declarations_mm
         # Phase-1 backward compatibility: no standard -> phase-1 schema (plus
         # the additive verdict keys above, #4687).
         if self.standard is None:
-            phase1: dict[str, Any] = {
+            return {
                 "board": self.board,
                 "net_class": self.net_class,
                 "min_mm": self.min_mm,
@@ -886,11 +893,8 @@ class CreepageReport:
                 "waived_count": waived_count,
                 "netless_items": self.netless_items,
                 "netless_treatment": "floating",
+                **thickness,
             }
-            if self.board_thickness_mm is not None:
-                phase1["board_thickness_mm"] = round(self.board_thickness_mm, 4)
-                phase1["board_thickness_source"] = self.board_thickness_source
-            return phase1
         d: dict[str, Any] = {
             "board": self.board,
             "net_class": self.net_class,
@@ -922,10 +926,8 @@ class CreepageReport:
             "waived_count": waived_count,
             "netless_items": self.netless_items,
             "netless_treatment": "floating",
+            **thickness,
         }
-        if self.board_thickness_mm is not None:
-            d["board_thickness_mm"] = round(self.board_thickness_mm, 4)
-            d["board_thickness_source"] = self.board_thickness_source
         # Per-net voltage mode (#4371): the requirement varies per pair, so the
         # report-level scalar requirement / working voltage are null (already set
         # to None by the caller) and we echo the voltage source instead.  These
@@ -1745,24 +1747,40 @@ def board_edge_geometry(pcb: PCB) -> Any | None:
 # ---------------------------------------------------------------------------
 
 
-def _board_thickness_mm(pcb: PCB) -> tuple[float, str]:
-    """``(thickness, source)`` for cross-face paths (#9704).
+class BoardThicknessError(ValueError):
+    """A cross-face measurement needs a valid finished board thickness."""
 
-    The stackup strata sum (copper + dielectric + mask, every ``StackupLayer``
-    carries its mm) is the board's total thickness when the file declares one;
-    otherwise the board header's ``(general (thickness X))`` is used (#9746);
-    only when neither is present is the 1.6 mm two-layer default assumed and
-    reported as such.
-    """
-    setup = getattr(pcb, "setup", None)
-    stackup = getattr(setup, "stackup", None) or []
+    def __init__(self, message: str, declarations_mm: dict[str, float] | None = None):
+        super().__init__(message)
+        self.declarations_mm = declarations_mm
+
+
+def _board_thickness_mm(
+    pcb: PCB, order_thickness_mm: float | None
+) -> tuple[float | None, str, dict[str, float]]:
+    """Resolve finished thickness and retain any disagreement between CAD declarations."""
+    stackup = getattr(getattr(pcb, "setup", None), "stackup", None) or []
     total = sum(float(getattr(stratum, "thickness", 0.0) or 0.0) for stratum in stackup)
-    if total > 0.0:
-        return total, "stackup"
     general = getattr(pcb, "general_thickness", None)
-    if general is not None and float(general) > 0.0:
-        return float(general), "general"
-    return _DEFAULT_BOARD_THICKNESS_MM, "default"
+    has_stackup = math.isfinite(total) and total > 0.0
+    conflict: dict[str, float] = {}
+    if general is not None and (not math.isfinite(general) or general <= 0):
+        general = None
+    if (
+        general is not None
+        and has_stackup
+        and not math.isclose(total, general, rel_tol=1e-12, abs_tol=1e-12)
+    ):
+        conflict = {"general": general, "stackup": round(total, 9)}
+    if order_thickness_mm is not None:
+        return order_thickness_mm, "order", conflict
+    if conflict:
+        return None, "unresolved", conflict
+    if has_stackup:
+        return total, "stackup", conflict
+    if general is not None:
+        return general, "general", conflict
+    return _DEFAULT_BOARD_THICKNESS_MM, "default", conflict
 
 
 def _npth_bore_rims(pcb: PCB) -> list[tuple[Any, str]]:
@@ -2221,6 +2239,7 @@ def compute_creepage_census(
     net_class: str = "HV",
     board: str = "",
     *,
+    order_thickness_mm: float | None = None,
     required_creepage_mm: float | None = None,
     required_clearance_mm: float | None = None,
     standard: str | None = None,
@@ -2239,6 +2258,10 @@ def compute_creepage_census(
     pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
 ) -> CreepageReport:
     """Build the full HV creepage/clearance census for a board.
+
+    ``order_thickness_mm`` is the nominal finished thickness selected for purchase.
+    It resolves conflicting CAD thickness declarations and reports the shortest
+    cross-face conductor path even when that path passes.
 
     For every HV net the census records one row per non-HV conductor (the
     binding, smallest-creepage layer) and one row for the board edge.
@@ -2287,6 +2310,10 @@ def compute_creepage_census(
     -byte unchanged from phase 2.
     """
     require_shapely("creepage census")
+    if order_thickness_mm is not None and (
+        not math.isfinite(order_thickness_mm) or order_thickness_mm <= 0.0
+    ):
+        raise BoardThicknessError("Order thickness must be a positive finite value in millimetres.")
 
     # Per-net voltage mode (#4371) requires BOTH a map and a resolved standard
     # table (the table is the only source of a derived requirement).
@@ -2546,7 +2573,7 @@ def compute_creepage_census(
     #
     # key -> (creepage, rim label, face of net A, face of net B, geom A, geom B)
     cross_best: dict[tuple[int, int], tuple[float, str, str, str, Any, Any]] = {}
-    thickness_mm, thickness_source = _board_thickness_mm(pcb)
+    thickness_mm, thickness_source, declarations = _board_thickness_mm(pcb, order_thickness_mm)
     _copper = pcb.copper_layers
     _faces = [_copper[0].name, _copper[-1].name] if _copper else []
     thickness_evaluated = False
@@ -2580,6 +2607,9 @@ def compute_creepage_census(
                         # Existing (same-face) row: a cross-face path binds
                         # only by being strictly shorter.
                         bound = prev[1] - _PASS_TOLERANCE
+                    elif order_thickness_mm is not None:
+                        # An explicit order also reports the shortest passing cross-face path.
+                        bound = math.inf
                     else:
                         # The pair shares no copper layer.  It enters the
                         # report only when the cross-face path FAILS the
@@ -2603,15 +2633,28 @@ def compute_creepage_census(
                     best_label: str | None = None
                     for k, (rim, label, joint) in enumerate(rims):
                         lb = straight[k][(fa, hv_num)] + straight[k][(fb, other_num)]
-                        if lb + thickness_mm >= min(bound, best_cand):
+                        limit = min(bound, best_cand)
+                        # Zero is a lower bound on any finished thickness. It can
+                        # rule a rim out without guessing an unknown thickness.
+                        if lb + (thickness_mm or 0.0) >= limit:
                             continue
-                        thickness_evaluated = True
                         if joint:
-                            cand = _min_sum_via_ring(ga, gb, rim) + thickness_mm
+                            surface_legs = _min_sum_via_ring(ga, gb, rim)
                         else:
                             leg_a = surface_path_length(ga, rim, obstacles, _bridged=True)[1]
                             leg_b = surface_path_length(rim, gb, obstacles, _bridged=True)[1]
-                            cand = leg_a + thickness_mm + leg_b
+                            surface_legs = leg_a + leg_b
+                        if thickness_mm is None:
+                            if surface_legs >= limit:
+                                continue
+                            raise BoardThicknessError(
+                                f"Board header thickness {declarations['general']:g} mm and stackup "
+                                f"thickness {declarations['stackup']:g} mm disagree. Supply "
+                                "--order-thickness-mm with the nominal finished thickness selected for purchase.",
+                                declarations,
+                            )
+                        thickness_evaluated = True
+                        cand = surface_legs + thickness_mm
                         if cand < best_cand:
                             best_cand, best_label = cand, label
                     if best_label is not None and best_cand < bound:
@@ -2619,6 +2662,7 @@ def compute_creepage_census(
     if thickness_evaluated:
         report.board_thickness_mm = thickness_mm
         report.board_thickness_source = thickness_source
+        report.board_thickness_declarations_mm = declarations or None
 
     def _attach_zone_row(
         layer: str,
@@ -2758,8 +2802,8 @@ def compute_creepage_census(
 
     # --- Cross-face-only pairs (#9704): nets sharing no copper layer -----
     # These pairs had no row at all before #9704; one appears only when the
-    # bore/edge path FAILS the pair's bound (see the ``bound`` above), so a
-    # passing cross-face pair keeps the old silence.
+    # bore/edge path fails its bound, or when the caller supplied an order
+    # thickness and asked for the physical measurement (including a pass).
     for (hv_num, other_num), (creepage, label, fa, fb, ga, gb) in cross_best.items():
         if (hv_num, other_num) in best:
             continue  # already folded into its same-face row above
