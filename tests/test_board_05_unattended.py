@@ -8,6 +8,7 @@ fixture rows; the route itself is exercised by the scheduled workflow
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -75,6 +76,10 @@ def test_clean_row_passes(mod):
             "oracle did not answer (oracle_failed)",
         ),
         ({"error": "no routed output (exit_code=124)"}, "no routed output"),
+        (
+            {"kct_check_mask_incomplete": True},
+            "mask_to_copper coverage incomplete",
+        ),
     ],
 )
 def test_any_single_failure_fails_the_run(mod, overrides, needle):
@@ -180,6 +185,54 @@ def test_post_route_prep_failure_is_fatal(mod, monkeypatch, tmp_path):
     board.write_text("(kicad_pcb)")
     with pytest.raises(RuntimeError, match="add-fiducials failed"):
         mod.prepare_for_grading(board)
+
+
+def test_run_kct_check_flags_incomplete_mask_coverage(mod, monkeypatch, tmp_path):
+    """A degraded mask pass (zero findings + the #8914 info marker) fails (#9424).
+
+    On an unqualified host kicad-cli the mask pass cannot attribute native
+    mask regions and emits no violations except one info
+    ``mask_to_copper_incomplete`` marker; the error/warning counters read 0/0
+    and the row must still carry the degradation for ``gate_failures``.
+    """
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001 -- matches subprocess.run shape
+        report = {
+            "summary": {"errors": 0, "warnings": 0},
+            "violations": [
+                {
+                    "rule_id": "mask_to_copper_incomplete",
+                    "severity": "info",
+                    "message": "Mask-to-copper coverage incomplete: ...",
+                }
+            ],
+        }
+        (tmp_path / "kct-check.json").write_text(json.dumps(report))
+        return None
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    row = mod.run_kct_check(tmp_path / "board.kicad_pcb", tmp_path)
+    assert row["kct_check_errors"] == 0
+    assert row["kct_check_warnings"] == 0
+    assert row["kct_check_mask_incomplete"] is True
+    assert mod.gate_failures(clean_row(**{"kct_check_mask_incomplete": True}))
+
+    # A report without the marker (the pass completed, or the rule is
+    # skipped) carries no flag.
+    (tmp_path / "kct-check.json").unlink()
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda cmd, **kwargs: (
+            (tmp_path / "kct-check.json").write_text(
+                json.dumps({"summary": {"errors": 0, "warnings": 0}, "violations": []})
+            )
+            or None
+        ),
+    )
+    row = mod.run_kct_check(tmp_path / "board.kicad_pcb", tmp_path)
+    assert "kct_check_mask_incomplete" not in row
+    assert mod.gate_failures(clean_row()) == []
 
 
 def test_workflow_runs_the_script_at_three_seeds_and_is_not_per_pr():

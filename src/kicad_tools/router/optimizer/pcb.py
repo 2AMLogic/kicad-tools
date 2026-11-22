@@ -10,7 +10,7 @@ import tempfile
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ...core.layers import kicad_read_via_layers, warn_normalised_vias
 from ..layers import Layer
@@ -69,7 +69,7 @@ def _extract_balanced_blocks(text: str, keyword: str) -> list[tuple[int, int, st
     parentheses.
     """
     blocks: list[tuple[int, int, str]] = []
-    opener = f"({keyword}"
+    opener = re.compile(rf"\(\s*{re.escape(keyword)}(?=[\s)])")
     start: int | None = None
     depth = 0
     # Consume complete strings/comments/atoms so neither quoted parentheses
@@ -79,13 +79,7 @@ def _extract_balanced_blocks(text: str, keyword: str) -> list[tuple[int, int, st
         token = match.group()
         if start is None:
             pos = match.start()
-            after = pos + len(opener)
-            if (
-                token == "("
-                and text.startswith(opener, pos)
-                and after < len(text)
-                and (text[after].isspace() or text[after] == ")")
-            ):
+            if token == "(" and opener.match(text, pos):
                 start = pos
                 depth = 1
         elif token == "(":
@@ -108,7 +102,7 @@ _RE_START = re.compile(r"\(start\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
 _RE_END = re.compile(r"\(end\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
 _RE_WIDTH = re.compile(r"\(width\s+([\d.eE+-]+)\)")
 _RE_LAYER = re.compile(r'\(layer\s+"([^"]+)"\)')
-_RE_NET = re.compile(r"\(net\s+(\d+)\)")
+_RE_NET = re.compile(r'\(net\s+(\d+)(?:\s+("(?:\\.|[^"\\])*"))?\s*\)')
 # Issue #9580: the item uuid KiCad writes on every track and via.  Captured
 # so a re-emitted track/via can keep its input identity.
 _RE_UUID = re.compile(r'\(uuid\s+("(?:\\.|[^"\\])*")\)')
@@ -132,7 +126,8 @@ def _resolve_block_net(
 
     Handles both KiCad net-reference dialects (issue #4413):
 
-    * numeric  ``(net N)``        -> id ``N``, name from the header table.
+    * numeric  ``(net N)`` or ``(net N "NAME")`` -> id ``N``, with the
+      header name or the item's explicit name.
     * name     ``(net "NAME")``   -> id from the ``name_to_id`` reverse map,
       name ``NAME``.
 
@@ -146,6 +141,8 @@ def _resolve_block_net(
     m_net = _RE_NET.search(block)
     if m_net:
         net = int(m_net.group(1))
+        if m_net.group(2):
+            return net, net_names.get(net, _decode_net_string(m_net.group(2)))
         return net, net_names.get(net, f"Net{net}")
 
     m_name = _RE_NET_NAME.search(block)
@@ -172,7 +169,7 @@ def _is_unresolvable_numeric_ref(
     if not name_only_board:
         return False
     m_net = _RE_NET.search(block)
-    if m_net is None:
+    if m_net is None or m_net.group(2):
         return False
     return int(m_net.group(1)) not in net_names
 
@@ -184,6 +181,34 @@ def _is_unresolvable_numeric_ref(
 # regex -- the bug class fixed by issue #4529.  Kept as a thin alias so
 # existing in-module callers of ``_resolve_block_net`` are unaffected.
 resolve_block_net = _resolve_block_net
+
+
+_RE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+_RE_LOCKED = re.compile(r"\(locked\s+yes\s*\)|\(locked\s*\)|(?<=[\s)])locked(?=[\s)])")
+
+
+def locked_segment_nets(pcb_text: str) -> set[str]:
+    """Names of nets that carry at least one locked track segment (Issue #9640).
+
+    A track locked in KiCad (``(locked yes)``, or the bare ``locked`` token of
+    older files) is how a designer marks a run as shaped on purpose.  The
+    optimizer rewrites whole chains, so it leaves every net that owns one
+    untouched rather than guessing which neighbouring segments may move.
+    """
+    net_names = parse_net_names(pcb_text)
+    name_to_id = {name: nid for nid, name in net_names.items()}
+    locked: set[str] = set()
+    # Straight tracks and copper arcs both carry the lock field.
+    for kind in ("segment", "arc"):
+        for _start, _end, block in _extract_balanced_blocks(pcb_text, kind):
+            # Quoted strings (net names, uuids) are data, never lock tokens:
+            # a net called "sense locked rail" does not lock its track.
+            if not _RE_LOCKED.search(_RE_QUOTED.sub('""', block)):
+                continue
+            resolved = _resolve_block_net(block, net_names, name_to_id)
+            if resolved and resolved[1]:
+                locked.add(resolved[1])
+    return locked
 
 
 def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
@@ -514,6 +539,11 @@ _PAD_VIOLATION_CATEGORIES = frozenset(
         "clearance_via_zone",
         "clearance_pad_zone",
         "clearance_net0_bridge",
+        # Issue #9748: mask exposure.  The conservative geometric screen (see
+        # ``router.optimizer.mask_screen``) keys its error-class findings
+        # here; growth must force the per-net rollback even at a flat total,
+        # exactly like a pad clearance swap.
+        "mask_to_copper",
     }
 )
 
@@ -531,6 +561,7 @@ def _run_drc_error_count_by_category(
     copper_oz: float,
     min_clearance_mm: float | None = None,
     project_path: Path | None = None,
+    mask_screen: Any | None = None,
 ) -> dict[str, int]:
     """Run DRC and return a dict of error counts keyed by rule id.
 
@@ -555,6 +586,14 @@ def _run_drc_error_count_by_category(
     ``.kicad_pro`` carries the net-class clearances.  It is staged beside the
     scratch board so ``netclass_clearance_copper`` -- which ``kct check``
     enforces -- is counted too.  ``None`` skips the check.
+
+    Issue #9748: ``mask_screen`` (a
+    :class:`~kicad_tools.router.optimizer.mask_screen.MaskExposureScreen`)
+    adds a conservative ``mask_to_copper`` count over the pure-Python mask
+    snapshot, so the rollback gate can see mask exposure the way ``kct check
+    --mfr`` reports it.  ``None`` (the default) keeps the pre-#9748 referee;
+    a screen that cannot model the board contributes nothing and reports
+    ``not_evaluated`` through its ``status``.
     """
     import shutil
     from dataclasses import replace
@@ -572,6 +611,11 @@ def _run_drc_error_count_by_category(
         pro = Path(project_path).with_suffix(".kicad_pro")
         if pro.is_file():
             shutil.copy2(pro, Path(tmp_path).with_suffix(".kicad_pro"))
+        # Issue #9748: a custom-rules file makes the mask snapshot honestly
+        # incomplete (native-only rule evaluation), so stage it too.
+        dru = Path(project_path).with_suffix(".kicad_dru")
+        if dru.is_file():
+            shutil.copy2(dru, Path(tmp_path).with_suffix(".kicad_dru"))
 
     try:
         pcb = PCB.load(tmp_path)
@@ -619,6 +663,15 @@ def _run_drc_error_count_by_category(
                 continue
             counts[v.rule_id] = counts.get(v.rule_id, 0) + 1
             counts["__total__"] += 1
+        # Issue #9748: the conservative mask screen over the pure snapshot --
+        # the referee's stand-in for the native ``mask_to_copper`` check.  It
+        # counts nothing when the snapshot cannot model the board, and says so
+        # through the screen's ``status`` (read by the summary line).
+        if mask_screen is not None:
+            mask_findings = mask_screen.count(tmp_path, pcb)
+            if mask_findings:
+                counts["mask_to_copper"] = counts.get("mask_to_copper", 0) + mask_findings
+                counts["__total__"] += mask_findings
         return counts
     finally:
         shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -1203,10 +1256,15 @@ def optimize_pcb(
     after optimization. Any net whose optimized segments increase the
     total DRC error count is rolled back to its original segments.  The
     gate runs the clearance, dimension and segment/via-vs-zone-fill checks;
-    growth in a pad- or short-class category also triggers rollback.  If
-    the rollback loop cannot reach baseline, nets are re-admitted one at a time
-    and only those that keep the board at baseline are kept (Issue #8367); if
-    none qualifies, all changed nets are reverted.
+    growth in a pad- or short-class category also triggers rollback.  With
+    a manufacturer mask policy (JLCPCB family) the referee additionally
+    screens ``mask_to_copper`` conservatively over the pure mask snapshot
+    (Issue #9748), and growth in that category rolls back the same way --
+    or the summary reports the rule not evaluated when the snapshot cannot
+    model the board.  If the rollback loop cannot reach baseline, nets are
+    re-admitted one at a time and only those that keep the board at
+    baseline are kept (Issue #8367); if none qualifies, all changed nets
+    are reverted.
 
     Args:
         pcb_path: Path to input .kicad_pcb file.
@@ -1262,7 +1320,14 @@ def optimize_pcb(
 
     # DRC baseline (when drc_aware is enabled)
     baseline_counts: dict[str, int] = {"__total__": 0}
+    mask_screen: Any | None = None
     if config.drc_aware and config.drc_manufacturer:
+        # Issue #9748: the referee's conservative mask_to_copper screen, from
+        # the same manufacturer policy ``kct check --mfr`` engages by default.
+        # ``None`` (no cited policy) keeps the pre-#9748 referee.
+        from .mask_screen import mask_exposure_screen_for_manufacturer
+
+        mask_screen = mask_exposure_screen_for_manufacturer(config.drc_manufacturer)
         baseline_counts = _run_drc_error_count_by_category(
             pcb_text,
             manufacturer=config.drc_manufacturer,
@@ -1270,8 +1335,13 @@ def optimize_pcb(
             copper_oz=config.drc_copper_oz,
             min_clearance_mm=config.drc_clearance_mm,
             project_path=config.drc_project_path,
+            mask_screen=mask_screen,
         )
         stats.drc_errors_before = baseline_counts["__total__"]
+        # Snapshot completeness does not change between referee calls
+        # (``replace_segments`` only rewrites track blocks), so the baseline
+        # status is every later call's status too.
+        stats.drc_mask_screen = mask_screen.status if mask_screen is not None else "off"
 
     # Issue #6889: the rewrites below ignore same-net copper, so on a Kelvin
     # net they can join two branches of the star away from the shunt pad --
@@ -1285,9 +1355,18 @@ def optimize_pcb(
 
     vias_by_net = parse_vias(pcb_text) if net_anchors_by_name else {}
 
+    # Issue #9640: a net owning a locked track was shaped on purpose; leave it.
+    locked_nets = locked_segment_nets(pcb_text)
+
     # Optimize each net
     optimized_segments: dict[str, list[Segment]] = {}
     for net, segs in segments_by_net.items():
+        if net in locked_nets:
+            stats.locked_nets_skipped.append(net)
+            optimized_segments[net] = list(segs)
+            if on_net_optimized is not None:
+                on_net_optimized(net, segs, segs)
+            continue
         optimized = (
             kelvin.optimize_net(
                 net, segs, optimize_fn, pad_guard=pad_guard, defer_pad_guard=defer_pad_guard
@@ -1361,6 +1440,7 @@ def optimize_pcb(
             copper_oz=config.drc_copper_oz,
             min_clearance_mm=config.drc_clearance_mm,
             project_path=config.drc_project_path,
+            mask_screen=mask_screen,
         )
         full_errors = full_counts["__total__"]
         baseline_errors = baseline_counts["__total__"]
@@ -1400,6 +1480,7 @@ def optimize_pcb(
                     copper_oz=config.drc_copper_oz,
                     min_clearance_mm=config.drc_clearance_mm,
                     project_path=config.drc_project_path,
+                    mask_screen=mask_screen,
                 )
 
                 # Issue #3138: a rollback is helpful if it lowers the total
@@ -1465,6 +1546,7 @@ def optimize_pcb(
                         copper_oz=config.drc_copper_oz,
                         min_clearance_mm=config.drc_clearance_mm,
                         project_path=config.drc_project_path,
+                        mask_screen=mask_screen,
                     )
                     if trial_counts["__total__"] <= baseline_errors and not _pad_violations_grew(
                         baseline_counts, trial_counts
@@ -1520,6 +1602,7 @@ def optimize_pcb(
                             copper_oz=config.drc_copper_oz,
                             min_clearance_mm=config.drc_clearance_mm,
                             project_path=config.drc_project_path,
+                            mask_screen=mask_screen,
                         )["__total__"]
                 if not any(final_segments[n] != segments_by_net[n] for n in final_segments):
                     stats.drc_failsafe_reverted = True

@@ -1173,6 +1173,8 @@ def merge_into_json_document(
         doc = relocate(parsed) if relocate is not None else parsed
     doc["lint_gate"] = outcome.to_dict()
     if outcome.rolled_back:
+        # The repaired candidate and its silk were rejected with the copper.
+        doc.pop("silk_fix", None)
         if "exit_code" in doc:
             doc["exit_code"] = exit_code
         if "success" in doc:
