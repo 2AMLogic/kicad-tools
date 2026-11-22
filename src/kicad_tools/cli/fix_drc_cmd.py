@@ -6,6 +6,8 @@ This command repairs multiple types of DRC violations:
 - clearance_segment_via: nudge traces away from enlarged vias via ClearanceRepairer
 - hole_to_hole_clearance (formerly dimension_drill_clearance, #4353): de-duplicate
   or slide vias via DrillClearanceRepairer
+- physical_copper_gap same-net slits (#9332): move a via clear of its own pad
+  or onto its own track via CopperGapRepairer
 
 Success is never self-reported (Issues #6431 / #6434): after the last pass
 ``fix-drc`` re-checks the output with ``kct check``'s own rule set (the
@@ -20,6 +22,7 @@ Usage:
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --dry-run
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --only clearance
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --only drill-clearance
+    kct fix-drc board.kicad_pcb --only copper-gap --dry-run
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --max-passes 3
 """
 
@@ -28,6 +31,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 import sys
 import tempfile
@@ -37,7 +41,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
+from kicad_tools.drc.repair_copper_gap import (
+    CopperGapRepairer,
+    CopperGapResult,
+    copper_gap_violations,
+)
 from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer, DrillRepairResult
+from kicad_tools.drc.repair_mask_copper import (
+    MaskCopperRepairer,
+    MaskRepairResult,
+    MaskUnrepaired,
+    finding_key,
+    mask_copper_violations,
+)
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import DRCViolation, ViolationType
 from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
@@ -71,7 +87,17 @@ from kicad_tools.transaction import board_transaction
 # orphaned zone-fill island has no ``required_value`` and no clearance
 # nudge can connect it -- the fix is a routing/zone decision (stitch it,
 # re-fill, or accept the island).  Same exclusion, same rationale.
-_UNREPAIRABLE_TOPOLOGY_RULE_IDS = frozenset({"track_dangling", "via_dangling", "isolated_copper"})
+#
+# ``physical_copper_gap_incomplete`` (Issue #9590 review: the fab-view pass
+# now runs through ``build_check_rule_set``) is a declaration gap, not a
+# copper defect: the board's stackup has no DFM entry / declared copper
+# weight, so the gap bands or pad mask-bridge severity are unknown.  It is
+# info severity, carries no location and no values, and no clearance nudge
+# can repair it -- the fix is to declare the stackup (or pass ``--copper``),
+# which is an operator decision.  ``kct check`` remains where it surfaces.
+_UNREPAIRABLE_TOPOLOGY_RULE_IDS = frozenset(
+    {"track_dangling", "via_dangling", "isolated_copper", "physical_copper_gap_incomplete"}
+)
 
 # Violation types fix-drc targets, per ``--only`` category.
 # kicad-cli reports every copper pair as plain ``clearance``; ``kct check``
@@ -91,6 +117,61 @@ _DRILL_TYPES = (ViolationType.DRILL_CLEARANCE, ViolationType.HOLE_NEAR_HOLE)
 # Detection engines (Issue #6431).
 ENGINE_KICAD_CLI = "kicad-cli"
 ENGINE_KCT_CHECK = "kct-check"
+
+
+def _mask_in_scope(args: argparse.Namespace) -> bool:
+    """Whether re-checks must engage ``mask_to_copper`` (Issue #9334).
+
+    True for ``--only mask-copper``, and once a run's detection report carried
+    mask findings (``_execute_repair`` records that on ``args``).
+    """
+    return args.only == "mask-copper" or bool(getattr(args, "mask_findings_seen", False))
+
+
+def _mask_kwargs(args: argparse.Namespace) -> dict:
+    """``_run_python_drc`` keyword for the mask assessment, only when in scope."""
+    return {"mask_copper": True} if _mask_in_scope(args) else {}
+
+
+def _copper_gap_in_scope(args: argparse.Namespace) -> bool:
+    """Whether re-checks must severity-grade ``physical_copper_gap`` (#9332).
+
+    ``build_check_rule_set`` leaves ``fab_view_gap_policy`` unset (the checker
+    then fails closed to an ``info`` incomplete finding), because fix-drc's
+    re-checks only need the gap pass when gap findings are in scope -- exactly
+    the mask precedent (#9334).  True for ``--only copper-gap``, and once a
+    run's detection report carried same-net gap findings.
+    """
+    return args.only == "copper-gap" or bool(getattr(args, "copper_gap_findings_seen", False))
+
+
+def _copper_gap_kwargs(args: argparse.Namespace) -> dict:
+    """``_run_python_drc`` keyword for the fab-view gap pass, when in scope."""
+    return {"copper_gap": True} if _copper_gap_in_scope(args) else {}
+
+
+def _targeted_mask(report: DRCReport, only: str | None) -> list:
+    """Error-severity ``mask_to_copper`` findings that fix-drc may repair (#9334).
+
+    Only ``kct check``'s engine emits them (kicad-cli has no such rule), so they
+    are present when the report is ``kct check`` JSON or the pure-Python
+    engine produced it.
+    """
+    if only not in (None, "mask-copper"):
+        return []
+    return mask_copper_violations(report.violations)
+
+
+def _targeted_copper_gap(report: DRCReport, only: str | None) -> list:
+    """Error-severity same-net ``physical_copper_gap`` findings (#9332).
+
+    Like the mask findings, only ``kct check``'s engine emits them, so they
+    are present when the report is ``kct check`` JSON or the pure-Python
+    engine produced it; a kicad-cli detection run simply carries none.
+    """
+    if only not in (None, "copper-gap"):
+        return []
+    return copper_gap_violations(report.violations)
 
 
 def _targeted(report: DRCReport, only: str | None) -> tuple[list, list]:
@@ -154,6 +235,8 @@ class PassResult:
     clearance_result: RepairResult
     drill_result: DrillRepairResult
     non_targeted_count: int = 0
+    mask_result: MaskRepairResult = field(default_factory=MaskRepairResult)
+    copper_result: CopperGapResult = field(default_factory=CopperGapResult)
     connectivity_before: int | None = None
     connectivity_after: int | None = None
     connectivity_rolled_back: bool = False
@@ -198,6 +281,12 @@ Examples:
 
     # Only fix drill clearance violations
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --only drill-clearance
+
+    # Only re-centre tracks that enter their own pad off-centre (mask_to_copper)
+    kct fix-drc board.kicad_pcb --only mask-copper --dry-run
+
+    # Only move vias that sit too close to their own pad/track (same-net slits)
+    kct fix-drc board.kicad_pcb --only copper-gap --dry-run
 
     # Run up to 3 iterative repair passes
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --max-passes 3
@@ -244,8 +333,16 @@ Examples:
     )
     parser.add_argument(
         "--only",
-        choices=["clearance", "drill-clearance"],
-        help="Only fix a specific violation type",
+        choices=["clearance", "drill-clearance", "mask-copper", "copper-gap"],
+        help=(
+            "Only fix a specific violation type. 'mask-copper' re-centres a "
+            "track that enters its own pad off-centre (mask_to_copper); it is "
+            "detected with kct check's rules, not kicad-cli, and is also part "
+            "of the default set when the report carries such findings. "
+            "'copper-gap' moves a via that sits too close to its own pad or "
+            "track (same-net physical_copper_gap slits), also detected with "
+            "kct check's rules and part of the default set."
+        ),
     )
     parser.add_argument(
         "-o",
@@ -340,11 +437,27 @@ Examples:
     if args.layers is None:
         args.layers = _board_layer_count(pcb_path)
 
-    # Get initial DRC report (detection only -- does not mutate the board)
-    report = _get_drc_report(args.drc_report, pcb_path, manufacturer=args.mfr, layers=args.layers)
+    # Get initial DRC report (detection only -- does not mutate the board).
+    # ``mask-copper`` and ``copper-gap`` findings only exist in ``kct check``'s
+    # rule set (kicad-cli has neither rule), so without a supplied report the
+    # detection run is forced onto the pure-Python engine (#9334 / #9332).
+    if args.only in ("mask-copper", "copper-gap") and not args.drc_report:
+        report = _run_python_drc(
+            pcb_path,
+            manufacturer=args.mfr,
+            layers=args.layers,
+            project_pcb_path=pcb_path,
+            **_mask_kwargs(args),
+            **_copper_gap_kwargs(args),
+        )
+        args.engine = ENGINE_KCT_CHECK
+    else:
+        report = _get_drc_report(
+            args.drc_report, pcb_path, manufacturer=args.mfr, layers=args.layers
+        )
+        args.engine = _detection_engine(args.drc_report)
     if report is None:
         return 1
-    args.engine = _detection_engine(args.drc_report)
 
     # Determine output path used for saving
     output_path = Path(args.output) if args.output else pcb_path
@@ -497,6 +610,8 @@ def _detect(board: Path, project_pcb_path: Path, args: argparse.Namespace) -> DR
         manufacturer=args.mfr,
         layers=args.layers,
         project_pcb_path=project_pcb_path,
+        **_mask_kwargs(args),
+        **_copper_gap_kwargs(args),
     )
 
 
@@ -518,6 +633,8 @@ def _final_recheck(
         manufacturer=args.mfr,
         layers=args.layers,
         project_pcb_path=project_pcb_path,
+        **_mask_kwargs(args),
+        **_copper_gap_kwargs(args),
     )
     recheck.engines.append(_engine_verdict(ENGINE_KCT_CHECK, python_report, args.only))
 
@@ -540,7 +657,14 @@ def _engine_verdict(engine: str, report: DRCReport | None, only: str | None) -> 
     if report is None:
         return EngineRecheck(engine=engine, ran=False, note="re-check failed to run")
     clearance, drill = _targeted(report, only)
-    targeted = [v for v in clearance + drill if v.is_error]
+    targeted = [
+        v
+        for v in clearance
+        + drill
+        + _targeted_mask(report, only)
+        + _targeted_copper_gap(report, only)
+        if v.is_error
+    ]
     targeted_ids = {id(v) for v in targeted}
     other = sum(1 for v in report.violations if v.is_error and id(v) not in targeted_ids)
     return EngineRecheck(engine=engine, ran=True, targeted_errors=targeted, other_errors=other)
@@ -564,6 +688,12 @@ def _execute_repair(
     if getattr(args, "layers", None) is None:
         args.layers = _board_layer_count(pcb_path)
 
+    # Issue #9332: once the detection report carries same-net gap findings,
+    # every re-check of this run must severity-grade them (the kwarg below
+    # mirrors the mask precedent), including the --verify before-snapshot.
+    if _targeted_copper_gap(report, args.only):
+        args.copper_gap_findings_seen = True
+
     # Effective max passes: dry-run forces single pass since no geometry changes
     effective_max_passes = 1 if args.dry_run else args.max_passes
 
@@ -575,7 +705,11 @@ def _execute_repair(
     verify_before: DRCReport | None = None
     if args.verify:
         verify_before = _run_python_drc(
-            pcb_path, manufacturer=args.mfr, layers=args.layers, project_pcb_path=pcb_path
+            pcb_path,
+            manufacturer=args.mfr,
+            layers=args.layers,
+            project_pcb_path=pcb_path,
+            **_copper_gap_kwargs(args),
         )
         if verify_before is not None and not args.quiet:
             print(
@@ -587,6 +721,13 @@ def _execute_repair(
     pass_results: list[PassResult] = []
     do_connectivity_check = not args.dry_run and not args.no_connectivity_check
     connectivity_rollback_occurred = False
+    # Issue #9331: the pre-edit report and pass-1 targets, kept so the
+    # invalidated-waiver report can diff waiver matching across the edit.
+    initial_report = report
+    first_pass_targets: tuple[list, ...] | None = None
+    # fix-drc overwrites its input when --output is not given, so the
+    # pre-edit geometry must be captured before the first repair pass.
+    waiver_before_board = _waiver_report_before_board(pcb_path)
 
     # Active manufacturer design rules -- forwarded to the drill-clearance
     # repairer so every via slide is re-validated against the shared clearance
@@ -600,8 +741,20 @@ def _execute_repair(
 
     for pass_num in range(1, effective_max_passes + 1):
         clearance_violations, drill_violations = _targeted(report, args.only)
+        copper_violations = _targeted_copper_gap(report, args.only)
+        if first_pass_targets is None:
+            first_pass_targets = (clearance_violations, drill_violations, copper_violations)
 
-        total_targeted = len(clearance_violations) + len(drill_violations)
+        mask_violations = _targeted_mask(report, args.only)
+        if mask_violations:
+            args.mask_findings_seen = True
+
+        total_targeted = (
+            len(clearance_violations)
+            + len(drill_violations)
+            + len(mask_violations)
+            + len(copper_violations)
+        )
         total_all = len(report.violations)
         non_targeted_count = total_all - total_targeted
 
@@ -650,6 +803,10 @@ def _execute_repair(
                 print(f"  Clearance: {len(clearance_violations)}")
             if drill_violations:
                 print(f"  Drill clearance: {len(drill_violations)}")
+            if mask_violations:
+                print(f"  Mask-to-copper: {len(mask_violations)}")
+            if copper_violations:
+                print(f"  Copper gap (same-net): {len(copper_violations)}")
             if non_targeted_count > 0:
                 print(
                     f"Also found {non_targeted_count} non-repairable "
@@ -674,12 +831,13 @@ def _execute_repair(
                 baseline_report = _connectivity_report(load_for_snapshot)
 
         # Run single-pass repairs
-        clearance_result, drill_result = _run_single_pass(
+        clearance_result, drill_result, copper_result = _run_single_pass(
             report=report,
             pcb_path=pcb_path,
             output_path=output_path,
             clearance_violations=clearance_violations,
             drill_violations=drill_violations,
+            copper_violations=copper_violations,
             max_displacement=args.max_displacement,
             margin=args.margin,
             dry_run=args.dry_run,
@@ -688,7 +846,27 @@ def _execute_repair(
             design_rules=drill_design_rules,
         )
 
-        repaired_this_pass = clearance_result.repaired + drill_result.repaired
+        mask_result = MaskRepairResult()
+        if mask_violations:
+            mask_result = _run_mask_pass(
+                report=report,
+                args=args,
+                pcb_path=pcb_path,
+                output_path=output_path,
+                mask_violations=mask_violations,
+                pass_number=pass_num,
+                earlier_saved=(
+                    clearance_result.repaired + drill_result.repaired + copper_result.repaired > 0
+                ),
+                design_rules=drill_design_rules,
+            )
+
+        repaired_this_pass = (
+            clearance_result.repaired
+            + drill_result.repaired
+            + mask_result.repaired
+            + copper_result.repaired
+        )
 
         # Post-pass connectivity check and rollback
         after_conn: int | None = None
@@ -713,6 +891,8 @@ def _execute_repair(
                     output_path=output_path,
                     clearance_result=clearance_result,
                     drill_result=drill_result,
+                    mask_result=mask_result,
+                    copper_result=copper_result,
                     regressed=regressed,
                     snapshot=snapshot,
                     pass_number=pass_num,
@@ -762,6 +942,8 @@ def _execute_repair(
                 clearance_result=clearance_result,
                 drill_result=drill_result,
                 non_targeted_count=non_targeted_count,
+                mask_result=mask_result,
+                copper_result=copper_result,
                 connectivity_before=baseline_conn,
                 connectivity_after=after_conn,
                 connectivity_rolled_back=rolled_back,
@@ -812,6 +994,7 @@ def _execute_repair(
             manufacturer=args.mfr,
             layers=args.layers,
             project_pcb_path=pcb_path,
+            **_copper_gap_kwargs(args),
         )
         if verify_before is not None and verify_after is not None:
             before_count = len(verify_before.violations)
@@ -834,6 +1017,22 @@ def _execute_repair(
                     "netclasses, path-dependent rules) for consistent comparison.",
                     file=human_out,
                 )
+
+    # Issue #9331: a nudge moves copper that waiver keys embed, so entries
+    # that waived a finding before the edit may match nothing now.
+    # Report-only; it never changes the exit code or the repair output.
+    if not args.quiet and pass_results:
+        _print_waiver_invalidation_report(
+            args,
+            pcb_path,
+            output_path,
+            pass_results,
+            initial_report,
+            first_pass_targets,
+            waiver_before_board,
+            drill_design_rules,
+            human_out,
+        )
 
     # Exit code: 0 = all repaired (the re-check finds no targeted error and
     #                no non-repairable violation was detected),
@@ -868,6 +1067,91 @@ def _execute_repair(
     return 2
 
 
+def _print_waiver_invalidation_report(
+    args: argparse.Namespace,
+    pcb_path: Path,
+    output_path: Path,
+    pass_results: list[PassResult],
+    initial_report: DRCReport,
+    first_pass_targets: tuple[list, ...] | None,
+    before_board,
+    design_rules: DesignRules | None,
+    human_out,
+) -> None:
+    """Report waiver sidecar keys this edit invalidated (Issue #9331).
+
+    Silent when the edit changed no copper (nothing repaired, or every
+    repair was rolled back) or when no waivers sidecar is discoverable for
+    the input board.  Under ``--dry-run`` the predicted repairs are re-run
+    on a throwaway copy of the board so the preview shows what the edit
+    *would* orphan.  Goes to ``human_out`` (stderr under ``--format json``,
+    so stdout stays a single JSON document); never changes the exit code.
+    """
+    if first_pass_targets is None or before_board is None:
+        return
+    applied = any(p.repaired > 0 and not p.connectivity_rolled_back for p in pass_results)
+    if not applied:
+        return
+    try:
+        from kicad_tools.cli.check_cmd import waiver_invalidation_report_lines
+        from kicad_tools.schema.pcb import PCB
+
+        if args.dry_run:
+            # Re-run the predicted pass-1 repairs on a throwaway copy of the
+            # board; the input's project rules ride along so the collateral
+            # checks see the same clearances the real pass would.  The report
+            # runs while the copy still exists: the findings pipeline re-opens
+            # the board under ``PCB.path``.
+            with tempfile.TemporaryDirectory(prefix="kct_fixdrc_waive_") as tmp:
+                sim = Path(tmp) / "preview.kicad_pcb"
+                shutil.copy2(pcb_path, sim)
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    sidecar = pcb_path.with_suffix(suffix)
+                    if sidecar.exists():
+                        shutil.copy2(sidecar, sim.with_suffix(suffix))
+                _run_single_pass(
+                    report=initial_report,
+                    pcb_path=sim,
+                    output_path=sim,
+                    clearance_violations=first_pass_targets[0],
+                    drill_violations=first_pass_targets[1],
+                    copper_violations=first_pass_targets[2],
+                    max_displacement=args.max_displacement,
+                    margin=args.margin,
+                    dry_run=False,
+                    pass_number=1,
+                    local_reroute=args.local_reroute,
+                    design_rules=design_rules,
+                )
+                lines = waiver_invalidation_report_lines(pcb_path, before_board, PCB.load(sim))
+        else:
+            lines = waiver_invalidation_report_lines(pcb_path, before_board, PCB.load(output_path))
+    except Exception as e:  # noqa: BLE001 - the report must never fail the command
+        print(f"WARNING: waiver invalidation report skipped: {e}", file=human_out)
+        return
+    for line in lines:
+        print(line, file=human_out)
+
+
+def _waiver_report_before_board(pcb_path: Path):
+    """Pre-edit geometry for the waiver-invalidation report, or ``None``.
+
+    fix-drc overwrites its input when ``--output`` is not given, so the
+    board must be captured before the first repair pass.  ``None`` (no
+    sidecar next to the board) skips the report entirely -- and the extra
+    load.
+    """
+    try:
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
+
+        if discover_waivers_sidecar(pcb_path) is None:
+            return None
+        return PCB.load(pcb_path)
+    except Exception:  # noqa: BLE001 - the report must never fail the command
+        return None
+
+
 def _run_single_pass(
     *,
     report: DRCReport,
@@ -881,16 +1165,19 @@ def _run_single_pass(
     pass_number: int = 1,
     local_reroute: bool = False,
     design_rules: DesignRules | None = None,
-) -> tuple[RepairResult, DrillRepairResult]:
-    """Execute a single repair pass (clearance + drill) and return results.
+    copper_violations: list | None = None,
+) -> tuple[RepairResult, DrillRepairResult, CopperGapResult]:
+    """Execute a single repair pass (clearance + drill + copper gap).
 
     When ``design_rules`` is provided it is forwarded to the drill-clearance
-    repairer so every via slide is re-validated against the shared clearance
-    engine before it is applied (issue #4408) -- a slide that would introduce a
-    new violation is declined rather than mis-placing the via.
+    and copper-gap repairers so every via slide/move is re-validated against
+    the shared clearance engine before it is applied (issue #4408) -- a move
+    that would introduce a new violation is declined rather than
+    mis-placing the via.
     """
     clearance_result = RepairResult()
     drill_result = DrillRepairResult()
+    copper_result = CopperGapResult()
     clearance_saved = False
 
     if clearance_violations:
@@ -934,7 +1221,288 @@ def _run_single_pass(
         except Exception as e:
             print(f"Error during drill clearance repair: {e}", file=sys.stderr)
 
-    return clearance_result, drill_result
+    if copper_violations:
+        try:
+            # Same chaining: load whatever the earlier repairers saved.
+            load_path = pcb_path
+            if (
+                clearance_saved
+                or (getattr(drill_result, "repaired", 0) > 0 and not dry_run)
+                or (pass_number > 1 and output_path.exists())
+            ):
+                load_path = output_path
+
+            copper_repairer = CopperGapRepairer(load_path)
+            copper_result = copper_repairer.repair_gaps(
+                copper_violations,
+                max_displacement=max_displacement,
+                margin=margin,
+                dry_run=dry_run,
+                design_rules=design_rules,
+            )
+            if copper_result.repaired > 0 and not dry_run:
+                copper_repairer.save(output_path)
+        except Exception as e:
+            print(f"Error during copper gap repair: {e}", file=sys.stderr)
+
+    return clearance_result, drill_result, copper_result
+
+
+_MASK_RULE_TYPES = (ViolationType.MASK_TO_COPPER, ViolationType.MASK_TO_COPPER_INCOMPLETE)
+
+
+def _error_class(v: DRCViolation) -> tuple:
+    """Class of a ``kct check`` finding: its rule plus its net pair.
+
+    Deliberately free of ``items`` and exact locations.  This engine names a
+    track in ``items`` by its geometry (``Trace@F.Cu:w0.2:...``, issue
+    #6088) -- clearance findings carry no uuids to key on, the way
+    ``new_mask_finding`` names a mask finding by uuid -- and a clearance
+    error's ``locations`` hold the closest-approach point, so both move with
+    the copper for exactly the errors the re-centre touches (Issue #9365).
+    Rule and net pair survive the move; position is compared separately,
+    with a move-scale tolerance, by :func:`_new_errors`.
+    """
+    return (v.type_str, tuple(sorted(v.nets)))
+
+
+def _new_errors(
+    after: list[DRCViolation],
+    baseline: list[DRCViolation],
+    tolerance_mm: float,
+) -> list[DRCViolation]:
+    """After-run errors with no baseline counterpart of the same class nearby.
+
+    An after error matches a baseline error when they share a class and one
+    of the after error's reported points lies within ``tolerance_mm`` of one
+    of the baseline error's -- close enough that the mask moves' displacement
+    can account for the shift.  Each baseline error matches at most one after
+    error, so a class whose count grew always leaves its surplus flagged.
+    """
+    remaining: dict[tuple, list[DRCViolation]] = {}
+    for v in baseline:
+        remaining.setdefault(_error_class(v), []).append(v)
+    new: list[DRCViolation] = []
+    for v in after:
+        bucket = remaining.get(_error_class(v), [])
+        index = None
+        if not v.locations:
+            # Unlocatable: only an equally unlocatable baseline error of the
+            # same class can be it.
+            index = next((i for i, b in enumerate(bucket) if not b.locations), None)
+        else:
+            index = next(
+                (
+                    i
+                    for i, b in enumerate(bucket)
+                    if b.locations
+                    and any(
+                        math.hypot(a.x_mm - c.x_mm, a.y_mm - c.y_mm) <= tolerance_mm
+                        for a in v.locations
+                        for c in b.locations
+                    )
+                ),
+                None,
+            )
+        if index is None:
+            new.append(v)
+        else:
+            del bucket[index]
+    return new
+
+
+def _moves_with_new_errors(
+    *,
+    after: DRCReport,
+    actions: list,
+    output_path: Path,
+    pcb_path: Path,
+    args: argparse.Namespace,
+) -> set[str]:
+    """Segment uuids of mask moves that a new non-mask error sits next to.
+
+    The mask repairer gates a move on the manufacturer's clearance floor, which
+    is below a net class's clearance, so a move can land between the two and
+    only ``kct check`` sees it (Issue #9365).  The baseline is ``kct check`` on
+    the board with this pass's moves undone, so both sides come from the same
+    engine.  A pre-existing error is recognised by class (rule + net pair) and
+    a location within the moves' displacement of its baseline counterpart; an
+    error without such a counterpart is attributed to the moves whose copper
+    is within reach of its location, or to every move when it has no location.
+
+    Cost: one extra pure-Python rule-set run per mask pass whose re-check
+    reports any non-mask error (the common case on a board being repaired);
+    cheaper than the re-check, which also runs kicad-cli twice for the mask
+    assessment.
+    """
+    candidates = [v for v in after.violations if v.is_error and v.type not in _MASK_RULE_TYPES]
+    if not candidates or not actions:
+        return set()
+
+    baseline_errors: list[DRCViolation] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        undo = MaskCopperRepairer(output_path)
+        if all(undo.undo_action(act) for act in actions):
+            base_path = Path(tmp) / output_path.name
+            undo.save(base_path)
+            baseline = _run_python_drc(
+                base_path,
+                manufacturer=args.mfr,
+                layers=args.layers,
+                project_pcb_path=pcb_path,
+            )
+            if baseline is not None:
+                baseline_errors = [
+                    v for v in baseline.violations if v.is_error and v.type not in _MASK_RULE_TYPES
+                ]
+    # A pre-existing error's closest-approach point shifts by at most the
+    # copper's own displacement (plus the engine's rounding); anything farther
+    # from every baseline counterpart of its class is new.  A failed baseline
+    # run or undo leaves ``baseline_errors`` empty, so every candidate reads
+    # as new and the moves revert: fail closed.
+    tolerance_mm = max(a.displacement_mm for a in actions) + 0.1
+    new_errors = _new_errors(candidates, baseline_errors, tolerance_mm)
+    if not new_errors:
+        return set()
+
+    from shapely.geometry import Point  # type: ignore[import-untyped]
+
+    moved = MaskCopperRepairer(output_path)
+    geometry = {act.uuid: moved.moved_geometry(act) for act in actions}
+    flagged: set[str] = set()
+    for v in new_errors:
+        if not v.locations:
+            return set(geometry)  # cannot attribute it, so keep none of the moves
+        # Attribution radius: the error's own requirement when the rule states
+        # one (copper can miss it by that much from the moved edge), floored
+        # at 0.25 mm (a rule without a requirement still sits within about a
+        # trace width of the copper that caused it) plus 0.1 mm because the
+        # reported point lies between the two copper edges, not on either.
+        reach = max(v.required_value_mm or 0.0, 0.25) + 0.1
+        flagged |= {
+            uuid
+            for uuid, geom in geometry.items()
+            if geom is None
+            or any(geom.distance(Point(loc.x_mm, loc.y_mm)) <= reach for loc in v.locations)
+        }
+    return flagged
+
+
+def _run_mask_pass(
+    *,
+    report: DRCReport,
+    args: argparse.Namespace,
+    pcb_path: Path,
+    output_path: Path,
+    mask_violations: list,
+    pass_number: int,
+    earlier_saved: bool,
+    design_rules: DesignRules | None,
+) -> MaskRepairResult:
+    """Re-centre own-pad track entries, then keep only moves the re-check confirms.
+
+    The repairer cannot run the native mask assessment, so after saving, the
+    board is re-checked with ``kct check``'s rules (Issue #9334).  A move is
+    reverted when the segment still carries a ``mask_to_copper`` error, or when
+    a finding appears that was not in ``report`` and names the moved segment or
+    its pad.  It is also reverted when a non-mask error appears that the
+    pre-move board did not have and sits next to the moved copper: the
+    repairer's own gate uses the manufacturer floor, which is below a net
+    class's clearance (Issue #9365).  If the re-check cannot run, every move of
+    this pass is reverted: an unverified move is never kept.
+    """
+    result = MaskRepairResult()
+    saved = False
+    snapshot: bytes | None = None
+    try:
+        load_path = pcb_path
+        if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
+            load_path = output_path
+        repairer = MaskCopperRepairer(load_path)
+        result = repairer.repair(
+            mask_violations,
+            max_displacement=args.max_displacement,
+            dry_run=args.dry_run,
+            clearance_mm=design_rules.min_clearance_mm if design_rules is not None else None,
+        )
+        if args.dry_run or result.repaired == 0:
+            return result
+        # Byte-exact copy of the board this pass started from, for the
+        # double-fault path below.
+        snapshot = load_path.read_bytes()
+        repairer.save(output_path)
+        saved = True
+
+        after = _run_python_drc(
+            output_path,
+            manufacturer=args.mfr,
+            layers=args.layers,
+            project_pcb_path=pcb_path,
+            mask_copper=True,
+        )
+        if after is not None and any(
+            v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in after.violations
+        ):
+            # The mask assessment could not complete (e.g. an unqualified
+            # KiCad): it proves nothing about the moves, so none are kept.
+            after = None
+        before_keys = {finding_key(v) for v in mask_copper_violations(report.violations)}
+        after_errors = mask_copper_violations(after.violations) if after is not None else []
+        new_keys = {finding_key(v) for v in after_errors} - before_keys
+        touched = {u for key in new_keys for u in key}
+        persisting = {key[-1] for key in (finding_key(v) for v in after_errors) if key}
+        regressed = (
+            _moves_with_new_errors(
+                after=after,
+                actions=result.actions,
+                output_path=output_path,
+                pcb_path=pcb_path,
+                args=args,
+            )
+            if after is not None
+            else set()
+        )
+
+        keep = []
+        revert = []
+        for act in result.actions:
+            if after is None:
+                revert.append((act, "recheck_unavailable"))
+            elif act.uuid in persisting:
+                revert.append((act, "finding_not_cleared"))
+            elif act.uuid in touched or act.pad_uuid in touched:
+                revert.append((act, "new_mask_finding"))
+            elif act.uuid in regressed:
+                revert.append((act, "new_drc_error"))
+            else:
+                keep.append(act)
+        if revert:
+            undo = MaskCopperRepairer(output_path)
+            for act, reason in revert:
+                if not undo.undo_action(act):
+                    raise RuntimeError(f"could not revert mask recentre {act.uuid!r}")
+                result.unrepaired.append(MaskUnrepaired(reason=reason, uuid=act.uuid))
+            undo.save(output_path)
+            result.actions = keep
+            result.repaired = len(keep)
+    except Exception as e:
+        print(f"Error during mask-to-copper repair: {e}", file=sys.stderr)
+        if saved and snapshot is not None:
+            # Saved but not verified: never keep an unverified move.  Restore
+            # the board this pass started from rather than undoing move by
+            # move: ``undo_action`` can return False, which would leave a move
+            # in the file that the result reports as not made.
+            try:
+                output_path.write_bytes(snapshot)
+            except OSError as undo_error:
+                print(
+                    f"Error reverting mask-to-copper moves: {undo_error}; "
+                    f"{output_path} may still contain {len(result.actions)} unverified move(s)",
+                    file=sys.stderr,
+                )
+            result.actions = []
+            result.repaired = 0
+    return result
 
 
 def _count_connected_nets(pcb_path: Path) -> int:
@@ -1001,6 +1569,8 @@ def _attempt_granular_rollback(
     regressed: set[str],
     snapshot: bytes,
     pass_number: int,
+    mask_result: MaskRepairResult | None = None,
+    copper_result: CopperGapResult | None = None,
 ) -> tuple[bool, int, list[str]]:
     """Revert only the nudges that touched a regressed net.
 
@@ -1028,7 +1598,9 @@ def _attempt_granular_rollback(
     """
     nudges = list(clearance_result.nudges)
     actions = list(drill_result.actions)
-    total = len(nudges) + len(actions)
+    mask_actions = list(mask_result.actions) if mask_result is not None else []
+    copper_actions = list(copper_result.actions) if copper_result is not None else []
+    total = len(nudges) + len(actions) + len(mask_actions) + len(copper_actions)
 
     # No nudges were applied this pass -- nothing to do.
     if total == 0:
@@ -1037,7 +1609,11 @@ def _attempt_granular_rollback(
     # Identify offenders by net_name membership.
     offending_nudges = [n for n in nudges if n.net_name in regressed]
     offending_actions = [a for a in actions if a.net_name in regressed]
-    offender_count = len(offending_nudges) + len(offending_actions)
+    offending_mask = [a for a in mask_actions if a.net_name in regressed]
+    offending_copper = [a for a in copper_actions if a.net_name in regressed]
+    offender_count = (
+        len(offending_nudges) + len(offending_actions) + len(offending_mask) + len(offending_copper)
+    )
 
     # If we cannot attribute the regression to any specific nudge (e.g.
     # empty regressed set, or no net_name match), fall back to a bulk
@@ -1088,11 +1664,42 @@ def _attempt_granular_rollback(
                 reverted_uuids.append(act.uuid)
             drill_repairer.save(output_path)
 
+        if offending_mask:
+            mask_repairer = MaskCopperRepairer(output_path)
+            for mask_act in offending_mask:
+                if not mask_repairer.undo_action(mask_act):
+                    raise RuntimeError(
+                        f"per-action undo failed for mask recentre uuid={mask_act.uuid!r} "
+                        f"on net {mask_act.net_name!r}"
+                    )
+                reverted_uuids.append(mask_act.uuid)
+            mask_repairer.save(output_path)
+
+        if offending_copper:
+            copper_repairer = CopperGapRepairer(output_path)
+            for copper_act in offending_copper:
+                if not copper_repairer.undo_move(copper_act):
+                    raise RuntimeError(
+                        f"per-action undo failed for copper-gap move uuid={copper_act.uuid!r} "
+                        f"on net {copper_act.net_name!r}"
+                    )
+                reverted_uuids.append(copper_act.uuid)
+            copper_repairer.save(output_path)
+
         # Repairs are counted per violation, not per nudge (a moved track can
         # clear several pairs, and a pair can be cleared by a neighbour's
         # move -- Issue #6434), so subtract the reverted nudges from the
         # repaired count rather than from the nudge count.
-        kept = max(0, clearance_result.repaired + drill_result.repaired - offender_count)
+        mask_repaired = mask_result.repaired if mask_result is not None else 0
+        copper_repaired = copper_result.repaired if copper_result is not None else 0
+        kept = max(
+            0,
+            clearance_result.repaired
+            + drill_result.repaired
+            + mask_repaired
+            + copper_repaired
+            - offender_count,
+        )
         return (False, kept, reverted_uuids)
 
     except Exception as e:
@@ -1104,6 +1711,28 @@ def _attempt_granular_rollback(
         )
         output_path.write_bytes(snapshot)
         return (True, 0, [])
+
+
+def _waived_report_indices(report_path: Path, violation_count: int) -> set[int]:
+    """Indices of ``kct check`` JSON findings marked waived (Issue #9326).
+
+    The report file is the source of truth: ``_parse_kct_check_json``
+    deliberately leaves ``DRCViolation.waived`` false so a re-parsed finding
+    stays severity-keyed for the ``kct audit`` manufacturing gate (Issue
+    #4417).  Positional matching is safe because that parser emits exactly
+    one violation per JSON entry; when the counts disagree (another schema,
+    or unparseable content) nothing is matched and the report is used as-is.
+    """
+    try:
+        data = json.loads(report_path.read_text())
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    items = data.get("violations")
+    if not isinstance(items, list) or len(items) != violation_count:
+        return set()
+    return {i for i, item in enumerate(items) if isinstance(item, dict) and item.get("waived")}
 
 
 def _get_drc_report(
@@ -1131,10 +1760,27 @@ def _get_drc_report(
             print(f"Error: DRC report not found: {report_path}", file=sys.stderr)
             return None
         try:
-            return DRCReport.load(report_path)
+            report = DRCReport.load(report_path)
         except Exception as e:
             print(f"Error loading DRC report: {e}", file=sys.stderr)
             return None
+        # Issue #9326: a ``kct check`` JSON report marks waived findings with
+        # a per-finding ``waived`` flag; those findings must not become
+        # repair targets (the no-report path already drops waived results --
+        # see ``_run_python_drc``).  The flag is read from the report file
+        # itself, not from ``DRCViolation.waived``: the shared parser keeps
+        # ``waived`` false on re-parse so severity-keyed consumers (the
+        # ``kct audit`` manufacturing gate, Issue #4417) still block on it.
+        # Reports without the flag are unchanged.
+        waived_idx = _waived_report_indices(report_path, len(report.violations))
+        if waived_idx:
+            report.violations = [v for i, v in enumerate(report.violations) if i not in waived_idx]
+            print(
+                f"Skipping {len(waived_idx)} waived finding(s) from the DRC report "
+                f"(waivers are not repair targets).",
+                file=sys.stderr,
+            )
+        return report
 
     # Try to run DRC using kicad-cli
     try:
@@ -1166,6 +1812,8 @@ def _run_python_drc(
     manufacturer: str = "jlcpcb",
     layers: int | None = None,
     project_pcb_path: Path | None = None,
+    mask_copper: bool = False,
+    copper_gap: bool = False,
 ) -> DRCReport | None:
     """Run ``kct check``'s rule set and convert the results into a DRCReport.
 
@@ -1177,8 +1825,9 @@ def _run_python_drc(
     (:func:`kicad_tools.cli.check_cmd.build_check_rule_set`) and runs it
     through the CLI's own dispatch.
 
-    Unrepairable *topology* advisories and waived findings are dropped from
-    the converted report -- see :data:`_UNREPAIRABLE_TOPOLOGY_RULE_IDS`.
+    Unrepairable advisories (topology findings, declaration gaps) and waived
+    findings are dropped from the converted report -- see
+    :data:`_UNREPAIRABLE_TOPOLOGY_RULE_IDS`.
 
     Args:
         pcb_path: The board whose copper is checked.
@@ -1188,6 +1837,15 @@ def _run_python_drc(
             (``.kicad_pro``, ``net_class_map.json``, ...).  Defaults to
             ``pcb_path``; pass the *input* board when checking a repaired
             copy written elsewhere with ``--output``.
+        mask_copper: Engage ``mask_to_copper`` with the manufacturer's default
+            policy, as ``kct check --mfr`` does (Issue #9334).  Off by default:
+            the assessment runs kicad-cli twice and fix-drc only needs it when
+            mask findings are in scope.
+        copper_gap: Resolve the stackup's fab-view gap bands onto the checker
+            so ``physical_copper_gap`` is severity-graded, as ``kct check``
+            does (Issue #9332).  Off by default: without bands the gap pass
+            fails closed to an ``info`` finding, which is what out-of-scope
+            re-checks want.
     """
     try:
         from kicad_tools.cli.check_cmd import build_check_rule_set, run_check_rule_set
@@ -1197,6 +1855,31 @@ def _run_python_drc(
         project = Path(project_pcb_path) if project_pcb_path is not None else Path(pcb_path)
         pcb = PCB.load(pcb_path)
         rule_set = build_check_rule_set(project, manufacturer=manufacturer, layers=layers, pcb=pcb)
+        if mask_copper:
+            from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+            rule_set.checker.mask_copper_request = default_request_for_manufacturer(
+                rule_set.manufacturer
+            )
+        if copper_gap:
+            from kicad_tools.cli.check_cmd import _resolve_fab_gap_policy, stackup_copper_oz
+
+            outer, inner = stackup_copper_oz(pcb)
+            # The same tier-1/2 resolution ``kct check`` applies: an undeclared
+            # stackup follows the 1 oz entry (fix-drc has no --copper flag).
+            preset_oz = outer if outer is not None else 1.0
+            # And the same fab-view flags its DRCChecker(...) call passes:
+            # without ``fab_view`` the gap pass returns before scanning.
+            rule_set.checker.fab_view = rule_set.manufacturer == "jlcpcb"
+            rule_set.checker.fab_view_copper_oz = outer
+            rule_set.checker.fab_view_gap_policy = _resolve_fab_gap_policy(
+                rule_set.manufacturer,
+                layers,
+                outer,
+                inner,
+                preset_oz,
+                len(pcb.copper_layers),
+            )
         results = run_check_rule_set(rule_set)
         results.violations = [
             v
@@ -1282,6 +1965,8 @@ def _print_json(
     last = pass_results[-1] if pass_results else None
     clearance_result = last.clearance_result if last else RepairResult()
     drill_result = last.drill_result if last else DrillRepairResult()
+    mask_result = last.mask_result if last else MaskRepairResult()
+    copper_result = last.copper_result if last else CopperGapResult()
 
     # Compute overall totals across all passes
     total_repaired_all = sum(p.repaired for p in pass_results)
@@ -1304,18 +1989,33 @@ def _print_json(
     # effective post-rollback count.
     clearance_reverted = sum(1 for n in clearance_result.nudges if n.uuid in reverted_uuids)
     drill_reverted = sum(1 for a in drill_result.actions if a.uuid in reverted_uuids)
+    mask_reverted = sum(1 for a in mask_result.actions if a.uuid in reverted_uuids)
+    copper_reverted = sum(1 for a in copper_result.actions if a.uuid in reverted_uuids)
 
     # For single-pass (or backward compat), use the single-pass totals
     if len(pass_results) == 1:
-        total_violations = clearance_result.total_violations + drill_result.total_violations
+        total_violations = (
+            clearance_result.total_violations
+            + drill_result.total_violations
+            + mask_result.total_violations
+            + copper_result.total_violations
+        )
         if rolled_back:
             total_repaired = 0
         elif partial_rolled_back:
-            total_repaired = (clearance_result.repaired - clearance_reverted) + (
-                drill_result.repaired - drill_reverted
+            total_repaired = (
+                (clearance_result.repaired - clearance_reverted)
+                + (drill_result.repaired - drill_reverted)
+                + (mask_result.repaired - mask_reverted)
+                + (copper_result.repaired - copper_reverted)
             )
         else:
-            total_repaired = clearance_result.repaired + drill_result.repaired
+            total_repaired = (
+                clearance_result.repaired
+                + drill_result.repaired
+                + mask_result.repaired
+                + copper_result.repaired
+            )
     else:
         # Multi-pass: first pass had the original count; total repaired is cumulative
         first = pass_results[0]
@@ -1331,12 +2031,18 @@ def _print_json(
     if rolled_back:
         effective_clearance_repaired = 0
         effective_drill_repaired = 0
+        effective_mask_repaired = 0
+        effective_copper_repaired = 0
     elif partial_rolled_back:
         effective_clearance_repaired = clearance_result.repaired - clearance_reverted
         effective_drill_repaired = drill_result.repaired - drill_reverted
+        effective_mask_repaired = mask_result.repaired - mask_reverted
+        effective_copper_repaired = copper_result.repaired - copper_reverted
     else:
         effective_clearance_repaired = clearance_result.repaired
         effective_drill_repaired = drill_result.repaired
+        effective_mask_repaired = mask_result.repaired
+        effective_copper_repaired = copper_result.repaired
 
     data: dict = {
         "dry_run": dry_run,
@@ -1399,6 +2105,46 @@ def _print_json(
                 for a in drill_result.actions
             ],
         },
+        "mask_copper": {
+            "violations": mask_result.total_violations,
+            "repaired": effective_mask_repaired,
+            "actions": [
+                {
+                    "action": a.action,
+                    "segment_uuid": a.uuid,
+                    "pad": a.pad_ref,
+                    "net_name": a.net_name,
+                    "layer": a.layer,
+                    "from": [a.old_x, a.old_y],
+                    "to": [a.new_x, a.new_y],
+                    "displacement_mm": round(a.displacement_mm, 4),
+                    "reverted": (bool(rolled_back) or (a.uuid in reverted_uuids)),
+                }
+                for a in mask_result.actions
+            ],
+            "unrepaired": [u.to_dict() for u in mask_result.unrepaired],
+        },
+        "copper_gap": {
+            "violations": copper_result.total_violations,
+            "repaired": effective_copper_repaired,
+            "snapped_to_pad": copper_result.snapped_to_pad,
+            "snapped_to_track": copper_result.snapped_to_track,
+            "opened": copper_result.opened,
+            "actions": [
+                {
+                    "action": a.action,
+                    "via_uuid": a.uuid,
+                    "net_name": a.net_name,
+                    "from": [a.via_x, a.via_y],
+                    "to": [a.new_x, a.new_y],
+                    "displacement_mm": round(a.displacement_mm, 4),
+                    "detail": a.detail,
+                    "reverted": (bool(rolled_back) or (a.uuid in reverted_uuids)),
+                }
+                for a in copper_result.actions
+            ],
+            "unrepaired": [u.to_dict() for u in copper_result.unrepaired],
+        },
     }
 
     # Add connectivity_check section when any pass has connectivity data
@@ -1460,7 +2206,14 @@ def _print_summary(
         # Single-pass: backward-compatible output
         clearance_result = last.clearance_result if last else RepairResult()
         drill_result = last.drill_result if last else DrillRepairResult()
-        total_violations = clearance_result.total_violations + drill_result.total_violations
+        mask_result = last.mask_result if last else MaskRepairResult()
+        copper_result = last.copper_result if last else CopperGapResult()
+        total_violations = (
+            clearance_result.total_violations
+            + drill_result.total_violations
+            + mask_result.total_violations
+            + copper_result.total_violations
+        )
 
         # Issue #2851: when a rollback occurred (full or partial), the
         # underlying ``RepairResult.repaired`` still counts the
@@ -1473,25 +2226,37 @@ def _print_summary(
         reverted_uuids = set(last.reverted_uuids) if last is not None else set()
         clearance_reverted = sum(1 for n in clearance_result.nudges if n.uuid in reverted_uuids)
         drill_reverted = sum(1 for a in drill_result.actions if a.uuid in reverted_uuids)
+        mask_reverted = sum(1 for a in mask_result.actions if a.uuid in reverted_uuids)
+        copper_reverted = sum(1 for a in copper_result.actions if a.uuid in reverted_uuids)
 
         if rolled_back:
             total_repaired = 0
             clearance_repaired = 0
             drill_repaired = 0
+            mask_repaired = 0
+            copper_repaired = 0
         elif partial_rolled_back:
             clearance_repaired = clearance_result.repaired - clearance_reverted
             drill_repaired = drill_result.repaired - drill_reverted
-            total_repaired = clearance_repaired + drill_repaired
+            mask_repaired = mask_result.repaired - mask_reverted
+            copper_repaired = copper_result.repaired - copper_reverted
+            total_repaired = clearance_repaired + drill_repaired + mask_repaired + copper_repaired
         else:
             clearance_repaired = clearance_result.repaired
             drill_repaired = drill_result.repaired
-            total_repaired = clearance_repaired + drill_repaired
+            mask_repaired = mask_result.repaired
+            copper_repaired = copper_result.repaired
+            total_repaired = clearance_repaired + drill_repaired + mask_repaired + copper_repaired
 
         print(f"{action} {total_repaired}/{total_violations} DRC violations")
         if clearance_result.total_violations > 0:
             print(f"  Clearance: {clearance_repaired}/{clearance_result.total_violations}")
         if drill_result.total_violations > 0:
             print(f"  Drill clearance: {drill_repaired}/{drill_result.total_violations}")
+        if mask_result.total_violations > 0:
+            print(f"  Mask-to-copper: {mask_repaired}/{mask_result.total_violations}")
+        if copper_result.total_violations > 0:
+            print(f"  Copper gap (same-net): {copper_repaired}/{copper_result.total_violations}")
     else:
         # Multi-pass: per-pass progress
         total_repaired_all = sum(p.repaired for p in pass_results)
@@ -1534,6 +2299,8 @@ def _print_text(
     last = pass_results[-1] if pass_results else None
     clearance_result = last.clearance_result if last else RepairResult()
     drill_result = last.drill_result if last else DrillRepairResult()
+    mask_result = last.mask_result if last else MaskRepairResult()
+    copper_result = last.copper_result if last else CopperGapResult()
     action = "Would repair" if dry_run else "Repaired"
 
     # Issue #2839: when the final pass was rolled back due to a connectivity
@@ -1562,6 +2329,8 @@ def _print_text(
     # Per-category reverted counts (for partial rollback).
     clearance_reverted_count = sum(1 for n in clearance_result.nudges if n.uuid in reverted_uuids)
     drill_reverted_count = sum(1 for a in drill_result.actions if a.uuid in reverted_uuids)
+    mask_reverted_count = sum(1 for a in mask_result.actions if a.uuid in reverted_uuids)
+    copper_reverted_count = sum(1 for a in copper_result.actions if a.uuid in reverted_uuids)
 
     print(f"\n{'=' * 60}")
     print("DRC VIOLATION REPAIR")
@@ -1589,7 +2358,12 @@ def _print_text(
     if rolled_back:
         summary_suffix = " (rolled back -- connectivity regression)"
     elif partial_rolled_back:
-        total_reverted = clearance_reverted_count + drill_reverted_count
+        total_reverted = (
+            clearance_reverted_count
+            + drill_reverted_count
+            + mask_reverted_count
+            + copper_reverted_count
+        )
         summary_suffix = (
             f" (partial rollback -- {total_reverted} nudge(s) reverted on regressed nets)"
         )
@@ -1669,6 +2443,75 @@ def _print_text(
                 print(f"    at ({act.via_x:.4f}, {act.via_y:.4f}) - {act.detail}")
             if len(drill_result.actions) > 5:
                 print(f"  ... and {len(drill_result.actions) - 5} more")
+
+    if mask_result.total_violations > 0:
+        print(f"\n{'-' * 60}")
+        if rolled_back:
+            effective_mask_repaired = 0
+            mask_header_suffix = " (reverted)"
+        elif partial_rolled_back:
+            effective_mask_repaired = mask_result.repaired - mask_reverted_count
+            mask_header_suffix = (
+                f" ({mask_reverted_count} reverted)" if mask_reverted_count > 0 else ""
+            )
+        else:
+            effective_mask_repaired = mask_result.repaired
+            mask_header_suffix = ""
+        print(
+            f"MASK-TO-COPPER: {effective_mask_repaired}/{mask_result.total_violations}"
+            f"{mask_header_suffix}"
+        )
+        for mask_act in mask_result.actions[:5]:
+            mask_suffix = " (reverted)" if _is_reverted(mask_act.uuid) else ""
+            print(f"  [RECENTRE] {mask_act.net_name} pad {mask_act.pad_ref}{mask_suffix}")
+            print(
+                f"    ({mask_act.old_x:.4f}, {mask_act.old_y:.4f}) -> "
+                f"({mask_act.new_x:.4f}, {mask_act.new_y:.4f}) "
+                f"{mask_act.displacement_mm:.4f}mm"
+            )
+        if len(mask_result.actions) > 5:
+            print(f"  ... and {len(mask_result.actions) - 5} more")
+        if mask_result.unrepaired:
+            reasons: dict[str, int] = {}
+            for item in mask_result.unrepaired:
+                reasons[item.reason] = reasons.get(item.reason, 0) + 1
+            print(f"  Not repaired ({len(mask_result.unrepaired)}):")
+            for reason, count in sorted(reasons.items(), key=lambda kv: -kv[1]):
+                print(f"    {reason}: {count}")
+
+    if copper_result.total_violations > 0:
+        print(f"\n{'-' * 60}")
+        if rolled_back:
+            effective_copper_repaired = 0
+            copper_header_suffix = " (reverted)"
+        elif partial_rolled_back:
+            effective_copper_repaired = copper_result.repaired - copper_reverted_count
+            copper_header_suffix = (
+                f" ({copper_reverted_count} reverted)" if copper_reverted_count > 0 else ""
+            )
+        else:
+            effective_copper_repaired = copper_result.repaired
+            copper_header_suffix = ""
+        print(
+            f"COPPER GAP (same-net): {effective_copper_repaired}"
+            f"/{copper_result.total_violations}{copper_header_suffix}"
+        )
+        for copper_act in copper_result.actions[:5]:
+            copper_suffix = " (reverted)" if _is_reverted(copper_act.uuid) else ""
+            print(f"  [{copper_act.action.upper()}] {copper_act.net_name}{copper_suffix}")
+            print(
+                f"    ({copper_act.via_x:.4f}, {copper_act.via_y:.4f}) -> "
+                f"({copper_act.new_x:.4f}, {copper_act.new_y:.4f}) - {copper_act.detail}"
+            )
+        if len(copper_result.actions) > 5:
+            print(f"  ... and {len(copper_result.actions) - 5} more")
+        if copper_result.unrepaired:
+            copper_reasons: dict[str, int] = {}
+            for copper_item in copper_result.unrepaired:
+                copper_reasons[copper_item.reason] = copper_reasons.get(copper_item.reason, 0) + 1
+            print(f"  Not repaired ({len(copper_result.unrepaired)}):")
+            for reason, count in sorted(copper_reasons.items(), key=lambda kv: -kv[1]):
+                print(f"    {reason}: {count}")
 
     # Show skipped totals
     total_skipped = (

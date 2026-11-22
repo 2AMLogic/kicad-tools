@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -238,6 +239,261 @@ class TestTieVias:
         gaps = [b - a for a, b in zip([20.0, *xs], [*xs, 50.0], strict=True)]
         assert all(g <= 5.0 + 1e-6 for g in gaps), gaps
         assert len(xs) == 5
+
+    # -- Issue #8950 (a): tie-via rows sized from the declared current ------
+
+    @staticmethod
+    def _smd_leg(*, end: float = 40.0, width: float = 3.5) -> PCB:
+        """A B.Cu leg of ``width`` mm between two SMD pads at x=20 and ``end``."""
+        pcb = PCB.create(width=200, height=100, center=False)
+        _smd_pad(pcb, "J1", 20.0, 50.0)
+        _smd_pad(pcb, "J2", end, 50.0)
+        pcb.add_trace((20.0, 50.0), (end, 50.0), width=width, layer="B.Cu", net=NET)
+        return pcb
+
+    def test_declared_current_sizes_a_tie_row_at_each_smd_end(self):
+        """A 15 A SMD-ended leg gets a 10-via tie row per end (0.30 mm drill
+        barrels 1.6 A each) and passes path_ampacity with no under-capacity
+        layer change at either end."""
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+        pcb = self._smd_leg()
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=_rules()
+        )
+        (leg,) = result.legs
+        assert leg.status == LEG_PARALLEL and leg.copy_status == COPY_PLACED, leg.reason
+        _, drill = stitch_via_geometry(_rules())
+        need = math.ceil(15.0 / via_barrel_current_capacity(drill))
+        assert need == 10
+        assert leg.copy is not None
+        # One packed row per end; the rows leave no room for an interior
+        # stitch (their tips sit ~3.5 mm apart, under the 5 mm pitch).
+        assert len(leg.copy.stitch_vias) == 2 * need
+        assert "20 stitching via(s)" in leg.reason  # the per-leg report row
+        res = resolve_current_path(pcb, _spec())
+        assert len(res.series_layer_changes) == 2
+        for change in res.series_layer_changes:
+            assert change.count == need
+            assert change.current_capacity_a() >= 15.0
+        assert PathAmpacityRule([_spec()]).check(pcb, _rules()).errors == []
+
+    def test_tie_row_count_tracks_the_governing_rules(self):
+        """A 0.20 mm drill tier sizes the row from its own barrel capacity
+        (13 vias for 15 A), not from a constant."""
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+        rules = DesignRules(
+            min_trace_width_mm=0.127,
+            min_clearance_mm=0.127,
+            min_via_drill_mm=0.2,
+            min_via_diameter_mm=0.45,
+            min_annular_ring_mm=0.13,
+            min_hole_to_hole_mm=0.5,
+            outer_copper_oz=2.0,
+            inner_copper_oz=2.0,
+        )
+        pcb = self._smd_leg()
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=rules
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        need = math.ceil(15.0 / via_barrel_current_capacity(0.2))
+        assert need == 13
+        res = resolve_current_path(pcb, _spec())
+        assert len(res.series_layer_changes) == 2
+        for change in res.series_layer_changes:
+            assert change.count == need
+            assert change.current_capacity_a() >= 15.0
+        assert PathAmpacityRule([_spec()]).check(pcb, rules).errors == []
+
+    def test_tie_row_groups_across_widened_clearance(self):
+        """Issue #8992: the row's grouping bound is derived from the placer's
+        own spacing rule, so widening ``min_clearance_mm`` past the old
+        ~0.485 mm crossing (where the placed row spacing outgrew the constant
+        bound) still groups the row into one summed layer change per end.
+
+        40 mm leg (``end=60.0``): the 20 mm default refuses these widened
+        rows outright for want of room, which is different behaviour.
+        0.4850 mm itself is a float knife edge and stays unasserted."""
+        for clearance_mm in (0.127, 0.400, 0.500, 0.600, 0.800):
+            rules = replace(_rules(), min_clearance_mm=clearance_mm)
+            pcb = self._smd_leg(end=60.0)
+            result = reinforce_net(
+                pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=rules
+            )
+            (leg,) = result.legs
+            assert leg.copy_status == COPY_PLACED, leg.reason
+            assert PathAmpacityRule([_spec()]).check(pcb, rules).errors == []
+            res = resolve_current_path(pcb, _spec(), design_rules=rules)
+            assert res.ok, res.reason
+            assert len(res.series_layer_changes) == 2
+            for change in res.series_layer_changes:
+                assert change.count == 10
+                assert change.current_capacity_a() >= 15.0
+
+    @pytest.mark.parametrize(
+        ("rules", "need"),
+        [
+            # 0.20 mm drill tier, 0.45 mm pads, 0.600 mm clearance: the
+            # crossing is via-size independent, so this geometry breaks the
+            # old constant bound too (spacing 1.065 > 0.950).
+            (
+                replace(
+                    _rules(), min_via_drill_mm=0.2, min_via_diameter_mm=0.45, min_clearance_mm=0.600
+                ),
+                13,
+            ),
+            # 1.00 mm pads at only 0.500 mm clearance: spacing 1.515 already
+            # exceeds the old 1.500 constant bound for this geometry.
+            (replace(_rules(), min_via_diameter_mm=1.0, min_clearance_mm=0.500), 10),
+        ],
+    )
+    def test_tie_row_grouping_is_not_calibrated_to_one_via_geometry(self, rules, need):
+        """Issue #8992 edge case: the derived bound groups rows placed with
+        other via geometries, not just the 0.60/0.30 mm probe."""
+        pcb = self._smd_leg(end=60.0)
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=rules
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        res = resolve_current_path(pcb, _spec(), design_rules=rules)
+        assert res.ok, res.reason
+        assert len(res.series_layer_changes) == 2
+        for change in res.series_layer_changes:
+            assert change.count == need
+            assert change.current_capacity_a() >= 15.0
+        assert PathAmpacityRule([_spec()]).check(pcb, rules).errors == []
+
+    def test_tie_row_groups_when_the_hole_to_hole_floor_dominates(self):
+        """Issue #8992 edge case: the derived bound also covers a rule set
+        whose hole-to-hole floor, not copper clearance, sets the row spacing
+        (1.2 + 0.3 > 0.6 + 0.127) -- the old constant bound missed it."""
+        rules = replace(_rules(), min_hole_to_hole_mm=1.2)
+        pcb = self._smd_leg(end=60.0)
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=rules
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        res = resolve_current_path(pcb, _spec(), design_rules=rules)
+        assert res.ok, res.reason
+        assert len(res.series_layer_changes) == 2
+        for change in res.series_layer_changes:
+            assert change.count == 10
+        assert PathAmpacityRule([_spec()]).check(pcb, rules).errors == []
+
+    def test_distributed_stitches_stay_separate_under_the_derived_bound(self):
+        """Issue #8992 / #8916: the derived bound must stay far below the
+        5 mm distributed-stitch pitch -- an ungated copy's interior stitches
+        never collapse into one summed ``LayerChange``."""
+        pcb = self._smd_leg()
+        reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        res = resolve_current_path(pcb, _spec(), design_rules=_rules())
+        assert res.ok, res.reason
+        # Two single end ties + three interior stitches, each its own change.
+        assert len(res.layer_changes) == 5
+        assert all(change.count == 1 for change in res.layer_changes)
+
+    def test_a_blocked_tie_row_refuses_the_copy_whole(self):
+        """An other-net via part-way along the row stops it: the leg is
+        refused whole, nothing is written, and the reason names the
+        shortfall and the governing rule."""
+        pcb = self._smd_leg()
+        # The end-0 row steps inward at 0.815 mm from x=20.927: the third
+        # member would sit on this via.
+        pcb.add_via(22.557, 50.0, size=0.6, drill=0.3, net="SIG")
+        n_seg, n_via = len(pcb.segments), len(pcb.vias)
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=_rules()
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_REFUSED
+        assert "end tie row" in leg.copy_reason and "10" in leg.copy_reason
+        assert result.refused_copies and not result.copies
+        assert (len(pcb.segments), len(pcb.vias)) == (n_seg, n_via)
+
+    def test_a_leg_too_short_for_the_tie_rows_refuses_whole(self):
+        """15 A needs a 7.34 mm row at each end; a 6 mm leg cannot hold one.
+        The refusal names the shortfall and nothing is written."""
+        pcb = self._smd_leg(end=26.0)
+        n_seg, n_via = len(pcb.segments), len(pcb.vias)
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=_rules()
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_REFUSED
+        assert "end tie row" in leg.copy_reason and "10" in leg.copy_reason
+        assert (len(pcb.segments), len(pcb.vias)) == (n_seg, n_via)
+
+    def test_ungated_smd_end_keeps_a_single_tie_via(self):
+        """Without declared current there is nothing to size a row from: one
+        tie via per SMD end, exactly as before #8950."""
+        pcb = self._smd_leg(width=1.0)
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        assert leg.copy is not None
+        assert len(leg.copy.stitch_vias) == 5  # two end ties + three interior
+        xs = sorted(v.position[0] for v in _stitches(pcb))
+        assert len([x for x in xs if x < 25.0]) == 1
+        assert len([x for x in xs if x > 35.0]) == 1
+
+    def test_pulsed_only_spec_sizes_the_row_without_crashing(self):
+        """A pulsed-only spec (no pulse_duration_s) has a peak-as-continuous
+        design current; the row sizes from it and the placement completes."""
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+        spec = CurrentPathSpec(
+            name="PULSE",
+            net_name=NET,
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J2", "1"),
+            continuous_a=15.0,
+            pulsed_a=15.0,
+            reinforcement_eligible=True,
+        )
+        pcb = self._smd_leg()
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[spec], design_rules=_rules()
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        _, drill = stitch_via_geometry(_rules())
+        assert leg.copy is not None
+        assert len(leg.copy.stitch_vias) == 2 * math.ceil(15.0 / via_barrel_current_capacity(drill))
+
+    def test_clear_removes_every_tie_row_via_and_rerun_is_idempotent(self):
+        """Every row via is recorded, so --clear removes them all, and a
+        re-run with the record writes the identical row again."""
+        pcb = self._smd_leg()
+        n_via0 = len(pcb.vias)
+        first = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=_rules()
+        )
+        assert len(pcb.vias) == 20
+        records = build_wire_records(first, 0.0, 0.0)
+
+        def copy_records(recs):
+            return [w for w in recs if w.get("strategy") == "parallel"]
+
+        n_seg, n_via = len(pcb.segments), len(pcb.vias)
+        second = reinforce_net(
+            pcb,
+            NET,
+            strategy="parallel",
+            current_paths=[_spec()],
+            design_rules=_rules(),
+            sidecar_wires=records,
+        )
+        assert (len(pcb.segments), len(pcb.vias)) == (n_seg, n_via)
+        assert copy_records(build_wire_records(second, 0.0, 0.0)) == copy_records(records)
+
+        clear_anchors(pcb, NET, sidecar_wires=records, design_rules=_rules())
+        assert len(pcb.vias) == n_via0
+        assert _on(pcb, "F.Cu") == []
 
 
 # --------------------------------------------------------------------------
@@ -799,3 +1055,159 @@ class TestRecordlessRerun:
         assert run_pcb_command(_args(board, strategy="parallel")) == 0
         second = PCB.load(board)
         assert len(second.vias) == n_vias
+
+
+class TestSmdEndTieAdoption:
+    """Issue #8970: on a leg ending in SMD pads the end ties themselves
+    accreted across record-less re-runs. ``end_tie`` adopted same-net vias
+    with a vertex-anchored test, but an SMD tie sits inward of the pad
+    (``pad_half_extent + via_size/2 + min_clearance``), one ``min_clearance``
+    past that test's reach -- so each pass that re-planned the original leg
+    planted a fresh pair beside the pair already there (+4 vias per leg at
+    the fixed point, reached on pass 4; a three-pass probe stops on the
+    ``11 -> 11`` plateau and misses it). The ties are now adopted at the
+    re-derived tie arc like interior stitches: credited to
+    ``existing_vias``, never recorded, so ``--clear`` still cannot remove
+    them (#8945's contract).
+    """
+
+    @staticmethod
+    def _smd_leg(length: float) -> PCB:
+        pcb = PCB.create(width=200, height=100, center=False)
+        _smd_pad(pcb, "J1", 20.0, 50.0)
+        _smd_pad(pcb, "J2", 20.0 + length, 50.0)
+        pcb.add_trace((20.0, 50.0), (20.0 + length, 50.0), width=1.0, layer="B.Cu", net=NET)
+        return pcb
+
+    @pytest.mark.parametrize(("length", "first_pass"), [(20.0, 5), (40.0, 9)], ids=["20mm", "40mm"])
+    def test_six_recordless_runs_hold_pass_one_count_and_positions(self, length, first_pass):
+        """Five-plus passes: the defect's fixed point is only reached on 4."""
+        pcb = self._smd_leg(length)
+        counts = []
+        pass_one = None
+        for i in range(6):
+            reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+            counts.append(len(_stitches(pcb)))
+            if i == 0:
+                pass_one = sorted(v.position for v in _stitches(pcb))
+        assert counts == [first_pass] * 6, counts
+        assert sorted(v.position for v in _stitches(pcb)) == pass_one
+
+    @staticmethod
+    def _smd_leg_l(a: float, b: float) -> PCB:
+        """Cornered B.Cu leg (20,50) -> (20,50+a) -> (20+b,50+a), SMD ends."""
+        pcb = PCB.create(width=200, height=100, center=False)
+        _smd_pad(pcb, "J1", 20.0, 50.0, rotation=90.0)
+        _smd_pad(pcb, "J2", 20.0 + b, 50.0 + a)
+        pcb.add_trace((20.0, 50.0), (20.0, 50.0 + a), width=1.0, layer="B.Cu", net=NET)
+        pcb.add_trace((20.0, 50.0 + a), (20.0 + b, 50.0 + a), width=1.0, layer="B.Cu", net=NET)
+        return pcb
+
+    @pytest.mark.parametrize(
+        ("a", "b", "first_pass"), [(20.0, 40.0, 13), (5.0, 45.0, 11)], ids=["L20/40", "L5/45"]
+    )
+    def test_six_recordless_runs_on_a_cornered_leg_hold_pass_one(self, a, b, first_pass):
+        """A corner between the SMD pads puts the far end's tie arc in the
+        reversed polyline's own arc frame. With unequal segment lengths the
+        forward cumulative arc is a different frame, and the far tie arc it
+        derived was scaled by the first segments' length ratio: adoption
+        missed the planted tie and the copy span ran past it, so every later
+        pass planted a fresh partial stitch set into the mis-spanned copy
+        (+16 unrecorded vias by pass 5 on L 20/40) -- this issue's accretion,
+        on a leg shape no straight-leg test reaches. The count is flat for
+        two passes (13 -> 13) before stepping up, so a shorter probe passes
+        while the defect accretes; hence six passes and positions, not just
+        counts.
+        """
+        pcb = self._smd_leg_l(a, b)
+        counts = []
+        pass_one = None
+        for i in range(6):
+            reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+            counts.append(len(_stitches(pcb)))
+            if i == 0:
+                pass_one = sorted(v.position for v in _stitches(pcb))
+        assert counts == [first_pass] * 6, counts
+        assert sorted(v.position for v in _stitches(pcb)) == pass_one
+
+    @pytest.mark.parametrize(
+        ("a", "b"), [(20.0, 40.0), (5.0, 45.0), (45.0, 5.0)], ids=["L20/40", "L5/45", "L45/5"]
+    )
+    def test_first_pass_far_end_tie_sits_clear_of_the_far_pad(self, a, b):
+        """Issue #8996: pass 1 only. The far tie arc must be derived in the
+        reversed polyline's own arc frame; with the forward frame the far tie
+        landed on the wrong point of a cornered leg (6.015 mm vs 0.927 mm on
+        L 45/5), overlapping the far pad."""
+        pcb = self._smd_leg_l(a, b)
+        reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        size, _drill = stitch_via_geometry(_rules())
+        # Far pad is 1.0 x 3.0 unrotated; the leg arrives along x, so the
+        # pad's half extent along the leg is 0.5 mm.
+        expected = 0.5 + size / 2 + _rules().min_clearance_mm
+        far = (20.0 + b, 50.0 + a)
+        nearest = min(
+            ((v.position[0] - far[0]) ** 2 + (v.position[1] - far[1]) ** 2) ** 0.5
+            for v in _stitches(pcb)
+        )
+        assert nearest == pytest.approx(expected, abs=1e-3)
+
+    def test_adopted_ties_credit_existing_vias_and_stay_out_of_the_record(self):
+        pcb = self._smd_leg(40.0)
+        reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        (leg,) = [l for l in result.legs if l.status == LEG_PARALLEL]
+        (copy,) = result.copies
+        # 7 interior stitches + the two end ties, all adopted in place.
+        assert copy.stitch_vias == []
+        assert copy.existing_vias == 9
+        assert "ends tied by a tie via" in leg.reason
+        records = build_wire_records(result, 0.0, 0.0)
+        assert all(
+            w["stitch_vias"] == [] for w in records if w.get("strategy") == STRATEGY_PARALLEL
+        )
+        before = sorted(v.position for v in pcb.vias)
+        clear_anchors(pcb, NET, sidecar_wires=records, design_rules=_rules())
+        assert sorted(v.position for v in pcb.vias) == before
+
+    def test_recorded_rerun_of_an_smd_leg_stays_byte_identical(self):
+        pcb = self._smd_leg(40.0)
+        first = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        n = (len(pcb.segments), len(pcb.vias))
+        records = build_wire_records(first, 0.0, 0.0)
+        second = reinforce_net(
+            pcb, NET, strategy="parallel", design_rules=_rules(), sidecar_wires=records
+        )
+        assert (len(pcb.segments), len(pcb.vias)) == n
+        assert build_wire_records(first, 0.0, 0.0) == build_wire_records(second, 0.0, 0.0)
+
+    def test_matching_via_between_pad_and_tie_arc_is_still_an_obstacle(self):
+        size, drill = stitch_via_geometry(_rules())
+        pcb = self._smd_leg(40.0)
+        # Same net, stitch geometry, on the leg -- but between the pad edge
+        # and the tie arc: past the vertex test's reach (0.8 mm), yet outside
+        # the end-tie adoption window (which starts at the 0.927 mm arc) and
+        # outside the copy span, so no interior target claims it either.
+        # Nobody's tie, nobody's stitch.
+        pcb.add_via(20.85, 50.0, size=size, drill=drill, net=NET)
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        assert result.refused_copies == []
+        (copy,) = result.copies
+        assert copy.existing_vias == 0
+        assert len(_stitches(pcb)) == 10  # the seed plus this pass's own 9
+        # Its own tie still lands past the pad, slid inward past the seed by
+        # the hole-to-hole nudge rather than on top of it.
+        assert _at(pcb, 20.927, 50.0) is False
+        xs = sorted(v.position[0] for v in _stitches(pcb))
+        assert xs[0] == pytest.approx(20.85)  # the seed, untouched
+        assert xs[1] > 21.0  # this pass's tie slid inward past it
+
+    def test_th_control_and_interior_adoption_unchanged_five_passes(self):
+        pcb = _two_pad_leg(length=40.0)
+        counts = []
+        result = None
+        for _ in range(5):
+            result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+            counts.append(len(_stitches(pcb)))
+        assert counts == [7] * 5
+        assert all(c.stitch_vias == [] for c in result.copies)
+        assert sum(c.existing_vias for c in result.copies) == 7

@@ -77,7 +77,9 @@ from typing import TYPE_CHECKING, Any, cast
 from kicad_tools.schema.pcb import PCB, Pad, Segment, _mm_atom
 
 if TYPE_CHECKING:
+    from kicad_tools.creepage.output_audit import CreepageAudit
     from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.optimizer.geometry import PadMaskZone
 
 logger = logging.getLogger(__name__)
 
@@ -976,12 +978,18 @@ def _try_snap(
     e: int,
     removed: set[int],
     baseline: frozenset[frozenset[int]],
+    zones: Sequence[PadMaskZone] = (),
 ) -> None:
     """Snap end ``e`` of segment ``i`` -- and every track end sharing that
     point -- onto the nearest anchoring via/pad centre, if that is safe.
 
     Moving the whole coincident group keeps the shared joint shared; moving
     one end alone would strand its neighbours off-centre.
+
+    ``zones`` (issue #9524) are the pads' mask-opening zones: a snap whose
+    re-aimed body would enter an opening the old geometry avoided is refused
+    (ending on the target pad itself stays allowed -- that is the terminating
+    entry every escape wants).
     """
     n = model.nodes[i]
     p = _end_pt(n, e)
@@ -1048,6 +1056,32 @@ def _try_snap(
             for x in (0, 1)
         )
     )
+    if ok and zones:
+        # Issue #9524: nodes are in their moved state here; ``old`` holds the
+        # pre-snap geometry.  The guard's ``moves`` tuples take the OLD
+        # geometry first (the already-crossed -> exempt side), then the moved
+        # one -- the order the veto branch is written against.
+        from kicad_tools.router.optimizer.geometry import snap_preserves_pad_zones
+
+        ok = snap_preserves_pad_zones(
+            zones,
+            [
+                (
+                    old[k][0][0],
+                    old[k][0][1],
+                    old[k][1][0],
+                    old[k][1][1],
+                    model.nodes[k].a[0],
+                    model.nodes[k].a[1],
+                    model.nodes[k].b[0],
+                    model.nodes[k].b[1],
+                    model.nodes[k].layers[0],
+                    getattr(model.nodes[k].ref, "net_name", "") or "",
+                )
+                for k, _x in movers
+            ],
+            c,
+        )
     if ok:
         for k, x in movers:
             plan.snaps.append((model.nodes[k].index, ("start", "end")[x], c))
@@ -1067,9 +1101,11 @@ def _try_reanchor(
     e: int,
     removed: set[int],
     baseline: frozenset[frozenset[int]],
+    zones: Sequence[PadMaskZone] = (),
 ) -> None:
     """Issue #8259: move an overlap-held end onto the via / pad centre, or add a
-    same-layer stub from the centre when moving it would tilt an on-angle track."""
+    same-layer stub from the centre when moving it would tilt an on-angle track.
+    """
     n = model.nodes[i]
     if getattr(n.ref, "locked", False) or model.overlap[i] or model.anch[i][e]:
         return
@@ -1096,6 +1132,33 @@ def _try_reanchor(
     _set_end(n, e, c)
     model.relink(i)
     if model.partition(removed) == baseline and model.end_ok(i, removed):
+        if zones:
+            from kicad_tools.router.optimizer.geometry import snap_preserves_pad_zones
+
+            pad_ok = snap_preserves_pad_zones(
+                zones,
+                [
+                    (
+                        old[0][0],
+                        old[0][1],
+                        old[1][0],
+                        old[1][1],
+                        n.a[0],
+                        n.a[1],
+                        n.b[0],
+                        n.b[1],
+                        n.layers[0],
+                        getattr(n.ref, "net_name", "") or "",
+                    )
+                ],
+                c,
+            )
+            if not pad_ok:
+                # Issue #9524: the re-aim would sweep the body through a pad's
+                # mask opening -- keep the overlap-held end where it was.
+                n.a, n.b = old
+                model.relink(i)
+                return
         plan.snaps.append((n.index, ("start", "end")[e], c))
         return
     n.a, n.b = old
@@ -2020,6 +2083,33 @@ def required_widths_for(pcb: PCB, current_a: float) -> dict[str, float]:
     return out
 
 
+def current_path_declarations(
+    pcb_path: Path, sidecar: Path
+) -> tuple[list[CurrentPathSpec], set[str], dict[str, dict[str, float]]]:
+    """Load a resolved current-paths sidecar into prune's planning inputs.
+
+    Returns ``(specs, declared_nets, required_widths)``: the parsed specs,
+    the net names they declare, and each declared net's per-layer IPC-2221
+    width (``required_widths_for``, at the board's own stackup copper
+    weight).  Raises on an unreadable sidecar or board; the caller decides
+    whether that is fatal (explicit ``--current-paths``) or a warning
+    (auto-discovered, mirroring ``kct check``'s contract).  Issue #9747:
+    one loader shared by ``kct pcb prune`` and the readiness cleanup.
+    """
+    from kicad_tools.router.current_paths import load_current_path_specs
+
+    specs = load_current_path_specs(sidecar)
+    declared_nets = {spec.net_name for spec in specs}
+    required_widths: dict[str, dict[str, float]] = {}
+    board = PCB.load(pcb_path)
+    for spec in specs:
+        need = required_widths_for(board, spec.thermal_design_current().current_a)
+        have = required_widths.setdefault(spec.net_name, {})
+        for layer, width in need.items():
+            have[layer] = max(have.get(layer, 0.0), width)
+    return specs, declared_nets, required_widths
+
+
 def _plan_declared_loops(
     model: _NetModel,
     plan: NetPlan,
@@ -2123,6 +2213,7 @@ def _plan_net(
     declared: bool = False,
     wide: float = DEFAULT_WIDE_MM,
     required: Required = 0.0,
+    zones: Sequence[PadMaskZone] = (),
 ) -> NetPlan:
     plan = NetPlan(net_number=net_number)
     baseline = model.partition(set())
@@ -2206,7 +2297,7 @@ def _plan_net(
         if i in removed or model.protected[i]:
             continue
         for e in (0, 1):
-            _try_snap(model, plan, i, e, removed, baseline)
+            _try_snap(model, plan, i, e, removed, baseline, zones)
 
     # Overlap-held ends that survive: centre them on the via / pad (issue #8259).
     for i in seg_ids:
@@ -2214,7 +2305,7 @@ def _plan_net(
             continue
         for e in (0, 1):
             if model.held[i][e]:
-                _try_reanchor(model, plan, i, e, removed, baseline)
+                _try_reanchor(model, plan, i, e, removed, baseline, zones)
 
     done = _plan_collinear_merges(model, plan, removed)
     _plan_anchored_merges(model, plan, removed, done)
@@ -2275,6 +2366,12 @@ def plan_prune(
     straddle it are appended to ``region_skipped_out``.
     """
     eff_wide = math.inf if wide is None else wide
+    # Issue #9524: the pads' mask-opening zones (board-relative, like every
+    # model coordinate here) gate endpoint snaps that would swing copper into
+    # an opening.
+    from kicad_tools.router.optimizer.geometry import pad_mask_zones_from_pcb
+
+    zones = pad_mask_zones_from_pcb(pcb)
     names = (
         {net.number: net.name for net in getattr(pcb, "nets", {}).values()}
         if isinstance(getattr(pcb, "nets", None), dict)
@@ -2293,6 +2390,7 @@ def plan_prune(
             declared=declared,
             wide=eff_wide,
             required=(required_widths or {}).get(net_name, 0.0) if wide is None else 0.0,
+            zones=zones,
         )
         if uncut_out is not None:
             uncut_out.extend({"net": net_name or net_number, **u} for u in plan.uncut_loops)
@@ -2456,6 +2554,11 @@ class PruneResult:
     uncut_loops: list[dict[str, Any]] = field(default_factory=list)
     #: plans not applied because an edit fell outside ``--region``
     region_skipped: list[NetPlan] = field(default_factory=list)
+    #: plans dropped because applying them left a pair further under its
+    #: creepage requirement (Issue #9640); empty without ``--voltage-map``
+    creepage_rejected: list[NetPlan] = field(default_factory=list)
+    #: creepage gate report (Issue #9640): ``None`` without ``--voltage-map``
+    creepage: dict[str, Any] | None = None
 
 
 def prune_board(
@@ -2471,12 +2574,21 @@ def prune_board(
     allow_default_rules: bool = False,
     nets: Collection[str] | None = None,
     region: Region | None = None,
+    creepage_audit: CreepageAudit | None = None,
+    creepage_baseline_text: str | None = None,
+    creepage_required_pairs: Mapping[Any, Any] | None = None,
 ) -> tuple[PCB, PruneResult]:
     """Plan (and optionally apply) pruning for ``pcb_path``.
 
     Returns the board (edited in memory when ``apply``) and a summary.  With
     ``kicad-cli`` available each net's plan is trial-applied to a scratch copy
     and kept only when ``pcb drc --refill-zones`` reports nothing new.
+
+    With ``creepage_audit`` (Issue #9640) each net's plan is also dropped when
+    applying it leaves any pair further under its creepage requirement than
+    ``creepage_baseline_text`` (default: ``pcb_path``'s text) -- a new failing
+    pair, or a deeper shortfall on one that already failed.  An audit that
+    cannot run drops every plan: nothing unverified is written.
     """
     import tempfile
 
@@ -2549,6 +2661,17 @@ def prune_board(
         accepted, audit_rejected = _audit_gate(Path(pcb_path), accepted, gate_specs)
         rejected = [*rejected, *audit_rejected]
 
+    creepage_rejected: list[NetPlan] = []
+    creepage_report: dict[str, Any] | None = None
+    if creepage_audit is not None:
+        accepted, creepage_rejected, creepage_report = _creepage_gate(
+            Path(pcb_path),
+            accepted,
+            creepage_audit,
+            creepage_baseline_text,
+            creepage_required_pairs,
+        )
+
     stats = {"segments_removed": 0, "ends_snapped": 0}
     if apply and accepted:
         stats = apply_plans(pcb, accepted)
@@ -2567,18 +2690,96 @@ def prune_board(
             apply_plans(result, accepted)
         uncut.extend(audit_loops_left(result, current_paths, uncut))
     return pcb, PruneResult(
-        plans, accepted, rejected, drc_verified, note, stats, uncut, region_skipped
+        plans,
+        accepted,
+        rejected,
+        drc_verified,
+        note,
+        stats,
+        uncut,
+        region_skipped,
+        creepage_rejected,
+        creepage_report,
     )
+
+
+def _plans_board_text(pcb_path: Path, group: list[NetPlan]) -> str:
+    """The board text of ``pcb_path`` with ``group``'s plans applied (scratch copy)."""
+    import tempfile
+
+    trial = PCB.load(pcb_path)
+    apply_plans(trial, group)
+    with tempfile.TemporaryDirectory(prefix="kct_prune_creep_") as tmp:
+        out = Path(tmp) / "trial.kicad_pcb"
+        trial.save(out)
+        return out.read_text()
+
+
+def _creepage_gate(
+    pcb_path: Path,
+    accepted: list[NetPlan],
+    audit: CreepageAudit,
+    baseline_text: str | None,
+    required_pairs: Mapping[Any, Any] | None,
+) -> tuple[list[NetPlan], list[NetPlan], dict[str, Any]]:
+    """Split ``accepted`` into (kept, rejected) by the creepage audit (Issue #9640).
+
+    Plans are judged per net (a net's snaps, merges and removals stand or fall
+    together), like the DRC trial above: first all together, then -- only when
+    that regresses -- one at a time on top of the plans already kept.
+    """
+    from kicad_tools.creepage.output_audit import audit_summary
+
+    base_text = baseline_text if baseline_text is not None else Path(pcb_path).read_text()
+    report: dict[str, Any] = {"creepage_gate": "active", "creepage_audit": "unchanged"}
+    if not accepted:
+        return accepted, [], report
+    base = audit(base_text)
+    if base is None:
+        for plan in accepted:
+            plan.reject_reason = "creepage audit could not run; edit not verified"
+        report["creepage_audit"] = "unavailable"
+        return [], list(accepted), report
+    report["creepage_audit"] = "ran"
+
+    def worse(group: list[NetPlan]) -> dict[str, int] | None:
+        cur = audit(_plans_board_text(pcb_path, group))
+        if cur is None:
+            return {"unverifiable": 1}
+        excess = {k: n for k, n in cur.items() if n > base.get(k, 0)}
+        return excess or None
+
+    kept: list[NetPlan] = []
+    rejected: list[NetPlan] = []
+    if worse(accepted) is None:
+        kept = list(accepted)
+    else:
+        for plan in accepted:
+            excess = worse([*kept, plan])
+            if excess is None:
+                kept.append(plan)
+            else:
+                pairs = ", ".join(sorted(k.rsplit("|", 1)[0] for k in excess))
+                plan.reject_reason = f"creepage: leaves pair(s) further under requirement: {pairs}"
+                rejected.append(plan)
+    report.update(
+        audit_summary(audit, base_text, _plans_board_text(pcb_path, kept), required_pairs)
+    )
+    return kept, rejected, report
 
 
 def _gate_specs(
     pcb_path: Path, current_paths: Sequence[CurrentPathSpec] | None
 ) -> Sequence[CurrentPathSpec]:
-    """Specs for the audit gate: explicit ones, else the board's sidecar (#8687).
+    """Specs for the audit gate: the caller's, else the board's sidecar (#8687).
 
+    ``current_paths=None`` means "not requested" and keeps the historical
+    discovery (direct callers rely on it).  Any sequence -- including an
+    empty one, an intentional suppression or a sidecar with no paths -- is
+    taken as the caller's resolution and never re-discovered (Issue #9747).
     Discovery only feeds the gate; an unreadable sidecar warns and disables it.
     """
-    if current_paths:
+    if current_paths is not None:
         return current_paths
     from kicad_tools.router.current_paths import (
         discover_current_paths_sidecar,

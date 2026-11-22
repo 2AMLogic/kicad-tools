@@ -397,7 +397,11 @@ def test_merge_into_json_document_keeps_a_single_document():
     from kicad_tools.cli.route_lint_gate import GateOutcome
 
     outcome = GateOutcome("rolled_back", "x")
-    merged = json.loads(merge_into_json_document('{"exit_code": 0, "success": true}', outcome, 3))
+    candidate = '{"exit_code": 0, "success": true, "silk_fix": {"total_fixed": 1}}'
+    merged = json.loads(merge_into_json_document(candidate, outcome, 3))
+    assert "silk_fix" not in merged
+    passed = json.loads(merge_into_json_document(candidate, GateOutcome("pass", "x"), 0))
+    assert passed["silk_fix"] == {"total_fixed": 1}
     assert merged["exit_code"] == 3 and merged["success"] is False
     assert merged["lint_gate"]["status"] == "rolled_back"
     assert json.loads(merge_into_json_document("", outcome, 3))["exit_code"] == 3

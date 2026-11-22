@@ -124,6 +124,47 @@ class TestDrcAwareArgValidation:
         )
         assert result == 0
 
+    def test_ordinary_run_keeps_pre_9748_pad_guard(self, simple_pcb_path: Path, tmp_path: Path):
+        """Issue #9748 is scoped to --drc-aware --mfr: other modes register no
+        mask clearance, so the pre-#9748 guard applies."""
+        from kicad_tools.router.optimizer.trace import TraceOptimizer
+
+        for extra in ([], ["--mfr", "jlcpcb"]):
+            with patch.object(
+                TraceOptimizer,
+                "set_pad_zones",
+                autospec=True,
+                side_effect=TraceOptimizer.set_pad_zones,
+            ) as spy:
+                result = main(
+                    [str(simple_pcb_path), *extra, "-o", str(tmp_path / "o.kicad_pcb"), "--quiet"]
+                )
+            assert result == 0
+            assert spy.call_args.kwargs["danger_clearance"] is None
+
+    def test_drc_aware_mfr_run_registers_mask_clearance(
+        self, simple_pcb_path: Path, tmp_path: Path
+    ):
+        from kicad_tools.router.optimizer.trace import TraceOptimizer
+
+        with patch.object(
+            TraceOptimizer, "set_pad_zones", autospec=True, side_effect=TraceOptimizer.set_pad_zones
+        ) as spy:
+            result = main(
+                [
+                    str(simple_pcb_path),
+                    "--drc-aware",
+                    "--allow-default-rules",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(tmp_path / "o.kicad_pcb"),
+                    "--quiet",
+                ]
+            )
+        assert result == 0
+        assert spy.call_args.kwargs["danger_clearance"] is not None
+
 
 # ---------------------------------------------------------------------------
 # Tests: DRC-aware optimization behavior
@@ -217,6 +258,7 @@ class TestDrcRollback:
             copper_oz,
             min_clearance_mm=None,
             project_path=None,
+            mask_screen=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -287,7 +329,13 @@ class TestDrcRollback:
 
         # Issue #3138: optimizer now uses _run_drc_error_count_by_category.
         def mock_drc(
-            pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None, project_path=None
+            pcb_text,
+            manufacturer,
+            layers,
+            copper_oz,
+            min_clearance_mm=None,
+            project_path=None,
+            mask_screen=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -358,7 +406,13 @@ class TestDrcRollback:
 
         # Issue #3138: optimizer now uses _run_drc_error_count_by_category.
         def mock_drc(
-            pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None, project_path=None
+            pcb_text,
+            manufacturer,
+            layers,
+            copper_oz,
+            min_clearance_mm=None,
+            project_path=None,
+            mask_screen=None,
         ):
             # Always return 0 errors -- optimization is safe
             return {"__total__": 0}
@@ -429,7 +483,13 @@ class TestCategoryAwareRollback:
         call_count = 0
 
         def mock_drc(
-            pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None, project_path=None
+            pcb_text,
+            manufacturer,
+            layers,
+            copper_oz,
+            min_clearance_mm=None,
+            project_path=None,
+            mask_screen=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -512,7 +572,13 @@ class TestCategoryAwareRollback:
         call_count = 0
 
         def mock_drc(
-            pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None, project_path=None
+            pcb_text,
+            manufacturer,
+            layers,
+            copper_oz,
+            min_clearance_mm=None,
+            project_path=None,
+            mask_screen=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -941,7 +1007,7 @@ class TestNameOnlyBoardAndGridSync:
                         pass
 
                 @staticmethod
-                def optimize_net(net_name, segments, optimize_fn):
+                def optimize_net(net_name, segments, optimize_fn, **kwargs):
                     optimize_fn(list(segments))
                     return list(segments)
 

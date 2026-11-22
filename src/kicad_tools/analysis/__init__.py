@@ -41,6 +41,10 @@ from .electrical_rating import (
     ElectricalRatingResult,
     infer_rail_voltage,
 )
+from .layout_quality import (
+    LayoutQualityReport,
+    analyze_layout_quality,
+)
 from .net_status import (
     NetStatus,
     NetStatusAnalyzer,
@@ -78,6 +82,7 @@ from .thermal import (
 )
 from .trace_length import (
     DifferentialPairReport,
+    NetPathMeasurement,
     TraceLengthAnalyzer,
     TraceLengthReport,
 )
@@ -104,6 +109,8 @@ __all__ = [
     "ElectricalRatingResult",
     "ImpedanceDiscontinuity",
     "LayerPrediction",
+    "LayoutQualityReport",
+    "NetPathMeasurement",
     "NetStatus",
     "NetStatusAnalyzer",
     "NetStatusResult",
@@ -126,6 +133,7 @@ __all__ = [
     "ThermalSource",
     "TraceLengthAnalyzer",
     "TraceLengthReport",
+    "analyze_layout_quality",
     "build_zone_net_map",
     "compute_routing_quality",
     "compute_routing_quality_from_records",

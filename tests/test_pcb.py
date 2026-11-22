@@ -687,7 +687,7 @@ class TestFootprintDirectSetPersistence:
     without requiring ``update_footprint_position()``.  This was broken
     before the ``_sexp_node`` back-reference was added to ``Footprint``.
 
-    See https://github.com/rjwalters/kicad-tools/issues/1990
+    See https://github.com/2AMLogic/kicad-tools/issues/1990
     """
 
     def test_position_setter_persists(self, routing_test_pcb, tmp_path):
@@ -2084,6 +2084,97 @@ class TestTraceRoutingAPI:
         assert seg.end == pytest.approx((50.0, 10.0))
         assert seg.width == pytest.approx(0.25)
         assert seg.layer == "F.Cu"
+
+    def test_add_trace_save_keeps_45_degree_endpoints(self, tmp_path):
+        """Saved endpoints keep 0.0001 mm digits past 100 mm (issue #9818).
+
+        ``.6g`` float formatting wrote ``147.5625`` as ``147.562``, tilting
+        this exact 45-degree leg 0.088 degrees off-angle in the census.
+        """
+        from kicad_tools.router.quantize import segment_angle_census
+
+        # Minimal board with net 1 and no outline, so save() does not
+        # recenter anything and the written coordinates are the added ones.
+        base = tmp_path / "base.kicad_pcb"
+        base.write_text(
+            "(kicad_pcb\n"
+            "\t(version 20241229)\n"
+            '\t(generator "pcbnew")\n'
+            '\t(generator_version "9.0")\n'
+            "\t(general\n\t\t(thickness 1.6)\n\t)\n"
+            '\t(paper "A4")\n'
+            "\t(layers\n"
+            '\t\t(0 "F.Cu" signal)\n'
+            '\t\t(2 "B.Cu" signal)\n'
+            '\t\t(25 "Edge.Cuts" user)\n'
+            "\t)\n"
+            '\t(net 0 "")\n'
+            '\t(net 1 "SIG")\n'
+            ")\n"
+        )
+
+        pcb = PCB.load(str(base))
+        pcb.add_trace((147.5625, 92.3375), (147.4, 92.5), net=1)
+        out = tmp_path / "with_trace.kicad_pcb"
+        pcb.save(str(out))
+
+        text = out.read_text()
+        assert "(start 147.5625 92.3375)" in text
+
+        reloaded = PCB.load(str(out))
+        assert len(reloaded.segments) == 1
+        seg = reloaded.segments[0]
+        assert seg.start == (147.5625, 92.3375)
+        assert seg.end == (147.4, 92.5)
+        assert segment_angle_census(out) == (1, [])
+
+    def test_add_trace_net_number_resolves_real_net(self):
+        """An int ``net`` is a net NUMBER reference, not a name (issue #9078).
+
+        board-04's ``compress_staircases`` passed ``Segment.net_number``
+        here; the old name-only handling fed the int to ``add_net``, which
+        minted a phantom net named after the number (``(net 13 5)``) and put
+        the replacement copper on it -- shorting it against the real net 5
+        copper the pads and vias still carried.
+        """
+        pcb = PCB.create(width=100, height=100)
+        osc = pcb.add_net("OSC_OUT")
+        nets_before = len(pcb.nets)
+
+        segments = pcb.add_trace((10.0, 10.0), (20.0, 10.0), width=0.2, net=osc.number)
+
+        assert len(pcb.nets) == nets_before, "int net reference minted a phantom net"
+        assert segments[0].net_number == osc.number
+        assert segments[0].net_name == "OSC_OUT"
+
+    def test_add_trace_unknown_net_number_fails_loudly(self):
+        """An int that names no net must fail, not mint a phantom (issue #9078)."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_net("GND")
+
+        with pytest.raises(ValueError, match="net number 99"):
+            pcb.add_trace((10.0, 10.0), (20.0, 10.0), width=0.2, net=99)
+
+    def test_add_via_net_number_resolves_real_net(self):
+        """``add_via`` shares ``add_trace``'s int-net contract (issue #9078)."""
+        pcb = PCB.create(width=100, height=100)
+        swdio = pcb.add_net("SWDIO")
+        nets_before = len(pcb.nets)
+
+        via = pcb.add_via(x=30.0, y=30.0, size=0.6, drill=0.3, net=swdio.number)
+
+        assert len(pcb.nets) == nets_before, "int net reference minted a phantom net"
+        assert via is not None
+        assert via.net_number == swdio.number
+        assert via.net_name == "SWDIO"
+
+    def test_add_via_unknown_net_number_fails_loudly(self):
+        """An unknown int net must fail, not mint a phantom (issue #9078)."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_net("GND")
+
+        with pytest.raises(ValueError, match="net number 99"):
+            pcb.add_via(x=30.0, y=30.0, size=0.6, drill=0.3, net=99)
 
     def test_add_via_basic(self, tmp_path):
         """Test adding a via at a position."""

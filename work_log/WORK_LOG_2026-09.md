@@ -2,6 +2,320 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-22
+
+- **PR #5679**: perf(zones): skip the post-fill remediation pass's redundant first kicad-cli refill
+- **PR #5675**: refactor(router): switch the fixed-copper predicate to the shared clearance kernel (Epic #5509 Phase 3f)
+- **PR #5674**: fix(router): surface the declared-rule undercut warning on the explicit --clearance path
+- **PR #5671**: perf(router): tombstone R-tree segment deletions instead of deleting eagerly
+- **PR #5670**: refactor(router): switch the lattice engine's clearance predicates to the shared kernel (Epic #5509 Phase 3d)
+- **PR #5669**: perf(router): memoise the per-layer route-halo via probe (phase 4 of the diff-pair re-route step)
+- **PR #5667**: feat(router): read the .kicad_pro Default netclass as a clearance floor
+- **PR #5666**: fix(router): run the plan stage on a cache-hit route too
+- **Issue #5665** (closed): [Epic #5509] Phase 3f: switch fixed-copper predicate (fixed_copper.py + grid.cpp) to the clearance kernel
+- **Issue #5663** (closed): [Epic #5509] Phase 3d: switch lattice engine predicates to the clearance kernel
+- **PR #5659**: test(conformance): add seg-zone, via-zone and copper-edge pair kinds
+- **PR #5658**: perf(router): vectorize + memoize the pure-Python A* via-clearance kernel (phase 4 of the diff-pair re-route step)
+- **PR #5657**: perf(stitch): index foreign-net tracks for the pad-aware via-placement ladders
+- **Issue #5656** (closed): router: explicit --clearance never surfaces the "undercuts a declared rule" warning the resolver builds
+- **PR #5655**: feat(router): unify clearance rule resolution behind one resolver
+- **Issue #5654** (closed): router: promote .kicad_pro netclass clearance to a resolver input once the project writer stops emitting KiCad's stock 0.20mm default
+- **PR #5653**: perf(router): whole-board wall-clock attribution for the resume-exhaustion path (diff-pair re-route step)
+- **PR #5652**: feat(router,cli): overflow report with computed relief, net-status --why consumer, --plan-gate, and the fleet precision/recall table
+- **Issue #5651** (closed): router: a routing-cache hit silently suppresses the routing-plan sidecar (plan stage lives inside route_all_negotiated)
+- **PR #5649**: perf(router): vectorize CongestionMap's cell-skip scan
+- **Issue #5645** (closed): [Epic #5509] Phase 2: rule resolver unification (DRU precedence, pair matrix, fab-tier floors, trace/via symmetry)
+- **Issue #5644** (closed): [Epic #5509] Phase 1c follow-up: zone and edge pair kinds so group 18's zone/edge rules and group 10's pour/outline branches can be measured
+- **Issue #5626** (closed): conformance: add a pad-pad pair kind so Epic #5509 group 19 (drc_cpp) can be measured
+- **Issue #5613** (closed): tests/router/test_monotone_reach.py::TestDDRByteReach fails at origin/main: DDR byte bundle routes 10/11 in ~15min, DQS_P/DQS_N unroutable
+- **Issue #5521** (closed): [Epic #5510] router/cli: overflow report with computed relief, net-status --why consumer, --plan-gate/--force, and the fleet precision/recall table
+- **Issue #5510** (closed): Epic: capacity-aware routing plan on the default path — layer assignment, hard corridors, and an infeasibility certificate
+
+### 2026-09-21
+
+- **PR #5647**: chore(release): bump version to 0.21.1
+- **PR #5646**: fix(router): engage the within-pair clearance override only when it relaxes
+- **PR #5643**: test(conformance): Epic #5509 Phase 1c -- oracle adapters for 18 of 19 consumer groups, kernel control row, CI wiring (#5515)
+- **PR #5642**: fix(router): write access-witness sidecar on deadline kill, fix verdict-shape and net0 defects
+- **PR #5641**: perf(router): reject far copper by bounding box before the exact halo distance
+- **PR #5640**: docs(diagnostics): Phase 1c access-loss witness runs on boards 05/06/07 (evidence only)
+- **Issue #5639** (closed): access-witness (1a/1b): no sidecar on deadline-terminated routes, plus two verdict-shape defects
+- **PR #5638**: test(board06): pin _path_ok's foreign drill-hole rejection (#5608 follow-up)
+- **PR #5637**: perf(stitch): index filled-polygon edges + add phase-level profiling to the diff-pair re-route step
+- **PR #5636**: feat(router): honest plan capacity — per-class pitch, plane exclusion, keepout/preserved-copper blockage (#5575)
+- **PR #5635**: fix(board06): name a foreign --step route input instead of letting it look like a regression (#5628)
+- **PR #5634**: perf(ci): raise KCT_NATIVE_MAX_CONCURRENCY from 1 to 2
+- **PR #5633**: fix(release): uv's idempotent-publish flag is --check-url, not --skip-existing
+- **PR #5632**: fix(release): idempotent PyPI publish via --skip-existing
+- **Issue #5631** (closed): board06: add dedicated regression test for _path_ok's hole-clearance rejection (#5608 follow-up)
+- **PR #5630**: fix(release): slim the sdist under PyPI's 100MB limit
+- **PR #5629**: fix(board06): enforce hole_clearance in pour-repair path acceptance (#5608)
+- **Issue #5628** (closed): board06: --step route on main now leaves +3V3 U3.1 UNREPAIRED (6 lines) and produces 0 hole_clearance errors — route outcome shifted from the #5606-era baseline
+- **PR #5627**: fix(zones): coverage-gate the queued-vs-queued overlap warning (#5618)
+- **PR #5624**: perf(ci): exclude kicad-cli --help/--version probes from the native permit gate
+- **PR #5623**: chore(release): bump version to 0.21.0
+- **PR #5622**: fix(board07): frame-independent pour-repair bounds + refill stability
+- **Issue #5618** (closed): zones: coverage-gate the queued-vs-queued overlap warning like existing-vs-new (follow-up to #5590)
+- **Issue #5616** (closed): perf(ci): recover the +4.7 min Test-job median regression from KCT_NATIVE_MAX_CONCURRENCY=1 without reintroducing the cgroup OOM
+- **Issue #5608** (closed): board06: pour-repair bridge can land 3um inside the hole_clearance floor vs a GND via
+- **Issue #5603** (closed): perf(ci): cache kicad-cli capability probes so --help launches stop taking native permits
+- **Issue #5575** (closed): [Epic #5510] router: honest plan capacity — per-class pitch, plane exclusion, keepout/preserved-copper blockage, channel fixture (#5520 PR-B)
+- **Issue #5520** (closed): [Epic #5510] router: run the plan stage on every default kct route with honest capacity (per-class pitch, plane exclusion, zone/keepout blockage, --no-routing-plan)
+- **Issue #5518** (closed): [Epic #5508] Phase 1c: access-loss witness runs on boards 05 / 06 / 07 with DQ3 as negative control (evidence only)
+- **Issue #5515** (closed): [Epic #5509] Phase 1c: oracle adapters for the remaining 14 consumer groups, kernel adapter, CI wiring, full disagreement table
+- **Issue #5507** (closed): router: preserve power-pad access for Board07 U4.C2 (+1V2)
+
+### 2026-09-20
+
+- **PR #5621**: chore(changelog): reconcile [Unreleased] since v0.20.0
+- **PR #5620**: feat(board06): reuse through-hole pads as pour-bridge termini in sub-stage D (#5606)
+- **PR #5619**: feat(router): replay commit journal into per-pad access witness
+- **PR #5615**: fix(zones): allocate new pours around pre-existing same-layer zones
+- **PR #5614**: fix(router): resume loop rejects accepted goal node + localized strict pad parity check
+- **PR #5612**: fix(ci): cache kicad-cli capability probes to cut native-launch amplification
+- **PR #5611**: feat(router): ordered commit journal + access-witness sidecar
+- **Issue #5610** (closed): [Epic #5508] Phase 1b (PR 2): access-witness replay + net-status/StuckNetDiagnosis consumers
+- **PR #5609**: fix(router): congestion-mark stagnation recovery so board06 converges without the avoidance leak
+- **Issue #5606** (closed): board06: port the through-hole pad pour-bridge reuse (#5564) into sub-stage D
+- **PR #5605**: fix(board06): reuse an existing same-net barrel for a pour bridge
+- **PR #5604**: feat(mcp): migrate to mcp 2.x SDK (FastMCP -> MCPServer) + fastmcp 4 (#5601)
+- **PR #5602**: fix(ci): board06 determinism smoke -- explicit output dir for --step route (#5597)
+- **Issue #5601** (closed): chore(mcp): migrate to fastmcp 4 / mcp 2.x (FastMCP renamed to MCPServer)
+- **PR #5600**: fix(ci): fix board 02/04 determinism-smoke flag drift + raise board-02 timeout
+- **Issue #5599** (closed): router: C++ pathfinder gives up on post-route clearance validation, falls back to slow Python A* (blocks board 02/04 routes)
+- **PR #5598**: fix(ci): delegate board06 smoke + load-independence copper hash to normalize_copper.py
+- **Issue #5597** (closed): board06_determinism_smoke.sh: generate_design.py's default output_dir (regression-output) breaks --step route without an explicit output dir
+- **PR #5596**: fix(tests): compose finite-mode route budget in test_route_artifact_receipt
+- **PR #5595**: feat(router): add pad outlines and zone polygons to the clearance kernel
+- **Issue #5594** (closed): test(router): board02 jlcpcb-tier1 baseline fails on main -- GND net partially routed, 2 of 3 pads stranded
+- **PR #5593**: fix(zones): derive generated zone UUIDs from content so pour fills are reproducible
+- **PR #5592**: feat(router): add exact-geometry clearance kernel for segments, vias and edges
+- **Issue #5591** (closed): pcb: generated boards emit pads with no (uuid ...), so KiCad invents a random one per pad on every load
+- **Issue #5590** (closed): zones: an auto-poured zone that overlaps an equal-priority zone on the same layer is starved of copper
+- **Issue #5589** (closed): feat(router): extend the clearance kernel with pad outlines and zone polygons
+- **Issue #5587** (closed): ci: board_route_determinism_smoke.sh 02 and 04 fail on a loaded host (wall-clock stage deadline / route deadline)
+- **Issue #5586** (closed): ci: two more line-based copper normalizers compare element COUNTS (board06 smoke, load-independence test)
+- **Issue #5584** (closed): flake risk: test_route_artifact_receipt's finite mode carries the same flat-30s route budget fixed in #5579
+- **Issue #5578** (closed): router: zone pour-fill island decomposition is not reproducible run-to-run (routed copper is)
+- **PR #5569**: chore(deps): bump anyio from 4.12.0 to 4.14.2
+- **Issue #5566** (closed): flake: lattice post-pass gating tests time out in native_concurrency acquire
+- **PR #5564**: fix(zones): reuse an existing through-hole pad as a pour-bridge terminus
+- **PR #5562**: chore(deps-dev): bump cmake from 4.4.2 to 4.4.3
+- **PR #5561**: chore(deps): bump the python-minor-patch group across 1 directory with 2 updates
+- **PR #5560**: chore(deps): bump actions/upload-artifact from 4 to 7
+- **PR #5559**: chore(deps): bump astral-sh/setup-uv from 10.0.1 to 10.1.0 in the github-actions group across 1 directory
+- **PR #5558**: chore(deps-dev): bump the site-minor-patch group in /site with 2 updates
+- **Issue #5551** (closed): board06: port the existing-barrel pour-bridge planner into sub-stage D
+- **Issue #5545** (closed): router: cohort-reroute converges on board06 U2.B1 stranding without the stale-penalty leak PR #5541 removes
+- **Issue #5517** (closed): [Epic #5508] Phase 1b: ordered commit journal + offline access-loss witness surfaced in `net-status --why`
+- **Issue #5514** (closed): [Epic #5509] Phase 1b: clearance kernel API in router/cpp with Python port and mandatory parity test (no consumer switched)
+- **Issue #5505** (closed): CI runtime: representative-cohort remeasurement and close-out for #5240
+- **Issue #5504** (closed): router: make per-connection avoidance cleanup the default once Board06 U2.B1 stranding is explained
+
+### 2026-09-19
+
+- **PR #5588**: docs(routing-plan): fix understated elapsed_s claim in Cost section
+- **PR #5585**: fix(ci): compare whole copper nodes, not header lines, in the route-determinism gate
+- **PR #5583**: test(ci): size the partial-placement route budget against the native-permit queue (#5579)
+- **Issue #5582** (closed): docs(routing-plan): "Cost" section understates the measured plan-stage elapsed_s by ~60x
+- **PR #5581**: feat(router): run the report-only routing plan stage on every default route (+ --no-routing-plan)
+- **Issue #5580** (closed): ci: board_route_determinism_smoke.sh normalize_copper() compares copper element COUNTS, not geometry
+- **Issue #5579** (closed): flake: test_route_partial_placement_cli deadline-exceeded failures redden the Test job on main
+- **PR #5577**: perf(board06): spatially prune the pour-repair obstacle clearance scans
+- **PR #5576**: fix(ci): credit native-slot wait back to the waiting test's pytest-timeout budget
+- **PR #5574**: fix(judge): restore draft-PR fallback exclusion reverted by installed-surface resync
+- **PR #5573**: test(ci): add evidence-sized pytest-timeout overrides to the three 60s-reaped test groups
+- **Issue #5572** (closed): CI: native-slot wait from KCT_NATIVE_MAX_CONCURRENCY=1 is charged to the waiting test's pytest-timeout budget
+- **PR #5571**: perf(router): hoist loop-invariant clearance lookups in validate_routes
+- **PR #5570**: fix(router): persist add_obstacle keepouts across grid resets
+- **Issue #5567** (closed): Flaky >60s pytest-timeout in tests/router/lattice/test_post_pass_gating.py CLI tests
+- **Issue #5557** (closed): judge-fallback-guard.sh: exclude draft PRs from fallback evaluation
+- **Issue #5556** (closed): CI: Test job flakes on a fixed 60s pytest-timeout hitting an arbitrary test (seen on main and PRs)
+- **Issue #5555** (closed): router: _reset_for_new_trial drops add_obstacle keepouts, silently reopening the grid
+- **Issue #5552** (closed): chore: resync installed Loom surfaces silently reverted merged fix #5543 (draft-PR fallback exclusion)
+- **Issue #5513** (closed): [Epic #5509] Phase 1a: kicad-cli clearance conformance oracle (report-only) with four adapters and named fixtures
+
+### 2026-09-18
+
+- **PR #5568**: fix(router): sum both edge directions in RoutingPlan edge entries
+- **PR #5565**: test(conformance): wrap five clearance consumers as adapters and populate the conformance table
+- **PR #5554**: perf(router): write segment clearance envelopes with slice assignment
+- **PR #5553**: feat(router): apply declared swap groups via a pad-rebind applicator
+- **PR #5549**: fix(zones): reuse an existing same-net barrel for a pour bridge (#5507)
+- **PR #5548**: feat(board-07): netlist write-back for generator-owned boards (Epic #5511 Phase 2b)
+- **PR #5547**: chore(deps): bump soupsieve from 2.8.4 to 2.9
+- **PR #5546**: chore(deps): bump devalue from 5.8.1 to 5.9.2 in /site
+- **Issue #5544** (closed): RoutingPlan.from_global_result() may disagree with get_total_overflow() on reverse-direction-only overflow
+- **PR #5542**: fix: parse kicad-cli 10 hole-to-hole 'min X mm; actual Y mm' wording
+- **PR #5540**: fix: RegionGraph.get_total_overflow() undercounts reverse-direction edge overflow
+- **Issue #5538** (closed): classify-dependency-block.sh's ref extraction treats a parenthetical epic mention as a second open blocker, wedging phase issues in DEFER forever
+- **Issue #5537** (closed): [Epic #5511] Phase 2b: netlist write-back for generator-owned boards
+- **Issue #5536** (closed): [Epic #5511] Phase 2a: pad-rebind applicator for declared swap groups
+- **Issue #5534** (closed): drc/report.py's clearance extractor doesn't parse kicad-cli 10's hole-to-hole wording
+- **Issue #5533** (closed): [Epic #5509] Phase 1a (2/2): five consumer adapters + populated clearance-conformance table
+- **Issue #5529** (closed): RegionGraph.get_total_overflow() can undercount overflow on reverse-direction edge traversals
+- **PR #5524**: ci: bound native KiCad subprocess concurrency from measured attribution
+- **Issue #5523** (closed): loom-fleet-dispatch auto-relabels draft PRs to loom:review-requested
+- **Issue #5501** (closed): CI: bound remaining native subprocess concurrency after confirmed Test cgroup OOM
+
+### 2026-09-17
+
+- **PR #5543**: fix(judge): exclude draft PRs from fallback-mode evaluation
+- **Issue #5535** (closed): judge-fallback-guard.sh does not exclude draft PRs from fallback-mode evaluation
+- **PR #5532**: test(conformance): kicad-cli clearance oracle harness + named fixtures (Epic #5509 Phase 1a)
+- **PR #5531**: perf(analysis): spatially prune net-status segment-adjacency scan
+- **PR #5528**: feat(router): emit RoutingPlan sidecar from two-phase global pass (#5519)
+- **PR #5527**: perf(router): vectorize diff-pair corridor mask dilation
+- **PR #5526**: feat(router): declared swap groups + crossing-minimising pin assignment
+- **PR #5525**: feat(router): pad access sets + Kelvin/competing-net fixture (Epic #5508 Phase 1a)
+- **Issue #5522** (closed): [Epic #5511] Declared swap groups + crossing-minimising pin assignment (report-only)
+- **Issue #5519** (closed): [Epic #5510] router: emit RoutingPlan sidecar from the existing two-phase global pass (report-only, byte-identical copper)
+- **Issue #5516** (closed): [Epic #5508] Phase 1a: `router/pad_access.py` access-set computation + 4-pad Kelvin/competing-net fixture
+
+### 2026-09-16
+
+- **PR #5512**: ci: pin routed job containers to the kicad slots' sibling-pair cores (6-31,38-63)
+- **PR #5503**: ci: attribute native Test workloads before selecting an OOM policy
+- **PR #5500**: perf(router): avoid sqrt in hole-to-hole clearance hot loop
+- **PR #5499**: feat(manufacturers): enable reviewed JLC Gerber upload transport
+- **PR #5498**: fix(router): check tuning across physical via barrel spans
+- **PR #5497**: fix(router): clear avoidance costs after each connection
+- **Issue #5496** (closed): router: validate tuning against physical via barrel spans
+- **Issue #5495** (closed): router: clear native avoidance penalties after each pad connection
+- **PR #5494**: test(router): preserve native import state across diagnostic reloads
+- **Issue #5493** (closed): tests: restore native backend import state after diagnostic reloads
+- **PR #5492**: docs: check coverage overhead before suspecting a hang in slow single-test runs
+- **PR #5491**: docs: record pinned-main softstart qualification
+- **Issue #5490** (closed): test_board02_real_hardware.py::test_generated_real_schematic_and_pcb_agree does not terminate quickly — verify actual failure mode
+- **PR #5489**: perf(lvs): resolve every schematic pin against one connectivity graph
+- **PR #5488**: perf(board06): spatially prune the pour-connectivity audit's pairwise scan
+- **PR #5487**: docs: record current softstart residual attribution
+- **PR #5486**: fix(router): preserve static partner-pad clearance in native search
+- **PR #5485**: fix: handle equal-potential pairs at zero HV threshold
+- **Issue #5484** (closed): Zero HV threshold crashes on equal-potential net pairs
+- **PR #5483**: fix(router): retain physical targets for repeated pad numbers
+- **Issue #5482** (closed): router: preserve static partner-pad clearance during native differential search
+- **Issue #5481** (closed): loom-daemon: loom:blocked stripped/re-dispatched within ~2 minutes on #5333 (105+ lease claims/16h, 3 hosts)
+- **Issue #5480** (closed): router: retain disconnected same-number pad lands as physical routing targets
+- **PR #5479**: fix(router): retain escape and two-phase routing checkpoints
+- **Issue #5478** (closed): router: retain checkpoints through escape and two-phase routing
+- **PR #5477**: fix(router): keep Kelvin destination escape copper reachable
+- **PR #5476**: perf(router): prune distant match-group clearance comparisons
+- **Issue #5475** (closed): router: keep destination escape copper reachable during Kelvin branch isolation
+- **PR #5474**: fix(board04): avoid unsupported route failure diagnoses
+- **PR #5473**: perf(router): AABB pre-filter for diff-pair length-tuning clearance check
+- **Issue #5472** (closed): board04: do not attribute every partial route to timeout
+- **Issue #5471** (closed): perf(router): AABB pre-filter for match-group post-insertion clearance checks
+- **PR #5470**: perf(router): keep scalar congestion arithmetic in Python floats
+- **Issue #5469** (closed): perf(router): use Python floats for scalar congestion arithmetic
+- **PR #5468**: perf(router): reuse congestion cost within neighbor batches
+- **Issue #5467** (closed): perf(router): reuse coarse congestion cost within neighbor batches
+- **Issue #5464** (closed): loom-daemon repeatedly redispatches issue #5240 despite an open non-closing 'Part of #5240' PR under review
+- **Issue #5455** (closed): router: diversify final bounded relief probe direction for two-terminal nets
+- **Issue #5435** (closed): router: reject negotiated trace crossings of foreign via copper during native search
+- **PR #5425**: fix(router): preserve physical clearances and complete bounded native searches
+- **Issue #5405** (closed): router: extract budget-exhaustion precedence fix from held Board07 draft
+- **Issue #5351** (closed): ci: containerd snapshots fill runner root disk despite mostly empty cache volume
+- **Issue #5145** (closed): JLC handoff: resumable exact-byte Gerber upload intents and bound receipts
+- **Issue #5056** (closed): Feature: Python JLCPCB submission preparation with verified handoff, live stock, review receipts and resumable upload
+- **Issue #5000** (closed): board03: qualify USB firmware identity and suspend behavior before factory flashing
+- **Issue #4956** (closed): Champion: Merge-Risk Hold Digest
+
+### 2026-09-15
+
+- **PR #5466**: perf(router): avoid cell-view allocation in zone lookup
+- **Issue #5465** (closed): perf(router): avoid cell-view allocations in zone lookup
+- **PR #5463**: fix(router): negotiate physical copper demand and tapered escapes
+- **PR #5462**: chore: install Squad repository coordination workflows
+- **Issue #5461** (closed): Install Squad repository adapters for cross-agent coordination
+- **PR #5460**: perf(router): hoist per-node pad-exit flags out of the A* neighbor loop
+- **PR #5459**: fix(router): enforce physical board edges for lattice copper
+- **Issue #5458** (closed): fix(router): enforce physical board-edge clearance for lattice class-width copper
+- **PR #5457**: fix(router): honor class clearance across lattice through-vias
+- **PR #5456**: router: reverse the final bounded two-terminal relief probe
+- **Issue #5454** (closed): router: honor net-class clearance across lattice through-via spans
+- **PR #5453**: ci: isolate native zone acceptance from parallel pytest workers
+- **Issue #5452** (closed): ci: prevent native zone acceptance from exhausting the Test container memory limit
+- **PR #5451**: perf(sch): reuse footprint pad counts within bulk assignment
+- **Issue #5450** (closed): router: make lattice negotiation history cover physical escape and unequal-width conflicts
+- **PR #5449**: fix(router): preserve physical Kelvin branch separation in lattice routing
+- **PR #5448**: test(parts): simulate retry waits while checking timing policy
+- **PR #5447**: fix(zones): preserve source constraints before HV keepout refill
+- **Issue #5446** (closed): zones: preserve source project and custom rules through HV keepout output and refill
+- **PR #5445**: perf(router): load public exports on demand
+- **Issue #5444** (closed): router: preserve physical Kelvin branch separation in lattice routing
+- **PR #5443**: fix(router): preserve physical pitches in differential routing
+- **Issue #5442** (closed): copper LVS misses a native-confirmed +1V2 open despite 244 bound pads
+- **PR #5440**: fix(board04): select clearance-safe manufacturing via bonds
+- **Issue #5439** (closed): Board04 off-pad manufacturing via relocation shorts fresh routed copper
+- **PR #5438**: feat(route): bind final board and custom rules in a verifiable receipt
+- **PR #5437**: fix(router): validate tapered goal-via landings at emitted width
+- **Issue #5436** (closed): Route outputs: bind effective board/project/custom-rule bytes in a verifiable receipt
+- **Issue #5434** (closed): router: validate tapered goal-via arrivals at emitted copper width
+- **PR #5433**: perf(validate): load public validation rules on demand
+- **PR #5432**: fix(impedance): require resistor topology for sense exclusions
+- **PR #5431**: perf(schema): index zone descendants once instead of 13 repeated finds
+- **Issue #5429** (closed): perf: lazy-load kicad_tools.validate/validate.rules to stop unrelated DRC-rule imports pulling in the whole router
+- **PR #5428**: perf(cli): defer eager CLI/reasoning imports to cut per-invocation startup cost
+- **PR #5427**: perf(router): incremental clearance-window dilation for trace collision checks
+- **Issue #5426** (closed): impedance.py exclude_current_sense over-broad name match can silently disable diff-pair DRC
+- **PR #5424**: perf(validate): vectorize broad-phase candidate-pair queries
+- **PR #5423**: fix(router): preserve physical identity for repeated footprint references
+- **PR #5422**: docs(board07): complete DQ3 stage-boundary diagnosis
+- **PR #5421**: fix(router): widen interior attachment search for wide pad escapes
+- **PR #5420**: ci: serialize native physical-stitch acceptance
+- **Issue #5418** (closed): Preserve physical terminal identity across repeated or empty footprint references
+- **Issue #5417** (closed): ci: serialize native physical-stitch acceptance to prevent measured cgroup OOM
+- **PR #5416**: fix(export): preserve board rules in manufacturing project archive
+- **Issue #5415** (closed): Fix generic manufacturing archive preservation of custom DRU rules
+- **PR #5414**: docs(router): record fresh softstart pairwise proof
+- **PR #5413**: fix: route valid nets while preserving placement-invalid copper
+- **PR #5411**: fix(router): bound Kelvin contact by native pad and trace width
+- **PR #5409**: fix(router): preserve authored gaps in differential sizing
+- **Issue #5408** (closed): router: preserve authored pair gaps during impedance sizing
+- **PR #5404**: fix(board03): make saved copper native-refill stable
+- **PR #5403**: perf(clearance): prune spatially impossible coupling pairs
+- **PR #5402**: fix(router): preserve physical Kelvin branch isolation
+- **PR #5401**: fix(router): attach wide escape necks inside pad copper
+- **PR #5400**: fix(zones): preserve HV keepout gaps through native refill
+- **Issue #5399** (closed): HV pour keepouts: preserve requested copper gap through native refill (1.593915 mm vs 1.600)
+- **PR #5397**: docs(board07): retain DQ3 and DDR-only diagnostic evidence
+- **PR #5396**: feat(stitch): validate physical power completion before promotion
+- **PR #5395**: perf(router): avoid cell views in diagonal corner checks
+- **PR #5394**: fix(readiness): verify finished releases without replacing recipe contents
+- **Issue #5393** (closed): [Epic #3438] Reproduce and localize the remaining Board07 DQ3 open
+- **PR #5392**: fix(router): audit HV pad copper and align search waiver geometry
+- **Issue #5391** (closed): kct readiness: zone_fill gate is vacuous, and the run degrades recipe-finalised bundles
+- **PR #5390**: perf(router): avoid per-call NumPy allocation in _is_via_blocked hot path
+- **PR #5389**: fix(board07): correct HDMI witness widths with native parity checks
+- **Issue #5388** (closed): [Epic #4410] Make via stitching short-free and complete physical power connections
+- **PR #5387**: docs(board07): decide scope of HDMI witness width correction
+- **PR #5386**: fix(board03): preserve corrected copper and report blocked native parity
+- **PR #5385**: fix(analysis): preserve narrow via contacts with copper fills
+- **PR #5384**: fix(schema): preserve the format default for explicit fill-stroke yes
+- **PR #5383**: feat(router): preserve bounded arc and Bezier outline geometry
+- **Issue #5382** (closed): analysis: verify current-main native parity for stroke-encoded fill fragments
+- **PR #5381**: fix(analysis): resolve fill-stroke encoding by token then file version
+- **Issue #5380** (closed): Board03: repair 44 PTH-hole clearance failures under PR #5152 factory rules
+- **PR #5377**: fix(router): reinstall board-edge keepout across trial resets and worker reconstruction
+- **PR #5376**: feat(router): preserve actual custom-pad copper for placement-excluded nets
+- **Issue #5374** (closed): Preserve board-edge keepouts across trial resets and routing grid reconstruction
+- **PR #5373**: feat(router): preserve bounded circle, arc and Bezier outline geometry
+- **Issue #5372** (closed): Router loader refuses gr_curve Edge.Cuts outlines -- next blocker after #5367's gr_circle fix
+- **Issue #5367** (closed): Router loader refuses circular Edge.Cuts outlines (gr_circle) before any pad is parsed
+- **Issue #5362** (closed): analysis: native R13/R14 VCC open is missed by combined physical-contact analyzers
+- **Issue #5357** (closed): [Parent #4946] Preserve actual custom-pad copper for placement-excluded nets
+- **Issue #5348** (closed): [Parent #4946] Enable default partial routing around invalid placement across all CLI modes
+- **Issue #5204** (closed): board-05: real silk-to-pad and inner PTH-hole clearance violations from PR #5152's new factory rules
+- **Issue #5201** (closed): Router via-in-pad placement/repair is not process-eligibility aware (regresses board02 at jlcpcb-tier1)
+- **PR #5189**: feat(manufacturing): model via-in-pad fabrication process eligibility
+- **PR #5152**: fix(drc): enforce object-specific factory clearances
+- **Issue #5126** (closed): board07: regenerate HDMI/TMDS copper to match corrected 0.225mm sidecar width
+- **Issue #5009** (closed): manufacturing: via-in-pad capability bypasses actual process eligibility and ordering requirements
+- **Issue #4946** (closed): router: --allow-offboard is whole-board, not scoped — one off-board footprint vetoes zero-touch routing of an otherwise-clean multi-hundred-net board (BeagleConnect Freedom)
+- **Issue #4409** (closed): router/diffpair: coupled router must actually couple pairs (board 06: 0/9 couple, all budget-exit)
+- **Issue #3803** (closed): Router/DRC fidelity: kct reports routing PASS while native KiCad DRC finds 400+ violations (incl. shorts)
+
 ### 2026-09-14
 
 - **PR #5378**: fix(router): distinguish unknown from verified-empty via-in-pad hole census

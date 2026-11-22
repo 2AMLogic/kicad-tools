@@ -110,6 +110,7 @@ def _build_obstacles(pcb, side: str, keepout: float):
     from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[import-untyped]
 
     from kicad_tools.geometry.courtyard import _courtyard_polygon
+    from kicad_tools.router.rule_area_resolve import all_rule_area_zones
     from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
 
     cu, short = _side_layers(side)
@@ -132,14 +133,19 @@ def _build_obstacles(pcb, side: str, keepout: float):
             geoms.append(LineString([seg.start, seg.end]).buffer(seg.width / 2))
     for via in pcb.vias:
         geoms.append(Point(via.position).buffer(via.size / 2))
-    for zone in pcb.zones:
-        ko = getattr(zone, "keepout", None)
+    for zone in all_rule_area_zones(pcb):
+        ko = zone.keepout
         if ko is None or len(zone.polygon) < 3:
             continue
         zone_layers = set(zone.layers or [zone.layer])
         if not ({cu, "F&B.Cu", "*.Cu"} & zone_layers):
             continue
-        if not (ko.copperpour_allowed and ko.tracks_allowed and ko.footprints_allowed):
+        if not (
+            ko.pads_allowed
+            and ko.footprints_allowed
+            and ko.copperpour_allowed
+            and ko.tracks_allowed
+        ):
             geoms.append(Polygon(zone.polygon).buffer(0))
     return geoms
 
@@ -225,12 +231,37 @@ def _existing_fiducials(pcb, side: str) -> int:
     return sum(1 for fp in pcb.footprints if _is_fiducial(fp) and fp.layer == layer)
 
 
+def _is_smd_part(fp) -> bool:
+    """True when the footprint is machine-placed: ``(attr smd)`` or any SMD pad.
+
+    The ``attr`` type token is optional in KiCad output, so SMD pads are
+    checked too. Through-hole-only footprints are hand/wave soldered and
+    need no pick-and-place fiducial (Issue #9472).
+    """
+    return fp.attr == "smd" or any(pad.type == "smd" for pad in fp.pads)
+
+
 def _populated_sides(pcb) -> list[str]:
+    """Sides carrying at least one placed SMD BOM part (Issues #9472, #9480).
+
+    A part counts when it is SMD, BOM-included, not ``board_only`` and not
+    DNP: a do-not-populate part is never machine-placed, so it needs no
+    fiducial even when it is still listed in the BOM.
+
+    Shared by ``--sides populated`` and the ``fiducials_missing`` /
+    ``board_id_missing`` rules so check and fix agree.
+    """
     sides = []
     for side, layer in (("front", "F.Cu"), ("back", "B.Cu")):
         for fp in pcb.footprints:
             flags: frozenset[str] | set[str] = getattr(fp, "attr_flags", frozenset())
-            if fp.layer == layer and not fp.exclude_from_bom and "board_only" not in flags:
+            if (
+                fp.layer == layer
+                and not fp.exclude_from_bom
+                and "board_only" not in flags
+                and not fp.dnp
+                and _is_smd_part(fp)
+            ):
                 sides.append(side)
                 break
     return sides

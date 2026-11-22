@@ -229,6 +229,37 @@ public:
                            int radius_cells, float amount);
     void clear_avoidance_costs();
 
+    // Issue #9597: bulk zone (copper pour) marking -- mirrors the Python
+    // ``RoutingGrid.add_zone_cells`` / ``clear_zones`` sync so the native
+    // A* sees the same plane-zone cells the Python pathfinder costs.
+    void mark_zone_cells(const std::vector<int>& xs, const std::vector<int>& ys,
+                         const std::vector<int>& layers, const std::vector<int>& nets);
+    // Issue #9826: ``layer < 0`` (default) clears every layer, otherwise
+    // only ``layer``.  Former zone cells that are neither blocked nor an
+    // obstacle get ``net = 0``, matching ``RoutingGrid.clear_zones``.
+    void clear_zone_cells(int layer = -1);
+
+    // Issue #9826: grid-layer indices the resolved stack types as ``PLANE``.
+    // A foreign zone cell on a plane layer is soft-costed
+    // (``cost_zone_foreign_plane``); on any other layer it is blocked --
+    // the same split the Python pathfinder makes.  Empty (the default)
+    // means no plane layers, so every foreign zone blocks.
+    void set_plane_layers(const std::vector<int>& layers);
+    bool is_plane_layer(int layer) const {
+        return layer >= 0 && static_cast<size_t>(layer) < plane_layer_.size() &&
+               plane_layer_[static_cast<size_t>(layer)] != 0;
+    }
+
+    // Airwire-separation cost plane (Issue #8999).  ``set_airwire_cells``
+    // writes the weighted sparse plane (same count column on every layer
+    // -- a desire line is layer-less) in one call; a full
+    // clear-then-rewrite per refresh keeps the native plane a pure
+    // function of the committed set, mirroring
+    // ``kicad_tools.router.airwire_cost.refresh_airwire_cost``.
+    void clear_airwire_costs();
+    void set_airwire_cells(const std::vector<int>& xs, const std::vector<int>& ys,
+                           const std::vector<float>& costs);
+
     // Negotiated routing support
     void reset_usage();
     void increment_usage(int x, int y, int layer);
@@ -274,7 +305,7 @@ public:
                  int net, int layer_idx, uint32_t ref_hash,
                  float clearance_override,
                  bool is_plane_net = false, float rotation = 0.0f,
-                 bool is_circular = false);
+                 bool is_circular = false, float copper_corner_radius = -1.0f);
 
     // Issue #6008: board-file keepout rule areas the occupancy planes cannot
     // hold -- net-filtered track rules (``spatial_keepouts``) and every via
@@ -447,8 +478,19 @@ public:
     // Issue #6272: ``clearance`` is the trace/via floor
     // (``trace_via_clearance``); ``partner_net`` / ``partner_clearance`` only
     // widen the candidate lookup -- a partner's barrel is never relaxed.
+    struct TraceViaBand {
+        float edge_mm = 0.0f;
+        float incoming_dx = 0.0f, incoming_dy = 0.0f;
+        bool terminal = false;
+    };
     bool trace_stored_vias_clear(const Segment& segment, float clearance,
-                                 int partner_net, float partner_clearance) const;
+                                 int /*partner_net*/, float partner_clearance) const {
+        return search_trace_vias_clear(segment, clearance, partner_clearance, {});
+    }
+    // Reconstructed pad-center stubs only need the same-net band. Ordinary
+    // planar steps use the same spatial lookup for foreign barrel clearance.
+    bool search_trace_vias_clear(const Segment& segment, std::optional<float> foreign_clearance,
+                                 float partner_clearance, const TraceViaBand& band) const;
     // Issue #6272: ``trace_clearance`` >= 0 raises the via-vs-stored-segment
     // floor to ``trace_via_clearance(trace_clearance, clearance)``; via-vs-via
     // keeps ``clearance``.  The default (-1) keeps the pre-#6272 via floor.
@@ -723,6 +765,7 @@ private:
     // skip the per-cell reservation read entirely when this is false, so
     // boards without active reservations keep byte-identical behaviour.
     bool has_reservations_ = false;
+    std::vector<uint8_t> plane_layer_;  // Issue #9826: per-layer PLANE flag
     int cols_, rows_, layers_;
     float resolution_;
     float origin_x_, origin_y_;

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 
 from kicad_tools.core.arcs import arc_sweep
 from kicad_tools.core.outline_tessellation import (
@@ -285,12 +286,575 @@ def circle_tessellation_points(
     ]
 
 
-def outline_graphics(root: SExp) -> Iterator[SExp]:
-    """Yield only direct, explicitly layer-qualified board outline graphics."""
+def outline_graphics(root: SExp, *, expanded_only: bool = False) -> Iterator[SExp]:
+    """Yield every board outline graphic in sheet-absolute board coordinates.
+
+    Board-level polygons with arcs expand to their ordered line and arc
+    primitives. Other top-level graphics pass through unchanged unless
+    ``expanded_only`` is set by a consumer that already read them. Graphics
+    stored inside a footprint (``fp_line``/``fp_arc``/``fp_circle``/``fp_poly``/
+    ``fp_rect``/``fp_curve`` carrying a ``(layer "Edge.Cuts")`` child) are
+    re-emitted as equivalent ``gr_*`` nodes transformed into board coordinates,
+    because KiCad treats footprint-local Edge.Cuts as board outline (real
+    boards ship this way -- SparkFun's IoT RedBoard ESP32-P4 keeps its whole
+    outline in a locked footprint). The transform is each footprint's
+    placement frame: ``board = anchor + R(rotation) . local`` (Y-down
+    rotate). A back-side footprint needs no extra mirror: KiCad stores its
+    children's local geometry already mirrored across the x axis
+    (:func:`kicad_tools.schema.pcb.flip_footprint_children_to_back`,
+    Issue #8581), and applying the zone formula's ``M(is_back)`` here
+    double-mirrored every back-side outline (native-parity pinned by
+    ``tests/test_footprint_edge_cuts_outline.py``). Both the modern
+    ``(footprint ...)`` and legacy KiCad 5 ``(module ...)`` block tags are
+    accepted.
+
+    A footprint ``fp_rect`` is emitted as four ``gr_line`` nodes: a rotated
+    rectangle is not axis-aligned, and every outline consumer already handles
+    straight segments. A rounded ``fp_rect`` (``(radius r)``) is emitted as
+    one ``gr_arc`` per corner joined by ``gr_line`` sides, and an ``fp_poly``
+    whose ``(pts ...)`` carries ``(arc ...)`` pieces becomes its closed
+    ``gr_line``/``gr_arc`` boundary (Issue #9759) -- the same reading the
+    filled-region side (:func:`footprint_outline_closed_shapes`) uses; an
+    arc-free ``fp_poly`` stays one ``gr_poly``.
+    Malformed footprint graphics raise ``ValueError`` like their top-level
+    counterparts.
+    """
     for node in root.iter_children():
         layer = node.find_child("layer")
         if node.tag and node.tag.startswith("gr_") and layer and layer.get_string(0) == "Edge.Cuts":
-            yield node
+            if has_board_polygon_arcs(node):
+                yield from _poly_boundary_nodes(_poly_pieces(node), lambda point: point)
+            elif not expanded_only:
+                yield node
+    yield from footprint_outline_graphics(root)
+
+
+_FP_OUTLINE_TAGS = frozenset({"fp_line", "fp_arc", "fp_circle", "fp_poly", "fp_rect", "fp_curve"})
+
+# Both spellings of a footprint block: modern ``(footprint ...)`` and the
+# KiCad 5 legacy ``(module ...)`` (the schema accepts both everywhere a
+# footprint block is walked; Edge.Cuts graphics inside a legacy module are
+# board outline exactly like modern ones).
+_FOOTPRINT_BLOCK_TAGS = frozenset({"footprint", "module"})
+
+
+def _footprint_frame(fp: SExp) -> tuple[Point, float]:
+    """``(sheet-absolute anchor, rotation deg)`` of a footprint/module node."""
+    at = fp.find_child("at")
+    if at is None or len(at.children) < 2:
+        raise ValueError("Malformed footprint Edge.Cuts: missing (at x y [angle]) anchor")
+    ax, ay = at.get_float(0), at.get_float(1)
+    if ax is None or ay is None or not math.isfinite(ax) or not math.isfinite(ay):
+        raise ValueError("Malformed footprint Edge.Cuts: invalid (at ...) anchor")
+    angle = at.get_float(2) if len(at.children) > 2 else 0.0
+    if angle is None or not math.isfinite(angle):
+        raise ValueError("Malformed footprint Edge.Cuts: invalid (at ...) rotation")
+    return (ax, ay), angle
+
+
+def _to_board_frame(local: Point, anchor: Point, angle_deg: float) -> Point:
+    """Push a footprint-local point through the placement frame.
+
+    KiCad stores a flipped footprint's local geometry already mirrored in
+    the file: flipping to the back rewrites the children's local ``y``
+    (verified black-box against pcbnew 10.0.6 ``Flip`` output in
+    :func:`kicad_tools.schema.pcb.flip_footprint_children_to_back`,
+    Issue #8581), so reading applies rotation and translation only -- an
+    extra mirror here would double-mirror every back-side footprint and
+    put its outline on the wrong side of the anchor (native-parity pinned
+    by ``tests/test_footprint_edge_cuts_outline.py``).
+    """
+    x, y = local
+    a = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(a), math.sin(a)
+    return (anchor[0] + x * cos_a + y * sin_a, anchor[1] - x * sin_a + y * cos_a)
+
+
+def _xy_node(point: Point) -> SExp:
+    return SExp.list("xy", point[0], point[1])
+
+
+def _pts_node(points: list[Point]) -> SExp:
+    node = SExp.list("pts")
+    for point in points:
+        node.add(_xy_node(point))
+    return node
+
+
+def _layer_node() -> SExp:
+    return SExp.list("layer", "Edge.Cuts")
+
+
+def _footprint_outline_nodes(node: SExp, anchor: Point, angle_deg: float) -> list[SExp]:
+    """Re-emit one footprint Edge.Cuts graphic as board-frame ``gr_*`` node(s)."""
+    tag = node.tag or ""
+
+    def board(local: Point) -> Point:
+        return _to_board_frame(local, anchor, angle_deg)
+
+    if tag == "fp_line":
+        return [
+            SExp.list(
+                "gr_line",
+                SExp.list("start", *board(_point(node, "start"))),
+                SExp.list("end", *board(_point(node, "end"))),
+                _layer_node(),
+            )
+        ]
+
+    if tag == "fp_arc":
+        start, end = _point(node, "start"), _point(node, "end")
+        mid_child = node.find_child("mid")
+        if mid_child is not None:
+            mid = _coordinate(mid_child, "fp_arc mid")
+        else:
+            angle_child = node.find_child("angle")
+            sweep = (
+                angle_child.get_float(0)
+                if angle_child is not None and len(angle_child.children) == 1
+                else None
+            )
+            if sweep is None or not math.isfinite(sweep):
+                raise ValueError("Malformed Edge.Cuts fp_arc: missing mid or invalid legacy angle")
+            # Legacy fp_arc stores (start) = centre, (end) = first on-arc point.
+            start, mid, end = legacy_arc_points(end, start, sweep)
+        return [
+            SExp.list(
+                "gr_arc",
+                SExp.list("start", *board(start)),
+                SExp.list("mid", *board(mid)),
+                SExp.list("end", *board(end)),
+                _layer_node(),
+            )
+        ]
+
+    if tag == "fp_circle":
+        center, end = _point(node, "center"), _point(node, "end")
+        return [
+            SExp.list(
+                "gr_circle",
+                SExp.list("center", *board(center)),
+                SExp.list("end", *board(end)),
+                _layer_node(),
+            )
+        ]
+
+    if tag == "fp_poly":
+        pieces = _poly_pieces(node)
+        if sum(len(points) for _kind, points in pieces) < 3:
+            raise ValueError(f"Malformed Edge.Cuts {tag}: missing points")
+        if all(kind == "xy" for kind, _points in pieces):
+            return [
+                SExp.list(
+                    "gr_poly",
+                    _pts_node([board(points[0]) for _kind, points in pieces]),
+                    _layer_node(),
+                )
+            ]
+        # ``(arc ...)`` pieces inside ``(pts ...)`` (Issue #9759): emit the
+        # closed boundary as ``gr_line`` edges plus one ``gr_arc`` per arc
+        # piece, read through the same piece reader as the filled-region side
+        # (:func:`outline_polygon_points`).  Arcs stay arcs, so every consumer's
+        # certified arc path -- and its ``max_error_mm`` accounting -- applies
+        # instead of a tessellation baked in here.
+        return _poly_boundary_nodes(pieces, board)
+
+    if tag == "fp_curve":
+        pts = node.find_child("pts")
+        chain = [_coordinate(xy, f"{tag} xy") for xy in pts.find_children("xy")] if pts else []
+        if len(chain) != 4:
+            raise ValueError(f"Malformed Edge.Cuts {tag}: expected four cubic control points")
+        return [SExp.list("gr_curve", _pts_node([board(point) for point in chain]), _layer_node())]
+
+    if tag == "fp_rect":
+        # Straight edges (plus one ``gr_arc`` per corner when ``(radius r)``
+        # rounds it, #9759); rotation/mirror make an axis-aligned (start, end)
+        # pair meaningless, and every outline consumer already handles plain
+        # segments and arcs. Left open (KiCad's own gr_poly convention):
+        # consumers close.
+        (x1, y1), (x2, y2) = _point(node, "start"), _point(node, "end")
+        arcs = _fp_rect_corner_arcs(node, (x1, y1), (x2, y2))
+        if arcs is None:
+            corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+            board_corners = [board(corner) for corner in corners]
+            return [
+                SExp.list(
+                    "gr_line",
+                    SExp.list("start", *board_corners[i]),
+                    SExp.list("end", *board_corners[(i + 1) % 4]),
+                    _layer_node(),
+                )
+                for i in range(4)
+            ]
+        nodes: list[SExp] = []
+        for i, (start, mid, end) in enumerate(arcs):
+            nodes.append(
+                SExp.list(
+                    "gr_arc",
+                    SExp.list("start", *board(start)),
+                    SExp.list("mid", *board(mid)),
+                    SExp.list("end", *board(end)),
+                    _layer_node(),
+                )
+            )
+            # Straight side to the next corner's arc; absent when the radius
+            # is clamped to half that side (the arcs then meet directly).
+            next_start = arcs[(i + 1) % 4][0]
+            if not _coincident(next_start, end):
+                nodes.append(
+                    SExp.list(
+                        "gr_line",
+                        SExp.list("start", *board(end)),
+                        SExp.list("end", *board(next_start)),
+                        _layer_node(),
+                    )
+                )
+        return nodes
+
+    raise ValueError(f"Unsupported footprint Edge.Cuts geometry: {tag}")
+
+
+def footprint_outline_graphics(root: SExp) -> Iterator[SExp]:
+    """Yield only the footprint-local Edge.Cuts graphics, in board coordinates.
+
+    The footprint-half of :func:`outline_graphics`; consumers that already
+    read top-level ``gr_*`` graphics through another path iterate this to add
+    the footprint contribution without double-counting the board-level ones.
+    """
+    for fp in root.iter_children():
+        if (fp.tag or "") not in _FOOTPRINT_BLOCK_TAGS:
+            continue
+        if not any(
+            (child.tag or "") in _FP_OUTLINE_TAGS
+            and (layer := child.find_child("layer")) is not None
+            and layer.get_string(0) == "Edge.Cuts"
+            for child in fp.iter_children()
+        ):
+            continue
+        anchor, angle = _footprint_frame(fp)
+        for node in fp.iter_children():
+            if (node.tag or "") in _FP_OUTLINE_TAGS:
+                layer = node.find_child("layer")
+                if layer is not None and layer.get_string(0) == "Edge.Cuts":
+                    yield from _footprint_outline_nodes(node, anchor, angle)
+
+
+@dataclass(frozen=True)
+class FootprintClosedShape:
+    """One footprint-local closed Edge.Cuts shape, in board coordinates.
+
+    The filled-cut-out sibling of the ``gr_*`` re-emission: the stroke
+    reader (:func:`footprint_outline_graphics`) drops fill state and a
+    rect's closed-shape identity, while KiCad resolves a filled
+    ``fp_circle``/``fp_poly``/``fp_rect`` on Edge.Cuts as a cut-out region
+    (Issue #9692).  Geometry is already pushed through the footprint's
+    placement frame -- a circle carries its transformed ``center`` and the
+    rotation-invariant ``radius``; a rect carries its transformed
+    four-corner ``ring`` (a rotated rect is not axis-aligned); a poly
+    carries its transformed vertex chain.  The authored fill state rides
+    along as the raw ``(fill ...)`` token plus the effective stroke width
+    for the caller's fill resolution.
+    """
+
+    shape_type: str  # "circle" | "poly" | "rect"
+    center: Point | None = None  # circle
+    radius: float | None = None  # circle, in mm
+    ring: tuple[Point, ...] = ()  # poly / rect vertices
+    fill: str = ""  # raw (fill ...) token, "" when absent
+    stroke_width: float = 0.0  # (stroke (width N)) else legacy (width N), else 0
+
+
+def _closed_shape_fill_and_stroke(node: SExp) -> tuple[str, float]:
+    """Raw ``(fill ...)`` token and effective stroke width of an fp_* node.
+
+    Mirrors the board-level ``BoardGraphic`` reading: ``(stroke (width N))``
+    wins, a pre-KiCad-6 top-level ``(width N)`` stands in when no stroke
+    node is authored, and neither node means a zero stroke width -- the
+    value KiCad's legacy fill default keys on (Issue #9690 probe matrix).
+    """
+    fill_node = node.find_child("fill")
+    fill = (fill_node.get_string(0) or "") if fill_node is not None else ""
+    stroke = node.find_child("stroke")
+    width_node = stroke.find_child("width") if stroke is not None else None
+    if width_node is None:
+        width_node = node.find_child("width")
+    width = (width_node.get_float(0) or 0.0) if width_node is not None else 0.0
+    return fill, width
+
+
+#: Polygon piece in the graphic's own coordinates: ``("xy", (p,))`` for a vertex or
+#: ``("arc", (start, mid, end))`` for a circular arc.
+_PolyPiece = tuple[str, tuple[Point, ...]]
+
+
+def _poly_pieces(node: SExp) -> list[_PolyPiece]:
+    """Authored pieces of an ``fp_poly``'s ``(pts ...)``, in authored order.
+
+    ``(pts ...)`` may interleave ``(xy x y)`` vertices with
+    ``(arc (start) (mid) (end))`` segments (KiCad 9+).  This is the single
+    reading of that structure shared by the filled-region reader
+    (:func:`outline_polygon_points`) and the stroke reader
+    (:func:`_footprint_outline_nodes`, Issue #9759), so the two cannot
+    disagree about which arcs a polygon has.
+    """
+    pts = node.find_child("pts")
+    pieces: list[_PolyPiece] = []
+    if pts is None:
+        return pieces
+    for child in pts.iter_children():
+        tag = child.tag or ""
+        if tag == "xy":
+            pieces.append(("xy", (_coordinate(child, f"{node.tag} xy"),)))
+        elif tag == "arc":
+            pieces.append(("arc", tuple(_point(child, name) for name in ("start", "mid", "end"))))
+    return pieces
+
+
+def outline_polygon_points(node: SExp, max_error: float = DEFAULT_MAX_ERROR_MM) -> list[Point]:
+    """Polygon vertices, following arcs in authored order and leaving closure implicit."""
+    pieces = _poly_pieces(node)
+    if all(kind == "xy" for kind, _points in pieces):
+        return [points[0] for _kind, points in pieces]
+
+    chain: list[Point] = []
+    for kind, points in _poly_edges(pieces):
+        if kind == "arc":
+            start, mid, end = points
+            chain.extend(tessellate_arc(start, mid, end, max_error=max_error)[:-1])
+        else:
+            chain.append(points[0])
+    return chain
+
+
+#: Two derived footprint points closer than this (mm) on both axes are the
+#: same point: one nanometre, KiCad's storage resolution.  Exact float
+#: equality on derived coordinates (``left + r`` vs ``right - r``) misses by an
+#: ulp and used to emit sub-nanometre sliver sides (Issue #9759).
+_COINCIDENT_MM = 1e-6
+
+
+def _coincident(a: Point, b: Point) -> bool:
+    """Whether two footprint-local points are the same within :data:`_COINCIDENT_MM`."""
+    return abs(a[0] - b[0]) <= _COINCIDENT_MM and abs(a[1] - b[1]) <= _COINCIDENT_MM
+
+
+def _poly_edges(pieces: list[_PolyPiece]) -> list[tuple[str, list[Point]]]:
+    """Closed line/arc boundary in polygon coordinates, with exactly joined endpoints."""
+    edges: list[tuple[str, list[Point]]] = []
+    first: Point | None = None
+    current: Point | None = None
+
+    for kind, points in pieces:
+        head = points[0]
+        if current is None:
+            first = head
+        elif _coincident(current, head):
+            head = current  # no edge: join the previous primitive exactly
+        else:
+            edges.append(("line", [current, head]))
+        if kind == "arc":
+            _start, mid, end = points
+            edges.append(("arc", [head, mid, end]))
+            current = end
+        else:
+            current = head
+    if first is not None and current is not None:
+        if not _coincident(current, first):
+            edges.append(("line", [current, first]))
+        elif edges:
+            edges[-1][1][-1] = first  # closing edge omitted: close exactly
+
+    return edges
+
+
+def _poly_boundary_nodes(pieces: list[_PolyPiece], board: Callable[[Point], Point]) -> list[SExp]:
+    """Emit a polygon's line and arc primitives in board coordinates."""
+    nodes: list[SExp] = []
+    for edge_kind, edge_points in _poly_edges(pieces):
+        if edge_kind == "line":
+            nodes.append(
+                SExp.list(
+                    "gr_line",
+                    SExp.list("start", *board(edge_points[0])),
+                    SExp.list("end", *board(edge_points[1])),
+                    _layer_node(),
+                )
+            )
+        else:
+            start, mid, end = edge_points
+            nodes.append(
+                SExp.list(
+                    "gr_arc",
+                    SExp.list("start", *board(start)),
+                    SExp.list("mid", *board(mid)),
+                    SExp.list("end", *board(end)),
+                    _layer_node(),
+                )
+            )
+    return nodes
+
+
+def has_board_polygon_arcs(node: SExp) -> bool:
+    """Whether a top-level polygon contains an authored arc."""
+    pts = node.find_child("pts") if node.tag == "gr_poly" else None
+    return pts is not None and pts.find_child("arc") is not None
+
+
+def _fp_rect_corner_arcs(
+    node: SExp, p1: Point, p2: Point
+) -> list[tuple[Point, Point, Point]] | None:
+    """Corner arcs of a rounded ``fp_rect``, or ``None`` for a square one.
+
+    ``(radius r)`` is clamped to half the shorter side; each corner becomes a
+    quarter-circle ``(start, mid, end)`` arc, the four walked clockwise on
+    screen so consecutive arcs are joined by the straight sides.  Shared by
+    the filled-region reader (:func:`_fp_rect_ring`) and the stroke reader
+    (Issue #9759) so both honour the same radius.
+    """
+    (x1, y1), (x2, y2) = p1, p2
+    radius_node = node.find_child("radius")
+    radius = (radius_node.get_float(0) or 0.0) if radius_node is not None else 0.0
+    left, right = min(x1, x2), max(x1, x2)
+    top, bottom = min(y1, y2), max(y1, y2)
+    radius = min(radius, (right - left) / 2.0, (bottom - top) / 2.0)
+    if not math.isfinite(radius) or radius <= 0.0:
+        return None
+    k = radius * (1.0 - math.sqrt(0.5))  # offset of the arc midpoint from the corner
+    # Where each straight side starts and ends.  A side the clamp shrank to
+    # nothing (a stadium: radius = half that side) has its two corner arcs
+    # meet at the side's midpoint -- computed once, so they meet *exactly*;
+    # ``left + r`` and ``right - r`` can differ by an ulp (Issue #9759).
+    x_lo, x_hi = left + radius, right - radius
+    if x_hi - x_lo <= _COINCIDENT_MM:
+        x_lo = x_hi = (left + right) / 2.0
+    y_lo, y_hi = top + radius, bottom - radius
+    if y_hi - y_lo <= _COINCIDENT_MM:
+        y_lo = y_hi = (top + bottom) / 2.0
+    return [
+        ((left, y_lo), (left + k, top + k), (x_lo, top)),
+        ((x_hi, top), (right - k, top + k), (right, y_lo)),
+        ((right, y_hi), (right - k, bottom - k), (x_hi, bottom)),
+        ((x_lo, bottom), (left + k, bottom - k), (left, y_hi)),
+    ]
+
+
+def _fp_rect_ring(node: SExp, p1: Point, p2: Point) -> list[Point]:
+    """Four corners of an ``fp_rect``, or its rounded outline when ``(radius r)``.
+
+    The removed corner material of a rounded rect is not part of the filled
+    region.
+    """
+    arcs = _fp_rect_corner_arcs(node, p1, p2)
+    if arcs is None:
+        (x1, y1), (x2, y2) = p1, p2
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    ring: list[Point] = []
+    for start, mid, end in arcs:
+        ring.extend(tessellate_arc(start, mid, end))
+    return ring
+
+
+def footprint_outline_closed_shapes(root: SExp) -> Iterator[FootprintClosedShape]:
+    """Yield footprint-local closed Edge.Cuts shapes with fill state.
+
+    Only the three closed shapes with a fillable interior are yielded
+    (``fp_circle``/``fp_poly``/``fp_rect``); ``fp_line``/``fp_arc``/
+    ``fp_curve`` have no interior and stay stroke-only.  Coordinates are
+    sheet-absolute board coordinates, transformed by the same placement
+    frame as :func:`footprint_outline_graphics` (``_to_board_frame``; no
+    extra mirror for a back-side footprint, whose local geometry the file
+    already stores mirrored).  Malformed geometry raises ``ValueError``
+    like the stroke reader.
+    """
+    for fp in root.iter_children():
+        if (fp.tag or "") not in _FOOTPRINT_BLOCK_TAGS:
+            continue
+        if not any(
+            (child.tag or "") in ("fp_circle", "fp_poly", "fp_rect")
+            and (layer := child.find_child("layer")) is not None
+            and layer.get_string(0) == "Edge.Cuts"
+            for child in fp.iter_children()
+        ):
+            continue
+        anchor, angle = _footprint_frame(fp)
+        for node in fp.iter_children():
+            tag = node.tag or ""
+            if tag not in ("fp_circle", "fp_poly", "fp_rect"):
+                continue
+            layer = node.find_child("layer")
+            if layer is None or layer.get_string(0) != "Edge.Cuts":
+                continue
+            fill, stroke_width = _closed_shape_fill_and_stroke(node)
+
+            if tag == "fp_circle":
+                center, end = _point(node, "center"), _point(node, "end")
+                board_center = _to_board_frame(center, anchor, angle)
+                board_end = _to_board_frame(end, anchor, angle)
+                yield FootprintClosedShape(
+                    shape_type="circle",
+                    center=board_center,
+                    radius=math.hypot(
+                        board_end[0] - board_center[0], board_end[1] - board_center[1]
+                    ),
+                    fill=fill,
+                    stroke_width=stroke_width,
+                )
+            elif tag == "fp_rect":
+                (x1, y1), (x2, y2) = _point(node, "start"), _point(node, "end")
+                corners = _fp_rect_ring(node, (x1, y1), (x2, y2))
+                yield FootprintClosedShape(
+                    shape_type="rect",
+                    ring=tuple(_to_board_frame(corner, anchor, angle) for corner in corners),
+                    fill=fill,
+                    stroke_width=stroke_width,
+                )
+            else:  # fp_poly
+                chain = outline_polygon_points(node)
+                if len(chain) < 3:
+                    raise ValueError("Malformed Edge.Cuts fp_poly: missing points")
+                yield FootprintClosedShape(
+                    shape_type="poly",
+                    ring=tuple(_to_board_frame(point, anchor, angle) for point in chain),
+                    fill=fill,
+                    stroke_width=stroke_width,
+                )
+
+
+def outline_node_points(node: SExp) -> list[Point]:
+    """Authored geometry points of one outline graphic node, in node coordinates.
+
+    ``gr_line``/``gr_rect`` yield ``[start, end]``; ``gr_arc`` yields
+    ``[start, mid, end]`` (legacy centre/angle encodings normalized);
+    ``gr_circle`` yields ``[center, end]``; ``gr_curve`` yields its control points
+    and ``gr_poly`` its vertices with any authored arcs tessellated. Malformed
+    geometry raises ``ValueError``.
+    """
+    tag = node.tag or ""
+    if tag in ("gr_line", "gr_rect"):
+        return [_point(node, "start"), _point(node, "end")]
+    if tag == "gr_arc":
+        start, end = _point(node, "start"), _point(node, "end")
+        if node.find_child("mid") is not None:
+            return [start, _point(node, "mid"), end]
+        angle = node.find_child("angle")
+        sweep = angle.get_float(0) if angle is not None and len(angle.children) == 1 else None
+        if sweep is None or not math.isfinite(sweep):
+            raise ValueError("Malformed Edge.Cuts gr_arc: missing mid or invalid legacy angle")
+        return list(legacy_arc_points(end, start, sweep))
+    if tag == "gr_circle":
+        return [_point(node, "center"), _point(node, "end")]
+    if tag in ("gr_poly", "gr_curve"):
+        if tag == "gr_poly":
+            chain = outline_polygon_points(node)
+        else:
+            pts = node.find_child("pts")
+            chain = (
+                [_coordinate(xy, "gr_curve xy") for xy in pts.find_children("xy")] if pts else []
+            )
+        if len(chain) < 3:
+            raise ValueError(f"Malformed Edge.Cuts {tag}: missing points")
+        return chain
+    raise ValueError(f"Unsupported Edge.Cuts geometry: {tag}")
 
 
 class OutlineSegments(list[tuple[Point, Point]]):
@@ -302,7 +866,7 @@ class OutlineSegments(list[tuple[Point, Point]]):
     true board outline it stands for.
 
     ``max_error_mm`` is ``0.0`` when every Edge.Cuts element was already
-    straight (``gr_line``/``gr_rect``/``gr_poly``), and the largest
+    straight (lines, rectangles and arc-free polygons), and the largest
     per-element tessellation sagitta otherwise. It is a *geometry* bound and
     must never be conflated with a consumer's floating-point comparison
     epsilon.

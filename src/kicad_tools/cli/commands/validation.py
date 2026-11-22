@@ -121,6 +121,12 @@ def run_fix_silkscreen_command(args) -> int:
         sub_argv.extend(["--min-width", str(args.min_width)])
     if getattr(args, "clip_to_pads", False):
         sub_argv.append("--clip-to-pads")
+    if getattr(args, "clip_to_holes", False):
+        sub_argv.append("--clip-to-holes")
+    if getattr(args, "hole_clearance", None) is not None:
+        sub_argv.extend(["--hole-clearance", str(args.hole_clearance)])
+    if getattr(args, "all", False):
+        sub_argv.append("--all")
     if args.output:
         sub_argv.extend(["-o", args.output])
     if args.dry_run:
@@ -156,6 +162,8 @@ def run_place_silk_refs_command(args) -> int:
         sub_argv.append("--allow-rotate")
     if getattr(args, "refs", None) is not None:
         sub_argv.extend(["--refs", args.refs])
+    if getattr(args, "over_holes", False):
+        sub_argv.append("--over-holes")
     if args.output:
         sub_argv.extend(["-o", args.output])
     if args.dry_run:
@@ -378,6 +386,11 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--courtyard-waivers", args.courtyard_waivers])
     if getattr(args, "waivers", None):
         sub_argv.extend(["--waivers", args.waivers])
+    # Issue #9454: forward the ev3 -> ev4 waiver migration flags.
+    if getattr(args, "migrate_waivers", False):
+        sub_argv.append("--migrate-waivers")
+    if getattr(args, "migrate_write", False):
+        sub_argv.append("--write")
     # Issue #3061: forward pad_grid tolerance flags.
     if getattr(args, "pad_grid_strict", False):
         sub_argv.append("--pad-grid-strict")

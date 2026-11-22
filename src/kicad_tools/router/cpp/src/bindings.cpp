@@ -65,6 +65,9 @@ NB_MODULE(router_cpp, m) {
         // blockage instead of erasing it.
         .def_rw("static_blocked", &GridCell::static_blocked)
         .def_rw("avoidance_cost", &GridCell::avoidance_cost)
+        // Issue #8999: prospective airwire-separation cost (weighted
+        // unrouted-desire-line crossing count; 0.0 when the flag is off).
+        .def_rw("airwire_cost", &GridCell::airwire_cost)
         // Issue #4071: per-cell corridor-reservation owner set count
         // (read-only surface for parity tests; the owner nets are written
         // via ``Grid3D::reserve_cell`` / read via ``is_reserved_for``).
@@ -91,9 +94,15 @@ NB_MODULE(router_cpp, m) {
         .def_rw("cost_via", &DesignRules::cost_via)
         .def_rw("cost_congestion", &DesignRules::cost_congestion)
         .def_rw("congestion_threshold", &DesignRules::congestion_threshold)
+        // Issue #9597: soft foreign plane-zone crossing cost.
+        .def_rw("cost_zone_foreign_plane", &DesignRules::cost_zone_foreign_plane)
         .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance)
         .def_rw("min_hole_to_hole", &DesignRules::min_hole_to_hole)
         .def_rw("min_via_pad_edge_gap", &DesignRules::min_via_pad_edge_gap)
+        // Issue #8994: same-net pad slit-band detection edge (0 = guard off).
+        .def_rw("same_net_pad_gap_band_edge_mm", &DesignRules::same_net_pad_gap_band_edge_mm)
+        // Issue #9208: same-net via-annulus-vs-own-trace slit-band edge (0 = off).
+        .def_rw("same_net_trace_gap_band_edge_mm", &DesignRules::same_net_trace_gap_band_edge_mm)
         // Issue #4071: soft corridor-attractor bonus (Python default 3.0).
         .def_rw("cost_corridor_attractor", &DesignRules::cost_corridor_attractor);
 
@@ -343,6 +352,17 @@ NB_MODULE(router_cpp, m) {
         .def("boost_region_cost", &Grid3D::boost_region_cost,
              "center_x"_a, "center_y"_a, "layer"_a, "radius_cells"_a, "amount"_a)
         .def("clear_avoidance_costs", &Grid3D::clear_avoidance_costs)
+        // Issue #8999: airwire-separation plane verbs (see grid.hpp).
+        .def("clear_airwire_costs", &Grid3D::clear_airwire_costs)
+        .def("set_airwire_cells", &Grid3D::set_airwire_cells,
+             "xs"_a, "ys"_a, "costs"_a)
+        // Issue #9597: zone (copper pour) marking verbs (see grid.hpp).
+        .def("mark_zone_cells", &Grid3D::mark_zone_cells,
+             "xs"_a, "ys"_a, "layers"_a, "nets"_a)
+        .def("clear_zone_cells", &Grid3D::clear_zone_cells, "layer"_a = -1)
+        // Issue #9826: per-layer PLANE mask for the zone cost/block split.
+        .def("set_plane_layers", &Grid3D::set_plane_layers, "layers"_a)
+        .def("is_plane_layer", &Grid3D::is_plane_layer, "layer"_a)
         // Congestion
         .def("get_congestion", &Grid3D::get_congestion, "x"_a, "y"_a, "layer"_a)
         .def("update_congestion", &Grid3D::update_congestion,
@@ -372,7 +392,7 @@ NB_MODULE(router_cpp, m) {
              "x"_a, "y"_a, "width"_a, "height"_a,
              "net"_a, "layer_idx"_a, "ref_hash"_a, "clearance_override"_a,
              "is_plane_net"_a = false, "rotation"_a = 0.0f,
-             "is_circular"_a = false)
+             "is_circular"_a = false, "copper_corner_radius"_a = -1.0f)
         .def("set_pad_class_clearances", &Grid3D::set_pad_class_clearances,
              "clearances"_a)
         .def("set_pad_via_policy", &Grid3D::set_pad_via_policy,
@@ -671,6 +691,14 @@ NB_MODULE(router_cpp, m) {
         .def("own_pad_step_clear", &Pathfinder::own_pad_step_clear,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a,
              "emit_trace_width"_a = 0.0f)
+        // Issue #9019: own-net pad slit-band step gate (fab detection edge, mm).
+        .def("set_search_own_net_band", &Pathfinder::set_search_own_net_band, "edge_mm"_a)
+        .def("own_net_band_rejects", &Pathfinder::own_net_band_rejects,
+             "steps the slit-band gate refused since its last arming (9019 review)")
+        .def("own_net_band_step_ok", &Pathfinder::own_net_band_step_ok,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "width"_a,
+             "exclude_sx"_a = -1e30, "exclude_sy"_a = -1e30,
+             "exclude_ex"_a = -1e30, "exclude_ey"_a = -1e30)
         .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)
         .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
              "trace_half_width_mm"_a, "via_half_diam_mm"_a,
