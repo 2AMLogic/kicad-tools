@@ -699,12 +699,18 @@ def _layer_slit_candidates(local, minimum_mm):
     # set, same (i, j) order as the per-edge loop, so results are unchanged.
     pairs = _facing_edge_pairs(tree, edges, normals, minimum_mm)
     for i, j in pairs:
-        edge = edges[i]
-        candidates = [nearest_points(edge, edges[j])]
+        edge, other = edges[i], edges[j]
+        closest = nearest_points(edge, other)
+        candidates = [closest]
+        # Parallel exposed edges can share a whole interval of minima. GEOS
+        # can pick a different end in each direction, with different owners.
+        on_other, on_edge = nearest_points(other, edge)
+        if (on_edge, on_other) != closest:
+            candidates.append((on_edge, on_other))
         middle = edge.interpolate(0.5, normalized=True)
-        candidates.append((middle, nearest_points(middle, edges[j])[1]))
-        middle = edges[j].interpolate(0.5, normalized=True)
-        candidates.append((nearest_points(edge, middle)[0], middle))
+        candidates.append((middle, nearest_points(middle, other)[1]))
+        middle = other.interpolate(0.5, normalized=True)
+        candidates.append((nearest_points(middle, edge)[1], middle))
         for a, b in candidates:
             distance = a.distance(b)
             if distance <= TOLERANCE or distance >= minimum_mm - TOLERANCE:

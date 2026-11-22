@@ -884,6 +884,59 @@ def test_remote_xtal_edit_preserves_joy_x_gap(xtal_vertices, tmp_path, capsys):
     assert gap["actual_value"] == pytest.approx(0.0408276598)
 
 
+@pytest.mark.parametrize("with_elbow", [False, True])
+def test_parallel_pad_gap_survives_remote_dogleg(with_elbow, tmp_path, capsys):
+    """Both ends of the parallel gap on board 07 can have different copper owners."""
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+
+    pad_id = "15436e44-f95d-4298-80f0-37ffa7519ad7"
+    local = [
+        "(gr_rect (start 93.5 40) (end 166.5 120) (stroke (width 0.05) (type default)) "
+        '(fill none) (layer "Edge.Cuts"))',
+        '(footprint "Test:U3" (layer "F.Cu") (at 0 0) '
+        '(property "Reference" "U3" (at 0 0) (layer "F.SilkS")) '
+        '(pad "4" smd rect (at 125.5 95.4) (size 0.7 0.3) (layers "F.Cu") '
+        f'(net 1 "MIPI_DAT0_N") (uuid "{pad_id}")))',
+        track((108.5, 95.511), (125.443, 95.511), "negative", width=0.225),
+        track((110.076, 95.003), (125.443, 95.003), "positive", net=2, width=0.225),
+    ]
+    horizontal_id = "Trace@F.Cu:w0.225:110.076/95.003~125.443/95.003"
+    expected = {(pad_id, horizontal_id)}
+    if with_elbow:
+        local.append(track((125.443, 95.003), (125.443, 94.622), "elbow", net=2, width=0.225))
+        expected.add((pad_id, horizontal_id, "Trace@F.Cu:w0.225:125.443/94.622~125.443/95.003"))
+    dogleg = [
+        track((108.5, 95.5), (104.5, 95.5), "remote-horizontal"),
+        track((104.5, 95.5), (104.5, 91.5), "remote-vertical"),
+    ]
+    for remote in ([], dogleg):
+        pcb = board(*local, *remote, net_names=("MIPI_DAT0_N", "MIPI_DAT0_P"))
+        path = tmp_path / "mipi.kicad_pcb"
+        path.write_text(serialize_sexp(pcb._sexp))
+        main(
+            [
+                "check",
+                str(path),
+                "--mfr",
+                "jlcpcb",
+                "--only",
+                "physical_copper_gap",
+                "--format",
+                "json",
+            ]
+        )
+        report = json.loads(capsys.readouterr().out)
+        gaps = [v for v in report["violations"] if v["rule_id"] == "physical_copper_gap"]
+        assert {tuple(v["items"]) for v in gaps} == expected
+        for gap in gaps:
+            assert gap["severity"] == "error" and gap["layer"] == "F.Cu"
+            assert gap["nets"] == ["MIPI_DAT0_N", "MIPI_DAT0_P"]
+            assert gap["actual_value"] == pytest.approx(0.1345)
+
+
 def _zone(uuid, net=1):
     return f'''(zone (net {net}) (net_name "GND") (layer "F.Cu") (uuid "{uuid}")
       (polygon (pts (xy 0 0) (xy 4 0) (xy 4 2) (xy 0 2)))
