@@ -48,11 +48,10 @@ TOLERANCE = 0.001
 # Per-end shave of a gap connector for the cheap copper-crossing prefilter; twice
 # this stays within the 1e-8 mm overlap threshold, so results are unchanged.
 _CONNECTOR_SHAVE_MM = 4e-9
-# Facing screen of the slit scan: the first boundary must face the gap within
-# 25 degrees, the second within 60 degrees (cosine 0.5).  The 60-degree side is
-# public because the router derives its same-net union depth from it (issue
-# #9424, ``router.via_clearance.same_net_pad_union_depth_mm``): a via that
-# barely overlaps its own pad leaves a wedge this screen still grades.
+# Both boundaries must face the gap within 60 degrees, and at least one
+# within 25 degrees. The router uses the 60-degree threshold to derive the
+# same-net pad union depth because a via that barely overlaps its own pad
+# leaves a wedge that this screen still grades (issue #9424).
 FACING_COS_FIRST = math.cos(math.radians(25))
 FACING_COS_SECOND = 0.5
 
@@ -700,21 +699,30 @@ def _layer_slit_candidates(local, minimum_mm):
     # set, same (i, j) order as the per-edge loop, so results are unchanged.
     pairs = _facing_edge_pairs(tree, edges, normals, minimum_mm)
     for i, j in pairs:
-        edge = edges[i]
-        candidates = [nearest_points(edge, edges[j])]
+        edge, other = edges[i], edges[j]
+        closest = nearest_points(edge, other)
+        candidates = [closest]
+        # Parallel exposed edges can share a whole interval of minima. GEOS
+        # can pick a different end in each direction, with different owners.
+        on_other, on_edge = nearest_points(other, edge)
+        if (on_edge, on_other) != closest:
+            candidates.append((on_edge, on_other))
         middle = edge.interpolate(0.5, normalized=True)
-        candidates.append((middle, nearest_points(middle, edges[j])[1]))
-        middle = edges[j].interpolate(0.5, normalized=True)
-        candidates.append((nearest_points(edge, middle)[0], middle))
+        candidates.append((middle, nearest_points(middle, other)[1]))
+        middle = other.interpolate(0.5, normalized=True)
+        candidates.append((nearest_points(middle, edge)[1], middle))
         for a, b in candidates:
             distance = a.distance(b)
             if distance <= TOLERANCE or distance >= minimum_mm - TOLERANCE:
                 continue
             dx, dy = (b.x - a.x) / distance, (b.y - a.y) / distance
-            # Both boundaries must face the open gap, within 25 degrees.
-            if normals[i][0] * dx + normals[i][1] * dy < FACING_COS_FIRST:
-                continue
-            if normals[j][0] * -dx + normals[j][1] * -dy < FACING_COS_SECOND:
+            # Unrelated copper can change the order of the union's edges.
+            facing_a = normals[i][0] * dx + normals[i][1] * dy
+            facing_b = -(normals[j][0] * dx + normals[j][1] * dy)
+            if (
+                min(facing_a, facing_b) < FACING_COS_SECOND
+                or max(facing_a, facing_b) < FACING_COS_FIRST
+            ):
                 continue
             connector = LineString([a, b])
             # The open connector must contain no copper from a third

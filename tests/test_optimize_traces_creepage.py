@@ -389,6 +389,8 @@ def test_finished_board_that_regresses_after_refill_reverts_to_input(
     pcb, vmap, tmp_path, capsys, in_place
 ):
     """A post-write step (zone refill) that breaks creepage must not ship."""
+    from kicad_tools.cli import main as public_main
+
     out = pcb if in_place else tmp_path / "out.kicad_pcb"
     original = pcb.read_bytes().replace(b"\n", b"\r\n")
     pcb.write_bytes(original)
@@ -402,11 +404,14 @@ def test_finished_board_that_regresses_after_refill_reverts_to_input(
     output_args = [] if in_place else ["-o", str(out)]
     with (
         patch("kicad_tools.cli.optimize_cmd._refill_written_board", side_effect=fake_refill),
-        patch("kicad_tools.cli.optimize_cmd._run_pour_slot_pass", return_value={"spread": 3}),
+        patch(
+            "kicad_tools.cli.optimize_cmd._run_pour_slot_pass", return_value={"spread": 3}
+        ) as pour,
     ):
         assert (
-            main(
+            public_main(
                 [
+                    "optimize-traces",
                     str(pcb),
                     *output_args,
                     "--pour-slots",
@@ -418,6 +423,7 @@ def test_finished_board_that_regresses_after_refill_reverts_to_input(
             )
             == 0
         )
+    assert pour.call_count == 1 and pour.call_args.kwargs == {"pack": False}
     data = json.loads(capsys.readouterr().out)
     assert out.read_bytes() == pcb.read_bytes() == original
     assert data["success"] and data["saved"] == (not in_place)
@@ -435,6 +441,37 @@ def test_finished_board_that_regresses_after_refill_reverts_to_input(
     assert data["creepage_final_reverted_to_input"] is True
     assert data["output_verify_rolled_back"]["creepage_final"]
     assert data["creepage_unwaived_failures_after"] == data["creepage_unwaived_failures_before"]
+
+
+@pytest.mark.parametrize("pack", [False, True])
+def test_public_command_reports_successful_pour_pass(pcb, vmap, tmp_path, capsys, pack):
+    from kicad_tools.cli import main as public_main
+
+    output = tmp_path / "optimized.kicad_pcb"
+    original = pcb.read_bytes()
+    summary = {"spread": 1, "packed": int(pack)}
+    args = [
+        "optimize-traces",
+        str(pcb),
+        "-o",
+        str(output),
+        "--voltage-map",
+        str(vmap),
+        "--format",
+        "json",
+        "--pour-slots",
+    ]
+    if pack:
+        args.append("--pour-slots-pack")
+    with (
+        patch(REFILL, return_value=KiCadCLIResult(success=True)),
+        patch("kicad_tools.cli.optimize_cmd._run_pour_slot_pass", return_value=summary) as pour,
+    ):
+        assert public_main(args) == 0
+    assert pour.call_count == 1 and pour.call_args.kwargs == {"pack": pack}
+    data = json.loads(capsys.readouterr().out)
+    assert data["saved"] and data["pour_slots"] == summary
+    assert pcb.read_bytes() == original and output.read_bytes() != original
 
 
 @pytest.mark.parametrize("failure", ["baseline", "after_refill"])

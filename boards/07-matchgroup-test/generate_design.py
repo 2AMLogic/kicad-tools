@@ -575,9 +575,8 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     on a shared copper layer.  A net is electrically continuous iff all
     of its pads land in ONE connected component.
 
-    Pad copper is approximated by the pad's *inscribed* circle, which is
-    conservative (an audit "connected" verdict implies real overlap; a
-    thermal-spoke connection always overlaps the inscribed circle).
+    The audit and repair use the same pad copper outlines as the connectivity
+    validator, including the ends of rectangular and rounded lands.
 
     Returns:
         ``{net_name: {"connected": bool, "pad_groups": [[(pad, is_th)]],
@@ -585,12 +584,12 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         ImportError if unavailable (a silent skip is how dead pours
         shipped on softstart in the first place -- see PR #3481).
     """
-    import math
     import re
 
     from shapely.geometry import LineString, Point, Polygon
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
+    from kicad_tools.geometry.copper import pad_copper_outline
 
     text = pcb_path.read_text()
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
@@ -657,24 +656,18 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     origin_x, origin_y = analyzer.pcb.board_origin
     pads: dict[str, list] = {n: [] for n in net_names}
     for fp in analyzer.pcb.footprints:
-        theta = math.radians(fp.rotation or 0.0)
+        sheet_position = (fp.position[0] + origin_x, fp.position[1] + origin_y)
         for pad in fp.pads:
             if pad.net_name not in pads:
                 continue
-            px, py = pad.position
-            rx = px * math.cos(theta) + py * math.sin(theta)
-            ry = -px * math.sin(theta) + py * math.cos(theta)
-            x = fp.position[0] + rx + origin_x
-            y = fp.position[1] + ry + origin_y
             is_th = any("*" in str(layer) for layer in pad.layers)
             layers = (
                 all_layers if is_th else frozenset({l for l in pad.layers if l.endswith(".Cu")})
             )
-            radius = min(pad.size) / 2.0
             pads[pad.net_name].append(
                 (
                     f"{fp.reference}.{pad.number}",
-                    Point(x, y).buffer(radius),
+                    pad_copper_outline(pad, sheet_position, fp.rotation),
                     layers,
                     is_th,
                 )
@@ -932,6 +925,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
     from kicad_tools.core.schematic_uuids import UuidMinter, uuids_in_text
+    from kicad_tools.geometry.copper import pad_board_center, pad_copper_outline
     from kicad_tools.router.clearance_kernel import (
         CLEARANCE_EPSILON_MM,
         KSegment,
@@ -939,6 +933,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         copper_gap,
     )
     from kicad_tools.router.via_clearance import (
+        SAME_NET_BAND_UNION_EPS_MM,
+        SAME_NET_BAND_WRITE_SLACK_MM,
         same_net_band_edges,
         same_net_band_seat_ok,
         same_net_trace_band_clear,
@@ -958,31 +954,22 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     analyzer = NetStatusAnalyzer(pcb_path)
     origin_x, origin_y = analyzer.pcb.board_origin
 
-    # Pads: (geom, net, layers, drill_r, center, name, is_th, inscribed,
+    # Pads: (geom, net, layers, drill_r, center, name, is_th, copper,
     #        kpad, bound_r) -- ``kpad`` / ``bound_r`` are Issue #6736's true
     #        pad copper and the radius of the circle (about ``center``) that
     #        encloses it.
     pad_index: list[tuple] = []
     for fp in analyzer.pcb.footprints:
-        theta = math.radians(fp.rotation or 0.0)
+        sheet_position = (fp.position[0] + origin_x, fp.position[1] + origin_y)
         for pad in fp.pads:
-            px, py = pad.position
-            rx = px * math.cos(theta) + py * math.sin(theta)
-            ry = -px * math.sin(theta) + py * math.cos(theta)
-            x = fp.position[0] + rx + origin_x
-            y = fp.position[1] + ry + origin_y
+            x, y = pad_board_center(pad, sheet_position, fp.rotation)
             is_th = any("*" in str(layer) for layer in pad.layers)
             layers = (
                 all_layers if is_th else frozenset({l for l in pad.layers if l.endswith(".Cu")})
             )
-            # Conservative obstacle: circumscribed half-diagonal so square
-            # pad corners are respected.  The CONNECTIVITY geometry uses
-            # the inscribed circle instead (matching ``_audit_pour_nets``)
-            # -- using the circumscribed circle for own-net union would
-            # make the repair believe pads are connected that the audit
-            # (correctly, conservatively) reports stranded.
+            # The via-in-pad exclusion uses the circumscribed half-diagonal.
+            # Own-net connectivity uses the same copper outline as the audit.
             half_diag = math.hypot(pad.size[0], pad.size[1]) / 2.0
-            inscribed_r = min(pad.size) / 2.0
             drill_r = float(getattr(pad, "drill", 0.0) or 0.0) / 2.0
             # Issue #6736: the pad's TRUE copper for clearance, from the
             # shared kernel adapter (board-relative, so shifted into the
@@ -1009,7 +996,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     (x, y),
                     f"{fp.reference}.{pad.number}",
                     is_th,
-                    Point(x, y).buffer(inscribed_r),
+                    pad_copper_outline(pad, sheet_position, fp.rotation),
                     kpad,
                     bound_r,
                 )
@@ -1038,6 +1025,9 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # resolves for this board's stackup, from the one shared resolver (never
     # literals; a missing profile entry disables the band, 0.0).
     SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
+    pad_slit_limit = (
+        SAME_NET_PAD_GAP_MM + SAME_NET_BAND_WRITE_SLACK_MM if SAME_NET_PAD_GAP_MM else 0.0
+    )
 
     # Segments: (geom, net, layer)
     seg_index: list[tuple] = []
@@ -1217,10 +1207,18 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         path = centreline.buffer(width / 2.0)
         kseg = KSegment(x1=p0[0], y1=p0[1], x2=p1[0], y2=p1[1], width=width)
         for entry in pad_index:
-            geom, pnet, layers, _drill_r, (px, py) = entry[:5]
-            if pnet != net and layer in layers:
-                cheap = centreline.distance(Point(px, py)) - width / 2.0 - entry[9]
+            _geom, pnet, layers, drill_r, (px, py), _name, is_th = entry[:7]
+            if layer not in layers:
+                continue
+            cheap = centreline.distance(Point(px, py)) - width / 2.0 - entry[9]
+            if pnet != net:
                 if _pad_too_close(kseg, entry, _pair_clear(net, pnet), cheap):
+                    return False
+            elif not is_th and not drill_r and cheap < pad_slit_limit:
+                # A stub may enter its own SMD pad, or pass outside the fab's
+                # pad-spacing band. Measure the actual rounded/rotated land.
+                gap = copper_gap(kseg, entry[8])
+                if SAME_NET_BAND_UNION_EPS_MM < gap < pad_slit_limit:
                     return False
         for geom, snet, lay in seg_index:
             if snet != net and lay == layer and path.distance(geom) < _pair_clear(net, snet):
@@ -1333,11 +1331,9 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             if vnet == net:
                 own.append((pt.buffer(radius), all_layers, "via"))
         for entry in pad_index:
-            _obst, pnet, layers, _dr, center, name, is_th, inscribed = entry[:8]
+            _obst, pnet, layers, _dr, center, name, is_th, copper = entry[:8]
             if pnet == net:
-                # Inscribed-circle copper for own-net union (matches the
-                # audit's conservative connectivity model).
-                own.append((inscribed, layers, f"pad:{name}"))
+                own.append((copper, layers, f"pad:{name}"))
         pad_center = {entry[5]: entry[4] for entry in pad_index if entry[1] == net}
         # Through-hole pads of this net.  Their plated barrel already spans
         # the copper stack, so sub-stage D may terminate a bridge on one

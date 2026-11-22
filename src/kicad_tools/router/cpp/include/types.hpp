@@ -408,7 +408,8 @@ namespace router {
 // v77 (Issue #9273): single-ended trace searches check their closest approach
 // to an already stored same-net via against the trace-population slit band.
 // v78 (Issue #9273): grade each facing leg, including shallow joins to stored vias.
-constexpr int ROUTER_CPP_BUILD_VERSION = 78;
+// v79 (Issue #9851): grade and emit pad stubs on the serialized coordinate grid.
+constexpr int ROUTER_CPP_BUILD_VERSION = 79;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
