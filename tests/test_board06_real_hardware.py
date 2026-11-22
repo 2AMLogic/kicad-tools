@@ -1,15 +1,19 @@
 """Datasheet and native-serialization regressions for the assembled LVDS demo."""
 
 import importlib.util
+import shutil
 from pathlib import Path
 
+from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import parse_file
+from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+BOARD = Path(__file__).resolve().parents[1] / "boards/06-diffpair-test"
 
 
 def _generator():
-    path = (
-        Path(__file__).resolve().parents[1] / "boards/06-diffpair-test/assembled-demo/generate.py"
-    )
+    path = BOARD / "assembled-demo/generate.py"
     spec = importlib.util.spec_from_file_location("lvds_demo_generate", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -67,3 +71,21 @@ def test_generator_leaves_routed_project_to_the_router(tmp_path, monkeypatch):
     generator.main()
     assert (tmp_path / "diffpair_test.kicad_pro").is_file()
     assert not stale.exists()
+
+
+def test_generated_lvds_legs_have_no_redundant_staircases(tmp_path):
+    generator = _generator()
+    pcb = PCB.load(generator.make_pcb(tmp_path, generator.components()))
+    findings = RedundantCopperRule().check(pcb, None).violations
+    assert [v.message for v in findings if v.rule_id == "redundant_copper_staircase"] == []
+
+
+def test_finished_board_needs_no_silk_edits_on_repeat_export(tmp_path):
+    published = BOARD / "output/diffpair_test_routed.kicad_pcb"
+    board = tmp_path / published.name
+    shutil.copyfile(published, board)
+    report = run_default_silk_pass(board, mfr="jlcpcb-tier1", quiet=True)
+    assert report is not None and report["applied"]
+    assert report["unresolved"] == []
+    assert report["total_fixed"] == report["total_moved"] == 0
+    assert board.read_bytes() == published.read_bytes()
