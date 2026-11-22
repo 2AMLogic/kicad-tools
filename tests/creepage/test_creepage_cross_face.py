@@ -11,6 +11,7 @@ only get stricter, never looser.
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -94,9 +95,8 @@ def test_cross_face_bore_path_reported_failing(tmp_path):
     # The binding row names the bore (as the island hop names its island).
     assert pair.via_bore == "MH1.1"
     assert pair.to_dict()["via_bore"] == "MH1.1"
-    # Cross-face-only pair: the clearance is the in-plan projection (0 here,
-    # the F.Cu track crosses the B.Cu run in plan), never above the creepage.
-    assert pair.clearance_mm <= pair.creepage_mm
+    # The tracks overlap in plan and are on opposite board faces.
+    assert pair.clearance_mm == pytest.approx(1.6)
     assert pair.witness is not None
 
 
@@ -136,9 +136,9 @@ def test_cross_face_bore_binds_below_same_face_row(tmp_path):
     assert pair.creepage_mm == pytest.approx(3.75, abs=0.01)
     assert pair.via_bore == "MH1.1"
     assert not pair.passed
-    # Same-face results unchanged: the binding same-face layer is still F.Cu
-    # and the clearance is still the same-face straight-line gap.
+    # The binding face stays F.Cu, while the opposite-face gap limits clearance.
     assert pair.layer == "F.Cu"
+    assert pair.clearance_mm == pytest.approx(1.6)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +167,7 @@ def test_cross_face_slot_wall_path(tmp_path):
     # The slot wall is crossed at ONE rim point: 1.0 (F.Cu pad -> near wall)
     # + 1.6 (thickness) + 3.0 (wall -> B.Cu pad across the 2 mm slot).
     assert pair.creepage_mm == pytest.approx(5.6, abs=0.05)
+    assert pair.clearance_mm == pytest.approx(math.hypot(4.0, 1.6), abs=0.01)
     assert pair.via_bore is not None and "slot" in pair.via_bore
     assert not pair.passed
 

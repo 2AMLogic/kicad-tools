@@ -2664,6 +2664,12 @@ def compute_creepage_census(
         report.board_thickness_source = thickness_source
         report.board_thickness_declarations_mm = declarations or None
 
+    def _opposite_face_clearance(geom_a: Any, geom_b: Any) -> float:
+        # A crossing candidate has a resolved face separation. The straight
+        # 3-D distance bounds any air path around the outline or through a bore.
+        assert thickness_mm is not None
+        return math.hypot(geom_a.distance(geom_b), thickness_mm)
+
     def _attach_zone_row(
         layer: str,
         geom_a: Any,
@@ -2707,15 +2713,13 @@ def compute_creepage_census(
         via_floating = best_via.get((hv_num, other_num))
         # Cross-face bore/edge path (#9704): when it is shorter than the
         # same-face binding path it takes over the creepage (never the layer,
-        # relationship or same-face witness) and caps the clearance at the
-        # two faces' in-plan projection (a conservative floor on the true 3-D
-        # through-bore air path, which the 2-D model cannot measure).
+        # relationship or same-face witness). Compare both clearance bounds.
         cross = cross_best.get((hv_num, other_num))
         via_bore_label: str | None = None
         if cross is not None and cross[0] < creepage - _PASS_TOLERANCE:
             creepage = cross[0]
             via_bore_label = cross[1]
-            clearance = min(clearance, cross[4].distance(cross[5]))
+            clearance = min(clearance, _opposite_face_clearance(cross[4], cross[5]))
         # A row bound by a floating-island hop is board-level by nature (#8548):
         # the direct-gap same_footprint / attach-zone classification would not apply.
         if via_floating is not None:
@@ -2826,9 +2830,7 @@ def compute_creepage_census(
                 net_b=net_b_name,
                 kind="conductor",
                 layer=f"{fa}/{fb}",
-                # In-plan projection of the two faces' copper: the honest
-                # lower bound the 2-D model has for their clearance.
-                clearance_mm=ga.distance(gb),
+                clearance_mm=_opposite_face_clearance(ga, gb),
                 creepage_mm=creepage,
                 relationship="board",
                 witness=witness,
