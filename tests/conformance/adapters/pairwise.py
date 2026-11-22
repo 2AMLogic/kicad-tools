@@ -48,7 +48,7 @@ import tempfile
 from pathlib import Path
 
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
-from tests.conformance.adapters._support import ALL_PAIR_KINDS, router_rules
+from tests.conformance.adapters._support import ALL_PAIR_KINDS, project_rules, router_rules
 from tests.conformance.generator import CopperCase
 
 __all__ = ["PairwiseAdapter"]
@@ -65,15 +65,56 @@ class PairwiseAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same board replay with the scalar floor at kicad-cli's clearance.
+
+        Issue #9922: the same-rule reading.  ``dru`` is the one rule value the
+        replay consults on an all-0 V board, so moving ``trace_clearance`` onto
+        ``case.rules.project_clearance`` moves the whole requirement.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def verdicts_at_voltages(
+        self,
+        case: CopperCase,
+        net_voltages: dict[str, float],
+        rules=None,
+    ) -> set[Verdict]:
+        """The same board replay under an explicit voltage map (Issue #9922).
+
+        The matched-rule **scope control**.  This row's corpus keeps every net
+        at 0 V, so no pair's requirement clears the scalar floor and
+        ``find_pairwise_violations`` skips every pair -- which is the gate's
+        design, not a fault in its arithmetic.  Raising one net's potential
+        here widens that pair's requirement through the table's own public
+        builder, and the same replay then decides it.  The voltage map is the
+        consumer's documented input; this is not an oracle for the widened
+        value, which Epic #5509's parent owns.
+
+        Args:
+            case: The case to replay.
+            net_voltages: ``{net: volts}``; every net of the case should be
+                present, since a missing net is a 0 V net.
+            rules: Rule values; defaults to kicad-cli's own.
+        """
+        return self._verdicts(case, project_rules(case) if rules is None else rules, net_voltages)
+
+    def _verdicts(
+        self,
+        case: CopperCase,
+        rules,
+        net_voltages: dict[str, float] | None = None,
+    ) -> set[Verdict]:
         from kicad_tools.router.pairwise_clearance import (
             board_pairwise_violations,
             build_pairwise_clearance_table,
         )
         from tests.conformance.board import write_case
 
-        rules = router_rules(case)
         table = build_pairwise_clearance_table(
-            dict.fromkeys(case.nets, 0.0),
+            dict.fromkeys(case.nets, 0.0) if net_voltages is None else net_voltages,
             dru=rules.trace_clearance,
         )
 

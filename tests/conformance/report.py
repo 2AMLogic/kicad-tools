@@ -37,6 +37,14 @@ not one of the nineteen groups -- it is the model they are to be unified onto
 -- so it renders in its own section under the key
 :data:`~tests.conformance.adapters.kernel.KERNEL_GROUP` (``0``).
 
+The rows that are still **advisory** -- neither migrated nor gated -- are
+classified as well as measured (Issue #9922).  :data:`ADVISORY_GROUPS` is
+their complement of :data:`MIGRATED_GROUPS`; :data:`CLASSIFICATIONS` states
+each one's production caller, the two rule values it is compared at and its
+disposition, and :func:`measure_corpus` reads every advisory adapter a second
+time at kicad-cli's own rule value so the published classification carries
+the counts and the named pairs it is based on.
+
 Run as a module (``tests`` is a package and pytest's ``pythonpath`` only adds
 ``src``, so invoking this file by path cannot import its own package)::
 
@@ -83,6 +91,7 @@ from tests.conformance.board import write_case
 from tests.conformance.generator import (
     BOUNDARY_BAND_MM,
     CopperCase,
+    PairIntent,
     PairKind,
     generate_corpus,
     parse_seed_range,
@@ -97,26 +106,42 @@ from tests.conformance.oracle import (
 
 __all__ = [
     "ADAPTERS",
+    "ADVISORY_GROUPS",
+    "ADVISORY_TRACE_SEEDS",
+    "CLASSIFICATION_TABLE_BEGIN",
+    "CLASSIFICATION_TABLE_END",
+    "CLASSIFICATIONS",
+    "CONSERVATIVE",
+    "DISPOSITIONS",
     "GROUPS",
     "KERNEL_GROUP",
     "MIGRATED_GROUPS",
     "NOTES",
     "NOT_MEASURED",
     "NOT_MEASURED_REASONS",
+    "OUT_OF_SCOPE",
     "QUANTISED_GROUPS",
     "REFINEMENT_GATED_GROUPS",
+    "RETAINED_GAP",
+    "RULE_VALUE",
     "TABLE_BEGIN",
     "TABLE_END",
     "KERNEL_TABLE_BEGIN",
     "KERNEL_TABLE_END",
+    "CLASSIFICATION_COLUMNS",
     "TABLE_COLUMNS",
     "AdapterMeasurement",
+    "Classification",
     "CorpusStats",
     "Group",
+    "SameRuleReading",
     "adapter_for_group",
+    "classification_errors",
+    "kicad_cli_version",
     "main",
     "measure_corpus",
     "not_measured_reason",
+    "render_advisory_table",
     "render_document",
     "render_kernel_table",
     "render_table",
@@ -129,6 +154,9 @@ TABLE_END = "<!-- clearance-conformance:table:end -->"
 
 KERNEL_TABLE_BEGIN = "<!-- clearance-conformance:kernel:begin -->"
 KERNEL_TABLE_END = "<!-- clearance-conformance:kernel:end -->"
+
+CLASSIFICATION_TABLE_BEGIN = "<!-- clearance-conformance:advisory:begin -->"
+CLASSIFICATION_TABLE_END = "<!-- clearance-conformance:advisory:end -->"
 
 DOC_PATH = Path(__file__).resolve().parents[2] / "docs" / "clearance-conformance.md"
 
@@ -467,8 +495,10 @@ NOTES: dict[int, str] = {
         "rather than the retired `tests/conformance/test_route_halo_refinement_gate.py`. "
         "The under-rejection cell is a **rule** reading, not a geometry one, "
         "and that attribution is asserted pair-by-pair rather than claimed: "
-        "every under-rejected pair (`seg-seg` and, since the widening above "
-        "retired, `seg-via` too) sits in the 0.15-0.20 mm band the router's "
+        "every under-rejected pair (`seg-seg` only: since #6272 a `seg-via` pair "
+        "resolves `max(trace_clearance, via_clearance)`, 0.20 mm at the router's "
+        "own values, and is no longer under-rejected) sits in the 0.15-0.20 mm "
+        "band the router's "
         "own `trace_clearance` does not require and the project's `Default` "
         "netclass does -- the #5398 / #5654 defect this row may not close. "
         "Driven at the clearance kicad-cli itself applies, the consumer "
@@ -487,7 +517,8 @@ NOTES: dict[int, str] = {
         "`search_fill_*` overrides and a `route_cell_has_geometry` pre-check "
         "-- no arithmetic of their own. Migrated, on the same two readings as "
         "group 4: 0.0% over-rejection is a hard gate, and the under-rejection "
-        "cell (`seg-seg` and `seg-via`, since the widening above retired) is "
+        "cell (`seg-seg` only, since #6272 moved `seg-via` onto "
+        "`max(trace_clearance, via_clearance)`) is "
         "asserted to be entirely the 0.15-0.20 mm "
         "`trace_clearance`-versus-`Default`-netclass band (#5398 / #5654) "
         "rather than geometry. At kicad-cli's own clearance this consumer "
@@ -586,7 +617,10 @@ NOTES: dict[int, str] = {
         "`_min_clearance_to_neighbors` and `_validate_segment_relaxed` "
         "(`router/subgrid.py`) are private `SubGridRouter` internals "
         "needing a live sub-grid escape context (parent grid, pad-cluster box, "
-        "per-pad overrides) -- escape router's Phase 3 PR."
+        "per-pad overrides) -- escape router's Phase 3 PR. Nor are the other "
+        "two encodings a production caller gives a foreign pad: the escape "
+        "router's rotation-aware box and the stitcher's disc-bound 4-tuple, "
+        "both of which can only over-reject (Issue #9922)."
     ),
     12: "Via-first insertion order only; the other order is #5398's fixture.",
     13: (
@@ -618,13 +652,10 @@ NOTES: dict[int, str] = {
         "reported by `raster_only_blocked_cell` -- still rejects outright. "
         "Migrated, so the row is a hard gate; driven at the clearance "
         "kicad-cli itself applies, the consumer agrees in **both** directions. "
-        "Both published cells keep the consumer's own rule values and are "
-        "rule readings rather than geometry ones: the 0.2 mm `via_clearance` "
-        "default widens a `seg-via` requirement to `max(trace_clearance, "
-        "via_clearance)` (over-rejection) and the 0.15 mm `trace_clearance` "
-        "sits below the project's 0.20 mm `Default` netclass "
-        "(under-rejection) -- the #5398 / #5654 defect no migration phase may "
-        "close."
+        "The published under-rejection cell keeps the consumer's own rule values "
+        "and is a rule reading rather than a geometry one: the 0.15 mm "
+        "`trace_clearance` sits below the project's 0.20 mm `Default` netclass "
+        "-- the #5398 / #5654 defect no migration phase may close."
     ),
     16: (
         "**Not measured**: `_post_insertion_clearance_detail_pair_group` "
@@ -701,11 +732,15 @@ NOTES: dict[int, str] = {
         "Every pad is a disc of `max(w, h) / 2` "
         "(`_extract_pad_arrays` in `drc/cpp_backend.py`), which can over-reject "
         "but never "
-        "under-reject. **Not measured**: the corpus probes the one axis where "
-        "that envelope is tight (each probe shape's long side is its local X "
-        "side, so `max(w, h) / 2` is the true support there) -- quantifying "
-        "the off-axis over-approximation needs a short-side pad pair kind "
-        "(Phase 4)."
+        "under-reject. **Not measured on the corpus**: the corpus probes the one "
+        "axis where that envelope is tight (each probe shape's long side is its "
+        "local X side, so `max(w, h) / 2` is the true support there), and it "
+        "places no `pad-pad` pair on the gate seeds at all. The off-axis "
+        "over-approximation is demonstrated instead by the named control "
+        "`drc-cpp-disc-off-axis` "
+        "(`test_corpus.test_drc_cpp_disc_envelope_control`, Issue #9922): two "
+        "1.2 x 0.8 mm rect pads 0.22 mm apart across their short sides are "
+        "clean for kicad-cli and rejected here at the same rule."
     ),
     KERNEL_GROUP: (
         "Control row, not a consumer group: both ports (`clearance_kernel.py` "
@@ -716,6 +751,294 @@ NOTES: dict[int, str] = {
         "fix it through `test_clearance_kernel_parity.py`, never here."
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Advisory groups at a matched rule (Issue #9922, Epic #5509 items E1 / C3)
+# ---------------------------------------------------------------------------
+#
+# ``MIGRATED_GROUPS`` says which consumers are on the shared kernel.  The
+# complement is the rows that are still *advisory*: measured, published, and
+# auto-``xfail``\\ ed, so a disagreement there is evidence rather than a red
+# build.  Epic #5509's acceptance audit left those rows without a stated
+# disposition -- a reader could not tell a rule-value difference (the caller
+# resolves 0.15 mm where the project says 0.20 mm) from a distance difference
+# (the caller's arithmetic disagrees with KiCad at the *same* rule), and the
+# two call for opposite responses.  A rule value is Phase 2's resolver axis
+# and no migration may close it by editing a number; a distance difference
+# either is a retained conservative approximation the caller accepts, or is
+# a gap somebody has to own.
+#
+# The split is made by reading every advisory adapter a second time, at the
+# clearance kicad-cli itself applies (``verdicts_at_project_rules``, the
+# reading every migrated adapter's merge gate already uses).  Whatever still
+# disagrees at that rule is a distance; whatever disagrees only at the
+# caller's own rule is a rule value.  Both readings are measured here, by the
+# same generator that renders the table, so the published classification
+# cannot drift from the numbers it explains.
+
+ADVISORY_GROUPS: frozenset[int] = (
+    frozenset(g.number for g in GROUPS) - MIGRATED_GROUPS - set(REFINEMENT_GATED_GROUPS)
+)
+"""Consumer groups whose adapter-vs-kicad-cli row is still advisory.
+
+Derived, never typed: a group is advisory exactly while it is neither
+migrated nor refinement-gated, so moving one into :data:`MIGRATED_GROUPS`
+retires its classification here in the same edit rather than leaving a stale
+one behind.  Issue #9922 classified six -- 3, 11, 12, 13, 14 and 19.
+"""
+
+ADVISORY_TRACE_SEEDS: range = range(0, 3)
+"""The seeds whose same-rule disagreements are named pair by pair.
+
+The merge gate's own ``test_corpus.CI_SEEDS``, so every pair the document
+names is a pair a test pins.  Only seeds that are also inside the measured
+corpus are traced; a report generated over another range says so instead of
+launching extra ``kicad-cli`` runs to manufacture a trace.
+"""
+
+RULE_VALUE = "rule value"
+CONSERVATIVE = "conservative approximation"
+RETAINED_GAP = "retained gap"
+OUT_OF_SCOPE = "out of scope by construction"
+
+DISPOSITIONS: dict[str, str] = {
+    RULE_VALUE: (
+        "disagrees at the caller's own rule value and agrees once driven at the "
+        "project minimum. Phase 2's resolver axis (#5398 / #5654): a rule value, "
+        "not arithmetic."
+    ),
+    CONSERVATIVE: (
+        "rejects a pair kicad-cli finds clean *at the project minimum*. The "
+        "arithmetic errs outward; the caller accepts it for the reason recorded "
+        "on the row."
+    ),
+    RETAINED_GAP: (
+        "accepts a pair kicad-cli flags *at the project minimum*. The arithmetic "
+        "or the model is short of a predicate; the row says which pairs and what "
+        "decides them in production."
+    ),
+    OUT_OF_SCOPE: (
+        "answers a narrower question than the corpus asks: the caller consults it "
+        "only for some pairs, so its silence on the others is by construction."
+    ),
+}
+"""The closed vocabulary a classification is stated in, with its definition.
+
+Rendered verbatim under the classification table, so a reader never has to
+guess what a disposition token means.
+"""
+
+
+@dataclass(frozen=True)
+class Classification:
+    """One advisory group's authored disposition (Issue #9922).
+
+    The static half of the classification: what no measurement can supply.
+    The measured half -- how many pairs, which seeds, which reading -- is
+    :class:`SameRuleReading`, produced by the same run that renders the row.
+
+    Attributes:
+        group: The Epic #5509 section-1 group number.
+        caller: The production path that consults this consumer.
+        rule: The rule value the caller resolves, against the project minimum
+            kicad-cli applies -- i.e. the two numbers the row compares.
+        dispositions: Which :data:`DISPOSITIONS` tokens the row is stated in.
+            Checked against the measurement: a token the numbers do not show
+            is a classification error, not a style choice.
+        retained: What persists at the matched rule and why the caller accepts
+            it, written for the reader who has to decide whether to act.
+    """
+
+    group: int
+    caller: str
+    rule: str
+    dispositions: frozenset[str]
+    retained: str
+
+
+CLASSIFICATIONS: dict[int, Classification] = {
+    3: Classification(
+        group=3,
+        caller=(
+            "the C++ A* acceptance read: `Pathfinder::is_trace_blocked` for a "
+            "trace candidate, `Pathfinder::is_via_blocked` for a via"
+        ),
+        rule=(
+            "halo radius from `trace_clearance` 0.15 mm / `via_clearance` 0.20 mm "
+            "against the project minimum 0.20 mm"
+        ),
+        dispositions=frozenset({CONSERVATIVE}),
+        retained=(
+            "Cell quantisation, and the same quantisation groups 1 and 2 already "
+            "carry in `test_corpus.QUANTISATION_LEDGER`: on every gate seed the "
+            "pairs this row over-rejects at the matched rule are exactly the "
+            "pairs group 2's ledger names, because the read side answers on the "
+            "cells the write side marked. Over seeds 0-199 its matched-rule cell "
+            "equals group 2's own row, 484 of 930. The caller accepts it because "
+            "a cell-quantised model errs outward: the search-time refinement "
+            "(groups 4 and 5) re-reads the exact geometry of a marked cell before "
+            "refusing it, and at the matched rule neither refinement row flags any "
+            "pair named here. The cost is A* expansions, not a rejected legal "
+            "route. The clearance supplied to the search and the quantisation of "
+            "the cell are recorded apart: only the first moves when the rule "
+            "value does, and here nothing moves -- this row was never "
+            "under-rejecting."
+        ),
+    ),
+    11: Classification(
+        group=11,
+        caller=(
+            "`Router.set_via_foreign_context` in `router/pathfinder.py`, "
+            "called from `router/core.py` and feeding "
+            "`point_clear_of_copper`, `segment_clears_foreign_via`, "
+            "`via_clears_foreign_segment` and `drill_hole_to_hole_clear`"
+        ),
+        rule=(
+            "`trace_clearance` 0.15 mm for a candidate trace, `via_clearance` "
+            "0.20 mm for a candidate via, against the project minimum 0.20 mm"
+        ),
+        dispositions=frozenset({RULE_VALUE, CONSERVATIVE, RETAINED_GAP}),
+        retained=(
+            "Three findings, and only the first is a rule value. **Rule value** "
+            "-- `seg-via`: this row drives the trace candidate at the 0.15 mm "
+            "trace rule, and every such disagreement over seeds 0-199 (240 of "
+            "them) is flagged once the rule is 0.20 mm; `via-via` agrees "
+            "outright. What survives the matched rule is entirely `pad-via`, and "
+            "it is the pad encoding: a pad handed to the predicate as an "
+            "axis-aligned box. **Conservative** -- 10 pairs (0.21-0.25 mm, "
+            "kicad-cli clean) are rejected at the matched rule because an "
+            "axis-aligned box standing for a rotated pad over-reaches at its "
+            "corners. Both callers that pass the 5-tuple share that: "
+            "`Pathfinder` with the pad's pre-rotation local size, the escape "
+            "router with its rotation-aware box, while the stitcher's disc "
+            "accepts all ten. The caller accepts it because a refused legal via "
+            "costs search, never a DRC violation. **Retained gap** -- 4 pairs "
+            "are accepted at the matched rule, and these are `Pathfinder`'s "
+            "alone: it passes the pad's *pre-rotation* local size, so a pad "
+            "turned away from the board axes is scored against an unrotated box "
+            "that under-reaches toward the via. On seed 1 the 1.2 x 0.8 mm rect "
+            "pad at 250.5 degrees measures 0.3248 mm that way where kicad-cli "
+            "measures 0.1933 mm; the rotation-aware box and the disc both reject "
+            "it. That is the site #9236 fixed for the escape router and did not "
+            "reach, so it is a gap rather than a chosen approximation: pinned, "
+            "not excused, and tracked in #9923. Not measured as rows of their "
+            "own: the `EscapeRouter` / `pad_access` encoding and the stitcher's "
+            "disc-bound 4-tuple."
+        ),
+    ),
+    12: Classification(
+        group=12,
+        caller=(
+            "`_TraceResolverTransaction.validate_committed_geometry` in `router/core.py` "
+            "for pad/via pairs, and its `RoutingGrid` validators for the other pairs"
+        ),
+        rule=(
+            "`trace_clearance` 0.15 mm for `seg-seg` and pad pairs, "
+            "`max(trace_clearance, via_clearance)` 0.20 mm for `seg-via` "
+            "(#6272), against the project minimum 0.20 mm"
+        ),
+        dispositions=frozenset({RULE_VALUE}),
+        retained=(
+            "The retry agrees with KiCad on all 1,294 comparisons at the 0.20 mm "
+            "project minimum. At the router's own rule values it accepts 346 "
+            "comparisons that KiCad flags. All 346 change to rejections at the "
+            "project minimum. The original measurement on `8df85294d` (#9927) "
+            "had 26 foreign-pad/via pairs that the retry accepted even at the "
+            "project minimum, or 52 comparisons across both fill states. The "
+            "repair (#9924, #9928) applies the ordinary Python pathfinder's "
+            "`RoutingGrid.worst_via_pad_deficit` check to committed vias. On "
+            "seeds 0 and 1, the retry, ordinary Python pathfinder, occupancy "
+            "halo and C++ commit validator all reject the pairs whose KiCad gaps "
+            "are 0.1782 and 0.1933 mm."
+        ),
+    ),
+    13: Classification(
+        group=13,
+        caller="`Grid3D::validate_route`, through `CppPathfinder._validate_route_clearance`",
+        rule=(
+            "`trace_clearance` 0.15 mm for `seg-seg` and pad pairs, "
+            "`max(trace_clearance, via_clearance)` 0.20 mm for `seg-via` "
+            "(#6272), against the project minimum 0.20 mm"
+        ),
+        dispositions=frozenset({RULE_VALUE}),
+        retained=(
+            "Nothing. Every disagreement at the caller's own rule value is a "
+            "`seg-seg`, `pad-seg` or `pad-via` pair between 0.15 mm and 0.20 mm "
+            "-- the kinds `validate_route` judges at the trace rule -- and each "
+            "is flagged once that argument is 0.20 mm: over seeds 0-199, 346 of "
+            "1294 comparisons move and none survive. The row is advisory, not "
+            "gated, only because its kernel migration has not been scheduled: "
+            "driven at kicad-cli's own clearance it agrees in both directions on "
+            "every traced seed and on the whole corpus. Its pad model keeps "
+            "oval and roundrect pads inside a rectangle, which could over-reject "
+            "(`roundrect-corner-gap`); over the same corpus at the matched rule "
+            "it never does."
+        ),
+    ),
+    14: Classification(
+        group=14,
+        caller=(
+            "`board_pairwise_violations` -> `find_pairwise_violations`, the "
+            "post-route replay of `PairwiseClearanceTable.path_is_clear`"
+        ),
+        rule="the scalar floor `dru` = `trace_clearance` 0.15 mm, against the project minimum 0.20 mm",
+        dispositions=frozenset({OUT_OF_SCOPE}),
+        retained=(
+            "The whole under-rejection cell, at either rule value -- over seeds "
+            "0-199, 632 of 1294 comparisons, which is every pair kicad-cli flags "
+            "in this row's scope -- and it is a property of the gate's *scope* "
+            "rather than of its arithmetic. The pairwise gate is the HV-widening "
+            "overlay: it walks a route pair only when `required_clearance(a, b) > "
+            "dru` and the copper-vs-pad branch only for a route some pad widens. "
+            "With every net at 0 V no pair clears the 30 V threshold, so the "
+            "requirement equals the floor for all of them and the loop skips "
+            "every pair -- including the ones kicad-cli flags. That is "
+            "deliberate: the scalar floor is another gate's question (the commit "
+            "gates, groups 12 and 13), and this one reports only what the scalar "
+            "path would miss. The measurement is therefore a lower bound on "
+            "strictness, never a claim that the gate is wrong. The matched-rule "
+            "control in `test_corpus.py` widens one pair's requirement and shows "
+            "the same board then reporting it. Owned elsewhere: the HV "
+            "domain-matrix oracle, and `Grid3D::pairwise_required_clearance`, "
+            "which is dormant until a domain matrix is installed."
+        ),
+    ),
+    19: Classification(
+        group=19,
+        caller=(
+            "`check_pair_clearance_cpp` (`drc/cpp_backend.py`), the placer's "
+            "candidate-move check over two whole footprints"
+        ),
+        rule=(
+            "the placer's threshold = `trace_clearance` 0.15 mm, against the "
+            "project minimum 0.20 mm"
+        ),
+        dispositions=frozenset({RULE_VALUE, CONSERVATIVE}),
+        retained=(
+            "On the corpus, only the rule value. Every pad-pad pair is placed "
+            "along the first pad's local +X axis, the one direction where the "
+            "consumer's disc of `max(w, h) / 2` is the pad's true support, so at "
+            "the matched rule it agrees: over seeds 0-199 all 20 disagreements "
+            "(of 42 comparisons) are 0.15-0.20 mm pairs and none survives. The "
+            "disc is still an approximation and the corpus cannot see it: "
+            "approached off its long axis a rect pad is over-approximated by "
+            "`(w - h) / 2`. The named pad-pad control in `test_corpus.py` "
+            "(`drc-cpp-disc-off-axis`) demonstrates it at the same rule -- two "
+            "1.2 x 0.8 mm rect pads 0.22 mm apart across their short sides are "
+            "clean for kicad-cli and rejected here, while the same pads 0.22 mm "
+            "apart across their long sides are accepted. The placer accepts the "
+            "envelope because it can only refuse a legal candidate, never place "
+            "an illegal one."
+        ),
+    ),
+}
+"""Issue #9922's disposition for every advisory group.
+
+Exactly :data:`ADVISORY_GROUPS`, asserted by ``test_report_shape``: a group
+that becomes advisory with no entry here fails, and so does an entry left
+behind by a group that has since been gated.
+"""
 
 
 def _adapter_available(adapter: ConsumerAdapter) -> bool:
@@ -774,6 +1097,76 @@ class AdapterMeasurement:
         return self._pct(self.under_reject)
 
 
+@dataclass(frozen=True)
+class SameRuleReading:
+    """An advisory adapter read at both rule values (Issue #9922).
+
+    ``own`` is the main table's row -- the consumer at the rule values it
+    resolves today.  ``at_project`` is the *same* consumer driven at the
+    clearance kicad-cli applies.  Subtracting the second from the first is
+    what separates a rule value from a distance: a pair the own-rule reading
+    accepts and the matched-rule reading flags disagreed about the number,
+    not the geometry.
+
+    Attributes:
+        group: The advisory group this reading classifies.
+        adapter_name: The adapter's row key.
+        own: Disagreements at the consumer's own rule values.
+        at_project: Disagreements at kicad-cli's own rule value.
+        compared_by_kind: The supported-pair denominator, per pair kind, in
+            sorted ``(kind, pairs)`` order.  Published beside every
+            percentage because a rate over three pairs and a rate over three
+            hundred are not the same claim.
+        rule_value_flips: Pairs kicad-cli flags, the own-rule reading accepts
+            and the matched-rule reading flags.
+        trace: One line per named pair on each :data:`ADVISORY_TRACE_SEED`,
+            saying which reading rejected or accepted it.  The exact pairs a
+            disposition is stated over, so "retained" can never be read as
+            "some pairs, unspecified".
+    """
+
+    group: int
+    adapter_name: str
+    own: AdapterMeasurement
+    at_project: AdapterMeasurement
+    compared_by_kind: tuple[tuple[str, int], ...]
+    rule_value_flips: int = 0
+    trace: tuple[str, ...] = ()
+
+
+def classification_errors(
+    dispositions: frozenset[str],
+    at_project: AdapterMeasurement,
+    rule_value_flips: int,
+) -> tuple[str, ...]:
+    """Authored disposition tokens the measurement contradicts.
+
+    One direction only, deliberately.  A measured disagreement at the matched
+    rule *must* be classified as arithmetic (it cannot be a rule value once
+    the two rule values are equal), and a measured rule-value flip *must* be
+    classified as one.  The reverse -- a token with nothing behind it -- is
+    not an error here, because a corpus cannot show every disposition: group
+    19's conservative disc only appears off the axis the corpus probes, and
+    that evidence is the named control in ``test_corpus.py``.
+    """
+    errors: list[str] = []
+    if at_project.over_reject and CONSERVATIVE not in dispositions:
+        errors.append(
+            f"over-rejects {at_project.over_reject} pair(s) at the project minimum "
+            f"but is not classified {CONSERVATIVE!r}"
+        )
+    if at_project.under_reject and not dispositions & {RETAINED_GAP, OUT_OF_SCOPE}:
+        errors.append(
+            f"under-rejects {at_project.under_reject} pair(s) at the project minimum "
+            f"but is classified {sorted(dispositions)!r}, none of which is arithmetic"
+        )
+    if rule_value_flips and RULE_VALUE not in dispositions:
+        errors.append(
+            f"has {rule_value_flips} rule-value flip(s) but is not classified {RULE_VALUE!r}"
+        )
+    return tuple(errors)
+
+
 TABLE_COLUMNS: tuple[str, ...] = (
     "adapter",
     "corpus (seed range)",
@@ -789,6 +1182,22 @@ The ``notes`` column is what makes the "every row is measured *or* states its
 reason" criterion checkable rather than aspirational: it carries
 :data:`NOT_MEASURED_REASONS` for an unmeasured group and :data:`NOTES` -- the
 sub-entry-points a row does not cover -- for a measured one.
+"""
+
+CLASSIFICATION_COLUMNS: tuple[str, ...] = (
+    "group · adapter",
+    "production caller",
+    "pair kinds (compared)",
+    "caller rule → project minimum",
+    "own-rule over / under",
+    "matched-rule over / under",
+    "disposition",
+)
+"""The advisory classification table's columns, in order (Issue #9922).
+
+Each column answers one question the acceptance audit left open per group:
+who calls it, what it can decide, which two numbers are being compared, how
+it disagrees at each of them, and what the residual is called.
 """
 
 
@@ -829,6 +1238,25 @@ def not_measured_reason(number: int) -> str:
     return "no adapter registered and no reason recorded -- this is a harness bug."
 
 
+def kicad_cli_version() -> str:
+    """The kicad-cli release the oracle resolved, or ``not measured``.
+
+    Read from the discovery probe :func:`find_kicad_cli` has already made, so
+    asking costs no process.  The corpus percentages and the classification
+    below are only meaningful against the release that produced them -- the
+    acceptance audit listed the missing version as a gap -- so the
+    classification states it.  It is a *toolchain* stamp, not a generating
+    commit: the same pinned image answers the same on every regeneration,
+    which is what keeps the document byte-identical.
+    """
+    from kicad_tools.cli import runner
+
+    path = runner.find_kicad_cli()
+    if path is None:
+        return NOT_MEASURED
+    return runner.PROBED_KICAD_CLI_VERSIONS.get(str(path)) or NOT_MEASURED
+
+
 def _row_note(number: int) -> str:
     """The ``notes`` cell for a *measured* row, migration status included.
 
@@ -842,24 +1270,33 @@ def _row_note(number: int) -> str:
     applies, isolating the geometry this epic actually unified.
     """
     note = NOTES.get(number, "")
-    if number not in MIGRATED_GROUPS:
-        return note
-    fails_on = (
-        "so it fails on any **under**-rejection and on any over-rejection its "
-        "pinned cell-quantisation ledger (`test_corpus.QUANTISATION_LEDGER`) "
-        "does not record"
-        if number in QUANTISED_GROUPS
-        else "so it fails on a **geometry** disagreement in either direction"
-    )
-    prefix = (
-        f"**Switched to the shared kernel in Phase {_MIGRATION_PHASE[number]} -- "
-        "no longer report-only.** The merge gate "
-        "(`test_corpus.test_adapter_agrees_with_kicad_cli`) drives this same "
-        "consumer at the project netclass clearance kicad-cli itself applies, "
-        f"{fails_on}; the percentages in this row keep the consumer's own rule "
-        "values."
-    )
-    return f"{prefix} {note}".strip()
+    if number in MIGRATED_GROUPS:
+        fails_on = (
+            "so it fails on any **under**-rejection and on any over-rejection its "
+            "pinned cell-quantisation ledger (`test_corpus.QUANTISATION_LEDGER`) "
+            "does not record"
+            if number in QUANTISED_GROUPS
+            else "so it fails on a **geometry** disagreement in either direction"
+        )
+        prefix = (
+            f"**Switched to the shared kernel in Phase {_MIGRATION_PHASE[number]} -- "
+            "no longer report-only.** The merge gate "
+            "(`test_corpus.test_adapter_agrees_with_kicad_cli`) drives this same "
+            "consumer at the project netclass clearance kicad-cli itself applies, "
+            f"{fails_on}; the percentages in this row keep the consumer's own rule "
+            "values."
+        )
+        return f"{prefix} {note}".strip()
+    if number in ADVISORY_GROUPS:
+        # Derived, not typed into NOTES: a group that becomes advisory gets
+        # its pointer in the same edit, and one that is gated loses it.
+        suffix = (
+            "**Still advisory (report-only).** Classified at a matched rule in "
+            "the advisory section below (Issue #9922): the production caller, the "
+            "pair kinds, both rule values and the named pairs."
+        )
+        return f"{note} {suffix}".strip()
+    return note
 
 
 def _escape_cell(text: str) -> str:
@@ -927,12 +1364,15 @@ def _kernel_row(
     )
 
 
-def _markdown_table(rows: list[tuple[str, ...]]) -> list[str]:
-    header = "| " + " | ".join(TABLE_COLUMNS) + " |"
-    sep = "|" + "---|" * len(TABLE_COLUMNS)
+def _markdown_table(
+    rows: list[tuple[str, ...]],
+    columns: tuple[str, ...] = TABLE_COLUMNS,
+) -> list[str]:
+    header = "| " + " | ".join(columns) + " |"
+    sep = "|" + "---|" * len(columns)
     body = ["| " + " | ".join(row) + " |" for row in rows]
     for row in rows:
-        assert len(row) == len(TABLE_COLUMNS), f"row has {len(row)} cells: {row}"
+        assert len(row) == len(columns), f"row has {len(row)} cells: {row}"
     return [header, sep, *body]
 
 
@@ -975,14 +1415,205 @@ def render_kernel_table(
     return "\n".join([KERNEL_TABLE_BEGIN, *_markdown_table([row]), KERNEL_TABLE_END])
 
 
+def _count_cell(count: int, total: int) -> str:
+    """``count/total``, or ``not measured`` over an empty denominator.
+
+    A bare ``0`` next to nothing reads as agreement; ``0/0`` reads as what it
+    is.  Group 19 is the case that needs this -- its pair kind is rare enough
+    that a short seed range places none.
+    """
+    return NOT_MEASURED if total == 0 else f"{count}/{total}"
+
+
+def _advisory_row(number: int, reading: SameRuleReading | None) -> tuple[str, ...]:
+    group = next(g for g in GROUPS if g.number == number)
+    classification = CLASSIFICATIONS[number]
+    label = f"{number}. {group.label}"
+    if reading is None:
+        return (
+            f"{label} — {NOT_MEASURED}",
+            _escape_cell(classification.caller),
+            NOT_MEASURED,
+            _escape_cell(classification.rule),
+            NOT_MEASURED,
+            NOT_MEASURED,
+            _escape_cell(not_measured_reason(number)),
+        )
+    own, at_project = reading.own, reading.at_project
+    # A kind nobody compared is not a denominator: drop it, so an empty
+    # corpus reads ``not measured`` rather than a column of zeros.
+    kinds = (
+        ", ".join(f"`{kind}` {pairs}" for kind, pairs in reading.compared_by_kind if pairs)
+        or NOT_MEASURED
+    )
+    return (
+        f"{label} — `{reading.adapter_name}`",
+        _escape_cell(classification.caller),
+        kinds,
+        _escape_cell(classification.rule),
+        f"{_count_cell(own.over_reject, own.pairs_compared)} / "
+        f"{_count_cell(own.under_reject, own.pairs_compared)}",
+        f"{_count_cell(at_project.over_reject, at_project.pairs_compared)} / "
+        f"{_count_cell(at_project.under_reject, at_project.pairs_compared)}",
+        _escape_cell(_ordered_dispositions(classification.dispositions)),
+    )
+
+
+def _ordered_dispositions(dispositions: frozenset[str]) -> str:
+    """Disposition tokens in :data:`DISPOSITIONS` order -- rule value first.
+
+    Alphabetical order happens to put the arithmetic tokens before the rule
+    value, which reads as the more important finding when it is the less
+    actionable one.
+    """
+    return ", ".join(token for token in DISPOSITIONS if token in dispositions)
+
+
+def render_advisory_table(advisory: dict[int, SameRuleReading] | None = None) -> str:
+    """Render one classification row per advisory group (Issue #9922).
+
+    Delimited by :data:`CLASSIFICATION_TABLE_BEGIN` / ``_END`` so a test can
+    count rows without parsing prose, exactly as the group table does.  A
+    group that is advisory but was not measured on this machine keeps its
+    row with the authored half stated and the measured half reading ``not
+    measured`` -- never an omitted row, which would read as "agrees".
+
+    Raises:
+        AssertionError: If a measured reading contradicts the group's authored
+            disposition.  The document must not publish a classification its
+            own numbers refute.
+    """
+    advisory = advisory or {}
+    rows: list[tuple[str, ...]] = []
+    for group in GROUPS:
+        if group.number not in ADVISORY_GROUPS:
+            continue
+        reading = advisory.get(group.number)
+        if reading is not None:
+            errors = classification_errors(
+                CLASSIFICATIONS[group.number].dispositions,
+                reading.at_project,
+                reading.rule_value_flips,
+            )
+            assert not errors, (
+                f"group {group.number}'s classification is contradicted by its "
+                f"own measurement: {errors}"
+            )
+        rows.append(_advisory_row(group.number, reading))
+    assert len(rows) == len(ADVISORY_GROUPS)
+    return "\n".join(
+        [
+            CLASSIFICATION_TABLE_BEGIN,
+            *_markdown_table(rows, CLASSIFICATION_COLUMNS),
+            CLASSIFICATION_TABLE_END,
+        ]
+    )
+
+
+def render_advisory_dispositions(advisory: dict[int, SameRuleReading] | None = None) -> list[str]:
+    """The per-group prose under the classification table, with the named pairs.
+
+    The ``retained`` text says *why* the caller accepts what persists; the
+    trace lines say *which* pairs, so a reader can reproduce every one from
+    its seed.
+    """
+    advisory = advisory or {}
+    lines: list[str] = []
+    for group in GROUPS:
+        if group.number not in ADVISORY_GROUPS:
+            continue
+        classification = CLASSIFICATIONS[group.number]
+        lines.append(f"- **{group.number}. {group.label}** -- {classification.retained}")
+        reading = advisory.get(group.number)
+        if reading is None:
+            lines.append(f"  - trace: {NOT_MEASURED}")
+            continue
+        for entry in reading.trace:
+            lines.append(f"  - {entry}")
+    return lines
+
+
+def _traced_seeds(stats: CorpusStats) -> list[int]:
+    """Which :data:`ADVISORY_TRACE_SEEDS` the measured corpus contains."""
+    first, last = (int(part) for part in stats.seed_range.split("-"))
+    return [seed for seed in ADVISORY_TRACE_SEEDS if first <= seed <= last]
+
+
+def _advisory_section(
+    stats: CorpusStats,
+    advisory: dict[int, SameRuleReading],
+    trace_seeds: list[int],
+) -> list[str]:
+    """The classification section: provenance, table, vocabulary, named pairs."""
+    groups = sorted(ADVISORY_GROUPS)
+    if not groups:
+        return []
+    if trace_seeds:
+        trace_text = (
+            f"seeds {', '.join(str(s) for s in trace_seeds)} -- the merge gate's "
+            "own `test_corpus.CI_SEEDS`, so every pair named below is a pair a "
+            "test pins"
+        )
+    else:
+        trace_text = (
+            f"`{NOT_MEASURED}` -- none of seeds {ADVISORY_TRACE_SEEDS.start}-"
+            f"{ADVISORY_TRACE_SEEDS.stop - 1} is inside the measured range"
+        )
+    return [
+        "## Advisory groups at a matched rule",
+        "",
+        f"Issue #9922 (Epic #5509 acceptance items E1 and C3). {len(groups)} of "
+        f"the {len(GROUPS)} rows above are still advisory -- groups "
+        f"{', '.join(str(g) for g in groups)} -- and a disagreement there is "
+        "evidence rather than a red build. Their percentages alone cannot say "
+        "**what kind** of disagreement they are: a consumer that resolves "
+        "0.15 mm where the project says 0.20 mm disagrees with kicad-cli "
+        "without a single wrong distance, and a consumer whose arithmetic is "
+        "short disagrees at the same rule. The first is Phase 2's resolver "
+        "axis and no migration may close it by editing a number; the second "
+        "either is a retained approximation the caller accepts, or is a gap "
+        "somebody has to own.",
+        "",
+        "So every advisory adapter is read twice: at the caller's own rule "
+        "values (the row above) and at the project netclass minimum kicad-cli "
+        "itself applies. Whatever still disagrees at the matched rule is "
+        "arithmetic; whatever disagrees only at the caller's rule is a rule "
+        "value. Each row states the production caller, the pair kinds it is "
+        "actually consulted for, the two rule values being compared, and its "
+        "disposition.",
+        "",
+        f"- kicad-cli: `{kicad_cli_version()}`",
+        f"- Fill states: {', '.join(stats.fill_states) or NOT_MEASURED}",
+        f"- Seed range: `{stats.seed_range}`; counts are pairs compared over both fill states",
+        f"- Named pairs: {trace_text}",
+        "- Provenance of the prose: prevalence quoted under the table was measured "
+        "for Issue #9922 at `efafdb1f4` on kicad-cli 10.0.6. The table itself is "
+        "re-measured on every regeneration.",
+        "",
+        render_advisory_table(advisory),
+        "",
+        "**How to read ``disposition``:**",
+        "",
+        *[f"- `{token}` -- {definition}" for token, definition in DISPOSITIONS.items()],
+        "",
+        "**What persists, and why the caller accepts it:**",
+        "",
+        *render_advisory_dispositions(advisory),
+        "",
+    ]
+
+
 def render_document(
     stats: CorpusStats,
     measurements: dict[int, AdapterMeasurement] | None = None,
+    advisory: dict[int, SameRuleReading] | None = None,
 ) -> str:
     """Render the full ``docs/clearance-conformance.md`` body."""
     measurements = measurements or {}
+    advisory = advisory or {}
     measured = sorted(g for g in measurements if g != KERNEL_GROUP)
     unmeasured = [g.number for g in GROUPS if g.number not in measurements]
+    trace_seeds = _traced_seeds(stats)
 
     lines: list[str] = [
         "# Clearance conformance: kicad-cli vs. in-tree consumers",
@@ -1021,6 +1652,20 @@ def render_document(
                 "",
             ]
             if MIGRATED_GROUPS
+            else []
+        ),
+        *(
+            [
+                "Still **advisory** (report-only): "
+                + ", ".join(f"group {n}" for n in sorted(ADVISORY_GROUPS))
+                + ". Their disagreements are classified in the advisory section "
+                "below -- each as a rule value, a retained conservative "
+                "approximation, a retained gap, or out of scope -- by reading "
+                "the same consumer a second time at kicad-cli's own rule value "
+                "(Issue #9922).",
+                "",
+            ]
+            if ADVISORY_GROUPS
             else []
         ),
         *(
@@ -1151,6 +1796,7 @@ def render_document(
         "",
         render_kernel_table(stats, measurements),
         "",
+        *_advisory_section(stats, advisory, trace_seeds),
         "## Corpus",
         "",
         f"- Seed range: `{stats.seed_range}` ({stats.case_count} generated cases)",
@@ -1280,8 +1926,12 @@ def measure_corpus(
     *,
     fill_states: tuple[bool, ...] = (False, True),
     work_dir: Path | None = None,
-) -> tuple[CorpusStats, dict[int, AdapterMeasurement]]:
+) -> tuple[CorpusStats, dict[int, AdapterMeasurement], dict[int, SameRuleReading]]:
     """Generate, write and measure the corpus; return stats + adapter results.
+
+    The third value is each advisory group read at both rule values (Issue
+    #9922), for the classification section; it is empty when every group is
+    gated.  It reuses the oracle runs the table already paid for.
 
     With no adapters registered (Phase 1a) this still does real work: it
     exercises the generator, the board writer and the oracle across the whole
@@ -1346,37 +1996,15 @@ def measure_corpus(
             # both fill states; measure once per case and reuse it for each.
             verdict_cache: dict[str, set[frozenset[str]]] = {}
             for case, result in results:
-                truth = {v.nets for v in result.without_zones()}
-                # Zone verdicts are only meaningful against a fresh fill, so
-                # they are read from the refilled run and only from there
-                # (#5644).  An unfilled pour contributes no copper at all to
-                # kicad-cli, so scoring a zone pair on the as-is run would
-                # measure the fill state rather than the clearance model.
-                zone_truth = {v.nets for v in result.verdicts if v.zone} if result.refill else set()
                 consumer = verdict_cache.get(case.name)
                 if consumer is None:
                     consumer = {v.nets for v in adapter.verdicts(case)}
                     verdict_cache[case.name] = consumer
-                for pair in case.pairs:
-                    if kinds is not None and pair.kind not in kinds:
-                        # Out of this consumer's declared scope -- see
-                        # ``ConsumerAdapter.pair_kinds``.  Counting it would
-                        # record the absence of a check elsewhere in the
-                        # pipeline, not a disagreement in this model.
-                        continue
-                    is_zone_pair = pair.kind in PairKind.ZONE
-                    if is_zone_pair and not result.refill:
-                        continue
-                    if pair.boundary:
-                        boundary_hits += 1
-                        continue
-                    compared += 1
-                    in_truth = pair.nets in (zone_truth if is_zone_pair else truth)
-                    in_consumer = pair.nets in consumer
-                    if in_consumer and not in_truth:
-                        over += 1
-                    elif in_truth and not in_consumer:
-                        under += 1
+                found, compared_pairs, n_boundary = _score(case, result, consumer, kinds)
+                compared += len(compared_pairs)
+                boundary_hits += n_boundary
+                over += sum(1 for _, direction in found if direction == "over")
+                under += sum(1 for _, direction in found if direction == "under")
             measurements[adapter.group] = AdapterMeasurement(
                 group=adapter.group,
                 adapter_name=adapter.name,
@@ -1386,10 +2014,188 @@ def measure_corpus(
                 boundary=boundary_hits,
                 fill_states=state_names,
             )
-        return stats, measurements
+
+        advisory: dict[int, SameRuleReading] = {}
+        for group in sorted(ADVISORY_GROUPS):
+            if group in measurements:
+                adapter = adapter_for_group(group)
+                assert adapter is not None  # a measured group has an adapter by construction
+                advisory[group] = _same_rule_reading(adapter, results, state_names)
+        return stats, measurements, advisory
     finally:
         if tmp is not None:
             tmp.cleanup()
+
+
+def _score(
+    case: CopperCase,
+    result: OracleResult,
+    consumer: set[frozenset[str]],
+    kinds: frozenset[str] | None,
+) -> tuple[list[tuple[PairIntent, str]], list[PairIntent], int]:
+    """Score one reading of ``case`` against one oracle run.
+
+    Returns ``(disagreements, compared, boundary_hits)``.  A disagreement is
+    ``(pair, "over" | "under")``; ``compared`` is every pair that was
+    compared, which is the supported-pair denominator the classification
+    publishes per kind.
+
+    This is the one place the comparison's scope rule lives, so the table's
+    own-rule reading and the classification's matched-rule reading cannot
+    drift apart on which pairs count.  The order of the exclusions is
+    load-bearing: a zone pair on an unrefilled run is not comparable at all,
+    so it is dropped before the boundary band could claim it.
+    """
+    truth = {v.nets for v in result.without_zones()}
+    # Zone verdicts are only meaningful against a fresh fill, so they are
+    # read from the refilled run and only from there (#5644).  An unfilled
+    # pour contributes no copper at all to kicad-cli, so scoring a zone pair
+    # on the as-is run would measure the fill state rather than the
+    # clearance model.
+    zone_truth = {v.nets for v in result.verdicts if v.zone} if result.refill else set()
+    found: list[tuple[PairIntent, str]] = []
+    compared: list[PairIntent] = []
+    boundary_hits = 0
+    for pair in case.pairs:
+        if kinds is not None and pair.kind not in kinds:
+            # Out of this consumer's declared scope -- see
+            # ``ConsumerAdapter.pair_kinds``.  Counting it would record the
+            # absence of a check elsewhere in the pipeline, not a
+            # disagreement in this model.
+            continue
+        is_zone_pair = pair.kind in PairKind.ZONE
+        if is_zone_pair and not result.refill:
+            continue
+        if pair.boundary:
+            boundary_hits += 1
+            continue
+        compared.append(pair)
+        in_truth = pair.nets in (zone_truth if is_zone_pair else truth)
+        in_consumer = pair.nets in consumer
+        if in_consumer and not in_truth:
+            found.append((pair, "over"))
+        elif in_truth and not in_consumer:
+            found.append((pair, "under"))
+    return found, compared, boundary_hits
+
+
+def _pair_label(pair: PairIntent) -> str:
+    return f"`{pair.kind}` {sorted(pair.nets)}"
+
+
+def _trace_entry(
+    case: CopperCase, pair: PairIntent, kicad_gap: float | None, own: str | None, at: str | None
+) -> str:
+    """One named pair: what each reading decided, and what kicad-cli said.
+
+    ``own`` / ``at`` are the direction each reading disagreed in, or ``None``
+    where that reading agrees with kicad-cli.  A pair the two readings decide
+    differently is a rule value; a pair both decide the same way against
+    kicad-cli is arithmetic.
+    """
+    if own == at == "over":
+        verdict = (
+            f"rejected at both rule values (kicad-cli clean; {pair.target_gap_mm:.4f} mm placed)"
+        )
+    elif own == at == "under":
+        verdict = f"accepted at both rule values (kicad-cli flags it at {kicad_gap:.4f} mm)"
+    elif own == "under":
+        verdict = f"accepted at the caller's rule, flagged at the project minimum (kicad-cli {kicad_gap:.4f} mm)"
+    elif at == "over":
+        verdict = (
+            f"rejected only at the project minimum (kicad-cli clean; "
+            f"{pair.target_gap_mm:.4f} mm placed)"
+        )
+    elif own == "over":
+        verdict = (
+            f"rejected only at the caller's rule (kicad-cli clean; "
+            f"{pair.target_gap_mm:.4f} mm placed)"
+        )
+    else:  # pragma: no cover - a reading that agrees with kicad-cli is never traced
+        verdict = f"own={own!r} matched={at!r}"
+    return f"seed {case.seed}: {_pair_label(pair)} -- {verdict}"
+
+
+def _same_rule_reading(
+    adapter: ConsumerAdapter,
+    results: list[tuple[CopperCase, OracleResult]],
+    state_names: tuple[str, ...],
+) -> SameRuleReading:
+    """Read one advisory adapter at both rule values over the measured corpus.
+
+    Costs no ``kicad-cli`` run: the oracle results are the ones the table
+    already paid for, and only the consumer is asked a second question.  The
+    trace is taken from the as-is run alone, so each named pair appears once
+    rather than once per fill state.
+    """
+    kinds = _adapter_pair_kinds(adapter)
+    own_cache: dict[str, set[frozenset[str]]] = {}
+    at_cache: dict[str, set[frozenset[str]]] = {}
+    own_over = own_under = own_compared = 0
+    at_over = at_under = flips = 0
+    by_kind: dict[str, int] = {}
+    trace: list[str] = []
+    for case, result in results:
+        # Computed once per case and reused across its fill states: an adapter
+        # never sees zone fill, so its answer cannot change between them.
+        # (Not ``setdefault`` -- that evaluates the verdicts before looking.)
+        if case.name not in own_cache:
+            own_cache[case.name] = {v.nets for v in adapter.verdicts(case)}
+            at_cache[case.name] = {v.nets for v in adapter.verdicts_at_project_rules(case)}
+        own = own_cache[case.name]
+        at = at_cache[case.name]
+        own_found, compared_pairs, _ = _score(case, result, own, kinds)
+        at_found, _, _ = _score(case, result, at, kinds)
+        own_compared += len(compared_pairs)
+        for pair in compared_pairs:
+            by_kind[pair.kind] = by_kind.get(pair.kind, 0) + 1
+        own_over += sum(1 for _, d in own_found if d == "over")
+        own_under += sum(1 for _, d in own_found if d == "under")
+        at_over += sum(1 for _, d in at_found if d == "over")
+        at_under += sum(1 for _, d in at_found if d == "under")
+        # A flip is a pair the own-rule reading accepts and the matched-rule
+        # reading flags.  Measured against the matched-rule reading's
+        # *under*-rejections, not against the set it flags: a pair both
+        # readings accept is in neither set and is a retained gap, not a flip.
+        at_under_nets = {pair.nets for pair, d in at_found if d == "under"}
+        flips += sum(1 for pair, d in own_found if d == "under" and pair.nets not in at_under_nets)
+
+        if result.refill or case.seed not in ADVISORY_TRACE_SEEDS:
+            continue
+        kicad_gaps = {v.nets: v.gap_mm for v in result.without_zones()}
+        own_by_nets = {pair.nets: d for pair, d in own_found}
+        at_by_nets = {pair.nets: d for pair, d in at_found}
+        for pair in compared_pairs:
+            own_direction = own_by_nets.get(pair.nets)
+            at_direction = at_by_nets.get(pair.nets)
+            if own_direction is None and at_direction is None:
+                continue
+            trace.append(
+                _trace_entry(case, pair, kicad_gaps.get(pair.nets), own_direction, at_direction)
+            )
+    return SameRuleReading(
+        group=adapter.group,
+        adapter_name=adapter.name,
+        own=AdapterMeasurement(
+            group=adapter.group,
+            adapter_name=adapter.name,
+            pairs_compared=own_compared,
+            over_reject=own_over,
+            under_reject=own_under,
+            fill_states=state_names,
+        ),
+        at_project=AdapterMeasurement(
+            group=adapter.group,
+            adapter_name=adapter.name,
+            pairs_compared=own_compared,
+            over_reject=at_over,
+            under_reject=at_under,
+            fill_states=state_names,
+        ),
+        compared_by_kind=tuple(sorted(by_kind.items())),
+        rule_value_flips=flips,
+        trace=tuple(trace),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1422,7 +2228,9 @@ def main(argv: list[str] | None = None) -> int:
     }[args.fill]
 
     try:
-        stats, measurements = measure_corpus(parse_seed_range(args.seeds), fill_states=fill_states)
+        stats, measurements, advisory = measure_corpus(
+            parse_seed_range(args.seeds), fill_states=fill_states
+        )
     except KiCadCliAbsent as exc:
         # Refuse to emit a document. Without kicad-cli every disagreement rate
         # would read zero, which is a confident wrong answer.
@@ -1431,8 +2239,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(render_document(stats, measurements), encoding="utf-8")
-    print(f"wrote {args.out} ({len(GROUPS)} group rows, {stats.case_count} cases)")
+    args.out.write_text(render_document(stats, measurements, advisory), encoding="utf-8")
+    print(
+        f"wrote {args.out} ({len(GROUPS)} group rows, {len(advisory)} advisory rows, "
+        f"{stats.case_count} cases)"
+    )
     return 0
 
 

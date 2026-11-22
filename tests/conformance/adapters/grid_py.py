@@ -3,8 +3,8 @@
 The pad/via reading submits the candidate through the production trace
 transaction, including the component clearance policy and the drilled span.
 Other routing pairs drive the grid validators used by that transaction.
-The published reading uses the router's configured floors. The merge gate
-runs the same consumer at the project's clearance.
+The published reading uses the router's configured floors. The matched-rule
+reading runs the same consumer at the project's clearance.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ __all__ = ["GridPyAdapter"]
 
 
 class GridPyAdapter:
-    """Drives ``RoutingGrid``'s commit-time clearance validators."""
+    """Exercise the trace retry transaction and its commit-time grid validators."""
 
     name = "grid_py"
     group = 12
@@ -127,6 +127,20 @@ class GridPyAdapter:
         if isinstance(existing, SegmentSpec):
             required = trace_via_clearance_mm(rules.trace_clearance, rules.via_clearance)
         return not (ok_seg and ok_via), _finite(actual), required
+
+
+def pathfinder_via_pad_control(case: CopperCase, pad: PadSpec, via: ViaSpec) -> tuple[float, bool]:
+    """Return the measured deficit and ordinary Python pathfinder decision at the project rule."""
+    from kicad_tools.router.pathfinder import Router
+
+    nets = net_ids(case)
+    rules = project_rules(case)
+    grid = router_grid(case, rules)
+    grid.add_pad(router_pad(pad, nets))
+    route = single_object_route(via, nets)
+    deficit, _ = grid.worst_via_pad_deficit(route.vias[0], route.net)
+    accepted = Router(grid, rules)._validate_route_clearance(route, route.net)
+    return deficit, accepted
 
 
 def _contexts(case: CopperCase) -> list[PairContext]:
