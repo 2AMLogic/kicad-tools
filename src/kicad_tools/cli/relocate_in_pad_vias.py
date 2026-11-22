@@ -650,21 +650,101 @@ def _resolve_hole_clearance(pcb: PCB, explicit: float | None = None) -> float:
     return float(value)
 
 
-def _has_unmodeled_drill(pad: Pad) -> bool:
-    """Scalar Pad.drill omits slots and offsets; never treat these as absent.
+def _pad_board_anchor(pad: Pad, fp: Footprint) -> tuple[float, float]:
+    """The pad's ``(at x y)`` in board coordinates -- its drill's position.
 
-    Until the schema exposes their transformed geometry, relevant foreign
-    pads with these drill forms conservatively block relocation and stubs.
+    Footprint-local pad positions rotate with the footprint (KiCad's
+    negated-angle convention, :func:`kicad_tools.core.geometry.rotate_pad_offset`);
+    flipped (back-layer) footprints read straight, their pad locals already
+    mirrored in the file.
     """
-    node = pad._sexp_node
+    from kicad_tools.validate.clearance_shapes import pad_center
+
+    return pad_center(pad, fp)
+
+
+def _pad_copper_shift(pad: Pad) -> tuple[float, float] | None:
+    """Board-frame displacement of a pad's copper by its ``(offset ...)``.
+
+    Black-box pinned against the KiCad 10 image (drill + gerber exports plus
+    native DRC probes, issue #9902): the drill offset moves the **copper**
+    (``ShapePos``), never the hole -- ``(drill D (offset ox oy))`` displaces
+    the pad shape by the offset rotated through the pad's ABSOLUTE angle, and
+    the hole stays at the pad anchor.  Returns ``None`` when the offset
+    metadata is malformed (the schema stores NaN for missing values), leaving
+    the copper extent unprovable.
+    """
+    ox, oy = getattr(pad, "drill_offset", (0.0, 0.0)) or (0.0, 0.0)
+    try:
+        ox, oy = float(ox), float(oy)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(ox) and math.isfinite(oy)):
+        return None
+    if ox == 0.0 and oy == 0.0:
+        return (0.0, 0.0)
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    return rotate_pad_offset(ox, oy, float(getattr(pad, "rotation", 0.0) or 0.0))
+
+
+def _pad_drill_focus(pad: Pad, fp: Footprint) -> tuple[Point | LineString, float] | None:
+    """Board-frame geometry of a pad's drill as a swept-circle ``(focus, radius)``.
+
+    A round drill is a disc: focus ``Point(anchor)``, radius ``drill / 2``.
+    An oval drill is a stadium of ``(drill_size[0], drill_size[1])`` rotated by
+    the pad's ABSOLUTE angle (native renders it as the minor-diameter aperture
+    stroked along the major axis, so the stadium's focus segment runs along
+    that rotated axis).  ``None`` when the pad has no positive drill -- the
+    caller then has no hole to check.
+    """
+    anchor = _pad_board_anchor(pad, fp)
+    slot = getattr(pad, "drill_size", None)
+    if slot is not None:
+        try:
+            dx, dy = float(slot[0]), float(slot[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if math.isfinite(dx) and math.isfinite(dy) and dx > 0 and dy > 0:
+            minor = min(dx, dy)
+            half = (max(dx, dy) - minor) / 2.0
+            from kicad_tools.core.geometry import rotate_pad_offset
+
+            local = (half, 0.0) if dx >= dy else (0.0, half)
+            rx, ry = rotate_pad_offset(
+                local[0], local[1], float(getattr(pad, "rotation", 0.0) or 0.0)
+            )
+            return (
+                LineString([(anchor[0] - rx, anchor[1] - ry), (anchor[0] + rx, anchor[1] + ry)]),
+                minor / 2.0,
+            )
+    drill = float(getattr(pad, "drill", 0.0) or 0.0)
+    if math.isfinite(drill) and drill > 0:
+        return (Point(anchor), drill / 2.0)
+    return None
+
+
+def _pad_drill_is_unprovable(pad: Pad) -> bool:
+    """Whether a pad carries a drill whose geometry cannot be modelled.
+
+    True for a ``(drill ...)`` node with neither a positive scalar nor two
+    positive oval dimensions (bare or malformed).  Such a pad keeps the
+    fail-closed verdict -- an absent model must never read as an absent hole.
+    """
+    node = getattr(pad, "_sexp_node", None)
     drill = node.find("drill") if node is not None else None
     if drill is None:
         return False
-    return (
-        len(drill.values) != 1
-        or not isinstance(drill.values[0], (int, float))
-        or drill.find("offset") is not None
-    )
+    slot = getattr(pad, "drill_size", None)
+    if slot is not None:
+        try:
+            dx, dy = float(slot[0]), float(slot[1])
+        except (TypeError, ValueError, IndexError):
+            return True
+        if math.isfinite(dx) and math.isfinite(dy) and dx > 0 and dy > 0:
+            return False
+    value = float(getattr(pad, "drill", 0.0) or 0.0)
+    return not (math.isfinite(value) and value > 0)
 
 
 def _raw_copper_bounds(item, transform):
@@ -805,13 +885,31 @@ def _check_raw_copper(
     return None
 
 
+def _custom_pad_extent(pad: Pad, center: tuple[float, float]):
+    """Exact board-frame copper of a ``custom`` pad, or ``None`` when refused.
+
+    ``center`` is the pad's copper centre (anchor plus any rotated drill
+    offset).  Delegates to the one custom-outline builder the DSN export,
+    router and connectivity already share (``custom_pad_board_outline``,
+    Issues #5376/#7545/#9468); ``None`` means the primitives are something
+    that builder refuses, and the caller keeps its named fail-closed
+    obstruction -- an unprovable extent must never read as absent copper.
+    """
+    from kicad_tools.geometry.copper import custom_pad_board_outline
+
+    return custom_pad_board_outline(pad, center)
+
+
 def _check_hole_to_copper(
     pcb: PCB, via: Via, x: float, y: float, floor: float, min_copper_clearance: float | None = None
 ) -> str | None:
     """Check both drill/copper directions independently of annulus width.
 
-    Ordinary pad bounding boxes conservatively enclose copper; custom pads
-    fail closed because their primitives can extend outside the nominal box.
+    Ordinary pad bounding boxes conservatively enclose copper, shifted by any
+    rotated drill offset (native displaces the copper, never the hole); a
+    pad's drill is modelled exactly -- a round hole as a disc, a slot as its
+    rotated stadium.  Custom pads use their real anchor-plus-primitives
+    outline and fail closed only when that extent cannot be built.
     """
     copper = [layer.name for layer in pcb.copper_layers]
 
@@ -851,17 +949,30 @@ def _check_hole_to_copper(
         for pad in fp.pads:
             if not foreign(pad.net_number) or not overlaps(pad.layers):
                 continue
-            if _has_unmodeled_drill(pad):
-                return f"hole-to-copper unmodeled drill at pad {fp.reference}-{pad.number}"
+            label = f"{fp.reference}-{pad.number}"
+            shift = _pad_copper_shift(pad)
+            drill = _pad_drill_focus(pad, fp)
+            if shift is None or _pad_drill_is_unprovable(pad):
+                return f"hole-to-copper unmodeled drill at pad {label}"
             if pad.shape == "custom":
-                return f"hole-to-copper unproven for custom pad {fp.reference}-{pad.number}"
-            bbox = pad_absolute_bbox(pad, fp)
-            gap = math.inf if pad.type == "np_thru_hole" else point.distance(box(*bbox)) - hole_r
-            if pad.drill > 0:
-                center = Point((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
-                gap = min(gap, point.distance(center) - via.size / 2 - pad.drill / 2)
+                anchor = _pad_board_anchor(pad, fp)
+                pad_copper = _custom_pad_extent(pad, (anchor[0] + shift[0], anchor[1] + shift[1]))
+                if pad_copper is None:
+                    return f"hole-to-copper unproven for custom pad {label}"
+            elif pad.type == "np_thru_hole":
+                pad_copper = None
+            else:
+                bbox = pad_absolute_bbox(pad, fp)
+                pad_copper = box(
+                    bbox[0] + shift[0], bbox[1] + shift[1], bbox[2] + shift[0], bbox[3] + shift[1]
+                )
+            gap = math.inf if pad_copper is None else point.distance(pad_copper) - hole_r
+            if drill is not None:
+                # The moving via's annulus against the pad's actual hole:
+                # a slot contributes its rotated stadium (focus + radius).
+                gap = min(gap, point.distance(drill[0]) - drill[1] - via.size / 2)
             if gap < floor - 1e-6:
-                return f"hole-to-copper {gap:.3f}mm to pad {fp.reference}-{pad.number}"
+                return f"hole-to-copper {gap:.3f}mm to pad {label}"
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
     for zone in pcb.zones:
@@ -995,7 +1106,9 @@ def _check_stub_clearance(
     required because an outline cannot predict future poured copper.
 
     Supported source-only arcs and graphics use conservative stroke bounds.
-    Unsupported copper and custom-pad primitives fail closed on relevant layers.
+    Pad drills are modelled exactly (disc or rotated stadium at the pad
+    anchor, with any drill offset shifting the copper instead).  Unsupported
+    copper and refused custom-pad primitives fail closed on relevant layers.
     """
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
@@ -1071,17 +1184,25 @@ def _check_stub_clearance(
         for pad in fp.pads:
             if not foreign(pad.net_number) or not overlaps(pad.layers):
                 continue
-            if _has_unmodeled_drill(pad):
-                return f"hole-to-copper unmodeled drill at pad {fp.reference}-{pad.number}"
+            label = f"{fp.reference}-{pad.number}"
+            shift = _pad_copper_shift(pad)
+            drill = _pad_drill_focus(pad, fp)
+            if shift is None or _pad_drill_is_unprovable(pad):
+                return f"hole-to-copper unmodeled drill at pad {label}"
             if pad.shape == "custom":
-                return f"stub clearance unproven for custom pad {fp.reference}-{pad.number}"
-            if pad.drill > 0:
+                anchor = _pad_board_anchor(pad, fp)
+                copper = _custom_pad_extent(pad, (anchor[0] + shift[0], anchor[1] + shift[1]))
+                if copper is None:
+                    return f"stub clearance unproven for custom pad {label}"
+            else:
                 bbox = pad_absolute_bbox(pad, fp)
-                center = Point((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
-                if too_close(center, pad.drill / 2, hole_floor):
-                    return f"stub hole-to-copper to pad {fp.reference}-{pad.number}"
-            if too_close(box(*pad_absolute_bbox(pad, fp)), 0.0, required(pad.net_number)):
-                return f"stub clearance to pad {fp.reference}-{pad.number}"
+                copper = box(
+                    bbox[0] + shift[0], bbox[1] + shift[1], bbox[2] + shift[0], bbox[3] + shift[1]
+                )
+            if drill is not None and too_close(drill[0], drill[1], hole_floor):
+                return f"stub hole-to-copper to pad {label}"
+            if too_close(copper, 0.0, required(pad.net_number)):
+                return f"stub clearance to pad {label}"
 
     for zone in pcb.zones:
         if not foreign(zone.net_number):

@@ -3621,12 +3621,14 @@ def test_hole_floor_rejects_unmodeled_pad_drills(tmp_path, drill, gate):
         _check_stub_clearance,
     )
 
-    # Nominal pad/drill center is 1 mm away. The actual slot/offset reaches
-    # y=10.2, within the 0.25 mm native floor of both proposed copper shapes.
+    # Nominal pad/drill center is 1 mm away. The slot (or, for the offset
+    # drill, the copper the offset displaces -- native moves the copper,
+    # never the hole) reaches y=10.2, within the 0.25 mm native floor of
+    # both proposed copper shapes.
     x = 10.7016 if gate == "via" else 10.35
     obstacle = (
         f'(footprint "Test:Hole" (layer "F.Cu") (at {x} 11) '
-        f'(pad "" np_thru_hole circle (at 0 0) (size .2 .2) '
+        f'(pad "1" thru_hole circle (at 0 0) (size .2 .2) '
         f'(drill {drill}) (layers "*.Cu")))'
     )
     pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
@@ -3640,7 +3642,235 @@ def test_hole_floor_rejects_unmodeled_pad_drills(tmp_path, drill, gate):
         assert actual_hole_edge.distance(LineString([via.position, target])) - 0.1 < 0.25
         reason = _check_stub_clearance(pcb, via, target, ["F.Cu"], 0.2, 0.1016)
     assert reason is not None
-    assert "unmodeled drill" in reason
+    assert "pad" in reason
+
+
+@pytest.mark.parametrize("drill", ["oval .2 1.6", ".2 (offset 0 -.7)"])
+@pytest.mark.parametrize("gate", ["via", "stub"])
+def test_hole_floor_distant_unmodeled_drills_do_not_veto(tmp_path, drill, gate):
+    from kicad_tools.cli.relocate_in_pad_vias import (
+        _check_hole_to_copper,
+        _check_stub_clearance,
+    )
+
+    # The same slot/offset obstacle ~100 mm away must not veto a clear
+    # relocation or stub: the verdicts are distance-tested against the
+    # modelled geometry, not fail-closed board-wide (issue #9902).
+    x = 10.7016 if gate == "via" else 10.35
+    obstacle = (
+        f'(footprint "Test:Hole" (layer "F.Cu") (at {x} 111) '
+        f'(pad "1" thru_hole circle (at 0 0) (size .2 .2) '
+        f'(drill {drill}) (layers "*.Cu")))'
+    )
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
+    via = pcb.vias[0]
+    target = (10.7016, 10)
+    if gate == "via":
+        assert _check_hole_to_copper(pcb, via, *target, 0.25) is None
+    else:
+        assert _check_stub_clearance(pcb, via, target, ["F.Cu"], 0.2, 0.1016) is None
+
+
+def test_hole_floor_rotated_slot_clears_and_blocks_in_its_own_direction(tmp_path):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_hole_to_copper
+
+    # A slot rotates with the pad's ABSOLUTE angle (native renders the
+    # minor-diameter aperture along the rotated major axis). At 90 degrees
+    # the 1.6-long slot lies along x, so the via 1 mm above the anchor is
+    # clear -- an unrotated model would still reject it at y=10.2.
+    obstacle = (
+        '(footprint "Test:Hole" (layer "F.Cu") (at 10.7016 11) '
+        '(pad "1" thru_hole oval (at 0 0 90) (size .2 .2) '
+        '(drill oval .2 1.6) (layers "*.Cu")))'
+    )
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
+    via = pcb.vias[0]
+    assert _check_hole_to_copper(pcb, via, 10.7016, 10, 0.25) is None
+    # Sideways, past the rotated slot's tip (x = 10.7016 +/- 0.8), the
+    # annulus is back inside the floor: 11.9 - 11.5016 - 0.225 < 0.25.
+    assert "hole-to-copper" in _check_hole_to_copper(pcb, via, 11.9, 11, 0.25)
+
+
+def test_hole_floor_slot_angle_is_the_absolute_pad_token(tmp_path):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_hole_to_copper
+
+    # The pad's stored angle already includes the footprint rotation, so a
+    # footprint rotated 90 with a 45-degree pad token carries its slot at 45
+    # degrees -- not folded to 135. The probe sits where the 45-degree slot
+    # reaches (edge gap -0.029 mm) and the 135-degree slot does not.
+    obstacle = (
+        '(footprint "Test:Hole" (layer "F.Cu") (at 10 11 90) '
+        '(pad "1" thru_hole oval (at 0 0 45) (size .2 .2) '
+        '(drill oval .2 1.6) (layers "*.Cu")))'
+    )
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
+    via = pcb.vias[0]
+    assert "hole-to-copper" in _check_hole_to_copper(pcb, via, 10.8, 11.3, 0.25)
+    control = (
+        '(footprint "Test:Hole" (layer "F.Cu") (at 10 11) '
+        '(pad "1" thru_hole oval (at 0 0 135) (size .2 .2) '
+        '(drill oval .2 1.6) (layers "*.Cu")))'
+    )
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=control))
+    assert _check_hole_to_copper(pcb, via, 10.8, 11.3, 0.25) is None
+
+
+@pytest.mark.parametrize("layer,angle", [("F.Cu", 0), ("B.Cu", 0), ("F.Cu", 90)])
+def test_hole_floor_drill_offset_displaces_copper_not_the_hole(tmp_path, layer, angle):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_hole_to_copper
+
+    # Native (pinned against the KiCad 10 image): the hole stays at the pad
+    # anchor and the copper moves by the offset rotated through the pad's
+    # absolute angle. Unrotated, the copper lands at (x, 10.3) and rejects;
+    # at 90 degrees it moves to (x - 0.7, 11) and the same via is clear. A
+    # back-layer footprint reads the same way (no extra mirroring).
+    expect_reject = angle == 0
+    obstacle = (
+        f'(footprint "Test:Hole" (layer "{layer}") (at 10.7016 11) '
+        f'(pad "1" thru_hole circle (at 0 0 {angle}) (size .2 .2) '
+        f'(drill .2 (offset 0 -.7)) (layers "*.Cu")))'
+    )
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
+    via = pcb.vias[0]
+    reason = _check_hole_to_copper(pcb, via, 10.7016, 10, 0.25)
+    if expect_reject:
+        assert reason is not None and "hole-to-copper" in reason
+    else:
+        assert reason is None
+
+
+@pytest.mark.parametrize(
+    "primitives",
+    [
+        "(primitives (gr_poly (pts (xy 0 0) (xy 1 0) (xy 1 1) (xy 0 1)) (fill solid)))",
+        "(primitives (gr_arc (start 0 0) (mid 0.5 0.5) (end 1 0) (width 0.1)))",
+    ],
+)
+def test_hole_floor_custom_pad_proven_extent_or_named_refusal(tmp_path, primitives):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_hole_to_copper
+
+    # A custom pad's real anchor-plus-primitives outline is checked with the
+    # true distance test; a primitive the shared builder refuses keeps the
+    # named fail-closed obstruction (an unprovable extent is never absent).
+    obstacle = (
+        '(footprint "Test:Custom" (layer "F.Cu") (at 10.7016 11) '
+        f'(pad "1" smd custom (at 0 0) (size .1 .1) (layers "F.Cu") '
+        f"{primitives}))"
+    )
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
+    via = pcb.vias[0]
+    if "gr_poly" in primitives:
+        # The polygon extends the copper to y=11; 1 mm below it is clear,
+        # 0.1 mm below it is inside the floor.
+        assert _check_hole_to_copper(pcb, via, 10.7016, 9.7, 0.25) is None
+        assert "hole-to-copper" in _check_hole_to_copper(pcb, via, 10.7016, 10.9, 0.25)
+    else:
+        assert "unproven for custom pad" in _check_hole_to_copper(pcb, via, 10.7016, 9.7, 0.25)
+
+
+def test_board03_distant_shield_slot_no_longer_rejects_nearby_via():
+    from kicad_tools.cli.relocate_in_pad_vias import (
+        _check_hole_to_copper,
+        _check_stub_clearance,
+    )
+
+    # Issue #9902's witness: on Board 03's routed release, J1's USB-C shield
+    # slots used to veto this via -- 41.662 mm away in file coordinates --
+    # with a board-wide "unmodeled drill" refusal. Modelled as rotated
+    # stadiums at the pad anchors they no longer reject it, while a probe
+    # 1.4 mm from the nearest slot center is still measurably blocked.
+    board = (
+        Path(__file__).resolve().parents[1]
+        / "boards"
+        / "03-usb-joystick"
+        / "output"
+        / "usb_joystick_routed.kicad_pcb"
+    )
+    if not board.exists():  # pragma: no cover - repo checkout always has it
+        pytest.skip("Board 03 release PCB not checked out")
+    pcb = PCB.load(board)
+    ox, oy = pcb.board_origin
+    via = min(
+        pcb.vias,
+        key=lambda v: (v.position[0] + ox - 172.5) ** 2 + (v.position[1] + oy - 97.9) ** 2,
+    )
+    assert (via.position[0] + ox, via.position[1] + oy) == (172.5, 97.9)
+    assert _check_hole_to_copper(pcb, via, *via.position, 0.25) is None
+    assert (
+        _check_stub_clearance(
+            pcb, via, (via.position[0] + 0.3, via.position[1]), ["F.Cu"], 0.2, 0.1016
+        )
+        is None
+    )
+    near_slot = _check_hole_to_copper(pcb, via, 150.825 - ox, 62.32 + 1.4 - oy, 0.25)
+    assert near_slot is not None
+    assert "J1-SH" in near_slot
+    assert "unmodeled" not in near_slot
+
+
+def test_alternative_native_roundtrip_with_distant_shield_slot(tmp_path):
+    import json
+    import subprocess
+
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    native = find_kicad_cli()
+    if native is None:
+        pytest.skip(
+            "find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)"
+        )
+    # A Board-03-style shield slot pad (oval drill, rotated footprint) well
+    # away from the relocation must neither veto the move nor leave a native
+    # hole/copper violation behind once the moved board is re-checked with
+    # pinned KiCad (issue #9902 acceptance).
+    slot = """(footprint "Test:USB" (layer "F.Cu") (at 17 17 180)
+      (property "Reference" "J9" (at 0 -2) (layer "F.SilkS"))
+      (pad "SH" thru_hole oval (at 0 0 180) (size 0.9 2.4) (drill oval 0.6 2.1)
+        (layers "*.Cu" "*.Mask") (net 0 ""))))"""
+    board = _blocked_slide_board(tmp_path, slot)
+
+    def drc(name):
+        output = tmp_path / f"{name}.json"
+        subprocess.run(
+            [
+                native,
+                "pcb",
+                "drc",
+                "--refill-zones",
+                "--save-board",
+                "--format",
+                "json",
+                "-o",
+                str(output),
+                str(board),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return json.loads(output.read_text())
+
+    before = drc("before")
+    pcb = PCB.load(board)
+    result = relocate_in_pad_vias(
+        pcb, get_mfr_design_rules("jlcpcb", 4, 1.0), search_alternatives=True
+    )
+    assert len(result.moved) == 1
+    pcb.save(board)
+    after = drc("after")
+    assert not [
+        v
+        for v in after["violations"]
+        if v["type"]
+        in {
+            "clearance",
+            "hole_clearance",
+            "hole_to_hole",
+            "holes_co_located",
+            "shorting_items",
+            "copper_edge_clearance",
+        }
+    ]
+    assert len(after["unconnected_items"]) <= len(before["unconnected_items"])
 
 
 @pytest.mark.parametrize(
