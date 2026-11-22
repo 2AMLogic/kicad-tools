@@ -1,7 +1,7 @@
 {
   "file": "output/charlieplex_3x3_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "0ba7f836c72525153ec7a55b0cc321b2d8f7daef5339451806893d66e1b57cb1",
+  "pcb_sha256": "cb39664c7c36d2a1ece95b72d2749750ab238bec59c28ddd583a9a7743e3ff8f",
   "layers": 2,
   "summary": {
     "errors": 0,
@@ -1032,7 +1032,7 @@
       "required_value": 0.09,
       "items": [
         "afa1105a-0d9b-5b97-b4c6-21b3136b29c2",
-        "c4228bb4-0ffa-59d2-9c43-2b857660d5d7"
+        "f80aaed7-715d-550a-a8ef-057b6851f1e7"
       ],
       "nets": [
         "NODE_C"
@@ -1042,8 +1042,8 @@
       "corner_class": null,
       "status": "info",
       "waived": false,
-      "key": "mask_to_copper|afa1105a-0d9b-5b97-b4c6-21b3136b29c2,c4228bb4-0ffa-59d2-9c43-2b857660d5d7|NODE_C|F.Cu",
-      "evidence_hash": "ev4:4f9e3d1ebfd3b408"
+      "key": "mask_to_copper|afa1105a-0d9b-5b97-b4c6-21b3136b29c2,f80aaed7-715d-550a-a8ef-057b6851f1e7|NODE_C|F.Cu",
+      "evidence_hash": "ev4:13f5d35746cef9c9"
     },
     {
       "rule_id": "mask_to_copper",
@@ -2161,10 +2161,10 @@
         "warning_clearance_mm": 0.15
       },
       "binding": {
-        "source_sha256": "0ba7f836c72525153ec7a55b0cc321b2d8f7daef5339451806893d66e1b57cb1",
+        "source_sha256": "cb39664c7c36d2a1ece95b72d2749750ab238bec59c28ddd583a9a7743e3ff8f",
         "project_sha256": "229dbb7c91a7eb4314d94b8e7a7e1d339b978e129f67675a941d7a0d7b1aac19",
         "rules_sha256": "94043e6c5e8e06fbb8e5841f354070022dfc6fd6971756669c3b1ecac2d2fbe7",
-        "export_profile_sha256": "66c2d9065dbb3918d476e2e29f10de62c61b23fdbb360db40411e5d816364e93"
+        "export_profile_sha256": "c87cc391c17a847bfb03eb6c3127e950783e6c85a110020795264084959628aa"
       },
       "measurements": [
         {
@@ -3425,7 +3425,7 @@
           "opening_uuids": [
             "afa1105a-0d9b-5b97-b4c6-21b3136b29c2"
           ],
-          "conductor_uuid": "c4228bb4-0ffa-59d2-9c43-2b857660d5d7",
+          "conductor_uuid": "f80aaed7-715d-550a-a8ef-057b6851f1e7",
           "mask_side": "F.Mask",
           "copper_layer": "F.Cu",
           "location_mm": [
@@ -4793,7 +4793,7 @@
       "intent_audit": [],
       "geometry_provenance": {
         "export": {
-          "source_sha256": "0ba7f836c72525153ec7a55b0cc321b2d8f7daef5339451806893d66e1b57cb1",
+          "source_sha256": "cb39664c7c36d2a1ece95b72d2749750ab238bec59c28ddd583a9a7743e3ff8f",
           "project_sha256": "229dbb7c91a7eb4314d94b8e7a7e1d339b978e129f67675a941d7a0d7b1aac19",
           "rules_sha256": "94043e6c5e8e06fbb8e5841f354070022dfc6fd6971756669c3b1ecac2d2fbe7",
           "native_version": "10.0.6",
@@ -4818,11 +4818,23 @@
             "profile": "macro-free-native-gerber",
             "board_plot_params": false,
             "variables": [],
-            "plot_profile_source_sha256": "0ba7f836c72525153ec7a55b0cc321b2d8f7daef5339451806893d66e1b57cb1",
+            "plot_profile_source_sha256": "cb39664c7c36d2a1ece95b72d2749750ab238bec59c28ddd583a9a7743e3ff8f",
             "stdout": "Plotted to '<scratch>/gerbers/charlieplex_3x3_routed-F_Cu.gbr'.\nPlotted to '<scratch>/gerbers/charlieplex_3x3_routed-B_Cu.gbr'.\nPlotted to '<scratch>/gerbers/charlieplex_3x3_routed-F_Mask.gbr'.\nPlotted to '<scratch>/gerbers/charlieplex_3x3_routed-B_Mask.gbr'.\n",
             "stderr": ""
           },
           "features": [
+            {
+              "source_uuid": "000bdb20-e861-5dd6-8d67-454583445790",
+              "parent_uuid": "",
+              "kind": "segment",
+              "layers": [
+                "B.Cu"
+              ],
+              "authored_at": null,
+              "position_frame": "board",
+              "angle_frame": null,
+              "parent_placement": null
+            },
             {
               "source_uuid": "0265ddfd-3c26-5c9e-abef-3f757433fe16",
               "parent_uuid": "",
@@ -4894,18 +4906,6 @@
                 "layer": "F.Cu",
                 "coordinate_frame": "board"
               }
-            },
-            {
-              "source_uuid": "07f658f1-4fbf-54ea-a540-e494d6e1c368",
-              "parent_uuid": "",
-              "kind": "segment",
-              "layers": [
-                "B.Cu"
-              ],
-              "authored_at": null,
-              "position_frame": "board",
-              "angle_frame": null,
-              "parent_placement": null
             },
             {
               "source_uuid": "07fa2ace-23d7-5868-b57f-7e01db167633",
@@ -5558,18 +5558,6 @@
             },
             {
               "source_uuid": "3f99db53-b7b7-5f6e-96e5-42643b8055bf",
-              "parent_uuid": "",
-              "kind": "segment",
-              "layers": [
-                "F.Cu"
-              ],
-              "authored_at": null,
-              "position_frame": "board",
-              "angle_frame": null,
-              "parent_placement": null
-            },
-            {
-              "source_uuid": "40390a23-136b-500d-beec-210b8fb642fa",
               "parent_uuid": "",
               "kind": "segment",
               "layers": [
@@ -6304,17 +6292,13 @@
               "parent_placement": null
             },
             {
-              "source_uuid": "81399040-6a43-5317-bd6e-803c02403463",
+              "source_uuid": "81873989-1c2d-560e-bede-7326ec64a59e",
               "parent_uuid": "",
-              "kind": "via",
+              "kind": "segment",
               "layers": [
-                "B.Cu",
                 "F.Cu"
               ],
-              "authored_at": [
-                140.1,
-                96.8
-              ],
+              "authored_at": null,
               "position_frame": "board",
               "angle_frame": null,
               "parent_placement": null
@@ -6516,6 +6500,22 @@
               }
             },
             {
+              "source_uuid": "91530839-90bb-5171-a42b-5772dff32689",
+              "parent_uuid": "",
+              "kind": "via",
+              "layers": [
+                "B.Cu",
+                "F.Cu"
+              ],
+              "authored_at": [
+                139.7,
+                96.7
+              ],
+              "position_frame": "board",
+              "angle_frame": null,
+              "parent_placement": null
+            },
+            {
               "source_uuid": "9298e2c0-3a01-5ce9-a1bc-ec9e0563ed7d",
               "parent_uuid": "5566cbc5-ecd1-5630-a015-1e63a6fa788e",
               "kind": "pad:roundrect",
@@ -6585,18 +6585,6 @@
                 "layer": "F.Cu",
                 "coordinate_frame": "board"
               }
-            },
-            {
-              "source_uuid": "9463c333-f8cd-55f5-a847-d134f264cd01",
-              "parent_uuid": "",
-              "kind": "segment",
-              "layers": [
-                "B.Cu"
-              ],
-              "authored_at": null,
-              "position_frame": "board",
-              "angle_frame": null,
-              "parent_placement": null
             },
             {
               "source_uuid": "952137cb-6367-589a-bf72-41ce1a9f8f41",
@@ -7155,18 +7143,6 @@
                 "layer": "F.Cu",
                 "coordinate_frame": "board"
               }
-            },
-            {
-              "source_uuid": "c4228bb4-0ffa-59d2-9c43-2b857660d5d7",
-              "parent_uuid": "",
-              "kind": "segment",
-              "layers": [
-                "F.Cu"
-              ],
-              "authored_at": null,
-              "position_frame": "board",
-              "angle_frame": null,
-              "parent_placement": null
             },
             {
               "source_uuid": "c4ebcd42-772c-5e63-88bf-c3fccec88356",
@@ -8066,6 +8042,30 @@
               "parent_placement": null
             },
             {
+              "source_uuid": "f749eff2-8cc6-5742-8cac-ae242073c85c",
+              "parent_uuid": "",
+              "kind": "segment",
+              "layers": [
+                "B.Cu"
+              ],
+              "authored_at": null,
+              "position_frame": "board",
+              "angle_frame": null,
+              "parent_placement": null
+            },
+            {
+              "source_uuid": "f80aaed7-715d-550a-a8ef-057b6851f1e7",
+              "parent_uuid": "",
+              "kind": "segment",
+              "layers": [
+                "F.Cu"
+              ],
+              "authored_at": null,
+              "position_frame": "board",
+              "angle_frame": null,
+              "parent_placement": null
+            },
+            {
               "source_uuid": "f9053604-fa0b-5655-a0e8-71882175c38f",
               "parent_uuid": "",
               "kind": "segment",
@@ -8227,16 +8227,16 @@
           "curve_error_mm_per_construction": 1e-06,
           "layers_wkt": {
             "B.Cu": {
-              "sha256": "91b6e141efd1c7bef781815c76a32862307fbf3d3d63911116d888c6b9462641",
-              "bytes": 2304565
+              "sha256": "36ff115102e30bbf7d7e88575ce3c731116b6e3e8e7ded0ba3bf65b7caef9fcf",
+              "bytes": 2304562
             },
             "B.Mask": {
               "sha256": "ab299a871b38a48cae8360c7326ef9c01df95d6adbb0852a8689d3ecc0c70c8b",
               "bytes": 1052376
             },
             "F.Cu": {
-              "sha256": "9b198418ab16b6f9139463d96f9d5896cc67e2f81cdb223d56fae66c985985ae",
-              "bytes": 3851115
+              "sha256": "c041829be4507794e1f69457aae29e952c8e94dcd2a4a38d2c6951998c261510",
+              "bytes": 3842575
             },
             "F.Mask": {
               "sha256": "7e0110eb3d1443aed9f970067a3b996440d16e3d82f266bada65ccd02a01e4a0",
@@ -8244,10 +8244,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "f2a82604d7d5e1178d171ee1f2278fc726bc7e3c7266ee38349084fbf9097aca",
-            "B.Mask": "165c89609fb46c7090546fe0084bb8f04a7bb4aace839b182c654daeaf2f3785",
-            "F.Cu": "d95b2c62f49df21cde4492c83dd6c6f4edbfb7977ca48a822b0e44b4464ba35f",
-            "B.Cu": "49537573b6b2fe1a7d83b20a597c254dfc6a4fb327ada155f6f02fdf7095af3a"
+            "F.Mask": "180b43925435ce07b6d7beebb06ec25654c666aa23d4f4267f1466b615f36b12",
+            "B.Mask": "41eb012a6763e82a2fbdc7aed839e0645db25462abd9b9262ff523724ec25d0a",
+            "F.Cu": "d4567e5f5ee77fdd45ecf3e53b42842cb2ea1c6db1a337921f6367eaef5090f1",
+            "B.Cu": "eb6a75acb42b6e5a060f33455dcc9932ab87c6476865a9da855700a6b284eb72"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -8261,7 +8261,7 @@
             "python3"
           ],
           "native_version": "10.0.6",
-          "objects_sha256": "aa94ffa0be198258b9795161a3613855c8e72b858b2f6f4be8b7bec4bae2436f",
+          "objects_sha256": "cab701e89b7dcf9014bc0e29ae5921d7e709edc55e878aa345c8d1c9aacd66a3",
           "max_error_mm_per_construction": 0.005,
           "attribution": "native full-board object UUID; no neighbor removal"
         },
@@ -11080,18 +11080,6 @@
               }
             }
           },
-          "40390a23-136b-500d-beec-210b8fb642fa": {
-            "kind": "segment",
-            "net": "NODE_C",
-            "margin_mm": {},
-            "margin_source": "board:pad_to_mask_clearance=0",
-            "layers_wkt": {
-              "F.Cu": {
-                "sha256": "a16c150b9bc1fdb6f59c0314182bb17fb54902a76121a617698885fe7c0c1cfc",
-                "bytes": 15478
-              }
-            }
-          },
           "428ea7a3-005d-594b-b27e-65a28e0cb5f2": {
             "kind": "segment",
             "net": "NODE_C",
@@ -11137,6 +11125,18 @@
               "F.Cu": {
                 "sha256": "a3a056b2309c46189e16f6998a45ab0f5665680969d54571aca3e0a174dfbcc3",
                 "bytes": 16193
+              }
+            }
+          },
+          "81873989-1c2d-560e-bede-7326ec64a59e": {
+            "kind": "segment",
+            "net": "NODE_C",
+            "margin_mm": {},
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "23f268c9a0885e1666732320ac4e1bbde3a7c9888244d90d9380f10721934375",
+                "bytes": 15478
               }
             }
           },
@@ -11188,18 +11188,6 @@
               }
             }
           },
-          "c4228bb4-0ffa-59d2-9c43-2b857660d5d7": {
-            "kind": "segment",
-            "net": "NODE_C",
-            "margin_mm": {},
-            "margin_source": "board:pad_to_mask_clearance=0",
-            "layers_wkt": {
-              "F.Cu": {
-                "sha256": "0981e9b1b006a6b4dae7f67d9e07c657f34a8fdd764a6ddda88114cd046cef71",
-                "bytes": 15484
-              }
-            }
-          },
           "c9a76063-61b3-54a7-9aca-0ac8e0543803": {
             "kind": "segment",
             "net": "NODE_C",
@@ -11212,6 +11200,18 @@
               }
             }
           },
+          "f80aaed7-715d-550a-a8ef-057b6851f1e7": {
+            "kind": "segment",
+            "net": "NODE_C",
+            "margin_mm": {},
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "7b2c60a5d03da4f43df784eee246ad3230a74dc5afe5d1d0d5a1e237ae8c7d1e",
+                "bytes": 15484
+              }
+            }
+          },
           "ff5329ad-48af-5a46-89bd-cc8922ede1d2": {
             "kind": "segment",
             "net": "NODE_C",
@@ -11221,22 +11221,6 @@
               "F.Cu": {
                 "sha256": "862fd07c8b833408d22c19a2b63998627940a60476f46cd866bf342d2dd7a874",
                 "bytes": 16199
-              }
-            }
-          },
-          "81399040-6a43-5317-bd6e-803c02403463": {
-            "kind": "via",
-            "net": "NODE_C",
-            "margin_mm": {},
-            "margin_source": "board:pad_to_mask_clearance=0",
-            "layers_wkt": {
-              "F.Cu": {
-                "sha256": "0e4a4552cd4aa67baa53f28003867c68cf1324fa1e1d4405a1d00f01131d6cc5",
-                "bytes": 26639
-              },
-              "B.Cu": {
-                "sha256": "0e4a4552cd4aa67baa53f28003867c68cf1324fa1e1d4405a1d00f01131d6cc5",
-                "bytes": 26639
               }
             }
           },
@@ -11253,6 +11237,22 @@
               "B.Cu": {
                 "sha256": "3bdba9cde8bbc1f28a43ff0f2586fc39945299fe35b8f10ca2df2da5c9da7ccd",
                 "bytes": 27864
+              }
+            }
+          },
+          "91530839-90bb-5171-a42b-5772dff32689": {
+            "kind": "via",
+            "net": "NODE_C",
+            "margin_mm": {},
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "F.Cu": {
+                "sha256": "d9d22c029d085b7f3b7509d53bcad307da588763b2cacdc0361d5203723649b5",
+                "bytes": 26639
+              },
+              "B.Cu": {
+                "sha256": "d9d22c029d085b7f3b7509d53bcad307da588763b2cacdc0361d5203723649b5",
+                "bytes": 26639
               }
             }
           },
@@ -11320,15 +11320,15 @@
               }
             }
           },
-          "07f658f1-4fbf-54ea-a540-e494d6e1c368": {
+          "000bdb20-e861-5dd6-8d67-454583445790": {
             "kind": "segment",
             "net": "NODE_C",
             "margin_mm": {},
             "margin_source": "board:pad_to_mask_clearance=0",
             "layers_wkt": {
               "B.Cu": {
-                "sha256": "fa67acbbbd9b1eae60fb509bc69821ccb42a6e0708676ada19a0ecc286ec3ae3",
-                "bytes": 15494
+                "sha256": "e02969952bc982f154ba4d0152a1bacb93e4d2be22fa87228c722113dbc8855d",
+                "bytes": 15490
               }
             }
           },
@@ -11356,18 +11356,6 @@
               }
             }
           },
-          "9463c333-f8cd-55f5-a847-d134f264cd01": {
-            "kind": "segment",
-            "net": "NODE_C",
-            "margin_mm": {},
-            "margin_source": "board:pad_to_mask_clearance=0",
-            "layers_wkt": {
-              "B.Cu": {
-                "sha256": "40d82d5ce5edb5135c560bdf48351a86ce6329462042e93427c8a25a48eb6276",
-                "bytes": 15460
-              }
-            }
-          },
           "986c1815-df43-557c-8d59-d9887d51f062": {
             "kind": "segment",
             "net": "NODE_C",
@@ -11377,6 +11365,18 @@
               "B.Cu": {
                 "sha256": "2b02cc8771bb7e4c18e95444572957746e823cc6f759ec9bfe03c66178c52a94",
                 "bytes": 15494
+              }
+            }
+          },
+          "f749eff2-8cc6-5742-8cac-ae242073c85c": {
+            "kind": "segment",
+            "net": "NODE_C",
+            "margin_mm": {},
+            "margin_source": "board:pad_to_mask_clearance=0",
+            "layers_wkt": {
+              "B.Cu": {
+                "sha256": "db50a21ad5cacf382d47b1876e5d7244953c925542e26c079284ff6887531cda",
+                "bytes": 15464
               }
             }
           },

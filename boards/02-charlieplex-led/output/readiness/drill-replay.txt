@@ -1,10 +1,12 @@
-The Board 02 seed-42 route with native router build 78 uses the ordinary
+The Board 02 seed-42 route with native router build 79 uses the ordinary
 two-layer JLCPCB process. Its reviewed drill relocations are recorded in
 drill-relocations.json as sheet coordinates in millimetres. NODE_D moves from
 (156.8, 105.0) to (156.625, 105.5). VCC moves from (152.8, 117.4) to
 (152.35, 116.3). Both relocations match build 76. The native router places
 a separate VCC feed via at (151.5, 115.9), 0.5 mm from its former position
-at (151.8, 115.5). Finalization leaves that feed via in place.
+at (151.8, 115.5). Build 79 moves the 0.30 mm NODE_C plated drill from
+(140.1, 96.8) to (139.7, 96.7), along with two front and two back tracks.
+Finalization leaves both native via positions in place.
 
 Pinned KiCad 10.0.6 reports zero refill DRC, schematic parity and ERC findings.
 The SMT drill check finds zero land overlaps. All 12 nets connect and copper
