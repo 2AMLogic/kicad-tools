@@ -31,6 +31,7 @@ from kicad_tools.router.current_paths import (
 )
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.path_ampacity import PathAmpacityRule
+from kicad_tools.validate.rules.reinforcement_incomplete import WiredLeg
 from tests.test_current_paths import _add_pad_footprint
 from tests.test_path_ampacity_check import _design_rules_2oz
 
@@ -388,6 +389,39 @@ def test_fine_bar_subdivision_connects_distinct_offset_track_contacts(tmp_path):
     assert path.ok, path.reason
     assert [change.count for change in path.series_layer_changes] == [3]
     assert {id(s) for s in path.segments} == {id(s) for s in pcb.segments}
+
+
+@pytest.mark.parametrize(
+    ("points", "anchors", "credited"),
+    [
+        (((30, 10), (30, 44.8)), (32, 34), False),
+        (((30, 10), (30, 44.8)), (3, 30), False),
+        (((30, 10), (30, 44.8)), (33, 3), True),
+        (((30, 10), (30, 44.8)), (31.2, 33), True),
+        (((28, 41.2), (32, 41.2)), (1, 3), False),
+        (((28, 39.2), (32, 43.2)), (1, 5), False),
+    ],
+    ids=["before-wire", "after-wire", "between", "at-anchor", "crossing", "diagonal-crossing"],
+)
+def test_cap_joint_ampacity_only_credits_wire_carried_across_the_pinch(points, anchors, credited):
+    pcb = tripled()
+    pcb.remove_segments([next(s for s in pcb.segments if s.layer == "F.Cu")])
+    pinch_y = 41.2
+    gap = 0.025
+    pcb.add_trace((30, 10), (30, pinch_y - gap / 2), width=0.4, layer="F.Cu", net="P")
+    pcb.add_trace((30, 44.8), (30, pinch_y + gap / 2), width=0.4, layer="F.Cu", net="P")
+    spec = replace(_spec(10), pulsed_a=100, duty_cycle=0.01, pulse_duration_s=1)
+    resolution = resolve_current_path(pcb, spec)
+    assert resolution.ok
+    (joint,) = resolution.cap_joints
+    assert joint.pinch == pytest.approx((30, pinch_y))
+    assert joint.span.width == pytest.approx((0.4**2 - gap**2) ** 0.5)
+
+    leg = WiredLeg(net="P", layer="F.Cu", points=points, width=0.4, gauge=14, anchor_arc=anchors)
+    findings = PathAmpacityRule([spec], wired_legs=[leg]).check(pcb, _design_rules_2oz())
+    messages = [v.message for v in findings.errors if v.location == (30, pinch_y)]
+    assert any("too narrow" in message for message in messages) == (not credited)
+    assert any("would fuse" in message for message in messages) == (not credited)
 
 
 @pytest.mark.parametrize("reverse", [False, True])
