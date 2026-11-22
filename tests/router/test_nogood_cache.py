@@ -10,6 +10,7 @@ from kicad_tools.router.nogood_cache import (
     NogoodCache,
     attempt_may_have_timed_out,
     nogood_cache_from_env,
+    search_budget_context,
 )
 from kicad_tools.router.rules import DesignRules
 
@@ -213,6 +214,18 @@ def test_key_includes_budget_context():
     a = NogoodCache.make_key(1, terms, False, 0.5, (100, True, None, False, False))
     b = NogoodCache.make_key(1, terms, False, 0.5, (200, True, None, False, False))
     assert a != b
+
+
+def test_relief_mode_and_weight_cannot_replay_the_normal_search_failure():
+    autorouter = _walled_router()
+    router = autorouter.router
+    normal = search_budget_context(router, 5.0, 1)
+    with autorouter.trial_gene_overrides({1: 1.5}):
+        weighted = search_budget_context(router, 5.0, 1)
+        assert weighted != normal
+        assert search_budget_context(router, 5.0, 2) == normal
+        router.set_relief_mode(True)
+        assert search_budget_context(router, 5.0, 1) != weighted
 
 
 def test_oracle_iteration_capped_failure_not_served_after_history_change(monkeypatch):

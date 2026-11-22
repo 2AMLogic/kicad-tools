@@ -20,6 +20,7 @@ from kicad_tools._shapely import has_shapely
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="shapely not installed")
 
+from kicad_tools.analysis.net_status import NetStatusAnalyzer  # noqa: E402
 from kicad_tools.cli import main as kct_main  # noqa: E402
 from kicad_tools.schema.pcb import PCB  # noqa: E402
 
@@ -41,7 +42,9 @@ DEFECTS = """
 """
 
 
-def _defect_board(directory: Path, name: str = "board.kicad_pcb") -> Path:
+def _defect_board(
+    directory: Path, name: str = "board.kicad_pcb", *, extra_copper: str = ""
+) -> Path:
     """The shared test project plus the authored silk defects above."""
     directory.mkdir(parents=True, exist_ok=True)
     for suffix in (".kicad_sch", ".kicad_pro"):
@@ -49,7 +52,7 @@ def _defect_board(directory: Path, name: str = "board.kicad_pcb") -> Path:
     source = (FIXTURE / "test_project.kicad_pcb").read_text()
     closing = source.rstrip().rfind(")")
     pcb = directory / name
-    pcb.write_text(source[:closing] + DEFECTS + source[closing:])
+    pcb.write_text(source[:closing] + DEFECTS + extra_copper + source[closing:])
     return pcb
 
 
@@ -123,17 +126,41 @@ def _export_json(board: Path, out_dir: Path, capsys, *extra: str) -> dict:
 
 
 def test_route_runs_pass_and_names_unresolved(tmp_path: Path, capsys):
-    board = _defect_board(tmp_path / "run")
+    # Connect the silk-crossing via to D1.2 so this board needs no GND pour.
+    board = _defect_board(
+        tmp_path / "run",
+        extra_copper='(segment (start 141 50) (end 148 57) (width 0.25) (layer "F.Cu") '
+        '(net 2) (uuid "silk-via-gnd-feed"))\n',
+    )
     out = tmp_path / "run" / "routed.kicad_pcb"
+    signal = NetStatusAnalyzer(board, strict=True).analyze().get_net("NET1")
+    assert signal is not None and signal.open_connections == 1
 
-    rc = kct_main(["route", str(board), "-o", str(out), "--seed", "7", "--skip-drc"])
+    rc = kct_main(
+        [
+            "route",
+            str(board),
+            "-o",
+            str(out),
+            "--seed",
+            "7",
+            "--skip-drc",
+            "--no-auto-pour",
+            "--no-chain-complete",
+        ]
+    )
 
     assert rc == 0
     text = capsys.readouterr().out
     assert "--- Silk legalisation (default pass, jlcpcb) ---" in text
     assert "unresolved [silk_over_hole]" in text
-    assert "fp_arc" in text  # the unfixable item is named
+    assert "U9 (fp_arc)" in text  # the unfixable item is named
 
+    routed = NetStatusAnalyzer(out, strict=True).analyze()
+    routed_signal = routed.get_net("NET1")
+    assert routed_signal is not None and routed_signal.connected_count == 3
+    assert routed.complete_count == routed.total_nets == 3
+    assert not routed.stranded
     widths = _silk_widths(out)
     assert widths  # the authored lines survived the write
     assert all(w >= 0.15 for w in widths)  # ...and meet the jlcpcb floor
