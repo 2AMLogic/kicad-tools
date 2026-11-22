@@ -1113,6 +1113,7 @@ def _layer_changes(
     array_of: dict[tuple[float, float], int] = {
         node[:2]: i for i, array in enumerate(arrays) for node in array.nodes
     }
+    row_contacts = {pos: ids for array in arrays for pos, ids in array.track_contacts.items()}
     found: list[tuple[int, Via, str, str]] = []
     for via in pcb.vias:
         if not _matches_net(via, net, net_name):
@@ -1120,7 +1121,10 @@ def _layer_changes(
         touching = [
             (i, seg.layer)
             for i, seg in enumerate(segments)
-            if point_to_segment_distance(*via.position, *seg.start, *seg.end) <= 0.01
+            if (
+                id(seg) in row_contacts.get(_node_key(via.position), ())
+                or point_to_segment_distance(*via.position, *seg.start, *seg.end) <= 0.01
+            )
             and via_spans_layer(via.layers, seg.layer)
         ]
         layers = list(dict.fromkeys(layer for _, layer in touching))
@@ -1600,14 +1604,96 @@ def _copper_node(point: tuple[float, float], layer: str) -> _Node:
     return (*_node_key(point), layer)
 
 
-def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGraph:
-    """Build exact centerline contacts and normalize convex pad-internal copper.
+def _track_station(seg: Segment, point: tuple[float, float]) -> tuple[float, float]:
+    """Nearest point along the finite track centreline."""
+    x, y = seg.start
+    dx, dy = seg.end[0] - x, seg.end[1] - y
+    length_sq = dx * dx + dy * dy
+    if not length_sq:
+        return seg.start
+    t = min(1.0, max(0.0, ((point[0] - x) * dx + (point[1] - y) * dy) / length_sq))
+    return x + t * dx, y + t * dy
+
+
+def _via_row_ports(
+    pcb: PCB, net_number: int, physical_contacts: Callable[[], CopperContactGraph]
+) -> set[tuple[_Node, _Node]]:
+    """Track stations and barrel centres for close vias bonded to two shared bars."""
+    from kicad_tools.validate.copper_contact import TRACK, VIA
+
+    # Most nets have no packed via pair. Bound the search by X before
+    # asking for the full physical bond inventory.
+    vias = sorted((v.position[0], i) for i, v in enumerate(pcb.vias) if v.net_number == net_number)
+    max_pitch = _VIA_GROUP_PITCH_PADS * max((pcb.vias[i].size for _, i in vias), default=0.0)
+    pairs = []
+    for start, (x, i) in enumerate(vias):
+        first = pcb.vias[i]
+        for idx in range(start + 1, len(vias)):
+            other_x, j = vias[idx]
+            if other_x - x > max_pitch + _PAD_EPS:
+                break
+            second = pcb.vias[j]
+            bound = _VIA_GROUP_PITCH_PADS * max(first.size, second.size)
+            if math.dist(first.position, second.position) <= bound + _PAD_EPS:
+                pairs.append((i, j))
+    if not pairs:
+        return set()
+
+    copper = physical_contacts()
+    via_tracks: dict[int, set[int]] = {}
+    touching_vias: set[int] = set()
+    for a, b in copper.bonds:
+        via, track = copper.items[a], copper.items[b]
+        if track.kind == VIA:
+            via, track = track, via
+        if via.kind == track.kind == VIA:
+            # Directly overlapping annuli can also conduct on an inner
+            # layer. The two-bar projection cannot prove that transfer.
+            touching_vias.update((via.key, track.key))
+        if via.kind == VIA and track.kind == TRACK and track.key[0] == "segment":
+            via_tracks.setdefault(via.key, set()).add(track.key[1])
+
+    ports = set()
+    for i, j in pairs:
+        if i in touching_vias or j in touching_vias:
+            continue
+        first_pos, second_pos = pcb.vias[i].position, pcb.vias[j].position
+        shared = via_tracks.get(i, set()) & via_tracks.get(j, set())
+        pair_ports = []
+        for track_index in shared:
+            bar = pcb.segments[track_index]
+            first_station = _track_station(bar, first_pos)
+            second_station = _track_station(bar, second_pos)
+            # A lane ending across the row can touch both rings at the same
+            # station. It cannot supply the bar between them.
+            if math.dist(first_station, second_station) > _VIA_CENTRE_EPS:
+                pair_ports.extend(
+                    (_copper_node(station, bar.layer), _copper_node(pos, bar.layer))
+                    for station, pos in ((first_station, first_pos), (second_station, second_pos))
+                )
+        if len({station[2] for station, _ in pair_ports}) >= 2:
+            ports.update(
+                (station, barrel)
+                for station, barrel in pair_ports
+                if math.dist(station[:2], barrel[:2]) > _VIA_CENTRE_EPS
+            )
+    return ports
+
+
+def _build_graph(
+    segments: list[Segment],
+    pcb: PCB,
+    net_name: str,
+    row_ports: set[tuple[_Node, _Node]] | None = None,
+) -> _CopperGraph:
+    """Build centerline contacts, physical via-row ports and convex pad hubs.
 
     Supported contacts are same-layer track endpoints (including a T landing
     in a segment interior), via centers on a track, and nodes inside supported
-    pad copper. Width-only overlaps, zone/arc connectivity and arbitrary pad
-    primitives are not modeled; no proximity tolerance invents a connection
-    (except the 1 µm via-centre snap, #7210).
+    pad copper. A packed pair of vias physically bonded to two common bars
+    may also attach at the nearest track stations on those bars. Other
+    width-only overlaps, zone/arc connectivity and arbitrary pad primitives
+    are outside this graph. The via-centre snap is limited to 1 µm (#7210).
     This is not a general PCB connectivity solver.
     """
     layers = {layer.name for layer in pcb.copper_layers}
@@ -1643,6 +1729,9 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
             if via_spans_layer(via.layers, layer):
                 contacts[layer].add(_node_key(via.position))
                 via_contacts[layer].add(_node_key(via.position))
+
+    for station, _ in row_ports or ():
+        contacts[station[2]].add(station[:2])
 
     edges: list[tuple[_Node, _Node, _GraphEdge]] = []
     for seg in segments:
@@ -1688,6 +1777,13 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
     pad_contacts: dict[tuple[str, str, int], list[_Node]] = {}
     pad_nodes: set[_Node] = set()
     internal_edges: set[_GraphEdge] = set()
+    if row_ports:
+        for station, barrel in sorted(row_ports):
+            if station in parents and barrel in parents:
+                parents[root(station)] = root(barrel)
+        # A short section between a real barrel and its bar station may also
+        # belong to an exiting track. It is internal to this same-layer bond.
+        internal_edges.update(edge for a, b, edge in edges if a != b and root(a) == root(b))
     wholly_internal_ids: set[int] = set()
     for component_id, fp in zip(footprint_keys(pcb.footprints), pcb.footprints, strict=True):
         occurrences: dict[str, int] = {}
@@ -1973,6 +2069,8 @@ class _ViaArray:
     nodes: set[_Node]
     edges: set[_GraphEdge]
     members: list[Segment]
+    # Original tracks attached to each barrel of a proved mid-path row.
+    track_contacts: dict[tuple[float, float], set[int]] = field(default_factory=dict)
 
 
 _BUFFER_SCALE = 1 / math.cos(math.pi / 64)
@@ -2453,7 +2551,16 @@ def _mid_path_via_groups(
                 unmodeled_edges.update(edges)
             continue
         members = {id(segment): segment for _, segment in bar_spans}
-        result.append(_ViaArray(nodes, edges, list(members.values())))
+        track_contacts = {
+            pos: {
+                id(edge.segment)
+                for layer in (la, lb)
+                for _, edge in graph.adjacency[_copper_node(pos, layer)]
+                if edge.segment is not None
+            }
+            for pos in group
+        }
+        result.append(_ViaArray(nodes, edges, list(members.values()), track_contacts))
     return result, unmodeled_edges
 
 
@@ -2525,8 +2632,8 @@ def _via_group_contacts_modeled(
 ) -> bool:
     """Reject unmodeled contacts with bar copper or barrel rings (#9725).
 
-    The bar span between two linked barrels is the straight stroke between
-    their centres at the width of the segment that joins them. A same-net
+    The bar span between two linked barrels follows the actual joining
+    track between their nearest centreline stations at its own width. A same-net
     feeder can meet local copper at a modeled exit. An offset track that
     only reaches the edge can bypass the group without a centreline join.
     """
@@ -2538,7 +2645,9 @@ def _via_group_contacts_modeled(
     pieces = [
         (
             segment.layer,
-            _outer_buffer(LineString(tuple(pair)), segment.width / 2),
+            _outer_buffer(
+                LineString([_track_station(segment, pos) for pos in pair]), segment.width / 2
+            ),
             segment.width / 2,
         )
         for pair, segment in bar_spans
@@ -2546,7 +2655,23 @@ def _via_group_contacts_modeled(
     pieces.extend(
         (layer, _outer_buffer(Point(pos), radius), radius) for pos, layer, radius in rings
     )
-    if not _array_tracks_modeled(pcb, net_name, [s for _, s in bar_spans], pieces, exits):
+    # An off-centre barrel can short a short section of an exiting track to
+    # the bar station. Both points are real ports of that same convex track.
+    track_exits = list(exits)
+    for node, other, edge in exits:
+        track = edge.segment
+        if track is None:
+            continue
+        for pair, bar in bar_spans:
+            if node[2] != bar.layer or node[:2] not in pair:
+                continue
+            station = _track_station(bar, node[:2])
+            if (
+                station != node[:2]
+                and point_to_segment_distance(*station, *track.start, *track.end) <= _PAD_EPS
+            ):
+                track_exits.append((_copper_node(station, bar.layer), other, edge))
+    if not _array_tracks_modeled(pcb, net_name, [s for _, s in bar_spans], pieces, track_exits):
         return False
     for via in pcb.vias:
         if not _matches_net(via, net, net_name) or _node_key(via.position) in group:
@@ -2574,13 +2699,8 @@ def _via_group_contacts_modeled(
 
 def _path_changes_layer_through(path_segments: Sequence[Segment], group: _ViaArray) -> bool:
     """True when path copper meets ``group``'s barrels on two layers (#9725)."""
-    touched = {
-        seg.layer
-        for seg in path_segments
-        for node in group.nodes
-        if node[2] == seg.layer
-        and point_to_segment_distance(*node[:2], *seg.start, *seg.end) <= _VIA_CENTRE_EPS
-    }
+    track_ids = set().union(*group.track_contacts.values())
+    touched = {seg.layer for seg in path_segments if id(seg) in track_ids}
     return len(touched) >= 2
 
 
@@ -3397,8 +3517,6 @@ def resolve_current_path(
             spec=spec, status=STATUS_UNRESOLVED, reason=unsupported, source=source, sink=sink
         )
 
-    adjacency = _build_graph(net_segments, pcb, spec.net_name)
-
     if spec.source == spec.sink:
         # Degenerate self-path: a declaration whose source and sink are the
         # same pad covers no copper, so it resolves trivially without needing
@@ -3408,6 +3526,17 @@ def resolve_current_path(
             spec=spec, status=STATUS_RESOLVED, source=source, sink=sink, segments=(), length_mm=0.0
         )
 
+    net_number = source.net_number
+
+    @cache
+    def physical_contacts() -> CopperContactGraph:
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+        return build_copper_contact_graph(ConnectivityValidator(pcb), net_number, with_bonds=True)
+
+    row_ports = _via_row_ports(pcb, net_number, physical_contacts)
+    adjacency = _build_graph(net_segments, pcb, spec.net_name, row_ports)
     # Attach each endpoint by its pad's own extent, not by an exact center
     # hit: a trace terminating anywhere inside the pad is electrically on it,
     # and several traces landing on one pad are shorted by it. Without this,
@@ -3507,15 +3636,6 @@ def resolve_current_path(
                     sink=sink,
                     reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
                 )
-    net_number = source.net_number
-
-    @cache
-    def physical_contacts() -> CopperContactGraph:
-        from kicad_tools.validate.connectivity import ConnectivityValidator
-        from kicad_tools.validate.copper_contact import build_copper_contact_graph
-
-        return build_copper_contact_graph(ConnectivityValidator(pcb), net_number, with_bonds=True)
-
     source_pin, sink_pin = (source.ref, source.pad), (sink.ref, sink.pad)
 
     def physical_spans(unmodeled_bonds: set[tuple[int, int]] | None = None) -> PhysicalPathSegments:
@@ -3541,13 +3661,25 @@ def resolve_current_path(
         physical_contacts,
     )
     contracted = [*arrays, *via_groups]
-    unmodeled_group = bool(unmodeled_edges) and not unmodeled_edges.isdisjoint(
-        _contracted_component(adjacency, start, contracted)[1]
+    # Every proposed port is a measured copper bond. An unproved group can
+    # expose a real return through another barrel. Its component must retain
+    # that cycle rather than reduce it as an ordinary parallel trace pair.
+    unproved_barrels = {barrel for _, barrel in row_ports} - {
+        node for group in contracted for node in group.nodes
+    }
+    component_edges = (
+        _contracted_component(adjacency, start, ())[1]
+        if unmodeled_edges or unproved_barrels
+        else {}
+    )
+    unmodeled_group = not unmodeled_edges.isdisjoint(component_edges)
+    unproved_row = bool(unproved_barrels) and not unproved_barrels.isdisjoint(
+        node for ends in component_edges.values() for node in ends
     )
     parallel_groups: list[ParallelGroup] = []
     blockers: list[list[Segment]] = []
     has_cycle = _component_has_cycle(adjacency, start, contracted)
-    if has_cycle and not unmodeled_group:
+    if has_cycle and not (unmodeled_group or unproved_row):
         parallel_groups = (
             _reduce_parallel_groups(adjacency, start, goal, contracted, blockers) or []
         )
@@ -3591,6 +3723,15 @@ def resolve_current_path(
     # copper: each resolved arm's buried continuation to the pad terminal
     # stays evidence. Taking attachments from a single BFS predecessor chain
     # left a second arm's buried neck in or out by file order (#9647 review).
+    if unproved_row:
+        return PathResolution(
+            spec=spec,
+            status=STATUS_AMBIGUOUS,
+            source=source,
+            sink=sink,
+            reason="physical via-to-bar contacts do not form a proved parallel layer change",
+        )
+
     if parallel_groups:
         group_ids = {id(seg) for group in parallel_groups for seg in group.segments}
         arm_edges = {

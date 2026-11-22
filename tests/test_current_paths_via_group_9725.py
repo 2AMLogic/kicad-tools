@@ -143,7 +143,9 @@ def test_offset_inner_layer_track_touching_a_ring_rejects_group():
     assert resolve_current_path(pcb, _spec()).status == "ambiguous"
 
 
-def _saved_row_board(tmp_path, bar_width=3.0, branch="F.Cu", lane="B.Cu", split_feeder=False):
+def _saved_row_board(
+    tmp_path, bar_width=3.0, branch="F.Cu", lane="B.Cu", split_feeder=False, via_offsets=(0, 0, 0)
+):
     from tests.test_pcb_reinforce import _write_single_pad_footprint_lib
 
     pcb = PCB.create(width=220, height=100, layers=4, center=False)
@@ -151,8 +153,8 @@ def _saved_row_board(tmp_path, bar_width=3.0, branch="F.Cu", lane="B.Cu", split_
     for ref, x, pad_y in [("J1", 30, 10), ("J2", 200, 44.8)]:
         pcb.add_footprint_from_file(footprint, ref, x, pad_y)
         pcb.assign_net_to_footprint_pad(ref, "1", "P")
-    for barrel_y in (40, 42.4, 44.8):
-        pcb.add_via(30, barrel_y, size=PAD, drill=DRILL, net="P")
+    for barrel_y, via_offset in zip((40, 42.4, 44.8), via_offsets, strict=True):
+        pcb.add_via(30 + via_offset, barrel_y, size=PAD, drill=DRILL, net="P")
     feeder_ys = (10, 40, 44.8) if split_feeder else (10, 44.8)
     for start, end in zip(feeder_ys, feeder_ys[1:], strict=False):
         pcb.add_trace((30, start), (30, end), width=bar_width, layer=branch, net="P")
@@ -161,34 +163,71 @@ def _saved_row_board(tmp_path, bar_width=3.0, branch="F.Cu", lane="B.Cu", split_
     return pcb
 
 
+@pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize(
-    "bar_width,y,offset,expected",
+    "offsets,expected",
+    [((0.25,) * 3, 3), ((-0.25,) * 3, 3), ((1.9,) * 3, 3), ((0, 0.25, 0), 3), ((3,) * 3, 0)],
+)
+def test_saved_via_row_attaches_by_pad_overlap(tmp_path, capsys, offsets, expected, reverse):
+    import argparse
+    import json
+
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from tests.test_pcb_reinforce import _reinforce_args
+
+    pcb = _saved_row_board(tmp_path, via_offsets=offsets)
+    board = tmp_path / "row.kicad_pcb"
+    pcb.save(board)
+    spec = _spec(source="J2", sink="J1") if reverse else _spec()
+    sidecar = tmp_path / "current_paths.json"
+    sidecar.write_text(json.dumps({"paths": [spec.to_dict()]}))
+    audit = argparse.Namespace(
+        pcb_command="current-paths-audit", pcb=str(board), current_paths=str(sidecar), format="json"
+    )
+    assert run_pcb_command(audit) == 0
+    (result,) = json.loads(capsys.readouterr().out)["resolutions"]
+    assert result["status"] == ("resolved" if expected else "unresolved")
+    assert [c["via_count"] for c in result["layer_changes"]] == ([expected] if expected else [])
+    args = _reinforce_args(
+        board, net="P", layer="B.Cu", current_paths=str(sidecar), format="json", anchor_mode="ends"
+    )
+    assert run_pcb_command(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["anchors_placed"] == len(PCB.load(board).vias) - 3 == (2 if expected else 0)
+
+
+@pytest.mark.parametrize(
+    "bar_width,y,offset,row_offset,expected",
     [
-        (3, 41.2, None, "resolved"),
-        (3, 41.2, 0, "ambiguous"),
-        (3, 41.2, 1.25, "ambiguous"),
-        (3, 41.2, 1.4, "ambiguous"),
-        (3, 41.2, 1.61, "ambiguous"),
-        (3, 41.2, 1.85, "resolved"),
+        (3, 41.2, None, 0, "resolved"),
+        (3, 41.2, 0, 0, "ambiguous"),
+        (3, 41.2, 1.25, 0, "ambiguous"),
+        (3, 41.2, 1.4, 0, "ambiguous"),
+        (3, 41.2, 1.61, 0, "ambiguous"),
+        (3, 41.2, 1.85, 0, "resolved"),
         # The bypass may join the feeder ahead of the first barrel.
-        (3, 39.0, 1.4, "ambiguous"),
-        (3, 39.0, 1.85, "resolved"),
+        (3, 39.0, 1.4, 0, "ambiguous"),
+        (3, 39.0, 1.85, 0, "resolved"),
+        # A separate path can bypass an entire off-centre row too.
+        (3, 39.0, 0, 0.25, "ambiguous"),
+        (3, 39.0, 1.4, 0.25, "ambiguous"),
+        (3, 39.0, 1.85, 0.25, "resolved"),
         # A narrow bar leaves the barrel ring exposed on the outer layer.
-        (0.4, 42.4, 1.2, "ambiguous"),
-        (0.4, 42.4, 1.45, "resolved"),
+        (0.4, 42.4, 1.2, 0, "ambiguous"),
+        (0.4, 42.4, 1.45, 0, "resolved"),
     ],
 )
 @pytest.mark.parametrize("branch,lane", [("F.Cu", "B.Cu"), ("B.Cu", "F.Cu")])
 @pytest.mark.parametrize("split_feeder", [False, True])
 def test_cli_via_group_with_outer_bar_bypass(
-    tmp_path, capsys, bar_width, y, offset, expected, branch, lane, split_feeder
+    tmp_path, capsys, bar_width, y, offset, row_offset, expected, branch, lane, split_feeder
 ):
     import argparse
     import json
 
     from kicad_tools.cli.commands.pcb import run_pcb_command
 
-    pcb = _saved_row_board(tmp_path, bar_width, branch, lane, split_feeder)
+    pcb = _saved_row_board(tmp_path, bar_width, branch, lane, split_feeder, (row_offset,) * 3)
     if offset is not None:
         # Some current can bypass the row through this fourth via if the
         # narrow trace reaches the edge of a bar or ring.
