@@ -109,6 +109,73 @@ graded on the 0.1016 mm trace edge. It is not a via seat. The #9844 RESET
 stub-turnback does not occur on this route. `mask_to_copper` was not
 re-measured.
 
+### Re-measured 2026-11-22 (Issue #9424: errors 0, mask face re-measured)
+
+`origin/main` @ `dc59d8c78` (the morning's merges include the #9846 stitcher
+stub band fix #9857 and the #9799 silk legalisation #9865), pinned kicad-cli
+10.0.6 via `KCT_KICAD_DOCKER=1`, AWS x86_64 host (load average 12-40 during
+the runs), C++ backend built. All three seeds ran through the gate script one
+at a time.
+
+The boards of seeds 42, 7 and 1337 are byte-identical again
+(sha1 `64411406e1732fd285f38034c9cdc0fb8c183d36`), so the cross-seed property
+survived the #9875/#9854/#9857 routing changes. No
+`[deterministic-budget] per-net wall clock bound` or `stage deadline fired`
+line appeared in any route log; `hit_timeout` and `rescue_wall_clock` are
+false everywhere.
+
+| | seed 42 | seed 7 | seed 1337 |
+|---|---|---|---|
+| `kct route` exit / nets | 0 / 37 of 37 | 0 / 37 of 37 | 0 / 37 of 37 |
+| kicad-cli DRC err / warn / unconnected, ERC | 0 / 0 / 0, 0 | 0 / 0 / 0, 0 | 0 / 0 / 0, 0 |
+| copper / label LVS | clean / clean | clean / clean | clean / clean |
+| `kct check --skip mask_to_copper` | **0 err** / 77 warn | 0 err / 77 warn | 0 err / 77 warn |
+| route wall s / vias | 630.3 / 124 | 577.0 / 124 | 401.0 / 124 |
+
+**Non-mask errors reached 0.** Two changes moved since the 2026-11-22
+curation pass measured 1 error:
+
+* The curated `nTRIP` F.Cu trace-to-trace slit no longer occurs on this
+  route (the #9875 via-turnback retry reshaped it).
+* At `8564ae74c` (pre-#9857) the board carried 3 same-net
+  `physical_copper_gap` errors instead: the oracle-completion stitch cascade
+  seated U2's GND pin 14 with a 0.2 mm two-leg stub down the 0.375 mm
+  corridor between the EP (0.06 mm slit) and pin 14 (0.115 mm slit) -- no
+  0.2 mm trace crosses that corridor legally. The #9846 leg-band refusal
+  (`stitch_cmd.py`, PR #9857) seats the weld legally; the errors are gone.
+
+The 77 warnings: 51 `pour_slot` (the structural congestion population,
+unchanged), 15 `redundant_copper_*`, 9 `silk_hole_overlap` (was 14 at
+`8564ae74c`, before the 2026-11-22 merges that include the #9799 silk
+legalisation), 1 `sharp_trace_corner` (the unrepairable acute fold-back),
+1 `plane_split`. The 0-warning bar still fails; the pour-slot question went
+to the operator with the mask question below.
+
+**`mask_to_copper` re-measured on the pinned toolchain** (pass enabled on the
+graded board, outside the gate): **25 errors / 20 warnings / 221 info** --
+the same population class as the PR #9845-era 22/19/218 face. 14 of the 25
+errors are the U2 EP mask opening (`aaf9bcde`, the 3.1 x 5.18 `F.Mask` pad)
+exposing GND copper (thermal vias and stitch copper beside it) in the
+#9420 `within_own_footprint` shape whose owner does not resolve to a
+footprint ref; the rest are `same-net pass-through` (#8914), via-ring and
+`different-net` openings. The classes the issue scopes out (#9260/#9261 rule
+changes, #8839 threshold tables) own this population; repair to ~0 is not
+achievable inside this issue. Per the Decision flag the policy question was
+filed as an operator decision on #9424 (allowances vs keep-skip), and
+`--skip mask_to_copper` stays at `scripts/ci/board_05_unattended.py` until
+that ruling lands.
+
+**Grading trap (measured, now guarded).** Grading the mask pass on a host
+whose kicad-cli is not 10.0.5/10.0.6 (this host has 10.0.8) silently
+degrades: zero findings plus one info `mask_to_copper_incomplete` marker
+(#8914), which the error/warning counters read as a clean board -- a
+standalone `kct check` on this host scored the byte-identical board 0/77
+where the pinned toolchain scores 25/97. The gate now fails a report
+carrying that marker ("not checked" is not "clean"), so a future skip-drop
+cannot turn an unqualified toolchain into a false green. The mask pass costs
++29.3 s on the pinned toolchain (37.6 s vs 8.3 s for the skipped run), the
+AC4 number to accept or reduce when the skip drops.
+
 ### Negative run
 
 The gate was checked against a known-bad board. The seed-42 board had all 20
@@ -173,3 +240,43 @@ This was a local container, not a GitHub-hosted runner. A new workflow cannot
 be dispatched until it is on the default branch, so the first hosted-runner
 numbers come from the first `workflow_dispatch` (or the 07:30 UTC schedule)
 after merge. Add them here when they exist.
+
+## Board 05 copper gaps on Linux and macOS, 2026-11-22
+
+The original RESET via-to-trace gap cleared on both hosts. The complete
+board had zero fabrication errors on Linux x86_64 and three on macOS arm64.
+Both used router build 78 at `7416c1c24`, which includes #9873's stored-via
+check and #9875's within-route guard. The macOS replay used `9c26521df`,
+whose only change from that revision was this research note.
+Both ran the #6508 protocol sequentially for seeds 42, 7 and 1337 with
+`KCT_KICAD_DOCKER=1` and pinned kicad-cli 10.0.6. [Linux run](https://github.com/2AMLogic/kicad-tools/blob/9c26521dff072cad992adb2cf9a40d0233402fcd/docs/research/board-05-unattended-route.md#re-measured-2026-11-22-zero-copper-gap-errors-9844-acceptance) · [macOS run and measured geometry](https://github.com/2AMLogic/kicad-tools/issues/9424#issuecomment-7074550273)
+
+| Host | Seed | Vias | Physical gap errors | All kct warnings | Route time (s) |
+|---|---:|---:|---:|---:|---:|
+| Linux x86_64 | 42 | 124 | 0 | 77 | 369.6 |
+| Linux x86_64 | 7 | 124 | 0 | 77 | 375.6 |
+| Linux x86_64 | 1337 | 124 | 0 | 77 | 351.1 |
+| macOS arm64 | 42 | 118 | 3 | 73 | 231.6 |
+| macOS arm64 | 7 | 118 | 3 | 73 | 313.1 |
+| macOS arm64 | 1337 | 118 | 3 | 73 | 299.1 |
+
+All six routes exited 0 with 37/37 nets and 142/142 connections. Pinned KiCad
+reported zero DRC errors, unconnected items or ERC findings. Copper and label
+LVS passed. The three seeds produced byte-identical boards on each host.
+The Linux board's SHA-1 starts with `64411406e173`. The macOS board's SHA-1
+is `0f1f7745e4b2c3dd4aab42309e762daec526a960`. The logs recorded no
+stage or per-net wall-clock cutoff. Linux load fell from 40.5 to 17.8 during
+seed 42. The cause of the cross-host geometry difference remains open.
+
+On macOS the SPEED trace passes C14.1 on F.Cu at 0.046747 mm against the
+0.150000 mm pad clearance. Two IREF trace-to-trace gaps on F.Cu measure
+0.019203 mm against 0.101600 mm. #9424 tracks these three findings. #9844's
+board-wide zero-gap criterion remains open. [Gap identities and closest points](https://github.com/2AMLogic/kicad-tools/issues/9424#issuecomment-7074550273) · [Board-wide acceptance criteria](https://github.com/2AMLogic/kicad-tools/issues/9844)
+
+The unattended harness exited 1 on both hosts. Linux tripped the #8073
+no-warning gate with 51 `pour_slot`, 9 `silk_hole_overlap`, 8
+`redundant_copper_covered`, 4 `redundant_copper_detour`, 2
+`redundant_copper_staircase`, 1 `redundant_copper_fragments`, 1 `plane_split`
+and 1 `sharp_trace_corner` warning. Its two zone-fill clearance findings were
+informational under #8938. On macOS the harness recorded the three physical
+gap errors and 73 warnings per seed.

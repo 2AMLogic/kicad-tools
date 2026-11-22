@@ -39,9 +39,10 @@ auto-skips as pours, on both engines:
   multi-pad footprints are reserved.  A footprint with an area array (more
   than one pad NUMBER strictly inside its pad bounding box, i.e. a BGA field) is
   skipped whole, and a lone interior pad (a QFN/QFP exposed pad) is skipped
-  too -- both escape by trace or carry their own via array.  Two-terminal
-  parts are skipped: their pads are open on three sides, and the boxed-in
-  failure (boards 03/04/05, issue #6388) is always an IC pin in a pin row.
+  too -- both escape by trace or carry their own via array. Pour-only
+  two-terminal parts can reserve sites as well. On mixed two-terminal
+  parts, a retry serves a pad only after KiCad reports it open and the
+  stitcher exhausts its candidate sites (#9883).
 * The grid engine gets the reservation as static grid cells, exactly as
   board 06 does.
 * The lattice engine has its own obstacle model and never reads the grid's
@@ -904,6 +905,31 @@ def _interior_test(
     return interior
 
 
+def stranded_mixed_pair_pads(
+    pads: Sequence[Pad], nets: Iterable[str], stranded: set[str] | frozenset[str]
+) -> frozenset[str]:
+    """Filter proven stitch failures to the plane pad of a mixed two-terminal SMD."""
+    if not stranded:
+        return frozenset()
+    wanted = set(nets)
+    refs = {p.ref for p in pads if _pad_name(p) in stranded and p.net_name in wanted}
+    footprints: dict[str, list[Pad]] = {}
+    for pad in pads:
+        if pad.ref in refs and not pad.steiner_point:
+            footprints.setdefault(pad.ref, []).append(pad)
+    result = set()
+    for body in footprints.values():
+        if len(body) != 2 or any(p.through_hole or not p.pin or not p.net_name for p in body):
+            continue
+        a, b = body
+        if a.pin == b.pin or (round(a.x - b.x, 4), round(a.y - b.y, 4)) == (0, 0):
+            continue
+        plane = [p for p in body if p.net_name in wanted]
+        if len(plane) == 1 and _pad_name(plane[0]) in stranded:
+            result.add(_pad_name(plane[0]))
+    return frozenset(result)
+
+
 def select_plane_via_pads(
     pads: Sequence[Pad],
     nets: Iterable[str],
@@ -911,6 +937,7 @@ def select_plane_via_pads(
     min_footprint_pads: int = 3,
     min_pour_footprint_pads: int | None = None,
     tolerance: float = 0.05,
+    stranded_pads: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[list[Pad], dict[str, str]]:
     """Pick the plane-net SMD pads a pre-route reservation should serve (#6401).
 
@@ -939,12 +966,15 @@ def select_plane_via_pads(
             elsewhere can still take its only stitch sites.  Signal-carrying
             small footprints stay skipped at ``min_footprint_pads``.
         tolerance: Perimeter tolerance in mm.
+        stranded_pads: Pads for which the previous routed board exhausted its
+            stitch sites. A mixed two-terminal SMD may reserve that pad on a retry.
 
     Returns:
         ``(selected, skipped)``: the served pads in deterministic order, and
         ``REF.PIN -> reason`` for each candidate pad left out.
     """
     wanted = set(nets)
+    retry_pads = stranded_mixed_pair_pads(pads, wanted, stranded_pads)
     by_ref: dict[str, list[Pad]] = {}
     for pad in pads:
         if pad.ref and not pad.steiner_point:
@@ -966,7 +996,10 @@ def select_plane_via_pads(
             min_pads = min(min_footprint_pads, min_pour_footprint_pads)
         if len(positions) < min_pads:
             for p in candidates:
-                skipped[_pad_name(p)] = f"footprint has {len(positions)} pad(s)"
+                if len(positions) == 2 and _pad_name(p) in retry_pads:
+                    selected.append(p)
+                else:
+                    skipped[_pad_name(p)] = f"footprint has {len(positions)} pad(s)"
             continue
         interior = _interior_test(positions, tolerance)
         # Count interior pad NUMBERS, not copper pieces: an exposed pad split
@@ -1625,6 +1658,7 @@ def reserve_router_plane_via_sites(
     stub_width: float | None = None,
     plane_fills: Mapping[str, Sequence[PlaneFill]] | None = None,
     min_pour_footprint_pads: int | None = None,
+    stranded_pads: frozenset[str] = frozenset(),
 ) -> PlaneViaReservation:
     """Reserve pour-pad via sites on a loaded ``Autorouter`` (Issue #6401).
 
@@ -1666,6 +1700,8 @@ def reserve_router_plane_via_sites(
         min_pour_footprint_pads: Issue #7573 -- opt-in; also reserve sites
             for pour-only parts of at least this many pads (``2`` covers a
             rail/GND decoupling cap).  ``None`` keeps the #6401 selection.
+        stranded_pads: Mixed two-terminal pour pads still open after KiCad
+            checked a routed board and its stitcher exhausted all sites.
 
     Returns:
         The reservation (no sites when there are no eligible pads).
@@ -1674,7 +1710,10 @@ def reserve_router_plane_via_sites(
     nets = sorted(set(nets))
     board_pads = list(grid._pads)
     pads, _skipped = select_plane_via_pads(
-        board_pads, nets, min_pour_footprint_pads=min_pour_footprint_pads
+        board_pads,
+        nets,
+        min_pour_footprint_pads=min_pour_footprint_pads,
+        stranded_pads=stranded_pads,
     )
 
     drules = router.rules
