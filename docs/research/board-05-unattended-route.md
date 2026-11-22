@@ -109,6 +109,73 @@ graded on the 0.1016 mm trace edge. It is not a via seat. The #9844 RESET
 stub-turnback does not occur on this route. `mask_to_copper` was not
 re-measured.
 
+### Re-measured 2026-11-22 (Issue #9424: errors 0, mask face re-measured)
+
+`origin/main` @ `dc59d8c78` (the morning's merges include the #9846 stitcher
+stub band fix #9857 and the #9799 silk legalisation #9865), pinned kicad-cli
+10.0.6 via `KCT_KICAD_DOCKER=1`, AWS x86_64 host (load average 12-40 during
+the runs), C++ backend built. All three seeds ran through the gate script one
+at a time.
+
+The boards of seeds 42, 7 and 1337 are byte-identical again
+(sha1 `64411406e1732fd285f38034c9cdc0fb8c183d36`), so the cross-seed property
+survived the #9875/#9854/#9857 routing changes. No
+`[deterministic-budget] per-net wall clock bound` or `stage deadline fired`
+line appeared in any route log; `hit_timeout` and `rescue_wall_clock` are
+false everywhere.
+
+| | seed 42 | seed 7 | seed 1337 |
+|---|---|---|---|
+| `kct route` exit / nets | 0 / 37 of 37 | 0 / 37 of 37 | 0 / 37 of 37 |
+| kicad-cli DRC err / warn / unconnected, ERC | 0 / 0 / 0, 0 | 0 / 0 / 0, 0 | 0 / 0 / 0, 0 |
+| copper / label LVS | clean / clean | clean / clean | clean / clean |
+| `kct check --skip mask_to_copper` | **0 err** / 77 warn | 0 err / 77 warn | 0 err / 77 warn |
+| route wall s / vias | 630.3 / 124 | 577.0 / 124 | 401.0 / 124 |
+
+**Non-mask errors reached 0.** Two changes moved since the 2026-11-22
+curation pass measured 1 error:
+
+* The curated `nTRIP` F.Cu trace-to-trace slit no longer occurs on this
+  route (the #9875 via-turnback retry reshaped it).
+* At `8564ae74c` (pre-#9857) the board carried 3 same-net
+  `physical_copper_gap` errors instead: the oracle-completion stitch cascade
+  seated U2's GND pin 14 with a 0.2 mm two-leg stub down the 0.375 mm
+  corridor between the EP (0.06 mm slit) and pin 14 (0.115 mm slit) -- no
+  0.2 mm trace crosses that corridor legally. The #9846 leg-band refusal
+  (`stitch_cmd.py`, PR #9857) seats the weld legally; the errors are gone.
+
+The 77 warnings: 51 `pour_slot` (the structural congestion population,
+unchanged), 15 `redundant_copper_*`, 9 `silk_hole_overlap` (was 14 at
+`8564ae74c`, before the 2026-11-22 merges that include the #9799 silk
+legalisation), 1 `sharp_trace_corner` (the unrepairable acute fold-back),
+1 `plane_split`. The 0-warning bar still fails; the pour-slot question went
+to the operator with the mask question below.
+
+**`mask_to_copper` re-measured on the pinned toolchain** (pass enabled on the
+graded board, outside the gate): **25 errors / 20 warnings / 221 info** --
+the same population class as the PR #9845-era 22/19/218 face. 14 of the 25
+errors are the U2 EP mask opening (`aaf9bcde`, the 3.1 x 5.18 `F.Mask` pad)
+exposing GND copper (thermal vias and stitch copper beside it) in the
+#9420 `within_own_footprint` shape whose owner does not resolve to a
+footprint ref; the rest are `same-net pass-through` (#8914), via-ring and
+`different-net` openings. The classes the issue scopes out (#9260/#9261 rule
+changes, #8839 threshold tables) own this population; repair to ~0 is not
+achievable inside this issue. Per the Decision flag the policy question was
+filed as an operator decision on #9424 (allowances vs keep-skip), and
+`--skip mask_to_copper` stays at `scripts/ci/board_05_unattended.py` until
+that ruling lands.
+
+**Grading trap (measured, now guarded).** Grading the mask pass on a host
+whose kicad-cli is not 10.0.5/10.0.6 (this host has 10.0.8) silently
+degrades: zero findings plus one info `mask_to_copper_incomplete` marker
+(#8914), which the error/warning counters read as a clean board -- a
+standalone `kct check` on this host scored the byte-identical board 0/77
+where the pinned toolchain scores 25/97. The gate now fails a report
+carrying that marker ("not checked" is not "clean"), so a future skip-drop
+cannot turn an unqualified toolchain into a false green. The mask pass costs
++29.3 s on the pinned toolchain (37.6 s vs 8.3 s for the skipped run), the
+AC4 number to accept or reduce when the skip drops.
+
 ### Negative run
 
 The gate was checked against a known-bad board. The seed-42 board had all 20
