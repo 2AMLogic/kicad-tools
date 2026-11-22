@@ -159,10 +159,8 @@ BOARD07_MASK_NETS = (
 # #9124 drained the PCIE_RX+ face-aligned corner wedge (a tangent via seat)
 # alongside board 07's six; #9208 drained the USB2_D- annulus-vs-own-net-TRACE
 # slit (via re-seated 0.1 mm further out, C++ own-net-trace band check).
-# #9846 drained the GND half (the stitcher refuses/relocates stub legs in
-# the band: board 06's U2.B4 / U3.48 GND tracks); the MIPI_CLK+ taper stays
-# with #9019.
-BOARD06_GAP_NETS = ("MIPI_CLK+",)
+# #9019 cleared the MIPI_CLK+ taper and #9846 cleared the GND stitch stubs.
+BOARD06_GAP_NETS: tuple[str, ...] = ()
 
 # Issue #8858 (measured 2026-11-18, pinned image, seed-42 regen at main
 # 304c70e2c): every ``mask_to_copper`` error net signature the regeneration
@@ -355,16 +353,8 @@ def with_board06_synthetic(gate):
 
 
 def test_board06_committed_allowance():
-    """Issue #7548 emptied the skew entry: board 06's allowance holds the
-    #8957 fab-view ``physical_copper_gap`` nets plus, since issue #8858, the
-    seed-42 regen's ``mask_to_copper`` net signatures (both net-signature
-    keyed -- the board is regenerated each CI run, so geometry-keyed
-    identities are ephemeral: the gap rule's items are via/track refs and
-    the mask rule's items are opening/conductor UUIDs).  #9124's
-    tangent-seat rejection drained the PCIE_RX+ face-aligned corner wedge
-    and #9208's C++ own-net-trace slit refusal drained the USB2_D-
-    trace-population finding (both entries deleted; see the allowance
-    comment in check_diffpair_coverage.py)."""
+    """Board 06 permits its measured mask identities. The skew (#7548) and
+    physical gap (#9019, #9846) populations have drained."""
     gate = load("check_diffpair_coverage")
     expected = fab_gap_allowance(BOARD06_GAP_NETS)
     expected.update(mask_allowance(BOARD06_MASK_NETS))
@@ -543,12 +533,14 @@ def test_board06_measured_mask_population_passes_and_drains():
     stops exposing goes stale and forces its entry out."""
     gate = load("check_diffpair_coverage")
     found = [mask_violation(net) for net in BOARD06_MASK_NETS]
-    # The #8957 slit population fires alongside the mask findings.
     found += [gap_violation((net,)) for net in BOARD06_GAP_NETS]
     ids = identities_of(found)
     assert gate.unexpected_baseline_errors(BOARD06_KEY, rule_counts(found), ids) == {}
     assert gate.unallowed_blocking(BOARD06_KEY, found) == []
     assert gate.stale_allowances(BOARD06_KEY, ids) == []
+    for net in ("GND", "MIPI_CLK+"):
+        recurring_gap = found + [gap_violation((net,))]
+        assert gate.unallowed_blocking(BOARD06_KEY, recurring_gap) == [("physical_copper_gap", net)]
     regressed = found + [mask_violation("ADDR_BUS")]
     assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", "ADDR_BUS")]
     last_mask_net = BOARD06_MASK_NETS[-1]

@@ -261,6 +261,21 @@ def _smd_pad_bboxes_on_layer(pcb: Path, layer: str) -> list[tuple[float, float, 
     ]
 
 
+def test_multilayer_roundrect_has_one_via_box_and_two_stub_layers():
+    board = parse_string(
+        '(kicad_pcb (net 1 "GND") (footprint "Test:Pad" (layer "F.Cu") (at 0 0)'
+        ' (pad "1" smd roundrect (at 0 0) (size 2 1) (layers "B.Cu" "F.Cu")'
+        ' (roundrect_rratio 0.25) (net 1 "GND"))))'
+    )
+    bounds = (1, -1.0, -0.5, 1.0, 0.5)
+    assert find_smd_pad_bboxes_on_nets(board, {1}) == [bounds]
+    assert find_smd_pad_bboxes_on_nets(board, {1}, with_corner_radius=True) == [(*bounds, 0.25)]
+    assert find_smd_pad_bboxes_with_layer_on_nets(board, {1}) == [
+        (*bounds, "B.Cu"),
+        (*bounds, "F.Cu"),
+    ]
+
+
 def _band_violations(pcb: Path, result, edge: float) -> list[float]:
     bad = []
     for b in _smd_pad_bboxes(pcb):

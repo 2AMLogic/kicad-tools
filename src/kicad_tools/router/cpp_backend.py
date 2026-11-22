@@ -174,7 +174,12 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # ``primitives.pad_half_extents``) instead of raw ``width/2``/``height/2``.  A
 # v74 .so under-sizes a non-cardinally rotated pad and silently accepts a leg
 # in the band the Python gate refuses (parity break on such boards).
-_REQUIRED_CPP_BUILD_VERSION = 75
+# v76 (Issue #9424): ``same_net_pad_gap_in_band`` takes a via annulus as a
+# union with its own SMD pad only at the union depth into the AABB's inscribed
+# stadium (``via_clearance.same_net_pad_union_depth_mm``).  A v75 .so seats
+# vias in a roundrect pad's corner air and in shallow overlap wedges that the
+# fab-view checker grades as ``physical_copper_gap``; reject it.
+_REQUIRED_CPP_BUILD_VERSION = 76
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1253,6 +1258,7 @@ class CppGrid:
         # the same carve-out as the Python ``_is_plane_net_pad`` helper.
         from .fine_pitch_escape import resolve_clearance_with_escape_region
         from .grid import _is_plane_net_pad
+        from .via_clearance import cpp_pad_copper_corner_radius
 
         component_pitches = grid.compute_component_pitches()
         grid._component_pitch_cache = component_pitches
@@ -1324,6 +1330,7 @@ class CppGrid:
                 is_plane_net,
                 pad.rotation,
                 pad.shape == "circle",
+                cpp_pad_copper_corner_radius(pad),
             )
 
         cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)
@@ -3741,8 +3748,47 @@ class CppPathfinder:
                 _band_cache[layer_value] = hit
             return hit
 
+        from .neck_down import band_safe_taper, band_safe_width, taper_points
+
+        # Issue #9019: the native adapter hands over one segment per grid
+        # cell, so taper pieces are collected per (layer, net) block of
+        # consecutive segments and fused over the whole block -- the same
+        # straight runs ``PathFinder._convert_path_to_route`` sees after its
+        # inline collinear merge.
+        pending: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+        pending_key: tuple[int, int] | None = None
+
+        def _flush() -> None:
+            if pending_key is None or not pending:
+                return
+            layer_value, net = pending_key
+            band_bboxes = (
+                _own_net_band_bboxes(start.net, layer_value)
+                if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
+                else None
+            )
+            for (sx, sy), (ex, ey), seg_width in band_safe_taper(
+                pending, band_bboxes, band_edge_mm
+            ):
+                route.segments.append(
+                    Segment(
+                        x1=sx,
+                        y1=sy,
+                        x2=ex,
+                        y2=ey,
+                        width=seg_width,
+                        layer=Layer(layer_value),
+                        net=net,
+                        net_name=start.net_name,
+                    )
+                )
+            pending.clear()
+
         for cpp_seg in result.segments:
             layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
+            if pending_key != (layer_enum_value, cpp_seg.net):
+                _flush()
+                pending_key = (layer_enum_value, cpp_seg.net)
             # Issue #3532: the C++ ``reconstruct_path`` connects the
             # exact (off-grid) pad centres to the first/last grid cell
             # with a single straight tail, which is off the 0/45/90/135
@@ -3769,24 +3815,11 @@ class CppPathfinder:
                 round(float(cpp_seg.x2), 4),
                 round(float(cpp_seg.y2), 4),
             )
-            from .neck_down import band_safe_width, taper_points
-
             centers = []
             if start_needs_neckdown:
                 centers.append((start.x, start.y))
             if end_needs_neckdown:
                 centers.append((end.x, end.y))
-            split_points = [points[0]]
-            for a, b in zip(points, points[1:], strict=False):
-                split_points.extend(
-                    taper_points(
-                        a,
-                        b,
-                        centers,
-                        self._rules.neck_down_distance,
-                        self._rules.grid_resolution,
-                    )[1:]
-                )
             # Issue #9019: mirror ``PathFinder._convert_path_to_route`` -- a
             # taper must not open an air gap beside the net's own pad.
             band_bboxes = (
@@ -3794,30 +3827,27 @@ class CppPathfinder:
                 if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
                 else None
             )
-            for (sx, sy), (ex, ey) in zip(split_points, split_points[1:], strict=False):
-                seg_width = _segment_width(sx, sy, ex, ey)
-                if band_bboxes:
-                    seg_width = band_safe_width(
-                        (sx, sy),
-                        (ex, ey),
-                        seg_width,
-                        base_trace_width,
-                        band_bboxes,
-                        band_edge_mm,
-                    )
-                if sx == ex and sy == ey:
-                    continue
-                seg = Segment(
-                    x1=sx,
-                    y1=sy,
-                    x2=ex,
-                    y2=ey,
-                    width=seg_width,
-                    layer=Layer(layer_enum_value),
-                    net=cpp_seg.net,
-                    net_name=start.net_name,
+            for a, b in zip(points, points[1:], strict=False):
+                piece_points = taper_points(
+                    a,
+                    b,
+                    centers,
+                    self._rules.neck_down_distance,
+                    self._rules.grid_resolution,
                 )
-                route.segments.append(seg)
+                for (sx, sy), (ex, ey) in zip(piece_points, piece_points[1:], strict=False):
+                    seg_width = _segment_width(sx, sy, ex, ey)
+                    if band_bboxes:
+                        seg_width = band_safe_width(
+                            (sx, sy),
+                            (ex, ey),
+                            seg_width,
+                            base_trace_width,
+                            band_bboxes,
+                            band_edge_mm,
+                        )
+                    pending.append(((sx, sy), (ex, ey), seg_width))
+        _flush()
 
         # Issue #3130: Mirror the segment-width override for via diameter.
         # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``

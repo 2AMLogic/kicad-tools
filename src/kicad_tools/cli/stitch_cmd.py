@@ -62,7 +62,9 @@ from kicad_tools.router.track_index import TrackSpatialIndex, build_track_index
 from kicad_tools.router.via_clearance import (
     COORD_WRITE_GUARD_MM,
     HOLE_TO_HOLE_TOLERANCE,
+    SameNetPadBox,
     drill_hole_to_hole_clear,
+    pad_union_corner_radius,
     same_net_pad_gap_acceptable,
     same_net_segment_pad_gap_acceptable,
 )
@@ -1119,15 +1121,9 @@ def _pad_copper_layers(pad: SExp, fp_layer: str) -> tuple[str, ...]:
 def _iter_smd_pad_bbox_records(
     sexp: SExp,
     net_numbers: set[int],
-) -> list[tuple[int, float, float, float, float, tuple[str, ...]]]:
-    """Per-pad ``(net, min_x, min_y, max_x, max_y, layers)`` SMD records.
-
-    The shared scan behind :func:`find_smd_pad_bboxes_on_nets` and (Issue
-    #9846) :func:`find_smd_pad_bboxes_with_layer_on_nets`; geometry mirrors
-    ``via_in_pad._pad_absolute_bbox`` (cardinal rotations swap dimensions,
-    other rotations use the conservative AABB of the rotated rect).
-    """
-    records: list[tuple[int, float, float, float, float, tuple[str, ...]]] = []
+) -> list[tuple[int, SameNetPadBox, tuple[str, ...]]]:
+    """Return each SMD pad's net, copper bounds with corner radius, and layers."""
+    records: list[tuple[int, SameNetPadBox, tuple[str, ...]]] = []
     name_to_num = get_name_to_net_map(sexp)
 
     for fp in sexp.iter_children():
@@ -1193,16 +1189,21 @@ def _iter_smd_pad_bbox_records(
 
             half_w = bbox_w / 2
             half_h = bbox_h / 2
-            records.append(
-                (
-                    net_num,
-                    board_x - half_w,
-                    board_y - half_h,
-                    board_x + half_w,
-                    board_y + half_h,
-                    _pad_copper_layers(pad, fp_layer),
-                )
+            # Non-cardinal rotations make the AABB conservative, so the
+            # via/track union check uses its unknown-radius fallback (#9424).
+            pad_angle = pad_at.get_float(2) or 0.0
+            rratio_node = pad.find_child("roundrect_rratio")
+            rratio = rratio_node.get_float(0) if rratio_node else None
+            corner = pad_union_corner_radius(pad.get_string(2), width, height, pad_angle, rratio)
+            if (
+                corner is not None
+                and pad_union_corner_radius("rect", width, height, fp_rotation_deg) is None
+            ):
+                corner = None
+            box = SameNetPadBox(
+                board_x - half_w, board_y - half_h, board_x + half_w, board_y + half_h, corner
             )
+            records.append((net_num, box, _pad_copper_layers(pad, fp_layer)))
 
     return records
 
@@ -1210,7 +1211,9 @@ def _iter_smd_pad_bbox_records(
 def find_smd_pad_bboxes_on_nets(
     sexp: SExp,
     net_numbers: set[int],
-) -> list[tuple[int, float, float, float, float]]:
+    *,
+    with_corner_radius: bool = False,
+) -> list[tuple[Any, ...]]:
     """Return axis-aligned bounding boxes for SMD pads on the given nets.
 
     Issue #3271: the stitch ``--avoid-pad-overlap`` post-filter (see
@@ -1235,13 +1238,12 @@ def find_smd_pad_bboxes_on_nets(
         coordinates (mm).  Bbox is the AABB of the rotated rectangle
         matching ``via_in_pad._pad_absolute_bbox`` for cardinal rotations
         (and the conservative AABB-of-rotated-rect for non-cardinal
-        angles).
+        angles). With ``with_corner_radius=True`` the sixth element is the
+        pad copper's corner radius, or ``None`` when unknown.
     """
     return [
-        (net_num, min_x, min_y, max_x, max_y)
-        for net_num, min_x, min_y, max_x, max_y, _layer in _iter_smd_pad_bbox_records(
-            sexp, net_numbers
-        )
+        (net, *box, box.corner_radius) if with_corner_radius else (net, *box)
+        for net, box, _layers in _iter_smd_pad_bbox_records(sexp, net_numbers)
     ]
 
 
@@ -1259,10 +1261,8 @@ def find_smd_pad_bboxes_with_layer_on_nets(
     layer never shares copper with an F.Cu track and must not reject it.
     """
     return [
-        (net_num, min_x, min_y, max_x, max_y, layer)
-        for net_num, min_x, min_y, max_x, max_y, layers in _iter_smd_pad_bbox_records(
-            sexp, net_numbers
-        )
+        (net, *box, layer)
+        for net, box, layers in _iter_smd_pad_bbox_records(sexp, net_numbers)
         for layer in layers
     ]
 
@@ -6878,13 +6878,12 @@ def run_stitch(
         net_numbers_local = {
             num for num, name in get_net_map(sexp).items() if name in set(net_names)
         }
-        for net_num, min_x, min_y, max_x, max_y, layer in find_smd_pad_bboxes_with_layer_on_nets(
-            sexp, net_numbers_local
-        ):
-            vip_bboxes_by_net.setdefault(net_num, []).append((min_x, min_y, max_x, max_y))
-            vip_bboxes_by_net_layer.setdefault((net_num, layer), []).append(
-                (min_x, min_y, max_x, max_y)
-            )
+        # Keep each physical pad once for vias and once per occupied copper
+        # layer for stubs. Both slit checks use the pad's copper corner radius.
+        for net_num, box, layers in _iter_smd_pad_bbox_records(sexp, net_numbers_local):
+            vip_bboxes_by_net.setdefault(net_num, []).append(box)
+            for layer in layers:
+                vip_bboxes_by_net_layer.setdefault((net_num, layer), []).append(box)
 
     # Issue #8957: the same-net pad slit band is a property of the
     # avoid_pad_overlap mode -- that mode is what pushes vias just outside
