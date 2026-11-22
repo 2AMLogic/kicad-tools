@@ -3700,8 +3700,8 @@ class CppPathfinder:
         # ``neck_down.taper_width_fn`` closure, so a piece's width is
         # bit-identical whichever backend converted the path.
         pitches = self._get_component_pitches()
-        start_pitch = pitches.get(start.component_key)
-        end_pitch = pitches.get(end.component_key)
+        start_pitch = pitches.get(start.component_key) if start.component_key else None
+        end_pitch = pitches.get(end.component_key) if end.component_key else None
         segment_width_fn, start_needs_neckdown, end_needs_neckdown = taper_width_fn(
             self._rules, start, end, start_pitch, end_pitch, base_trace_width
         )
@@ -4186,7 +4186,7 @@ class CppPathfinder:
         width = float(base_width)
         pitches = self._get_component_pitches()
         for pad in (start, end):
-            pitch = pitches.get(pad.component_key)
+            pitch = pitches.get(pad.component_key) if pad.component_key else None
             if self._rules.should_apply_neck_down(pad.ref, pitch):
                 width = min(
                     width,

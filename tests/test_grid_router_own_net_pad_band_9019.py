@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -546,6 +547,21 @@ class TestConversionSegmentParity:
         )
         assert self._sexps(cpp_route) == py_sexps
         assert cpp_finder._narrowest_emit_width(a, b, self.BASE_W) == pytest.approx(self.MIN_W)
+
+    @pytest.mark.requires_router_cpp
+    def test_unidentified_programmatic_pads_keep_the_base_width(self) -> None:
+        rules = self._rules()
+        grid = RoutingGrid(8, 8, rules, layer_stack=LayerStack.two_layer())
+        start = replace(_pad(1.0, 3.0), ref="")
+        end = replace(start, x=3.0)
+        for pad in (start, end, replace(start, y=3.5, pin="2")):
+            grid.add_pad(pad)
+        assert grid.compute_component_pitches() == {"": 0.5}
+        native = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+        route = native.route(start, end, per_net_timeout=5)
+        assert route is not None
+        assert {segment.width for segment in route.segments} == {self.BASE_W}
+        assert native._narrowest_emit_width(start, end, self.BASE_W) == self.BASE_W
 
     @pytest.mark.requires_router_cpp
     @pytest.mark.parametrize(
