@@ -814,6 +814,8 @@ def drc_report_problem(
 def run_refill_zones(
     pcb_path: Path,
     kicad_cli: Path | None = None,
+    *,
+    require_save: bool = False,
 ) -> KiCadCLIResult:
     """Refill all copper zones in-place via ``kicad-cli pcb drc --refill-zones``.
 
@@ -840,6 +842,9 @@ def run_refill_zones(
     Args:
         pcb_path: Path to the ``.kicad_pcb`` file to refill (rewritten in place).
         kicad_cli: Path to kicad-cli (auto-detected when not provided).
+        require_save: Always request the explicit refill and save flags. A caller
+            committing verified copper must not silently fall back to read-only
+            DRC if the help probe timed out or an older CLI lacks these flags.
 
     Returns:
         KiCadCLIResult with ``output_path`` set to ``pcb_path`` on success.
@@ -874,7 +879,7 @@ def run_refill_zones(
 
     # KiCad 10+ requires explicit flags to refill zones and persist changes;
     # KiCad 8/9 refill + save as a side effect of the plain drc run.
-    if _kicad_drc_supports_refill(kicad_cli):
+    if require_save or _kicad_drc_supports_refill(kicad_cli):
         cmd.extend(["--refill-zones", "--save-board"])
 
     cmd.append(str(pcb_path))
@@ -886,7 +891,8 @@ def run_refill_zones(
         # exit code here signals DRC violations, not a fill failure).  Issue
         # #6724: a signal kill (negative status) did not complete, whatever
         # it left in the pre-created report file.
-        if result.returncode >= 0 and report_path.exists() and report_path.stat().st_size > 0:
+        completed = result.returncode in (0, 5) if require_save else result.returncode >= 0
+        if completed and report_path.exists() and report_path.stat().st_size > 0:
             _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
             return KiCadCLIResult(
                 success=True,
