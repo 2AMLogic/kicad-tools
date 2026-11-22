@@ -34,7 +34,7 @@ import math
 import re
 import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -2558,10 +2558,20 @@ class SilkKeepoutArea:
     #: forbid all four combinations.
     forbidden: frozenset[tuple[str, str]]
     label: str
+    # A later ignored rule wins for an entire item that intersects its area.
+    exceptions: dict[tuple[str, str], tuple[Any, ...]] = field(default_factory=dict, hash=False)
 
     def forbids(self, side: str, kind: str) -> bool:
         """Whether silk of ``kind`` on ``side`` is forbidden in this area."""
         return (side, kind) in self.forbidden
+
+    def forbids_item(self, side: str, kind: str, ink: Any) -> bool:
+        """Whether this area forbids the printed geometry of this item."""
+        return (
+            self.forbids(side, kind)
+            and self.polygon.intersects(ink)
+            and not any(area.intersects(ink) for area in self.exceptions.get((side, kind), ()))
+        )
 
     @property
     def sides(self) -> frozenset[str]:
@@ -2608,11 +2618,12 @@ def _zone_silk_sides(zone: Zone) -> frozenset[str]:
 def _silk_keepout_dru_rules(
     dru_path: Path,
     unsupported: list[str] | None = None,
-) -> list[tuple[frozenset[str] | None, frozenset[str], list[str]]]:
+) -> list[tuple[frozenset[str] | None, frozenset[str], list[str], bool]]:
     """Parse silk-forbidding rules from a ``.kicad_dru`` file.
 
-    Yields ``(silk_sides, kinds, area_references)`` per ``(rule ...)`` whose
-    constraint is a ``disallow`` naming ``text`` and/or ``graphic``.
+    Yields ``(silk_sides, kinds, area_references, ignored)`` per rule with a
+    ``disallow`` constraint naming ``text`` and/or ``graphic``. Other constraint
+    types can precede or follow it. Ignored rules retain their priority.
     ``silk_sides`` is ``None`` when the rule carries no ``(layer ...)``
     clause of its own -- the caller then resolves sides from the referenced
     area -- and an empty frozenset when the clause names no silk layer (a
@@ -2640,12 +2651,26 @@ def _silk_keepout_dru_rules(
             file=sys.stderr,
         )
         return []
-    rules: list[tuple[frozenset[str] | None, frozenset[str], list[str]]] = []
+    rules: list[tuple[frozenset[str] | None, frozenset[str], list[str], bool]] = []
     for node in doc.children:
         if node.is_atom or node.name != "rule":
             continue
-        constraint = node.find("constraint")
-        if constraint is None or constraint.get_string(0) != "disallow":
+        constraints = node.find_children("constraint")
+        by_type = {c.get_string(0): c for c in constraints}
+        if len(by_type) != len(constraints):
+            # KiCad rejects the rule file when one rule repeats a constraint
+            # type. Clipping from the remaining rules would destroy legal ink.
+            rule_name = node.get_string(0) or "(unnamed)"
+            if unsupported is not None:
+                unsupported.append(rule_name)
+            print(
+                f"Warning: {dru_path}: rule {rule_name!r} repeats a constraint type; "
+                "silk keepout rules were not applied.",
+                file=sys.stderr,
+            )
+            return []
+        constraint = by_type.get("disallow")
+        if constraint is None:
             continue
         kinds = frozenset(str(c.value) for c in constraint.children[1:] if c.is_atom) & {
             "text",
@@ -2677,7 +2702,9 @@ def _silk_keepout_dru_rules(
             sides = frozenset(
                 side for side in (_SILK_LAYER_SIDES.get(n) for n in layer_names) if side
             )
-        rules.append((sides, kinds, refs))
+        severity = node.find_child("severity")
+        ignored = severity is not None and severity.get_string(0) == "ignore"
+        rules.append((sides, kinds, refs, ignored))
     return rules
 
 
@@ -2695,7 +2722,9 @@ def resolve_silk_keepouts(
     ``PCB.footprint_rule_areas`` -- both carry board-relative polygons.
     Several rules may address one area; each contributes its own
     ``(side, kind)`` pairs, so a front-text rule and a back-graphic rule on
-    one area never forbid front graphics or back text.  Rules whose
+    one area never forbid front graphics or back text. A later ignored
+    rule exempts matching items even if its area only partly overlaps
+    the active keepout. Rules whose
     condition the resolver cannot preserve are skipped and named in
     ``unsupported`` (when a list is passed).
 
@@ -2724,9 +2753,13 @@ def resolve_silk_keepouts(
         return []
 
     zones = pcb.rule_areas + pcb.footprint_rule_areas
-    # Per zone index: the (side, kind) pairs the rules forbid.
-    pairs_by_zone: dict[int, set[tuple[str, str]]] = {}
-    for rule_sides, kinds, refs in _silk_keepout_dru_rules(dru_path, unsupported):
+    # KiCad gives later rules priority for the same item kind. Record the
+    # higher-priority exceptions in effect when each active rule is reached.
+    ignored_zones: dict[tuple[str, str], set[int]] = {}
+    pairs_by_zone: dict[int, dict[tuple[str, str], frozenset[int]]] = {}
+    for rule_sides, kinds, refs, ignored in reversed(
+        _silk_keepout_dru_rules(dru_path, unsupported)
+    ):
         for ref in refs:
             for index, zone in enumerate(zones):
                 if not _zone_matches_reference(zone, ref):
@@ -2737,18 +2770,31 @@ def resolve_silk_keepouts(
                 else:
                     # A clause naming no silk layer scopes the rule off silk.
                     resolved = rule_sides
-                if not resolved:
-                    continue
-                pairs_by_zone.setdefault(index, set()).update(
-                    (side, kind) for side in resolved for kind in kinds
-                )
+                for side in resolved:
+                    for kind in kinds:
+                        pair = (side, kind)
+                        if ignored:
+                            ignored_zones.setdefault(pair, set()).add(index)
+                        else:
+                            exceptions = ignored_zones.get(pair, set())
+                            if index not in exceptions:
+                                pairs_by_zone.setdefault(index, {}).setdefault(
+                                    pair, frozenset(exceptions)
+                                )
+    if not pairs_by_zone:
+        return []
+    indices = set(pairs_by_zone).union(*ignored_zones.values())
+    polygons = {}
+    for index in indices:
+        polygon = _Polygon(zones[index].polygon)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if not polygon.is_empty and polygon.area > 0:
+            polygons[index] = polygon
     areas: list[SilkKeepoutArea] = []
     for index in sorted(pairs_by_zone):
         zone = zones[index]
-        polygon = _Polygon(zone.polygon)
-        if not polygon.is_valid:
-            polygon = polygon.buffer(0)
-        if polygon.is_empty or polygon.area <= 0:
+        if index not in polygons:
             continue
         uuid = (zone.uuid or "").strip()
         name = (zone.name or "").strip()
@@ -2758,9 +2804,14 @@ def resolve_silk_keepouts(
             label = f"{label} in {parent}"
         areas.append(
             SilkKeepoutArea(
-                polygon=polygon,
+                polygon=polygons[index],
                 forbidden=frozenset(pairs_by_zone[index]),
                 label=label,
+                exceptions={
+                    pair: tuple(polygons[i] for i in indices if i in polygons)
+                    for pair, indices in pairs_by_zone[index].items()
+                    if indices
+                },
             )
         )
     return areas
@@ -2925,9 +2976,7 @@ def check_silk_in_keepout(
     for side, kind, geom, label, _owner, layer, silk_uuid, location in _iter_silk_typed(pcb):
         for idx in tree.query(geom):
             area = areas[int(idx)]
-            if not area.forbids(side, kind):
-                continue
-            if not geom.intersects(area.polygon):
+            if not area.forbids_item(side, kind, geom):
                 continue
             silk_item = f"{label} {{{silk_uuid}}}" if silk_uuid else label
             found.append(

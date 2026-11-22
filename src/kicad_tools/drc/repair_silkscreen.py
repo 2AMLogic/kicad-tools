@@ -38,7 +38,7 @@ from __future__ import annotations
 import copy
 import math
 import uuid as _uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -858,7 +858,6 @@ class SilkscreenRepairer:
         from kicad_tools.schema.pcb import PCB, BoardGraphic, Footprint, FootprintGraphic
         from kicad_tools.sexp.parser import parse_string, serialize_sexp
         from kicad_tools.validate.rules.silkscreen import (
-            SilkKeepoutArea,
             _fp_transform,
             _iter_silk_typed,
             _silk_side,
@@ -870,11 +869,7 @@ class SilkscreenRepairer:
         result = KeepoutClipRepairResult()
         dru_path = self.path.with_suffix(".kicad_dru")
         scratch = PCB(parse_string(serialize_sexp(self.doc)))
-        board_areas = [
-            area
-            for area in resolve_silk_keepouts(scratch, dru_path=dru_path)
-            if area.disallow_graphic
-        ]
+        board_areas = resolve_silk_keepouts(scratch, dru_path=dru_path)
         if not board_areas:
             return result
 
@@ -884,20 +879,27 @@ class SilkscreenRepairer:
             if kind != "text":
                 continue
             for area in board_areas:
-                if area.forbids(side, "text") and geom.intersects(area.polygon):
+                if area.forbids_item(side, "text", geom):
                     item = f"{label} {{{uuid}}}" if uuid else label
                     result.text_residual.append(f"{item} in {area.label}")
 
-        # Graphics are clipped in the file's own frame (sheet-absolute),
-        # like the hole clip: shift the resolved polygons by the origin.
+        # Graphics use sheet coordinates. Shift the keepouts and their
+        # exceptions once before querying them for each printed item.
         ox, oy = getattr(scratch, "_board_origin", (0.0, 0.0))
+
+        def to_sheet(polygon):
+            return translate(polygon, xoff=ox, yoff=oy)
+
         areas = [
-            SilkKeepoutArea(
-                polygon=translate(area.polygon, xoff=ox, yoff=oy),
-                forbidden=area.forbidden,
-                label=area.label,
+            replace(
+                area,
+                polygon=to_sheet(area.polygon),
+                exceptions={
+                    pair: tuple(map(to_sheet, shapes)) for pair, shapes in area.exceptions.items()
+                },
             )
             for area in board_areas
+            if area.disallow_graphic
         ]
         tree = STRtree([area.polygon for area in areas])
 
@@ -938,8 +940,7 @@ class SilkscreenRepairer:
             return [
                 areas[int(i)]
                 for i in tree.query(ink)
-                if areas[int(i)].forbids(silk_side, "graphic")
-                and ink.intersects(areas[int(i)].polygon)
+                if areas[int(i)].forbids_item(silk_side, "graphic", ink)
             ]
 
         def outline_of(kind: str, graphic, xf) -> tuple[list[tuple[float, float]], bool]:
@@ -1844,8 +1845,8 @@ def legalize_silk(
             SilkLegalizeUnresolved(
                 "silk_keepout_rule_unsupported",
                 f"rule {name!r}",
-                "condition not understood (only plain A.intersectsArea('...') terms "
-                "joined by || are read); the rule was not applied",
+                "custom rule could not be applied; check its condition and constraint types "
+                "in the sibling .kicad_dru",
             )
             for name in unsupported_keepout_rules
         ]

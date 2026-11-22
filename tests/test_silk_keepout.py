@@ -697,6 +697,86 @@ _OUTSIDE_LINE = (
 )
 
 
+@pytest.mark.parametrize(
+    "clauses,forbidden",
+    [
+        ("(constraint disallow graphic) (severity ignore)", False),
+        ("(severity ignore) (constraint disallow graphic)", False),
+        ("(constraint track_width (min 0.15mm)) (constraint disallow graphic)", True),
+        ("(constraint disallow graphic) (constraint track_width (min 0.15mm))", True),
+        ("(constraint disallow graphic) (severity warning)", True),
+        ("(constraint track_width (min 0.15mm)) (constraint disallow text)", False),
+    ],
+)
+def test_public_fix_uses_active_disallow_constraints(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], clauses: str, forbidden: bool
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    rules = _DRU.replace("(constraint disallow text graphic)", clauses)
+    board = _board(tmp_path, _SILK_ZONE + _INSIDE_LINE + _OUTSIDE_LINE, dru=rules)
+    before = _gr_lines(board)
+    original_bytes = board.read_bytes()
+    assert [v.severity for v in check_silk_in_keepout(PCB.load(board)).violations] == (
+        ["error"] if forbidden else []
+    )
+    assert fix_silkscreen_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["total_keepout_clip_fixed"] == int(forbidden)
+    assert _gr_lines(board) == (before[1:] if forbidden else before)
+    if not forbidden:
+        assert board.read_bytes() == original_bytes
+    assert not check_silk_in_keepout(PCB.load(board)).violations
+
+
+@pytest.mark.parametrize("same_area", [True, False])
+@pytest.mark.parametrize("ignore_last", [True, False])
+def test_ignored_rule_precedence_is_per_item_and_kind(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], same_area: bool, ignore_last: bool
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    # The smaller area covers part of the line but none of the text.
+    inner = (
+        _SILK_ZONE.replace("no_ink", "exception")
+        .replace("000000000001", "000000000002")
+        .replace("120 120", "127 124")
+        .replace("140 120", "131 124")
+        .replace("140 140", "131 128")
+        .replace("120 140", "127 128")
+    )
+    active = _DRU.removeprefix("(version 1)\n")
+    ignored = active.replace("printed legend keepout", "allow graphics").replace(
+        "(constraint disallow text graphic)", "(severity ignore) (constraint disallow graphic)"
+    )
+    if not same_area:
+        ignored = ignored.replace("no_ink", "exception")
+    rules = "(version 1)\n" + (active + ignored if ignore_last else ignored + active)
+    board = _board(tmp_path, _SILK_ZONE + inner + _INSIDE_LINE + _OUTSIDE_LINE + _FRONT_TEXT, rules)
+    before = _gr_lines(board)
+    found = {v.items[0] for v in check_silk_in_keepout(PCB.load(board)).violations}
+    assert found == ({"LEGEND"} if ignore_last else {"LEGEND", "gr_line {inside-line}"})
+    residual_text = SilkscreenRepairer(board).repair_keepout_clearance(dry_run=True).text_residual
+    assert len(residual_text) == 1 and "LEGEND" in residual_text[0]
+    assert fix_silkscreen_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["total_keepout_clip_fixed"] == (0 if ignore_last else 1)
+    assert _gr_lines(board) == (before if ignore_last else before[1:])
+    assert [v.items[0] for v in check_silk_in_keepout(PCB.load(board)).violations] == ["LEGEND"]
+
+
+def test_repeated_constraint_type_invalidates_the_sidecar(tmp_path: Path) -> None:
+    invalid = _DRU.removeprefix("(version 1)\n").replace(
+        "(constraint disallow text graphic)",
+        "(constraint track_width (min 0.15mm)) (constraint track_width (max 0.45mm))",
+    )
+    board = _board(tmp_path, _SILK_ZONE + _INSIDE_LINE, dru=_DRU + invalid)
+    unsupported = []
+    assert not resolve_silk_keepouts(PCB.load(board), unsupported=unsupported)
+    assert unsupported == ["printed legend keepout"]
+    assert not SilkscreenRepairer(board).repair_keepout_clearance().fixes
+
+
 def test_negated_condition_is_unsupported_not_a_positive_match(tmp_path: Path) -> None:
     board = _board(tmp_path, _SILK_ZONE + _INSIDE_LINE + _OUTSIDE_LINE, dru=_NEGATED_DRU)
     pcb = PCB.load(board)
