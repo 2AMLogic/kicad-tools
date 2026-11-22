@@ -61,6 +61,10 @@ def _relocate_escapes(pcb):
         ("NODE_B", (148.1, 105.5)): (148.4, 105.5),  # D8-1
         ("NODE_B", (158.9, 105.5)): (158.6, 105.5),  # D9-2
         ("NODE_C", (138.1, 106.0)): (138.4, 106.0),  # D7-1
+        # Build 76: keep the returning D9 trace clear of its own via rim.
+        ("NODE_D", (156.8, 105.0)): (156.625, 105.5),
+        # C1-1: move the VCC via onto its diagonal feeder, outside the pad opening.
+        ("VCC", (152.8, 117.4)): (152.35, 116.3),
     }
     # Only a present via activates a relocation. Quantization can create a
     # track-only waypoint at an old escape cell; moving it on a second pass

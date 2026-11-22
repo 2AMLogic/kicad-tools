@@ -393,7 +393,11 @@ def declare_ampacity_targets(output_dir: Path) -> None:
     # route_success fast-fail gate's message with an ENOENT.
     output_dir.mkdir(parents=True, exist_ok=True)
     sidecar = output_dir / "net_class_map.json"
-    data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+    # A fresh output directory must check the same widths and layer choices
+    # as the released project. Preserve local overrides on subsequent runs.
+    authored = Path(__file__).with_name("output") / sidecar.name
+    source = sidecar if sidecar.is_file() else authored
+    data = json.loads(source.read_text()) if source.is_file() else {}
     for net, amps in AMPACITY_TARGETS_A.items():
         entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
         entry["target_ampacity"] = amps

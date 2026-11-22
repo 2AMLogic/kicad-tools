@@ -14,6 +14,7 @@ Fast and hermetic: monkeypatch the recipe's module-level functions so
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -45,6 +46,21 @@ def _load_board02_module():
         if inserted and sys.path and sys.path[0] == board_dir:
             sys.path.pop(0)
     return module
+
+
+def test_fresh_release_uses_the_authored_net_classes(tmp_path: Path) -> None:
+    module = _load_board02_module()
+    authored = json.loads((BOARD_DIR / "output/net_class_map.json").read_text())
+    sidecar = tmp_path / "net_class_map.json"
+
+    module.declare_ampacity_targets(tmp_path)
+    assert json.loads(sidecar.read_text()) == authored
+
+    # Rerunning an existing project keeps its own class overrides.
+    authored["VCC"]["trace_width"] = 0.6
+    sidecar.write_text(json.dumps(authored))
+    module.declare_ampacity_targets(tmp_path)
+    assert json.loads(sidecar.read_text()) == authored
 
 
 class TestBoard02PartialRouteFastFail:

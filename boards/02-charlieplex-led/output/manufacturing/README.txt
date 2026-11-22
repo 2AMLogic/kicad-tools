@@ -2,7 +2,7 @@ Manufacturing package for charlieplex_3x3_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-11-22T00:46:47+00:00
+Generated        : 2026-11-22T01:57:20Z
 
 Assembly package: BOM and CPL are included.
 
@@ -49,7 +49,7 @@ Hand-solder / through-hole items
 
 Warning review (per rule)
 -------------------------
-  mask_to_copper: 1
+  mask_to_copper: 2
   tht_smd_spacing: 5
   All assembly-affecting warning counts are zero.
 
@@ -58,7 +58,7 @@ Copper cleanup
   copper_cleanup: applied; exact-duplicate copper removed: 0 segment(s), 0 via(s)
   step dedupe: applied (segments=0, vias=0)
   step prune: applied (segments_removed=0, ends_snapped=0)
-  step optimize_traces: applied (segments_before=152, segments_after=152, corners_before=122, corners_after=122, layers=2, copper_oz=1.0)
+  step optimize_traces: applied (segments_before=144, segments_after=144, corners_before=118, corners_after=118, layers=2, copper_oz=1.0)
 
 LCSC stock order
 ----------------
@@ -79,7 +79,7 @@ Sign-off
 --------
   Fresh kct check and native KiCad DRC (saved and refilled copper): zero errors.
   firmware: passed -- Sources and programmed image byte-identical to the AVR GCC 7.3.0 compiled audit (214 flash bytes, 22 RAM bytes); Intel HEX record checksums verified and flash size re-measured (214 bytes). avr-gcc not installed here, so no rebuild. Physical hardware bring-up remains untested.
-  smt_drill_clearance: passed -- Issue #5012 actual-land overlap rule re-run (jlcpcb, 2 layers): 0 overlaps; all 4 reviewed via relocations present on their nets. Ordinary JLCPCB process.
+  smt_drill_clearance: passed -- Issue #5012 actual-land overlap rule re-run (jlcpcb, 2 layers): 0 overlaps; all 2 reviewed via relocations present on their nets. Ordinary JLCPCB process.
   native_erc: passed -- Fresh native KiCad ERC: 0 errors, 0 warnings.
 
 ATtiny85 Charlieplex LED Grid, revision B
