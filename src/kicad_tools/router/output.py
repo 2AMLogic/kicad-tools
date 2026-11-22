@@ -1256,6 +1256,7 @@ def print_routing_diagnostics_json(
     diagnose_unrouted_budget: float | None = None,
     verdict: str | None = None,
     grid_selection: str | None = None,
+    silk_fix: dict | None = None,
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -1276,6 +1277,7 @@ def print_routing_diagnostics_json(
             Issue #6239).  Emitted as ``summary.verdict`` when given.
         grid_selection: ``"explicit"`` / ``"auto"`` for ``grid.selection``
             (Issue #6875) -- see :func:`get_routing_diagnostics_json`.
+        silk_fix: Report for silk legalisation on the saved candidate, when run.
     """
     diagnostics = get_routing_diagnostics_json(
         router,
@@ -1288,6 +1290,8 @@ def print_routing_diagnostics_json(
         diagnose_unrouted_budget=diagnose_unrouted_budget,
         grid_selection=grid_selection,
     )
+    if silk_fix is not None:
+        diagnostics["silk_fix"] = silk_fix
     if verdict is not None:
         diagnostics["summary"]["verdict"] = verdict
     # json_stdout(): the real stdout even while ``kct route --format json``

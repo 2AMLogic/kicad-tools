@@ -11567,6 +11567,32 @@ def _warn_unresolved_net_class_map(resolution, board_net_names, nearest_fn) -> N
     print("\n".join(lines), file=sys.stderr)
 
 
+def _apply_default_silk_pass(
+    output_path: Path, args, *, layers: int | None, quiet: bool
+) -> dict | None:
+    """Run the default silk legalisation pass on the finished board (#9799).
+
+    Applies the shared ``legalize_silk`` pass (#9795 phase 1) to the written
+    output -- after copper is saved and zones filled, before post-route DRC
+    judges silk -- and prints what it fixed and could not fix.  Skipped
+    entirely (silk byte-identical) under ``--no-silk-fix`` or ``--dry-run``;
+    a pass that cannot run is a warning, never a routing failure.
+
+    Returns the pass document (for the JSON report tail) or ``None``.
+    """
+    if getattr(args, "no_silk_fix", False) or getattr(args, "dry_run", False):
+        return None
+    from .silk_default_pass import run_default_silk_pass
+
+    return run_default_silk_pass(
+        output_path,
+        mfr=getattr(args, "manufacturer", None),
+        layers=layers,
+        copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+        quiet=quiet,
+    )
+
+
 def _resolve_mfr_design_rules(args, layer_stack):
     """Resolve the manufacturer :class:`DesignRules` used for ampacity advisories.
 
@@ -14657,6 +14683,12 @@ def route_with_layer_escalation(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
 
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
+    # after copper is written and before post-route DRC judges silk.
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=final_result.layer_count, quiet=quiet
+    )
+
     # Run DRC validation unless skipped
     fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
@@ -15653,6 +15685,12 @@ def route_with_rule_relaxation(
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
+    # after copper is written and before post-route DRC judges silk.
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=final_result.layer_count, quiet=quiet
+    )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -18211,6 +18249,12 @@ def route_with_combined_escalation(
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
+    # after copper is written and before post-route DRC judges silk.
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=final_result.layer_count, quiet=quiet
+    )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -22131,6 +22175,20 @@ def _route_parser() -> argparse.ArgumentParser:
             "flag for performance-critical use or when running separate validation."
         ),
     )
+    # Issue #9799 (#9795 phase 3): the shared silk legalisation pass runs on
+    # the finished board by default; this is the opt-out that leaves authored
+    # silk byte-identical.
+    parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "otherwise runs on the written board before post-route DRC and "
+            "names what it fixed and could not fix. With this flag authored "
+            "silk is left byte-identical (Issue #9799)."
+        ),
+    )
     # Issue #4178: hard-gate on native (kicad-cli) DRC actually running.
     parser.add_argument(
         "--strict-drc",
@@ -23462,7 +23520,7 @@ def _chain_complete_argv(
       ``--net-class-map`` -- the fab tier, determinism and net classes.
     * ``--complete-exclude-nets`` -- rebuilt from ``excluded_nets``.
     * ``--per-net-iterations``, ``--deterministic-budget`` -- the search budget.
-    * ``--quiet``, ``--skip-drc``, ``--allow-offboard``,
+    * ``--quiet``, ``--skip-drc``, ``--no-silk-fix``, ``--allow-offboard``,
       ``--no-plane-via-reservation``, ``--no-reserve-pour-only-passives``.
     * ``--layers`` (Issue #8674) unless it is ``auto``: the operator's stack is
       passed by name, so the inner pass builds the same explicit stack instead
@@ -23614,6 +23672,7 @@ def _chain_complete_argv(
     for flag, attr in (
         ("--quiet", "quiet"),
         ("--skip-drc", "skip_drc"),
+        ("--no-silk-fix", "no_silk_fix"),
         ("--allow-offboard", "allow_offboard"),
         ("--no-plane-via-reservation", "no_plane_via_reservation"),
         ("--deterministic-budget", "deterministic_budget"),
@@ -24595,6 +24654,7 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
 
     from kicad_tools.json_stdout import json_stdout
 
+    silk_fix = getattr(args, "_route_silk_fix", None)
     last = getattr(args, "_last_layer_result", None)
     if last is not None:
         from kicad_tools.router import print_routing_diagnostics_json
@@ -24611,17 +24671,15 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 # Issue #6239: the exit code is the run's single final verdict.
                 verdict=_verdict_for_exit(exit_code),
                 grid_selection=getattr(args, "_grid_selection", None),
+                silk_fix=silk_fix,
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
-    print(
-        json.dumps(
-            {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)},
-            indent=2,
-        ),
-        file=json_stdout(),
-    )
+    document = {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)}
+    if silk_fix is not None:
+        document["silk_fix"] = silk_fix
+    print(json.dumps(document, indent=2), file=json_stdout())
 
 
 def _dry_run_layer_counts(pcb_path: Path, args, argv) -> tuple[list[int], bool]:
@@ -27457,6 +27515,12 @@ def _run_main_impl(args, parser, argv) -> int:
         _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
         _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
 
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
+    # after copper is written and before post-route DRC judges silk.
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=layer_stack.num_layers, quiet=quiet
+    )
+
     _rss.mark("post-fill-zones")
 
     # Run DRC validation unless skipped or dry-run
@@ -27806,6 +27870,7 @@ def _run_main_impl(args, parser, argv) -> int:
             routing_plan=_routing_plan_json,
             verdict=_final_verdict,
             grid_selection=getattr(args, "_grid_selection", None),
+            silk_fix=args._route_silk_fix,
         )
 
     # Save partial results on clean partial exit (not just SIGINT)

@@ -14,8 +14,40 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-22
+
+- **PR #9806**: fix: stop optimize-traces --drc-aware --mfr breaking mask-clean pad escapes
+- **Issue #8585** (closed): repair-creepage follow-ups: live kicad-cli DRC run, vanished-target, DRC identity, via_floating reason
+- **Issue #8563** (closed): route: withdrawn pour-oracle closures leave legacy (net <n>) stubs on name-only KiCad 10 boards
+- **Issue #9247** (closed): Dependabot policy: grouped minor/patch updates exclude security-relevant majors (fleet-gitops ask)
+- **Issue #8573** (closed): route-link: attach-zone relaxed floor + net-clearance-only floors not re-checked on collapsed routes (follow-up to #8546)
+- **Issue #9848** (closed): redundant_copper_staircase: conservative checks now suppress some legal shortcuts (tolerance, mask entry, overlap terminals)
+- **PR #9863**: fix(validate): stop suppressing legal redundant_copper_staircase shortcuts
+- **Issue #9436** (closed): mask_to_copper: a pad solid-connected to its own-net pour is an error, but the fab DFM reports nothing (13 errors vs 0 danger / 0 warning)
+- **PR #9441**: feat: classify a pad solid-connected to its own pour as info in mask_to_copper
+- **PR #9875**: fix(router): retry routes that turn back beside their own via
+- **Issue #9808** (closed): kct zones relieve is unreachable from the unified CLI (parser.py registers only add/list/batch/hv-keepout/fill)
+- **PR #9819**: fix: register zones relieve in the unified kct CLI
+- **Issue #9616** (closed): Automated unpark re-dispatches builders onto settled #9464 after body park citation was retracted (loop, 5 stand-downs)
+- **Issue #9847** (closed): Board-level Edge.Cuts gr_poly with (arc ...) points is read as straight edges
+- **PR #9872**: fix: preserve arcs in board Edge.Cuts polygons
+- **Issue #9870** (closed): Clarify the route-length and turn-count claims for weighted Python diff-pair guides
+- **PR #9871**: docs: clarify the Python guide heuristic and measured outcome
+- **Issue #9833** (closed): sch connectivity: T-junctions without a dot, pins mid-wire and power symbols mid-wire connect in kct but not in kicad-cli
+- **PR #9859**: fix: sch wire graph leaves undotted Ts, mid-wire pins and power symbols open like kicad-cli
+- **Issue #9849** (closed): Make the via-conflict spent-budget test deterministic
+- **PR #9855**: test: drive the via-conflict spent-budget test on a controlled clock
+- **Issue #9868** (closed): test flake: test_grid_engine_has_no_hole_clearance_violation times out in the Test job
+- **Issue #9202** (closed): Verify RSS teardown ceiling slack on a 16K/64K-page host (post-#9201)
+- **PR #9854**: fix: fuse in-band taper pieces so the U4.1 diagonal approach reaches its pad
+- **Issue #9000** (closed): Router: barrier-closure diagnostic (predict severed nets when a routing loop closes)
+- **PR #9221**: feat: add env-gated barrier-closure diagnostic to the negotiated router
+- **PR #9845**: fix(router): via-to-own-pad union needs real overlap depth (#9424)
+- **PR #8623**: build(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
+
 ### 2026-11-21
 
+- **Issue #9387** (closed): Out-of-band: confirm no cancelled Changelog Fragment Check rows after #9383's per-run concurrency group
 - **PR #9867**: fix: report the active silkscreen repair rules
 - **PR #9858**: fix: run pure-Python diff-pair guide probes bounded-suboptimal
 - **PR #9856**: feat: name the C++-only centerline rescue in route backend status
@@ -3858,35 +3890,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #5662** (closed): [Epic #5509] Phase 3c: switch coupled diff-pair search (coupled_pathfinder.cpp + diffpair_routing.py) to the clearance kernel
 - **Issue #5059** (closed): Manufacturing profiles: verify effective silk/pad DRC coverage and preserve custom rules
 - **Issue #4507** (closed): router Phase 2 (#4431): search-time pairwise HV avoidance + C++ validate_route domain-matrix extension — make HV boards actually converge
-
-### 2026-09-22
-
-- **PR #5679**: perf(zones): skip the post-fill remediation pass's redundant first kicad-cli refill
-- **PR #5675**: refactor(router): switch the fixed-copper predicate to the shared clearance kernel (Epic #5509 Phase 3f)
-- **PR #5674**: fix(router): surface the declared-rule undercut warning on the explicit --clearance path
-- **PR #5671**: perf(router): tombstone R-tree segment deletions instead of deleting eagerly
-- **PR #5670**: refactor(router): switch the lattice engine's clearance predicates to the shared kernel (Epic #5509 Phase 3d)
-- **PR #5669**: perf(router): memoise the per-layer route-halo via probe (phase 4 of the diff-pair re-route step)
-- **PR #5667**: feat(router): read the .kicad_pro Default netclass as a clearance floor
-- **PR #5666**: fix(router): run the plan stage on a cache-hit route too
-- **Issue #5665** (closed): [Epic #5509] Phase 3f: switch fixed-copper predicate (fixed_copper.py + grid.cpp) to the clearance kernel
-- **Issue #5663** (closed): [Epic #5509] Phase 3d: switch lattice engine predicates to the clearance kernel
-- **PR #5659**: test(conformance): add seg-zone, via-zone and copper-edge pair kinds
-- **PR #5658**: perf(router): vectorize + memoize the pure-Python A* via-clearance kernel (phase 4 of the diff-pair re-route step)
-- **PR #5657**: perf(stitch): index foreign-net tracks for the pad-aware via-placement ladders
-- **Issue #5656** (closed): router: explicit --clearance never surfaces the "undercuts a declared rule" warning the resolver builds
-- **PR #5655**: feat(router): unify clearance rule resolution behind one resolver
-- **Issue #5654** (closed): router: promote .kicad_pro netclass clearance to a resolver input once the project writer stops emitting KiCad's stock 0.20mm default
-- **PR #5653**: perf(router): whole-board wall-clock attribution for the resume-exhaustion path (diff-pair re-route step)
-- **PR #5652**: feat(router,cli): overflow report with computed relief, net-status --why consumer, --plan-gate, and the fleet precision/recall table
-- **Issue #5651** (closed): router: a routing-cache hit silently suppresses the routing-plan sidecar (plan stage lives inside route_all_negotiated)
-- **PR #5649**: perf(router): vectorize CongestionMap's cell-skip scan
-- **Issue #5645** (closed): [Epic #5509] Phase 2: rule resolver unification (DRU precedence, pair matrix, fab-tier floors, trace/via symmetry)
-- **Issue #5644** (closed): [Epic #5509] Phase 1c follow-up: zone and edge pair kinds so group 18's zone/edge rules and group 10's pour/outline branches can be measured
-- **Issue #5626** (closed): conformance: add a pad-pad pair kind so Epic #5509 group 19 (drc_cpp) can be measured
-- **Issue #5613** (closed): tests/router/test_monotone_reach.py::TestDDRByteReach fails at origin/main: DDR byte bundle routes 10/11 in ~15min, DQS_P/DQS_N unroutable
-- **Issue #5521** (closed): [Epic #5510] router/cli: overflow report with computed relief, net-status --why consumer, --plan-gate/--force, and the fleet precision/recall table
-- **Issue #5510** (closed): Epic: capacity-aware routing plan on the default path — layer assignment, hard corridors, and an infeasibility certificate
 
 ### 2026-07-20 (evening)
 
