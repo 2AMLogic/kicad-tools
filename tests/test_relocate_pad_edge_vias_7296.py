@@ -308,6 +308,51 @@ def test_ring_dam_mode_moves_a_drill_legal_ring_encroacher(tmp_path):
     assert _edge_warnings(pcb) == []
 
 
+@pytest.mark.parametrize("explicit_escape", [False, True])
+def test_ring_move_keeps_an_existing_pad_attachment(tmp_path, explicit_escape):
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    head = _HEAD.replace(
+        "(at 100 100)",
+        '(at 100 100) (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))',
+    )
+    far_pad = (
+        '(footprint "test:remote" (layer "F.Cu") (at 104 100) '
+        '(property "Reference" "U2" (at 0 0) (layer "F.SilkS")) '
+        '(pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu") (net 1 "SIG1")))'
+    )
+    escape = (
+        '(segment (start 100 100) (end 100.78 100) (width .2) (layer "F.Cu") (net 1))'
+        if explicit_escape
+        else ""
+    )
+    pcb = _load(tmp_path, far_pad + escape + _EDGE_VIA.replace("100.65", "100.78"), head=head)
+    original = pcb._sexp.to_string()
+    assert ConnectivityValidator(pcb)._contact_graph(1).open_count() == 0
+    result = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)
+    saved = tmp_path / "result.kicad_pcb"
+    pcb.save(saved)
+    assert ConnectivityValidator(saved)._contact_graph(1).open_count() == 0
+    if explicit_escape:
+        assert result.moved
+    elif not result.moved:
+        assert result.unresolvable and pcb._sexp.to_string() == original
+
+
+@pytest.mark.parametrize(
+    "lock,locked", [("locked", True), ("(locked yes)", True), ("(locked no)", False)]
+)
+def test_ring_move_respects_the_via_lock(tmp_path, lock, locked):
+    source = _EDGE_VIA.replace("100.65", "100.8").replace("(via (at", f"(via {lock} (at")
+    pcb = _load(tmp_path, source)
+    original = pcb._sexp.to_string()
+    result = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)
+    assert bool(result.moved) != locked
+    if locked:
+        assert result.skipped[0].reason == "via is locked"
+        assert pcb._sexp.to_string() == original
+
+
 def test_ring_dam_mode_leaves_a_ring_legal_via_alone(tmp_path):
     pcb = _load(tmp_path, _EDGE_VIA.replace("100.65", "100.95"))
     ring = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)

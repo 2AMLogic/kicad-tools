@@ -8157,10 +8157,24 @@ class PCB:
             >>> pcb.save()
         """
         ox, oy = self._board_origin
+        node = self.via_source_node(via)
+        at_node = node.find("at") if node is not None else None
+        if at_node is not None:
+            at_node.set_value(0, new_position[0] + ox)
+            at_node.set_value(1, new_position[1] + oy)
+
+        # Update the in-memory object regardless so reads reflect the move.
+        via.position = (new_position[0], new_position[1])
+        # Position changed -> the cached via dedup key set is stale.
+        self._invalidate_dedup_keys()
+        return at_node is not None
+
+    def via_source_node(self, via: Via) -> SExp | None:
+        """Locate a via's backing node by UUID or its current sheet position."""
+        ox, oy = self._board_origin
         old_x, old_y = via.position
         target_uuid = via.uuid
 
-        updated = False
         for child in self._sexp.children:
             if child.is_atom or child.name != "via":
                 continue
@@ -8180,16 +8194,8 @@ class PCB:
                 if abs(ax - (old_x + ox)) > 1e-6 or abs(ay - (old_y + oy)) > 1e-6:
                     continue
 
-            at_node.set_value(0, new_position[0] + ox)
-            at_node.set_value(1, new_position[1] + oy)
-            updated = True
-            break
-
-        # Update the in-memory object regardless so reads reflect the move.
-        via.position = (new_position[0], new_position[1])
-        # Position changed -> the cached via dedup key set is stale.
-        self._invalidate_dedup_keys()
-        return updated
+            return child
+        return None
 
     def reinforce_net(
         self,

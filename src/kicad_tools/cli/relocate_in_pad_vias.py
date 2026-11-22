@@ -1105,6 +1105,8 @@ def _persist_via_with_stubs(
     stub_layers: list[str],
     stub_width: float,
     net_name: str,
+    *,
+    preserve_connections: bool = False,
 ) -> bool:
     """Commit a validated move and its copper, rolling back failed writes.
 
@@ -1114,6 +1116,10 @@ def _persist_via_with_stubs(
     """
     import copy
 
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    validator = ConnectivityValidator(pcb) if preserve_connections else None
+    previous = validator._contact_graph(via.net_number) if validator is not None else None
     old_position = via.position
     old_children = list(pcb._sexp.children)
     old_segments = list(pcb._segments)
@@ -1129,6 +1135,9 @@ def _persist_via_with_stubs(
             return False
         for layer in stub_layers:
             pcb.add_trace(old_position, target, width=stub_width, layer=layer, net=net_name or None)
+        if validator is not None and previous is not None:
+            if not validator._contact_graph(via.net_number).preserves_connections(previous):
+                return False
         committed = True
         return True
     finally:
@@ -1687,6 +1696,7 @@ def relocate_pad_edge_vias(
     guard off (the pre-#8979 behaviour, bit-for-bit).
     """
     from kicad_tools.core.project_clearance import ProjectClearanceError
+    from kicad_tools.drc.repair_clearance import _is_locked
     from kicad_tools.validate.rules.clearance import _pad_polygon
     from kicad_tools.validate.rules.netclass_clearance_copper import netclass_pair_requirement
 
@@ -1768,6 +1778,21 @@ def relocate_pad_edge_vias(
         pad_ref = f"{fp.reference}-{pad.number}"
         net_name = via.net_name or pad.net_name or ""
         if nets is not None and net_name not in nets:
+            continue
+        node = pcb.via_source_node(via)
+        if node is not None and _is_locked(node):
+            result.skipped.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason="via is locked",
+                    uuid=via.uuid,
+                    category="skipped",
+                )
+            )
             continue
         if net_name in pair_legs:
             result.skipped.append(
@@ -1893,7 +1918,15 @@ def relocate_pad_edge_vias(
                 )
             )
             continue
-        if not _persist_via_with_stubs(pcb, via, target, stub_layers, stub_width, net_name):
+        if not _persist_via_with_stubs(
+            pcb,
+            via,
+            target,
+            stub_layers,
+            stub_width,
+            net_name,
+            preserve_connections=ring_dam_mm is not None,
+        ):
             result.unresolvable.append(
                 ViaRelocationSkip(
                     x=vx,
@@ -1901,7 +1934,11 @@ def relocate_pad_edge_vias(
                     net=via.net_number,
                     net_name=net_name,
                     pad_ref=pad_ref,
-                    reason="could not locate backing (via ...) node to persist move",
+                    reason=(
+                        "could not persist the via move with its existing copper connections"
+                        if ring_dam_mm is not None
+                        else "could not locate backing (via ...) node to persist move"
+                    ),
                     uuid=via.uuid,
                     category="unresolvable",
                 )

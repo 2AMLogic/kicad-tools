@@ -40,6 +40,7 @@ from shapely.ops import unary_union  # type: ignore[import-untyped]
 
 from ..sexp import SExp, parse_file
 from .net_compat import resolve_net_atom
+from .repair_clearance import _is_locked
 from .violation import DRCViolation, ViolationType
 
 #: Message marker the mask rule writes for a same-net segment that enters its
@@ -339,7 +340,7 @@ class MaskCopperRepairer:
                 xy = self._xy(node.find(tag))
                 if xy is None or math.dist(xy, point) >= _TOLERANCE_MM:
                     continue
-                if self._net_name(node) != net_name or node.find("locked") is not None:
+                if self._net_name(node) != net_name or _is_locked(node):
                     return members, True
                 members.append((uuid, node, tag))
         for via in self.doc.find_all("via"):
@@ -458,7 +459,7 @@ class MaskCopperRepairer:
         net_name = self._net_name(seg)
         if not net_name or net_name != pad_net:
             return "not_same_net"
-        if seg.find("locked") is not None or "locked" in [str(a) for a in seg.get_atoms()]:
+        if _is_locked(seg):
             return "locked_segment"
 
         layer_node = seg.find("layer")
@@ -579,7 +580,7 @@ class MaskCopperRepairer:
         net_name = self._net_name(seg)
         if not net_name or net_name != pad_net:
             return "not_same_net"
-        if seg.find("locked") is not None or "locked" in [str(a) for a in seg.get_atoms()]:
+        if _is_locked(seg):
             return "locked_segment"
 
         layer_node = seg.find("layer")
@@ -662,16 +663,31 @@ class MaskCopperRepairer:
             joined=[(u, t) for u, _, t in joined],
             end_tag="start" if near_node is start_node else "end",
         )
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        pcb = PCB(self.doc)
+        net = pcb.get_net_by_name(net_name)
+        if net is None:
+            return "net_geometry_unverified"
+        previous = ConnectivityValidator(pcb)._contact_graph(net.number)
+        endpoints = [near_node, *(jnode.find(jtag) for _, jnode, jtag in joined)]
+        original = [(node, list(node.children)) for node in endpoints if node is not None]
+        keep = False
+        try:
+            for node, _ in original:
+                node.set_value(0, action.new_x)
+                node.set_value(1, action.new_y)
+            current = ConnectivityValidator(PCB(self.doc))._contact_graph(net.number)
+            if not current.preserves_connections(previous):
+                return "would_disconnect_copper"
+            keep = not dry_run
+        finally:
+            if not keep:
+                for node, children in original:
+                    node.children[:] = children
         result.actions.append(action)
-        if not dry_run and near_node is not None:
-            near_node.set_value(0, action.new_x)
-            near_node.set_value(1, action.new_y)
-            for _, jnode, jtag in joined:
-                end_node = jnode.find(jtag)
-                if end_node is not None:
-                    end_node.set_value(0, action.new_x)
-                    end_node.set_value(1, action.new_y)
-            self.modified = True
+        self.modified |= keep
         result.repaired += 1
         return None
 

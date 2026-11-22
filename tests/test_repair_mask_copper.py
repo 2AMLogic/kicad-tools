@@ -494,6 +494,62 @@ def test_pull_in_includes_exactly_45_degrees(tmp_path, far_x, repairable):
     assert _end(board, "trk-diagonal")[1] == ((100, 100) if repairable else (100.55, 100.55))
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    "fourth_pad", [(105, 102.5), (99.88, 101.1)], ids=["isolated", "joined-by-unsafe-move"]
+)
+def test_pull_in_keeps_an_attached_arc_on_a_partially_routed_net(tmp_path, dry_run, fourth_pad):
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    def pad(ref, x, y):
+        return (
+            f'(footprint "test:pad" (layer "F.Cu") (at {x} {y}) '
+            f'(property "Reference" "{ref}" (at 0 0) (layer "F.SilkS")) '
+            '(pad "1" smd rect (at 0 0) (size .55 .55) (layers "F.Cu") (net 1 "N1")))'
+        )
+
+    copper = (
+        _seg("pull", (100.35, 102), (100.55, 100.62), width=0.3)
+        + "(arc (start 100.55 100.62) (mid 101.775 100.73) (end 103 100.62) "
+        '(width .2) (layer "F.Cu") (net 1))'
+        + pad("U2", 103, 100.62)
+        + pad("U3", 100.35, 102)
+        # In the second case the proposed move joins U4 but splits U2 off.
+        # The total number of opens stays at one.
+        + pad("U4", *fourth_pad)
+    )
+    board = _board(tmp_path, copper)
+    assert ConnectivityValidator(board)._contact_graph(1).open_count() == 1
+    repairer = MaskCopperRepairer(board)
+    original = repairer.doc.to_string()
+    result = repairer.repair([_finding("pull")], max_displacement=1, dry_run=dry_run)
+    assert result.repaired == 0 and not repairer.modified
+    assert repairer.doc.to_string() == original
+    repairer.save(board)
+    assert ConnectivityValidator(board)._contact_graph(1).open_count() == 1
+
+
+@pytest.mark.parametrize("locked_item", ["primary", "joined"])
+@pytest.mark.parametrize(
+    "lock,locked", [("locked", True), ("(locked yes)", True), ("(locked no)", False)]
+)
+def test_pull_in_respects_segment_locks(tmp_path, locked_item, lock, locked):
+    endpoint = (100.55, 100.55)
+    primary = _seg("primary", (100.3, 102), endpoint)
+    joined = _seg("joined", endpoint, (101.5, 101.5))
+    if locked_item == "primary":
+        primary = primary.replace("(segment ", f"(segment {lock} ")
+    else:
+        joined = joined.replace("(segment ", f"(segment {lock} ")
+    board = _board(tmp_path, primary + joined)
+    repairer = MaskCopperRepairer(board)
+    original = repairer.doc.to_string()
+    result = repairer.repair([_finding("primary")], max_displacement=1)
+    assert result.repaired == int(not locked)
+    if locked:
+        assert repairer.doc.to_string() == original
+
+
 def test_pull_in_declined_when_entry_crosses_too_shallow(tmp_path):
     """A pull-in whose entry would cross the pad edge at over 45 degrees cannot
     clear the finding, so it is declined (``entry_too_shallow``)."""
