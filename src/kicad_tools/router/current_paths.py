@@ -100,6 +100,10 @@ reports ``"ambiguous"`` -- naming the copper -- for any declared branch
 whose net carries one, because either can form a parallel return path this
 bounded model cannot see and rule out.
 
+Mid-path via groups also use the shared physical copper-contact graph to
+check whether their two bars remain connected after removing the barrels.
+This detects bypasses through width-only contacts anywhere on their feeders.
+
 Consumers:
 
 * :class:`kicad_tools.validate.rules.path_ampacity.PathAmpacityRule` --
@@ -232,6 +236,7 @@ if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.schema.pcb import PCB, Footprint, Net, Pad, Segment, Via, Zone
     from kicad_tools.sexp.parser import SExp
+    from kicad_tools.validate.copper_contact import CopperContactGraph
 
 __all__ = [
     "CURRENT_PATHS_SIDECAR_BASENAME",
@@ -2272,7 +2277,7 @@ _VIA_GROUP_PITCH_PADS = 2.0
 
 def _mid_path_via_groups(
     graph: _CopperGraph, pcb: PCB, net_name: str, taken: set[_Node]
-) -> list[_ViaArray]:
+) -> tuple[list[_ViaArray], set[_GraphEdge]]:
     """Prove mid-path layer changes carried by several barrels (Issue #9725).
 
     A group is two or more same-net two-layer-spec vias, not in a pad and not
@@ -2288,6 +2293,8 @@ def _mid_path_via_groups(
       track, a doubled bar) is copper the group does not account for;
     * a same-net via, pad or track whose copper meets a bar or barrel
       without a modeled contact prevents contraction;
+    * after removing the group's barrels, the two bars must lie in
+      separate physical copper components, including their feeders;
     * the row must be a layer change: copper leaves it on ``La`` AND on
       ``Lb``, and not on both layers at two or more barrels each (that is a
       run doubled through the row -- stitching, judged as parallel copper);
@@ -2297,7 +2304,9 @@ def _mid_path_via_groups(
 
     Contracting a group treats its barrels as sharing the transfer, so the
     layer change it yields has the summed barrel capacity. Every bar segment
-    is still evidence checked at the full declared current.
+    is still evidence checked at the full declared current. Return the edges
+    of groups with unmodeled physical contacts as well: a centerline-only
+    parallel-track reduction cannot establish their current split either.
     """
     net = pcb.get_net_by_name(net_name)
     layer_names = {layer.name for layer in pcb.copper_layers}
@@ -2357,6 +2366,8 @@ def _mid_path_via_groups(
             claimed[pos] = claimed.get(pos, 0) + 1
 
     result: list[_ViaArray] = []
+    unmodeled_edges: set[_GraphEdge] = set()
+    physical_contacts = None
     for la, lb, group, group_pairs in candidates:
         if any(claimed[pos] > 1 for pos in group):
             continue
@@ -2406,11 +2417,66 @@ def _mid_path_via_groups(
             if edge.segment is not None
         ]
         rings = [(pos, layer, vias[pos].size / 2.0) for pos in group for layer in spans[pos]]
-        if not _via_group_contacts_modeled(pcb, net_name, group, bar_spans, rings, exits):
+        if physical_contacts is None:
+            from kicad_tools.validate.connectivity import ConnectivityValidator
+            from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+            physical_contacts = build_copper_contact_graph(
+                ConnectivityValidator(pcb), net.number if net else None, with_bonds=True
+            )
+        if not _via_group_contacts_modeled(
+            pcb, net_name, group, bar_spans, rings, exits
+        ) or not _via_group_separates_bars(pcb, physical_contacts, group, bar_spans):
+            # A modeled bypass still has its real path and loop-free feeders.
+            # A width-only contact is absent from that graph, so its remaining
+            # edges cannot prove the row equivalent to ordinary parallel tracks.
+            pos = next(iter(group))
+            first, second = _copper_node(pos, la), _copper_node(pos, lb)
+            _, ends = _contracted_component(graph, first, ())
+            for edge in edges:
+                if edge.segment is None:
+                    ends.pop(edge, None)
+            if _edge_route(ends, first, second) is None:
+                unmodeled_edges.update(edges)
             continue
         members = {id(segment): segment for _, segment in bar_spans}
         result.append(_ViaArray(nodes, edges, list(members.values())))
-    return result
+    return result, unmodeled_edges
+
+
+def _via_group_separates_bars(
+    pcb: PCB,
+    contacts: CopperContactGraph,
+    group: set[tuple[float, float]],
+    bar_spans: list[tuple[frozenset[tuple[float, float]], Segment]],
+) -> bool:
+    """Removing the group must disconnect its two bars in the physical copper."""
+    from kicad_tools.validate.copper_contact import TRACK, VIA
+
+    from .connectivity import _UnionFind
+
+    barrels = set()
+    tracks = {}
+    for index, item in enumerate(contacts.items):
+        if item.kind == VIA and item.center is not None and _node_key(item.center) in group:
+            barrels.add(index)
+        elif item.kind == TRACK and item.key[0] == "segment":
+            tracks[id(pcb.segments[item.key[1]])] = index
+    if len(barrels) != len(group):
+        return False
+
+    components = _UnionFind()
+    for a, b in contacts.bonds:
+        if a not in barrels and b not in barrels:
+            components.union(a, b)
+    bar_components: dict[str, set[int]] = {}
+    for _, segment in bar_spans:
+        track_index = tracks.get(id(segment))
+        if track_index is None:
+            return False
+        bar_components.setdefault(segment.layer, set()).add(components.find(track_index))
+    first, second = bar_components.values()
+    return first.isdisjoint(second)
 
 
 def _linked_components(
@@ -3405,17 +3471,21 @@ def resolve_current_path(
     # Mid-path layer changes carried by several barrels (Issue #9725) are
     # contracted like endpoint arrays; only groups the declared path changes
     # layer through become evidence (an off-path group still is no loop).
-    via_groups = _mid_path_via_groups(
+    via_groups, unmodeled_edges = _mid_path_via_groups(
         adjacency, pcb, spec.net_name, {node for array in arrays for node in array.nodes}
     )
     contracted = [*arrays, *via_groups]
+    unmodeled_group = bool(unmodeled_edges) and not unmodeled_edges.isdisjoint(
+        _contracted_component(adjacency, start, contracted)[1]
+    )
     parallel_groups: list[ParallelGroup] = []
-    if _component_has_cycle(adjacency, start, contracted):
-        blockers: list[list[Segment]] = []
+    blockers: list[list[Segment]] = []
+    has_cycle = _component_has_cycle(adjacency, start, contracted)
+    if has_cycle and not unmodeled_group:
         parallel_groups = (
             _reduce_parallel_groups(adjacency, start, goal, contracted, blockers) or []
         )
-    if not parallel_groups and _component_has_cycle(adjacency, start, contracted):
+    if has_cycle and not parallel_groups:
         witness = _component_cycle_witness(adjacency, start, contracted, goal)
         if witness and blockers:
             witness["blocking_branches"] = _blocking_branches_witness(blockers)
@@ -3436,10 +3506,10 @@ def resolve_current_path(
             )
         # The loop leaves the current split unknown only inside it: copper
         # every source-to-sink route crosses still carries the full declared
-        # current (Issue #9725). Unmodeled same-net copper (a pour, an arc)
-        # could bypass any of it, so it then withholds the whole set.
+        # current (Issue #9725). An unmodeled via-group bypass, pour or arc
+        # makes that centerline proof incomplete.
         loop_free: tuple[Segment, ...] = ()
-        if not unmodeled_copper(pcb, spec.net_name):
+        if not unmodeled_group and not unmodeled_copper(pcb, spec.net_name):
             loop_free = _loop_free_path_segments(adjacency, start, goal, contracted)
         return PathResolution(
             spec=spec,

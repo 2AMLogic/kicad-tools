@@ -152,14 +152,18 @@ def test_offset_inner_layer_track_touching_a_ring_rejects_group():
         (3, 41.2, 1.4, "ambiguous"),
         (3, 41.2, 1.61, "ambiguous"),
         (3, 41.2, 1.85, "resolved"),
+        # The bypass may join the feeder ahead of the first barrel.
+        (3, 39.0, 1.4, "ambiguous"),
+        (3, 39.0, 1.85, "resolved"),
         # A narrow bar leaves the barrel ring exposed on the outer layer.
         (0.4, 42.4, 1.2, "ambiguous"),
         (0.4, 42.4, 1.45, "resolved"),
     ],
 )
 @pytest.mark.parametrize("branch,lane", [("F.Cu", "B.Cu"), ("B.Cu", "F.Cu")])
+@pytest.mark.parametrize("split_feeder", [False, True])
 def test_cli_via_group_with_outer_bar_bypass(
-    tmp_path, capsys, bar_width, y, offset, expected, branch, lane
+    tmp_path, capsys, bar_width, y, offset, expected, branch, lane, split_feeder
 ):
     import argparse
     import json
@@ -174,7 +178,9 @@ def test_cli_via_group_with_outer_bar_bypass(
         pcb.assign_net_to_footprint_pad(ref, "1", "P")
     for barrel_y in (40, 42.4, 44.8):
         pcb.add_via(30, barrel_y, size=PAD, drill=DRILL, net="P")
-    pcb.add_trace((30, 10), (30, 44.8), width=bar_width, layer=branch, net="P")
+    feeder_ys = (10, 40, 44.8) if split_feeder else (10, 44.8)
+    for start, end in zip(feeder_ys, feeder_ys[1:], strict=False):
+        pcb.add_trace((30, start), (30, end), width=bar_width, layer=branch, net="P")
     pcb.add_trace((30, 40), (30, 44.8), width=3, layer=lane, net="P")
     pcb.add_trace((30, 44.8), (200, 44.8), width=4, layer=lane, net="P")
     if offset is not None:
@@ -214,6 +220,24 @@ def test_group_with_oblique_feeder_at_modeled_barrel():
     result = resolve_current_path(pcb, _spec(source="J3"))
     assert result.ok, result.reason
     assert [change.count for change in result.series_layer_changes] == [3]
+
+
+@pytest.mark.parametrize(("offset", "modeled"), [(0, True), (1.4, False)])
+def test_partial_reinforcement_with_a_feeder_bypass(offset, modeled):
+    pcb = tripled()
+    _add_pad_footprint(pcb, ref="J4", x=220, y=44.8, net="P")
+    pcb.add_trace((200, 44.8), (220, 44.8), width=4, layer="B.Cu", net="P")
+    pcb.add_trace((30 + offset, 39), (60, 39), width=0.4, layer="F.Cu", net="P")
+    pcb.add_via(60, 39, size=PAD, drill=DRILL, net="P")
+    pcb.add_trace((60, 39), (60, 44.8), width=0.4, layer="B.Cu", net="P")
+
+    result = resolve_current_path(pcb, _spec(sink="J4"))
+    assert result.status == "ambiguous"
+    # A modeled junction proves the downstream J2-J4 lane carries the full
+    # load. An edge-only contact leaves the centerline route incomplete.
+    assert [(seg.start, seg.end) for seg in result.loop_free_segments] == (
+        [((200, 44.8), (220, 44.8))] if modeled else []
+    )
 
 
 def test_two_vias_only_resolve_with_two_barrels():
