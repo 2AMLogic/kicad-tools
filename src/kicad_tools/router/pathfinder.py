@@ -454,6 +454,7 @@ class Router:
         # is a proof.  ``CppPathfinder`` memoizes the proof so the negotiated
         # loop does not re-run this 10-100x-slower search on an unchanged grid.
         self.last_route_exhausted: bool = False
+        self.last_route_iteration_limited: bool = False
 
         # Issue #6329: True when the most recent ``route()`` stopped because its
         # per-net WALL-CLOCK deadline fired (not the iteration cap, not a
@@ -4904,6 +4905,7 @@ class Router:
         # Issue #6098: only a drained open set (set after the A* loop) proves
         # unreachability; every other exit leaves this False.
         self.last_route_exhausted = False
+        self.last_route_iteration_limited = False
         self.last_route_deadline_hit = False  # Issue #6329
         self.last_route_deadline_iterations = 0
 
@@ -6116,6 +6118,7 @@ class Router:
         # search drained (a timeout ``break`` or the iteration cap leaves
         # frontier nodes behind).
         self.last_route_exhausted = not open_set and not goal_rejected
+        self.last_route_iteration_limited = bool(open_set) and iterations >= max_iterations
         return None
 
     def _note_setup_deadline_stop(self) -> None:
@@ -6963,6 +6966,7 @@ class Router:
         # Issue #6527: status attributes mirror ``_route_impl`` (reset first so
         # every early exit leaves them in a defined state).
         self.last_route_exhausted = False
+        self.last_route_iteration_limited = False
         self.last_route_deadline_hit = False
         self.last_route_deadline_iterations = 0
 
@@ -7415,6 +7419,9 @@ class Router:
         # drained open set does in ``_route_impl``; a deadline or the
         # iteration cap does not.
         self.last_route_exhausted = not (forward_open and backward_open) and not bidi_deadline_hit
+        self.last_route_iteration_limited = (
+            bool(forward_open and backward_open) and iterations >= max_iterations
+        )
         return None
 
     def _expand_bidirectional_neighbors(

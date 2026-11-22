@@ -3163,6 +3163,8 @@ class Autorouter:
             RIPUP_SIBLING_FAILED,
             RIPUP_VICTIM_BUDGET,
             RIPUP_VICTIM_GEOMETRIC,
+            RIPUP_VICTIM_REFUSED,
+            RIPUP_VICTIM_UNPROVEN,
         )
 
         return {
@@ -3173,6 +3175,8 @@ class Autorouter:
             RIPUP_VICTIM_BUDGET: (
                 "rolled back, victim search stopped at its budget (no no-path proof; issue #9900)"
             ),
+            RIPUP_VICTIM_REFUSED: "rolled back, the victim route was refused at commit",
+            RIPUP_VICTIM_UNPROVEN: "rolled back, victim search returned no route without a no-path proof",
             RIPUP_SIBLING_FAILED: "rolled back, a blocker could not re-land",
         }.get(guard_reason, "targeted rip-up failed")
 

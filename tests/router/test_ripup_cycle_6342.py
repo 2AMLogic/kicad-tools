@@ -39,6 +39,7 @@ from kicad_tools.router.algorithms.negotiated import (
     RIPUP_TRADED,
     RIPUP_VICTIM_BUDGET,
     RIPUP_VICTIM_GEOMETRIC,
+    RIPUP_VICTIM_UNPROVEN,
     NegotiatedRouter,
     TargetedRipupOutcome,
 )
@@ -75,18 +76,17 @@ def _run_ripup(
     original = {2: _stub_route(2), 3: _stub_route(3)}
     net_routes: dict[int, list] = {n: [r] for n, r in original.items()}
     routes_list: list = list(original.values())
-    # Issue #9900: the victim-failure reason is chosen by
-    # ``_victim_failure_is_proven`` -- whether the (here faked) victim
-    # search drained its open set.  ``fake_route_net`` bypasses the real
-    # pathfinder so no real drained/proof state exists; stub the oracle
-    # explicitly.  ``True`` (default) reproduces the pre-#9900 tests'
-    # "the search proved no path" premise.
-    with (
-        patch.object(NegotiatedRouter, "route_net_negotiated", fake_route_net),
-        patch.object(
-            NegotiatedRouter, "_victim_failure_is_proven", lambda self: victim_search_drained
-        ),
-    ):
+
+    def route_with_evidence(self_neg, pads, *args, **options):
+        routes = fake_route_net(self_neg, pads, *args, **options)
+        failures = options.get("failure_callback")
+        if isinstance(failures, list) and not routes and not failures:
+            failures.append(
+                RIPUP_VICTIM_GEOMETRIC if victim_search_drained else RIPUP_VICTIM_BUDGET
+            )
+        return routes
+
+    with patch.object(NegotiatedRouter, "route_net_negotiated", route_with_evidence):
         success = neg.targeted_ripup(
             failed_net=1,
             blocking_nets=set(blocking),
@@ -477,7 +477,9 @@ def test_victim_is_retried_with_the_ripped_copper_freed_on_the_cpp_grid(transact
         # The window itself is still open for every other net.
         assert router.grid._cpp_unmark_deferred is True
     else:
-        assert outcome.reason == RIPUP_VICTIM_GEOMETRIC
+        # This control explicitly disabled the fallback. The remaining
+        # native seal alone cannot prove the victim has no route.
+        assert outcome.reason == RIPUP_VICTIM_UNPROVEN
         assert net_routes[SEAL] == [seal]
         assert cpp._impl.at(gx, gy, layer).blocked
 

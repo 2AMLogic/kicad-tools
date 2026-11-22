@@ -11,33 +11,11 @@ reached targeted rip-up for all four USB3_RX1/TX1 conductors and recorded::
       USB2_D+, USB2_D-, USB_CC1
     = targeted rip-up for USB3_TX1- ...: victim_geometric; ripped USB_CC1
 
-Replaying those transactions on the reconstructed pre-retry state (the
-iteration-0 copper of the 12 nets the archived run committed) shows every
-failed victim search stopped at the deterministic 1,000,000-node-expansion
-cap with the frontier still open -- never a drained no-path proof -- and the
-C++ backend routes the same four nets on the same grid state in seconds
-(USB3_RX1+ needs ~96k expansions under C++ vs >3M under pure Python; every
-cell of the C++ route's 2,127-cell corridor is passable under the Python
-grid's own ``is_blocked_for_net`` predicate).  ``victim_geometric`` therefore
-claimed a geometric seal that was never demonstrated: the cause is the pure
-Python A*'s search-capacity under the shared node-expansion budget, an
-intentional backend limitation (the 10-100x C++ speedup is why
-``--deterministic-budget`` exists), not board geometry.
-
-This module pins the repair and the reduction at fixture scale:
-
-* a victim whose search stops at its (here scaled-down) deterministic cap
-  while a legal route exists records ``victim_budget``, not
-  ``victim_geometric`` (``NegotiatedRouter._victim_failure_is_proven``);
-* the transaction still rolls back verbatim -- existing copper, pair
-  constraints and the manufacturing clearance floor are preserved;
-* a sibling re-land that cannot return under the same budget keeps the
-  ``sibling_failed`` outcome and its rollback (the archived USB3_RX1-
-  shape: victim lands, USB2_D- cannot re-land);
-* the negative control -- the only available route violates the class
-  clearance -- drains the search and still records ``victim_geometric``;
-* the saved C++ seed-42 result keeps all four USB3_RX1/TX1 polarities AND
-  every displaced USB2/CC signal connected.
+The focused boards reproduce a legal route that exceeds the Python
+search budget, a displaced sibling that cannot re-land, and a sealed
+clearance corridor that drains the search. The saved Board 06 regression
+fixture exercises the eight signal identities on committed copper. The
+two outputs of archive 44961232189 are separate physical boards.
 
 The reduced fixture preserves the traced classes' width/clearance (USB3
 0.275/0.15, USB2 0.250/0.15), the 0.05 mm grid pitch, the per-net
@@ -55,6 +33,7 @@ from kicad_tools.router.algorithms.negotiated import (
     RIPUP_SIBLING_FAILED,
     RIPUP_VICTIM_BUDGET,
     RIPUP_VICTIM_GEOMETRIC,
+    RIPUP_VICTIM_REFUSED,
     NegotiatedRouter,
 )
 from kicad_tools.router.core import Autorouter
@@ -179,9 +158,9 @@ def _local_board() -> Autorouter:
     return router
 
 
-def _sealed_board() -> Autorouter:
+def _sealed_board(*, force_python: bool = True) -> Autorouter:
     """The negative control: no gap, so every crossing violates clearance."""
-    router = Autorouter(20.0, 6.0, rules=_rules(), force_python=True, physics_enabled=False)
+    router = Autorouter(20.0, 6.0, rules=_rules(), force_python=force_python, physics_enabled=False)
     _add_pad(router, "JX", "1", 1.5, 3.0, VICTIM, "VICTIM")
     _add_pad(router, "UX", "1", 16.0, 3.0, VICTIM, "VICTIM")
     _add_pad(router, "BX", "1", 6.0, 3.0, BLOCKER, "BLOCKER")
@@ -218,11 +197,18 @@ def _neg(router: Autorouter) -> NegotiatedRouter:
     )
 
 
-def _run_ripup(router: Autorouter, net_routes: dict[int, list[Route]]):
+def _run_ripup(
+    router: Autorouter,
+    net_routes: dict[int, list[Route]],
+    *,
+    victim=VICTIM,
+    blocker=BLOCKER,
+    timeout=None,
+):
     neg = _neg(router)
     ok = neg.targeted_ripup(
-        failed_net=VICTIM,
-        blocking_nets={BLOCKER},
+        failed_net=victim,
+        blocking_nets={blocker},
         net_routes=net_routes,
         routes_list=router.routes,
         pads_by_net=_pads_by_net(router),
@@ -230,7 +216,7 @@ def _run_ripup(router: Autorouter, net_routes: dict[int, list[Route]]):
         mark_route_callback=router._mark_route,
         ripup_history={},
         max_ripups_per_net=3,
-        per_net_timeout=None,
+        per_net_timeout=timeout,
     )
     return ok, neg.last_ripup_outcome
 
@@ -292,6 +278,106 @@ def test_targeted_ripup_records_victim_budget_and_rolls_back():
     assert router.grid.is_blocked_for_net(
         probe[0], probe[1], router.grid.layer_to_index(Layer.F_CU.value), VICTIM
     )
+
+
+def test_expired_multi_pad_victim_cannot_inherit_a_previous_net_proof(monkeypatch):
+    board = _sealed_board()
+    local = 20
+    for index, x in enumerate((1.5, 4.0, 7.0)):
+        _add_pad(board, f"U{index}", "1", x, 1.0, local, "LOCAL")
+    board.router._max_iterations_override = FULL_CAP
+    assert board.router.route(*_pads_by_net(board)[VICTIM]) is None
+    assert board.router.last_route_exhausted
+    blocker = _blocker_route(crossing=False)
+    assert board._mark_route(blocker)
+    board.routes.append(blocker)
+    routes = {BLOCKER: [blocker]}
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            board.router, "route", lambda *args, **kwargs: pytest.fail("expired edge searched")
+        )
+        ok, outcome = _run_ripup(board, routes, victim=local, timeout=1e-9)
+    assert not ok and outcome.reason == RIPUP_VICTIM_BUDGET
+    assert routes[BLOCKER][0] is blocker
+    assert _run_ripup(board, routes, victim=local, timeout=30)[0]
+    assert len(routes[local]) == 2
+
+
+def test_later_drained_edge_preserves_an_earlier_budget_stop(monkeypatch):
+    board = _sealed_board()
+    local = 20
+    for index, x in enumerate((1.5, 4.0, 16.0)):
+        _add_pad(board, f"U{index}", "1", x, 1.0, local, "LOCAL")
+    original = board.router.route
+    drained = []
+
+    def route(start, end, **options):
+        crosses_wall = (start.x < 10) != (end.x < 10)
+        board.router._max_iterations_override = FULL_CAP if crosses_wall else 1
+        candidate = original(start, end, **options)
+        drained.append(board.router.last_route_exhausted)
+        return candidate
+
+    monkeypatch.setattr(board.router, "route", route)
+    blocker = _blocker_route(crossing=False)
+    assert board._mark_route(blocker)
+    routes = {BLOCKER: [blocker]}
+    ok, outcome = _run_ripup(board, routes, victim=local)
+    assert drained == [False, True]
+    assert not ok and outcome.reason == RIPUP_VICTIM_BUDGET
+    assert routes[BLOCKER][0] is blocker
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize(
+    "fallback_cap,reason", [(64, RIPUP_VICTIM_BUDGET), (FULL_CAP, RIPUP_VICTIM_GEOMETRIC)]
+)
+def test_native_drain_and_python_fallback_must_both_prove_no_path(
+    monkeypatch, fallback_cap, reason
+):
+    from kicad_tools.router.pathfinder import Router
+
+    board = _sealed_board(force_python=False)
+    original = Router._route_impl
+
+    def capped(self, *args, **options):
+        self._max_iterations_override = fallback_cap
+        return original(self, *args, **options)
+
+    monkeypatch.setattr(Router, "_route_impl", capped)
+    blocker = _blocker_route(crossing=False)
+    assert board._mark_route(blocker)
+    routes = {BLOCKER: [blocker]}
+    ok, outcome = _run_ripup(board, routes)
+    assert board.router.get_last_failure_info()["failure_reason"] == 1
+    assert board.router._py_router.last_route_exhausted == (reason == RIPUP_VICTIM_GEOMETRIC)
+    assert not ok and outcome.reason == reason
+    assert routes[BLOCKER][0] is blocker
+
+
+@pytest.mark.parametrize("protect", [True, False])
+def test_plane_commit_veto_has_its_own_outcome(tmp_path, protect):
+    from tests.test_route_plane_zone_9597 import _board_text, _load, _sig_id
+
+    source = tmp_path / "plane.kicad_pcb"
+    source.write_text(_board_text())
+    board = _load(source)
+    board.protect_plane_zones = protect
+    board.router.net_class_map = board.net_class_map
+    spare = 77
+    for ref, x in [("B1", 5.0), ("B2", 6.0)]:
+        _add_pad(board, ref, "1", x, 3.0, spare, "SPARE")
+    blocker = Route(spare, "SPARE", segments=[Segment(5, 3, 6, 3, 0.20, Layer.F_CU, spare)])
+    assert board._mark_route(blocker)
+    board.routes.append(blocker)
+    routes = {spare: [blocker]}
+    ok, outcome = _run_ripup(board, routes, victim=_sig_id(board), blocker=spare, timeout=30)
+    if protect:
+        assert not ok and outcome.reason == RIPUP_VICTIM_REFUSED
+        assert "split zone [+3V3]" in board.plane_zone_refusals[0]
+        assert routes[spare][0] is blocker
+    else:
+        assert ok and routes[_sig_id(board)] and routes[spare]
 
 
 # ---------------------------------------------------------------------------
@@ -362,14 +448,8 @@ def test_sealed_corridor_drains_and_records_victim_geometric():
 # ---------------------------------------------------------------------------
 
 
-def test_saved_cpp_result_connects_all_four_usb3_polarities_and_displaced_nets():
-    """Per-signal connectivity on the committed seed-42 routed artifact.
-
-    The archived C++ leg's 21/21 result is what the pure-Python leg failed
-    to reach; the committed regression artifact carries it.  Every USB3
-    RX1/TX1 polarity -- and every USB2/CC signal the traced transactions
-    displaced -- must be connected by real geometric copper contact.
-    """
+def test_committed_board_connects_all_four_usb3_polarities_and_displaced_nets():
+    """The repository regression fixture has physical copper for all eight nets."""
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
     from kicad_tools.schema.pcb import PCB
 
