@@ -249,12 +249,6 @@ def _disc_dilate_exact(mask: np.ndarray, disc: np.ndarray) -> np.ndarray:
     return out
 
 
-# Issue #6117: tolerance for the post-route via-vs-foreign-pad check in
-# ``Router._validate_route_clearance``.  Matches the C++ validator's
-# ``CLEARANCE_EPSILON_MM`` (grid.cpp) so both backends reject the same vias.
-_VIA_PAD_CLEARANCE_EPSILON_MM = 1e-4
-
-
 @dataclass(frozen=True)
 class _SegmentAdapter:
     """Adapter exposing :class:`Segment` with the ``start_x/start_y/end_x/end_y``
@@ -6737,7 +6731,7 @@ class Router:
                 component_pitches=component_pitches,
                 exclude_refs=exclude_refs,
             )
-            if deficit > _VIA_PAD_CLEARANCE_EPSILON_MM:
+            if deficit > CLEARANCE_EPSILON_MM:
                 return False
 
         # Issue #1693: Validate vias against other-net vias
