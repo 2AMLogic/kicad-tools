@@ -46,6 +46,7 @@ from .layers import Layer, LayerType
 from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via, pad_half_extents
 from .quantize import dogleg_points, is_45_aligned
+from .route_via_gap import route_own_via_slit
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
 from .search_radius import search_radius_cells
 from .via_clearance import (
@@ -6472,7 +6473,7 @@ class Router:
             """
             if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
                 # Issue #1018: Calculate width with neck-down support
-                from .neck_down import band_safe_width, taper_points
+                from .neck_down import band_safe_taper, band_safe_width, taper_points
 
                 centers = []
                 if start_needs_neckdown:
@@ -6480,17 +6481,6 @@ class Router:
                 if end_needs_neckdown:
                     centers.append((end_pad.x, end_pad.y))
                 dogleg = dogleg_points(x1, y1, x2, y2)
-                points = [dogleg[0]]
-                for a, b in zip(dogleg, dogleg[1:], strict=False):
-                    points.extend(
-                        taper_points(
-                            a,
-                            b,
-                            centers,
-                            self.rules.neck_down_distance,
-                            self.rules.grid_resolution,
-                        )[1:]
-                    )
                 # Issue #9019: a taper that only narrows must not open an air
                 # gap beside the net's own pad (the slit band).
                 band_bboxes = (
@@ -6498,12 +6488,31 @@ class Router:
                     if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
                     else None
                 )
-                for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
-                    width = _calculate_segment_width(sx, sy, ex, ey)
-                    if band_bboxes:
-                        width = band_safe_width(
-                            (sx, sy), (ex, ey), width, base_trace_width, band_bboxes, band_edge_mm
-                        )
+                pieces: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+                for a, b in zip(dogleg, dogleg[1:], strict=False):
+                    points = taper_points(
+                        a,
+                        b,
+                        centers,
+                        self.rules.neck_down_distance,
+                        self.rules.grid_resolution,
+                    )
+                    for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+                        width = _calculate_segment_width(sx, sy, ex, ey)
+                        if band_bboxes:
+                            width = band_safe_width(
+                                (sx, sy),
+                                (ex, ey),
+                                width,
+                                base_trace_width,
+                                band_bboxes,
+                                band_edge_mm,
+                            )
+                        pieces.append(((sx, sy), (ex, ey), width))
+                # Issue #9019: fuse a taper piece no width can lift out of the
+                # band into one that reaches the pad (U4.1, board 06).
+                pieces = band_safe_taper(pieces, band_bboxes, band_edge_mm)
+                for (sx, sy), (ex, ey), width in pieces:
                     if sx == ex and sy == ey:
                         continue
                     seg = Segment(
@@ -6641,6 +6650,8 @@ class Router:
         Returns:
             True if route passes clearance validation, False otherwise.
         """
+        if route_own_via_slit(route, self.rules.same_net_trace_gap_band_edge_mm) is not None:
+            return False
         # Final emitted geometry may differ from the search candidate after
         # reconstruction or legalization. Component holes are physical on
         # every net/layer; copper-sharing exceptions cannot waive their floor.
