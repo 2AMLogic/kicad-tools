@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Routed-PCB DRC gate for CI (issue #2546).
 
-Runs ``kct check <file> --mfr <mfr> --errors-only --format json`` against
+Runs ``kct check <file> --mfr <mfr> --format json`` against
 each PCB path passed on the command line, and compares the resulting error
 count against a per-board tolerance allowlist (``.github/routed-drc-tolerance.yml``).
 
@@ -129,43 +129,35 @@ def identity_outcome(
     entries whose finding no longer fires, and the allowance rules that did
     not run to completion (Issue #9706: either a severity-agnostic
     ``<rule>_incomplete`` record or the rule's name in
-    ``summary.coverage_blocking_unknown`` -- the latter is the only shape
-    that survives this gate's own ``--errors-only`` filter -- means the
+    ``summary.coverage_blocking_unknown`` means the
     rule's findings, including their absence, are not evidence, so its
     entries are neither stale nor clean, are dropped from ``stale``, and
     are surfaced separately for :func:`check_file` to fail on; without this
     an incomplete pass read as a clean one and every entry looked stale).
     A payload without a ``violations`` list (legacy summary-only reports)
     cannot be judged by identity, so ``applied`` is False and the caller
-    falls back to the raw count -- failing closed, never silently excusing.
+    falls back to the raw count while retaining any reported coverage gaps.
     """
     blocking, _advisory = count_blocking_errors(data)
     if allowance is None:
         return IdentityOutcome(blocking, False, [], [])
-    violations = data.get("violations")
-    if not isinstance(violations, list):
-        return IdentityOutcome(blocking, False, [], [])
-    unallowed = unallowed_findings(allowance, violations, advisory=_is_advisory)
-    # Issue #9706: two payload shapes say "this rule did not run to
-    # completion".  A severity-agnostic ``<rule>_incomplete`` violation
-    # record (the info marker ``kct check`` emits without ``--errors-only``)
-    # and the ``summary.coverage_blocking_unknown`` list, which is what
-    # survives the gate's own ``--errors-only`` filter (an info record does
-    # not).  Union both, scoped to the rules this board has entries for.
     summary = data.get("summary")
     blocking_unknown = (
         summary.get("coverage_blocking_unknown") if isinstance(summary, dict) else None
     ) or []
-    incomplete = sorted(
-        (incomplete_rules(violations) | {str(r) for r in blocking_unknown})
-        & {rule for rule, _ident in allowance}
-    )
+    allowance_rules = {rule for rule, _ident in allowance}
+    incomplete = allowance_rules.intersection(str(rule) for rule in blocking_unknown)
+    violations = data.get("violations")
+    if not isinstance(violations, list):
+        return IdentityOutcome(blocking, False, [], [], sorted(incomplete))
+    incomplete.update(allowance_rules.intersection(incomplete_rules(violations)))
+    unallowed = unallowed_findings(allowance, violations, advisory=_is_advisory)
     stale = [
         entry
         for entry in stale_entries(allowance, error_identities(violations))
         if entry[0] not in incomplete
     ]
-    return IdentityOutcome(blocking, True, unallowed, stale, incomplete)
+    return IdentityOutcome(blocking, True, unallowed, stale, sorted(incomplete))
 
 
 def load_allowlist(allowlist_path: Path) -> dict[str, int]:
@@ -465,10 +457,12 @@ def count_errors(
         str(pcb_path),
         "--mfr",
         mfr,
-        "--errors-only",
         "--format",
         "json",
     ]
+    # An incomplete identity rule may emit its only coverage marker at info severity.
+    if not allowance:
+        cmd.append("--errors-only")
     with resolve_net_class_map_sidecar(pcb_path) as sidecar:
         if sidecar is not None:
             cmd.extend(["--net-class-map", str(sidecar)])
@@ -680,7 +674,7 @@ def check_file(
 
     if outcome.applied:
         msg = (
-            f"DRC errors detected by `kct check --mfr {mfr} --errors-only`: "
+            f"DRC errors detected by `kct check --mfr {mfr}`: "
             f"{errors} blocking error(s) outside this board's identity "
             f"allowance: {outcome.unallowed}. Boards NOT in "
             f".github/routed-drc-tolerance.yml must report 0 unallowed "
@@ -690,7 +684,7 @@ def check_file(
         )
     elif allowed == 0:
         msg = (
-            f"DRC errors detected by `kct check --mfr {mfr} --errors-only`: "
+            f"DRC errors detected by `kct check --mfr {mfr}`: "
             f"{errors} blocking error(s) (advisory rules excluded). Boards NOT "
             f"in .github/routed-drc-tolerance.yml must report 0 errors. Either "
             f"fix the routing or, if grandfathering is justified, add an "

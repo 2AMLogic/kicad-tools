@@ -636,11 +636,7 @@ class TestIdentityAllowance:
         assert "REPAIRED_NET" in msg
 
     def test_incomplete_marker_via_summary_fails_as_did_not_run(self) -> None:
-        """The ``--errors-only`` payload shape (Issue #9706): the info
-        ``mask_to_copper_incomplete`` record is filtered out, and the only
-        surviving signal is ``summary.coverage_blocking_unknown`` -- exactly
-        what the CI gate's own run produces on a host without the qualified
-        native toolchain."""
+        """Filtered reports can carry the coverage gap only in the summary."""
         payload = _make_kct_json([], {"coverage_blocking_unknown": ["mask_to_copper"]})
         allowance = {("mask_to_copper", "GND"): 8858, ("mask_to_copper", "VOUT"): 8858}
         with self._stub_kct(payload):
@@ -652,6 +648,36 @@ class TestIdentityAllowance:
         assert "mask_to_copper" in msg
         assert "native KiCad toolchain required" in msg
         assert "Stale identity allowance" not in msg
+
+    def test_gate_keeps_info_markers_for_a_rule_with_identity_allowances(self):
+        marker = _make_violation("silk_over_copper_incomplete", severity="info")
+
+        def check(cmd, **kwargs):
+            records = [] if "--errors-only" in cmd else [marker]
+            return subprocess.CompletedProcess(cmd, 0, _make_kct_json(records), "")
+
+        with patch.object(subprocess, "run", side_effect=check):
+            passed, message, errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"),
+                allowed=0,
+                allowance={("silk_over_copper", "GND"): 9706},
+            )
+        assert not passed and errors == 0
+        assert "silk_over_copper did not run" in message
+        assert "Stale identity allowance" not in message
+
+    @pytest.mark.parametrize("unknown,expected_pass", [(["mask_to_copper"], False), ([], True)])
+    def test_summary_only_report_preserves_allowance_coverage(self, unknown, expected_pass):
+        summary: dict[str, object] = {"errors": 0}
+        if unknown:
+            summary["coverage_blocking_unknown"] = unknown
+        with self._stub_kct(json.dumps({"summary": summary}), returncode=0):
+            passed, message, errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance={("mask_to_copper", "GND"): 9706}
+            )
+        assert passed is expected_pass and errors == 0
+        if unknown:
+            assert "mask_to_copper did not run" in message
 
     def test_incomplete_marker_for_rule_without_allowance_ignored(self) -> None:
         """An ``<rule>_incomplete`` record for a rule with NO allowance
