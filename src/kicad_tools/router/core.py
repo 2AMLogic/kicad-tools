@@ -18403,7 +18403,7 @@ class Autorouter:
     def _failure_neighbourhood_print(
         self, failed_net: int, net_routes: dict[int, list[Route]], *, search_geometry: bool = False
     ) -> tuple | frozenset | None:
-        """Identity of the foreign copper near ``failed_net`` (#8486).
+        """Foreign copper used by the rescue and search memos (#8486).
 
         Relief rescues use the set of ``(net, layer)`` pairs of foreign segments, and
         ``(net, "via")`` for its vias, whose extent meets the bounding box of
@@ -18413,10 +18413,12 @@ class Autorouter:
         survives a re-route pass); a foreign net entering or leaving the
         window, or changing layers, changes it.  The memo built on it is
         re-probed every ``KNOWN_FAILURE_REPROBE_EVERY`` iterations regardless.
-        For the search budget, also retain the physical track and via shapes.
-        A net can lose its wall while another branch keeps its net/layer pairs
-        in the window. Separate shapes from ownership so an identical wall
-        can change hands without appearing to open the corridor.
+        A negotiated search can leave this window to reach the other pad.
+        Include foreign track and via shapes across the board for its budget:
+        removing any original shape can open a detour. The guard checks only
+        shapes present at the first failure, so extra copper can come and go.
+        Record physical shapes independently of their owners to recognise
+        an unchanged wall even after a different net takes it over.
         ``None`` when the net has no terminals.
         """
         keys = self.nets.get(int(failed_net)) or []
@@ -18442,15 +18444,15 @@ class Autorouter:
                         and max(s.y1, s.y2) + h >= y0
                     ):
                         items.add((net, str(s.layer)))
-                        if search_geometry:
-                            start, end = sorted(((s.x1, s.y1), (s.x2, s.y2)))
-                            items.add(("segment", s.layer, start, end, s.width))
+                    if search_geometry:
+                        start, end = sorted(((s.x1, s.y1), (s.x2, s.y2)))
+                        items.add(("segment", s.layer, start, end, s.width))
                 for v in route.vias:
                     h = v.diameter / 2
                     if v.x - h <= x1 and v.x + h >= x0 and v.y - h <= y1 and v.y + h >= y0:
                         items.add((net, "via"))
-                        if search_geometry:
-                            items.add(("via", v.x, v.y, v.diameter, v.drill, v.drilled_layers))
+                    if search_geometry:
+                        items.add(("via", v.x, v.y, v.diameter, v.drill, v.drilled_layers))
         return frozenset(items) if search_geometry else tuple(sorted(items))
 
     def _route_net_known_failure_aware(

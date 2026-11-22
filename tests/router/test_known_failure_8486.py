@@ -494,7 +494,7 @@ def test_seal_copper_regime_change_resets_the_streak():
 # re-benchmark on the reporter's board.
 
 
-def _wall_board(gap: bool = False):
+def _wall_board(gap: bool = False, *, terminal_y=(6.0, 14.0), gap_y=(9.4, 10.6)):
     from kicad_tools.router.core import Autorouter
 
     def pad(num, x, y, net, w=0.6, h=0.6, th=False):
@@ -512,7 +512,7 @@ def _wall_board(gap: bool = False):
 
     router = Autorouter(width=30.0, height=20.0)
     # The victim: net 1, one pad each side of the wall.
-    router.add_component("U1", [pad(1, 6.0, 6.0, 1), pad(2, 24.0, 14.0, 1)])
+    router.add_component("U1", [pad(1, 6.0, terminal_y[0], 1), pad(2, 24.0, terminal_y[1], 1)])
     # A full-height wall of overlapping through-hole pads at x=15 (each its
     # own single-pad net: fixed obstacles no rip-up can move).  ``gap`` opens
     # a corridor -- the negative control's real reachability change.
@@ -524,7 +524,7 @@ def _wall_board(gap: bool = False):
         wall.append(pad(i, 15.0, y, 100 + i, w=1.0, h=1.0, th=True))
         y += 0.85
     if gap:
-        wall = [p for p in wall if not 9.4 < p["y"] < 10.6]
+        wall = [p for p in wall if not gap_y[0] < p["y"] < gap_y[1]]
     router.add_component("W1", wall)
     # Healthy traffic: eight 2-pad nets, four per half.
     net = 10
@@ -551,7 +551,7 @@ def _run_wall_board(gap: bool = False):
     return router, {r.net for r in routes}
 
 
-def _corridor_wall(net):
+def _corridor_wall(net, extent=(0.35, 19.75), via_y=(9.70, 10.55)):
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment, Via
 
@@ -559,8 +559,8 @@ def _corridor_wall(net):
     return Route(
         net,
         "wall",
-        segments=[Segment(15, 0.35, 15, 19.75, 0.90, layer, net) for layer in layers],
-        vias=[Via(15, y, 0.5, 1.2, layers, net) for y in (9.70, 10.55)],
+        segments=[Segment(15, extent[0], 15, extent[1], 0.90, layer, net) for layer in layers],
+        vias=[Via(15, y, 0.5, 1.2, layers, net) for y in via_y],
     )
 
 
@@ -608,11 +608,20 @@ def test_reopening_a_live_corridor_restores_the_first_search_budget():
 
 @pytest.mark.requires_router_cpp
 @pytest.mark.parametrize("same_iteration", [False, True])
-def test_removing_a_replacement_wall_restores_the_first_open_search(same_iteration):
+@pytest.mark.parametrize(
+    "terminal_y, gap_y, wall_extent, via_y",
+    [
+        pytest.param((6.0, 14.0), (9.4, 10.6), (0.35, 19.75), (9.70, 10.55), id="between-pads"),
+        pytest.param((9.0, 11.0), (15.15, 17.5), (15.45, 17.5), (15.65, 16.55, 17.3), id="detour"),
+    ],
+)
+def test_removing_a_replacement_wall_restores_the_first_open_search(
+    same_iteration, terminal_y, gap_y, wall_extent, via_y
+):
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment, Via
 
-    router = _wall_board(gap=True)
+    router = _wall_board(gap=True, terminal_y=terminal_y, gap_y=gap_y)
     guard = RipupCycleGuard()
     layers = (Layer.F_CU, Layer.B_CU)
     remote = Route(
@@ -621,7 +630,8 @@ def test_removing_a_replacement_wall_restores_the_first_open_search(same_iterati
         segments=[Segment(8, 12, 8.5, 12, 0.20, layer, 99) for layer in layers],
         vias=[Via(8, 12, 0.30, 0.60, layers, 99)],
     )
-    original, replacement = _corridor_wall(99), _corridor_wall(201)
+    original = _corridor_wall(99, wall_extent, via_y)
+    replacement = _corridor_wall(201, wall_extent, via_y)
     for route in (remote, original):
         router.routes.append(route)
         router.grid.mark_route(route)
@@ -648,7 +658,7 @@ def test_removing_a_replacement_wall_restores_the_first_open_search(same_iterati
         assert run.call_args.kwargs["per_net_timeout"] == 30.0
         assert routes and 1 not in guard.capped_streak
 
-    fresh = _wall_board(gap=True)
+    fresh = _wall_board(gap=True, terminal_y=terminal_y, gap_y=gap_y)
     fresh.routes.append(remote)
     fresh.grid.mark_route(remote)
     expected = fresh._route_net_negotiated(1, 1.0, per_net_timeout=30.0)
