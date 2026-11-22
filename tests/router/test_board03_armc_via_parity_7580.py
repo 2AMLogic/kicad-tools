@@ -14,6 +14,7 @@ the profile board 03's copper is derived under -- and holds every gate of
 
 * USB_D+ / USB_D- commit with equal via counts, and the
   ``diffpair_uncoupled_length`` rule raises no via-count finding on the pair;
+* both external USB nets clear the 0.15 mm fabrication-gap screen (#9884);
 * copper-LVS is clean (0 shorts / 0 opens), so VBUS U2.5 is routed;
 * ``routing_plan.usb_geometry()`` passes (it raises on any bound) and the
   Q36 bounds hold explicitly;
@@ -195,7 +196,15 @@ def test_armc_route_gives_usb_d_equal_vias_with_every_gate(armc_route: Path) -> 
     )
 
     ncm = net_class_map_from_dict(json.loads((BOARD / "output" / "net_class_map.json").read_text()))
-    checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4, net_class_map=ncm)
+    checker = DRCChecker(
+        pcb, manufacturer="jlcpcb", layers=4, net_class_map=ncm, physical_copper_gap_mm=0.15
+    )
+    usb_gaps = [
+        finding
+        for finding in checker.check_physical_copper_gap().violations
+        if set(PAIR).intersection(finding.nets)
+    ]
+    assert usb_gaps == []
     via_findings = [
         v
         for v in checker.check_diffpair_uncoupled_length().violations
