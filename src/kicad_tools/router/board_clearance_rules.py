@@ -58,6 +58,7 @@ these item properties:
 
 * ``A.NetName``, ``A.NetClass``, ``A.Type`` (``'Track'`` -- an arc too, as
   ``kicad-cli`` 10.0.1 reports it -- ``'Via'``, ``'Pad'``);
+* ``A.Reference`` of a pad (the footprint reference, with case-insensitive wildcards).
 * ``A.Pad_Type`` of a pad (``'SMD'``, ``'Through-hole'``,
   ``'NPTH, mechanical'``) -- the fleet's JLCPCB ``.kicad_dru`` keys its hole
   rules on it;
@@ -715,6 +716,12 @@ class _PairContext:
             return _UNKNOWN
         if name == "netname":
             return _UNKNOWN if item.net_name is None else item.net_name
+        if name == "reference":
+            if item.type == "Pad":
+                return _UNKNOWN if item.footprint_ref is None else item.footprint_ref
+            if item.type in ("Track", "Via"):
+                return _NULL
+            return _UNKNOWN
         if name == "netclass":
             classes = self.rules.netclasses_of(item.net_name)
             return classes[0] if classes is not None and len(classes) == 1 else _UNKNOWN

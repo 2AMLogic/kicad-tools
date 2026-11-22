@@ -308,6 +308,27 @@ def test_ring_dam_mode_moves_a_drill_legal_ring_encroacher(tmp_path):
     assert _edge_warnings(pcb) == []
 
 
+@pytest.mark.parametrize(
+    ("pad_x", "floor", "straight"),
+    [(101.55, 0.30, False), (101.55, 0.20, True), (101.65, 0.30, True)],
+)
+def test_ring_slide_keeps_the_foreign_pad_clearance(tmp_path, pad_x, floor, straight):
+    import math
+
+    neighbor = f"""(footprint "test:TP" (layer "B.Cu") (at {pad_x} 100)
+        (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "B.Cu")
+        (clearance {floor}) (net 2 "SIG2")))"""
+    contact = (
+        '(segment (start 100 100) (end 100.78 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "s2"))'
+    )
+    pcb = _load(tmp_path, neighbor + contact + _EDGE_VIA.replace("100.65", "100.78"))
+    assert relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09).moved
+    via = pcb.vias[0]
+    gap = math.dist(via.position, (pad_x, 100)) - via.size / 2 - 0.10
+    assert gap >= floor
+    assert (via.position[1] == 100) == straight
+
+
 @pytest.mark.parametrize("explicit_escape", [False, True])
 def test_ring_move_keeps_an_existing_pad_attachment(tmp_path, explicit_escape):
     from kicad_tools.validate.connectivity import ConnectivityValidator
