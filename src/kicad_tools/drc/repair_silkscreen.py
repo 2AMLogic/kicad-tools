@@ -91,6 +91,8 @@ class KeepoutClipRepairResult:
     residual: list[str] = field(default_factory=list)
     #: Sidecar rules whose conditions could not be evaluated before clipping.
     unsupported_rules: list[tuple[str, str]] = field(default_factory=list)
+    #: Candidate text/area pairs whose native shape could not be measured.
+    measurement_errors: list[str] = field(default_factory=list)
 
     @property
     def total_fixed(self) -> int:
@@ -859,8 +861,8 @@ class SilkscreenRepairer:
         from kicad_tools.sexp.parser import parse_string, serialize_sexp
         from kicad_tools.validate.rules.silkscreen import (
             _fp_transform,
-            _iter_silk_typed,
             _silk_graphic_style,
+            _silk_keepout_findings,
             _silk_side,
             _stroke_geometry,
             check_silk_in_keepout,
@@ -878,13 +880,11 @@ class SilkscreenRepairer:
 
         # Text residuals first, in the board frame the resolver speaks:
         # report the surviving item and its area, clip nothing.
-        for side, kind, geom, label, _owner, _layer, uuid, _location in _iter_silk_typed(scratch):
-            if kind != "text":
-                continue
-            for area in board_areas:
-                if area.forbids_item(side, "text", geom):
-                    item = f"{label} {{{uuid}}}" if uuid else label
-                    result.text_residual.append(f"{item} in {area.label}")
+        for kind, violation in _silk_keepout_findings(scratch, dru_path, areas=board_areas):
+            if kind == "text":
+                result.text_residual.append(" in ".join(violation.items))
+            elif kind == "unmeasured":
+                result.measurement_errors.append(violation.message)
 
         # Graphics use sheet coordinates. Shift the keepouts and their
         # exceptions once before querying them for each printed item.
@@ -951,7 +951,8 @@ class SilkscreenRepairer:
                 return [xf(graphic.start), xf(graphic.end)]
             if kind == "rect":
                 (sx, sy), (ex, ey) = graphic.start, graphic.end
-                return [xf(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey))]
+                corners = graphic.points or [(sx, sy), (ex, sy), (ex, ey), (sx, ey)]
+                return [xf(point) for point in corners]
             return [xf(p) for p in graphic.points]
 
         # --- footprint silk -------------------------------------------------
@@ -969,9 +970,11 @@ class SilkscreenRepairer:
             for node in [
                 n
                 for n in fp_node.children
-                if not n.is_atom and n.name in _FP_GRAPHIC_KINDS and self._is_silkscreen(n)
+                if not n.is_atom
+                and (n.name in _FP_GRAPHIC_KINDS or n.name == "fp_curve")
+                and self._is_silkscreen(n)
             ]:
-                kind = _FP_GRAPHIC_KINDS[str(node.name)]
+                kind = str(node.name)[3:]
                 graphic = FootprintGraphic.from_sexp(node, kind)
                 silk_side = _silk_side(graphic.layer)
                 if silk_side is None:
@@ -1027,7 +1030,7 @@ class SilkscreenRepairer:
             n
             for n in self.doc.children
             if not n.is_atom
-            and n.name in ("gr_line", "gr_rect", "gr_poly", "gr_circle", "gr_arc")
+            and n.name in ("gr_line", "gr_rect", "gr_poly", "gr_circle", "gr_arc", "gr_curve")
             and self._is_silkscreen(n)
         ]:
             kind = str(node.name)[3:]
@@ -1808,14 +1811,17 @@ def legalize_silk(
         keepout_residual: list[str] = []
         text_in_keepout: list[str] = []
         if dru_path.exists():
+            keepout_result.measurement_errors.clear()
             for kind, violation in _silk_keepout_findings(final_pcb, dru_path):
                 item = " / ".join(violation.items)
                 if kind == "graphic":
                     keepout_residual.append(
                         f"{item} (approx. {violation.actual_value:.4f} mm² overlap)"
                     )
-                else:
+                elif kind == "text":
                     text_in_keepout.append(item)
+                else:
+                    keepout_result.measurement_errors.append(violation.message)
 
         unresolved = [
             SilkLegalizeUnresolved("silk_over_hole", i, "graphic still overlaps a drilled hole")
@@ -1846,6 +1852,12 @@ def legalize_silk(
                 "silk_in_keepout", i, "text in a silk keepout is never moved; move or rephrase it"
             )
             for i in text_in_keepout
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved(
+                "silk_keepout_geometry_unverified", message, "measurement unavailable"
+            )
+            for message in keepout_result.measurement_errors
         ]
         unresolved += [
             SilkLegalizeUnresolved(

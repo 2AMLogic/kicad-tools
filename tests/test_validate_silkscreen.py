@@ -1879,7 +1879,7 @@ def _silk_unknown(
     *, uuid: str = "", layer: str = "F.SilkS", stroke_width: float = 0.12
 ) -> FootprintGraphic:
     return FootprintGraphic(
-        graphic_type="curve",
+        graphic_type="future_shape",
         layer=layer,
         stroke_width=stroke_width,
         start=(0.0, 0.0),
@@ -2040,14 +2040,14 @@ class TestSilkGeometryCoverage:
         violation = coverage.violations[0]
         assert violation.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID
         assert violation.severity == "info"
-        assert violation.items == ("U1 (fp_curve) {u}",)
+        assert violation.items == ("U1 (fp_future_shape) {u}",)
         assert violation.layer == "F.SilkS"
 
     def test_coverage_item_omits_uuid_suffix_when_unset(self):
         pcb = _empty_pcb()
         pcb._footprints.append(_make_footprint(graphics=[_silk_unknown()]))
 
-        assert check_silk_coverage(pcb, _rules()).violations[0].items == ("U1 (fp_curve)",)
+        assert check_silk_coverage(pcb, _rules()).violations[0].items == ("U1 (fp_future_shape)",)
 
     @pytest.mark.parametrize("layer", ["F.Fab", "F.CrtYd", "F.Cu"])
     def test_non_silk_layer_shapes_are_not_reported(self, layer):
@@ -2084,18 +2084,18 @@ class TestSilkGeometryCoverage:
         pcb = _empty_pcb()
         pcb._graphics.append(
             BoardGraphic(
-                graphic_type="curve",
+                graphic_type="future_shape",
                 layer="F.SilkS",
                 stroke_width=0.12,
                 start=(5.0, 5.0),
                 end=(5.5, 5.0),
-                uuid="gr-curve-uuid",
+                uuid="unmodeled-uuid",
             )
         )
 
         coverage = check_silk_coverage(pcb, _rules())
         assert len(coverage) == 1
-        assert coverage.violations[0].items == ("gr_curve {gr-curve-uuid}",)
+        assert coverage.violations[0].items == ("gr_future_shape {unmodeled-uuid}",)
 
     def test_coverage_reachable_through_check_all_silkscreen(self):
         """``kct check --only silkscreen`` surfaces the coverage advisory."""

@@ -482,6 +482,7 @@ def _legalize_json(report: SilkLegalizeReport, mfr: str | None) -> dict:
     ]
     data["keepout_residual"] = report.keepout_residual
     data["text_in_keepout"] = report.text_in_keepout
+    data["keepout_measurement_errors"] = report.keepouts.measurement_errors
     data["reference_placements"] = (
         [p.to_dict() for p in report.refs.placements] if report.refs is not None else []
     )
@@ -588,6 +589,10 @@ def _run_legalize(args, pcb_path: Path) -> int:
             f"Error: {len(report.hole_residual)} silk graphic(s) still overlap a drilled hole",
             file=sys.stderr,
         )
+        return 1
+    if report.keepouts.measurement_errors:
+        for message in report.keepouts.measurement_errors:
+            print(f"Error: {message}", file=sys.stderr)
         return 1
     if report.keepout_residual:
         print(

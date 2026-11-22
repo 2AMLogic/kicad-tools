@@ -752,6 +752,238 @@ def test_rectangle_ink_in_keepout_and_saved_repair(
     assert board.read_bytes() == saved
 
 
+@pytest.mark.parametrize("footprint", [False, True], ids=["board", "rotated-footprint"])
+@pytest.mark.parametrize("width", [0, 0.2])
+@pytest.mark.parametrize("control", ["active", "rule-off", "other-side", "displaced", "hull-only"])
+def test_public_keepout_reports_the_authored_bezier(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], footprint: bool, width: float, control: str
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_main
+
+    identity = "fb5658fe-0010-4050-9000-000000000001"
+    # This cubic's printed width-0.20 area is 1.753699 mm² on KiCad 10.0.6.
+    points = [(125, 129), (126, 125), (130, 130), (132, 126)]
+    if control == "displaced":
+        points = [(x + 20, y) for x, y in points]
+    if footprint:
+        # Inverse of the 90 degree footprint placement at (110, 110).
+        points = [(110 - y, x - 110) for x, y in points]
+    vertices = " ".join(f"(xy {x} {y})" for x, y in points)
+    layer = "B.SilkS" if control == "other-side" else "F.SilkS"
+    owner = "fp" if footprint else "gr"
+    curve = (
+        f"({owner}_curve (pts {vertices}) (stroke (width {width}) (type solid)) "
+        f'(layer "{layer}") (uuid "{identity}"))'
+    )
+    if footprint:
+        curve = f'(footprint "test:curve" (layer "F.Cu") (at 110 110 90) {curve})'
+    zone = _SILK_ZONE
+    if control == "hull-only":
+        # A control point falls inside this window. The ink stays outside.
+        zone = zone.replace(
+            "(xy 120 120) (xy 140 120) (xy 140 140) (xy 120 140)",
+            "(xy 125.9 124.9) (xy 126.1 124.9) (xy 126.1 125.1) (xy 125.9 125.1)",
+        )
+    board = _board(tmp_path, zone + curve, dru=None if control == "rule-off" else _DRU)
+    original = board.read_bytes()
+    violations = check_silk_in_keepout(PCB.load(board)).violations
+    assert len(violations) == (control == "active")
+    if violations:
+        assert identity in violations[0].items[0] and violations[0].items[1] == _AREA_LABEL
+        if width:
+            assert violations[0].actual_value == pytest.approx(1.753699, abs=0.001)
+    for _ in range(2):
+        assert fix_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]) == bool(
+            violations
+        )
+        report = json.loads(capsys.readouterr().out)
+        assert report["text_in_keepout"] == [] and not report["total_fixed"]
+        assert len(report["keepout_residual"]) == len(violations)
+        if violations:
+            assert (
+                identity in report["keepout_residual"][0]
+                and _AREA_LABEL in report["keepout_residual"][0]
+            )
+        assert board.read_bytes() == original
+
+
+_TEXT_SHAPE_ID = "fb5658fe-0010-4050-9000-000000000001"
+
+
+def _boxed_silk(kind: str, layer: str = "F.SilkS", *, uuid: bool = True) -> str:
+    ident = f'(uuid "{_TEXT_SHAPE_ID}")' if uuid else ""
+    effects = "(effects (font (size 1 1) (thickness 0.2)))"
+    stroke = "(stroke (width 0.2) (type solid))"
+    if kind == "table":
+        return (
+            f'(table (column_count 1) {ident} (layer "{layer}") '
+            f"(border (external yes) (header yes) {stroke}) "
+            f"(separators (rows yes) (cols yes) {stroke}) (column_widths 8) (row_heights 4) "
+            f'(cells (table_cell "MARK" (start 124 125) (end 132 129) (margins 0.3 0.3 0.3 0.3) '
+            f'(span 1 1) (layer "{layer}") (effects (font (size 1 1) (thickness 0.2)) '
+            "(justify left top)))))"
+        )
+    if kind == "gr_text_box":
+        return f'({kind} "MARK" (start 123 124) (end 133 129) (layer "{layer}") {ident} {effects} {stroke})'
+    if kind == "fp_text_box":
+        mark = f'({kind} "MARK" (start 13 14) (end 23 19) (layer "{layer}") {ident} {effects} {stroke})'
+    else:
+        mark = f'(property "Manufacturer" "MARK" (at 18 18) (layer "{layer}") {ident} {effects})'
+    return f'(footprint "test:ink" (layer "F.Cu") (at 110 110) {mark})'
+
+
+@pytest.mark.parametrize("kind", ["gr_text_box", "fp_text_box", "table", "property"])
+@pytest.mark.parametrize(
+    "selection", ["whole", "type", "wrong-type", "graphic-only", "back", "rule-off"]
+)
+def test_native_text_items_retain_a_named_keepout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], kind: str, selection: str
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_main
+    from kicad_tools.validate.mask_copper_geometry import _resolve_native_python_command
+
+    if _resolve_native_python_command(None, tmp_path)[0] is None:
+        pytest.skip("Per-object native KiCad geometry unavailable")
+    item_type = {
+        "gr_text_box": "Text Box",
+        "fp_text_box": "Text Box",
+        "table": "Table",
+        "property": "Text",
+    }[kind]
+    dru = _DRU
+    if selection in ("type", "wrong-type"):
+        expected = item_type if selection == "type" else "Table Cell"
+        dru = dru.replace(
+            "A.intersectsArea('no_ink')", f"A.intersectsArea('no_ink') && A.Type == '{expected}'"
+        )
+    if selection == "graphic-only":
+        dru = dru.replace("disallow text graphic", "disallow graphic")
+    board = _board(
+        tmp_path,
+        _SILK_ZONE + _boxed_silk(kind, "B.SilkS" if selection == "back" else "F.SilkS"),
+        None if selection == "rule-off" else dru,
+    )
+    original = board.read_bytes()
+    positive = selection in ("whole", "type")
+    violations = check_silk_in_keepout(PCB.load(board)).violations
+    assert [v.rule_id for v in violations] == (["silk_in_keepout"] if positive else [])
+    if positive:
+        assert violations[0].severity == "error" and violations[0].actual_value > 0
+        assert _TEXT_SHAPE_ID in violations[0].items[0] and violations[0].items[1] == _AREA_LABEL
+    for _ in range(2):
+        assert fix_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert not result["total_fixed"] and not result["keepout_residual"]
+        assert result["text_in_keepout"] == ([" / ".join(violations[0].items)] if positive else [])
+        assert board.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "kind,x,y,hit,native",
+    [
+        ("gr_text_box", 128.47345, 126.47531, True, True),  # Plotted glyph.
+        ("fp_text_box", 131.133152, 126.577926, False, False),  # Blank box interior.
+        ("gr_text_box", 133.0, 126.5, True, True),
+        ("borderless", 133.0, 126.5, False, True),  # Frame.
+        ("table", 132.0, 127.0, True, True),  # Table's native effective border.
+        (
+            "table",
+            126.003006,
+            126.051504,
+            True,
+            False,
+        ),  # Native table DRC leaves the cell glyph clear.
+    ],
+)
+def test_native_keepout_uses_the_effective_text_shape(
+    tmp_path: Path, kind: str, x: float, y: float, hit: bool, native: bool
+) -> None:
+    from kicad_tools.validate.mask_copper_geometry import _resolve_native_python_command
+
+    if _resolve_native_python_command(None, tmp_path)[0] is None:
+        pytest.skip("Per-object native KiCad geometry unavailable")
+    points = " ".join(
+        f"(xy {x + dx:.6f} {y + dy:.6f})"
+        for dx, dy in ((-0.008, -0.008), (0.008, -0.008), (0.008, 0.008), (-0.008, 0.008))
+    )
+    zone = _SILK_ZONE.replace("(xy 120 120) (xy 140 120) (xy 140 140) (xy 120 140)", points)
+    mark = _boxed_silk("gr_text_box" if kind == "borderless" else kind, uuid=False)
+    if kind == "borderless":
+        mark = mark.replace('(layer "F.SilkS")', '(layer "F.SilkS") (border no)')
+    board = _board(tmp_path, zone + mark)
+    source = board.read_bytes()
+    assert bool(_native_items_not_allowed(board)) == native
+    results = check_silk_in_keepout(PCB.load(board)).violations
+    assert [v.rule_id for v in results] == (["silk_in_keepout"] if hit else [])
+    if results:
+        assert "{" not in results[0].items[0] and results[0].items[1] == _AREA_LABEL
+    assert source == board.read_bytes()
+
+
+def test_unavailable_native_shape_names_the_unmeasured_item_and_fails_fix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_main
+    from kicad_tools.validate import native_silk_text
+
+    def unavailable(*args):
+        raise RuntimeError("KiCad is unavailable")
+
+    monkeypatch.setattr(native_silk_text, "_native_shapes", unavailable)
+    board = _board(tmp_path, _SILK_ZONE + _boxed_silk("gr_text_box"))
+    original = board.read_bytes()
+    (finding,) = check_silk_in_keepout(PCB.load(board)).violations
+    assert finding.rule_id == "silk_keepout_geometry_unverified"
+    assert finding.severity == "error" and finding.actual_value is None
+    assert _TEXT_SHAPE_ID in finding.items[0] and finding.items[1] == _AREA_LABEL
+    assert fix_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["keepout_measurement_errors"] == [finding.message]
+    assert not result["text_in_keepout"] and not result["total_fixed"]
+    assert original == board.read_bytes()
+
+
+@pytest.mark.parametrize("owner", ["gr", "fp"])
+@pytest.mark.parametrize("shape", ["arc-poly", "rounded-arc", "empty-corner"])
+def test_clip_uses_the_curved_boundary_of_closed_silk(
+    tmp_path: Path, owner: str, shape: str
+) -> None:
+    offset = 110 if owner == "fp" else 0
+
+    def at(x: float, y: float) -> str:
+        return f"{x - offset} {y - offset}"
+
+    zone = _SILK_ZONE
+    if shape == "arc-poly":
+        geometry = (
+            f"({owner}_poly (pts (xy {at(116, 123)}) (arc (start {at(116, 123)}) "
+            f"(mid {at(122, 129)}) (end {at(116, 135)})))"
+        )
+        fill = "yes"
+    else:
+        geometry = f"({owner}_rect (start {at(122, 122)}) (end {at(135, 135)}) (radius 3)"
+        fill = "no"
+        low, high = (122.82, 122.93) if shape == "rounded-arc" else (121.96, 122.04)
+        zone = zone.replace(
+            "(xy 120 120) (xy 140 120) (xy 140 140) (xy 120 140)",
+            f"(xy {low} {low}) (xy {high} {low}) (xy {high} {high}) (xy {low} {high})",
+        )
+    graphic = f'{geometry} (stroke (width 0.2) (type solid)) (fill {fill}) (layer "F.SilkS"))'
+    if owner == "fp":
+        graphic = f'(footprint "test:ink" (layer "F.Cu") (at 110 110) {graphic})'
+    board = _board(tmp_path, zone + graphic)
+    original = board.read_bytes()
+    assert bool(check_silk_in_keepout(PCB.load(board)).violations) == (shape != "empty-corner")
+    repairer = SilkscreenRepairer(board)
+    result = repairer.repair_keepout_clearance()
+    if shape == "empty-corner":
+        assert not result.fixes and board.read_bytes() == original
+    else:
+        assert len(result.fixes) == 1 and result.fixes[0].action == "trimmed"
+        repairer.save()
+        assert not check_silk_in_keepout(PCB.load(board)).violations
+
+
 @pytest.mark.parametrize("footprint", [False, True], ids=["board", "footprint"])
 @pytest.mark.parametrize("has_uuid", [False, True], ids=["no-uuid", "authored-uuid"])
 @pytest.mark.parametrize("width", [0, 0.2])
@@ -1217,7 +1449,9 @@ def test_two_rules_on_one_area_keep_side_kind_pairing(tmp_path: Path) -> None:
 
     areas = resolve_silk_keepouts(pcb)
     assert len(areas) == 1
-    assert areas[0].forbidden == frozenset({("F", "text"), ("B", "graphic")})
+    assert areas[0].forbidden == frozenset(
+        {("F", "text"), ("F", "text box"), ("F", "table"), ("B", "graphic")}
+    )
 
     flagged = sorted(v.items[0] for v in check_silk_in_keepout(pcb).violations)
     assert len(flagged) == 2

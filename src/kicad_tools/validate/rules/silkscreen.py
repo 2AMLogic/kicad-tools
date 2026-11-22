@@ -10,7 +10,7 @@ This module implements DRC checks for silkscreen elements:
 - Silkscreen geometry coverage (which silk primitives were NOT modeled)
 
 **Modeled silk geometry.**  :func:`_stroke_geometry` builds the printed ink
-for ``line``, ``rect``, ``circle``, ``arc`` and ``poly`` primitives. Filled
+for lines, rectangles, circles, arcs, polygons and cubic Bézier curves. Filled
 rectangles, circles and polygons can print even with zero stroke width. Primitives outside
 :data:`MODELED_SILK_GRAPHIC_TYPES` contribute no geometry at all; rather than
 letting that silence read as a clean board, :func:`check_silk_coverage`
@@ -287,7 +287,7 @@ _MIN_SILK_OVERLAP_AREA_MM2 = 0.005
 # Anything outside this set contributes NO geometry to the clearance checks,
 # which is a coverage gap, not a clean result -- :func:`check_silk_coverage`
 # reports each occurrence so it cannot pass unnoticed.
-MODELED_SILK_GRAPHIC_TYPES = ("line", "rect", "poly", "circle", "arc")
+MODELED_SILK_GRAPHIC_TYPES = ("line", "rect", "poly", "circle", "arc", "curve")
 
 #: Rule id for the coverage advisory emitted per unmodeled silk primitive.
 SILK_GEOMETRY_UNMODELED_RULE_ID = "silk_geometry_unmodeled"
@@ -337,7 +337,7 @@ def _graphic_descriptor(prefix: str, graphic: Any) -> str:
         return f"{x:g}/{y:g}"
 
     gtype = graphic.graphic_type
-    if gtype == "poly" and getattr(graphic, "points", None):
+    if gtype in ("poly", "curve") and getattr(graphic, "points", None):
         pts = list(graphic.points)
     elif gtype == "circle":
         pts = [getattr(graphic, "center", None), graphic.end]
@@ -940,7 +940,8 @@ def _rect_geometry(
 
     sx, sy = graphic.start
     ex, ey = graphic.end
-    ring = [xf(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey), (sx, sy))]
+    points = graphic.points or [(sx, sy), (ex, sy), (ex, ey), (sx, ey)]
+    ring = [xf(point) for point in (*points, points[0])]
     if filled:
         rect = Polygon(ring)
         return rect.buffer(width / 2.0) if width > 0 else rect
@@ -1070,6 +1071,14 @@ def _stroke_geometry(
 
     if graphic.graphic_type == "poly":
         return _poly_geometry(graphic, xf, filled, width)
+
+    if graphic.graphic_type == "curve":
+        from kicad_tools.core.outline_tessellation import tessellate_cubic
+
+        if len(graphic.points) != 4:
+            return None
+        centerline = [xf(point) for point in tessellate_cubic(graphic.points)]
+        return LineString(centerline).buffer(width / 2.0)
 
     coords = [xf(graphic.start), xf(graphic.end)]
     if coords[0] == coords[1]:
@@ -2535,8 +2544,8 @@ class SilkKeepoutArea:
     """
 
     polygon: Any
-    #: ``(side, kind)`` pairs the area forbids, ``kind`` being ``"text"`` or
-    #: ``"graphic"``.  Pairing is kept per rule: a rule that forbids text on
+    #: ``(side, kind)`` pairs this area forbids. Native types are graphic,
+    #: text, text box and table. Pairing is kept per rule: a rule that forbids text on
     #: the front and another that forbids graphics on the back must not
     #: forbid all four combinations.
     forbidden: frozenset[tuple[str, str]]
@@ -2563,7 +2572,7 @@ class SilkKeepoutArea:
 
     @property
     def disallow_text(self) -> bool:
-        return any(kind == "text" for _side, kind in self.forbidden)
+        return any(kind in ("text", "text box", "table") for _side, kind in self.forbidden)
 
     @property
     def disallow_graphic(self) -> bool:
@@ -2669,6 +2678,10 @@ def _silk_keepout_dru_rules(
         }
         if not kinds:
             continue
+        # disallow text covers all three native item types. A.Type compares
+        # their distinct names (including wildcards) before rule priority.
+        if "text" in kinds:
+            kinds |= {"text box", "table"}
         layer_node = node.find("layer") or node.find("layers")
         sides: frozenset[str] | None = None
         if layer_node is not None:
@@ -2947,8 +2960,10 @@ def check_silk_in_keepout(
     ``silk_in_keepout`` **error** per (silk item, area) pair -- the board
     author wrote the disallow, so printing there is a defect, whatever the
     fab profile says. ``actual_value`` measures the modeled overlap in mm².
-    Where kicad-cli evaluates the same rule it reports
-    ``items_not_allowed`` on the same items; kct keeps its own rule id and
+    Where kicad-cli evaluates the same printed geometry it reports
+    ``items_not_allowed`` on the same items. Native table DRC checks the
+    borders while its plot also includes cell text, and a disabled text-box
+    border can remain in DRC even when the artwork has no border. Kct keeps its own rule id and
     severity so the native finding and the manufacturer verdict stay
     separable.
 
@@ -2964,33 +2979,68 @@ def check_silk_in_keepout(
     return results
 
 
-def _silk_keepout_findings(pcb: PCB, dru_path: str | Path | None) -> list[tuple[str, DRCViolation]]:
+def _silk_keepout_findings(
+    pcb: PCB, dru_path: str | Path | None, *, areas: list[SilkKeepoutArea] | None = None
+) -> list[tuple[str, DRCViolation]]:
     """Pair each finding with its original item kind for check and repair."""
     require_shapely("silk keepout geometry")
     from shapely import STRtree
 
-    areas = resolve_silk_keepouts(pcb, dru_path=dru_path)
+    if areas is None:
+        areas = resolve_silk_keepouts(pcb, dru_path=dru_path)
     if not areas:
         return []
 
     tree = STRtree([area.polygon for area in areas])
     found: list[tuple[str, DRCViolation]] = []
-    for side, kind, geom, label, _owner, layer, silk_uuid, location in _iter_silk_typed(pcb):
+
+    def add(side, kind, geom, label, layer, location):
         for idx in tree.query(geom):
             area = areas[int(idx)]
-            if not area.forbids_item(side, kind, geom):
-                continue
-            silk_item = f"{label} {{{silk_uuid}}}" if silk_uuid else label
-            violation = DRCViolation(
-                rule_id="silk_in_keepout",
-                severity="error",
-                message=f"Silkscreen {label} lies in silk keepout {area.label}",
-                location=location,
-                layer=layer,
-                items=(silk_item, area.label),
-                actual_value=geom.intersection(area.polygon).area,
-            )
-            found.append((kind, violation))
+            if area.forbids_item(side, kind, geom):
+                found.append(
+                    (
+                        "graphic" if kind == "graphic" else "text",
+                        DRCViolation(
+                            rule_id="silk_in_keepout",
+                            severity="error",
+                            message=f"Silkscreen {label} lies in silk keepout {area.label}",
+                            location=location,
+                            layer=layer,
+                            items=(label, area.label),
+                            actual_value=geom.intersection(area.polygon).area,
+                        ),
+                    )
+                )
+
+    for side, kind, geom, label, _owner, layer, silk_uuid, location in _iter_silk_typed(pcb):
+        add(side, kind, geom, f"{label} {{{silk_uuid}}}" if silk_uuid else label, layer, location)
+
+    from kicad_tools.validate.native_silk_text import text_keepout_shapes
+
+    board_path = Path(dru_path).with_suffix(".kicad_pcb") if dru_path else pcb._path
+    if board_path:
+        eligible = {pair for area in areas for pair in area.forbidden if pair[1] != "graphic"}
+        for side, kind, label, layer, geom, location, error in text_keepout_shapes(
+            pcb, eligible, board_path
+        ):
+            if error:
+                candidates = ", ".join(area.label for area in areas if area.forbids(side, kind))
+                found.append(
+                    (
+                        "unmeasured",
+                        DRCViolation(
+                            rule_id="silk_keepout_geometry_unverified",
+                            severity="error",
+                            layer=layer,
+                            location=None,
+                            message=f"Could not check {label} against {candidates}. {error}",
+                            items=(label, candidates),
+                        ),
+                    )
+                )
+            else:
+                add(side, kind, geom, label, layer, location)
     return sorted(found, key=lambda hit: hit[1].items)
 
 
