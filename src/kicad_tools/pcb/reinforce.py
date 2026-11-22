@@ -2097,7 +2097,11 @@ def _physical_leg_spans(
             if covering:
                 # On a common centreline the widest stroke occupies this interval.
                 span = replace(max(covering, key=lambda s: s.width), start=start, end=end)
-                sources[id(span)] = tuple(id(s) for s in covering)
+                sources[id(span)] = tuple(
+                    dict.fromkeys(
+                        source for s in covering for source in sources.get(id(s), (id(s),))
+                    )
+                )
                 result.append(span)
     return result
 
@@ -2116,7 +2120,9 @@ def _declared_leg_spans(
             if ids[0] in eligible and ids[1] in eligible:
                 cap_spans[frozenset(ids)] = joint.span
                 sources[id(joint.span)] = ids
-    return [*_physical_leg_spans(segments, sources), *cap_spans.values()]
+    # Authored copper can extend into a rounded joint. Split their common
+    # centreline once so that neither the placer nor DRC creates a second leg.
+    return _physical_leg_spans([*segments, *cap_spans.values()], sources)
 
 
 def _derive_legs(

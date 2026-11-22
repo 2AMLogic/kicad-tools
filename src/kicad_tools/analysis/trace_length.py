@@ -247,9 +247,62 @@ class _PadToPadGraph(NamedTuple):
     node_items: list[int]
 
 
+def _uniform_lane_contacts(
+    contacts: CopperContactGraph,
+) -> tuple[list[tuple[int, int]], set[tuple[int, int]]]:
+    """Represent a continuous, uniform straight lane independently of its segment cuts.
+
+    A plated joint has one landing on such a lane, at the closest point on
+    its centreline. Round caps from a cut can touch the joint or other pieces
+    farther along the same lane. Those contacts and any collinear stroke
+    already wholly covered by another add no copper path.
+    """
+    from kicad_tools.geometry.copper import collinear_overlap_length, point_segment_distance
+    from kicad_tools.router.connectivity import _UnionFind
+    from kicad_tools.validate.copper_contact import PAD, TRACK, VIA
+
+    items, bonds = contacts.items, contacts.bonds
+    straight = {i for i, item in enumerate(items) if item.kind == TRACK and item.straight}
+    runs = _UnionFind()
+    continuous: set[tuple[int, int]] = set()
+    covered = {i for i in straight if items[i].key[1] in contacts.covered_collinear_tracks}
+    for a, b in bonds:
+        if a not in straight or b not in straight:
+            continue
+        first, second = items[a], items[b]
+        if first.layers != second.layers or first.half_width != second.half_width:
+            continue
+        p, q = first.endpoints
+        r, s = second.endpoints
+        if collinear_overlap_length(p, q, r, s) is not None:
+            runs.union(a, b)
+            continuous.add((a, b))
+    if not continuous and not covered:
+        return bonds, continuous
+
+    redundant = set()
+    landings: dict[tuple[int, int], list[tuple[float, tuple[int, int]]]] = defaultdict(list)
+    for a, b in bonds:
+        if a in covered or b in covered:
+            redundant.add((a, b))
+            continue
+        if a in straight and b in straight:
+            if runs.find(a) == runs.find(b) and (a, b) not in continuous:
+                redundant.add((a, b))
+            continue
+        track, joint = (a, b) if a in straight else (b, a)
+        center = items[joint].center
+        if track in straight and items[joint].kind in (PAD, VIA) and center is not None:
+            distance = point_segment_distance(center, *items[track].endpoints)
+            landings[joint, runs.find(track)].append((distance, (a, b)))
+    for candidates in landings.values():
+        _, nearest = min(candidates)
+        redundant.update(bond for _, bond in candidates if bond != nearest)
+    return [bond for bond in bonds if bond not in redundant], continuous
+
+
 def _build_pad_to_pad_graph(
-    items: list[Any],
-    bonds: list[tuple[int, int]],
+    contacts: CopperContactGraph,
     *,
     bonded_junctions_only: bool = False,
 ) -> _PadToPadGraph:
@@ -279,6 +332,7 @@ def _build_pad_to_pad_graph(
 
     from kicad_tools.validate.copper_contact import FILL, PAD, TRACK, VIA
 
+    items, bonds = contacts.items, contacts.bonds
     points: list[tuple[float, float]] = []
     node_items: list[int] = []
 
@@ -359,16 +413,20 @@ def _build_pad_to_pad_graph(
         attachments.setdefault(track_index, []).append((distance, node))
         return node
 
+    continuous: set[tuple[int, int]] = set()
+    if bonded_junctions_only:
+        bonds, continuous = _uniform_lane_contacts(contacts)
     for a, b in bonds:
         ia, ib = items[a], items[b]
         if ia.kind == TRACK and ib.kind == TRACK:
+            # At a cut within one lane, join the coincident centrelines.
+            # The round end of a short piece can reach past the actual cut.
+            join_distance = 1e-6 if (a, b) in continuous else ia.half_width + ib.half_width + 1e-9
             for t_index, o_index in ((a, b), (b, a)):
                 t_item, o_item = items[t_index], items[o_index]
                 linked = False
                 for ep_node, endpoint in zip(end_nodes[o_index], o_item.endpoints, strict=True):
-                    if t_item.line.distance(_Point(endpoint)) <= (
-                        t_item.half_width + o_item.half_width + 1e-9
-                    ):
+                    if t_item.line.distance(_Point(endpoint)) <= join_distance:
                         link_geometric(ep_node, attach(t_index, endpoint))
                         linked = True
                 if not linked:
@@ -582,7 +640,7 @@ def physical_path_segments(
     A physical return bypasses it when adding bonds that the model omitted
     takes a previously unavoidable piece of track out of series.
     """
-    graph = _build_pad_to_pad_graph(contacts.items, contacts.bonds, bonded_junctions_only=True)
+    graph = _build_pad_to_pad_graph(contacts, bonded_junctions_only=True)
     pads: dict[tuple[str, str], int] = {}
     for index, node in graph.pad_nodes.items():
         footprint_index, pad_index = contacts.items[index].key
@@ -1063,7 +1121,7 @@ class TraceLengthAnalyzer:
         graph = build_copper_contact_graph(
             ConnectivityValidator(board), net.number, with_bonds=True
         )
-        path_graph = _build_pad_to_pad_graph(graph.items, graph.bonds)
+        path_graph = _build_pad_to_pad_graph(graph)
         adjacency, pad_nodes, via_nodes = (
             path_graph.adjacency,
             path_graph.pad_nodes,

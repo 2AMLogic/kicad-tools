@@ -17,6 +17,7 @@ never qualified and the whole net was ``ambiguous``. These fixtures pin:
 from __future__ import annotations
 
 from dataclasses import replace
+from itertools import pairwise
 
 import pytest
 
@@ -681,6 +682,58 @@ def test_downstream_return_only_through_a_physical_layer_contact(tmp_path, landi
         assert not result.loop_free_segments
 
 
+@pytest.mark.parametrize(
+    "splits", [(), (0.0,), (-1.028,), (0.058,), (1.028,), (-0.4, 0.058, 1.028)]
+)
+@pytest.mark.parametrize("return_on_front", [False, True])
+def test_subdividing_a_uniform_lane_at_an_anchor_preserves_its_topology(splits, return_on_front):
+    pcb = tripled()
+    lane = next(s for s in pcb.segments if s.layer == "B.Cu" and s.end[0] == 200)
+    x, y = 134.942, lane.start[1]
+    pcb.remove_segments([lane])
+    points = [lane.start, *((x + offset, y) for offset in splits), lane.end]
+    for start, end in pairwise(points):
+        pcb.add_trace(start, end, width=2, layer="B.Cu", net="P")
+    pcb.add_via(x, y, size=2.2, drill=1.416, net="P")
+    if return_on_front:
+        branch = [(x, y), (x, y + 15), (lane.end[0], y + 15), lane.end]
+        for start, end in pairwise(branch):
+            pcb.add_trace(start, end, width=1, layer="F.Cu", net="P")
+    for source, sink in [("J1", "J2"), ("J2", "J1")]:
+        result = resolve_current_path(pcb, _spec(3.6, source=source, sink=sink))
+        assert result.status == ("ambiguous" if return_on_front else "resolved"), result.reason
+        assert [change.count for change in result.series_layer_changes] == (
+            [] if return_on_front else [3]
+        )
+
+
+@pytest.mark.parametrize("end", [136.4, 137.0])
+def test_anchor_on_a_lane_with_a_fully_contained_stroke_preserves_its_throat(end):
+    from kicad_tools.pcb.reinforce import _declared_leg_spans
+
+    pcb = tripled()
+    lane = next(s for s in pcb.segments if s.layer == "B.Cu" and s.end[0] == 200)
+    y = lane.start[1]
+    pcb.remove_segments([lane])
+    pcb.add_trace(lane.start, (136.6, y), width=2, layer="B.Cu", net="P")
+    pcb.add_trace((137.4, y), lane.end, width=2, layer="B.Cu", net="P")
+    pcb.add_via(134.942, y, size=2.2, drill=1.416, net="P")
+    # The second endpoint can extend into the round cap of the 2 mm stroke.
+    pcb.add_trace((135, y), (end, y), width=0.2, layer="B.Cu", net="P")
+    overlay = pcb.segments[-1]
+    for source, sink in [("J1", "J2"), ("J2", "J1")]:
+        result = resolve_current_path(pcb, _spec(3.6, source=source, sink=sink))
+        assert result.ok, result.reason
+        assert [change.count for change in result.series_layer_changes] == [3]
+        assert result.min_width.width_mm == pytest.approx((2**2 - 0.8**2) ** 0.5)
+        assert overlay in result.covered_segments
+        lane_pieces = [s for s in result.covered_segments if s.start[1] == s.end[1] == y]
+        spans = _declared_leg_spans(lane_pieces, [result], {})
+        assert sum(abs(s.end[0] - s.start[0]) for s in spans) == pytest.approx(
+            lane.end[0] - lane.start[0]
+        )
+
+
 def test_downstream_return_shunting_only_the_middle_of_a_long_track(tmp_path):
     pcb = _saved_row_with_downstream_lane(tmp_path)
     lane = pcb.segments[-1]
@@ -720,6 +773,26 @@ def test_partial_reinforcement_with_a_feeder_bypass(offset, modeled):
     assert [(seg.start, seg.end) for seg in result.loop_free_segments] == (
         [((200, 44.8), (220, 44.8))] if modeled else []
     )
+
+
+def test_anchor_between_a_feeder_loop_and_load_preserves_every_series_piece():
+    pcb = tripled()
+    y = 44.8
+    _add_pad_footprint(pcb, ref="J4", x=220, y=y, net="P")
+    # A real bypass upstream of J2 does not carry current around this lane.
+    pcb.add_trace((30, 39), (60, 39), width=0.4, layer="F.Cu", net="P")
+    pcb.add_via(60, 39, size=PAD, drill=DRILL, net="P")
+    pcb.add_trace((60, 39), (60, y), width=0.4, layer="B.Cu", net="P")
+    pcb.add_via(209.942, y, size=2.2, drill=1.416, net="P")
+    stations = [200, 209.6, 210, 210.97, 220]
+    for start, end in pairwise(stations):
+        pcb.add_trace((start, y), (end, y), width=2, layer="B.Cu", net="P")
+    for source, sink in [("J1", "J4"), ("J4", "J1")]:
+        result = resolve_current_path(pcb, _spec(source=source, sink=sink))
+        assert result.status == "ambiguous"
+        assert {(s.start[0], s.end[0]) for s in result.loop_free_segments} == set(
+            pairwise(stations)
+        )
 
 
 def test_two_vias_only_resolve_with_two_barrels():

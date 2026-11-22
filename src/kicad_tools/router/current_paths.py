@@ -1715,7 +1715,9 @@ def _straight_bar_tracks(
             continue
         if overlap >= -_PAD_EPS:
             runs.union(i, j)
-        else:
+        elif i not in copper.covered_collinear_tracks and j not in copper.covered_collinear_tracks:
+            # A stroke inside its carrier's copper can end closer to the
+            # opposite cap without defining a separate, narrower joint.
             gaps.append((-overlap, i, j))
 
     joints = []
@@ -4033,12 +4035,23 @@ def resolve_current_path(
             )
 
     on_path = {id(segment) for segment in path_segments}
+    fully_covered = (
+        {
+            id(pcb.segments[index])
+            for index, carriers in physical_contacts().covered_collinear_tracks.items()
+            if any(id(pcb.segments[i]) in on_path for i in carriers)
+        }
+        if on_path_groups
+        else set()
+    )
     overlaid = tuple(
         seg
         for seg in net_segments
         if id(seg) not in on_path
-        and id(seg) in adjacency.track_cover
-        and adjacency.track_cover[id(seg)] <= on_path
+        and (
+            id(seg) in fully_covered
+            or (id(seg) in adjacency.track_cover and adjacency.track_cover[id(seg)] <= on_path)
+        )
     )
     path_joints = tuple(
         joint for joint in cap_joints if id(joint.first) in on_path and id(joint.second) in on_path
