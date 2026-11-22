@@ -100,6 +100,28 @@ def test_perimeter_pins_are_served_and_the_exposed_pad_is_not() -> None:
     assert skipped == {"U1.17": "interior (exposed) pad"}
 
 
+def test_only_stranded_mixed_pairs_gain_a_plane_reservation():
+    pads = [
+        _pad("R1", "1", 4, 6, 1, "VCC"),
+        _pad("R1", "2", 6, 6, 2, "BUTTON"),
+        _pad("D4", "A", 14, 5, 3, "LED"),
+        _pad("D4", "K", 14, 7, 4, "GND"),
+        _pad("R2", "1", 22, 6, 1, "VCC"),
+        _pad("R2", "2", 24, 6, 2, "BUTTON"),
+        _pad("J1", "1", 32, 6, 1, "VCC", through_hole=True),
+        _pad("J1", "2", 34, 6, 2, "BUTTON"),
+        *_qfn_with_exposed_pad(),
+    ]
+    nets = {"GND", "VCC"}
+    selected, _ = select_plane_via_pads(pads, nets)
+    selected_after, skipped = select_plane_via_pads(
+        pads, nets, stranded_pads={"R1.1", "D4.K", "J1.1", "U1.17", "R2.2"}
+    )
+    before = {(p.ref, p.pin) for p in selected}
+    assert {(p.ref, p.pin) for p in selected_after} - before == {("R1", "1"), ("D4", "K")}
+    assert "R2.1" in skipped and "U1.17" in skipped
+
+
 def test_area_array_footprint_is_skipped_whole() -> None:
     """A BGA field escapes by trace (#5700): no site beside any of its balls."""
     balls = [
@@ -425,6 +447,38 @@ def _cap_beside_signal_grid() -> RoutingGrid:
     return grid
 
 
+def test_stranded_diode_and_resistor_get_legal_sites_and_stubs() -> None:
+    grid = _cap_beside_signal_grid()
+    grid.add_pad(_pad("D4", "A", 4, 3, 8, "LED"))
+    grid.add_pad(_pad("D4", "K", 4, 5, 0, PLANE))
+    grid.add_pad(_pad("R2", "1", 14, 4, 0, PLANE))
+    grid.add_pad(_pad("R2", "2", 16, 4, 7, "SIG"))
+
+    result = reserve_router_plane_via_sites(
+        _fake_router(grid), [PLANE, "+5V"], stranded_pads=frozenset({"D4.K", "R1.1"})
+    )
+    assert {stub.pad for stub in result.stubs} == {"D4.K", "R1.1"}
+    assert len(result.sites) == 2
+    for stub in result.stubs:
+        point = (stub.site_x, stub.site_y)
+        for pad in grid._pads:
+            dx = max(abs(point[0] - pad.x) - pad.width / 2, 0.0)
+            dy = max(abs(point[1] - pad.y) - pad.height / 2, 0.0)
+            clearance = result.rules.clearance if pad.net_name != PLANE else 0.0
+            assert math.hypot(dx, dy) >= result.rules.via_diameter / 2 + clearance - 1e-9
+            if pad.net_name != PLANE:
+                polygon = tuple(
+                    (pad.x + sx * pad.width / 2, pad.y + sy * pad.height / 2)
+                    for sx, sy in ((-1, -1), (-1, 1), (1, 1), (1, -1))
+                )
+                assert not seg_near_polygon(
+                    (stub.pad_x, stub.pad_y),
+                    point,
+                    polygon,
+                    clearance + result.rules.stub_width / 2 - 1e-9,
+                )
+
+
 def test_router_entry_point_serves_pour_only_caps_only_when_opted_in() -> None:
     nets = [PLANE, "+5V"]
     off = reserve_router_plane_via_sites(_fake_router(_cap_beside_signal_grid()), nets)
@@ -436,6 +490,61 @@ def test_router_entry_point_serves_pour_only_caps_only_when_opted_in() -> None:
     assert served  # the cap's pads are planned, not skipped
     assert set(served) | set(on.unreserved) == {"C10.1", "C10.2"}
     assert len(router._plane_via_keepout_areas) == 2 * len(on.sites)
+
+
+@pytest.mark.parametrize(
+    "stop_reason,expected", [("no_closer", {"R1.1"}), ("oracle_failed", set())]
+)
+def test_retry_uses_only_exhausted_native_endpoints_on_enabled_pours(
+    tmp_path, stop_reason, expected
+):
+    from kicad_tools.cli.route_cmd import _run_pour_oracle_stage
+    from kicad_tools.router.oracle_completion import (
+        OracleCompletionResult,
+        OracleEndpoint,
+        OracleLink,
+    )
+
+    grid = _cap_beside_signal_grid()
+    for ref, y, net in (("D4", 2, PLANE), ("D5", 4, PLANE), ("D6", 6, "+5V")):
+        grid.add_pad(_pad(ref, "K", 3, y, 0 if net == PLANE else 5, net))
+        grid.add_pad(_pad(ref, "A", 5, y, 7, "SIG"))
+
+    def link(ref, pin, net):
+        pad = OracleEndpoint.parse(f"Pad {pin} [{net}] of {ref} on F.Cu", 3, 2)
+        zone = OracleEndpoint.parse(f"Zone [{net}] on B.Cu", 6, 2)
+        return OracleLink(net, pad, zone)
+
+    def oracle(_path, *, closer, **kwargs):
+        closer.exhausted_stitch_pads.update({"R1.1", "D5.K", "D6.K", "C10.2"})
+        links = [
+            link("R1", "1", PLANE),
+            link("D4", "K", PLANE),
+            link("D6", "K", "+5V"),
+            link("C10", "2", PLANE),
+        ]
+        return OracleCompletionResult(
+            ran=True,
+            stop_reason=stop_reason,
+            initial_links=4,
+            final_links=4,
+            final_link_details=links,
+        )
+
+    args = Namespace(_plane_reservation_nets=frozenset({PLANE}))
+    with (
+        patch("kicad_tools.cli.runner.find_kicad_cli", return_value="kicad-cli"),
+        patch("kicad_tools.core.sexp_file.load_pcb", return_value=object()),
+        patch("kicad_tools.cli.stitch_cmd.find_all_plane_nets", return_value=[PLANE, "+5V"]),
+        patch("kicad_tools.router.oracle_completion.run_oracle_completion", oracle),
+    ):
+        assert (
+            _run_pour_oracle_stage(
+                tmp_path / "b.kicad_pcb", args=args, router=_fake_router(grid), quiet=True
+            )
+            == 4
+        )
+    assert args._exhausted_mixed_plane_pads == expected
 
 
 def test_lattice_mask_merges_reserved_sites_with_rule_areas() -> None:
