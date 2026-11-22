@@ -152,8 +152,8 @@ override, else footprint, else zone, as ``_declared_thermal`` resolves it) is
 solid, a "thermal for through-hole" setting on an SMD pad counting as solid;
 the fill overlaps the pad beyond ``u``, nothing of it is exposed beyond the
 pad, every piece of it within the examined band touches the pad (no same-zone
-island), and it shows no relief gap (a free pocket against the pad edge
-closed off by more fill of the zone, whatever the spoke width). A
+island), and its connections at the pad rim are not solely narrow passages
+that widen into the pour beyond a relief gap. A
 declared-solid pad whose fill shows spokes or no join, an island, an
 unconnected same-net pour, a positive expansion with pour in the ring and a
 different-net pour keep their measured verdict.
@@ -1238,8 +1238,61 @@ def _own_pour_thermal(opening, copper, owner_copper, owner, item, margin, band, 
     return qualifies, spokes, excess, gap, spoke
 
 
-#: Relief-gap reach (mm) probed when no thermal gap is declared anywhere.
-_SOLID_PROBE_GAP_MM = 0.5
+def _spoke_shoulders(contact, centre, copper, walls, reach, tolerance):
+    """Does this pad-rim contact run between parallel walls into a wider pour?
+
+    Return None for a broad contact, False for a straight strip and True when
+    the strip opens into more copper on both sides before its centreline ends.
+    """
+    from shapely.geometry import LineString, Point
+
+    if contact.is_ring or contact.convex_hull.distance(centre) <= tolerance:
+        return None
+    ends = [Point(contact.coords[0]), Point(contact.coords[-1])]
+    middle = Point((ends[0].x + ends[1].x) / 2, (ends[0].y + ends[1].y) / 2)
+    # Read the tangent of the copper boundary on either side of each rim
+    # crossing. A spoke can cross a flat or curved pad at any angle.
+    outward = (middle.x - centre.x, middle.y - centre.y)
+    directions = []
+    sample = 4 * tolerance
+    for end in ends:
+        wall = min(walls, key=end.distance)
+        where = wall.project(end)
+        before = wall.interpolate((where - sample) % wall.length)
+        after = wall.interpolate((where + sample) % wall.length)
+        dx, dy = after.x - before.x, after.y - before.y
+        length = math.hypot(dx, dy)
+        if length < 2 * sample - tolerance:
+            return None
+        if dx * outward[0] + dy * outward[1] < 0:
+            length = -length
+        directions.append((dx / length, dy / length))
+    (dx, dy), (other_x, other_y) = directions
+    if math.hypot(dx - other_x, dy - other_y) * sample > 2 * tolerance:
+        return None
+
+    def outward_ray(point):
+        return LineString([(point.x, point.y), (point.x + dx * reach, point.y + dy * reach)])
+
+    # A zone edge clipping the pad can leave a strip too. On a relief spoke,
+    # a ray just outside each wall crosses the gap then meets the pour body.
+    # The strip's centreline must stay in copper up to those shoulders.
+    width = (ends[0].x - ends[1].x) * -dy + (ends[0].y - ends[1].y) * dx
+    if abs(width) <= 4 * tolerance:
+        return None
+    outside = outward_ray(middle).difference(copper)
+    limit = middle.distance(outside) if not outside.is_empty else reach
+    offset = math.copysign(4 * tolerance, width)
+    for end, side in zip(ends, (offset, -offset), strict=True):
+        flank = Point(end.x - dy * side, end.y + dx * side)
+        body = outward_ray(flank).intersection(copper)
+        along = (end.x - middle.x) * dx + (end.y - middle.y) * dy
+        if (
+            body.is_empty
+            or not 2 * tolerance < flank.distance(body) < limit - along + 2 * tolerance
+        ):
+            return False
+    return True
 
 
 def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, band, uncertainty):
@@ -1257,13 +1310,10 @@ def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, band, un
     5. No same-zone island: every connected piece of the fill within ``band``
        of the opening touches the pad. A zone is one conductor, so an island
        of it beside the opening would otherwise ride in on the joined pour.
-    6. No relief gap: the fill shows no free pocket against the pad edge that
-       is bounded outward by more fill of the zone (within the pad's thermal
-       gap, else the zone's, doubled, at least ``_SOLID_PROBE_GAP_MM``). That
-       is what spokes around a relief gap look like whatever their width, so
-       a declaration the fill does not bear out keeps its verdict. A cut that
-       runs out to the probe's edge (another net's clearance clipping the
-       pour) does not defeat the class.
+    6. The actual join is solid. A spoke-only join has parallel-sided copper
+       crossings at the pad rim and widens into the pour beyond the relief
+       gap. A solid zone may clip the pad or have neighbouring clearance
+       cutouts. Their voids alone are not evidence of a relief.
     """
     if (
         owner["kind"] not in _WITHIN_OWN_PAD_OWNER_KINDS
@@ -1285,25 +1335,27 @@ def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, band, un
             and not piece.buffer(tolerance).intersects(pad_zone)
         ):
             return False
-    _effective, pad, pour = _effective_connection(owner, item)
-    gap = pad["thermal_gap_mm"] if pad["thermal_gap_mm"] is not None else pour["thermal_gap_mm"]
-    reach = max(2 * gap if gap and gap > 0 else 0.0, _SOLID_PROBE_GAP_MM)
-    probe = owner_copper.buffer(reach)
-    pockets = probe.difference(owner_copper.buffer(uncertainty)).difference(
-        copper.buffer(tolerance)
-    )
-    for pocket in getattr(pockets, "geoms", None) or [pockets]:
-        # A relief gap is a free pocket against the pad edge that fill closes
-        # off on the far side, inside the probe. A cut that reaches the probe's
-        # edge is another net's clearance clipping the pour, not a relief gap.
-        if (
-            pocket.geom_type in ("Polygon", "MultiPolygon")
-            and pocket.area > _AREA_EPSILON_MM2
-            and pocket.distance(owner_copper) <= 2 * tolerance
-            and pocket.distance(probe.boundary) > 2 * tolerance
-        ):
-            return False
-    return True
+    from shapely import line_merge  # type: ignore[import-untyped]
+
+    rim = line_merge(owner_copper.boundary.intersection(copper))
+    contacts = [
+        edge
+        for edge in getattr(rim, "geoms", [rim])
+        if edge.geom_type == "LineString" and edge.length > 2 * tolerance
+    ]
+    if not contacts:
+        return False
+    if rim.is_ring:
+        return True
+    boundary = near.boundary
+    walls = list(getattr(boundary, "geoms", [boundary]))
+    xmin, ymin, xmax, ymax = copper.bounds
+    reach = math.hypot(xmax - xmin, ymax - ymin) + owner_copper.length
+    shoulders = [
+        _spoke_shoulders(contact, owner_copper.centroid, copper, walls, reach, tolerance)
+        for contact in contacts
+    ]
+    return None in shoulders or not any(shoulders)
 
 
 def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=()):
@@ -1319,7 +1371,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
     """
     # The shapely.geometry stubs error is consumed at the first import site
     # (_conductor_endpoints above); a second ignore here would read as unused.
-    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely import STRtree
     from shapely.geometry import GeometryCollection, box
     from shapely.ops import nearest_points, unary_union
 

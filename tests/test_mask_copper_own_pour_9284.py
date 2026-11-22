@@ -13,7 +13,7 @@ Evidence: ``docs/research/mask-to-copper-own-pad-8858.md``.
 """
 
 import pytest
-from shapely.geometry import box
+from shapely.geometry import Point, box
 from shapely.ops import unary_union
 
 from kicad_tools.validate.mask_copper import (
@@ -270,8 +270,6 @@ def test_solid_declared_but_round_pad_fill_shows_spokes_stays_an_error():
     On a circle r=0.5 mm, four 0.3 mm spokes contact 1.218 mm, above a bound
     that omits _ENTRY_CROSSING_FACTOR (1.2 mm); the factor keeps it an error.
     """
-    from shapely.geometry import Point
-
     round_pad = Point(0.5, 0.5).buffer(0.5, quad_segs=64)
     fill = thermal_fill(pad=round_pad)
     result, m = _measure(
@@ -315,15 +313,53 @@ def test_solid_declared_relief_gap_with_wide_spokes_stays_an_error(spoke, spokes
     assert _severity(result) == "error"
 
 
-def test_solid_join_plus_same_zone_island_beside_opening_stays_an_error():
+@pytest.mark.parametrize(
+    "fill,expected",
+    [
+        (thermal_fill(spokes=2).intersection(box(0.2, -3, 0.8, 4)), "violation"),
+        (thermal_fill(gap=0.6), "violation"),
+        (thermal_fill(spoke=0.9), "violation"),
+        (thermal_fill(spokes=1), "violation"),
+        (box(0.2, -3, 0.8, 4), "own_pour_solid"),
+        (OUTLINE.difference(Point(1.18, 0.5).buffer(0.25)), "own_pour_solid"),
+        (OUTLINE.difference(Point(1.48, 0.5).buffer(0.25)), "own_pour_solid"),
+        (
+            OUTLINE.difference(Point(1.18, 0.5).buffer(0.25)).difference(
+                Point(-0.18, 0.5).buffer(0.25)
+            ),
+            "own_pour_solid",
+        ),
+    ],
+    ids=[
+        "clipped-two-spokes",
+        "wider-actual-gap",
+        "wide-spokes",
+        "one-spoke",
+        "solid-strip",
+        "near-cutout",
+        "far-cutout",
+        "two-cutouts",
+    ],
+)
+@pytest.mark.parametrize("construction_error", [0.0, 0.005], ids=["exact", "native-tolerance"])
+def test_solid_connection_follows_the_actual_fill(fill, expected, construction_error):
+    geometry = _geometry(fill, owner_conn=pad_connection(pad=SOLID))
+    geometry.provenance["max_error_mm_per_construction"] = construction_error
+    result, m = _measure(geometry)
+    assert m.disposition == expected
+    assert _severity(result) == ("info" if expected == "own_pour_solid" else "error")
+
+
+@pytest.mark.parametrize("with_island", [False, True])
+def test_solid_join_plus_same_zone_island_beside_opening_stays_an_error(with_island):
     """Issue #9436 review: a disconnected island of the joined zone is not the pad's pour."""
     # Solid pour joined along the pad's bottom edge, an island 0.04 mm above it.
-    joined = box(-3, -3, 4, 0.0)
+    joined = box(-3, -3, 4, 0.2)
     island = box(0.2, 1.04, 0.8, 1.3)
-    fill = unary_union([joined, island])
+    fill = unary_union([joined, island]) if with_island else joined
     result, m = _measure(_geometry(fill, owner_conn=pad_connection(pad=SOLID)))
-    assert m.disposition == "violation"
-    assert _severity(result) == "error"
+    assert m.disposition == ("violation" if with_island else "own_pour_solid")
+    assert _severity(result) == ("error" if with_island else "info")
 
 
 def test_solid_fill_notched_through_two_pad_edges_is_still_info():

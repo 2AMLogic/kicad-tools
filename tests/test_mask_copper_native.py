@@ -609,14 +609,23 @@ _OWN_POUR_NATIVE = {
 }
 
 
-def _native_fill(path, native_options):
+def _native_fill(path, native_options, *, declare_solid_after_fill=False):
     """Fill the board's zones with the selected native pcbnew, in place."""
     import subprocess
 
     script = (
         "import pcbnew,sys; b=pcbnew.LoadBoard(sys.argv[1]); "
-        "assert pcbnew.ZONE_FILLER(b).Fill(b.Zones()); pcbnew.SaveBoard(sys.argv[1], b)"
+        "assert pcbnew.ZONE_FILLER(b).Fill(b.Zones()); "
     )
+    if declare_solid_after_fill:
+        # Keep the measured thermal copper while presenting a stale solid
+        # declaration. The production assessment must grade the stored fill.
+        script += (
+            "next(p for p in b.GetPads() if p.GetNumber() == '1')"
+            ".SetLocalZoneConnection(pcbnew.ZONE_CONNECTION_FULL); "
+            "b.Zones()[0].SetThermalReliefGap(pcbnew.FromMM(0.2)); "
+        )
+    script += "pcbnew.SaveBoard(sys.argv[1], b)"
     subprocess.run(
         [*native_options["native_python_command"], "-c", script, str(path)],
         check=True,
@@ -697,6 +706,45 @@ def test_native_own_pour_thermal_only_for_spokes(tmp_path, native_options, case)
         assert beyond > 0.001
     elif case in ("thermal_gap0.1", "unconnected"):
         assert sum(p.area for p in pieces) > 4 * spoke * 0.15 * 1.1
+
+
+@pytest.mark.parametrize(
+    "thermal,zone_width,gap,neighbour_offset,expected_overlap",
+    [
+        (True, 0.6, 0.2, None, 0.30),
+        (True, 6.0, 0.6, None, 0.51),
+        (False, 0.6, 0.2, None, 0.60),
+        (False, 6.0, 0.2, 0.68, 0.9825),
+        (False, 6.0, 0.2, 0.98, 1.0),
+    ],
+    ids=["clipped-spokes", "actual-gap-0.6", "solid-strip", "near-cutout", "far-cutout"],
+)
+def test_native_declared_solid_uses_filled_zone(
+    tmp_path, native_options, thermal, zone_width, gap, neighbour_offset, expected_overlap
+):
+    """Paired native pours at a 1 mm GND pad, including a 0.1 mm VOUT obstacle."""
+    left, right = 10 - zone_width / 2, 10 + zone_width / 2
+    obstacle = ""
+    if neighbour_offset:
+        obstacle = f"""(pad "2" smd circle (at {neighbour_offset} 0) (size .1 .1)
+          (layers "F.Cu" "F.Mask") (net 2 "VOUT"))"""
+    body = f"""(net 1 "GND") (net 2 "VOUT")
+      (footprint "P" (layer "F.Cu") (at 10 10)
+       (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask")
+        (thermal_bridge_angle 90) (net 1 "GND")) {obstacle})
+      (zone (net 1) (net_name "GND") (layer "F.Cu") (hatch edge .5)
+       (connect_pads{"" if thermal else " yes"} (clearance .2)) (min_thickness .1)
+       (filled_areas_thickness no) (fill yes (thermal_gap {gap}) (thermal_bridge_width .3))
+       (polygon (pts (xy {left} 7) (xy {right} 7) (xy {right} 13) (xy {left} 13))))"""
+    path = _board(tmp_path / "solid.kicad_pcb", body)
+    _native_fill(path, native_options, declare_solid_after_fill=thermal)
+    result = check_mask_to_copper(
+        path, MaskCopperPolicy(0.09, "fixture", "test", "rev1", 0.15), **native_options
+    )
+    assert result.coverage == "complete", result.reasons
+    [measurement] = [m for m in result.measurements if m.conductor_kind == "zone"]
+    assert measurement.disposition == ("violation" if thermal else "own_pour_solid")
+    assert measurement.exposed_area_mm2 == pytest.approx(expected_overlap, abs=0.001)
 
 
 #: Issue #9261 native corner cases: a 45-degree diagonal entry whose both

@@ -286,11 +286,11 @@ spoke band, which does not apply (a solid pour body lies inside it):
 - the fill overlaps the pad by more than `u` and nothing is exposed beyond the pad;
 - every piece of the zone within the examined band touches the pad, so a
   disconnected same-zone island beside the opening stays an error;
-- the fill shows no relief gap: no free pocket against the pad edge that fill of
-  the zone closes off within the probe (twice the thermal gap, at least 0.5 mm).
-  That is what spokes of any width look like, so a declaration the fill does not
-  bear out keeps its verdict. A cut running out to the probe's edge (another
-  net's clearance clipping the pour) still counts as solid.
+- the fill joins the pad continuously. A relief spoke has parallel sides at the
+  pad rim and widens into the body of the pour beyond the gap. The checker
+  follows those sides in the actual fill, even when the zone clips a relief
+  or the gap differs from its setting. A neighbouring clearance cutout can
+  leave a solid connection, as can a narrow zone running through the pad.
 
 An unconnected same-net pour, a positive expansion with pour in the ring,
 different-net pour and unreadable connection data stay errors. The measurement

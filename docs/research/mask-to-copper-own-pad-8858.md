@@ -306,10 +306,11 @@ and that shape is `own_pour_solid` at info. It requires a plain pad shape with a
 margin of 0 or more, an *effective* solid zone connection (pad override, else
 footprint, else zone; "thermal for through-hole" on an SMD pad counts as solid),
 fill overlapping the pad beyond `u`, nothing exposed beyond the pad, no same-zone
-island within the band (every piece touches the pad), and no relief gap (a free
-pocket against the pad edge that zone fill closes off within twice the thermal
-gap, at least 0.5 mm; a cut running out to that edge, i.e. another net's clearance,
-does not count). The 13 consumer pads were not re-measured against this
+island within the band (every piece touches the pad), and a solid join at the pad
+rim. A thermal spoke has parallel copper edges at the rim and widens into the pour
+beyond the actual relief gap. This holds when the zone clips the gap open or its
+width differs from the declared gap. A solid strip stays the same width. A
+neighbouring pad's clearance can cut into a solid join. The 13 consumer pads were not re-measured against this
 rule (the board is not in this repo). There is no band test: a solid pour body lies inside
 the band by definition. A declared-solid pad whose fill shows spokes keeps its
 verdict. The class was not re-measured on the fab here; the evidence is as
