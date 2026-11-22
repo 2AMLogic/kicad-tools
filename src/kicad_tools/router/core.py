@@ -3162,7 +3162,10 @@ class Autorouter:
         from .algorithms.negotiated import (
             RIPUP_BUDGET_EXHAUSTED,
             RIPUP_SIBLING_FAILED,
+            RIPUP_VICTIM_BUDGET,
             RIPUP_VICTIM_GEOMETRIC,
+            RIPUP_VICTIM_REFUSED,
+            RIPUP_VICTIM_UNPROVEN,
         )
 
         return {
@@ -3170,6 +3173,11 @@ class Autorouter:
             PLAN_REFUSE: "refused by rip-up guard",
             RIPUP_BUDGET_EXHAUSTED: "rip skipped, rip-up budget spent",
             RIPUP_VICTIM_GEOMETRIC: "rolled back, no path with blockers ripped",
+            RIPUP_VICTIM_BUDGET: (
+                "rolled back, victim search stopped at its budget (no no-path proof; issue #9900)"
+            ),
+            RIPUP_VICTIM_REFUSED: "rolled back, the victim route was refused at commit",
+            RIPUP_VICTIM_UNPROVEN: "rolled back, victim search returned no route without a no-path proof",
             RIPUP_SIBLING_FAILED: "rolled back, a blocker could not re-land",
         }.get(guard_reason, "targeted rip-up failed")
 
@@ -12338,9 +12346,6 @@ class Autorouter:
         # non-converging rip-up destroyed the failed net's pre-existing
         # partial connectivity.
 
-        def _mark_route(route: Route) -> None:
-            self._mark_route(route)
-
         # Snapshot pre-rip-up state for the failed net so we can detect
         # whether targeted_ripup actually placed new routes for it.
         pre_failed_routes = len(net_routes.get(failed_net, []))
@@ -12376,7 +12381,7 @@ class Autorouter:
                 routes_list=self.routes,
                 pads_by_net=pads_by_net,
                 present_cost_factor=present_cost_factor,
-                mark_route_callback=_mark_route,
+                mark_route_callback=self._mark_route,
                 ripup_history=ripup_history,
                 max_ripups_per_net=max_ripups_per_net,
                 per_net_timeout=per_net_timeout,
@@ -16707,10 +16712,6 @@ class Autorouter:
                                 # external rip, losing the partial connectivity
                                 # on a failed rescue.
                                 if blocking_nets:
-
-                                    def _mark_route_fallback(route: Route) -> None:
-                                        self._mark_route(route)
-
                                     success = self._guarded_targeted_ripup(
                                         neg_router,
                                         ripup_guard,
@@ -16719,7 +16720,7 @@ class Autorouter:
                                         net_routes=net_routes,
                                         pads_by_net=pads_by_net,
                                         present_cost_factor=present_factor,
-                                        mark_route_callback=_mark_route_fallback,
+                                        mark_route_callback=self._mark_route,
                                         ripup_history=ripup_history,
                                         max_ripups_per_net=max_ripups_per_net,
                                         per_net_timeout=iter_per_net_cap,
@@ -18603,10 +18604,6 @@ class Autorouter:
             guard=ripup_guard,
         )
         if blocking_nets:
-
-            def _mark_route_silent(route: Route) -> None:
-                self._mark_route(route)
-
             if self._guarded_targeted_ripup(
                 neg_router,
                 ripup_guard,
@@ -18615,7 +18612,7 @@ class Autorouter:
                 net_routes=net_routes,
                 pads_by_net=pads_by_net,
                 present_cost_factor=present_factor,
-                mark_route_callback=_mark_route_silent,
+                mark_route_callback=self._mark_route,
                 ripup_history=ripup_history,
                 max_ripups_per_net=max_ripups_per_net,
                 per_net_timeout=iter_per_net_cap,

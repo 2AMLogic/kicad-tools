@@ -14,6 +14,7 @@ Fast and hermetic: monkeypatch the recipe's module-level functions so
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -45,6 +46,21 @@ def _load_board02_module():
         if inserted and sys.path and sys.path[0] == board_dir:
             sys.path.pop(0)
     return module
+
+
+def test_fresh_release_uses_the_authored_net_classes(tmp_path: Path) -> None:
+    module = _load_board02_module()
+    authored = json.loads((BOARD_DIR / "output/net_class_map.json").read_text())
+    sidecar = tmp_path / "net_class_map.json"
+
+    module.declare_ampacity_targets(tmp_path)
+    assert json.loads(sidecar.read_text()) == authored
+
+    # Rerunning an existing project keeps its own class overrides.
+    authored["VCC"]["trace_width"] = 0.6
+    sidecar.write_text(json.dumps(authored))
+    module.declare_ampacity_targets(tmp_path)
+    assert json.loads(sidecar.read_text()) == authored
 
 
 class TestBoard02PartialRouteFastFail:
@@ -127,8 +143,9 @@ class TestBoard02PartialRouteFastFail:
             return (True, True)
 
         # Issue #8399: route_pcb is stubbed, so no routed PCB exists for the
-        # copper cleanup (cleanup_copper) the recipe now runs after routing.
-        monkeypatch.setattr("kicad_tools.pcb_prune.cleanup_copper", lambda *a, **k: {})
+        # copper cleanup the recipe now runs after routing.  The optimizer
+        # fixed-point loop (#9467) would equally run on a stub board.
+        monkeypatch.setattr(module, "stabilize_release_copper", lambda *a, **k: None)
         # Fiducials/board-ID steps also operate on the routed PCB (#8759).
         monkeypatch.setattr(
             "kicad_tools.cli.pcb_add_fiducials.run_add_fiducials", lambda *a, **k: 0
@@ -136,6 +153,8 @@ class TestBoard02PartialRouteFastFail:
         monkeypatch.setattr(
             "kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **k: 0
         )
+        # The silk-over-hole clean-up (#9467) also edits the routed PCB.
+        monkeypatch.setattr(module, "clear_silk_over_holes", lambda *a, **k: None)
         monkeypatch.setattr(module, "write_lvs_report", _fake_lvs)
         monkeypatch.setattr(module, "export_manufacturing_bundle", lambda *a, **k: True)
         monkeypatch.setattr(module.sys, "argv", ["generate_design.py", str(tmp_path / "out")])
