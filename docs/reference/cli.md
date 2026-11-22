@@ -542,7 +542,7 @@ kct pcb prune board.kicad_pcb --voltage-map voltages.json --dry-run --format jso
 | `--creepage-standard` | IEC table used to calculate required creepage distances in millimetres. Accepts `iec60664` (default) or `iec62368`. |
 | `--pollution-degree` | Pollution degree for the creepage table. Accepts `1`, `2` (default) or `3`. |
 | `--material-group` | Insulation material group for the creepage table. Accepts `I`, `II`, `IIIa` (default) or `IIIb`. |
-| `--hv-threshold` `VOLTS` | Minimum absolute voltage difference between two mapped nets for the creepage check. Defaults to 30 V. |
+| `--hv-threshold` `VOLTS` | Minimum voltage difference for the list of required pairs (default 30 V). The audit selects mapped nets whose worst-case voltage differs from the board-edge potential by at least this amount. It also includes nets with recognized mains or HV names. |
 | `--unverified` | Write the result even when it was not verified with kicad-cli DRC (`--no-drc`, or kicad-cli missing). Without this the file is left untouched |
 
 With a voltage map, prune compares each net's proposed edits with the input

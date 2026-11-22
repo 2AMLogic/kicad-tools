@@ -3103,7 +3103,9 @@ def _add_pcb_parser(subparsers) -> None:
         type=float,
         default=30.0,
         metavar="VOLTS",
-        help="Minimum net-pair |dV| that is checked against --voltage-map (default: 30.0)",
+        help="Minimum voltage difference for the required-pair list (default: 30 V). "
+        "The audit selects mapped nets at least this far from the board-edge potential "
+        "and includes nets with mains or HV names.",
     )
     pcb_prune.add_argument(
         "--unverified",
