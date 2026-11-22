@@ -34,6 +34,35 @@ from pathlib import Path
 # to repair" (the converged end state this issue is driving toward).
 _FIX_DRC_SUMMARY_RE = re.compile(r"Repaired (\d+)/(\d+) violations")
 
+# The production zero-target outcomes: ``fix-drc`` prints no ``Repaired N/M``
+# summary when no mask finding is targeted (already clean, or only
+# non-repairable findings remain), so these prose lines mean "0 detected".
+_FIX_DRC_ZERO_TARGET_MARKERS = (
+    "Nothing to repair",
+    "No repairable violations found",
+)
+
+
+def _mask_assessment_complete(pcb_path: Path) -> bool:
+    """True when the mask-to-copper assessment of ``pcb_path`` completed.
+
+    ``fix-drc`` reports zero targets on an unqualified KiCad as well (the
+    assessment is incomplete, so it sees no findings), so a zero-target run
+    only proves convergence when this independent re-check completes.
+    """
+    from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+    from kicad_tools.drc.violation import ViolationType
+
+    report = _run_python_drc(
+        pcb_path,
+        manufacturer="jlcpcb-tier1",
+        project_pcb_path=pcb_path,
+        mask_copper=True,
+    )
+    if report is None:
+        return False
+    return not any(v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in report.violations)
+
 
 def repair_mask_copper(routed_path: Path, *, max_invocations: int = 3) -> int:
     """Slide/re-centre copper out of foreign mask openings (#8900, #9334).
@@ -108,15 +137,25 @@ def repair_mask_copper(routed_path: Path, *, max_invocations: int = 3) -> int:
                 f"fix-drc mask-copper pass failed (exit {result.returncode}, "
                 f"invocation {invocation}): {result.stderr[-500:]}"
             )
-        match = _FIX_DRC_SUMMARY_RE.search(result.stdout or "")
-        if match is None:
+        stdout = result.stdout or ""
+        match = _FIX_DRC_SUMMARY_RE.search(stdout)
+        if match is not None:
+            repaired, detected = (int(g) for g in match.groups())
+        elif any(marker in stdout for marker in _FIX_DRC_ZERO_TARGET_MARKERS):
+            repaired, detected = 0, 0
+        else:
             raise RuntimeError(
                 "fix-drc mask-copper pass printed no 'Repaired N/M "
-                f"violations' summary (invocation {invocation}); cannot tell "
-                "progress from convergence"
+                f"violations' summary or nothing-to-repair line (invocation "
+                f"{invocation}); cannot tell progress from convergence"
             )
-        repaired, detected = (int(g) for g in match.groups())
         if detected == 0:
+            if not _mask_assessment_complete(routed_path):
+                raise RuntimeError(
+                    "fix-drc found no mask findings but the mask assessment "
+                    "is incomplete (unqualified KiCad?); not a verified "
+                    f"convergence (invocation {invocation})"
+                )
             print(f"   invocation {invocation}: no mask findings left; done.")
             break
         current_bytes = routed_path.read_bytes()

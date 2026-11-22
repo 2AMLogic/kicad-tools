@@ -79,6 +79,7 @@ def _run_loop(monkeypatch, board_file: Path, replies, file_bytes):
     """
     recipe = _recipe()
     calls: list[list[str]] = []
+    monkeypatch.setattr(recipe, "_mask_assessment_complete", lambda path: True)
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
@@ -167,4 +168,45 @@ def test_unparseable_summary_is_a_hard_error(monkeypatch, board_file) -> None:
 
     monkeypatch.setattr(recipe.subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="summary"):
+        recipe.repair_mask_copper(board_file)
+
+
+NOTHING = "No targeted violations found. Nothing to repair."
+NON_REPAIRABLE = (
+    "No repairable violations found, but 3 non-repairable violation(s) "
+    "detected (edge clearance, dimension, silkscreen, etc.)."
+)
+
+
+@pytest.mark.parametrize("prose,code", [(NOTHING, 0), (NON_REPAIRABLE, 2)])
+def test_already_clean_input_is_not_an_error(monkeypatch, board_file, prose, code) -> None:
+    """The real zero-target prose (no 'Repaired N/M') means converged (#9940)."""
+    kept, calls = _run_loop(
+        monkeypatch,
+        board_file,
+        replies={1: (prose, code)},
+        file_bytes={1: b"(kicad_pcb v0)"},
+    )
+    assert kept == 0
+    assert len(calls) == 1
+
+
+def test_repair_then_second_invocation_converges(monkeypatch, board_file) -> None:
+    """A real repair followed by the production nothing-to-repair run succeeds."""
+    kept, calls = _run_loop(
+        monkeypatch,
+        board_file,
+        replies={1: ("Repaired 1/1 violations", 0), 2: (NOTHING, 0)},
+        file_bytes={1: b"(kicad_pcb fixed)", 2: b"(kicad_pcb fixed)"},
+    )
+    assert kept == 1
+    assert len(calls) == 2
+
+
+def test_zero_target_with_incomplete_assessment_is_a_hard_error(monkeypatch, board_file) -> None:
+    """An unqualified KiCad reports zero targets; that is not convergence."""
+    recipe = _recipe()
+    monkeypatch.setattr(recipe, "_mask_assessment_complete", lambda path: False)
+    monkeypatch.setattr(recipe.subprocess, "run", lambda cmd, **kw: _FakeResult(NOTHING, 0))
+    with pytest.raises(RuntimeError, match="incomplete"):
         recipe.repair_mask_copper(board_file)
