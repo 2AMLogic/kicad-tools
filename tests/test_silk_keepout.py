@@ -665,6 +665,93 @@ def test_fix_silkscreen_all_clips_keepout_through_public_command(
     assert len([l for l in _gr_lines(board) if l[0] == "F.SilkS"]) == 2
 
 
+@pytest.mark.parametrize("owner", ["board", "rotated-footprint"])
+@pytest.mark.parametrize("legacy_width", [False, True], ids=["stroke", "legacy-width"])
+@pytest.mark.parametrize(
+    ("corners", "fill", "width", "exempt", "action"),
+    [
+        ((115, 145), "yes", 0.2, False, "trimmed"),
+        ((115, 145), "no", 0.2, False, None),
+        ((126, 132), "yes", 0.0, False, "removed"),
+        ((126, 132), "no", 0.0, False, "removed"),
+        ((115, 145), "no", 0.0, False, None),
+        ((115, 145), "", 0.0, False, "trimmed"),
+        ((115, 145), "", 0.2, False, None),
+        ((115, 135), "", 0.0, True, None),
+        ((115, 135), "yes", 0.2, True, None),
+        ((115, 135), "no", 0.2, True, "trimmed"),
+        ((115, 135), "no", 0.0, True, "trimmed"),
+    ],
+    ids=(
+        "enclosing-solid",
+        "enclosing-outline",
+        "zero-width-solid",
+        "zero-width-outline",
+        "zero-width-outline-surrounds-area",
+        "implicit-solid",
+        "implicit-outline",
+        "implicit-solid-exemption",
+        "interior-exemption",
+        "outline-misses-exemption",
+        "zero-width-outline-misses-exemption",
+    ),
+)
+def test_rectangle_ink_in_keepout_and_saved_repair(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    owner: str,
+    legacy_width: bool,
+    corners: tuple[int, int],
+    fill: str,
+    width: float,
+    exempt: bool,
+    action: str | None,
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    lo, hi = corners
+    fill_node = f"(fill {fill})" if fill else ""
+    stroke = f"(width {width})" if legacy_width else f"(stroke (width {width}) (type solid))"
+    style = f'{stroke} {fill_node} (layer "F.SilkS")'
+    if owner == "board":
+        graphic = f"(gr_rect (start {lo} {lo}) (end {hi} {hi}) {style})"
+    else:
+        # Invert the 90-degree placement so the footprint prints the same rectangle.
+        graphic = (
+            '(footprint "Test:Rect" (layer "F.Cu") (at 110 150 90) '
+            f"(fp_rect (start {150 - lo} {lo - 110}) (end {150 - hi} {hi - 110}) {style}))"
+        )
+    zones, rules = _SILK_ZONE, _DRU
+    if exempt:
+        zones += (
+            _SILK_ZONE.replace("no_ink", "preserve_only")
+            .replace("000000000001", "000000000002")
+            .replace("120", "124")
+            .replace("140", "130")
+        )
+        rules += """(rule "preserve printed ink"
+          (layer "F.SilkS") (condition "A.intersectsArea('preserve_only')")
+          (severity ignore) (constraint disallow graphic))"""
+    board = _board(tmp_path, zones + graphic + _BACK_LINE, rules)
+    original = board.read_bytes()
+    assert len(check_silk_in_keepout(PCB.load(board)).violations) == int(action is not None)
+
+    args = [str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]
+    assert fix_silkscreen_main(args) == 0
+    fixes = json.loads(capsys.readouterr().out)["keepout_clip_fixes"]
+    assert [fix["action"] for fix in fixes] == ([] if action is None else [action])
+    saved = board.read_bytes()
+    if action is None:
+        assert saved == original
+    elif action == "trimmed" and fill == "yes":
+        # The legal band outside the 20 mm square keepout remains printed.
+        assert fixes[0]["new_area_mm2"] == pytest.approx(511.95, abs=0.02)
+    assert check_silk_in_keepout(PCB.load(board)).violations == []
+    assert fix_silkscreen_main(args) == 0
+    assert json.loads(capsys.readouterr().out)["keepout_clip_fixes"] == []
+    assert board.read_bytes() == saved
+
+
 def test_fix_silkscreen_all_surfaces_text_left_in_keepout(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

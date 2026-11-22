@@ -661,6 +661,7 @@ class SilkscreenRepairer:
         from kicad_tools.silkscreen._silk_defaults import SILK_HOLE_CLEARANCE_MM
         from kicad_tools.validate.rules.silkscreen import (
             _fp_transform,
+            _silk_graphic_style,
             _silk_side,
             _stroke_geometry,
             iter_drill_holes,
@@ -730,20 +731,17 @@ class SilkscreenRepairer:
                         )
                         continue
 
-                    width = max(graphic.stroke_width, 0.0)
+                    filled, width = _silk_graphic_style(graphic)
                     keepout = unary_union([g for g, _label, _sides in hit]).buffer(
                         clearance + width / 2.0 + _CLIP_EPSILON_MM, quad_segs=16
                     )
                     if kind == "line":
                         outline = [fwd(graphic.start), fwd(graphic.end)]
-                        filled = False
                     elif kind == "rect":
                         (sx, sy), (ex, ey) = graphic.start, graphic.end
                         outline = [fwd(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey))]
-                        filled = graphic.is_filled
                     else:
                         outline = [fwd(p) for p in graphic.points]
-                        filled = graphic.is_filled
 
                     new_lines: list[list[tuple[float, float]]] = []
                     new_polys: list[list[tuple[float, float]]] = []
@@ -862,6 +860,7 @@ class SilkscreenRepairer:
         from kicad_tools.validate.rules.silkscreen import (
             _fp_transform,
             _iter_silk_typed,
+            _silk_graphic_style,
             _silk_side,
             _stroke_geometry,
             check_silk_in_keepout,
@@ -907,9 +906,9 @@ class SilkscreenRepairer:
         ]
         tree = STRtree([area.polygon for area in areas])
 
-        def clip(kind: str, graphic, outline: list[tuple[float, float]], filled: bool, hits):
-            """Shared clip math: returns (new_lines, new_polys, keepout)."""
-            width = max(graphic.stroke_width, 0.0)
+        def clip(kind: str, graphic, outline: list[tuple[float, float]], hits):
+            """Return the clipped paths and their printed stroke width."""
+            filled, width = _silk_graphic_style(graphic)
             keepout = unary_union([area.polygon for area in hits]).buffer(
                 width / 2.0 + _CLIP_EPSILON_MM, quad_segs=16
             )
@@ -924,7 +923,7 @@ class SilkscreenRepairer:
                     if part.geom_type == "Polygon" and part.area >= _MIN_POLY_AREA_MM2:
                         ring = _keyhole_ring(part)
                         if ring is None:
-                            return None, None, keepout
+                            return None, None, width
                         new_polys.append(ring)
             else:
                 closed = kind != "line"
@@ -938,7 +937,7 @@ class SilkscreenRepairer:
                     if part.length < max(width, 1e-6):
                         continue
                     new_lines.append(list(part.coords))
-            return new_lines, new_polys, keepout
+            return new_lines, new_polys, width
 
         def graphic_hits(ink, silk_side: str):
             return [
@@ -947,13 +946,13 @@ class SilkscreenRepairer:
                 if areas[int(i)].forbids_item(silk_side, "graphic", ink)
             ]
 
-        def outline_of(kind: str, graphic, xf) -> tuple[list[tuple[float, float]], bool]:
+        def outline_of(kind: str, graphic, xf) -> list[tuple[float, float]]:
             if kind == "line":
-                return [xf(graphic.start), xf(graphic.end)], False
+                return [xf(graphic.start), xf(graphic.end)]
             if kind == "rect":
                 (sx, sy), (ex, ey) = graphic.start, graphic.end
-                return [xf(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey))], graphic.is_filled
-            return [xf(p) for p in graphic.points], graphic.is_filled
+                return [xf(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey))]
+            return [xf(p) for p in graphic.points]
 
         # --- footprint silk -------------------------------------------------
         footprints = [(node, Footprint.from_sexp(node)) for node in _find_all_footprints(self.doc)]
@@ -994,8 +993,8 @@ class SilkscreenRepairer:
                         )
                     )
                     continue
-                outline, filled = outline_of(kind, graphic, fwd)
-                new_lines, new_polys, _keepout = clip(kind, graphic, outline, filled, hits)
+                outline = outline_of(kind, graphic, fwd)
+                new_lines, new_polys, width = clip(kind, graphic, outline, hits)
                 if new_lines is None:
                     result.skipped.append(
                         PadClearanceSkip(
@@ -1014,7 +1013,7 @@ class SilkscreenRepairer:
                     ink,
                     new_lines,
                     new_polys,
-                    graphic.stroke_width,
+                    width,
                     labels,
                     dry_run,
                     fp_node,
@@ -1053,8 +1052,8 @@ class SilkscreenRepairer:
                     )
                 )
                 continue
-            outline, filled = outline_of(kind, board_graphic, lambda p: p)
-            new_lines, new_polys, _keepout = clip(kind, board_graphic, outline, filled, hits)
+            outline = outline_of(kind, board_graphic, lambda p: p)
+            new_lines, new_polys, width = clip(kind, board_graphic, outline, hits)
             if new_lines is None:
                 result.skipped.append(
                     PadClearanceSkip(
@@ -1073,7 +1072,7 @@ class SilkscreenRepairer:
                 ink,
                 new_lines,
                 new_polys,
-                board_graphic.stroke_width,
+                width,
                 labels,
                 dry_run,
                 self.doc,
@@ -1212,9 +1211,12 @@ class SilkscreenRepairer:
             source_uuid = str(uid.get_first_atom() or "")
         layer = str(node.find("layer").get_first_atom())  # type: ignore[union-attr]
         stroke = node.find("stroke")
-        stroke_text = (
-            serialize_sexp(stroke) if stroke is not None else "(stroke (width 0) (type solid))"
-        )
+        if stroke is not None:
+            stroke_text = serialize_sexp(stroke)
+        else:
+            legacy = node.find("width")
+            width = legacy.get_float(0) if legacy is not None else 0.0
+            stroke_text = f"(stroke (width {width or 0:g}) (type solid))"
 
         def fmt(value: float) -> str:
             return f"{round(value, 6):g}" if abs(value) >= 1e-6 else "0"

@@ -1573,6 +1573,7 @@ class FootprintGraphic:
     uuid: str = ""
     mid: tuple[float, float] | None = None  # Appended for positional compatibility
     fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
+    legacy_width: float | None = None  # top-level (width N), as on BoardGraphic
 
     @property
     def is_filled(self) -> bool:
@@ -1596,6 +1597,8 @@ class FootprintGraphic:
         if stroke := sexp.find("stroke"):
             if width := stroke.find("width"):
                 graphic.stroke_width = width.get_float(0) or 0.0
+        elif width := sexp.find("width"):
+            graphic.legacy_width = width.get_float(0)
 
         # Start/end points (for line, rect)
         if start := sexp.find("start"):

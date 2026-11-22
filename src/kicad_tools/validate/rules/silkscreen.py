@@ -10,9 +10,8 @@ This module implements DRC checks for silkscreen elements:
 - Silkscreen geometry coverage (which silk primitives were NOT modeled)
 
 **Modeled silk geometry.**  :func:`_stroke_geometry` builds the printed ink
-for ``line``, ``rect``, ``circle``, ``arc`` and (since #5811) ``poly`` primitives -- the latter in
-both fill states, because a filled polygon prints its interior and routinely
-carries a zero stroke width.  Primitives outside
+for ``line``, ``rect``, ``circle``, ``arc`` and ``poly`` primitives. Filled
+rectangles, circles and polygons can print even with zero stroke width. Primitives outside
 :data:`MODELED_SILK_GRAPHIC_TYPES` contribute no geometry at all; rather than
 letting that silence read as a clean board, :func:`check_silk_coverage`
 reports each one as an ``info`` finding.
@@ -907,7 +906,7 @@ def _poly_geometry(
       is printed, so the geometry is the polygon itself, dilated by
       ``width / 2`` when the outline is also stroked.  A filled marker
       routinely carries ``(stroke (width 0))``, which is why the zero-width
-      early return that guards line/rect must NOT apply here: a
+      early return that guards lines must NOT apply here: a
       zero-stroke filled polygon is the single most common pin-1 marker
       shape and used to be dropped entirely.
     * **unfilled** -- only the boundary is printed, so the geometry is the
@@ -940,6 +939,32 @@ def _poly_geometry(
         # Neither filled nor stroked: nothing is printed.
         return None
     return LineString([*points, points[0]]).buffer(width / 2.0)
+
+
+def _silk_graphic_style(graphic: FootprintGraphic | BoardGraphic) -> tuple[bool, float]:
+    """Resolve fill and printed stroke width for silkscreen intersection and clipping."""
+    if graphic.graphic_type != "rect":
+        return graphic.graphic_type != "line" and graphic.is_filled, max(graphic.stroke_width, 0.0)
+    width = max(graphic.stroke_width or graphic.legacy_width or 0.0, 0.0)
+    # KiCad 10.0.6 plots a zero-width rectangle with no fill token as a
+    # solid region. Explicitly unfilled rectangles use a 0.100 mm pen.
+    filled = graphic.is_filled or (not graphic.fill and width == 0)
+    return filled, width if filled or width > 0 else 0.1
+
+
+def _rect_geometry(
+    graphic: FootprintGraphic | BoardGraphic, xf: _Transform, filled: bool, width: float
+) -> _Geometry | None:
+    """Area covered by a filled rectangle or its stroked outline."""
+    from shapely.geometry import LineString, Polygon
+
+    sx, sy = graphic.start
+    ex, ey = graphic.end
+    ring = [xf(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey), (sx, sy))]
+    if filled:
+        rect = Polygon(ring)
+        return rect.buffer(width / 2.0) if width > 0 else rect
+    return LineString(ring).buffer(width / 2.0) if width > 0 else None
 
 
 def _circle_geometry(
@@ -1048,8 +1073,7 @@ def _stroke_geometry(
     Returns ``None`` for graphic types we do not model (see
     :func:`iter_unmodeled_silk_graphics`, which keeps those visible as
     incomplete coverage rather than letting them read as clean) and for
-    primitives that print nothing (zero stroke width on a line/rect or on
-    an unfilled polygon).
+    primitives that print nothing (a zero-width line or unfilled outline).
     """
     from shapely.geometry import LineString
 
@@ -1067,6 +1091,10 @@ def _stroke_geometry(
     if graphic.graphic_type == "arc":
         return _arc_geometry(graphic, xf, width)
 
+    if graphic.graphic_type == "rect":
+        filled, width = _silk_graphic_style(graphic)
+        return _rect_geometry(graphic, xf, filled, width)
+
     if graphic.graphic_type == "poly":
         # Checked BEFORE the zero-width return: a filled polygon prints its
         # interior even with ``(stroke (width 0))`` (#5811).
@@ -1075,19 +1103,10 @@ def _stroke_geometry(
     if width <= 0:
         return None
 
-    if graphic.graphic_type == "line":
-        coords = [xf(graphic.start), xf(graphic.end)]
-        if coords[0] == coords[1]:
-            return None
-        return LineString(coords).buffer(width / 2.0)
-
-    # rect: expand to its 4 boundary segments (in local space), transform, then
-    # buffer the closed ring.
-    sx, sy = graphic.start
-    ex, ey = graphic.end
-    ring = [(sx, sy), (ex, sy), (ex, ey), (sx, ey), (sx, sy)]
-    ring = [xf(p) for p in ring]
-    return LineString(ring).buffer(width / 2.0)
+    coords = [xf(graphic.start), xf(graphic.end)]
+    if coords[0] == coords[1]:
+        return None
+    return LineString(coords).buffer(width / 2.0)
 
 
 def _pad_aperture_geometry(
@@ -1844,7 +1863,7 @@ def _mask_graphic_geometry(
     graphic: FootprintGraphic | BoardGraphic, transform: _Transform | None
 ) -> _Geometry | None:
     """Shapely geometry of the mask removed by one graphic on a ``*.Mask`` layer."""
-    from shapely.geometry import LineString, Polygon
+    from shapely.geometry import LineString
 
     def xf(p: tuple[float, float]) -> tuple[float, float]:
         return transform(p) if transform is not None else p
@@ -1865,13 +1884,7 @@ def _mask_graphic_geometry(
             return None
         return LineString(coords).buffer(width / 2.0)
     if gtype == "rect":
-        sx, sy = graphic.start
-        ex, ey = graphic.end
-        ring = [xf(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey), (sx, sy))]
-        if graphic.is_filled:
-            poly = Polygon(ring)
-            return poly.buffer(width / 2.0) if width > 0 else poly
-        return LineString(ring).buffer(width / 2.0) if width > 0 else None
+        return _rect_geometry(graphic, xf, graphic.is_filled, width)
     return None
 
 
