@@ -597,7 +597,7 @@ def extract_items(pcb: PCB) -> list[DiffItem]:
             )
 
     for gr in pcb.graphics:
-        points = tuple(_qp(p) for p in gr.points)
+        points = tuple(_qp(p) for p in gr.boundary_points)
         center = _qp(gr.center) if gr.center is not None else None
         mid = _qp(gr.mid) if gr.mid is not None else None
         start, end = _qp(gr.start), _qp(gr.end)

@@ -337,8 +337,8 @@ def _graphic_descriptor(prefix: str, graphic: Any) -> str:
         return f"{x:g}/{y:g}"
 
     gtype = graphic.graphic_type
-    if gtype in ("poly", "curve") and getattr(graphic, "points", None):
-        pts = list(graphic.points)
+    if gtype in ("poly", "curve") and graphic.boundary_points:
+        pts = list(graphic.boundary_points)
     elif gtype == "circle":
         pts = [getattr(graphic, "center", None), graphic.end]
     elif gtype == "arc":
@@ -900,7 +900,7 @@ def _poly_geometry(
     """Printed polygon interior and outline, or the outline alone, in the PCB frame."""
     from shapely.geometry import LineString, Polygon
 
-    points = [xf(p) for p in getattr(graphic, "points", ()) or ()]
+    points = [xf(p) for p in graphic.boundary_points]
     if len(points) < 3:
         return None
 
@@ -1038,11 +1038,12 @@ def _graphic_anchor(graphic: FootprintGraphic | BoardGraphic) -> tuple[float, fl
     A parsed ``gr_circle`` / ``fp_circle`` carries its centre in ``center``
     and leaves ``start`` at the parse default ``(0, 0)``, so reporting
     ``graphic.start`` sends users to the file origin instead of the shape
-    (Issue #9642).  Every other shape has a real ``start`` -- a poly's is
-    seeded from its first vertex at parse time.
+    (Issue #9642). A polygon may begin with an arc before its first ``xy``.
     """
     if graphic.graphic_type == "circle" and graphic.center is not None:
         return graphic.center
+    if graphic.graphic_type == "poly" and graphic.arc_boundary:
+        return graphic.arc_boundary[0]
     return graphic.start
 
 

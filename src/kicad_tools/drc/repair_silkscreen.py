@@ -743,7 +743,7 @@ class SilkscreenRepairer:
                         (sx, sy), (ex, ey) = graphic.start, graphic.end
                         outline = [fwd(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey))]
                     else:
-                        outline = [fwd(p) for p in graphic.points]
+                        outline = [fwd(p) for p in graphic.boundary_points]
 
                     new_lines: list[list[tuple[float, float]]] = []
                     new_polys: list[list[tuple[float, float]]] = []
@@ -953,7 +953,7 @@ class SilkscreenRepairer:
                 (sx, sy), (ex, ey) = graphic.start, graphic.end
                 corners = graphic.points or [(sx, sy), (ex, sy), (ex, ey), (sx, ey)]
                 return [xf(point) for point in corners]
-            return [xf(p) for p in graphic.points]
+            return [xf(p) for p in graphic.boundary_points]
 
         # --- footprint silk -------------------------------------------------
         footprints = [(node, Footprint.from_sexp(node)) for node in _find_all_footprints(self.doc)]

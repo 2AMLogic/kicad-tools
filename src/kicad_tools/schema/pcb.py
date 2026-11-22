@@ -1547,29 +1547,41 @@ def _resolves_filled_cutout(graphic_type: str, fill: str, stroke_width: float) -
     return not stroke_width
 
 
-def _graphic_points(
-    node: SExp, kind: str, start: tuple[float, float], end: tuple[float, float]
-) -> list[tuple[float, float]]:
-    """Read polygon boundaries, rounded rectangle boundaries or cubic control points."""
+class _GraphicPointGeometry:
+    points: list[tuple[float, float]]
+    arc_boundary: list[tuple[float, float]] | None
+
+    @property
+    def boundary_points(self) -> list[tuple[float, float]]:
+        """Polygon vertices with embedded arcs tessellated for geometric operations."""
+        return self.points if self.arc_boundary is None else self.arc_boundary
+
+
+def _read_graphic_points(graphic: BoardGraphic | FootprintGraphic, node: SExp) -> None:
+    """Read authored points and the physical boundary of an arc-bearing polygon."""
+    kind = graphic.graphic_type
     if kind == "rect" and node.find_child("radius") is not None:
-        return outline_rect_points(node, start, end)
-    if kind not in ("poly", "curve"):
-        return []
-    pts = node.find_child("pts")
-    if pts is None:
-        return []
-    if kind == "poly" and pts.find_child("arc") is not None:
-        return _polygon_arc_chain(node)
-    return [(xy.get_float(0) or 0.0, xy.get_float(1) or 0.0) for xy in pts.find_all("xy")]
+        graphic.points = outline_rect_points(node, graphic.start, graphic.end)
+    elif kind in ("poly", "curve") and (pts := node.find_child("pts")) is not None:
+        graphic.points = [
+            (xy.get_float(0) or 0.0, xy.get_float(1) or 0.0) for xy in pts.find_all("xy")
+        ]
+        if kind == "poly" and pts.find_child("arc") is not None:
+            graphic.arc_boundary = _polygon_arc_chain(node)
+            # The board outline API has exposed the tessellated Edge.Cuts ring
+            # since #9847. On other layers, points are the literal xy vertices.
+            if node.name == "gr_poly" and graphic.layer == "Edge.Cuts":
+                graphic.points = graphic.arc_boundary
 
 
 @dataclass
-class FootprintGraphic:
+class FootprintGraphic(_GraphicPointGeometry):
     """Graphic element within a footprint (line, rectangle, circle, arc, polygon or curve).
 
     Used for silkscreen outlines, courtyard outlines, and markings on
-    footprints. ``points`` carries polygon or rounded-rectangle boundaries,
-    or the four authored control points of a cubic curve.
+    footprints. ``points`` carries the authored polygon vertices, a rounded
+    rectangle boundary, or the four control points of a cubic curve. Use
+    :attr:`boundary_points` for the full boundary of a polygon containing arcs.
 
     ``fill`` carries the raw ``(fill ...)`` token verbatim (``"yes"`` /
     ``"no"`` on KiCad 7+, ``"solid"`` / ``"none"`` on older files, ``""``
@@ -1589,6 +1601,7 @@ class FootprintGraphic:
     mid: tuple[float, float] | None = None  # Appended for positional compatibility
     fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
     legacy_width: float | None = None  # top-level (width N), as on BoardGraphic
+    arc_boundary: list[tuple[float, float]] | None = field(default=None, repr=False)
 
     @property
     def is_filled(self) -> bool:
@@ -1636,7 +1649,7 @@ class FootprintGraphic:
                     graphic.end[1] - graphic.center[1],
                 )
 
-        graphic.points = _graphic_points(sexp, graphic_type, graphic.start, graphic.end)
+        _read_graphic_points(graphic, sexp)
         if graphic_type == "curve" and graphic.points:
             graphic.start, graphic.end = graphic.points[0], graphic.points[-1]
 
@@ -1728,13 +1741,14 @@ def _polygon_arc_chain(node: SExp) -> list[tuple[float, float]]:
 
 
 @dataclass
-class BoardGraphic:
+class BoardGraphic(_GraphicPointGeometry):
     """Board-level graphic element (line, rectangle, circle, arc, polygon or curve).
 
     Used for board outlines, silkscreen graphics, and other board-level drawings.
 
-    Mirrors :class:`FootprintGraphic`: ``points`` holds a polygon or rounded
-    rectangle boundary, or the four authored Bézier controls. The
+    Mirrors :class:`FootprintGraphic`. Polygon ``points`` holds the literal
+    vertices except on Edge.Cuts, where it includes embedded arcs.
+    :attr:`boundary_points` follows the complete outline on every layer. The
     ``(fill ...)`` token is stored in ``fill`` (read it through
     :pyattr:`is_filled`).  Before Issue #5811 ``gr_poly`` was not parsed at
     all, so a board-level polygon silk marker was invisible to every
@@ -1757,6 +1771,7 @@ class BoardGraphic:
     # convention ties the *default* fill of a circle/rect to a zero stroke
     # width (Issue #9690), so the Edge.Cuts fill resolution needs it.
     legacy_width: float | None = None
+    arc_boundary: list[tuple[float, float]] | None = field(default=None, repr=False)
 
     @property
     def is_filled(self) -> bool:
@@ -1821,7 +1836,7 @@ class BoardGraphic:
         if center := sexp.find("center"):
             graphic.center = (center.get_float(0) or 0.0, center.get_float(1) or 0.0)
 
-        graphic.points = _graphic_points(sexp, graphic_type, graphic.start, graphic.end)
+        _read_graphic_points(graphic, sexp)
         if graphic_type in ("poly", "curve") and graphic.points:
             graphic.start = graphic.points[0]
             if graphic_type == "curve":
