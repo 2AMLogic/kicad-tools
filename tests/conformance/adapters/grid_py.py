@@ -1,7 +1,7 @@
-"""Group 12 -- the Python commit gate, unmodified.
+"""Group 12 -- the original Python trace-resolver retry checks (#9924).
 
-``RoutingGrid``'s three commit-time validators are what stand between a route
-A* has found and the copper that gets written::
+This row measures the three ``RoutingGrid`` copper validators used by
+``_TraceResolverTransaction.validate_committed_geometry`::
 
     validate_segment_clearance(seg, exclude_net)      -> (ok, min_actual, loc)
     validate_via_clearance(via, exclude_net)          -> (ok, min_actual, loc)
@@ -26,14 +26,11 @@ pairs: both validators now resolve ``max(trace_clearance, via_clearance)``
 through ``clearance_resolver.trace_via_clearance_mm``, so the pinned order no
 longer changes this row's verdict.)
 
-**It has no via-vs-pad predicate at all.**  ``validate_via_clearance`` walks
-``self.routes``' *segments*; ``validate_via_to_via_clearance`` walks their
-*vias*; neither consults ``self._pads``.  The C++ twin does check via-vs-pad
-(``grid.cpp`` ``violation_type = 8``).  A ``pad-via`` pair that kicad-cli flags
-therefore shows up here as an under-reject -- correctly: in production that
-pair is caught by the pad halo in the *occupancy* model (group 1), not by this
-gate, so the gate alone would commit it.  Pair kinds are not narrowed to hide
-this; it is one of the disagreements the table exists to record.
+**Foreign pads.** For a candidate via these checks visit committed segments
+and vias. The original retry transaction omitted the foreign-pad check that
+the ordinary Python pathfinder performs with ``RoutingGrid.worst_via_pad_deficit``
+(#6117). The C++ commit validator also checks foreign pads (violation type 8).
+Group 12 includes pad/via pairs to measure the retry omission owned by #9924.
 """
 
 from __future__ import annotations
@@ -45,13 +42,15 @@ from tests.conformance.adapters._support import (
     ALL_PAIR_KINDS,
     PairContext,
     net_ids,
+    project_rules,
     router_grid,
     router_pad,
+    router_rules,
     router_segment,
     router_via,
     single_object_route,
 )
-from tests.conformance.generator import CopperCase, PadSpec, SegmentSpec
+from tests.conformance.generator import CopperCase, PadSpec, SegmentSpec, ViaSpec
 
 __all__ = ["GridPyAdapter"]
 
@@ -67,10 +66,23 @@ class GridPyAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same three validators on a grid armed at kicad-cli's clearance.
+
+        Issue #9922: the same-rule reading.  ``router_grid(case, rules)`` is
+        what keeps the grid the validators read their requirement from and the
+        project value from disagreeing, exactly as every migrated adapter's
+        gated reading does it.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules) -> set[Verdict]:
         nets = net_ids(case)
         found: set[Verdict] = set()
         for context in _contexts(case):
-            rejected, actual, required = self._judge(case, context, nets)
+            rejected, actual, required = self._judge(case, context, nets, rules)
             if rejected:
                 net_a, net_b = context.nets
                 found.add(
@@ -89,9 +101,10 @@ class GridPyAdapter:
         case: CopperCase,
         context: PairContext,
         nets: dict[str, int],
+        rules,
     ) -> tuple[bool, float | None, float]:
         """``(rejected, measured_gap_mm, required_mm)`` for one pair."""
-        grid = router_grid(case)
+        grid = router_grid(case, rules)
         existing = context.existing
         if isinstance(existing, PadSpec):
             grid.add_pad(router_pad(existing, nets))
@@ -112,6 +125,20 @@ class GridPyAdapter:
         ok_via, actual_via, _ = grid.validate_via_to_via_clearance(via, exclude_net)
         actual = min(actual_seg, actual_via)
         return (not (ok_seg and ok_via), _finite(actual), grid.rules.via_clearance)
+
+
+def pathfinder_via_pad_control(case: CopperCase, pad: PadSpec, via: ViaSpec) -> tuple[float, bool]:
+    """Return the measured deficit and ordinary Python pathfinder decision at the project rule."""
+    from kicad_tools.router.pathfinder import Router
+
+    nets = net_ids(case)
+    rules = project_rules(case)
+    grid = router_grid(case, rules)
+    grid.add_pad(router_pad(pad, nets))
+    route = single_object_route(via, nets)
+    deficit, _ = grid.worst_via_pad_deficit(route.vias[0], route.net)
+    accepted = Router(grid, rules)._validate_route_clearance(route, route.net)
+    return deficit, accepted
 
 
 def _contexts(case: CopperCase) -> list[PairContext]:

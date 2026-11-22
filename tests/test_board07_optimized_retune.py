@@ -186,3 +186,38 @@ def test_fresh_recipe_stops_on_an_unrelated_build_failure(tmp_path, monkeypatch,
     assert not (output / "retuned").exists()
     with pytest.raises(FileExistsError):
         recipe.reproduce(output)
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_retuning_requires_both_native_optimizer_probes(tmp_path, monkeypatch, recipe, recovers):
+    attempts = []
+    accepted = []
+    monkeypatch.setattr(recipe, "evidence_toolchain", lambda *a, **k: nullcontext())
+
+    def run(argv, **kwargs):
+        if len(argv) > 1 and Path(argv[1]).name == "build.py":
+            project = Path(argv[2]) / "validation/checked.kicad_dru"
+            project.parent.mkdir(parents=True)
+            project.write_text("(version 1)")
+        elif argv[0] == "kct":
+            attempts.append(argv)
+            status = "ran" if len(attempts) == 2 and recovers else "unavailable"
+            return SimpleNamespace(
+                stdout=json.dumps({"output_checks": {"opens": "ran", "drc": status}})
+            )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(recipe.subprocess, "run", run)
+    monkeypatch.setattr(recipe, "prepare", lambda *args: accepted.append(args))
+    out = tmp_path / "probe-test"
+    if recovers:
+        assert recipe.reproduce(out) == 0
+        assert len(accepted) == 1
+    else:
+        with pytest.raises(RuntimeError, match="Native optimizer checks did not complete"):
+            recipe.reproduce(out)
+        assert not accepted
+    assert len(attempts) == 2
+    assert (
+        json.loads((out / "optimizer-1.json").read_bytes())["output_checks"]["drc"] == "unavailable"
+    )
