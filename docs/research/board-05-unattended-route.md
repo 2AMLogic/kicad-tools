@@ -174,33 +174,42 @@ be dispatched until it is on the default branch, so the first hosted-runner
 numbers come from the first `workflow_dispatch` (or the 07:30 UTC schedule)
 after merge. Add them here when they exist.
 
-## Re-measured 2026-11-22: zero copper-gap errors (#9844 acceptance)
+## Board 05 copper gaps on Linux and macOS, 2026-11-22
 
-`origin/main` @ `7416c1c24` — the merge of #9873 (stored-via check, native
-router build 78), with #9875's within-route guard already in. Linux x86_64
-host, seeds run sequentially, pinned kicad-cli 10.0.6 (`KCT_KICAD_DOCKER=1`),
-same #6508 protocol flags. The host was busy (load average 40.5 falling to
-17.8 during seed 42), but no `stage deadline fired` or `per-net wall clock
-bound` line appears in any route log, so every board is an iteration-bounded
-(machine-independent) result: all three seeds wrote byte-identical boards
-(sha1 `64411406e173...`), 142/142 connections each.
+The original RESET via-to-trace gap cleared on both hosts. The complete
+board had zero fabrication errors on Linux x86_64 and three on macOS arm64.
+Both used router build 78 at `7416c1c24`, which includes #9873's stored-via
+check and #9875's within-route guard. The macOS replay used `9c26521df`,
+whose only change from that revision was this research note.
+Both ran the #6508 protocol sequentially for seeds 42, 7 and 1337 with
+`KCT_KICAD_DOCKER=1` and pinned kicad-cli 10.0.6. [Linux run](https://github.com/2AMLogic/kicad-tools/blob/9c26521dff072cad992adb2cf9a40d0233402fcd/docs/research/board-05-unattended-route.md#re-measured-2026-11-22-zero-copper-gap-errors-9844-acceptance) · [macOS run and measured geometry](https://github.com/2AMLogic/kicad-tools/issues/9424#issuecomment-7074550273)
 
-| Seed | Route exit | Nets | kicad-cli DRC err | Unconnected | ERC | `physical_copper_gap` err | kct check err / warn | LVS (copper / label) | Vias | Wall s |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 42 | 0 | 37/37 | 0 | 0 | 0 | 0 | 0 / 77 | clean / clean | 124 | 369.6 |
-| 7 | 0 | 37/37 | 0 | 0 | 0 | 0 | 0 / 77 | clean / clean | 124 | 375.6 |
-| 1337 | 0 | 37/37 | 0 | 0 | 0 | 0 | 0 / 77 | clean / clean | 124 | 351.1 |
+| Host | Seed | Vias | Physical gap errors | All kct warnings | Route time (s) |
+|---|---:|---:|---:|---:|---:|
+| Linux x86_64 | 42 | 124 | 0 | 77 | 369.6 |
+| Linux x86_64 | 7 | 124 | 0 | 77 | 375.6 |
+| Linux x86_64 | 1337 | 124 | 0 | 77 | 351.1 |
+| macOS arm64 | 42 | 118 | 3 | 73 | 231.6 |
+| macOS arm64 | 7 | 118 | 3 | 73 | 313.1 |
+| macOS arm64 | 1337 | 118 | 3 | 73 | 299.1 |
 
-The #9844 RESET V-turn slit and the residuals the 2026-11-22 combined build
-still carried (one SPEED pad/trace and two IREF trace/trace gaps at native
-build 77) do not occur on this revision: `physical_copper_gap` reports zero
-findings at error or warning severity on every seed. Its two remaining
-findings are info severity (zone-fill clearance; pour copper is not judged,
-#8938).
+All six routes exited 0 with 37/37 nets and 142/142 connections. Pinned KiCad
+reported zero DRC errors, unconnected items or ERC findings. Copper and label
+LVS passed. The three seeds produced byte-identical boards on each host.
+The Linux board's SHA-1 starts with `64411406e173`. The macOS board's SHA-1
+is `0f1f7745e4b2c3dd4aab42309e762daec526a960`. The logs recorded no
+stage or per-net wall-clock cutoff. Linux load fell from 40.5 to 17.8 during
+seed 42. The cause of the cross-host geometry difference remains open.
 
-The harness still exits 1, on the #8073 no-warning gate alone: 77 warnings per
-seed, identical across seeds (51 `pour_slot`, 9 `silk_hole_overlap`, 8
+On macOS the SPEED trace passes C14.1 on F.Cu at 0.046747 mm against the
+0.150000 mm pad clearance. Two IREF trace-to-trace gaps on F.Cu measure
+0.019203 mm against 0.101600 mm. #9424 tracks these three findings. #9844's
+board-wide zero-gap criterion remains open. [Gap identities and closest points](https://github.com/2AMLogic/kicad-tools/issues/9424#issuecomment-7074550273) · [Board-wide acceptance criteria](https://github.com/2AMLogic/kicad-tools/issues/9844)
+
+The unattended harness exited 1 on both hosts. Linux tripped the #8073
+no-warning gate with 51 `pour_slot`, 9 `silk_hole_overlap`, 8
 `redundant_copper_covered`, 4 `redundant_copper_detour`, 2
-`redundant_copper_staircase`, 1 `redundant_copper_fragments`, 1 `plane_split`,
-1 `sharp_trace_corner`). Every error-side gate is green. Warning and mask
-cleanup stays out of #9844's scope.
+`redundant_copper_staircase`, 1 `redundant_copper_fragments`, 1 `plane_split`
+and 1 `sharp_trace_corner` warning. Its two zone-fill clearance findings were
+informational under #8938. On macOS the harness recorded the three physical
+gap errors and 73 warnings per seed.
