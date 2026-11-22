@@ -99,6 +99,7 @@ from .cache import (
     normalize_routes_to_origin,
     transform_routes,
 )
+from .clearance_kernel import CLEARANCE_EPSILON_MM
 from .congestion_estimator import CongestionEstimator
 from .cpp_backend import (
     STAGE_FALLBACK_BUDGET_FRACTION,
@@ -1398,7 +1399,8 @@ class _TraceResolverTransaction:
         each contained segment and via against the **current
         post-rip grid state** using the precise edge-to-edge
         clearance primitives (``validate_segment_clearance``,
-        ``validate_via_clearance``, ``validate_via_to_via_clearance``).
+        ``validate_via_clearance``, ``validate_via_to_via_clearance``,
+        ``worst_via_pad_deficit``).
         Same-net comparisons are excluded by ``exclude_net`` so a
         route does not flag its own internal geometry.
 
@@ -1449,7 +1451,18 @@ class _TraceResolverTransaction:
                 )
                 if not is_valid:
                     return False
+            if not new_route.vias:
+                continue
+            own_refs = {ref for ref, _ in self._router.nets.get(new_route.net, ())}
             for via in new_route.vias:
+                deficit, _ = grid.worst_via_pad_deficit(
+                    via,
+                    exclude_net=new_route.net,
+                    component_pitches=self._router.component_pitches,
+                    exclude_refs=own_refs,
+                )
+                if deficit > CLEARANCE_EPSILON_MM:
+                    return False
                 is_valid, _actual, _loc = grid.validate_via_clearance(
                     via=via,
                     exclude_net=new_route.net,

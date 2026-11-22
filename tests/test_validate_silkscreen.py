@@ -171,7 +171,9 @@ class TestSilkOverCopper:
         assert len(results) == 1
         v = results.violations[0]
         assert v.rule_id == "silk_over_copper"
-        assert v.severity == "warning"
+        # Error under the jlcpcb profiles (operator ruling on #9795, #9798);
+        # a profile without the knob keeps the warning.
+        assert v.severity == "error"
         assert v.items[0].startswith("U1")
         assert "pad 1" in v.items[1]
 
@@ -1304,8 +1306,8 @@ class TestSilkEdgeClearance:
 
 
 class TestSilkSeverity:
-    def test_all_violations_are_warnings(self):
-        """Every emitted silk violation is warning severity (non-blocking)."""
+    def test_pad_overlap_errors_edge_stays_warning(self):
+        """Silk on exposed copper errors under jlcpcb (#9798); edge stays warning."""
         pcb = _empty_pcb()
         _square_outline(pcb)
         fp = _make_footprint(
@@ -1317,9 +1319,8 @@ class TestSilkSeverity:
 
         over = check_silk_over_copper(pcb, _rules())
         edge = check_silk_edge_clearance(pcb, _rules())
-        for v in (*over.violations, *edge.violations):
-            assert v.severity == "warning"
-        assert over.violations or edge.violations  # at least one fired
+        assert over.violations and all(v.severity == "error" for v in over.violations)
+        assert all(v.severity == "warning" for v in edge.violations)
 
 
 # Historical defect witnesses are frozen under regression-fixture/.
@@ -1358,7 +1359,11 @@ def test_real_board_regression(rel_path, rule_id):
         "silk_edge_clearance": edge.violations,
     }
     assert len(by_rule[rule_id]) >= 1
-    for v in (*over.violations, *edge.violations):
+    # #9798: silk on exposed copper grades as an error under jlcpcb (silk
+    # over a via aperture as info); edge clearance keeps its warning.
+    for v in over.violations:
+        assert v.severity in ("error", "info")
+    for v in edge.violations:
         assert v.severity == "warning"
 
 
@@ -1642,11 +1647,12 @@ class TestSilkPolygonGeometry:
         assert _stroke_geometry(graphic, None) is not None
 
     @pytest.mark.parametrize("fill", ["no", "none", ""])
-    def test_unfilled_fill_tokens_with_zero_stroke_print_nothing(self, fill):
-        """Unfilled AND unstroked prints no ink at all, so there is no geometry."""
+    def test_zero_width_polygon_prints_solid_or_with_default_pen(self, fill):
+        # KiCad 10.0.6 front-silk Gerber areas for this 6 mm square.
         graphic = _silk_poly(points=_RING_AROUND_ORIGIN, stroke_width=0.0, fill=fill)
-        assert graphic.is_filled is False
-        assert _stroke_geometry(graphic, None) is None
+        assert _stroke_geometry(graphic, None).area == pytest.approx(
+            36.0 if not fill else 2.39785, abs=1e-5
+        )
 
     @pytest.mark.parametrize("points", [[], [(0.0, 0.0)], [(0.0, 0.0), (1.0, 0.0)]])
     def test_degenerate_poly_is_skipped(self, points):
@@ -1869,11 +1875,13 @@ def _silk_arc(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
     return graphic
 
 
-def _silk_unknown(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
+def _silk_unknown(
+    *, uuid: str = "", layer: str = "F.SilkS", stroke_width: float = 0.12
+) -> FootprintGraphic:
     return FootprintGraphic(
-        graphic_type="curve",
+        graphic_type="future_shape",
         layer=layer,
-        stroke_width=0.12,
+        stroke_width=stroke_width,
         start=(0.0, 0.0),
         end=(1.0, 0.0),
         uuid=uuid,
@@ -2032,14 +2040,14 @@ class TestSilkGeometryCoverage:
         violation = coverage.violations[0]
         assert violation.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID
         assert violation.severity == "info"
-        assert violation.items == ("U1 (fp_curve) {u}",)
+        assert violation.items == ("U1 (fp_future_shape) {u}",)
         assert violation.layer == "F.SilkS"
 
     def test_coverage_item_omits_uuid_suffix_when_unset(self):
         pcb = _empty_pcb()
         pcb._footprints.append(_make_footprint(graphics=[_silk_unknown()]))
 
-        assert check_silk_coverage(pcb, _rules()).violations[0].items == ("U1 (fp_curve)",)
+        assert check_silk_coverage(pcb, _rules()).violations[0].items == ("U1 (fp_future_shape)",)
 
     @pytest.mark.parametrize("layer", ["F.Fab", "F.CrtYd", "F.Cu"])
     def test_non_silk_layer_shapes_are_not_reported(self, layer):
@@ -2076,23 +2084,28 @@ class TestSilkGeometryCoverage:
         pcb = _empty_pcb()
         pcb._graphics.append(
             BoardGraphic(
-                graphic_type="curve",
+                graphic_type="future_shape",
                 layer="F.SilkS",
                 stroke_width=0.12,
                 start=(5.0, 5.0),
                 end=(5.5, 5.0),
-                uuid="gr-curve-uuid",
+                uuid="unmodeled-uuid",
             )
         )
 
         coverage = check_silk_coverage(pcb, _rules())
         assert len(coverage) == 1
-        assert coverage.violations[0].items == ("gr_curve {gr-curve-uuid}",)
+        assert coverage.violations[0].items == ("gr_future_shape {unmodeled-uuid}",)
 
     def test_coverage_reachable_through_check_all_silkscreen(self):
         """``kct check --only silkscreen`` surfaces the coverage advisory."""
         pcb = _empty_pcb()
-        pcb._footprints.append(_make_footprint(graphics=[_silk_unknown(uuid="u")]))
+        # A compliant stroke width (>= the 0.15 floor) so the only finding
+        # is the coverage advisory itself (#9798 regraded sub-minimum widths
+        # to errors under jlcpcb).
+        pcb._footprints.append(
+            _make_footprint(graphics=[_silk_unknown(uuid="u", stroke_width=0.2)])
+        )
 
         results = check_all_silkscreen(pcb, _rules())
         unmodeled = [v for v in results.violations if v.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID]

@@ -4603,6 +4603,45 @@ def _write_pair_floor(board, kind, minimum, item="Via", ref="J9", layer="F.Cu"):
 
 
 @pytest.mark.parametrize(
+    ("drill", "minimum", "east"),
+    [
+        (".30", 0.85, False),
+        ("oval .30 .30", 0.85, False),
+        ("oval .2999996 .30", 0.85, False),
+        ("oval .2999995 .30", 0.85, False),
+        ("oval .2999994 .30", 0.85, True),
+        ("oval .3000005 .30", 0.85, True),
+        ("oval .28 .30", 0.85, True),
+        ("oval .30 .30", 0.72, True),
+    ],
+)
+def test_public_round_hole_spacing_uses_native_drill_dimensions(tmp_path, drill, minimum, east):
+    from kicad_tools.cli import main as public_main
+
+    board = _pair_floor_board(tmp_path, 10.7016, 11.0, drill=f"{drill} (offset 0 .03)")
+    _write_pair_floor(board, "hole_to_hole", minimum)
+    output = tmp_path / "moved.kicad_pcb"
+    assert (
+        public_main(
+            [
+                "fix-vias",
+                str(board),
+                "--relocate-in-pad",
+                "--search-alternatives",
+                "--mfr",
+                "jlcpcb",
+                "--layers",
+                "4",
+                "-o",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert PCB.load(output).vias[0].position == pytest.approx((10.7016 if east else 8.8984, 10))
+
+
+@pytest.mark.parametrize(
     ("rule", "minimum", "same_net", "reference", "expected"),
     [
         ("clearance", 0.29, False, "J9", True),

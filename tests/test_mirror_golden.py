@@ -731,3 +731,28 @@ class TestMirrorOneSidedPadstackExchange:
                 self._defs(pcb, number),
                 self._defs(PCB.load(str(_BACK)), number),
             )
+
+
+def test_mirror_arc_polygon_preserves_authored_points_and_saved_boundary(tmp_path):
+    from shapely.geometry import Polygon
+
+    from kicad_tools.sexp import parse_string
+
+    pcb = PCB(
+        parse_string(
+            '(kicad_pcb (footprint "Test:Lobe" (layer "F.Cu") (at 10 10) '
+            '(property "Reference" "U1" (at 0 0) (layer "F.SilkS")) '
+            "(fp_poly (pts (arc (start 2 0) (mid 3 1) (end 2 2)) (xy 0 2) (xy 0 0)) "
+            '(layer "F.SilkS"))))'
+        )
+    )
+    (original,) = _u1(pcb).graphics
+    mirrored_boundary = Polygon([(x, -y) for x, y in original.boundary_points])
+    assert StrategyApplicator().apply_strategy(pcb, _mirror_strategy()).success
+    output = tmp_path / "mirrored.kicad_pcb"
+    pcb.save(output)
+    for board in (pcb, PCB.load(output)):
+        (graphic,) = _u1(board).graphics
+        assert graphic.layer == "B.SilkS"
+        assert graphic.points == [(0, -2), (0, 0)]
+        assert Polygon(graphic.boundary_points).symmetric_difference(mirrored_boundary).area < 1e-12

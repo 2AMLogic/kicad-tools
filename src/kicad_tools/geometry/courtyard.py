@@ -20,7 +20,7 @@ Courtyard-outline extraction supports four representations:
 
 * ``fp_rect`` — a single axis-aligned rectangle (fast path).
 * ``fp_poly`` — a closed polygon whose vertices are recorded in
-  :attr:`FootprintGraphic.points`.
+  :attr:`FootprintGraphic.boundary_points`.
 * ``fp_line`` — a closed loop of line segments chained by endpoint matching.
 * ``fp_circle`` — a single circle (stock fiducial / mounting-hole
   courtyards, #8540); ``fp_arc`` courtyards are not modeled.
@@ -157,8 +157,8 @@ def _courtyard_polygon(footprint: Footprint, side: str, Polygon: Any):
         # A single rect fully describes the courtyard; if multiple exist we
         # take the first (the common single-rect case).
         ring = _rect_ring(rects[0])
-    elif polys and len(polys[0].points) >= 3:
-        ring = list(polys[0].points)
+    elif polys and len(polys[0].boundary_points) >= 3:
+        ring = list(polys[0].boundary_points)
     elif line_segments:
         ring = _chain_lines(line_segments)
     elif circles:

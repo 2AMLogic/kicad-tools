@@ -26,7 +26,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .body_surcharge import BodySurchargeRegion
@@ -37,8 +37,9 @@ import numpy as np
 from kicad_tools.core.types import copper_span
 
 from . import wall_deadline as _wall_deadline
-from .clearance_kernel import CLEARANCE_EPSILON_MM
+from .clearance_kernel import CLEARANCE_EPSILON_MM, KPad, KVia, clear
 from .clearance_resolver import trace_via_clearance_mm
+from .clearance_shapes import pad_shape
 from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid, SetupDeadlineExpired
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
@@ -248,12 +249,6 @@ def _disc_dilate_exact(mask: np.ndarray, disc: np.ndarray) -> np.ndarray:
     return out
 
 
-# Issue #6117: tolerance for the post-route via-vs-foreign-pad check in
-# ``Router._validate_route_clearance``.  Matches the C++ validator's
-# ``CLEARANCE_EPSILON_MM`` (grid.cpp) so both backends reject the same vias.
-_VIA_PAD_CLEARANCE_EPSILON_MM = 1e-4
-
-
 @dataclass(frozen=True)
 class _SegmentAdapter:
     """Adapter exposing :class:`Segment` with the ``start_x/start_y/end_x/end_y``
@@ -270,6 +265,40 @@ class _SegmentAdapter:
     end_x: float
     end_y: float
     width: float
+
+
+class _ForeignPadCopper(NamedTuple):
+    """A foreign pad as exact kernel copper plus a cheap board-frame AABB.
+
+    Issue #9923: ``set_via_foreign_context`` used to hand
+    ``point_clear_of_copper`` a ``(x, y, width, height, net)`` 5-tuple, which
+    scores the pad as its **pre-rotation** local rectangle -- a pad turned
+    away from the board axes under-reaches toward a via placed off its long
+    side (conformance seeds 1/44/135/151 accepted four pinned KiCad
+    violations).  Doubling the rotation-aware ``pad_half_extents`` instead
+    over-rejects (six native-legal pairs rejected), because a rotated AABB
+    over-approximates an oval/rect pad's true copper.  The exact model is the
+    clearance kernel: :func:`~kicad_tools.router.clearance_shapes.pad_shape`
+    keeps the pad's shape and rotation, and ``clear`` compares it against a
+    ``KVia`` for the candidate.
+
+    The stored AABB (``half_w``/``half_h`` from
+    :func:`~kicad_tools.router.primitives.pad_half_extents``) encloses the
+    pad copper on every supported shape, so a box gap beyond the requirement
+    proves the exact gap clears too -- the per-candidate hot path rules out
+    distant pads without entering the kernel.
+
+    Kept a ``NamedTuple`` with ``net`` LAST so the ``pad[-1]`` net reads the
+    rip-up context introspection (tests/router/test_ripup_foreign_context_9899.py)
+    already performs on ``_foreign_pad_tuples`` stay valid.
+    """
+
+    copper: KPad
+    x: float
+    y: float
+    half_w: float
+    half_h: float
+    net: int
 
 
 @dataclass(frozen=True)
@@ -654,17 +683,18 @@ class Router:
         # or trace in world coordinates -- the same bug class PR #2945
         # patched in ``EscapeRouter._can_place_via``.  When this context is
         # populated via :meth:`set_via_foreign_context`,
-        # ``_check_via_placement_cached`` consults
-        # :func:`point_clear_of_copper` after the per-layer grid check
-        # passes.  Empty by default so behavior matches pre-#2947 when no
-        # caller wires the context up.  Cache invariant: the setter
-        # CLEARS ``_via_cache`` so subsequent checks re-evaluate against
-        # the new context (same pattern as ``add_routed_segments``).
-        # Issue #2951: stored as 5-tuples ``(x, y, width, height, net)`` so
-        # ``point_clear_of_copper`` uses rect-distance for oblong fine-pitch
-        # pads (the previous ``(x, y, max(w,h)/2, net)`` disc-bound was the
-        # last remaining via-clearance bug pattern for non-square pads).
-        self._foreign_pad_tuples: list[tuple[float, float, float, float, int]] = []
+        # ``_check_via_placement_cached`` consults the clearance kernel
+        # (pads, issue #9923) / :func:`point_clear_of_copper` (tracks)
+        # after the per-layer grid check passes.  Empty by default so
+        # behavior matches pre-#2947 when no caller wires the context up.
+        # Cache invariant: the setter CLEARS ``_via_cache`` so subsequent
+        # checks re-evaluate against the new context (same pattern as
+        # ``add_routed_segments``).
+        # Issue #2951 / #9923: pads are stored as ``_ForeignPadCopper``
+        # records -- exact ``KPad`` copper plus a board-frame AABB -- so the
+        # via check measures the pad's real shape and rotation instead of
+        # its pre-rotation local box.
+        self._foreign_pad_tuples: list[_ForeignPadCopper] = []
         self._foreign_track_adapters: list[_SegmentAdapter] = []
         # Issue #6243: ``(index, {(gx, gy, net): verdict})`` for the authored
         # via gate; reset whenever the grid's authored index is rebuilt.
@@ -1382,8 +1412,11 @@ class Router:
         ``via_radius + foreign_obstacle_radius + clearance`` of an
         adjacent foreign-net pad / trace in world coordinates -- the
         coarse grid's resolution loses this distinction.  When this
-        context is populated, the via predicate consults
-        :func:`point_clear_of_copper` after the grid check passes.
+        context is populated, the via predicate measures the foreign pads
+        with the exact clearance kernel and the foreign tracks with
+        :func:`point_clear_of_copper` after the grid check passes (pads
+        moved onto the kernel by issue #9923 -- the old 5-tuple scored a
+        rotated pad against its pre-rotation box).
 
         Cache-key safety: the via cache key is
         ``(gx, gy, net, effective_radius)`` -- already net-keyed, so
@@ -1401,14 +1434,26 @@ class Router:
             foreign_tracks: Committed track segments (any net) the via
                 must clear.  Same-net segments are filtered per-call.
         """
-        # Issue #2951: pass (x, y, width, height, net) 5-tuples so
-        # ``point_clear_of_copper`` uses rect-distance for oblong
-        # fine-pitch pads (mirrors the same change in
-        # ``EscapeRouter._can_place_via``).
-        pad_tuples: list[tuple[float, float, float, float, int]] = []
+        # Issue #2951 / #9923: store each pad as exact kernel copper
+        # (:func:`pad_shape` keeps shape and rotation) plus its
+        # board-frame AABB, so ``_check_via_placement_cached`` compares a
+        # candidate ``KVia`` against the pad's real copper instead of the
+        # pre-rotation local box the old ``(x, y, w, h, net)`` 5-tuple
+        # scored (four pinned KiCad violations accepted on rotated pads).
+        pad_tuples: list[_ForeignPadCopper] = []
         if foreign_pads:
             for p in foreign_pads:
-                pad_tuples.append((p.x, p.y, p.width, p.height, p.net))
+                half_w, half_h = pad_half_extents(p)
+                pad_tuples.append(
+                    _ForeignPadCopper(
+                        copper=pad_shape(p),
+                        x=p.x,
+                        y=p.y,
+                        half_w=half_w,
+                        half_h=half_h,
+                        net=p.net,
+                    )
+                )
 
         track_adapters: list[_SegmentAdapter] = []
         if foreign_tracks:
@@ -4361,23 +4406,40 @@ class Router:
             # This world-coordinate check adds clearance to the copper itself.
             net_class = self._halo_net_class(net)
             via_size = net_class.via_size if net_class else self.rules.via_diameter
-            # Filter same-net obstacles (passing a superset is allowed
-            # by ``point_clear_of_copper``'s contract but the same-net
-            # filter avoids spurious rejections on the routing net).
-            # Net is at index 4 for the 5-tuple (x, y, w, h, net) shape
-            # populated by ``set_via_foreign_context`` (Issue #2951).
-            other_pads = [p for p in self._foreign_pad_tuples if p[4] != net]
+            # Issue #9923: pads are measured with the exact clearance
+            # kernel -- ``clear`` compares the candidate ``KVia`` against
+            # the stored ``KPad`` (real shape and rotation), replacing the
+            # pre-rotation box rect-distance the 5-tuple form scored.  The
+            # stored board-frame AABB encloses the copper, so a box gap
+            # beyond the requirement rules the pad out without entering
+            # the kernel (this branch sits in the A* via-candidate loop).
+            via_copper = KVia(x=wx, y=wy, diameter=via_size)
+            for entry in self._foreign_pad_tuples:
+                # Filter same-net obstacles (passing a superset is
+                # allowed by the context contract but the same-net filter
+                # avoids spurious rejections on the routing net).
+                if entry.net == net:
+                    continue
+                box_gap = math.hypot(
+                    max(0.0, abs(wx - entry.x) - entry.half_w),
+                    max(0.0, abs(wy - entry.y) - entry.half_h),
+                )
+                if box_gap >= via_size / 2 + self.rules.via_clearance:
+                    continue
+                if not clear(via_copper, entry.copper, self.rules.via_clearance):
+                    if not allow_sharing:
+                        self._via_cache[(gx, gy, net, effective_radius)] = False
+                    return False
             # Track adapter does not carry net id; the caller
             # (``Autorouter``) is responsible for excluding same-net
             # segments before populating the context.  This matches
             # ``EscapeRouter``'s pattern at the boundary.
-            if not point_clear_of_copper(
+            if self._foreign_track_adapters and not point_clear_of_copper(
                 x=wx,
                 y=wy,
                 via_size=via_size,
                 clearance=self.rules.via_clearance,
                 other_net_tracks=self._foreign_track_adapters,
-                other_net_pads=other_pads,
             ):
                 if not allow_sharing:
                     self._via_cache[(gx, gy, net, effective_radius)] = False
@@ -6669,7 +6731,7 @@ class Router:
                 component_pitches=component_pitches,
                 exclude_refs=exclude_refs,
             )
-            if deficit > _VIA_PAD_CLEARANCE_EPSILON_MM:
+            if deficit > CLEARANCE_EPSILON_MM:
                 return False
 
         # Issue #1693: Validate vias against other-net vias
