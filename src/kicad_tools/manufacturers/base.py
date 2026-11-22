@@ -323,13 +323,9 @@ class DesignRules:
     # behaviour driven by ``min_silk_to_pad_clearance_mm``.
     silk_to_pad_danger_mm: float | None = None
     silk_to_pad_warning_mm: float | None = None
-    # Fab-graded silk-to-hole severity (Issue #9033): when set, the
-    # ``silk_hole_overlap`` rule buffers the drilled hole by this clearance
-    # and emits an **error** instead of the legacy warning.  ``None`` keeps
-    # the advisory behaviour for profiles without a recorded fab band.
-    # JLCPCB's JLCDFM reports only danger items for silkscreen-to-hole
-    # (0 warnings on both recorded boards), so its profiles set 0.0 -- the
-    # drill-overlap threshold the rule has used since #8844.
+    # A configured band grades silk on plated/non-plated component drills
+    # as errors and silk on via drills as informational (#9033). None keeps
+    # the existing advisory grade. JLCPCB's configured 0.0 mm detects overlap.
     silk_to_hole_danger_mm: float | None = None
     min_smd_pad_clearance_mm: float | None = None
     min_pth_hole_to_track_mm: float | None = None

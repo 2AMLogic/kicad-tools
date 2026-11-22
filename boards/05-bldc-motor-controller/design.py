@@ -3836,22 +3836,12 @@ def legacy_main() -> int:
         if routed_path.exists():
             repair_shorts_in_routed_pcb(routed_path)
 
-        # Step 7b (Issue #9033): clear silk the routed vias landed on.
-        # The JLCPCB profiles grade ``silk_hole_overlap`` as an error, so a
-        # fresh route whose vias land on generator-authored silk fails the
-        # manufacturing gates.  The committed artifact's pre-existing 13
-        # findings (6 reference designators, 7 footprint graphics) are
-        # excepted by identity in .github/routed-drc-tolerance.yml until the
-        # #9134 repair + evidence re-issue retires those entries.  Runs after the last
-        # via-producing step (7a can relocate vias; Step 7's fix-drc is
-        # disabled) and before the zone fill + DRC, reading the rule's own
-        # findings so the pass tracks whatever via population this run
-        # produced.
+        # Clear generator-authored silk from component drills before checking the routed board.
         if routed_path.exists():
             print("\nStep 7b: Silkscreen clearance (silk_hole_overlap, Issue #9033)...")
             graphics_clipped, refs_moved = clear_silk_over_holes(routed_path, log=print)
             if not graphics_clipped and not refs_moved:
-                print("   no silk over holes -- nothing to clear")
+                print("   no silk over component drills")
 
         # Step 7: Repair DRC clearance violations introduced by routing.
         # Issue #3096: tried calling fix-drc as a separate subprocess

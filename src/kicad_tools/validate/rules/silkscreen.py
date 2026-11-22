@@ -1690,49 +1690,46 @@ def silk_hits_hole(silk: _Geometry, hole: _Geometry, clearance_mm: float) -> boo
 def check_silk_hole_overlap(
     pcb: PCB,
     design_rules: DesignRules | None = None,
+    *,
+    include_vias: bool = True,
 ) -> DRCResults:
-    """Silkscreen over a drilled hole (via, PTH or NPTH).
+    """Measure printed silk against the drills that reach that board side.
 
-    ``design_rules`` is unused (the threshold is the shared
-    :data:`SILK_HOLE_CLEARANCE_MM` constant) and may be omitted by callers
-    that have no manufacturer profile (Issue #9707).
-
-    Unlike :func:`check_silk_over_copper` this tests the **drill** circle, not
-    the mask aperture, so silk over a *tented* via hole is reported (Issue
-    #8844; the fab's DFM flags it).  Through-via and pad holes pierce every
-    layer so both silk sides are tested; a blind/micro via only the outer
-    side it reaches and a buried via neither (Issue #9076).  Text uses the
-    same bbox approximation as the other silk checks.  Emits one
-    ``silk_hole_overlap`` finding per (silk, hole) pair.  Holes come from
-    :func:`iter_drill_holes` and the threshold is
-    :data:`SILK_HOLE_CLEARANCE_MM` (0 mm: any overlap), both shared with the
-    tools that clear these findings (Issue #9054).  Severity is a warning
-    unless the profile sets ``silk_to_hole_danger_mm`` (Issue #9033: the
-    fab's silkscreen-to-hole band has no warning tier), which both buffers
-    the hole by at least that clearance and upgrades the finding to an
-    error.
+    A profile with a ``silk_to_hole_danger_mm`` band grades plated and
+    non-plated component holes as errors and via drills as informational,
+    irrespective of tenting. Other profiles retain advisory findings.
+    The clearance defaults to the shared overlap-only threshold. Optional
+    repair callers can select just component drills with ``include_vias``.
+    Text uses the same bounding box as the other silk checks.
     """
     require_shapely("silk-hole overlap geometry")
     from shapely import STRtree
 
     results = DRCResults(rules_checked=1)
     origin = getattr(pcb, "board_origin", None) or (0.0, 0.0)
-    danger = design_rules.silk_to_hole_danger_mm
+    danger = design_rules.silk_to_hole_danger_mm if design_rules is not None else None
     clearance = (
         SILK_HOLE_CLEARANCE_MM if danger is None else max(SILK_HOLE_CLEARANCE_MM, float(danger))
     )
-    severity = "warning" if danger is None else "error"
-
-    holes = list(iter_drill_holes(pcb.vias, pcb.footprints, origin))
+    # Keep each source's grade next to its geometry. The display label is
+    # also a finding identity and a footprint reference can contain any text.
+    holes = [
+        (geom, label, sides, grade)
+        for vias, footprints, grade in (
+            (pcb.vias if include_vias else (), (), "info" if danger is not None else "warning"),
+            ((), pcb.footprints, "error" if danger is not None else "warning"),
+        )
+        for geom, label, sides in iter_drill_holes(vias, footprints, origin)
+    ]
     if not holes:
         return results
 
-    tree = STRtree([geom for geom, _label, _sides in holes])
+    tree = STRtree([hole[0] for hole in holes])
     found: list[DRCViolation] = []
     for side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
         query = geom.buffer(clearance) if clearance > 0 else geom
         for idx in tree.query(query):
-            hole_geom, hole_label, hole_sides = holes[int(idx)]
+            hole_geom, hole_label, hole_sides, severity = holes[int(idx)]
             if side not in hole_sides:
                 continue
             if not silk_hits_hole(geom, hole_geom, clearance):

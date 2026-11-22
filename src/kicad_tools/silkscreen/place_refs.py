@@ -136,10 +136,8 @@ def _iter_drill_obstacles(pcb: PCB, include_vias: bool = True):
     vias (#9797).
     """
     for geom, label, sides in iter_drill_holes(
-        pcb.vias, pcb.footprints, getattr(pcb, "_board_origin", (0.0, 0.0))
+        pcb.vias if include_vias else (), pcb.footprints, getattr(pcb, "_board_origin", (0.0, 0.0))
     ):
-        if not include_vias and label.startswith("via at"):
-            continue
         label = f"drill {label}"
         for side in ("F", "B"):
             if side in sides:
@@ -180,20 +178,21 @@ def collect_apertures(
     return apertures
 
 
-def references_over_holes(pcb: PCB) -> set[str]:
+def references_over_holes(pcb: PCB, *, include_vias: bool = True) -> set[str]:
     """Footprint references whose reference text ``silk_hole_overlap`` flags.
 
     Feeds ``plan(only=...)`` / ``kct place-silk-refs --over-holes`` (Issue
     #9054) so a recipe can move exactly the references sitting on a drill,
     leaving every reviewed position that is already clear where it is.  Read
-    from the rule's own findings, so it can never name a different set.
+    from the rule's own findings. With ``include_vias=False``, only references
+    over a plated or non-plated component hole are selected.
     """
     from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
 
     suffix = " (reference)"
     return {
         violation.items[0][: -len(suffix)]
-        for violation in check_silk_hole_overlap(pcb).violations
+        for violation in check_silk_hole_overlap(pcb, include_vias=include_vias).violations
         if violation.items and violation.items[0].endswith(suffix)
     }
 

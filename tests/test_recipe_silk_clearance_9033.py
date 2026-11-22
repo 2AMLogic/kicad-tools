@@ -1,4 +1,4 @@
-"""The recipe silk clearance pass clears every ``silk_hole_overlap`` finding (#9033).
+"""The recipe silk clearance pass clears component drills and preserves via-only ink (#9033).
 
 ``kicad_tools.recipes.silk_clearance.clear_silk_over_holes`` is the shared
 post-route step the board recipes call once the routed vias exist: it clips
@@ -42,6 +42,14 @@ def _via(x: float, y: float) -> str:
         f'  (via (at {x} {y}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
         f'(net 1) (uuid "via-{x}-{y}"))\n'
     )
+
+
+def _mounting_hole(x: float, y: float) -> str:
+    return f"""(footprint "X:Mount" (layer "F.Cu") (at {x} {y})
+       (property "Reference" "MH{x}" (at 0 -2) (layer "F.Fab")
+          (effects (font (size 1 1) (thickness 0.15))))
+       (pad "" np_thru_hole circle (at 0 0) (size 0.5 0.5) (drill 0.5)
+          (layers "*.Cu" "*.Mask")))"""
 
 
 def _fp(body: str, *, ref: str = "U1", at: str = "130 130") -> str:
@@ -92,10 +100,10 @@ def _hole_findings(path: Path) -> list[tuple[str, ...]]:
 def test_clears_graphics_and_references_and_is_idempotent(tmp_path: Path):
     path = _write(
         tmp_path,
-        _via(130.0, 130.0)  # under the reference text
-        + _via(145.0, 145.0)  # under the outline line
+        _mounting_hole(130.0, 130.0)  # under the reference text
+        + _mounting_hole(145.0, 145.0)  # under the outline line
         + _fp(
-            # fp-relative: absolute (140..150, 145), crossed by the (145,145) via
+            # fp-relative: absolute (140..150, 145), crossed by the (145,145) mounting hole
             _line(10, 15, 20, 15, uid="over-line"),
             at="130 130",
         ),
@@ -117,10 +125,10 @@ def test_unclippable_graphic_fails_loud(tmp_path: Path):
     # An fp_arc over a drill cannot be clipped (the clipper skips arcs), so
     # the pass must refuse to ship silk the fab will remove.  The arc's
     # fp-relative start (0,0) is the footprint origin, i.e. absolute
-    # (130,130); the via drill sits 0.2 mm away, inside the 0.15 mm drill
+    # (130,130); the mounting-hole drill sits 0.2 mm away, inside the 0.25 mm drill
     # radius plus half the stroke width.
     path = _write(
-        tmp_path, _via(130.2, 130.0) + _fp(_arc(start="0 0", mid="0.2 -0.2", end="0.4 0"))
+        tmp_path, _mounting_hole(130.2, 130.0) + _fp(_arc(start="0 0", mid="0.2 -0.2", end="0.4 0"))
     )
 
     with pytest.raises(SilkClearanceError):
@@ -136,7 +144,23 @@ def test_free_silk_text_over_hole_fails_loud(tmp_path: Path):
         '(gr_text "3V3 SENSE" (at 130 130) (layer "F.SilkS")\n'
         "  (effects (font (size 1 1) (thickness 0.15)) (justify left)))\n"
     )
-    path = _write(tmp_path, _via(130.0, 130.0) + legend)
+    path = _write(tmp_path, _mounting_hole(130.0, 130.0) + legend)
 
     with pytest.raises(SilkClearanceError, match="3V3 SENSE"):
         clear_silk_over_holes(path)
+
+
+def test_via_only_ink_is_preserved_by_the_recipe(tmp_path):
+    path = _write(tmp_path, _via(130, 130) + _via(145, 145) + _fp(_line(10, 15, 20, 15)))
+    before = path.read_bytes()
+    assert clear_silk_over_holes(path) == (0, 0)
+    assert path.read_bytes() == before
+
+
+def test_mixed_recipe_moves_only_ink_on_a_component_drill(tmp_path):
+    path = _write(
+        tmp_path,
+        _via(130, 130) + _mounting_hole(145, 145) + _fp(_line(10, 15, 20, 15)),
+    )
+    assert clear_silk_over_holes(path) == (1, 0)
+    assert _hole_findings(path) == [("U1 (reference)", "via at (130.000, 130.000)")]

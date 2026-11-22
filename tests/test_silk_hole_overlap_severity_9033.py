@@ -1,10 +1,4 @@
-"""Fab-graded ``silk_hole_overlap`` severity: error under jlcpcb (Issue #9033).
-
-The fab's silkscreen-to-hole band is danger-only (0 warnings on both
-recorded boards), so a profile that sets ``silk_to_hole_danger_mm`` upgrades
-the rule's findings to errors at (at least) that clearance; ``None`` keeps
-the advisory warning every other manufacturer sees.
-"""
+"""JLCPCB grades silk over component drills as an error and via drills as info."""
 
 from __future__ import annotations
 
@@ -71,12 +65,27 @@ def test_jlcpcb_profile_wires_the_band():
     assert _other().silk_to_hole_danger_mm is None
 
 
-def test_silk_over_via_is_error_under_jlcpcb(tmp_path):
-    results = check_silk_hole_overlap(_load(tmp_path, _VIA + _silk(20.0)), _jlc())
-    assert [v.severity for v in results.violations] == ["error"]
-    assert results.violations[0].rule_id == "silk_hole_overlap"
-    assert results.violations[0].required_value == 0.0
-    assert "via" in results.violations[0].items[1]
+@pytest.mark.parametrize("profile", ["jlcpcb", "jlcpcb-tier1"])
+@pytest.mark.parametrize("tented", [True, False])
+def test_via_and_component_drills_are_graded_separately(tmp_path, profile, tented):
+    via = _VIA.replace(
+        "(net 0)",
+        f"(tenting (front {'yes' if tented else 'no'}) (back {'yes' if tented else 'no'})) (net 0)",
+    )
+    pth = (
+        _NPTH.replace("np_thru_hole", "thru_hole")
+        .replace('"MH1"', '"J1"')
+        .replace("(at 30 20)", "(at 40 20)")
+    )
+    pcb = _load(tmp_path, via + _NPTH + pth + _silk(20) + _silk(30) + _silk(40, "B.SilkS"))
+    rules = get_profile(profile).get_design_rules(layers=2, copper_oz=1)
+    findings = check_silk_hole_overlap(pcb, rules).violations
+    assert {(v.items[1], v.layer, v.severity) for v in findings} == {
+        ("via at (20.000, 20.000)", "F.SilkS", "info"),
+        ("MH1 pad 1 hole", "F.SilkS", "error"),
+        ("J1 pad 1 hole", "B.SilkS", "error"),
+    }
+    assert all(v.rule_id == "silk_hole_overlap" and v.required_value == 0.0 for v in findings)
 
 
 def test_silk_over_via_is_warning_under_other_manufacturer(tmp_path):
@@ -109,10 +118,10 @@ def test_npth_hole_is_error_under_jlcpcb(tmp_path):
     assert "MH1 pad 1" in results.violations[0].items[1]
 
 
-def test_back_side_silk_over_hole_is_error(tmp_path):
+def test_back_side_silk_over_via_is_info(tmp_path):
     """Holes pierce every layer, so B.SilkS ink over a drill is flagged too."""
     results = check_silk_hole_overlap(_load(tmp_path, _VIA + _silk(20.0, layer="B.SilkS")), _jlc())
-    assert [v.severity for v in results.violations] == ["error"]
+    assert [v.severity for v in results.violations] == ["info"]
 
 
 def test_silk_clear_of_holes_stays_clean(tmp_path):
@@ -121,19 +130,16 @@ def test_silk_clear_of_holes_stays_clean(tmp_path):
     ).violations
 
 
-def test_positive_band_buffers_the_hole(tmp_path):
-    """A nonzero danger clearance flags near-but-not-touching silk as error."""
+def test_positive_band_buffers_the_component_drill(tmp_path):
     rules = dataclasses.replace(_jlc(), silk_to_hole_danger_mm=0.3)
-    # Via drill radius 0.15 + stroke half-width 0.075: silk at x=20.35 sits
-    # ~0.125 mm from the drill edge -- clear at 0 mm, inside a 0.3 mm band.
-    results = check_silk_hole_overlap(_load(tmp_path, _VIA + _silk(20.35)), rules)
+    # 0.5 mm drill radius + 0.075 mm ink radius + 0.125 mm of air.
+    pcb = _load(tmp_path, _NPTH + _silk(30.7))
+    results = check_silk_hole_overlap(pcb, rules)
     assert [v.severity for v in results.violations] == ["error"]
     assert results.violations[0].required_value == 0.3
-    # The same board stays clean under the profile's real 0.0 band.
-    assert not check_silk_hole_overlap(_load(tmp_path, _VIA + _silk(20.35)), _jlc()).violations
+    assert not check_silk_hole_overlap(pcb, _jlc()).violations
 
 
-def test_tented_via_still_flagged_as_error(tmp_path):
-    """Tenting covers the annulus, not the drill: the finding stands (#8844)."""
-    results = check_silk_hole_overlap(_load(tmp_path, _VIA + _silk(20.0)), _jlc())
-    assert [v.severity for v in results.violations] == ["error"]
+def test_no_profile_keeps_the_advisory_geometry_query(tmp_path):
+    results = check_silk_hole_overlap(_load(tmp_path, _VIA + _silk(20.0)))
+    assert [v.severity for v in results.violations] == ["warning"]

@@ -807,13 +807,7 @@ class SilkscreenRepairer:
 
         pcb = PCB(parse_string(serialize_sexp(self.doc)))
         graphic = re.compile(r"(\((fp|gr)_[a-z]+\)$)|(^gr_(line|rect|circle|arc|poly|curve)$)")
-        for violation in check_silk_hole_overlap(pcb).violations:
-            if (
-                not include_vias
-                and len(violation.items) >= 2
-                and str(violation.items[1]).startswith("via at")
-            ):
-                continue
+        for violation in check_silk_hole_overlap(pcb, include_vias=include_vias).violations:
             text = " / ".join(violation.items)
             if graphic.search(violation.items[0]):
                 result.residual.append(text)
@@ -1401,9 +1395,7 @@ def legalize_silk(
         graphic = re.compile(r"(\((fp|gr)_[a-z]+\)$)|(^gr_(line|rect|circle|arc|poly|curve)$)")
         hole_residual: list[str] = []
         text_over_hole: list[str] = []
-        for violation in check_silk_hole_overlap(final_pcb).violations:
-            if len(violation.items) >= 2 and str(violation.items[1]).startswith("via at"):
-                continue
+        for violation in check_silk_hole_overlap(final_pcb, include_vias=False).violations:
             (hole_residual if graphic.search(violation.items[0]) else text_over_hole).append(
                 " / ".join(violation.items)
             )

@@ -288,17 +288,15 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "partial",
         True,
         ("silk_hole_overlap",),
-        "`silk_hole_overlap` (#8844) flags silk that *overlaps* a via/PTH/NPTH drill "
-        "circle, tented vias included -- a rule id under the `silkscreen` category. "
-        "Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance "
-        "but not touching is still unchecked, and text is tested as its bounding box "
-        "rather than glyph outlines. Observed 75 danger, not reproduced against the "
-        "live tool. Fab thresholds read 2026-11-17/18 (jlcdfm.com Alert value "
-        "panel, 4-layer, 2 oz outer copper): danger 0.13 mm / warning 0.18 mm "
-        "silk-to-hole, against kct's overlap-only threshold of 0 -- 27 kct "
-        "warnings vs 50 fab danger on that board. `SILK_HOLE_CLEARANCE_MM` is "
-        "shared with the silkscreen repair tool, so it is deliberately unchanged "
-        "(#9421).",
+        "JLCPCB profiles grade silk intersecting PTH, NPTH and mounting drills as an error; "
+        "via drills of either tenting state are informational (operator ruling on #9112). "
+        "In the 4-layer/2 oz Gerber replay (#8858, comment 6970004546), all 50 displayed "
+        "danger items were strokes at 0 mm over 0.3 or 0.4 mm via holes: 50 via, 0 component "
+        "holes. Board 01 separately position-matched a 0.04 mm danger to the R2.1 via "
+        "(#8858, comment 6963569039). The historical 50/0 (#8938) and 75/0 (#8838) "
+        "danger/warning totals have no per-item attribution. The fab's Alert value panel "
+        "on 2026-11-17/18 showed 0.13 mm danger and 0.18 mm warning; kct grades actual "
+        "overlap (0 mm) and measures text by bounding box (#9421).",
     ),
     ParityRow(
         "annular_ring",
