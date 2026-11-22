@@ -1409,8 +1409,8 @@ class PathResolution:
     #: that every source-to-sink route crosses, so they carry the full
     #: declared current however the loop splits it. ``segments`` stays
     #: empty -- the path is not resolved -- and the ampacity check never
-    #: reads this; ``pcb reinforce`` may anchor exactly these segments of an
-    #: eligible declaration. Empty when a same-net pour or arc exists (it
+    #: reads this. Placement can also use the intervals in ``loop_free_spans``
+    #: of an eligible declaration. Empty when a same-net pour or arc exists (it
     #: could bypass any of them) and for every other status.
     loop_free_segments: tuple[Segment, ...] = ()
 
@@ -1421,6 +1421,12 @@ class PathResolution:
     # Authored traces wholly inside the measured path copper carry no
     # independent width, but are accounted for by its declared path.
     overlaid_segments: tuple[Segment, ...] = ()
+    # A track crossing a via row can be in series only between its inner
+    # barrels. Keep those intervals separate from the whole-track allow-list.
+    loop_free_spans: dict[int, tuple[Segment, ...]] = field(default_factory=dict)
+    # Proved plated rows remain layer changes even when another part of the
+    # path is ambiguous. Their drill can match the requested wire anchor.
+    row_barrels: frozenset[tuple[float, float]] = frozenset()
 
     @property
     def covered_segments(self) -> tuple[Segment, ...]:
@@ -1607,6 +1613,8 @@ class _GraphEdge:
 
     segment: Segment | None = None  # None is real via barrel copper
     overlaid: tuple[Segment, ...] = ()
+    # Authored centreline contacts, before pad hubs and via rows contract nodes.
+    span: tuple[tuple[float, float], tuple[float, float]] | None = None
 
     def tracks(self) -> tuple[Segment, ...]:
         return (self.segment, *self.overlaid) if self.segment is not None else ()
@@ -1922,7 +1930,7 @@ def _build_graph(
                 else:
                     edge.overlaid += (seg,)
             else:
-                edge = _GraphEdge(seg)
+                edge = _GraphEdge(seg, span=(a[:2], b[:2]))
                 if on_row:
                     track_spans[span_key] = edge
                 edges.append((a, b, edge))
@@ -2899,7 +2907,27 @@ def _via_group_contacts_modeled(
                 and point_to_segment_distance(*station, *track.start, *track.end) <= _PAD_EPS
             ):
                 track_exits.append((_copper_node(station, bar.layer), other, edge))
-    if not _array_tracks_modeled(pcb, net_name, [s for _, s in bar_spans], pieces, track_exits):
+    # A cut just outside a barrel can leave the next piece's round cap
+    # touching the row. A continuous straight stroke of unchanged width has
+    # the same footprint however many end-to-end records describe it.
+    ends: dict[tuple[float, float], list[Segment]] = {}
+    for seg in _net_segments(pcb, net_name):
+        for point in (seg.start, seg.end):
+            ends.setdefault(_node_key(point), []).append(seg)
+    bar_tracks = {id(s): s for _, s in bar_spans}
+    pending = list(bar_tracks.values())
+    while pending:
+        seg = pending.pop()
+        for point in (seg.start, seg.end):
+            for neighbour in ends[_node_key(point)]:
+                if (
+                    id(neighbour) not in bar_tracks
+                    and seg.width == neighbour.width
+                    and _continuous_bar(seg, neighbour)
+                ):
+                    bar_tracks[id(neighbour)] = neighbour
+                    pending.append(neighbour)
+    if not _array_tracks_modeled(pcb, net_name, list(bar_tracks.values()), pieces, track_exits):
         return False
     for via in pcb.vias:
         if not _matches_net(via, net, net_name) or _node_key(via.position) in group:
@@ -2994,7 +3022,7 @@ def _edge_route(
 
 def _loop_free_path_segments(
     graph: _CopperGraph, start: _Node, goal: _Node, arrays: Sequence[_ViaArray]
-) -> tuple[Segment, ...]:
+) -> tuple[tuple[Segment, ...], dict[int, list[tuple[float, float]]]]:
     """Path segments every ``start`` -> ``goal`` route crosses (Issue #9725).
 
     Under the same contraction as the cycle test, an edge whose removal
@@ -3003,24 +3031,39 @@ def _loop_free_path_segments(
     resolved path. A segment qualifies only when EVERY modeled piece of it is
     such an edge, so a segment the loop rides for part of its length, an
     off-path spur and copper inside the loop are all excluded. Returned in
-    route order from ``start``.
+    route order from ``start``, alongside the modeled series intervals along
+    each original track, measured from its start.
     """
     roots, ends = _contracted_component(graph, start, arrays)
     source, target = roots.get(start, start), roots.get(goal, goal)
     route = _edge_route(ends, source, target)
     if route is None:
-        return ()
+        return (), {}
     separating = {edge for _, edge, _ in route if _edge_route(ends, source, target, edge) is None}
     pieces: dict[int, list[_GraphEdge]] = {}
     for edge in ends:
         if edge.segment is not None:
             pieces.setdefault(id(edge.segment), []).append(edge)
     found: dict[int, Segment] = {}
+    series: dict[int, list[tuple[float, float]]] = {}
     for _, edge, _ in route:
         seg = edge.segment
-        if seg is not None and all(piece in separating for piece in pieces[id(seg)]):
+        if seg is None or edge not in separating:
+            continue
+        if edge.span:
+            first, last = sorted(math.dist(seg.start, _track_station(seg, p)) for p in edge.span)
+            series.setdefault(id(seg), []).append((first, last))
+        if all(piece in separating for piece in pieces[id(seg)]):
             found.setdefault(id(seg), seg)
-    return tuple(found.values())
+    for track_id, intervals in series.items():
+        merged: list[tuple[float, float]] = []
+        for first, last in sorted(intervals):
+            if merged and first <= merged[-1][1] + _PAD_EPS:
+                merged[-1] = (merged[-1][0], max(last, merged[-1][1]))
+            else:
+                merged.append((first, last))
+        series[track_id] = merged
+    return tuple(found.values()), series
 
 
 def _unmodeled_bonds(
@@ -3873,10 +3916,41 @@ def resolve_current_path(
             pcb, physical_contacts(), source_pin, sink_pin, unmodeled_bonds
         )
 
-    def proved_series_segments(indices: set[int]) -> tuple[Segment, ...]:
-        segment_ids = {id(pcb.segments[i]) for i in indices}
-        candidates = _loop_free_path_segments(adjacency, start, goal, contracted)
-        return tuple(seg for seg in candidates if id(seg) in segment_ids)
+    def proved_series_segments(
+        evidence: PhysicalPathSegments,
+    ) -> tuple[tuple[Segment, ...], dict[int, tuple[Segment, ...]]]:
+        candidates, series = _loop_free_path_segments(adjacency, start, goal, contracted)
+        segment_ids = {id(pcb.segments[i]) for i in evidence.unavoidable}
+        whole = tuple(seg for seg in candidates if id(seg) in segment_ids)
+        partial = {}
+        for index, intervals in evidence.partial.items():
+            seg = pcb.segments[index]
+            if id(seg) not in series:
+                continue
+            # A proved via row can occupy the end of an otherwise series
+            # track. An unrelated track or via touching midway still
+            # withholds that track, even if a shorter tail is a bridge.
+            boundaries = {_node_key(seg.start), _node_key(seg.end)}
+            boundaries.update(
+                _node_key(_track_station(seg, pos))
+                for group in via_groups
+                for pos, tracks in group.track_contacts.items()
+                if id(seg) in tracks
+            )
+            spans = tuple(
+                replace(seg, start=a, end=b)
+                for a, b in intervals
+                if _node_key(a) in boundaries
+                and _node_key(b) in boundaries
+                and any(
+                    low - _PAD_EPS <= math.dist(seg.start, a)
+                    and math.dist(seg.start, b) <= high + _PAD_EPS
+                    for low, high in series[id(seg)]
+                )
+            )
+            if spans:
+                partial[id(seg)] = spans
+        return whole, partial
 
     # Mid-path layer changes carried by several barrels (Issue #9725) are
     # contracted like endpoint arrays; only groups the declared path changes
@@ -3935,8 +4009,9 @@ def resolve_current_path(
         # current (Issue #9725). An unmodeled via-group bypass, pour or arc
         # makes that centerline proof incomplete.
         loop_free: tuple[Segment, ...] = ()
+        loop_free_spans: dict[int, tuple[Segment, ...]] = {}
         if not unmodeled_group and not unmodeled_copper(pcb, spec.net_name):
-            loop_free = proved_series_segments(physical_spans().unavoidable)
+            loop_free, loop_free_spans = proved_series_segments(physical_spans())
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,
@@ -3945,6 +4020,8 @@ def resolve_current_path(
             sink=sink,
             witness=witness,
             loop_free_segments=loop_free,
+            loop_free_spans=loop_free_spans,
+            row_barrels=frozenset(pos for group in via_groups for pos in group.track_contacts),
         )
 
     # A parallel arm the BFS chain did not ride still owns its pad-internal
@@ -4024,6 +4101,7 @@ def resolve_current_path(
     if missing_bonds:
         evidence = physical_spans(missing_bonds)
         if evidence.witness:
+            loop_free, loop_free_spans = proved_series_segments(evidence)
             return PathResolution(
                 spec=spec,
                 status=STATUS_AMBIGUOUS,
@@ -4031,7 +4109,9 @@ def resolve_current_path(
                 source=source,
                 sink=sink,
                 witness=evidence.witness,
-                loop_free_segments=proved_series_segments(evidence.unavoidable),
+                loop_free_segments=loop_free,
+                loop_free_spans=loop_free_spans,
+                row_barrels=frozenset(pos for group in via_groups for pos in group.track_contacts),
             )
 
     on_path = {id(segment) for segment in path_segments}
@@ -4199,7 +4279,9 @@ def reinforcement_eligible_segment_ids(pcb: PCB, specs: Sequence[CurrentPathSpec
             net by the caller, typically).
 
     Returns:
-        The set of ``id(segment)`` values that may be anchored.
+        The set of ``id(segment)`` values eligible over their whole length.
+        A track with only a proved inter-row interval has no entry here.
+        Placement uses :attr:`PathResolution.loop_free_spans` for that case.
     """
     eligible: set[int] = set()
     partition = reinforcement_path_resolutions(pcb, specs)
@@ -4257,7 +4339,9 @@ def reinforcement_path_resolutions(
         resolution = resolve_current_path(pcb, spec)
         if not resolution.ok:
             unresolved.append(resolution)
-            if spec.reinforcement_eligible and resolution.loop_free_segments:
+            if spec.reinforcement_eligible and (
+                resolution.loop_free_segments or resolution.loop_free_spans
+            ):
                 partial.append(resolution)
         elif spec.reinforcement_eligible:
             eligible.append(resolution)

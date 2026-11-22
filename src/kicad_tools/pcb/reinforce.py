@@ -78,6 +78,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import pairwise
 from typing import Any
 
 from kicad_tools.core.geometry import point_in_polygon, rotate_pad_offset
@@ -94,7 +95,7 @@ from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     PathResolution,
-    reinforcement_eligible_segment_ids,
+    ReinforcementPathResolutions,
     reinforcement_path_resolutions,
 )
 from kicad_tools.router.optimizer.algorithms import merge_collinear
@@ -1571,6 +1572,63 @@ def resolve_min_wire_length_mm(
     return None
 
 
+def _reinforcement_tracks(
+    segments: list[Segment], partition: ReinforcementPathResolutions
+) -> tuple[list[Segment], list[PathResolution]]:
+    """Split the placement view at all declarations' proved interval ends.
+
+    The excluded pieces remain same-net end copper for clearance. The PCB and
+    the whole-track identities returned by the resolver stay intact.
+    """
+    resolutions = [
+        *partition.eligible,
+        *(replace(res, segments=res.loop_free_segments) for res in partition.partial),
+    ]
+    boundaries: dict[int, set[tuple[float, float]]] = {}
+    for resolution in resolutions:
+        for source, spans in resolution.loop_free_spans.items():
+            boundaries.setdefault(source, set()).update(p for s in spans for p in (s.start, s.end))
+    if not boundaries:
+        return segments, resolutions
+
+    pieces: dict[int, list[Segment]] = {}
+    station_indices: dict[int, dict[tuple[float, float], int]] = {}
+    placed_tracks: list[Segment] = []
+    for seg in segments:
+        points = boundaries.get(id(seg))
+        if points is None:
+            placed_tracks.append(seg)
+            continue
+        stops = sorted(points | {seg.start, seg.end}, key=lambda p: math.dist(seg.start, p))
+        station_indices[id(seg)] = {point: index for index, point in enumerate(stops)}
+        pieces[id(seg)] = [replace(seg, start=a, end=b) for a, b in pairwise(stops)]
+        placed_tracks.extend(pieces[id(seg)])
+
+    def end_piece(seg: Segment, point: tuple[float, float]) -> Segment:
+        if id(seg) not in pieces:
+            return seg
+        return pieces[id(seg)][0 if point == seg.start else -1]
+
+    placed_resolutions = []
+    for res in resolutions:
+        covered = [piece for s in res.covered_segments for piece in pieces.get(id(s), [s])]
+        for source, spans in res.loop_free_spans.items():
+            stations = station_indices[source]
+            for span in spans:
+                first, last = sorted((stations[span.start], stations[span.end]))
+                covered.extend(pieces[source][first:last])
+        joints = tuple(
+            replace(
+                j, first=end_piece(j.first, j.span.start), second=end_piece(j.second, j.span.end)
+            )
+            for j in res.cap_joints
+        )
+        placed_resolutions.append(
+            replace(res, segments=tuple(covered), overlaid_segments=(), cap_joints=joints)
+        )
+    return placed_tracks, placed_resolutions
+
+
 def reinforce_net(
     pcb: PCB,
     net_name: str,
@@ -1797,6 +1855,7 @@ def reinforce_net(
     # modes, never silently skipped (Issue #8742).
     net_path_specs = [spec for spec in (current_paths or ()) if spec.net_name == net_name]
     partition = reinforcement_path_resolutions(pcb, net_path_specs) if net_path_specs else None
+    eligible_resolutions = None
     if partition is not None:
         partial_ids = {id(res) for res in partition.partial}
         result.unresolved_paths = [
@@ -1805,10 +1864,15 @@ def reinforce_net(
                 status=res.status,
                 reason=res.reason,
                 witness=res.witness,
-                anchored_segments=(len(res.loop_free_segments) if id(res) in partial_ids else 0),
+                anchored_segments=(
+                    len(res.loop_free_segments) + sum(map(len, res.loop_free_spans.values()))
+                    if id(res) in partial_ids
+                    else 0
+                ),
             )
             for res in partition.unresolved
         ]
+        net_segments, eligible_resolutions = _reinforcement_tracks(net_segments, partition)
 
     if anchor_mode == ANCHOR_MODE_ENDS:
         if layer is not None and layer not in {s.layer for s in net_segments}:
@@ -1820,14 +1884,7 @@ def reinforce_net(
             target_net_number=target_net_number,
             # A loop-ambiguous eligible path lends only its loop-free
             # segments (Issue #9725); the looped part stays unhandled.
-            eligible_resolutions=(
-                [
-                    *partition.eligible,
-                    *(replace(res, segments=res.loop_free_segments) for res in partition.partial),
-                ]
-                if partition is not None
-                else None
-            ),
+            eligible_resolutions=eligible_resolutions,
             layer=layer,
             all_runs=all_runs,
             min_wire_length_mm=resolve_min_wire_length_mm(
@@ -1863,8 +1920,8 @@ def reinforce_net(
     original_ids: dict[int, int] = {}
     runs = _chain_polylines(by_layer[target_layer], original_ids=original_ids)
     classified_runs: list[tuple[list[Segment], str | None]] = []
-    if net_path_specs:
-        allowed_ids = reinforcement_eligible_segment_ids(pcb, net_path_specs)
+    if eligible_resolutions is not None:
+        allowed_ids = {id(seg) for res in eligible_resolutions for seg in res.covered_segments}
         excluded_reason = (
             "excluded by declared current-path intent (Issue #4980): not fully "
             "covered by a resolved, reinforcement-eligible CurrentPathSpec for "

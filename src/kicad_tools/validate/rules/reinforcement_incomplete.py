@@ -195,6 +195,7 @@ class _WirePlan:
 
     resolved: dict[str, list[PathResolution]] = field(default_factory=dict)
     located: dict[str, dict[str, list[Segment]]] = field(default_factory=dict)
+    row_barrels: dict[str, set[_Point]] = field(default_factory=dict)
     no_wire: list[PathResolution] = field(default_factory=list)
     skipped: list[PathResolution] = field(default_factory=list)
 
@@ -331,6 +332,7 @@ class ReinforcementIncompleteRule(DRCRule):
                 end_offset,
                 results,
                 located=plan.located.get(net),
+                row_barrels=plan.row_barrels.get(net),
                 collector=collector,
             )
 
@@ -347,8 +349,12 @@ class ReinforcementIncompleteRule(DRCRule):
         from the board geometry (:meth:`_locate_wire`).
         """
         plan = _WirePlan()
-        for res in partition.eligible:
-            plan.resolved.setdefault(res.spec.net_name, []).append(res)
+        tracks, placement = rf._reinforcement_tracks(list(pcb.segments), partition)
+        for res in placement:
+            if res.ok:
+                plan.resolved.setdefault(res.spec.net_name, []).append(res)
+            elif res.row_barrels:
+                plan.row_barrels.setdefault(res.spec.net_name, set()).update(res.row_barrels)
         for res in partition.unresolved:
             if not res.spec.reinforcement_eligible:
                 continue
@@ -361,7 +367,7 @@ class ReinforcementIncompleteRule(DRCRule):
                 plan.skipped.append(res)
                 continue
             taken = {id(s) for r in plan.resolved.get(net, []) for s in r.covered_segments}
-            located, any_strip, any_anchor = self._locate_wire(pcb, rf, net, taken)
+            located, any_strip, any_anchor = self._locate_wire(pcb, rf, net, taken, tracks)
             if located:
                 plan.located[net] = located
             elif not any_strip and not any_anchor:
@@ -378,7 +384,7 @@ class ReinforcementIncompleteRule(DRCRule):
         return plan
 
     def _locate_wire(
-        self, pcb: PCB, rf: Any, net: str, taken: set[int]
+        self, pcb: PCB, rf: Any, net: str, taken: set[int], tracks: list[Segment]
     ) -> tuple[dict[str, list[Segment]], bool, bool]:
         """Locate the wire copper of ``net`` from its mask strips and anchors.
 
@@ -405,7 +411,7 @@ class ReinforcementIncompleteRule(DRCRule):
                 )
         located: dict[str, list[Segment]] = {}
         any_strip = False
-        for seg in pcb.segments:
+        for seg in tracks:
             if seg.net_number != net_number or id(seg) in taken or rf._seg_length(seg) <= 1e-9:
                 continue
             mask_layer = rf.MASK_LAYER_FOR_COPPER.get(seg.layer)
@@ -699,6 +705,7 @@ class ReinforcementIncompleteRule(DRCRule):
         end_offset: float,
         results: DRCResults,
         located: dict[str, list[Segment]] | None = None,
+        row_barrels: set[_Point] | None = None,
         collector: list[WiredLeg] | None = None,
     ) -> None:
         from kicad_tools.core.geometry import rotate_pad_offset
@@ -724,7 +731,7 @@ class ReinforcementIncompleteRule(DRCRule):
             return
 
         # --- layer-change vias belong to the path, not to the anchors ------
-        change_vias: list[_Point] = []
+        change_vias = list(row_barrels or ())
         changes: dict[tuple[float, float], Any] = {}
         for res in resolutions:
             for change in res.layer_changes:

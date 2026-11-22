@@ -21,7 +21,7 @@ import re
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
-from itertools import pairwise
+from itertools import groupby, pairwise
 from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 if TYPE_CHECKING:
@@ -583,6 +583,9 @@ def _junction_path(
 
 class PhysicalPathSegments(NamedTuple):
     unavoidable: set[int]
+    # For a partly shunted track, the contiguous centreline intervals that
+    # every source-to-sink path crosses, in authored track order.
+    partial: dict[int, list[tuple[tuple[float, float], tuple[float, float]]]]
     witness: dict[str, object]
 
 
@@ -647,19 +650,28 @@ def physical_path_segments(
         footprint = pcb.footprints[footprint_index]
         pads[(footprint.reference, footprint.pads[pad_index].number)] = node
     if source not in pads or sink not in pads:
-        return PhysicalPathSegments(set(), {})
+        return PhysicalPathSegments(set(), {}, {})
     start, target = pads[source], pads[sink]
     adjacency = {node: {other for other, _ in edges} for node, edges in graph.adjacency.items()}
     path = _junction_path(adjacency, start, target)
     bridges = _simple_graph_bridges(adjacency) & {_edge_pair(a, b) for a, b in pairwise(path)}
-    spans = {
-        contacts.items[index].key[1]: {_edge_pair(a, b) for a, b, _ in pieces}
-        for index, pieces in graph.track_pieces.items()
-        if contacts.items[index].key[0] == "segment"
-    }
-    unavoidable = {index for index, pieces in spans.items() if pieces <= bridges}
+    unavoidable: set[int] = set()
+    partial: dict[int, list[tuple[tuple[float, float], tuple[float, float]]]] = {}
+    for item, pieces in graph.track_pieces.items():
+        kind, index = contacts.items[item].key
+        if kind != "segment":
+            continue
+        if all(_edge_pair(a, b) in bridges for a, b, _ in pieces):
+            unavoidable.add(index)
+            continue
+        for in_series, group in groupby(pieces, key=lambda p: _edge_pair(p[0], p[1]) in bridges):
+            if in_series:
+                run = list(group)
+                partial.setdefault(index, []).append(
+                    (graph.points[run[0][0]], graph.points[run[-1][1]])
+                )
     if not unmodeled_bonds:
-        return PhysicalPathSegments(unavoidable, {})
+        return PhysicalPathSegments(unavoidable, partial, {})
 
     owners = graph.node_items
     modeled = {
@@ -678,9 +690,10 @@ def physical_path_segments(
             alternative = _junction_path(adjacency, start, target, skip=edge)
             return PhysicalPathSegments(
                 unavoidable,
+                partial,
                 _physical_loop_witness(graph, contacts, modeled_path, alternative, index),
             )
-    return PhysicalPathSegments(unavoidable, {})
+    return PhysicalPathSegments(unavoidable, partial, {})
 
 
 def _two_edge_connected_labels(

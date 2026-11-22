@@ -1032,6 +1032,134 @@ def test_partial_reinforcement_respects_declared_ineligibility():
     assert not reinforcement_eligible_segment_ids(pcb, [spec])
 
 
+def _straight_lane_between_rows(stations, *, bypass=False, cut=False, footprint=None):
+    """A series lane between two via rows, with a genuine loop on the front."""
+    pcb = PCB.create(width=235, height=90, layers=4, center=False)
+    for ref, x in (("J1", 12), ("J2", 218)):
+        if footprint is None:
+            _add_pad_footprint(pcb, ref=ref, x=x, y=55, net="P")
+        else:
+            pcb.add_footprint_from_file(footprint, ref, x, 55)
+            pcb.assign_net_to_footprint_pad(ref, "1", "P")
+    for x in (43, 45.5, 48, 172, 174.5, 177):
+        pcb.add_via(x, 55, size=PAD, drill=DRILL, net="P")
+    for a, b in ((12, 18), (18, 28), (28, 48), (172, 218)):
+        pcb.add_trace((a, 55), (b, 55), width=2, layer="F.Cu", net="P")
+    for a, b in pairwise(((18, 55), (18, 67), (28, 67), (28, 55))):
+        pcb.add_trace(a, b, width=0.8, layer="F.Cu", net="P")
+    for a, b in pairwise(stations):
+        parts = ((a, 105), (115, b)) if cut and a < 105 < 115 < b else ((a, b),)
+        for left, right in parts:
+            pcb.add_trace((left, 55), (right, 55), width=3, layer="B.Cu", net="P")
+    if bypass:
+        for a, b in pairwise(((43, 55), (43, 72), (177, 72), (177, 55))):
+            pcb.add_trace(a, b, width=1, layer="B.Cu", net="P")
+    return pcb
+
+
+@pytest.mark.parametrize("mode", ["ends", "spaced"])
+@pytest.mark.parametrize("reverse_track", [False, True])
+def test_series_lane_between_rows_is_independent_of_track_boundaries(mode, reverse_track):
+    from kicad_tools.pcb.reinforce import reinforce_net
+
+    reference = None
+    for stations in (
+        (43, 45.5, 48, 172, 174.5, 177),
+        (43, 177),
+        (43, 56, 164, 177),
+        (43, 48.25, 48.5, 171.5, 171.75, 177),
+    ):
+        if reverse_track:
+            stations = stations[::-1]
+        pcb = _straight_lane_between_rows(stations)
+        specs = [_spec(), replace(_spec(source="J2", sink="J1"), name="reverse")]
+        tracks = list(pcb.segments)
+        result = reinforce_net(
+            pcb,
+            "P",
+            layer="B.Cu",
+            current_paths=specs,
+            anchor_mode=mode,
+            all_runs=True,
+            dry_run=True,
+        )
+        assert [u.status for u in result.unresolved_paths] == ["ambiguous", "ambiguous"]
+        anchors = sorted((p.x, p.y) for p in result.placed)
+        assert len(anchors) >= 2 and all(48 <= x <= 172 and y == 55 for x, y in anchors)
+        if mode == "ends":
+            (leg,) = [leg for leg in result.legs if leg.anchors]
+            assert leg.length_mm == pytest.approx(124)
+            assert len(anchors) == 2
+            assert set(leg.paths) == {"force", "reverse"}
+        if reference is None:
+            reference = anchors
+        assert anchors == reference
+        assert [id(s) for s in pcb.segments] == [id(s) for s in tracks]
+        if len(stations) == 2:
+            assert id(tracks[-1]) not in reinforcement_eligible_segment_ids(pcb, specs)
+
+
+def test_series_lane_shared_by_declarations_ends_at_each_terminal_row():
+    from kicad_tools.pcb.reinforce import reinforce_net
+
+    reference = None
+    for stations in ((43, 45.5, 48, 98, 100.5, 103, 172, 174.5, 177), (43, 177)):
+        pcb = _straight_lane_between_rows(stations)
+        _add_pad_footprint(pcb, ref="J3", x=98, y=35, net="P")
+        for x in (98, 100.5, 103):
+            pcb.add_via(x, 55, size=PAD, drill=DRILL, net="P")
+        pcb.add_trace((98, 55), (103, 55), width=2, layer="F.Cu", net="P")
+        pcb.add_trace((98, 55), (98, 35), width=2, layer="F.Cu", net="P")
+        specs = [_spec(), replace(_spec(sink="J3"), name="tap")]
+        result = reinforce_net(pcb, "P", current_paths=specs, layer="B.Cu", dry_run=True)
+        legs = sorted((leg.length_mm, sorted(leg.paths)) for leg in result.legs if leg.anchors)
+        assert len(legs) == 2
+        assert [names for _, names in legs] == [["force", "tap"], ["force"]]
+        if reference is None:
+            reference = legs
+        assert legs == reference
+
+
+@pytest.mark.parametrize(
+    "stations", [(43, 177), (43, 45.5, 48, 172, 174.5, 177), (43, 56, 164, 177)]
+)
+def test_saved_inter_row_wire_checks_its_own_ends_and_drills(tmp_path, stations):
+    from kicad_tools.pcb.reinforce import reinforce_net
+    from kicad_tools.validate.rules.reinforcement_incomplete import ReinforcementIncompleteRule
+    from tests.test_pcb_reinforce import _write_single_pad_footprint_lib
+
+    pcb = _straight_lane_between_rows(stations, footprint=_write_single_pad_footprint_lib(tmp_path))
+    result = reinforce_net(pcb, "P", current_paths=[_spec()], layer="B.Cu", dry_run=False)
+    assert len(result.placed) == 2
+    board = tmp_path / "series.kicad_pcb"
+    pcb.save(board)
+    written = PCB.load(board)
+    rule = ReinforcementIncompleteRule([_spec()])
+    design_rules = _design_rules_2oz()
+    assert not rule.check(written, design_rules).violations
+    (leg,) = rule.fully_wired_legs(written, design_rules)
+    assert sorted((leg.points[0], leg.points[-1])) == [(48, 55), (172, 55)]
+
+    # A missing wire hole cannot be supplied by the nearby plated barrels.
+    hole = next(v for v in written.vias if v.drill > DRILL)
+    written.remove_vias([hole])
+    assert not rule.fully_wired_legs(written, design_rules)
+    assert any("[a]" in v.message for v in rule.check(written, design_rules).violations)
+
+
+@pytest.mark.parametrize("defect", ["bypass", "cut"])
+@pytest.mark.parametrize("stations", [(43, 177), (43, 45.5, 48, 172, 174.5, 177)])
+def test_parallel_return_or_cut_leaves_the_lane_unanchored(stations, defect):
+    from kicad_tools.pcb.reinforce import reinforce_net
+
+    pcb = _straight_lane_between_rows(stations, **{defect: True})
+    result = reinforce_net(
+        pcb, "P", layer="B.Cu", current_paths=[_spec()], all_runs=True, dry_run=True
+    )
+    assert not result.placed
+    assert result.unresolved_paths[0].status == ("unresolved" if defect == "cut" else "ambiguous")
+
+
 def test_unmodeled_copper_withholds_partial_reinforcement():
     """A same-net pour may bypass any 'bridge': nothing is loop-free then."""
     pcb = _lane_with_loop_and_spur()
