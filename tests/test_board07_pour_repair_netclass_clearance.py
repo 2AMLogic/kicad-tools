@@ -76,7 +76,14 @@ def generate_design_mod():
     return _load_module("board_07_generate_design_6736", BOARD_DIR / "generate_design.py")
 
 
-def _fixture(shape: str, rratio: float, centre: tuple[float, float]) -> str:
+def _fixture(
+    shape: str,
+    rratio: float,
+    centre: tuple[float, float],
+    *,
+    adjacent_net: tuple[int, str] = (2, "GND"),
+    adjacent_size: tuple[float, float] = (GND_SIZE, GND_SIZE),
+) -> str:
     gx, gy = centre[0] - STRANDED[0], centre[1] - STRANDED[1]
     return f"""(kicad_pcb
   (version 20240108)
@@ -101,8 +108,8 @@ def _fixture(shape: str, rratio: float, centre: tuple[float, float]) -> str:
     (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-u1"))
     (pad "36" smd circle (at 0 0) (size 0.25 0.25) (layers "F.Cu" "F.Mask") \
 (net 1 "+1V2"))
-    (pad "24" smd {shape} (at {gx:.4f} {gy:.4f}) (size {GND_SIZE} {GND_SIZE}) \
-(layers "F.Cu" "F.Mask") (roundrect_rratio {rratio}) (net 2 "GND"))
+    (pad "24" smd {shape} (at {gx:.4f} {gy:.4f}) (size {adjacent_size[0]} {adjacent_size[1]}) \
+(layers "F.Cu" "F.Mask") (roundrect_rratio {rratio}) (net {adjacent_net[0]} "{adjacent_net[1]}"))
   )
   (footprint "Capacitor_THT:CP_Radial"
     (layer "F.Cu")
@@ -199,3 +206,26 @@ def test_a_legal_diagonal_stub_is_still_taken(generate_design_mod, tmp_path, cap
     segments, new_vias = _new_copper(before, board.read_text())
     assert [(v.x, v.y) for v in new_vias] == [(140.99, 140.99)]
     assert [(s.x1, s.y1, s.x2, s.y2) for s in segments] == [(140.0, 140.0, 140.99, 140.99)]
+
+
+def test_pour_repair_keeps_diagonal_stubs_out_of_an_adjacent_same_net_pad_slit(
+    generate_design_mod, tmp_path, capsys
+):
+    # The seed-42 Board 07 repair emits two 45-degree GND stubs beside pads
+    # with this size and pitch. Their copper clears the pad by only 0.137132 mm.
+    centre = (STRANDED[0] + 0.8, STRANDED[1])
+    size = (0.3, 0.7)
+    source = _fixture("rect", 0.25, centre, adjacent_net=(1, "+1V2"), adjacent_size=size)
+    board = tmp_path / "adjacent_ground_pad.kicad_pcb"
+    board.write_text(source)
+    pad = make_pad("rect", *size, cx=centre[0], cy=centre[1])
+    original_stub = KSegment(*STRANDED, 140.99, 140.99, 0.15)
+    assert copper_gap(original_stub, pad) == pytest.approx(0.137132, abs=1e-6)
+
+    generate_design_mod._repair_pour_connectivity(board, ["+1V2"])
+    assert "UNREPAIRED" not in capsys.readouterr().out
+    segments, vias = _new_copper(source, board.read_text())
+    assert segments and vias
+    for segment in segments:
+        gap = copper_gap(segment, pad)
+        assert gap <= 0 or gap >= 0.15 - 1e-6

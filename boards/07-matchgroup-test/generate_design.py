@@ -939,6 +939,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         copper_gap,
     )
     from kicad_tools.router.via_clearance import (
+        SAME_NET_BAND_UNION_EPS_MM,
+        SAME_NET_BAND_WRITE_SLACK_MM,
         same_net_band_edges,
         same_net_band_seat_ok,
         same_net_trace_band_clear,
@@ -1038,6 +1040,9 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # resolves for this board's stackup, from the one shared resolver (never
     # literals; a missing profile entry disables the band, 0.0).
     SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
+    pad_slit_limit = (
+        SAME_NET_PAD_GAP_MM + SAME_NET_BAND_WRITE_SLACK_MM if SAME_NET_PAD_GAP_MM else 0.0
+    )
 
     # Segments: (geom, net, layer)
     seg_index: list[tuple] = []
@@ -1217,10 +1222,18 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         path = centreline.buffer(width / 2.0)
         kseg = KSegment(x1=p0[0], y1=p0[1], x2=p1[0], y2=p1[1], width=width)
         for entry in pad_index:
-            geom, pnet, layers, _drill_r, (px, py) = entry[:5]
-            if pnet != net and layer in layers:
-                cheap = centreline.distance(Point(px, py)) - width / 2.0 - entry[9]
+            _geom, pnet, layers, drill_r, (px, py), _name, is_th = entry[:7]
+            if layer not in layers:
+                continue
+            cheap = centreline.distance(Point(px, py)) - width / 2.0 - entry[9]
+            if pnet != net:
                 if _pad_too_close(kseg, entry, _pair_clear(net, pnet), cheap):
+                    return False
+            elif not is_th and not drill_r and cheap < pad_slit_limit:
+                # A stub may enter its own SMD pad, or pass outside the fab's
+                # pad-spacing band. Measure the actual rounded/rotated land.
+                gap = copper_gap(kseg, entry[8])
+                if SAME_NET_BAND_UNION_EPS_MM < gap < pad_slit_limit:
                     return False
         for geom, snet, lay in seg_index:
             if snet != net and lay == layer and path.distance(geom) < _pair_clear(net, snet):
