@@ -278,3 +278,37 @@ def test_lone_plus_suffix_net_without_partner_still_moves(tmp_path):
     pcb = _pair_board(tmp_path, "VCC+", "SIG2")
     result = relocate_pad_edge_vias(pcb, _RULES)
     assert len(result.moved) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #9891: ring-dam mode (mask_to_copper's copper-ring view)
+# ---------------------------------------------------------------------------
+
+
+def test_ring_dam_mode_moves_a_drill_legal_ring_encroacher(tmp_path):
+    """A via whose drill clears the dam but whose copper ring reaches into the
+    aperture is moved only in ``ring_dam_mm`` mode."""
+    # Drill gap = 100.8 - 0.15 - 100.5 = 0.15 >= dam 0.1 (plain rule silent);
+    # ring gap = 100.8 - 0.3 - 100.5 = 0.0 < ring dam.
+    pcb = _load(tmp_path, _EDGE_VIA.replace("100.65", "100.8"))
+    assert _edge_warnings(pcb) == []
+
+    plain = relocate_pad_edge_vias(pcb, _RULES)
+    assert plain.moved == [] and plain.unresolvable == []
+
+    ring = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)
+    assert [m.kind for m in ring.moved] == ["pad-edge"]
+    assert not ring.unresolvable
+    (via,) = pcb.vias
+    # Ring edge clears 0.09: x - 0.3 - 100.5 >= 0.09, on the 0.025 step grid.
+    assert via.position[1] == pytest.approx(100.0)
+    assert via.position[0] == pytest.approx(100.9, abs=0.03)
+    # The move must not create a plain via_at_pad_edge finding either.
+    assert _edge_warnings(pcb) == []
+
+
+def test_ring_dam_mode_leaves_a_ring_legal_via_alone(tmp_path):
+    pcb = _load(tmp_path, _EDGE_VIA.replace("100.65", "100.95"))
+    ring = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)
+    assert ring.moved == [] and ring.unresolvable == []
+    assert pcb.vias[0].position[0] == pytest.approx(100.95)

@@ -57,7 +57,7 @@ _INSIDE_EPS_MM = 0.015
 class MaskRepairAction:
     """One applied (or, in a dry run, predicted) segment-end move."""
 
-    action: str  # always "recentre"
+    action: str  # "recentre" or "pull_in" (issue #9891)
     uuid: str  # the segment's uuid
     pad_uuid: str
     pad_ref: str
@@ -72,10 +72,16 @@ class MaskRepairAction:
     # Same-net segments whose end shared the moved point and moved with it:
     # (segment uuid, "start"|"end").
     joined: list[tuple[str, str]] = field(default_factory=list)
+    # Which of the primary segment's own ends moved ("start"|"end"); with
+    # ``joined`` this names every endpoint an undo restores, so a later
+    # finding on the same endpoint is declined instead of double-moved
+    # (issue #9891: a joined member's near-pad end is often its own
+    # pull-in candidate).
+    end_tag: str = ""
 
     def __str__(self) -> str:
         return (
-            f"recentre: track [{self.net_name}] end ({self.old_x:.4f}, {self.old_y:.4f}) -> "
+            f"{self.action}: track [{self.net_name}] end ({self.old_x:.4f}, {self.old_y:.4f}) -> "
             f"({self.new_x:.4f}, {self.new_y:.4f}) on pad {self.pad_ref} - {self.detail}"
         )
 
@@ -151,6 +157,20 @@ def _item_uuids(violation: DRCViolation) -> list[str]:
 def finding_key(violation: DRCViolation) -> tuple[str, ...]:
     """Identity of a mask finding: its opening uuids plus the conductor uuid."""
     return tuple(_item_uuids(violation))
+
+
+#: Maximum distance (mm) from the pad polygon within which a track end that
+#: stopped short of its own pad may be pulled in to the pad centre.  The
+#: router's tapered pad escapes end at or just outside the pad edge (issue
+#: #9891); beyond this the "end" is a mid-route vertex, not an escape
+#: terminus, and dragging it would rewrite routing.
+_PULL_IN_REACH_MM = 0.3
+#: Largest angle (degrees) between the pulled entry direction and the crossed
+#: pad-edge normal for which the pull-in is offered.  ``mask_to_copper``'s
+#: ``within_own_pad`` class excuses one straight entry up to 45 degrees from
+#: perpendicular; a steeper pull-in cannot clear the finding, so it is not
+#: attempted (the re-check would only revert it).
+_PULL_IN_MAX_ANGLE_DEG = 45.0
 
 
 class MaskCopperRepairer:
@@ -359,6 +379,16 @@ class MaskCopperRepairer:
         segments = self._segment_nodes()
         pads = self._pads()
         moved: set[str] = set()
+        # Every endpoint an applied action has moved (primary and joined):
+        # (segment uuid, "start"|"end").  A later finding whose conductor end
+        # already moved is declined rather than moved twice -- undo_action
+        # cannot revert a stacked move (issue #9891).
+        moved_ends: set[tuple[str, str]] = set()
+
+        def _record(action: MaskRepairAction) -> None:
+            if action.end_tag:
+                moved_ends.add((action.uuid, action.end_tag))
+            moved_ends.update(action.joined)
 
         for violation in findings:
             uuids = _item_uuids(violation)
@@ -380,13 +410,33 @@ class MaskCopperRepairer:
             if conductor in moved:
                 result.skip("segment_already_moved", violation, conductor)
                 continue
+            if (conductor, "start") in moved_ends or (conductor, "end") in moved_ends:
+                result.skip("segment_end_already_moved", violation, conductor)
+                continue
             reason = self._repair_one(
                 seg, conductor, openings[0], pads, result, max_displacement, dry_run, clearance_mm
             )
+            if reason == "no_end_inside_pad":
+                # Issue #9891: the router's tapered pad escapes stop at (or a
+                # hair outside) the pad edge, so no authored end is strictly
+                # inside and the recentre declines.  A terminus that merely
+                # stopped short is pulled in to the pad centre instead --
+                # the same single clean entry the recentre produces.
+                reason = self._pull_in_one(
+                    seg,
+                    conductor,
+                    openings[0],
+                    pads,
+                    result,
+                    max_displacement,
+                    dry_run,
+                    clearance_mm,
+                )
             if reason is not None:
                 result.skip(reason, violation, conductor)
             else:
                 moved.add(conductor)
+                _record(result.actions[-1])
         return result
 
     def _repair_one(
@@ -481,6 +531,7 @@ class MaskCopperRepairer:
             displacement_mm=displacement,
             detail=f"moved track end {displacement:.4f}mm to the pad centre",
             joined=[(u, t) for u, _, t in joined],
+            end_tag="start" if start_in else "end",
         )
         result.actions.append(action)
         if not dry_run and inside_node is not None:
@@ -495,6 +546,179 @@ class MaskCopperRepairer:
         result.repaired += 1
         return None
 
+    def _pull_in_one(
+        self,
+        seg: SExp,
+        seg_uuid: str,
+        pad_uuid: str,
+        pads: dict,
+        result: MaskRepairResult,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+    ) -> str | None:
+        """Drag a same-net track end that stopped short of its pad to its centre.
+
+        The complement of :meth:`_repair_one`'s recentre for the ``no end
+        inside`` population (issue #9891): the conductor is a straight segment
+        on the opening pad's net whose nearest endpoint sits within
+        ``_PULL_IN_REACH_MM`` of the pad polygon with the other endpoint
+        outside it.  The near endpoint moves to the pad centre, making the
+        segment a single straight entry that crosses the pad edge within
+        ``_PULL_IN_MAX_ANGLE_DEG`` of perpendicular -- the shape
+        ``mask_to_copper``'s ``within_own_pad`` class excuses.  Returns
+        ``None`` on success, else the skip reason.  Everything else (a via at
+        the moved end, a foreign or locked junction, a clearance-losing move)
+        is declined like the recentre; ``fix-drc``'s re-check still reverts a
+        move that does not clear its finding.
+        """
+        poly, centre, pad_layers, pad_net, pad_ref, shape = pads[pad_uuid]
+        if shape == "unsupported":
+            return "unverified_pad_shape"
+
+        net_name = self._net_name(seg)
+        if not net_name or net_name != pad_net:
+            return "not_same_net"
+        if seg.find("locked") is not None or "locked" in [str(a) for a in seg.get_atoms()]:
+            return "locked_segment"
+
+        layer_node = seg.find("layer")
+        layer = _bare(layer_node.get_first_atom()) if layer_node else ""
+        if layer not in pad_layers and "*.Cu" not in pad_layers:
+            return "pad_not_on_segment_layer"
+
+        start_node, end_node = seg.find("start"), seg.find("end")
+        start, end = self._xy(start_node), self._xy(end_node)
+        width_node = seg.find("width")
+        if start is None or end is None or width_node is None:
+            return "malformed_segment"
+        width = _num(width_node)
+
+        grown = poly.buffer(_INSIDE_EPS_MM)
+        if grown.contains(Point(start)) or grown.contains(Point(end)):
+            return "end_inside_pad_recentre_applies"
+        near, near_node, far = start, start_node, end
+        if math.dist(end, centre) < math.dist(start, centre):
+            near, near_node, far = end, end_node, start
+        if poly.distance(Point(near)) > _PULL_IN_REACH_MM:
+            # Beyond the reach the conductor is mid-route, not an escape
+            # terminus; keep the historical reason for this population.
+            return "no_end_inside_pad"
+
+        # The straight entry the pull-in would create: from the far end to the
+        # pad centre.  It must cross the pad boundary within the angle the
+        # within_own_pad class excuses, else the move cannot clear the finding.
+        entry = LineString([far, centre])
+        crossing = entry.intersection(poly.boundary)
+        if crossing.is_empty:
+            return "entry_misses_pad"
+        if not self._entry_within_angle(poly, crossing, far, centre):
+            return "entry_too_shallow"
+
+        displacement = math.dist(near, centre)
+        if displacement < _TOLERANCE_MM / 2:
+            return "end_already_centred"
+        if displacement > max_displacement:
+            return "exceeds_max_displacement"
+        joined, blocked = self._junction(layer, near, seg_uuid, net_name)
+        if blocked:
+            return "junction_at_moved_end"
+
+        # Clearance gate: identical to the recentre's.
+        required = clearance_mm if clearance_mm is not None else 0.0
+        old_shape = LineString([far, near]).buffer(width / 2, quad_segs=16)
+        new_shape = LineString([far, centre]).buffer(width / 2, quad_segs=16)
+        moves = [(old_shape, new_shape)]
+        for _, jnode, jtag in joined:
+            jw = _num(jnode.find("width")) or width
+            jother = self._xy(jnode.find("end" if jtag == "start" else "start"))
+            if jother is None:
+                return "malformed_segment"
+            moves.append(
+                (
+                    LineString([jother, near]).buffer(jw / 2, quad_segs=16),
+                    LineString([jother, centre]).buffer(jw / 2, quad_segs=16),
+                )
+            )
+        for obstacle in self._other_net_obstacles(layer, net_name, seg_uuid, pads):
+            for old_s, new_s in moves:
+                new_d = new_s.distance(obstacle)
+                if new_d < required - 1e-6 and new_d < old_s.distance(obstacle) - 1e-6:
+                    return "would_violate_clearance"
+
+        action = MaskRepairAction(
+            action="pull_in",
+            uuid=seg_uuid,
+            pad_uuid=pad_uuid,
+            pad_ref=pad_ref,
+            net_name=net_name,
+            layer=layer,
+            old_x=near[0],
+            old_y=near[1],
+            new_x=round(centre[0], 4),
+            new_y=round(centre[1], 4),
+            displacement_mm=displacement,
+            detail=f"pulled track end {displacement:.4f}mm in to the pad centre",
+            joined=[(u, t) for u, _, t in joined],
+            end_tag="start" if near_node is start_node else "end",
+        )
+        result.actions.append(action)
+        if not dry_run and near_node is not None:
+            near_node.set_value(0, action.new_x)
+            near_node.set_value(1, action.new_y)
+            for _, jnode, jtag in joined:
+                end_node = jnode.find(jtag)
+                if end_node is not None:
+                    end_node.set_value(0, action.new_x)
+                    end_node.set_value(1, action.new_y)
+            self.modified = True
+        result.repaired += 1
+        return None
+
+    @staticmethod
+    def _entry_within_angle(
+        poly: BaseGeometry, crossing: BaseGeometry, far: tuple[float, float], centre: tuple[float, float]
+    ) -> bool:
+        """True when the ``far -> centre`` entry crosses the pad edge within 45°.
+
+        The crossing point is matched to the nearest straight piece of the
+        polygon boundary; the angle between the entry direction and that
+        piece's normal must not exceed ``_PULL_IN_MAX_ANGLE_DEG``.  A
+        multi-point crossing (a corner clip) is judged on the piece nearest
+        the pad centre, where the entry actually lands.
+        """
+        from shapely.geometry import MultiPoint
+
+        if isinstance(crossing, MultiPoint):
+            points = [(p.x, p.y) for p in crossing.geoms]
+            point = min(points, key=lambda xy: math.dist(xy, centre))
+        else:
+            point = (crossing.x, crossing.y)
+        direction = (centre[0] - far[0], centre[1] - far[1])
+        length = math.hypot(*direction)
+        if length < 1e-9:
+            return False
+        unit = (direction[0] / length, direction[1] / length)
+        best = None
+        coords = list(poly.boundary.coords)
+        for (x1, y1), (x2, y2) in zip(coords, coords[1:], strict=False):
+            ex, ey = x2 - x1, y2 - y1
+            edge_len = math.hypot(ex, ey)
+            if edge_len < 1e-9:
+                continue
+            # Distance from the crossing point to this edge piece.
+            t = ((point[0] - x1) * ex + (point[1] - y1) * ey) / (edge_len * edge_len)
+            t = max(0.0, min(1.0, t))
+            dist = math.hypot(point[0] - (x1 + t * ex), point[1] - (y1 + t * ey))
+            if best is None or dist < best[0]:
+                normal = (ey / edge_len, -ex / edge_len)
+                best = (dist, normal)
+        if best is None:
+            return False
+        normal = best[1]
+        cos = abs(unit[0] * normal[0] + unit[1] * normal[1])
+        return bool(cos >= math.cos(math.radians(_PULL_IN_MAX_ANGLE_DEG)))
+
     # ------------------------------------------------------------------
     # Undo / save
     # ------------------------------------------------------------------
@@ -506,7 +730,7 @@ class MaskCopperRepairer:
         post-move position (callers fall back to a snapshot restore).
         """
         segments = self._segment_nodes()
-        targets = [(action.uuid, None), *((u, t) for u, t in action.joined)]
+        targets = [(action.uuid, action.end_tag or None), *((u, t) for u, t in action.joined)]
         restore: list[SExp] = []
         for uuid, tag in targets:
             node = segments.get(_bare(uuid))

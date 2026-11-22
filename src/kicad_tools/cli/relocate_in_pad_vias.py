@@ -74,6 +74,7 @@ from kicad_tools.validate.rules.via_pad_geometry import (
     is_smd_pad,
     pad_absolute_bbox,
     via_inside_pad,
+    via_ring_to_mask_aperture_gap,
 )
 
 if TYPE_CHECKING:
@@ -1563,15 +1564,19 @@ def _pad_edge_gap(
     y: float,
     candidates: list[tuple[Footprint, Pad, tuple[float, float, float, float]]],
     pad_to_mask: float,
+    *,
+    ring: bool = False,
 ) -> float | None:
     """Smallest drill-edge-to-aperture gap of a via placed at ``(x, y)``.
 
     Negative when the drill reaches into a same-net pad's copper (via-in-pad).
-    ``None`` when no same-net pad has a measurable aperture.
+    ``None`` when no same-net pad has a measurable aperture.  ``ring=True``
+    measures the via's copper *ring* edge (``size / 2``) instead of its drill
+    edge -- the mask-to-copper view (issue #9891).
     """
     from types import SimpleNamespace
 
-    probe: Any = SimpleNamespace(position=(x, y), drill=via.drill)
+    probe: Any = SimpleNamespace(position=(x, y), drill=via.size if ring else via.drill)
     gaps = [
         gap
         for fp, pad, _bbox in candidates
@@ -1608,6 +1613,7 @@ def relocate_pad_edge_vias(
     *,
     nets: set[str] | None = None,
     min_hole_clearance_mm: float | None = None,
+    ring_dam_mm: float | None = None,
 ) -> RelocationResult:
     """Slide vias out of the mask-dam zone beside an SMD pad (Issue #7296).
 
@@ -1622,6 +1628,14 @@ def relocate_pad_edge_vias(
     layer, and the move is gated by the same clearance / hole-to-hole /
     stub-clearance checks as :func:`relocate_in_pad_vias`.  A via with no legal
     spot is reported ``unresolvable`` and left in place.
+
+    ``ring_dam_mm`` (issue #9891) tightens both the flagging and the acceptance
+    test to the mask-to-copper view: a via is flagged when its copper *ring*
+    edge sits closer than ``ring_dam_mm`` to a same-net pad's aperture, and a
+    candidate spot is accepted only when the ring clears ``ring_dam_mm`` AND
+    the drill still clears the plain dam (the move may never create a
+    ``via_at_pad_edge`` finding).  The ring gap uses
+    :func:`~kicad_tools.validate.rules.via_pad_geometry.via_ring_to_mask_aperture_gap`.
 
     Copper clearance is the effective per-pair requirement ``kct check``'s
     ``netclass_clearance_copper`` enforces (the project's netclasses,
@@ -1671,18 +1685,22 @@ def relocate_pad_edge_vias(
         if not candidates:
             continue
         vx, vy = via.position
+        gap_fn = (
+            via_ring_to_mask_aperture_gap
+            if ring_dam_mm is not None
+            else drill_to_mask_aperture_gap
+        )
+        flag_dam = float(ring_dam_mm) if ring_dam_mm is not None else dam
         flagged = next(
             (
                 (fp, pad)
                 for fp, pad, bbox in candidates
                 if not via_inside_pad(via, bbox, pad, fp)
                 and (
-                    gap := drill_to_mask_aperture_gap(
-                        via, pad, fp, pad_to_mask_clearance=pad_to_mask
-                    )
+                    gap := gap_fn(via, pad, fp, pad_to_mask_clearance=pad_to_mask)
                 )
                 is not None
-                and gap < dam - WRITER_CLEARANCE_MARGIN_MM
+                and gap < flag_dam - WRITER_CLEARANCE_MARGIN_MM
             ),
             None,
         )
@@ -1759,10 +1777,15 @@ def relocate_pad_edge_vias(
             for step in steps:
                 # Whole micrometres: what KiCad's own serializer keeps.
                 nx, ny = round(vx + dx * step, 3), round(vy + dy * step, 3)
-                gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask)
-                if gap is None or gap < dam + 1e-6:
+                gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask, ring=ring_dam_mm is not None)
+                if gap is None or gap < flag_dam + 1e-6:
                     # Still in the zone, or into a pad's copper: keep sliding.
                     continue
+                if ring_dam_mm is not None:
+                    # The move may not create a plain via_at_pad_edge finding.
+                    drill_gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask)
+                    if drill_gap is None or drill_gap < dam + 1e-6:
+                        continue
                 failure = _check_clearance(
                     pcb,
                     via,

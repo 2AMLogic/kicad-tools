@@ -459,3 +459,98 @@ def test_a_move_between_floors_is_flagged_on_the_real_engine(tmp_path):
     after = _recheck(board)
     assert any(v.type_str == "netclass_clearance_copper" and v.is_error for v in after.violations)
     assert _flagged(board, after, result.actions) == {"trk-a"}
+
+
+# ---------------------------------------------------------------------------
+# Issue #9891: pull-in for tapered escapes that stop short of the pad
+# ---------------------------------------------------------------------------
+
+
+def test_pull_in_moves_short_terminus_to_pad_centre(tmp_path):
+    """An entry that stopped 0.1 mm outside the pad is pulled to the centre."""
+    copper = _seg("trk-p", (100.3, 102.0), (100.3, 100.6))
+    board = _board(tmp_path, copper)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_finding("trk-p")], max_displacement=1.0, clearance_mm=0.1)
+    assert result.repaired == 1 and not result.unrepaired
+    repairer.save(board)
+    start, end = _end(board, "trk-p")
+    assert start == (100.3, 102.0)
+    assert end == (100.0, 100.0)
+    assert result.actions[0].action == "pull_in"
+    assert result.actions[0].end_tag == "end"
+
+
+def test_pull_in_declined_when_entry_crosses_too_shallow(tmp_path):
+    """A pull-in whose entry would cross the pad edge at over 45 degrees cannot
+    clear the finding, so it is declined (``entry_too_shallow``)."""
+    copper = _seg("trk-s", (98.0, 101.5), (100.5, 100.7))
+    board = _board(tmp_path, copper)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_finding("trk-s")], max_displacement=1.0, clearance_mm=0.1)
+    assert result.repaired == 0
+    assert result.skipped("entry_too_shallow") == 1
+    assert _end(board, "trk-s") == [(98.0, 101.5), (100.5, 100.7)]
+
+
+def test_pull_in_declined_beyond_reach(tmp_path):
+    """A terminus 0.7 mm from the pad is mid-route, not an escape end."""
+    copper = _seg("trk-f", (100.3, 103.0), (100.3, 101.2))
+    board = _board(tmp_path, copper)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_finding("trk-f")], max_displacement=2.0, clearance_mm=0.1)
+    assert result.repaired == 0
+    assert result.skipped("no_end_inside_pad") == 1
+
+
+def test_undo_restores_the_moved_end_when_the_other_sits_at_the_target(tmp_path):
+    """Regression (issue #9891): when the segment's other end already sits at
+    the move target, undo must restore the *moved* end.  The pre-#9891 undo
+    matched the first endpoint at the target coordinates and restored the
+    wrong one, corrupting the segment instead of reverting the move."""
+    from kicad_tools.drc.repair_mask_copper import MaskRepairAction
+
+    copper = _seg("trk-z", (100.0, 100.0), (100.0, 100.0))
+    board = _board(tmp_path, copper)
+    # A pull-in style action whose target the segment's start already sits on
+    # (the board-06 escape chains produce exactly this after a joined move).
+    action = MaskRepairAction(
+        action="pull_in",
+        uuid="trk-z",
+        pad_uuid=PAD,
+        pad_ref="R1/1",
+        net_name="N1",
+        layer="F.Cu",
+        old_x=101.3,
+        old_y=100.3,
+        new_x=100.0,
+        new_y=100.0,
+        displacement_mm=1.044,
+        end_tag="end",
+    )
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(action)
+    undo.save(board)
+    assert _end(board, "trk-z") == [(100.0, 100.0), (101.3, 100.3)]
+
+
+def test_joined_end_is_not_moved_twice_by_a_later_finding(tmp_path):
+    """A joined member's near-pad end is often its own pull-in candidate; the
+    second finding on it must be declined (``segment_end_already_moved``)
+    rather than stacked on the first move, which undo cannot revert."""
+    copper = _seg("trk-a", (100.5, 100.6), (100.3, 100.6)) + "\n" + _seg(
+        "trk-b", (100.1, 100.6), (100.3, 100.6)
+    )
+    board = _board(tmp_path, copper)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(
+        [_finding("trk-a"), _finding("trk-b")], max_displacement=1.0, clearance_mm=0.1
+    )
+    assert result.repaired == 1
+    assert result.skipped("segment_end_already_moved") == 1
+    repairer.save(board)
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(result.actions[0])
+    undo.save(board)
+    assert _end(board, "trk-a") == [(100.5, 100.6), (100.3, 100.6)]
+    assert _end(board, "trk-b") == [(100.1, 100.6), (100.3, 100.6)]

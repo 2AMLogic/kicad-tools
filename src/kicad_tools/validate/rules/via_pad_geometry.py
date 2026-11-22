@@ -156,3 +156,40 @@ def drill_to_mask_aperture_gap(
     if aperture.is_empty:
         return None
     return float(aperture.distance(Point(via.position))) - radius
+
+
+def via_ring_to_mask_aperture_gap(
+    via: Via,
+    pad: Pad,
+    footprint: Footprint,
+    *,
+    pad_to_mask_clearance: float = 0.0,
+) -> float | None:
+    """Return the gap from a via's copper ring edge to ``pad``'s mask aperture.
+
+    The mask-to-copper view of the same via-vs-own-pad geometry
+    :func:`drill_to_mask_aperture_gap` measures for ``via_at_pad_edge``: the
+    interim JLCPCB policy (issue #8842) holds a via's *copper* at least the
+    ``mask_to_copper`` error clearance from a same-net pad's opening, and the
+    drill-gap dam alone does not express that (a via can be dam-legal while
+    its ring reaches into the danger band beside the aperture -- the board-06
+    escape-via population, issue #9891).  Radius is ``via.size / 2``; the
+    rest of the measurement matches the drill variant.  ``None`` for a
+    degenerate pad or a sizeless via.
+    """
+    radius = via.size / 2.0
+    if radius <= DRC_TOLERANCE or not hasattr(pad, "shape"):
+        return None
+    require_shapely("via-at-pad-edge mask-dam geometry")
+    from shapely.geometry import Point
+
+    from .clearance import _pad_polygon
+
+    copper = _pad_polygon(pad, footprint)
+    if copper is None:
+        return None
+    margin = pad_mask_margin(pad, pad_to_mask_clearance)
+    aperture = copper.buffer(margin) if margin != 0 else copper
+    if aperture.is_empty:
+        return None
+    return float(aperture.distance(Point(via.position))) - radius
