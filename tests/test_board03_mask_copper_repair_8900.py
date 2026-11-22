@@ -1,13 +1,13 @@
-"""Board 03 recipe repairs mask_to_copper copper via fix-drc (Issue #8900).
+"""Board 03's staged mask_to_copper repair (Issue #8900).
 
-The recipe's Step 5.55 runs ``kct fix-drc --only mask-copper`` on the routed
-board -- after the Step 5.48 fiducials (new mask openings) and after the
-Step 5.5 fill (the repairer's native gate needs the filled state; it refills
-internally after saving) -- so a fresh regen carries legal copper instead of
-the 72 same-net ``mask_to_copper`` errors the committed board measures on
-the pinned toolchain.  These tests pin the wiring (order + command shape)
-and the invocation loop's stop/error semantics; the repairer itself is
-covered by ``tests/test_fix_drc_cmd.py``.
+``boards/03-usb-joystick/engineering/mask_repair_8900.py`` wraps ``kct fix-drc
+--only mask-copper`` for a scratch copy of the routed, filled board.  It is
+scratch-only: the live recipe must stay byte-identical to the published
+``design-source`` archive (operator ruling on #8900: no expected-stale entry),
+so the recipe gains the step only with the producer-generated release.  These
+tests pin the live recipe's non-use, the command shape and the invocation
+loop's stop/error semantics; the repairer itself is covered by
+``tests/test_fix_drc_cmd.py``.
 """
 
 from __future__ import annotations
@@ -20,31 +20,33 @@ from pathlib import Path
 import pytest
 
 BOARD = Path(__file__).resolve().parent.parent / "boards" / "03-usb-joystick"
-RECIPE = BOARD / "generate_design.py"
+RECIPE = BOARD / "engineering" / "mask_repair_8900.py"
+LIVE_RECIPE = BOARD / "generate_design.py"
 
 
 def _recipe():
-    spec = importlib.util.spec_from_file_location("board03_generate_design_8900", RECIPE)
+    spec = importlib.util.spec_from_file_location("board03_mask_repair_8900", RECIPE)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-def test_repair_step_runs_after_the_fill_and_before_drc() -> None:
-    """Step 5.55 is wired after Step 5.5's fill and before Step 6's DRC gate.
+def test_live_recipe_does_not_wire_the_staged_repair() -> None:
+    """The live recipe stays untouched until the consistent release lands.
 
-    The fill must come first: the repairer's native before/after gate on the
-    unfilled board is pour-served-opens noise (62 -> 0 on a fresh regen).
+    Wiring it now would diverge the recipe from the published archive (the
+    parity test in ``test_design_source_archive_parity.py`` guards the bytes).
     """
-    source = inspect.getsource(_recipe().main)
-    fill = source.find("fill_zones_in_routed_pcb(routed_path)")
-    repair = source.find("repair_mask_copper(routed_path)")
-    drc = source.find("drc_success = run_drc(routed_path)")
-    assert 0 < fill < repair < drc, (
-        "repair_mask_copper must run after the zone fill and before the DRC "
-        f"gate (indices {fill}/{repair}/{drc})"
-    )
+    source = LIVE_RECIPE.read_text()
+    assert "repair_mask_copper" not in source
+    assert "mask_repair_8900" not in source
+
+
+def test_missing_board_is_a_hard_error(tmp_path: Path) -> None:
+    """A router that reports success without writing the board must fail loudly."""
+    with pytest.raises(FileNotFoundError):
+        _recipe().repair_mask_copper(tmp_path / "absent.kicad_pcb")
 
 
 def test_repair_command_targets_mask_copper_on_jlcpcb_tier1() -> None:

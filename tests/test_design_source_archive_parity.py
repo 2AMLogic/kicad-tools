@@ -32,24 +32,7 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # "<board-dir>/<archive filename>" relative to the boards directory.  Each
 # entry cites the issue that owns the refresh; remove the entry when that
 # lands (strict xfail turns an unexpected pass into a failure).
-EXPECTED_STALE: dict[str, str] = {
-    # Issue #8900: board 03's live recipe gained Step 5.55 (the verified
-    # mask-copper repair, #9334/#9905), but the archive refresh IS the full
-    # producer re-issue, and that is coupled to the recipe's own exit gate:
-    # ``generate_design.py`` runs ``kct check`` with no mask skip, so while
-    # the board still carries tool-declined ``mask_to_copper`` findings (41
-    # as of 2026-11-22) the recipe exits 1 and
-    # ``regenerate_boards_03_04_6076.py`` aborts before the archive and
-    # manifest are rebuilt.  The re-issue lands when the residual findings
-    # and the #9083 silkscreen wiring do (same landing that removes board
-    # 03's entry in tests/test_board_readiness_committed_hashes.py).
-    "03-usb-joystick/generate_design.py": (
-        "Issue #8900: live recipe gained the Step 5.55 mask-copper repair; "
-        "the archived copy refreshes with the full producer re-issue, which "
-        "waits on the residual mask_to_copper findings and the #9083 silk "
-        "wiring."
-    ),
-}
+EXPECTED_STALE: dict[str, str] = {}
 
 # Live recipes deliberately left out of the archive, keyed by
 # "<board-dir>/<live filename>" relative to the boards directory.  Each entry
