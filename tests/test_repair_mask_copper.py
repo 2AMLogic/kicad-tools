@@ -592,6 +592,113 @@ def test_pass_through_segment_refused_when_a_via_anchors_its_end(tmp_path):
     assert board.read_text() == before
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_pass_through_moves_shared_junction_and_keeps_its_via_fixed(tmp_path, reverse):
+    anchor, junction, remote = (95, 100.62), (105, 100.62), (108, 103)
+    track = _seg("trk-p", junction, anchor) if reverse else _seg("trk-p", anchor, junction)
+    fork, inner = (108, 100.8), (95, 105)
+    board = _board(
+        tmp_path,
+        "\n".join(
+            [
+                track,
+                _via("fixed", anchor),
+                _seg("joined", junction, remote),
+                _seg("fork", fork, junction),
+                _seg("other-layer", anchor, inner, layer="B.Cu"),
+            ]
+        ),
+    )
+    original = {
+        uid: _saved_copper(board, uid)[1]
+        for uid in ("trk-p", "fixed", "joined", "fork", "other-layer")
+    }
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0, clearance_mm=0.1)
+    assert result.repaired == 1
+    repairer.save(board)
+    copper, ends = _saved_copper(board, "trk-p")
+    moved = ends[0 if reverse else 1]
+    action = result.actions[0]
+    assert (action.old_x, action.old_y) == junction
+    assert (round(action.new_x, 4), round(action.new_y, 4)) == moved
+    assert ends[1 if reverse else 0] == _saved_copper(board, "fixed")[1] == anchor
+    assert _end(board, "joined") == [moved, remote]
+    assert _end(board, "fork") == [fork, moved]
+    assert _end(board, "other-layer") == [anchor, inner]
+    assert moved != junction and _pad_poly(board, "R1/1").distance(copper) >= 0.11 - 1e-6
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(result.actions[0])
+    undo.save(board)
+    assert {uid: _saved_copper(board, uid)[1] for uid in original} == original
+
+
+@pytest.mark.parametrize(
+    "block",
+    ["locked_neighbor", "fixed_end_too_close", "two_vias", "unbroken_track", "arc_midpoint"],
+)
+def test_pass_through_preserves_an_immovable_junction(tmp_path, block):
+    anchor = (99.5, 100.62) if block == "fixed_end_too_close" else (95, 100.62)
+    junction = (105, 100.62)
+    joined = _seg("joined", junction, (108, 103))
+    if block == "locked_neighbor":
+        joined = joined.replace('(uuid "joined")', '(locked yes) (uuid "joined")')
+    copper = [_seg("trk-p", anchor, junction), _via("fixed", anchor), joined]
+    if block == "two_vias":
+        copper.append(_via("other", junction))
+    if block == "unbroken_track":
+        copper.append(_seg("tee", (105, 99), (105, 102)))
+    if block == "arc_midpoint":
+        copper.append(
+            "(arc (start 104 101.62) (mid 105 100.62) (end 106 101.62) "
+            '(width 0.2) (layer "F.Cu") (net 1) (uuid "arc"))'
+        )
+    board = _board(tmp_path, "\n".join(copper))
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 0
+    assert (
+        result.skipped("infeasible" if block == "fixed_end_too_close" else "junction_at_moved_end")
+        == 1
+    )
+    assert not repairer.modified
+
+
+def test_via_fixed_junction_clears_both_openings_within_displacement_limit(tmp_path):
+    anchor, junction = (95, 100.62), (105, 100.62)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, (108, 103)),
+    ]
+    board = _board2(tmp_path, "\n".join(copper), "102.8 100.01")
+    findings = [_pt_finding("trk-p"), _pt_finding("trk-p", pad="pad-r2-1", measured=0.01)]
+    repairer = MaskCopperRepairer(board)
+    refused = repairer.repair(findings, max_displacement=0.15)
+    assert refused.skipped("exceeds_max_displacement") and not repairer.modified
+
+    result = repairer.repair(findings, max_displacement=1.0)
+    assert result.repaired == 1 and set(result.actions[0].openings) == {PAD, "pad-r2-1"}
+    repairer.save(board)
+    shape, _ = _saved_copper(board, "trk-p")
+    for ref in ("R1/1", "R2/1"):
+        assert _pad_poly(board, ref).distance(shape) >= 0.11 - 1e-6
+
+
+def test_via_fixed_junction_checks_clearance_on_other_joined_track(tmp_path):
+    anchor, junction = (95, 100.62), (105, 100.62)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, (108, 103)),
+        _seg("n2", (105.68, 101.57), (105.72, 101.57), net=2),
+    ]
+    repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0, clearance_mm=0.1)
+    assert result.repaired == 0 and result.skipped("would_violate_clearance") == 1
+    assert not repairer.modified
+
+
 def test_pass_through_segment_refused_by_other_net_copper(tmp_path):
     # The nudge moves the track up 0.09 mm; an N2 track 0.05 mm beyond the
     # destination is crowded below the 0.1 mm floor while the authored track

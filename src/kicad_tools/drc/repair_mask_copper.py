@@ -16,16 +16,16 @@ nudge is issue #9896):
 * **same-net pass-through** (``disjoint`` relation only) -- the conductor, a
   straight ``segment`` or a ``via``, passes *beside* the opening of a pad on
   its own net with no endpoint inside, keeping copper under the mask closer
-  than the policy clearance.  The repair translates the whole conductor away
-  from the opening until the modelled distance clears the policy clearance
-  plus a margin: a segment moves with every same-net end joined to it, a via
-  drags every same-net track end anchored at it.  One grouped edit per
+  than the policy clearance.  The repair moves the conductor clear of the
+  opening by the policy clearance plus a margin. A via carries every same-net
+  track end anchored at it. A segment carries its joined track ends and can
+  pivot at a fixed via when its opposite end shares a movable junction.  One grouped edit per
   conductor must clear **every** opening the conductor has findings against,
   and a candidate that would crowd another opening (or whose joined ends
   would leave a pad they terminate in) is declined.
 
 Everything else (different net, pour, arc, overlap of any kind, a straddle,
-both ends inside, a junction anchoring a segment end, an exotic pad shape,
+both ends inside, an immovable junction, an exotic pad shape,
 or a measured clearance the pad-shape opening model cannot reproduce) is
 left untouched and listed as unrepaired with a reason.  A move that would
 bring the copper closer than the clearance rule to other-net copper, or a
@@ -55,6 +55,7 @@ from shapely.geometry import LineString, Point, box  # type: ignore[import-untyp
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyped]
 
+from ..schema.pcb import Arc
 from ..sexp import SExp
 from .net_compat import resolve_net_atom
 from .repair_copper_gap import CopperGapRepairer
@@ -117,15 +118,14 @@ class MaskRepairAction:
 
 @dataclass
 class MaskNudgeAction:
-    """One applied (or, in a dry run, predicted) pass-through translation.
+    """One applied (or, in a dry run, predicted) pass-through nudge.
 
-    A pass-through conductor (segment or via) and every same-net end that
-    moves with it translate by the same ``(dx, dy)``, so one action records
-    the whole grouped edit: ``points`` names every moved point with its
-    pre-move coordinates (a via's own point carries ``tag=None``), and
-    ``openings`` lists every opening uuid the move was computed to clear.
-    ``old_x``/``new_x`` carry a reference point (the via centre or the
-    segment midpoint) for reporting.
+    A nudge can translate the conductor or keep one segment end fixed at a
+    via. Every moved point shares the same ``(dx, dy)``. The grouped edit
+    records each point and its pre-move coordinates in ``points`` (a via's own
+    point carries ``tag=None``). ``openings`` lists every opening UUID to clear.
+    The reported reference point is the moving junction, translated segment
+    midpoint or via centre.
     """
 
     action: str  # always "nudge_clear"
@@ -721,7 +721,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         margin_mm: float,
         touched_by_action: set[str],
     ) -> tuple[str, str] | None:
-        """Translate a whole pass-through segment clear of its openings."""
+        """Move a pass-through track, preserving an attached via at a fixed end."""
         entries = [pads[opening] for opening in openings]
         if any(entry[5] == "unsupported" for entry in entries):
             return "unverified_pad_shape", ""
@@ -747,21 +747,44 @@ class MaskCopperRepairer(CopperGapRepairer):
         copper = LineString([start, end]).buffer(width / 2, quad_segs=16)
 
         joined: list[tuple[str, SExp, str]] = []
+        fixed = None
         for point in (start, end):
             members_at, blocked = self._junction(layer, point, seg_uuid, net_name)
             if blocked:
-                return "junction_at_moved_end", ""
+                # An attached via and all copper on its other layers can stay
+                # exactly where they are while the opposite junction moves.
+                if fixed is not None or not any(
+                    self._net_name(via) == net_name
+                    and layer in self._via_span_layer_set(via)
+                    and (at := self._xy(via.find("at"))) is not None
+                    and math.dist(at, point) < _TOLERANCE_MM
+                    for via in self.doc.find_all("via")
+                ):
+                    return "junction_at_moved_end", ""
+                fixed = point
+                continue
             for member in members_at:
                 if member not in joined:
                     joined.append(member)
+        if fixed is not None and not joined:
+            return "junction_at_moved_end", ""
 
         refusal = self._opening_model_refusal(pairs, copper, pads, seg_uuid in touched_by_action)
         if refusal is not None:
             return refusal
 
-        push = self._push_clear_of_openings(
-            copper, [(pads[o][0], pads[o][1]) for o in openings], required + margin_mm
-        )
+        if fixed is None:
+            reference = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+            push = self._push_clear_of_openings(
+                copper, [(pads[o][0], pads[o][1]) for o in openings], required + margin_mm
+            )
+        else:
+            reference = end if fixed == start else start
+            if self._has_fixed_junction_contact(reference, layer, net_name):
+                return "junction_at_moved_end", ""
+            push = self._shift_junction_clear(
+                fixed, reference, [entry[0] for entry in entries], required + margin_mm + width / 2
+            )
         if push is None:
             return "infeasible", ""
         dx, dy = push
@@ -771,8 +794,8 @@ class MaskCopperRepairer(CopperGapRepairer):
         if displacement > max_displacement:
             return "exceeds_max_displacement", f"needs {displacement:.4f}mm"
 
-        new_start = (start[0] + dx, start[1] + dy)
-        new_end = (end[0] + dx, end[1] + dy)
+        new_start = start if start == fixed else (start[0] + dx, start[1] + dy)
+        new_end = end if end == fixed else (end[0] + dx, end[1] + dy)
         moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
             (
                 copper,
@@ -781,8 +804,9 @@ class MaskCopperRepairer(CopperGapRepairer):
             )
         ]
         points: list[tuple[str, str, str | None, float, float]] = [
-            ("segment", seg_uuid, "start", start[0], start[1]),
-            ("segment", seg_uuid, "end", end[0], end[1]),
+            ("segment", seg_uuid, tag, point[0], point[1])
+            for tag, point in (("start", start), ("end", end))
+            if point != fixed
         ]
         for join_uuid, join_node, join_tag in joined:
             join_width_node = join_node.find("width")
@@ -829,10 +853,10 @@ class MaskCopperRepairer(CopperGapRepairer):
             pad_ref=first[4],
             net_name=net_name,
             layer=layer,
-            old_x=(start[0] + end[0]) / 2,
-            old_y=(start[1] + end[1]) / 2,
-            new_x=(start[0] + end[0]) / 2 + dx,
-            new_y=(start[1] + end[1]) / 2 + dy,
+            old_x=reference[0],
+            old_y=reference[1],
+            new_x=reference[0] + dx,
+            new_y=reference[1] + dy,
             dx=dx,
             dy=dy,
             displacement_mm=displacement,
@@ -844,6 +868,64 @@ class MaskCopperRepairer(CopperGapRepairer):
             points=points,
         )
         return self._apply_nudge(action, result, dry_run)
+
+    def _has_fixed_junction_contact(
+        self, point: tuple[float, float], layer: str, net_name: str
+    ) -> bool:
+        """A straight-end move cannot drag an arc or an unbroken crossing track."""
+        for node in self.doc.find_all("arc") + self.doc.find_all("segment"):
+            layer_node = node.find("layer")
+            if (
+                layer_node is None
+                or _bare(layer_node.get_first_atom()) != layer
+                or self._net_name(node) != net_name
+            ):
+                continue
+            start, end = self._xy(node.find("start")), self._xy(node.find("end"))
+            if start is None or end is None:
+                continue
+            at_end = min(math.dist(point, start), math.dist(point, end)) < _TOLERANCE_MM
+            if node.tag == "arc":
+                try:
+                    path = Arc.from_sexp(node).centerline_points()
+                except ValueError:
+                    return True
+                if LineString(path).distance(Point(point)) <= _TOLERANCE_MM + 0.00001:
+                    return True
+            elif not at_end and LineString([start, end]).distance(Point(point)) < _TOLERANCE_MM:
+                return True
+        return False
+
+    @staticmethod
+    def _shift_junction_clear(
+        fixed: tuple[float, float],
+        junction: tuple[float, float],
+        openings: list[BaseGeometry],
+        centreline_clearance: float,
+    ) -> tuple[float, float] | None:
+        """Move the free end of a track until its whole width clears every opening."""
+        # The editor writes four decimal places. Leave one unit of that grid
+        # so rounding the moved junction cannot consume the requested margin.
+        centreline_clearance += 0.0001
+        if any(opening.distance(Point(fixed)) < centreline_clearance for opening in openings):
+            return None
+        x, y = junction
+        for _ in range(16):
+            track = LineString([fixed, (x, y)])
+            obstacle = min(openings, key=track.distance)
+            gap = track.distance(obstacle)
+            if gap >= centreline_clearance - 1e-9:
+                return x - junction[0], y - junction[1]
+            face, nearest = nearest_points(obstacle, track)
+            # A point a fraction t along the track moves by t times the
+            # junction displacement. At the via (t=0) it cannot move.
+            fraction = track.project(nearest, normalized=True) if track.length else 0.0
+            if fraction <= 1e-9 or gap <= 1e-9:
+                return None
+            scale = (centreline_clearance - gap) / (fraction * gap)
+            x += (nearest.x - face.x) * scale
+            y += (nearest.y - face.y) * scale
+        return None
 
     def _nudge_via_clear(
         self,
