@@ -987,6 +987,11 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
     extension is absent the status also names the capability gap, not just the
     speed gap: the differential-pair centerline trunk rescue (Issue #5786) is
     C++-only, and without it the router falls back to independent legs.
+    Issue #9900 adds the search-capacity gap: the pure-Python A* shares the
+    per-net node-expansion budget but explores 10-100x less per expansion,
+    so maze-class corridors (the Board 06 USB3 fanout) can exhaust the cap
+    with the frontier still open -- targeted rip-up reports such victims as
+    ``victim_budget``, never as a proven geometric seal.
 
     Args:
         backend_info: Dictionary from get_backend_info().
@@ -1011,6 +1016,12 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
         parts.append(
             "Differential-pair centerline trunk rescue requires C++. "
             "If the coupled search fails, routing falls back to independent legs"
+        )
+        parts.append(
+            "Search-capacity limitation (issue #9900): without C++, a maze-class "
+            "corridor can exceed the per-net node-expansion budget and targeted "
+            "rip-up records such victims as 'victim_budget' -- a budget stop, not "
+            "a proven geometric seal"
         )
         if grid_cells > LARGE_GRID_THRESHOLD:
             parts.append(

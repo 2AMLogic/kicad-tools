@@ -44,6 +44,7 @@ ProgressCallback = Callable[[str, dict], None]
 RIPUP_COMMITTED = "committed"
 RIPUP_BUDGET_EXHAUSTED = "budget_exhausted"
 RIPUP_VICTIM_GEOMETRIC = "victim_geometric"
+RIPUP_VICTIM_BUDGET = "victim_budget"
 RIPUP_SIBLING_FAILED = "sibling_failed"
 RIPUP_TRADED = "traded"
 
@@ -107,7 +108,12 @@ class TargetedRipupOutcome:
     ``if success:`` callers keep their meaning.
 
     Attributes:
-        reason: One of the ``RIPUP_*`` constants.
+        reason: One of the ``RIPUP_*`` constants.  Issue #9900 splits the
+            victim-side failures: :data:`RIPUP_VICTIM_GEOMETRIC` is recorded
+            only when the victim's failed search drained its open set (a
+            proven no-path); a search that stopped at its node-expansion cap
+            or wall-clock deadline without draining is
+            :data:`RIPUP_VICTIM_BUDGET` -- a legal route may still exist.
         failed_net: The victim the rip-up was for.
         ripped: Blockers that were actually ripped (after the budget filter).
         dropped: Blockers the caller named that the per-net
@@ -2800,7 +2806,12 @@ class NegotiatedRouter:
             geometry, zero A* time -- strictly better than the previous
             10s-probe fresh reroute, which routinely failed and stranded
             previously-routed siblings) and return ``False`` so the caller
-            can escalate to a different strategy.
+            can escalate to a different strategy.  Issue #9900 narrows the
+            recorded reason: only a DRAINED victim search (an open-set
+            no-path proof) is :data:`RIPUP_VICTIM_GEOMETRIC`; a victim that
+            stopped at its node-expansion cap or deadline is
+            :data:`RIPUP_VICTIM_BUDGET` -- the Board 06 pure-Python leg's
+            USB3 victims were budget stops, not geometric seals.
         """
         if ripup_history is None:
             ripup_history = {}
@@ -2829,7 +2840,11 @@ class NegotiatedRouter:
         if success or not self._cpp_rip_is_deferred():
             return success
         outcome = self.last_ripup_outcome
-        if outcome is None or outcome.reason != RIPUP_VICTIM_GEOMETRIC or not outcome.ripped:
+        if (
+            outcome is None
+            or outcome.reason not in (RIPUP_VICTIM_GEOMETRIC, RIPUP_VICTIM_BUDGET)
+            or not outcome.ripped
+        ):
             return success
 
         # Issue #6363: the first attempt's rollback discarded the victim's
@@ -2868,6 +2883,51 @@ class NegotiatedRouter:
         """Queued C++ unmarks in the open window (0 without one)."""
         count = getattr(self.grid, "pending_cpp_unmark_count", None)
         return int(count()) if callable(count) else 0
+
+    def _victim_failure_is_proven(self) -> bool:
+        """True only when the victim's failed search PROVED no path exists.
+
+        Issue #9900.  The proof signal is per backend:
+
+        * pure-Python ``Router``: ``last_route_exhausted`` (#6098) -- the A*
+          drained its open set without ever popping a goal (and no goal was
+          reached and rejected by path validation).
+        * ``CppPathfinder``: the C++ verdict is a drained failure
+          (:data:`~kicad_tools.router.nogood_cache.DRAINED_FAILURE_REASONS`
+          -- ``NO_PATH`` / ``VIA_VIA_BLOCKED`` / ``PAIRWISE_BLOCKED``, i.e.
+          "open set exhausted, no candidates remained") rather than a budget
+          give-up (``ITERATION_LIMIT`` / ``TIMEOUT``).
+
+        A search that stopped at the deterministic per-net node-expansion
+        cap or a wall-clock deadline leaves candidates on the frontier -- a
+        legal path may still exist (Board 06 seed-42: the pure-Python
+        USB3_RX1+ victim search stopped at its 1M-expansion cap with
+        325,574 open nodes after the blockers were ripped, and the C++
+        backend connects that exact net on that exact grid state), so
+        ``False`` here means "budget stop, not a geometric seal" and the
+        transaction records :data:`RIPUP_VICTIM_BUDGET` instead of
+        :data:`RIPUP_VICTIM_GEOMETRIC`.
+        """
+        from ..nogood_cache import DRAINED_FAILURE_REASONS
+
+        router = self.router
+        if getattr(router, "_try_python_fallback", None) is not None:
+            getter = getattr(router, "get_last_failure_info", None)
+            if not callable(getter):
+                return False
+            info = getter() or {}
+            try:
+                return int(info.get("failure_reason") or 0) in DRAINED_FAILURE_REASONS
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                return False
+        return bool(getattr(router, "last_route_exhausted", False))
+
+    # NOTE (#9900): ``last_route_exhausted`` mirrors the MOST RECENT failed
+    # search.  For the 2-pad victims at issue that is exactly the victim's
+    # A*; a multi-edge victim whose last edge drained after an earlier edge
+    # stopped at its budget can still read as proven -- the conservative
+    # direction is the reverse (a budget stop is never reported as a proof
+    # the way the pre-#9900 blanket ``victim_geometric`` label did).
 
     def _cpp_rip_is_deferred(self) -> bool:
         """True when a rip-up's C++-grid unmark would be queued, not applied.
@@ -3070,7 +3130,20 @@ class NegotiatedRouter:
         # snapshotted pre-rip-up routes: zero A* time, zero collateral.
         if not failed_net_success:
             _rollback_to_snapshot()
-            _record(RIPUP_VICTIM_GEOMETRIC)
+            # Issue #9900: ``victim_geometric`` claims "no path exists with
+            # the blockers ripped" -- that is only PROVEN when the victim's
+            # failed search drained its open set.  A search that stopped at
+            # its deterministic node-expansion cap (or a wall-clock deadline)
+            # found no such proof: on Board 06's pure-Python leg every USB3
+            # RX1/TX1 victim search stopped at the 1M-expansion cap with a
+            # 300k-node frontier still open, while the same net on the same
+            # grid state routes under the C++ backend -- a legal route
+            # existed and the search ran out of budget, not geometry.
+            # Record the honest distinction so logs and summaries cannot
+            # report a geometric seal that was never demonstrated.
+            _record(
+                RIPUP_VICTIM_GEOMETRIC if self._victim_failure_is_proven() else RIPUP_VICTIM_BUDGET
+            )
             return False  # geometric blocker -- caller should escalate
 
         # Re-route the displaced nets

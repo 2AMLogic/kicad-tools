@@ -37,6 +37,7 @@ from kicad_tools.router.algorithms.negotiated import (
     RIPUP_COMMITTED,
     RIPUP_SIBLING_FAILED,
     RIPUP_TRADED,
+    RIPUP_VICTIM_BUDGET,
     RIPUP_VICTIM_GEOMETRIC,
     NegotiatedRouter,
     TargetedRipupOutcome,
@@ -61,13 +62,31 @@ def _neg(router: Autorouter) -> NegotiatedRouter:
     )
 
 
-def _run_ripup(fake_route_net, *, blocking=frozenset({2, 3}), history=None, **kwargs):
+def _run_ripup(
+    fake_route_net,
+    *,
+    blocking=frozenset({2, 3}),
+    history=None,
+    victim_search_drained=True,
+    **kwargs,
+):
     router = _make_router_with_four_nets()
     neg = _neg(router)
     original = {2: _stub_route(2), 3: _stub_route(3)}
     net_routes: dict[int, list] = {n: [r] for n, r in original.items()}
     routes_list: list = list(original.values())
-    with patch.object(NegotiatedRouter, "route_net_negotiated", fake_route_net):
+    # Issue #9900: the victim-failure reason is chosen by
+    # ``_victim_failure_is_proven`` -- whether the (here faked) victim
+    # search drained its open set.  ``fake_route_net`` bypasses the real
+    # pathfinder so no real drained/proof state exists; stub the oracle
+    # explicitly.  ``True`` (default) reproduces the pre-#9900 tests'
+    # "the search proved no path" premise.
+    with (
+        patch.object(NegotiatedRouter, "route_net_negotiated", fake_route_net),
+        patch.object(
+            NegotiatedRouter, "_victim_failure_is_proven", lambda self: victim_search_drained
+        ),
+    ):
         success = neg.targeted_ripup(
             failed_net=1,
             blocking_nets=set(blocking),
@@ -108,6 +127,31 @@ def test_outcome_victim_geometric_when_the_victim_has_no_path_with_blockers_gone
     assert bool(outcome) is False
     # Still the #3470 verbatim rollback.
     assert net_routes[2] == [original[2]]
+
+
+def test_outcome_victim_budget_when_the_victim_search_stopped_at_its_cap():
+    """Issue #9900: a budget stop is not a geometric seal.
+
+    The Board 06 seed-42 pure-Python leg recorded ``victim_geometric`` ("no
+    path with blockers ripped") for USB3_RX1+/TX1 victim searches that
+    stopped at the deterministic 1M node-expansion cap with the frontier
+    still open -- the C++ backend connects the same nets on the same grid,
+    so a legal route existed.  When the failed search did NOT drain (no
+    unreachability proof), the outcome must say ``victim_budget`` instead.
+    """
+
+    def fake(self_neg, pads, *a, **k):
+        return [] if pads[0].net == 1 else [_stub_route(pads[0].net)]
+
+    success, outcome, net_routes, _routes, original = _run_ripup(fake, victim_search_drained=False)
+
+    assert success is False
+    assert outcome.reason == RIPUP_VICTIM_BUDGET
+    assert bool(outcome) is False
+    # The #3470 verbatim rollback is unchanged: a budget stop rolls back
+    # exactly like a proven-geometric failure.
+    assert net_routes[2] == [original[2]]
+    assert net_routes[3] == [original[3]]
 
 
 def test_outcome_sibling_failed_names_the_blocker_that_could_not_re_land():
@@ -312,7 +356,13 @@ def test_negotiated_run_never_rips_a_pair_more_than_twice():
     assert guard is not None
     assert guard.pair_counts, "the sealed net should have been sent to rip-up"
     assert guard.max_pair_count() <= MAX_PAIR_RIPUPS
-    assert RIPUP_VICTIM_GEOMETRIC in {o.reason for o in guard.outcomes}
+    # Issue #9900: this fixture's 20k per-net node cap cuts the victim's
+    # search before it can drain, so the seal is recorded as a budget stop
+    # (``victim_budget``), not ``victim_geometric`` -- the C++ search never
+    # proved no-path within the cap, exactly the distinction the Board 06
+    # trace demanded.  A drained search on an uncapped fixture is the
+    # ``victim_geometric`` case (test_ripup_budget_9900's negative control).
+    assert RIPUP_VICTIM_BUDGET in {o.reason for o in guard.outcomes}
 
 
 # ---------------------------------------------------------------------------
