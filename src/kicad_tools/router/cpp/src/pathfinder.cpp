@@ -1740,8 +1740,11 @@ static float landing_cost(const PadBounds& pb, int ax, int ay, int bx, int by,
 
 // Search and reconstruction must agree on which short pad-center stubs
 // become copper on the board.
-static bool emits_trace_segment(float dx, float dy) {
-    return std::abs(dx) > 0.01f || std::abs(dy) > 0.01f;
+static bool emits_trace_segment(float x1, float y1, float x2, float y2) {
+    // Mirror quantize.emits_trace_segment: compare 0.01 mm on the 0.1 µm
+    // output grid, where the discrepancy between float32 and float64 drops out.
+    const auto units = [](float mm) { return std::lrint(static_cast<double>(mm) * 10000); };
+    return std::abs(units(x2) - units(x1)) > 100 || std::abs(units(y2) - units(y1)) > 100;
 }
 
 bool Pathfinder::trace_step_vias_clear(const AStarNode& current, const Segment& step,
@@ -1755,7 +1758,7 @@ bool Pathfinder::trace_step_vias_clear(const AStarNode& current, const Segment& 
         // stub and remember its direction when grading the join at this seed.
         band.incoming_dx = step.x1 - start_x;
         band.incoming_dy = step.y1 - start_y;
-        if (emits_trace_segment(band.incoming_dx, band.incoming_dy)) {
+        if (emits_trace_segment(start_x, start_y, step.x1, step.y1)) {
             const Segment stub{start_x, start_y, step.x1, step.y1, step.width, step.layer, step.net};
             if (!grid_.search_trace_vias_clear(stub, std::nullopt, 0.0f, {edge})) return false;
         } else if (band.incoming_dx != 0.0f || band.incoming_dy != 0.0f) {
@@ -1780,7 +1783,7 @@ bool Pathfinder::goal_stub_vias_clear(const AStarNode& node, float end_x, float 
     if (edge <= 0.0f || grid_.stored_via_count() == 0) return true;
     const auto [wx, wy] = grid_.grid_to_world(node.x, node.y);
     // An omitted tail still has a round end cap at the last emitted vertex.
-    if (!emits_trace_segment(end_x - wx, end_y - wy)) {
+    if (!emits_trace_segment(wx, wy, end_x, end_y)) {
         end_x = wx;
         end_y = wy;
         if (node.via_from_parent) return true;  // the trace ends in its new via
@@ -3426,7 +3429,7 @@ RouteResult Pathfinder::reconstruct_path(
             current_layer = layer;
         } else {
             // Add segment if position changed
-            if (emits_trace_segment(wx - current_x, wy - current_y)) {
+            if (emits_trace_segment(current_x, current_y, wx, wy)) {
                 Segment seg;
                 seg.x1 = current_x;
                 seg.y1 = current_y;
@@ -3444,7 +3447,7 @@ RouteResult Pathfinder::reconstruct_path(
     }
 
     // Final segment to end
-    if (emits_trace_segment(end_x - current_x, end_y - current_y)) {
+    if (emits_trace_segment(current_x, current_y, end_x, end_y)) {
         Segment seg;
         seg.x1 = current_x;
         seg.y1 = current_y;

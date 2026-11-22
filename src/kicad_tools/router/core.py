@@ -3115,6 +3115,7 @@ class Autorouter:
             return False
 
         success = neg_router.targeted_ripup(
+            refresh_foreign_context=self._refresh_ripup_foreign_context,
             failed_net=failed_net,
             blocking_nets=set(plan.blockers),
             net_routes=net_routes,
@@ -4512,6 +4513,13 @@ class Autorouter:
             foreign_vias.extend(vias)
 
         self.router.set_segment_foreign_context(foreign_vias=foreign_vias)
+
+    def _refresh_ripup_foreign_context(self, net: int) -> None:
+        """Rebuild clearance inputs after lifting, replacing or restoring copper."""
+        # A rollback can replace routes while preserving the list's length.
+        self._all_vias_by_net_cache = None
+        self._update_router_via_foreign_context(net)
+        self._update_router_segment_foreign_context(net)
 
     def _collect_extra_routes_for_revalidation(
         self,
@@ -12176,6 +12184,7 @@ class Autorouter:
 
         try:
             success = neg_router.targeted_ripup(
+                refresh_foreign_context=self._refresh_ripup_foreign_context,
                 failed_net=failed_net,
                 blocking_nets=siblings,
                 net_routes=net_routes,
@@ -12360,6 +12369,7 @@ class Autorouter:
         ripup_start = time.time()
         try:
             success = neg_router.targeted_ripup(
+                refresh_foreign_context=self._refresh_ripup_foreign_context,
                 failed_net=failed_net,
                 blocking_nets=siblings,
                 net_routes=net_routes,
