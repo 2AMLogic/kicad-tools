@@ -512,12 +512,33 @@ def test_via_on_a_different_net_than_the_pad_is_declined(tmp_path):
     assert result.skipped("not_same_net") == 1
 
 
-def test_locked_via_is_declined(tmp_path):
-    locked = PAD_VIA.replace("(at 100 100.9)", "(at 100 100.9) (locked yes)")
-    board = _board(tmp_path, locked)
-    result = CopperGapRepairer(board).repair_gaps([_finding([PAD, VIA_PAD])], max_displacement=1.0)
+@pytest.mark.parametrize(
+    ("flag", "locked"), [("locked", True), ("(locked yes)", True), ("(locked no)", False)]
+)
+@pytest.mark.parametrize(
+    ("copper", "items"), [(PAD_VIA, [PAD, VIA_PAD]), (TANGENT, [TRACE, VIA_TANGENT])]
+)
+def test_gap_repair_respects_via_lock(tmp_path, flag, locked, copper, items):
+    board = _board(tmp_path, copper.replace("(via ", f"(via {flag} "))
+    result = CopperGapRepairer(board).repair_gaps([_finding(items)], max_displacement=1.0)
+    assert result.repaired == int(not locked)
+    assert result.skipped("locked_via") == int(locked)
+
+
+@pytest.mark.parametrize(
+    ("copper", "items", "via_id"),
+    [(PAD_VIA, [PAD, VIA_PAD], "via-p"), (TANGENT, [TRACE, VIA_TANGENT], "via-t")],
+)
+def test_gap_repair_preserves_group_locked_via(tmp_path, copper, items, via_id):
+    groups = f'(group "fab" (uuid "g") (locked yes) (members "{via_id}"))'
+    board = _board(tmp_path, copper + "\n" + groups)
+    original = board.read_bytes()
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps([_finding(items)], max_displacement=1.0)
     assert result.repaired == 0
     assert result.skipped("locked_via") == 1
+    assert not repairer.modified
+    assert board.read_bytes() == original
 
 
 def test_move_longer_than_max_displacement_is_declined(tmp_path):

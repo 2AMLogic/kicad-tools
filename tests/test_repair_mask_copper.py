@@ -234,7 +234,7 @@ def _report(*violations: DRCViolation) -> DRCReport:
     )
 
 
-def _run(monkeypatch, board: Path, reports: list[DRCReport], extra=()):
+def _run(monkeypatch, board: Path, reports: list[DRCReport], extra=(), *, connectivity=False):
     """Run fix-drc --only mask-copper; ``reports`` feed successive kct-check runs."""
     feed = iter(reports)
     last = [reports[-1]]
@@ -249,7 +249,7 @@ def _run(monkeypatch, board: Path, reports: list[DRCReport], extra=()):
             str(board),
             "--only",
             "mask-copper",
-            "--no-connectivity-check",
+            *([] if connectivity else ["--no-connectivity-check"]),
             "--max-displacement",
             "1.0",
             *extra,
@@ -647,3 +647,573 @@ def test_joined_end_is_not_moved_twice_by_a_later_finding(tmp_path):
     undo.save(board)
     assert _end(board, "trk-a") == [(100.5, 100.6), (100.3, 100.6)]
     assert _end(board, "trk-b") == [(100.1, 100.6), (100.3, 100.6)]
+
+
+# ---------------------------------------------------------------------------
+# Issue #9896: disjoint same-net pass-through nudges (segment and via)
+# ---------------------------------------------------------------------------
+
+PASS_THROUGH = "same-net pass-through"
+DISJOINT = "Mask-to-copper disjoint: violation"
+
+# A second same-net pad footprint; the leading "(at x y" of R1's placement is
+# patched per test so R2/1 can sit anywhere the case needs.
+_BOARD_TWO_PADS = BOARD.replace(
+    """  (footprint "test:R1" (layer "F.Cu") (at 100 100)""",
+    """  (footprint "test:R1" (layer "F.Cu") (at 100 100)""",
+)
+
+
+def _board2(tmp_path: Path, copper: str, r2_at: str) -> Path:
+    extra = (
+        f'  (footprint "test:R2" (layer "F.Cu") (at {r2_at})\n'
+        '    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS")\n'
+        "      (effects (font (size 1 1) (thickness 0.15))))\n"
+        '    (property "Value" "R" (at 0 1.5 0) (layer "F.Fab")\n'
+        "      (effects (font (size 1 1) (thickness 0.15))))\n"
+        '    (pad "1" smd rect (at 0 0) (size 2 1) (layers "F.Cu" "F.Paste" "F.Mask") '
+        '(net 1 "N1") (uuid "pad-r2-1"))\n'
+        "  )\n"
+    )
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(BOARD % (extra + copper))
+    return path
+
+
+def _via(uuid: str, at, size: float = 0.6, drill: float = 0.3, net: int = 1) -> str:
+    return (
+        f"  (via (at {at[0]} {at[1]}) (size {size}) (drill {drill}) "
+        f'(layers "F.Cu" "B.Cu") (net {net}) (uuid "{uuid}"))'
+    )
+
+
+def _pt_finding(
+    conductor: str,
+    pad: str = PAD,
+    measured: float = 0.02,
+    required: float = 0.09,
+    location=(100.0, 100.52),
+):
+    return DRCViolation(
+        type=ViolationType.MASK_TO_COPPER,
+        type_str="mask_to_copper",
+        severity=Severity.ERROR,
+        message=f"{DISJOINT}; exposed area 0 mm²; opening R1/1; {PASS_THROUGH}",
+        locations=[Location(x_mm=location[0], y_mm=location[1], layer="F.Cu")],
+        items=[pad, conductor],
+        required_value_mm=required,
+        actual_value_mm=measured,
+    )
+
+
+def _saved_copper(path: Path, uuid: str):
+    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+
+    doc = parse_file(path)
+    for node in doc.find_all("segment"):
+        if str(node.find("uuid").get_first_atom()).strip('"') == uuid:
+            s = tuple(float(a) for a in node.find("start").get_atoms())
+            e = tuple(float(a) for a in node.find("end").get_atoms())
+            w = float(node.find("width").get_first_atom())
+            return LineString([s, e]).buffer(w / 2, quad_segs=16), (s, e)
+    for node in doc.find_all("via"):
+        if str(node.find("uuid").get_first_atom()).strip('"') == uuid:
+            at = tuple(float(a) for a in node.find("at").get_atoms())
+            size = float(node.find("size").get_first_atom())
+            return Point(at).buffer(size / 2, quad_segs=32), at
+    raise AssertionError(uuid)
+
+
+def _pad_poly(path: Path, pad_ref: str):
+    repairer = MaskCopperRepairer(path)
+    entry = next(e for e in repairer._openings().values() if e[4] == pad_ref)
+    return entry[0]
+
+
+# A pass-through segment beside the pad: copper y 100.52..100.72, so the
+# measured opening distance is 0.02 mm (the pad's top edge is y = 100.5).
+PASS = _seg("trk-p", (95, 100.62), (105, 100.62))
+
+
+def test_pass_through_segment_moves_away_from_the_opening(tmp_path):
+    board = _board(tmp_path, PASS)
+    result = MaskCopperRepairer(board).repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 1 and not result.unrepaired
+    action = result.actions[0]
+    assert action.action == "nudge_clear" and action.uuid == "trk-p"
+    repairer = MaskCopperRepairer(board)
+    repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    repairer.save(board)
+    copper, ends = _saved_copper(board, "trk-p")
+    deltas = [
+        (x - ox, y - oy)
+        for (x, y), (ox, oy) in zip(ends, [(95.0, 100.62), (105.0, 100.62)], strict=True)
+    ]
+    assert deltas[0] == deltas[1]  # the whole segment translates by one delta
+    assert deltas[0][1] > 0.05  # away from the pad below
+    assert _pad_poly(board, "R1/1").distance(copper) == pytest.approx(0.11, abs=1e-6)
+
+
+def test_pass_through_segment_drag_joins_and_undoes_exactly(tmp_path):
+    board = _board(tmp_path, PASS + "\n" + _seg("trk-q", (105, 100.62), (108, 103)))
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 1
+    repairer.save(board)
+    assert _end(board, "trk-q")[0] == _end(board, "trk-p")[1]  # the joined end moved with it
+    assert _end(board, "trk-q")[1] == (108.0, 103.0)  # the far end stays put
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(result.actions[0])
+    undo.save(board)
+    assert _end(board, "trk-p") == [(95.0, 100.62), (105.0, 100.62)]
+    assert _end(board, "trk-q")[0] == (105.0, 100.62)
+
+
+def test_pass_through_segment_refused_when_a_via_anchors_its_end(tmp_path):
+    copper = PASS + "\n" + _via("v-anchor", (95, 100.62))
+    board = _board(tmp_path, copper)
+    before = board.read_text()
+    result = MaskCopperRepairer(board).repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 0
+    assert result.skipped("junction_at_moved_end") == 1
+    assert not result.unrepaired[0].uuid or board.read_text() == before
+    assert board.read_text() == before
+
+
+def test_pass_through_segment_refused_by_other_net_copper(tmp_path):
+    # The nudge moves the track up 0.09 mm; an N2 track 0.05 mm beyond the
+    # destination is crowded below the 0.1 mm floor while the authored track
+    # keeps 0.13 mm.
+    copper = PASS + "\n" + _seg("trk-n2", (99, 100.95), (103, 100.95), net=2)
+    board = _board(tmp_path, copper)
+    result = MaskCopperRepairer(board).repair(
+        [_pt_finding("trk-p")], max_displacement=1.0, clearance_mm=0.1
+    )
+    assert result.repaired == 0
+    assert result.skipped("would_violate_clearance") == 1
+    assert not MaskCopperRepairer(board).modified
+
+
+def test_pass_through_segment_refused_when_push_approaches_another_opening(tmp_path):
+    # R2's opening sits 0.11 mm above the authored copper -- clear of the
+    # error band -- and 0.02 mm above the nudged copper.
+    board = _board2(tmp_path, PASS, "104 101.33")
+    result = MaskCopperRepairer(board).repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 0
+    assert result.skipped("would_approach_other_opening") == 1
+    assert "R2/1" in result.unrepaired[0].detail
+
+
+def test_pass_through_segment_refused_when_an_end_would_leave_its_own_pad(tmp_path):
+    # The segment starts inside R2's opening 0.045 mm under its edge; the
+    # 0.09 mm nudge would pull it out, turning R2's own-pad entry into a
+    # new pass-through finding.
+    copper = _seg("trk-p", (95.2, 100.62), (105, 100.62))
+    board = _board2(tmp_path, copper, "95.5 100.15")
+    result = MaskCopperRepairer(board).repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 0
+    assert result.skipped("would_leave_own_pad") == 1
+
+
+def test_pass_through_findings_grouped_into_one_move_per_conductor(tmp_path):
+    # R1 and R2 sit side by side; the segment passes 0.02 mm above both
+    # openings, so one grouped translation must clear the pair.
+    copper = _seg("trk-p", (99, 100.62), (104, 100.62))
+    board = _board2(tmp_path, copper, "102.9 100")
+    findings = [_pt_finding("trk-p"), _pt_finding("trk-p", pad="pad-r2-1", location=(103, 100.52))]
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(findings, max_displacement=1.0)
+    assert result.total_violations == 2
+    assert result.repaired == 1 and len(result.actions) == 1
+    assert set(result.actions[0].openings) == {"pad-r1-1", "pad-r2-1"}
+    repairer.save(board)
+    copper_geom, _ends = _saved_copper(board, "trk-p")
+    assert _pad_poly(board, "R1/1").distance(copper_geom) == pytest.approx(0.11, abs=1e-6)
+    assert _pad_poly(board, "R2/1").distance(copper_geom) == pytest.approx(0.11, abs=1e-6)
+
+
+def test_pass_through_between_facing_pads_is_infeasible(tmp_path):
+    # The bar passes between two facing openings 0.02/0.03 mm from either
+    # side: no translation clears both.
+    copper = _seg("trk-p", (101.12, 99), (101.12, 101))
+    board = _board2(tmp_path, copper, "102.25 100")
+    findings = [_pt_finding("trk-p"), _pt_finding("trk-p", pad="pad-r2-1", location=(101.23, 100))]
+    result = MaskCopperRepairer(board).repair(findings, max_displacement=1.0)
+    assert result.repaired == 0
+    assert result.skipped("infeasible") == 2  # every member finding carries the reason
+
+
+# A pass-through via just off the pad's right edge: disc left edge x = 101.05,
+# measured opening distance 0.05 mm.
+PASS_VIA = _via("via-p", (101.35, 99.6))
+
+
+@pytest.mark.parametrize(
+    ("lock_flag", "groups", "movable"),
+    [
+        ("locked", "", False),
+        ("(locked yes)", "", False),
+        ("(locked no)", "", True),
+        ("", "", True),
+        ("", '(group "g" (uuid "g") (locked yes) (members "TARGET"))', False),
+        (
+            "(locked no)",
+            '(group "child" (uuid "c") (locked no) (members "TARGET"))'
+            '(group "parent" (uuid "p") (locked yes) (members "c"))',
+            False,
+        ),
+        ("", '(group "g" (uuid "g") (locked no) (members "TARGET"))', True),
+        ("", '(group "g" (uuid "g") (locked yes) (members "other"))', True),
+    ],
+)
+@pytest.mark.parametrize(
+    ("conductor", "locked_item", "reason"),
+    [
+        ("via-p", "via-p", "locked_via"),
+        ("via-p", "trk-q", "locked_attached_track"),
+        ("trk-p", "trk-p", "locked_segment"),
+        ("trk-p", "trk-q", "junction_at_moved_end"),
+    ],
+)
+def test_nudge_respects_authored_copper_locks(
+    tmp_path, monkeypatch, capsys, conductor, locked_item, reason, lock_flag, groups, movable
+):
+    if conductor == "via-p":
+        copper = PASS_VIA + "\n" + _seg("trk-q", (101.35, 99.6), (103, 99.6))
+        finding = _pt_finding(conductor, measured=0.05, location=(101.05, 99.6))
+    else:
+        copper = PASS + "\n" + _seg("trk-q", (105, 100.62), (108, 103))
+        finding = _pt_finding(conductor)
+    uuid = f'(uuid "{locked_item}")'
+    copper = copper.replace(uuid, f"{lock_flag} {uuid}")
+    board = _board(tmp_path, copper + "\n" + groups.replace("TARGET", locked_item))
+    original = board.read_bytes()
+    before = [_saved_copper(board, item)[1] for item in (conductor, "trk-q")]
+    reports = [_report(finding), _report() if movable else _report(finding)]
+    _run(monkeypatch, board, reports, extra=("--format", "json"))
+    repair = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert repair["repaired"] == int(movable)
+    assert [item["reason"] for item in repair["unrepaired"]] == ([] if movable else [reason])
+    assert (board.read_bytes() != original) == movable
+    after = [_saved_copper(board, item)[1] for item in (conductor, "trk-q")]
+    assert [old != new for old, new in zip(before, after, strict=True)] == [movable, movable]
+
+
+def test_pass_through_via_moves_away_dragging_its_tracks(tmp_path):
+    copper = (
+        PASS_VIA
+        + "\n"
+        + _seg("trk-f", (101.35, 99.6), (103, 99.6))
+        + "\n"
+        + _seg("trk-b", (101.35, 99.6), (102, 99), layer="B.Cu")
+    )
+    board = _board(tmp_path, copper)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(
+        [_pt_finding("via-p", measured=0.05, location=(101.05, 99.6))], max_displacement=1.0
+    )
+    assert result.repaired == 1 and not result.unrepaired
+    action = result.actions[0]
+    assert action.uuid == "via-p"
+    repairer.save(board)
+    disc, at = _saved_copper(board, "via-p")
+    assert _pad_poly(board, "R1/1").distance(disc) >= 0.11 - 1e-6
+    # Both attached track ends (F.Cu and B.Cu) moved with the via: connected.
+    assert _end(board, "trk-f")[0] == at
+    assert _end(board, "trk-b")[0] == at
+    assert _end(board, "trk-f")[1] == (103.0, 99.6)
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(action)
+    undo.save(board)
+    assert _saved_copper(board, "via-p")[1] == (101.35, 99.6)
+    assert _end(board, "trk-f")[0] == (101.35, 99.6)
+    assert _end(board, "trk-b")[0] == (101.35, 99.6)
+
+
+def test_pass_through_via_refused_by_drill_clearance_at_the_destination(tmp_path):
+    from kicad_tools.manufacturers.base import DesignRules
+
+    # First place the foreign via from the push's actual destination: its
+    # drill sits 0.4 mm (hole-to-hole) from where the via would land, while
+    # its copper keeps clear of the via both before and after the nudge.
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    plain = _board(plain_dir, PASS_VIA)
+    probe = MaskCopperRepairer(plain)
+    probe_result = probe.repair(
+        [_pt_finding("via-p", measured=0.05, location=(101.05, 99.6))], max_displacement=1.0
+    )
+    assert probe_result.repaired == 1
+    dest = probe_result.actions[0].new_x, probe_result.actions[0].new_y
+
+    copper = PASS_VIA + "\n" + _via("via-n2", (dest[0] + 0.7, dest[1]), size=0.4, drill=0.3, net=2)
+    board = _board(tmp_path, copper)
+    rules = DesignRules(
+        min_clearance_mm=0.127,
+        min_trace_width_mm=0.127,
+        min_via_drill_mm=0.3,
+        min_via_diameter_mm=0.6,
+        min_annular_ring_mm=0.15,
+    )
+    result = MaskCopperRepairer(board).repair(
+        [_pt_finding("via-p", measured=0.05, location=(101.05, 99.6))],
+        max_displacement=1.0,
+        design_rules=rules,
+    )
+    assert result.repaired == 0
+    assert result.skipped("would_violate_clearance") == 1
+    assert "hole-to-hole" in result.unrepaired[0].detail
+
+
+def test_pass_through_overlap_relation_and_model_mismatch_are_refused(tmp_path):
+    from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer as R
+
+    board = _board(tmp_path, PASS)
+    # Overlap relation (the marker says pass-through but the copper crosses
+    # the pad): left to the overlap workflows.
+    overlap = DRCViolation(
+        type=ViolationType.MASK_TO_COPPER,
+        type_str="mask_to_copper",
+        severity=Severity.ERROR,
+        message=f"Mask-to-copper overlap: violation; opening R1/1; {PASS_THROUGH}",
+        locations=[Location(x_mm=100.0, y_mm=100.3, layer="F.Cu")],
+        items=[PAD, "trk-p"],
+        required_value_mm=0.09,
+    )
+    result = R(board).repair([overlap], max_displacement=1.0)
+    assert result.skipped("not_own_pad_entry") == 1
+    # The measurement disagrees with the opening model by more than the
+    # agreement window: the move is not verified against the real opening.
+    result = R(board).repair([_pt_finding("trk-p", measured=0.5)], max_displacement=1.0)
+    assert result.skipped("opening_model_mismatch") == 1
+
+
+def test_fix_drc_repairs_and_verifies_a_pass_through_nudge(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, PASS)
+    before = _report(_pt_finding("trk-p"))
+    clean = _report()
+    code = _run(monkeypatch, board, [before, clean, clean])
+    assert code == 0
+    ends = _end(board, "trk-p")
+    assert ends != [(95.0, 100.62), (105.0, 100.62)]  # the nudge was applied and kept
+    assert _pad_poly(board, "R1/1").distance(_saved_copper(board, "trk-p")[0]) == pytest.approx(
+        0.11, abs=1e-6
+    )
+    assert "MASK-TO-COPPER: 1/1" in capsys.readouterr().out
+
+
+def test_fix_drc_reverts_a_pass_through_nudge_that_does_not_clear(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, PASS)
+    before = _report(_pt_finding("trk-p"))
+    still = _report(_pt_finding("trk-p"))
+    code = _run(monkeypatch, board, [before, still, still])
+    assert code != 0
+    assert _end(board, "trk-p") == [(95.0, 100.62), (105.0, 100.62)]  # reverted
+    assert "finding_not_cleared" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "via_y, opens, refusal",
+    [
+        (100.204, 1, "pad_connection_lost"),
+        (100.202, 1, "native opens"),
+        (100.601, 1, None),
+        (100.0, 2, None),
+    ],
+)
+def test_mask_nudge_preserves_existing_pad_island_on_incomplete_net(
+    tmp_path, capsys, via_y, opens, refusal
+):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    # R1 is already disconnected. The via joins R4 to the front track at
+    # y=100.601. At y=100.202 KiCad still connects a 1 µm annulus contact.
+    fixture = Path(__file__).parent / "fixtures" / "mask_pass_through_via_contact.kicad_pcb"
+    board = tmp_path / fixture.name
+    # Move the via and the end of its back-layer trace together.
+    board.write_text(fixture.read_text().replace("102.5 100.202", f"102.5 {via_y}"))
+    original = board.read_bytes()
+    with evidence_toolchain(mounts=[tmp_path]):
+        before = run_geometric_drc(board, refill_zones=False)
+        assert before.ran and before.unconnected_count == opens
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-displacement",
+                "2",
+                "--verify",
+                "--format",
+                "json",
+            ]
+        )
+        after = run_geometric_drc(board, refill_zones=False)
+    assert after.ran and after.unconnected_count == opens
+    result = json.loads(capsys.readouterr().out)
+    assert result["mask_copper"]["violations"] == 1
+    assert result["total_repaired"] == int(refusal is None)
+    assert (board.read_bytes() != original) == (refusal is None)
+    if refusal:
+        rejected = result["mask_copper"]["unrepaired"][0]
+        assert refusal in (rejected.get("detail") or rejected["reason"])
+
+
+def test_mask_nudges_cannot_trade_pad_connections_on_the_same_partial_net(tmp_path, capsys):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    fixture = Path(__file__).parent / "fixtures" / "mask_pass_through_compensating_opens.kicad_pcb"
+    board = tmp_path / fixture.name
+    original = fixture.read_bytes()
+    board.write_bytes(original)
+    # Losing R4's via contact and gaining R14's both yield four native opens.
+    # One-count-per-net is constant even though R2, R3 and R4 are split.
+    with evidence_toolchain(mounts=[tmp_path]):
+        assert run_geometric_drc(board, refill_zones=False).unconnected_count == 4
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-displacement",
+                "2",
+                "--verify",
+                "--format",
+                "json",
+            ]
+        )
+    result = json.loads(capsys.readouterr().out)
+    assert result["mask_copper"]["repaired"] < 2
+    assert any(
+        entry["reason"] == "pad_connection_lost" for entry in result["mask_copper"]["unrepaired"]
+    )
+    trace = "bb000000-0000-4000-8000-000000000080"
+    assert _end(board, trace) == _end(fixture, trace)
+
+
+@pytest.mark.parametrize("fail_on_read", [1, 2])
+def test_unavailable_native_pad_groups_preserve_prior_output(
+    tmp_path, monkeypatch, capsys, fail_on_read
+):
+    from collections import Counter
+
+    board = _board(tmp_path, PASS)
+    original = board.read_bytes()
+    output = tmp_path / "previous.kicad_pcb"
+    output.write_bytes(b"existing output")
+    calls = 0
+
+    def read_groups(candidate):
+        nonlocal calls
+        calls += 1
+        if calls == fail_on_read:
+            raise RuntimeError("native pad groups unavailable")
+        return [frozenset({"left", "right"})]
+
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", read_groups)
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: (Counter(), 1))
+    _run(
+        monkeypatch,
+        board,
+        [_report(_pt_finding("trk-p")), _report(), _report()],
+        extra=("--output", str(output), "--format", "json"),
+        connectivity=True,
+    )
+    repair = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert calls == fail_on_read and repair["repaired"] == 0
+    assert repair["unrepaired"][-1]["reason"] == "recheck_unavailable"
+    assert "native pad groups unavailable" in repair["unrepaired"][-1]["detail"]
+    assert board.read_bytes() == original
+    assert output.read_bytes() == b"existing output"
+
+
+@pytest.mark.parametrize("outcome", ["saved", "refill_failed", "saved_error", "mask_reappeared"])
+def test_mask_refill_publishes_only_verified_saved_copper(tmp_path, monkeypatch, capsys, outcome):
+    from collections import Counter
+
+    from kicad_tools.cli import runner
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a") (priority 2))'
+    board = _board(tmp_path, PASS + zone)
+    board.with_suffix(".kicad_dru").write_text("(version 1)")
+    original = board.read_bytes()
+    output = tmp_path / "other.kicad_pcb"
+    if outcome != "saved":
+        output.write_bytes(b"previous output")
+    original_output = output.read_bytes() if output.exists() else None
+
+    def native_state(candidate):
+        assert candidate != board
+        assert candidate.name == board.name
+        assert candidate.with_suffix(".kicad_dru").read_text() == "(version 1)"
+        saved = "priority 3" in candidate.read_text()
+        return (Counter({"clearance": 1}) if saved and outcome == "saved_error" else Counter(), 0)
+
+    def refill(candidate, *, require_save):
+        assert require_save
+        assert candidate != board
+        assert board.read_bytes() == original
+        assert (output.read_bytes() if output.exists() else None) == original_output
+        candidate.write_text(candidate.read_text().replace("priority 2", "priority 3"))
+        return runner.KiCadCLIResult(success=outcome != "refill_failed", stderr="refill refused")
+
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", native_state)
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    finding = _report(_pt_finding("trk-p"))
+    final = finding if outcome == "mask_reappeared" else _report()
+    _run(
+        monkeypatch,
+        board,
+        [finding, _report(), final],
+        extra=("--output", str(output), "--format", "json"),
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert board.read_bytes() == original
+    assert result["total_repaired"] == int(outcome == "saved")
+    if outcome == "saved":
+        assert "priority 3" in output.read_text()
+        assert _end(output, "trk-p") != _end(board, "trk-p")
+    else:
+        assert output.read_bytes() == original_output
+        assert result["mask_copper"]["unrepaired"][-1]["reason"] == "recheck_unavailable"
+
+
+def test_moves_with_new_errors_attributes_a_via_centre_location(tmp_path, monkeypatch):
+    # A dragged track's segment-to-via error reports at the via centre, one
+    # measured gap inside the via's own copper: the attribution radius must
+    # count that gap or the move that caused it is kept (#9896).
+    board = _board(tmp_path, PASS)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 1
+    repairer.save(board)
+
+    error = DRCViolation(
+        type=ViolationType.from_string("netclass_clearance_copper"),
+        type_str="netclass_clearance_copper",
+        severity=Severity.ERROR,
+        message="Segment to via clearance 0.1090mm < netclass 'Digital' minimum 0.1500mm",
+        locations=[Location(x_mm=100.0, y_mm=101.21, layer="F.Cu")],
+        items=["Trace@F.Cu:w0.2:95/100.71~105/100.71", "Via@100/101.21:F.Cu-B.Cu:d0.3/s0.6"],
+        nets=["N1", "N2"],
+        required_value_mm=0.15,
+        actual_value_mm=0.109,
+    )
+    after = _report(error)
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", lambda *a, **k: _report())
+    flagged = fix_drc_cmd._moves_with_new_errors(
+        after=after,
+        actions=result.actions,
+        output_path=board,
+        pcb_path=board,
+        args=argparse.Namespace(mfr="jlcpcb", layers=None),
+    )
+    # The nudged copper sits 0.40 mm from the via centre -- outside the old
+    # 0.35 mm reach, inside reach + the measured 0.109 mm gap.
+    assert flagged == {"trk-p"}
