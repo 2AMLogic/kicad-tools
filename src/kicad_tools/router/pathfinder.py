@@ -43,7 +43,7 @@ from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid, SetupDeadlineExpired
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer, LayerType
-from .neck_down import taper_width_fn, tapered_run_pieces
+from .neck_down import band_safe_taper, taper_width_fn, tapered_run_pieces
 from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via, pad_half_extents
 from .quantize import is_45_aligned, normalize_direction, same_direction
@@ -6430,7 +6430,7 @@ class Router:
                     if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
                     else None
                 )
-                for (sx, sy), (ex, ey), width in tapered_run_pieces(
+                pieces = tapered_run_pieces(
                     x1,
                     y1,
                     x2,
@@ -6442,7 +6442,11 @@ class Router:
                     base_trace_width,
                     band_bboxes,
                     band_edge_mm,
-                ):
+                )
+                # Issue #9019: fuse a taper piece no width can lift out of the
+                # band into one that reaches the pad (U4.1, board 06).
+                pieces = band_safe_taper(pieces, band_bboxes, band_edge_mm)
+                for (sx, sy), (ex, ey), width in pieces:
                     if sx == ex and sy == ey:
                         continue
                     seg = Segment(

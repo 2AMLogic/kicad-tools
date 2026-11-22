@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from . import wall_deadline as _wall_deadline
-from .neck_down import taper_width_fn, tapered_run_pieces
+from .neck_down import band_safe_taper, taper_width_fn, tapered_run_pieces
 from .pad_landing import pad_landing_geometry
 from .resource_guard import reraise_if_resource_exhaustion
 from .search_radius import search_radius_cells
@@ -176,7 +176,12 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # ``primitives.pad_half_extents``) instead of raw ``width/2``/``height/2``.  A
 # v74 .so under-sizes a non-cardinally rotated pad and silently accepts a leg
 # in the band the Python gate refuses (parity break on such boards).
-_REQUIRED_CPP_BUILD_VERSION = 75
+# v76 (Issue #9424): ``same_net_pad_gap_in_band`` takes a via annulus as a
+# union with its own SMD pad only at the union depth into the AABB's inscribed
+# stadium (``via_clearance.same_net_pad_union_depth_mm``).  A v75 .so seats
+# vias in a roundrect pad's corner air and in shallow overlap wedges that the
+# fab-view checker grades as ``physical_copper_gap``; reject it.
+_REQUIRED_CPP_BUILD_VERSION = 76
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -988,7 +993,10 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
     """Format a human-readable backend status string for CLI output.
 
     Provides actionable guidance when the C++ backend is not available,
-    especially when routing large grids where performance matters.
+    especially when routing large grids where performance matters.  When the
+    extension is absent the status also names the capability gap, not just the
+    speed gap: the differential-pair centerline trunk rescue (Issue #5786) is
+    C++-only, and without it the router falls back to independent legs.
 
     Args:
         backend_info: Dictionary from get_backend_info().
@@ -1010,6 +1018,10 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
 
     if not available:
         parts.append("C++ backend not installed")
+        parts.append(
+            "Differential-pair centerline trunk rescue requires C++. "
+            "If the coupled search fails, routing falls back to independent legs"
+        )
         if grid_cells > LARGE_GRID_THRESHOLD:
             parts.append(
                 f"WARNING: Routing {grid_cells:,} grid cells with Python backend "
@@ -1259,6 +1271,7 @@ class CppGrid:
         # the same carve-out as the Python ``_is_plane_net_pad`` helper.
         from .fine_pitch_escape import resolve_clearance_with_escape_region
         from .grid import _is_plane_net_pad
+        from .via_clearance import cpp_pad_copper_corner_radius
 
         component_pitches = grid.compute_component_pitches()
         grid._component_pitch_cache = component_pitches
@@ -1330,6 +1343,7 @@ class CppGrid:
                 is_plane_net,
                 pad.rotation,
                 pad.shape == "circle",
+                cpp_pad_copper_corner_radius(pad),
             )
 
         cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)
@@ -3727,8 +3741,10 @@ class CppPathfinder:
             Runs through the SAME shared pipeline as
             ``PathFinder._convert_path_to_route``'s ``_emit_segment``
             (``neck_down.tapered_run_pieces``: #3532 dogleg, #1018 taper
-            cuts, per-piece width, #9019 slit-band guard), so the two
-            backends emit identical segment bytes for the same path.
+            cuts, per-piece width, #9019 slit-band guard, then
+            ``band_safe_taper`` to fuse pieces no width can lift out of the
+            band), so the two backends emit identical segment bytes for the
+            same path.
             """
             if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
                 layer_enum_value = self._grid.index_to_layer(layer_idx)
@@ -3739,7 +3755,7 @@ class CppPathfinder:
                     if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
                     else None
                 )
-                for (sx, sy), (ex, ey), seg_width in tapered_run_pieces(
+                pieces = tapered_run_pieces(
                     x1,
                     y1,
                     x2,
@@ -3751,20 +3767,24 @@ class CppPathfinder:
                     base_trace_width,
                     band_bboxes,
                     band_edge_mm,
+                )
+                for (sx, sy), (ex, ey), seg_width in band_safe_taper(
+                    pieces, band_bboxes, band_edge_mm
                 ):
                     if sx == ex and sy == ey:
                         continue
-                    seg = Segment(
-                        x1=sx,
-                        y1=sy,
-                        x2=ex,
-                        y2=ey,
-                        width=seg_width,
-                        layer=Layer(layer_enum_value),
-                        net=net,
-                        net_name=start.net_name,
+                    route.segments.append(
+                        Segment(
+                            x1=sx,
+                            y1=sy,
+                            x2=ex,
+                            y2=ey,
+                            width=seg_width,
+                            layer=Layer(layer_enum_value),
+                            net=net,
+                            net_name=start.net_name,
+                        )
                     )
-                    route.segments.append(seg)
 
         # Issue #9734: the C++ ``Segment`` stores float32 coordinates,
         # whose ulp at board scale (~1.5e-5 mm at 130 mm) round-trips a
