@@ -69,6 +69,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
@@ -9153,9 +9154,11 @@ def _apply_plane_via_reservation(
     ``find_all_plane_nets`` set the oracle stage closes); ``route_via=
     "manual"`` nets are not pours and are left alone.  Off with
     ``--no-plane-via-reservation``, and skipped when a placement disposition
-    preserves copper (the oracle stage does not run there either).  Never
-    raises: a failure is a warning and routing proceeds unreserved.
+    preserves copper (the oracle stage does not run there either). On the
+    initial route a missing reservation is advisory. A staged retry must
+    actually reserve the pad that triggered it.
     """
+    requested: frozenset[str] = getattr(args, "_retry_plane_pads", frozenset())
     if getattr(args, "no_plane_via_reservation", False):
         return
     names = set(getattr(args, "_auto_skipped_net_names", None) or ())
@@ -9212,11 +9215,24 @@ def _apply_plane_via_reservation(
             min_pour_footprint_pads=(
                 2 if getattr(args, "reserve_pour_only_passives", True) else None
             ),
+            stranded_pads=requested,
         )
-    except Exception as exc:  # advisory: never fail a route over a reservation
+    except Exception as exc:
+        if requested:
+            raise
         logger.warning("Plane-via reservation skipped: %s", exc)
         return
     args._plane_via_reservation = reservation
+    args._plane_reservation_nets = frozenset(nets)
+    if requested:
+        sites = _reserved_plane_via_sites(args) or {}
+        missing = requested.difference(sites)
+        if missing:
+            raise ValueError(f"No legal plane via and stub for {', '.join(sorted(missing))}")
+        if not quiet:
+            for pad in sorted(requested):
+                x, y = sites[pad][0]
+                print(f"    Reserved {pad} at ({x:g}, {y:g}) mm (sheet coordinates)")
     links = getattr(reservation, "array_links", None) or []
     if links and not quiet:
         # Issue #6673: same-pour ball clusters of an area array on a layer
@@ -10803,10 +10819,13 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     from kicad_tools.router.oracle_completion import (
         DEFAULT_ORACLE_ROUNDS,
         STOP_DEADLINE,
+        STOP_NO_CLOSER,
+        STOP_NO_PROGRESS,
         STOP_NOT_RUN,
     )
 
     args._stranded_pour_links = 0
+    args._exhausted_mixed_plane_pads = frozenset()
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
     args._stranded_pour_unknown = False
@@ -10923,6 +10942,25 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         return 0
     args._stranded_pour_links = result.final_links
     args._oracle_completion = result
+    reserved_nets: frozenset[str] = getattr(args, "_plane_reservation_nets", frozenset())
+    if (
+        result.stop_reason in (STOP_NO_CLOSER, STOP_NO_PROGRESS)
+        and reserved_nets
+        and closer.exhausted_stitch_pads
+        and router is not None
+    ):
+        from kicad_tools.router.plane_via_sites import stranded_mixed_pair_pads
+
+        unresolved = {
+            pad
+            for link in closer.canonical_stranded_links(output_path, result.final_link_details)
+            if link.net in reserved_nets
+            for pad in (link.a.pad_key, link.b.pad_key)
+            if pad is not None
+        }
+        args._exhausted_mixed_plane_pads = stranded_mixed_pair_pads(
+            router.grid._pads, pour_nets, unresolved & closer.exhausted_stitch_pads
+        )
     if not quiet:
         print(
             f"  {result.initial_links} -> {result.final_links} unconnected pour link(s) "
@@ -23208,6 +23246,7 @@ def _budget_retry_static_eligible(args) -> bool:
     """
     return not (
         getattr(args, "dry_run", False)
+        or getattr(args, "_retry_plane_pads", None)
         or getattr(args, "complete", False)
         or getattr(args, "resume", None)
         or getattr(args, "checkpoint", None)
@@ -24001,7 +24040,7 @@ def _staged_export_report_path(original: str) -> Path:
 
 def _budget_retry_argv(
     argv: list[str] | None,
-    grid_mm: float,
+    grid_mm: float | None,
     staged: Path,
     report_map: dict[str, Path] | None = None,
 ) -> list[str]:
@@ -24104,7 +24143,7 @@ def _budget_retry_argv(
                 return [f"{tok.partition('=')[0]}={new_value}"]
             return [f"{tok[:2]}{new_value}"]
 
-        if dest == "grid":
+        if dest == "grid" and grid_mm is not None:
             out.extend(_respell(f"{grid_mm:g}"))
             grid_set = True
         elif dest == "output":
@@ -24123,7 +24162,7 @@ def _budget_retry_argv(
         else:
             out.extend(head[i : i + consumed])
         i += consumed
-    if not grid_set:
+    if grid_mm is not None and not grid_set:
         out.extend(["--grid", f"{grid_mm:g}"])
     if not output_set:
         out.extend(["-o", str(staged)])
@@ -24205,12 +24244,11 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
 
     from kicad_tools.router.partial_rescue import partially_connected_signal_nets
     from kicad_tools.router.stuck_classifier import (
-        _search_failures_sidecar_path,
         is_budget_search_failure,
         load_search_failures_sidecar,
     )
 
-    from .route_deadline import CONTROL_ENV, DEADLINE_ENV
+    from .route_deadline import DEADLINE_ENV
 
     manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
     # Issue #9620 review: the retry is judged against the nets THIS batch
@@ -24279,11 +24317,116 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             f"retrying the batch once on a {retry_grid:g}mm grid "
             f"({first_grid:g}mm x2{capped}) ---"
         )
+    return _stage_route_retry(args, argv, result, output, before, _open_nets, retry_grid=retry_grid)
+
+
+def _plane_retry_eligible(args) -> bool:
+    """Only a fresh whole-board run can replay its input with extra reservations."""
+    return not (
+        getattr(args, "_retry_plane_pads", None)
+        or getattr(args, "no_plane_via_reservation", False)
+        or getattr(args, "allow_stranded_pour_pads", False)
+        or getattr(args, "dry_run", False)
+        or getattr(args, "complete", False)
+        or getattr(args, "resume", None)
+        or getattr(args, "checkpoint", None)
+        or getattr(args, "nets", None)
+        or getattr(args, "region", None)
+        or _interrupt_pending()
+    )
+
+
+def _chain_stranded_plane_pass(args, argv, result: int, started: float) -> int:
+    """Retry a real, exhausted mixed-pad stitch with its site reserved before signals."""
+    pads: frozenset[str] = getattr(args, "_exhausted_mixed_plane_pads", frozenset())
+    if (
+        not pads
+        or result not in (3, 4)
+        or not _plane_retry_eligible(args)
+        or getattr(args, "_pour_completion_cut_by_timeout", False)
+        or getattr(args, "_allow_stranded_pour_pads", False)
+    ):
+        return result
+    from . import route_receipt
+    from .route_deadline import DEADLINE_ENV
+
+    pcb = Path(args.pcb)
+    output = Path(args.output) if args.output else pcb.with_stem(pcb.stem + "_routed")
+    invocation = route_receipt._current.get()
+    if invocation is None or output.absolute() not in invocation.published:
+        return result
+    try:
+        if output.samefile(pcb):
+            # An in-place first run replaced the original layout.
+            return result
+    except OSError:
+        # A disappeared input or output leaves nothing to replay or compare.
+        return result
+    deadline = os.environ.get(DEADLINE_ENV)
+    if deadline is not None:
+        now = time.monotonic()
+        if float(deadline) - now < max(_BUDGET_RETRY_MIN_BUDGET_S, now - started):
+            return result
+
+    def remaining(board: Path) -> list[str]:
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+        from kicad_tools.lvs.copper_lvs import compare_partitions
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        analyzer = NetStatusAnalyzer(board, strict=True)
+        checked = analyzer.analyze()
+        connected_pads = {p.full_name for net in checked.nets for p in net.connected_pads}
+        # Per-net connectivity cannot see two otherwise-complete nets touching.
+        # Compare the physical islands against the ORIGINAL pad assignments.
+        source = PCB.load(pcb)
+        expected: dict[tuple[str, str], str | None] = {
+            (fp.reference, pad.number): source.nets[pad.net_number].name
+            for fp in source.footprints
+            for pad in fp.pads
+            if fp.reference and pad.number and pad.net_number and pad.net_number in source.nets
+        }
+        islands, bindings = ConnectivityValidator(analyzer.pcb).extract_pad_occurrences()
+        copper = compare_partitions(expected, islands, pad_bindings=bindings)
+        absent = expected.keys() - set(bindings.values())
+        return [
+            *sorted(pads - connected_pads),
+            *sorted(f"{ref}.{pin}" for ref, pin in absent),
+            *(f"{m.kind} {m.pad_a}/{m.pad_b}" for m in copper.mismatches),
+            *(net.net_name for net in (*checked.incomplete, *checked.unrouted, *checked.stranded)),
+        ]
+
+    if not getattr(args, "quiet", False):
+        print(
+            f"\n--- Reserving exhausted plane stitch sites before retry: {', '.join(sorted(pads))} ---"
+        )
+    return _stage_route_retry(args, argv, result, output, sorted(pads), remaining, plane_pads=pads)
+
+
+def _stage_route_retry(
+    args,
+    argv: list[str] | None,
+    result: int,
+    output: Path,
+    before: list[str],
+    remaining_nets: Callable[[Path], list[str]],
+    *,
+    retry_grid: float | None = None,
+    plane_pads: frozenset[str] = frozenset(),
+) -> int:
+    """Run one candidate against fresh input and publish its board and reports atomically."""
+    from kicad_tools.router.stuck_classifier import _search_failures_sidecar_path
+
+    from .route_deadline import CONTROL_ENV
+
+    quiet = bool(getattr(args, "quiet", False))
+    kind = "plane-sites" if plane_pads else "coarser"
+    label = "Plane-site retry" if plane_pads else "Coarser-grid retry"
     # Issue #9620 review: staging lives in a private per-invocation directory
     # (unique, dot-prefixed) -- a ``<stem>.coarser*`` glob next to -o matched
     # unrelated files (an input named ``board.coarser.kicad_pcb`` was deleted
     # before the retry could read it; a ``board.coarser-notes.txt`` was lost).
-    stage_dir = _fresh_staging_dir(output, "coarser")
+    stage_dir = _fresh_staging_dir(output, kind)
     staged = stage_dir / output.name
     staged_reports: dict[str, Path] = {}
     retry_argv = _budget_retry_argv(argv, retry_grid, staged, staged_reports)
@@ -24322,10 +24465,14 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
         try:
             if json_capture is not None:
                 _route_json_capture = json_capture
-            retry_rc = _main_impl(retry_argv)
+            retry_rc = (
+                _main_impl(retry_argv, plane_pads=plane_pads)
+                if plane_pads
+                else _main_impl(retry_argv)
+            )
             if staged.is_file():
                 try:
-                    after = _open_nets(staged)
+                    after = remaining_nets(staged)
                 except Exception:
                     # Issue #9620 review: an unreadable connectivity report
                     # means the open-net count is unknown, never zero -- an
@@ -24337,10 +24484,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             # keep unwinding -- the finally below still restores the receipt
             # and supervisor control, and the outer finally discards staging.
             if not quiet:
-                print(
-                    f"  Coarser-grid retry failed ({type(exc).__name__}: {exc}); "
-                    "keeping the first result"
-                )
+                print(f"  {label} failed ({type(exc).__name__}: {exc}); keeping the first result")
             retry_rc, after = None, before
         finally:
             if json_capture is not None:
@@ -24350,9 +24494,11 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             if control and control_snapshot is not None:
                 _restore_supervisor_control(control, control_snapshot)
         if (
-            retry_rc not in _BUDGET_RETRY_ACCEPT_EXITS
+            retry_rc is None
+            or retry_rc not in ({0} if plane_pads else _BUDGET_RETRY_ACCEPT_EXITS)
             or not staged.is_file()
             or after is None
+            or (plane_pads and after)
             or len(after) >= len(before)
         ):
             if not quiet:
@@ -24362,8 +24508,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
                     else f"{len(after)} open vs {len(before)}"
                 )
                 print(
-                    "  Coarser-grid retry did not route more nets "
-                    f"(exit {retry_rc}, {why}); first result kept"
+                    f"  {label} did not route more nets (exit {retry_rc}, {why}); first result kept"
                 )
             return result
         # Promotion: the retry's diagnostics travel with its board, as ONE
@@ -24383,10 +24528,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             _promote_staging_dir(stage_dir, output, staged, args, extra_moves)
         except OSError as exc:
             if not quiet:
-                print(
-                    f"  Coarser-grid retry could not publish its artifacts ({exc}); "
-                    "first result kept"
-                )
+                print(f"  {label} could not publish its artifacts ({exc}); first result kept")
             return result
         _adopt_constraint_receipt(output, staged, inner_invocation, outer_invocation)
         if json_capture:
@@ -24400,7 +24542,9 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
         # Also runs on RouteDeadlineExpired / KeyboardInterrupt: -o was never
         # touched before promotion, so only staging needs removing.
         _discard()
-    if not quiet:
+    if not quiet and plane_pads:
+        print(f"  {label} connected the written board; promoted")
+    elif not quiet and retry_grid is not None:
         print(
             f"  Coarser-grid retry routed {len(before) - len(after)} more net(s) "
             f"on the {retry_grid:g}mm grid; promoted"
@@ -24411,9 +24555,11 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     return retry_rc
 
 
-def _main_impl(argv: list[str] | None = None) -> int:
+def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = frozenset()) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    args._retry_plane_pads = plane_pads
+    started = time.monotonic()
     if getattr(args, "nogood_cache", False):
         # Issue #6353: experiment-only plumbing; read by Autorouter lazily.
         os.environ["KCT_NOGOOD_CACHE"] = "1"
@@ -24466,6 +24612,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     gate is not None
                     or _route_json_capture is not None
                     or _budget_retry_static_eligible(args)
+                    or _plane_retry_eligible(args)
                 )
                 else contextlib.nullcontext(None)
             )
@@ -24484,6 +24631,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                                 args._lint_gate_output = str(gate.output)
                                 args.output = str(staged)
                         result = _run_main_impl(args, parser, argv)
+                        result = _chain_stranded_plane_pass(args, argv, result, started)
                         # Issue #9620: the budget-only coarser retry re-routes the
                         # whole batch before the chained completion pass, so its
                         # classification reads the grid pass's own give-up labels
