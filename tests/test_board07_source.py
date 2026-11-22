@@ -107,6 +107,50 @@ def _load_record(name):
     return module
 
 
+def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land():
+    from types import SimpleNamespace
+
+    import pytest
+
+    release = _load_record("build_source")
+    pad = SimpleNamespace(
+        number="", net_name="", net_number=0, size=(1.0, 1.0), drill=0.0, layers=["F.Cu", "F.Mask"]
+    )
+    mark = SimpleNamespace(
+        reference="FID1",
+        name=release.FIDUCIAL_FOOTPRINT,
+        value="Fiducial",
+        layer="F.Cu",
+        _attr_unknown_tokens=["board_only"],
+        exclude_from_bom=True,
+        exclude_from_pos_files=True,
+        pads=[pad],
+    )
+    board = SimpleNamespace(footprints=[mark])
+    release.verify_fiducials(board, {"FID1": "F.Cu"})
+    for obj, field, invalid in (
+        (mark, "name", "Resistor_SMD:R_0603"),
+        (mark, "_attr_unknown_tokens", []),
+        (mark, "exclude_from_pos_files", False),
+        (mark, "exclude_from_bom", False),
+        (mark, "layer", "B.Cu"),
+        (mark, "pads", [pad, pad]),
+        (pad, "number", "1"),
+        (pad, "net_name", "SDCLK"),
+        (pad, "net_number", 2),
+        (pad, "drill", 0.3),
+        (pad, "size", (1.0, 2.0)),
+        (pad, "layers", ["F.Cu", "B.Cu"]),
+    ):
+        initial = getattr(obj, field)
+        setattr(obj, field, invalid)
+        with pytest.raises(ValueError, match="Invalid board-only fiducial"):
+            release.verify_fiducials(board, {"FID1": "F.Cu"})
+        setattr(obj, field, initial)
+    with pytest.raises(ValueError, match="Missing declared fiducials"):
+        release.verify_fiducials(board, {"FID1": "F.Cu", "FID2": "B.Cu"})
+
+
 def _vias(path):
     import re
 
