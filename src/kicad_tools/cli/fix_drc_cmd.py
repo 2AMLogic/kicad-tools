@@ -33,13 +33,16 @@ import hashlib
 import json
 import math
 import shutil
+import subprocess
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.core.atomic_write import atomic_write_text
 from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
 from kicad_tools.drc.repair_copper_gap import (
     CopperGapRepairer,
@@ -49,6 +52,8 @@ from kicad_tools.drc.repair_copper_gap import (
 from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer, DrillRepairResult
 from kicad_tools.drc.repair_mask_copper import (
     MaskCopperRepairer,
+    MaskNudgeAction,
+    MaskRepairAction,
     MaskRepairResult,
     MaskUnrepaired,
     finding_key,
@@ -336,7 +341,8 @@ Examples:
         choices=["clearance", "drill-clearance", "mask-copper", "copper-gap"],
         help=(
             "Only fix a specific violation type. 'mask-copper' re-centres a "
-            "track that enters its own pad off-centre (mask_to_copper); it is "
+            "track that enters its own pad off-centre and nudges a same-net "
+            "pass-through clear of its own pad's opening (mask_to_copper); it is "
             "detected with kct check's rules, not kicad-cli, and is also part "
             "of the default set when the report carries such findings. "
             "'copper-gap' moves a via that sits too close to its own pad or "
@@ -528,7 +534,9 @@ def _detection_engine(drc_report_path: str | None) -> str:
 
 
 @contextmanager
-def _with_project_rules(board: Path, project_pcb_path: Path) -> Iterator[Path]:
+def _with_project_rules(
+    board: Path, project_pcb_path: Path, *, private: bool = False
+) -> Iterator[Path]:
     """Yield a path to ``board``'s copper that sits next to the project's rules.
 
     kicad-cli reads ``<stem>.kicad_pro`` / ``.kicad_dru`` next to the board it
@@ -537,7 +545,7 @@ def _with_project_rules(board: Path, project_pcb_path: Path) -> Iterator[Path]:
     the project board itself it is copied, with the project's sidecars, into a
     private temporary directory; nothing is written next to the user's files.
     """
-    if board.resolve() == project_pcb_path.resolve():
+    if not private and board.resolve() == project_pcb_path.resolve():
         yield board
         return
     with tempfile.TemporaryDirectory(prefix="kct-fix-drc-") as tmp:
@@ -547,6 +555,17 @@ def _with_project_rules(board: Path, project_pcb_path: Path) -> Iterator[Path]:
             sidecar = project_pcb_path.with_suffix(suffix)
             if sidecar.is_file():
                 shutil.copyfile(sidecar, staged.with_suffix(suffix))
+        if private:
+            # Native DRC also resolves project libraries and included rules relative
+            # to the PCB. Keep writable board/project state private to this pass.
+            from kicad_tools.cli.runner import _link_or_copy
+
+            for sibling in project_pcb_path.resolve().parent.iterdir():
+                target = staged.parent / sibling.name
+                if sibling.name.startswith(".") or target.exists() or target.is_symlink():
+                    continue
+                if sibling.suffix not in {".kicad_pcb", ".kicad_pro", ".kicad_prl"}:
+                    _link_or_copy(sibling, target)
         yield staged
 
 
@@ -886,6 +905,13 @@ def _execute_repair(
                 # Connectivity decreased -- try granular rollback first.
                 after_report = _connectivity_report(output_path)
                 regressed = _regressed_nets(baseline_report, after_report)
+                if mask_result.repaired:
+                    from kicad_tools.schema.pcb import PCB
+
+                    if any(zone.keepout is None for zone in PCB.load(output_path).zones):
+                        # Undoing only some moves would invalidate freshly saved fills.
+                        # Restore the complete pre-pass copper and its matching fills.
+                        regressed = set()
 
                 reverted_all, kept_count, reverted_uuid_list = _attempt_granular_rollback(
                     output_path=output_path,
@@ -1378,7 +1404,12 @@ def _moves_with_new_errors(
         # at 0.25 mm (a rule without a requirement still sits within about a
         # trace width of the copper that caused it) plus 0.1 mm because the
         # reported point lies between the two copper edges, not on either.
-        reach = max(v.required_value_mm or 0.0, 0.25) + 0.1
+        # The measured gap is added too: a finding between a moved conductor
+        # and a via or hole reports at that item's centre/edge, one whole
+        # gap inside its own copper from the moved edge (issue #9896: dragged
+        # tracks' segment-to-via errors report at the via centre, ~0.3 mm
+        # inside its annulus).
+        reach = max(v.required_value_mm or 0.0, 0.25) + 0.1 + max(v.actual_value_mm or 0.0, 0.0)
         flagged |= {
             uuid
             for uuid, geom in geometry.items()
@@ -1386,6 +1417,94 @@ def _moves_with_new_errors(
             or any(geom.distance(Point(loc.x_mm, loc.y_mm)) <= reach for loc in v.locations)
         }
     return flagged
+
+
+def _mask_action_touches(action: MaskRepairAction | MaskNudgeAction, touched: set[str]) -> bool:
+    """Whether a new mask finding names anything a move owns.
+
+    A recentre owns its conductor and pad; a grouped nudge (issue #9896)
+    additionally owns every opening it was computed to clear and every
+    same-net end it dragged, so a new finding on a dragged track or against
+    a second opening reverts the whole grouped edit.
+    """
+    if action.uuid in touched or action.pad_uuid in touched:
+        return True
+    for opening in getattr(action, "openings", ()):
+        if opening in touched:
+            return True
+    for joined in getattr(action, "joined", ()):
+        if joined and joined[0] in touched:
+            return True
+    return any(len(point) >= 2 and point[1] in touched for point in getattr(action, "points", ()))
+
+
+def _mask_pad_islands(board: Path, nets: set[str] | None) -> dict[str, list[frozenset]]:
+    """Physical pad groups on the edited nets, including partially routed nets."""
+    from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+    analyzer = NetStatusAnalyzer(board, strict=True)
+    statuses = analyzer.analyze() if nets is None else analyzer.analyze_nets(nets)
+    # Native refill may reorder footprints. A pad's place, layer and pin
+    # identify its physical land even when two footprints share a display ref.
+    return {
+        net.net_name: [
+            frozenset(
+                (pad.full_name, tuple(round(c, 6) for c in pad.position), tuple(sorted(pad.layers)))
+                for pad in island
+            )
+            for island in net.islands
+        ]
+        for net in statuses.nets
+    }
+
+
+def _split_mask_nets(before: dict[str, list[frozenset]], board: Path) -> set[str]:
+    after = _mask_pad_islands(board, set(before))
+    return {
+        name
+        for name, groups in before.items()
+        if any(not any(group <= intact for intact in after.get(name, [])) for group in groups)
+    }
+
+
+class _MaskPadConnectionLost(RuntimeError):
+    """A saved repair split a previously connected group of pads."""
+
+
+def _mask_native_pad_groups(board: Path) -> list[frozenset[str]]:
+    """Read KiCad's physical pad groups on the private, project-staged board."""
+    from kicad_tools.drc import _native_pad_groups
+    from kicad_tools.validate.mask_copper_geometry import _resolve_native_python_command
+
+    stage = board.parent.resolve()
+    command, reason = _resolve_native_python_command(None, stage)
+    if command is None:
+        raise RuntimeError(reason)
+    worker = stage / "_native_pad_groups.py"
+    shutil.copyfile(_native_pad_groups.__file__, worker)
+    result = subprocess.run(
+        [*command, str(worker), str(board.resolve())],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode:
+        raise RuntimeError(f"KiCad could not read saved pad connectivity: {result.stderr.strip()}")
+    return [frozenset(group) for group in json.loads(result.stdout)]
+
+
+def _mask_native_state(board: Path) -> tuple[Counter, int]:
+    """Read the native errors and opens on the copper actually stored on disk."""
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    report = run_geometric_drc(board, refill_zones=False, all_track_errors=True)
+    if not report.ran:
+        raise RuntimeError(f"could not check saved copper: {report.note}")
+    failures = Counter(
+        (v.type_str, v.rule, tuple(sorted(v.item_uuids if any(v.item_uuids) else v.items)))
+        for v in report.error_violations
+    )
+    return failures, report.unconnected_count
 
 
 def _run_mask_pass(
@@ -1412,97 +1531,185 @@ def _run_mask_pass(
     this pass is reverted: an unverified move is never kept.
     """
     result = MaskRepairResult()
-    saved = False
-    snapshot: bytes | None = None
+    load_path = pcb_path
+    if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
+        load_path = output_path
     try:
-        load_path = pcb_path
-        if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
-            load_path = output_path
         repairer = MaskCopperRepairer(load_path)
         result = repairer.repair(
             mask_violations,
             max_displacement=args.max_displacement,
             dry_run=args.dry_run,
             clearance_mm=design_rules.min_clearance_mm if design_rules is not None else None,
+            design_rules=design_rules,
         )
-        if args.dry_run or result.repaired == 0:
+        if args.dry_run or not result.actions:
             return result
-        # Byte-exact copy of the board this pass started from, for the
-        # double-fault path below.
-        snapshot = load_path.read_bytes()
-        repairer.save(output_path)
-        saved = True
-
-        after = _run_python_drc(
-            output_path,
-            manufacturer=args.mfr,
-            layers=args.layers,
-            project_pcb_path=pcb_path,
-            mask_copper=True,
-        )
-        if after is not None and any(
-            v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in after.violations
-        ):
-            # The mask assessment could not complete (e.g. an unqualified
-            # KiCad): it proves nothing about the moves, so none are kept.
-            after = None
-        before_keys = {finding_key(v) for v in mask_copper_violations(report.violations)}
-        after_errors = mask_copper_violations(after.violations) if after is not None else []
-        new_keys = {finding_key(v) for v in after_errors} - before_keys
-        touched = {u for key in new_keys for u in key}
-        persisting = {key[-1] for key in (finding_key(v) for v in after_errors) if key}
-        regressed = (
-            _moves_with_new_errors(
-                after=after,
-                actions=result.actions,
-                output_path=output_path,
-                pcb_path=pcb_path,
-                args=args,
+        with _with_project_rules(load_path, pcb_path, private=True) as candidate:
+            has_zones = any(zone.find("keepout") is None for zone in repairer.doc.find_all("zone"))
+            edited_nets = {act.net_name for act in result.actions}
+            pad_islands = (
+                _mask_pad_islands(candidate, None if has_zones else edited_nets)
+                if not args.no_connectivity_check
+                else {}
             )
-            if after is not None
-            else set()
-        )
+            # KiCad can join an annulus and a trace at the edge of contact
+            # even when the strict pad-island graph considers them separate.
+            check_nudges = not args.no_connectivity_check and any(
+                isinstance(action, MaskNudgeAction) for action in result.actions
+            )
+            before_native = _mask_native_state(candidate) if has_zones or check_nudges else None
+            # On a partially connected board one new contact can hide a split,
+            # even on the same net. Keep KiCad's actual pad groups for that case.
+            native_groups = (
+                _mask_native_pad_groups(candidate)
+                if before_native is not None and not args.no_connectivity_check
+                else []
+            )
+            proposed = len(result.actions)
+            repairer.save(candidate)
+            _verify_mask_actions(result, report, args, pcb_path, candidate, pad_islands)
+            if result.actions and has_zones:
+                from kicad_tools.cli.runner import run_refill_zones
 
-        keep = []
-        revert = []
-        for act in result.actions:
-            if after is None:
-                revert.append((act, "recheck_unavailable"))
-            elif act.uuid in persisting:
-                revert.append((act, "finding_not_cleared"))
-            elif act.uuid in touched or act.pad_uuid in touched:
-                revert.append((act, "new_mask_finding"))
-            elif act.uuid in regressed:
-                revert.append((act, "new_drc_error"))
-            else:
-                keep.append(act)
-        if revert:
-            undo = MaskCopperRepairer(output_path)
-            for act, reason in revert:
-                if not undo.undo_action(act):
-                    raise RuntimeError(f"could not revert mask recentre {act.uuid!r}")
-                result.unrepaired.append(MaskUnrepaired(reason=reason, uuid=act.uuid))
-            undo.save(output_path)
-            result.actions = keep
-            result.repaired = len(keep)
+                refill = run_refill_zones(candidate, require_save=True)
+                if not refill.success:
+                    raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
+            if result.actions and before_native is not None:
+                errors, opens = _mask_native_state(candidate)
+                new_errors = (errors - before_native[0]).total()
+                if new_errors or opens > before_native[1]:
+                    raise RuntimeError(
+                        "saved mask repair introduced native errors or opens "
+                        f"({new_errors} new errors, native opens {before_native[1]} to {opens})"
+                    )
+                if native_groups:
+                    membership = {
+                        pad: group for group in _mask_native_pad_groups(candidate) for pad in group
+                    }
+                    if any(
+                        not group <= membership.get(next(iter(group)), frozenset())
+                        for group in native_groups
+                    ):
+                        raise _MaskPadConnectionLost(
+                            "saved mask repair disconnected previously connected native pads"
+                        )
+            if result.actions and (has_zones or result.repaired < proposed):
+                # Undoing one proposal or refilling a pour changes the actual
+                # final copper after the first per-action check.
+                if pad_islands and _split_mask_nets(pad_islands, candidate):
+                    raise _MaskPadConnectionLost(
+                        "final saved board disconnected previously connected pads"
+                    )
+                final = _run_python_drc(
+                    candidate,
+                    manufacturer=args.mfr,
+                    layers=args.layers,
+                    project_pcb_path=pcb_path,
+                    mask_copper=True,
+                )
+                if final is None or any(
+                    v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in final.violations
+                ):
+                    raise RuntimeError("could not verify mask openings on the final saved board")
+                remaining = {finding_key(v) for v in mask_copper_violations(final.violations)}
+                previous = {finding_key(v) for v in mask_copper_violations(report.violations)}
+                touched = {uid for key in remaining - previous for uid in key}
+                persisting = {key[-1] for key in remaining if key}
+                if any(
+                    a.uuid in persisting or _mask_action_touches(a, touched) for a in result.actions
+                ):
+                    raise RuntimeError("mask openings failed verification on the final saved board")
+                if _moves_with_new_errors(
+                    after=final,
+                    actions=result.actions,
+                    output_path=candidate,
+                    pcb_path=pcb_path,
+                    args=args,
+                ):
+                    raise RuntimeError("final saved mask repair introduced clearance errors")
+            if result.actions:
+                atomic_write_text(output_path, candidate.read_text())
+            elif output_path != load_path and not output_path.exists():
+                atomic_write_text(output_path, load_path.read_text())
     except Exception as e:
         print(f"Error during mask-to-copper repair: {e}", file=sys.stderr)
-        if saved and snapshot is not None:
-            # Saved but not verified: never keep an unverified move.  Restore
-            # the board this pass started from rather than undoing move by
-            # move: ``undo_action`` can return False, which would leave a move
-            # in the file that the result reports as not made.
-            try:
-                output_path.write_bytes(snapshot)
-            except OSError as undo_error:
-                print(
-                    f"Error reverting mask-to-copper moves: {undo_error}; "
-                    f"{output_path} may still contain {len(result.actions)} unverified move(s)",
-                    file=sys.stderr,
-                )
-            result.actions = []
-            result.repaired = 0
+        reason = (
+            "pad_connection_lost"
+            if isinstance(e, _MaskPadConnectionLost)
+            else "recheck_unavailable"
+        )
+        for act in result.actions:
+            result.unrepaired.append(MaskUnrepaired(reason=reason, uuid=act.uuid, detail=str(e)))
+        result.actions = []
+        result.repaired = 0
     return result
+
+
+def _verify_mask_actions(
+    result: MaskRepairResult,
+    report: DRCReport,
+    args: argparse.Namespace,
+    pcb_path: Path,
+    candidate: Path,
+    pad_islands: dict[str, list[frozenset]],
+) -> None:
+    """Undo a grouped move if its saved geometry fails the mask, clearance or pad checks."""
+    after = _run_python_drc(
+        candidate,
+        manufacturer=args.mfr,
+        layers=args.layers,
+        project_pcb_path=pcb_path,
+        mask_copper=True,
+    )
+    if after is not None and any(
+        v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in after.violations
+    ):
+        # The mask assessment could not complete (e.g. an unqualified
+        # KiCad): it proves nothing about the moves, so none are kept.
+        after = None
+    before_keys = {finding_key(v) for v in mask_copper_violations(report.violations)}
+    after_errors = mask_copper_violations(after.violations) if after is not None else []
+    new_keys = {finding_key(v) for v in after_errors} - before_keys
+    touched = {u for key in new_keys for u in key}
+    persisting = {key[-1] for key in (finding_key(v) for v in after_errors) if key}
+    regressed = (
+        _moves_with_new_errors(
+            after=after,
+            actions=result.actions,
+            output_path=candidate,
+            pcb_path=pcb_path,
+            args=args,
+        )
+        if after is not None
+        else set()
+    )
+
+    disconnected = _split_mask_nets(pad_islands, candidate) if pad_islands else set()
+    keep = []
+    revert = []
+    for act in result.actions:
+        if after is None:
+            revert.append((act, "recheck_unavailable"))
+        elif act.net_name in disconnected:
+            revert.append((act, "pad_connection_lost"))
+        elif act.uuid in persisting:
+            revert.append((act, "finding_not_cleared"))
+        elif _mask_action_touches(act, touched):
+            revert.append((act, "new_mask_finding"))
+        elif act.uuid in regressed:
+            revert.append((act, "new_drc_error"))
+        else:
+            keep.append(act)
+    if revert:
+        undo = MaskCopperRepairer(candidate)
+        for act, reason in revert:
+            if not undo.undo_action(act):
+                raise RuntimeError(f"could not revert mask recentre {act.uuid!r}")
+            result.unrepaired.append(MaskUnrepaired(reason=reason, uuid=act.uuid))
+        undo.save(candidate)
+        result.actions = keep
+        result.repaired = len(keep)
 
 
 def _count_connected_nets(pcb_path: Path) -> int:
@@ -2463,7 +2670,9 @@ def _print_text(
         )
         for mask_act in mask_result.actions[:5]:
             mask_suffix = " (reverted)" if _is_reverted(mask_act.uuid) else ""
-            print(f"  [RECENTRE] {mask_act.net_name} pad {mask_act.pad_ref}{mask_suffix}")
+            print(
+                f"  [{mask_act.action.upper()}] {mask_act.net_name} pad {mask_act.pad_ref}{mask_suffix}"
+            )
             print(
                 f"    ({mask_act.old_x:.4f}, {mask_act.old_y:.4f}) -> "
                 f"({mask_act.new_x:.4f}, {mask_act.new_y:.4f}) "
