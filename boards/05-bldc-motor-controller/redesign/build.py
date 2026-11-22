@@ -71,6 +71,124 @@ def clear_fiducial_openings(routed):
     routed.write_text(serialize_sexp(board))
 
 
+#: Issue #9921: the pads whose front/back GND pour must keep the authored
+#: 0.2 mm standoff the four ``Zone clearance`` DRU rules declare.  Inside
+#: every rated part's courtyard the #8048 attach-zone exemptions drop that
+#: pair to the 0.1016 mm fab floor, so the pour fills 0.1021 mm from these
+#: pads' mask openings -- inside JLCPCB's 0.15 mm mask-to-copper warning
+#: band (#8842).  A pad-local clearance restores the authored standoff for
+#: exactly that pad: KiCad resolves the local value above the courtyard
+#: exemption when filling (measured on the pinned toolchain; the fiducial
+#: step below relies on the same resolution), and the shared DRU rules,
+#: the exemptions and the pre-routing fingerprint are untouched.  U2 and
+#: U3's land-pattern pads are deliberately absent: their openings' ownership
+#: and lead pitch await the operator decisions tracked in #9921.
+POUR_STANDOFF_MM = 0.2
+POUR_STANDOFF_PADS = {
+    "U1": frozenset(
+        {
+            "1",
+            "2",
+            "4",
+            "6",
+            "9",
+            "10",
+            "11",
+            "12",
+            "13",
+            "14",
+            "15",
+            "16",
+            "17",
+            "18",
+            "20",
+            "23",
+            "24",
+            "25",
+            "26",
+            "28",
+            "29",
+            "30",
+            "32",
+        }
+    ),
+    "J1": frozenset({"1"}),
+    "J3": frozenset({"1", "3", "4", "5"}),
+    "J4": frozenset({"1", "2", "3", "4", "5"}),
+    "J5": frozenset({"1"}),
+    "RV1": frozenset({"1", "2"}),
+    "C1": frozenset({"1"}),
+    "C2": frozenset({"1"}),
+    "C3": frozenset({"1"}),
+    "C6": frozenset({"1"}),
+    "C7": frozenset({"1"}),
+    "C8": frozenset({"1"}),
+    "C9": frozenset({"1"}),
+    "C10": frozenset({"1"}),
+    "C11": frozenset({"1"}),
+    "C12": frozenset({"1"}),
+    "C13": frozenset({"1"}),
+    "C14": frozenset({"1"}),
+    "C15": frozenset({"1"}),
+    "C16": frozenset({"1"}),
+    "D2": frozenset({"1"}),
+    "D3": frozenset({"2"}),
+    "R1": frozenset({"1"}),
+    "R3": frozenset({"1"}),
+    "R8": frozenset({"1"}),
+}
+
+
+def restore_pour_standoff(routed):
+    """Keep the authored 0.2 mm pour standoff at the #9921 pad openings.
+
+    Every pad in :data:`POUR_STANDOFF_PADS` had the front or back GND pour
+    fill to the exempted 0.1016 mm fab floor beside its mask opening; the
+    pad-local clearance raises that fill back to the authored zone standoff
+    (0.2005 mm measured after refill) without touching any other pad, net
+    or rule.  Pads are matched by reference and number, so a stock-footprint
+    regeneration cannot silently drop the declaration, and a missing pad
+    fails the rebuild instead of shipping the finding.
+    """
+    board = parse_file(routed)
+    bumped = 0
+    seen = set()
+    for footprint in board.find_children("footprint"):
+        ref = next(
+            (
+                prop.get_string(1)
+                for prop in footprint.find_all("property")
+                if prop.get_string(0) == "Reference"
+            ),
+            None,
+        )
+        wanted = POUR_STANDOFF_PADS.get(ref)
+        if not wanted:
+            continue
+        seen.add(ref)
+        numbers = {pad.get_string(0) for pad in footprint.find_children("pad")}
+        missing = wanted - numbers
+        if missing:
+            raise RuntimeError(f"{ref} lost the pour-standoff pads {sorted(missing)}")
+
+        for pad in footprint.find_children("pad"):
+            if pad.get_string(0) not in wanted:
+                continue
+            clearance = pad.find_child("clearance")
+            if clearance is None:
+                pad.append(parse_string(f"(clearance {POUR_STANDOFF_MM})"))
+            elif clearance.get_float(0) < POUR_STANDOFF_MM:
+                clearance.set_value(0, POUR_STANDOFF_MM)
+            bumped += 1
+    absent = set(POUR_STANDOFF_PADS) - seen
+    if absent:
+        raise RuntimeError(f"pour-standoff footprints missing from the board: {sorted(absent)}")
+    expected = sum(len(pads) for pads in POUR_STANDOFF_PADS.values())
+    if bumped != expected:
+        raise RuntimeError(f"Pour standoff applied to {bumped} pads, expected {expected}")
+    routed.write_text(serialize_sexp(board))
+
+
 def declare_router_netclasses(routed):
     """Declare the router's net classes in the routed sidecars (#6390, #7391).
 
@@ -158,6 +276,7 @@ def prepare_routed_board(output):
     if run_add_fiducials(routed, sides="populated") != 0:
         raise RuntimeError("pcb add-fiducials failed")
     clear_fiducial_openings(routed)
+    restore_pour_standoff(routed)
     if run_add_board_info(routed, auto=True) != 0:
         raise RuntimeError("pcb add-board-info failed")
     evidence = output / "readiness"
