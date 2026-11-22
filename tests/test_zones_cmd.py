@@ -401,7 +401,7 @@ class TestRunFillZones:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(
                 _SUBPROCESS_RUN,
                 side_effect=FileNotFoundError("not found"),
@@ -421,7 +421,7 @@ class TestRunFillZones:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(
                 _SUBPROCESS_RUN,
                 side_effect=subprocess.SubprocessError("boom"),
@@ -498,7 +498,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
         ):
             result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -521,7 +521,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -548,7 +548,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run),
         ):
             result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -562,7 +562,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN) as mock_run,
         ):
             # DRC fails to produce a report
@@ -585,7 +585,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run),
         ):
             run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -607,7 +607,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
         ):
             run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -627,7 +627,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=True),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: True),
             patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
         ):
             run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -670,7 +670,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -702,7 +702,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
         ):
             result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -732,7 +732,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_keeps_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -765,7 +765,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -792,7 +792,7 @@ class TestRunFillZonesDRCFallback:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run),
         ):
             result = run_fill_zones(pcb_path, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -843,7 +843,7 @@ class TestPadNetPreservation:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_pad_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -890,7 +890,7 @@ class TestPadNetPreservation:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_element_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -930,7 +930,7 @@ class TestPadNetPreservation:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_element_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -963,7 +963,7 @@ class TestPadNetPreservation:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_keeps_nets),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -1324,7 +1324,7 @@ class TestUUIDRegenerationResilience:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -1377,7 +1377,7 @@ class TestUUIDRegenerationResilience:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
@@ -1429,7 +1429,7 @@ class TestUUIDRegenerationResilience:
 
         with (
             patch(_HAS_FILL_ZONES, return_value=False),
-            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, lambda _cli: False),
             patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
         ):
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))

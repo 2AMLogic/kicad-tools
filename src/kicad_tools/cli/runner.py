@@ -404,6 +404,15 @@ class KiCadCLIResult:
     #: line per zone naming the foreign pads.  Non-empty means the saved
     #: fill is clearance-correct but fragmented; ``kct zones fill`` exits 1.
     fill_conflicts: list[str] = field(default_factory=list)
+    #: Issue #9938: the completed fill invocation persisted freshly
+    #: refilled copper on disk -- the explicit ``--refill-zones
+    #: --save-board`` was accepted and the save was verified against the
+    #: pre-run bytes.  Only such a completed write lets the post-fill
+    #: thermal remediation skip its own first refill; a later help reply
+    #: or a report written by read-only DRC says nothing about the saved
+    #: copper, and a run that went without those flags makes no such claim,
+    #: so remediation keeps its unconditional first refill there.
+    refill_saved: bool = False
 
 
 #: The line kicad-cli prints (and then exits 0) when ``--schematic-parity``
@@ -1140,8 +1149,9 @@ def run_fill_zones(
     # Issue #5617: when the fill just above went through
     # :func:`_run_fill_zones_via_drc` (the only reachable branch on every
     # kicad-cli 8/9/10 -- ``_kicad_cli_has_fill_zones`` is unconditionally
-    # False there, see its docstring) *and* that call already used
-    # ``--refill-zones --save-board`` (``_kicad_drc_supports_refill`` true),
+    # False there, see its docstring) *and* that call used
+    # ``--refill-zones --save-board`` with the save verified
+    # (``result.refill_saved``, Issue #9938),
     # ``result.output_path`` is already a freshly filled, saved board -- an
     # exact duplicate of what remediation's own first-pass refill would
     # redo.  Nothing mutates ``pcb_path`` between the fill above and this
@@ -1155,11 +1165,17 @@ def run_fill_zones(
     # kicad-cli round trips a clean first pass makes).  Skip that redundant
     # first-pass refill in exactly this case; every other path (the native
     # ``fill-zones`` branch, or a kicad-cli whose DRC doesn't support
-    # ``--refill-zones``) keeps the original, unconditional refill.
+    # ``--refill-zones``, or a save that could not be verified) keeps the
+    # original, unconditional refill.
     if result.success and result.output_path is not None:
-        already_freshly_refilled = (not _kicad_cli_has_fill_zones(kicad_cli)) and (
-            _kicad_drc_supports_refill(kicad_cli) is True
-        )
+        # Issue #9938: decide from what the *completed* fill invocation
+        # actually persisted (``refill_saved`` -- a flag-driven run whose
+        # save was verified), never from a fresh probe.  A probe that timed
+        # out during the fill can answer ``True`` here a moment later, and
+        # that late reply says nothing about the copper on disk: trusting it
+        # made remediation skip its own first refill on top of a fill that
+        # never saved, so the board shipped with no fresh pour at all.
+        already_freshly_refilled = bool(getattr(result, "refill_saved", False))
         # Issue #6273: the fill just measured is one KiCad load + refill.
         fill_cost = _monotonic() - fill_started
         remediation_kwargs: dict = {}
@@ -1874,6 +1890,24 @@ def _refill_probe_inconclusive(kicad_cli: Path) -> bool:
     """
     inconclusive = getattr(_kicad_drc_supports_refill, "inconclusive", None)
     return bool(callable(inconclusive) and inconclusive(Path(kicad_cli)))
+
+
+def _rejected_refill_option(result: "subprocess.CompletedProcess") -> bool:
+    """Whether a kicad-cli run definitively rejected ``--refill-zones`` (Issue #9938).
+
+    KiCad 8/9 print ``Unknown argument: --refill-zones`` and exit
+    :data:`KICAD_CLI_ERR_ARGS` without loading the board -- the definitive
+    "unsupported" answer the help probe could not give.  Any other
+    ``KICAD_CLI_ERR_ARGS`` failure (a load error, a different unknown
+    option) is not a capability statement and must not trigger the retry.
+    """
+    from kicad_tools.drc.geometric import KICAD_CLI_ERR_ARGS, unknown_argument
+
+    return (
+        getattr(result, "returncode", 0) == KICAD_CLI_ERR_ARGS
+        and unknown_argument(getattr(result, "stdout", None), getattr(result, "stderr", None))
+        == REFILL_ZONES_OPTION
+    )
 
 
 def run_kicad_drc_command(
@@ -2722,6 +2756,17 @@ def _run_fill_zones_via_drc(
     A non-zero exit code caused by DRC *violations* does **not** indicate
     a fill failure.
 
+    Issue #9938: when the capability probe cannot answer whether this
+    kicad-cli has ``--refill-zones`` (killed, timed out, empty help), the
+    flags are requested anyway and kicad-cli's own parser decides; a
+    definitive ``Unknown argument: --refill-zones`` rejection restores the
+    original copper and retries once without the flags, the run a definitive
+    "unsupported" answer would have requested.  Every flag-driven run must
+    end in a verified on-disk save: a report written over a board whose
+    bytes and mtime never changed is an explicit failure, not a success.  A
+    failed transaction also leaves a pre-existing separate ``output_path``
+    destination exactly as the caller left it.
+
     After a successful DRC run the output PCB's net declarations are
     verified against the input.  If kicad-cli stripped the net table
     (a known issue when the PCB was serialized by kicad-tools rather
@@ -2738,7 +2783,16 @@ def _run_fill_zones_via_drc(
 
     # DRC modifies the input file in-place.  If the caller requested a
     # separate output file, copy the source first and run DRC on the copy.
+    # Issue #9938: remember a pre-existing destination's bytes -- a fill that
+    # does not verifiably complete must leave the caller's file as it was,
+    # never silently replaced with unfilled source bytes.
+    prior_output_bytes: bytes | None = None
     if output_path is not None:
+        if output_path.exists():
+            try:
+                prior_output_bytes = output_path.read_bytes()
+            except OSError:
+                prior_output_bytes = None
         shutil.copy2(pcb_path, output_path)
         target_pcb = output_path
     else:
@@ -2760,7 +2814,16 @@ def _run_fill_zones_via_drc(
     ]
 
     # KiCad 10+ requires explicit flags to refill zones and persist changes.
-    refills = _kicad_drc_supports_refill(kicad_cli) is True
+    # Issue #9938: a probe that could not answer (killed, timed out, empty
+    # help) must not silently drop those flags -- on KiCad 10 the plain DRC
+    # that follows writes a report and saves nothing, so the runner would
+    # hand back an unfilled board as success.  "Unknown" is not "no":
+    # request the explicit refill and save and let kicad-cli's own parser
+    # decide, mirroring ``run_kicad_drc_command``; a genuine rejection is
+    # retried once without the flags further below.
+    refills = (_kicad_drc_supports_refill(kicad_cli) is True) or _refill_probe_inconclusive(
+        kicad_cli
+    )
     if refills:
         cmd.extend(["--refill-zones", "--save-board"])
 
@@ -2777,25 +2840,61 @@ def _run_fill_zones_via_drc(
     except OSError:
         pre_run_bytes = None
     unfilled_backup = _strip_stale_zone_fills(target_pcb) if refills else None
-    # Issue #6023: the stripped board's bytes.  KiCad's --save-board always
-    # rewrites the file (with fresh fills), so a board still holding exactly
-    # these bytes after a run that produced a report was never saved.
+    # Issue #6023: the bytes a completed ``--save-board`` must replace --
+    # the stripped board when stale fills were removed, else the board as it
+    # stood.  KiCad's ``--save-board`` always rewrites the file (with fresh
+    # fills), so a board still holding exactly these bytes after a run that
+    # produced a report was never saved (Issue #9938: this is now checked
+    # for every flag-driven run, not only one that had stale fills to strip
+    # -- a first fill of an empty zone is exactly the case a lost probe used
+    # to turn into silent success).
     stripped: bytes | None = None
     stripped_mtime_ns: int | None = None
     # Issue #6023: the stale fills are restored on EVERY path that does not
     # end in a verified save -- including exceptions the handlers below do
     # not name (PermissionError, KeyboardInterrupt, ...).
     filled = False
+    # Issue #9938: the caller's timeout bounds the whole transaction (first
+    # attempt + rejection retry).  It is measured from here, exactly where the
+    # single run's timeout used to start, so a first attempt still gets the
+    # budget it always had; a retry with nothing left times out at once.
+    deadline = None if timeout is None else _monotonic() + timeout
+
+    def _remaining() -> float | None:
+        if deadline is None:
+            return None
+        return max(deadline - _monotonic(), 0.0)
 
     try:
-        if unfilled_backup is not None:
+        if refills:
             # Inside the try so an OSError/Ctrl-C here still restores.
             stripped = target_pcb.read_bytes()
             stripped_mtime_ns = target_pcb.stat().st_mtime_ns
         # Issue #6273: ``timeout`` bounds a caller on a hard deadline.  An
         # expiry raises TimeoutExpired (a SubprocessError, handled below) and
         # the ``finally`` restores the board's previous fills.
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=_remaining())
+
+        # Issue #9938: a definitive rejection is the older-CLI compatibility
+        # path.  Memoise the answer, put the original copper back (the strip
+        # above already changed the board; the rejected run never loaded it)
+        # and retry exactly once without the flags -- the same no-flags run a
+        # definitive "unsupported" probe asks for.  ``pre_run_bytes`` stays
+        # in force, so a retry killed or timed out mid-write is still undone.
+        if refills and _rejected_refill_option(result):
+            record = getattr(_kicad_drc_supports_refill, "record", None)
+            if callable(record):
+                record(Path(kicad_cli), False)
+            _restore_stale_zone_fills(target_pcb, unfilled_backup)
+            unfilled_backup = None
+            if pre_run_bytes is not None and not _board_unchanged(target_pcb, pre_run_bytes):
+                with contextlib.suppress(OSError):
+                    target_pcb.write_bytes(pre_run_bytes)
+            stripped = None
+            stripped_mtime_ns = None
+            refills = False
+            cmd = [c for c in cmd if c not in (REFILL_ZONES_OPTION, "--save-board")]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=_remaining())
 
         # DRC returns non-zero when there are violations, but the zones
         # are still filled.  We treat it as success when the DRC report
@@ -2837,6 +2936,9 @@ def _run_fill_zones_via_drc(
                 stdout=result.stdout,
                 stderr=result.stderr,
                 return_code=result.returncode,
+                # Issue #9938: only a flag-driven run whose save was verified
+                # above (the unchanged-check) may claim persisted copper.
+                refill_saved=refills,
             )
         else:
             return KiCadCLIResult(
@@ -2851,15 +2953,22 @@ def _run_fill_zones_via_drc(
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
     finally:
         if not filled:
-            if unfilled_backup is None and pre_run_bytes is not None:
-                # Issue #6724: no stale fills to restore below, but a kicad-cli
-                # killed (signal) or timed out mid ``--save-board`` may have
-                # left the board half-written: put back the pre-run bytes.
-                # A run that did not refill or save leaves them unchanged.
-                if not _board_unchanged(target_pcb, pre_run_bytes):
+            if prior_output_bytes is not None:
+                # Issue #9938: the separate-output transaction failed; put
+                # the caller's pre-existing destination back untouched.
+                if not _board_unchanged(target_pcb, prior_output_bytes):
                     with contextlib.suppress(OSError):
-                        target_pcb.write_bytes(pre_run_bytes)
-            _restore_stale_zone_fills(target_pcb, unfilled_backup)
+                        target_pcb.write_bytes(prior_output_bytes)
+            else:
+                if unfilled_backup is None and pre_run_bytes is not None:
+                    # Issue #6724: no stale fills to restore below, but a kicad-cli
+                    # killed (signal) or timed out mid ``--save-board`` may have
+                    # left the board half-written: put back the pre-run bytes.
+                    # A run that did not refill or save leaves them unchanged.
+                    if not _board_unchanged(target_pcb, pre_run_bytes):
+                        with contextlib.suppress(OSError):
+                            target_pcb.write_bytes(pre_run_bytes)
+                _restore_stale_zone_fills(target_pcb, unfilled_backup)
         # Clean up the temporary DRC report.
         drc_report.unlink(missing_ok=True)
 
