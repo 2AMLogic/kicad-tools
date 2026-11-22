@@ -923,10 +923,16 @@ def _pad_outer_extent(pad: Pad, fp: Footprint, shift: tuple[float, float]) -> Ba
 def _pad_copper_extent(
     pad: Pad,
     fp: Footprint,
-    shift: tuple[float, float],
     drill: tuple[Point | LineString, float] | None,
+    *,
+    on_layer: bool,
 ) -> BaseGeometry | None:
-    """Bound the copper left around an unplated drill, including unassigned lands."""
+    """Bound the pad land on the candidate layers, subtracting any unplated drill."""
+    if not on_layer:
+        return Polygon()
+    shift = _pad_copper_shift(pad)
+    if shift is None:
+        return None
     outer = _pad_outer_extent(pad, fp, shift)
     if outer is None or drill is None or pad.type != "np_thru_hole":
         return outer
@@ -943,6 +949,46 @@ def _pad_copper_extent(
     # polygon keeps the remaining bound conservative even at a slot end.
     focus, radius = drill
     return outer.difference(focus.buffer(radius, quad_segs=64))
+
+
+def _slot_edge_clearance(
+    pcb: PCB, via: Via, kind: str, layers: set[str]
+) -> Callable[[Footprint, Pad], float]:
+    """Resolve the board-edge clearance KiCad also applies to nonplated slots."""
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules, item_props_for_type
+
+    rules = None
+
+    def required(fp: Footprint, pad: Pad) -> float:
+        nonlocal rules
+        slot_size = pad.drill_size
+        if pad.type != "np_thru_hole" or slot_size is None or slot_size[0] == slot_size[1]:
+            return 0.0
+        if rules is None:
+            rules = BoardClearanceRules.from_board(pcb.path) if pcb.path else BoardClearanceRules()
+            if rules.dru_error:
+                raise ValueError(rules.dru_error)
+        net = pcb.get_net(via.net_number)
+        net_name = via.net_name or (net.name if net else None)
+        pad_net = pcb.get_net(pad.net_number)
+        slot = item_props_for_type(
+            "pad",
+            pad.net_name or (pad_net.name if pad_net else ""),
+            False,
+            pad.type,
+            fp.layer,
+            fp.reference,
+            fp.name,
+        )
+        minimum = 0.0
+        for layer in layers:
+            copper = item_props_for_type(
+                kind, net_name, kind == "via", layer=layer, footprint_ref="", footprint_lib_id=""
+            )
+            minimum = max(minimum, rules.edge_clearance(copper, slot, layer))
+        return minimum
+
+    return required
 
 
 def _check_hole_to_copper(
@@ -984,6 +1030,7 @@ def _check_hole_to_copper(
 
     point = Point(x, y)
     hole_r = via.drill / 2
+    slot_edge_clearance = _slot_edge_clearance(pcb, via, "via", layers)
     for seg in pcb.segments:
         if seg.layer in layers and foreign(seg.net_number):
             gap = _dist_point_to_segment(x, y, seg) - hole_r - seg.width / 2
@@ -998,15 +1045,19 @@ def _check_hole_to_copper(
             return f"hole-to-copper {gap:.3f}mm to via on net {other.net_number}"
     for fp in pcb.footprints:
         for pad in fp.pads:
-            if not foreign(pad.net_number) or not overlaps(pad.layers):
+            foreign_land = foreign(pad.net_number)
+            if pad.type != "np_thru_hole" and not foreign_land:
                 continue
             label = f"{fp.reference}-{pad.number}"
-            shift = _pad_copper_shift(pad)
             drill = _pad_drill_focus(pad, fp)
-            if shift is None or _pad_drill_is_unprovable(pad):
+            if _pad_drill_is_unprovable(pad):
                 return f"hole-to-copper unmodeled drill at pad {label}"
             gap = math.inf
-            pad_copper = _pad_copper_extent(pad, fp, shift, drill)
+            # A through drill crosses the stack even on a mask-only pad.
+            # Only the land is restricted to the pad's declared copper layers.
+            pad_copper = _pad_copper_extent(
+                pad, fp, drill, on_layer=foreign_land and overlaps(pad.layers)
+            )
             if pad_copper is None:
                 return f"hole-to-copper unproven for {pad.shape} pad {label}"
             if not pad_copper.is_empty:
@@ -1022,12 +1073,14 @@ def _check_hole_to_copper(
                         kind = "THT pad" if pad.type == "thru_hole" else "pad"
                         return f"clearance {annulus_gap:.3f}mm to {kind} {label}"
                 gap = center_to_copper - hole_r
+            drill_gap = math.inf
             if drill is not None:
-                # The moving via's annulus against the pad's actual hole:
-                # a slot contributes its rotated stadium (focus + radius).
-                gap = min(gap, point.distance(drill[0]) - drill[1] - via.size / 2)
+                drill_gap = point.distance(drill[0]) - drill[1] - via.size / 2
+                gap = min(gap, drill_gap)
             if gap < floor - 1e-6:
                 return f"hole-to-copper {gap:.3f}mm to pad {label}"
+            if drill is not None and drill_gap < slot_edge_clearance(fp, pad) - 1e-6:
+                return f"board-edge clearance {drill_gap:.3f}mm to NPTH slot {label}"
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
     for zone in pcb.zones:
@@ -1174,6 +1227,9 @@ def _check_stub_clearance(
     path = LineString([via.position, target])
     radius = stub_width / 2.0
     layers = set(stub_layers)
+    if not layers:
+        return None
+    slot_edge_clearance = _slot_edge_clearance(pcb, via, "track", layers)
     copper_layers = [layer.name for layer in pcb.copper_layers]
 
     # Subtract the old via's clearance envelope AFTER buffering the complete
@@ -1240,18 +1296,24 @@ def _check_stub_clearance(
 
     for fp in pcb.footprints:
         for pad in fp.pads:
-            if not foreign(pad.net_number) or not overlaps(pad.layers):
+            foreign_land = foreign(pad.net_number)
+            if pad.type != "np_thru_hole" and not foreign_land:
                 continue
             label = f"{fp.reference}-{pad.number}"
-            shift = _pad_copper_shift(pad)
             drill = _pad_drill_focus(pad, fp)
-            if shift is None or _pad_drill_is_unprovable(pad):
+            if _pad_drill_is_unprovable(pad):
                 return f"hole-to-copper unmodeled drill at pad {label}"
-            copper = _pad_copper_extent(pad, fp, shift, drill)
+            copper = _pad_copper_extent(
+                pad, fp, drill, on_layer=foreign_land and overlaps(pad.layers)
+            )
             if copper is None:
                 return f"stub clearance unproven for {pad.shape} pad {label}"
-            if drill is not None and too_close(drill[0], drill[1], hole_floor):
-                return f"stub hole-to-copper to pad {label}"
+            if drill is not None:
+                if too_close(drill[0], drill[1], hole_floor):
+                    return f"stub hole-to-copper to pad {label}"
+                edge_floor = slot_edge_clearance(fp, pad)
+                if edge_floor > hole_floor and too_close(drill[0], drill[1], edge_floor):
+                    return f"stub board-edge clearance to NPTH slot {label}"
             if not copper.is_empty and too_close(copper, 0.0, required(pad.net_number)):
                 return f"stub clearance to pad {label}"
 

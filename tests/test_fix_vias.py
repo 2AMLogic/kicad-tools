@@ -2779,10 +2779,9 @@ def test_stub_obstacles_are_physical_and_layer_aware(tmp_path, kind, net, layer,
     )
     pcb = PCB.load(_write(tmp_path, text))
     reason = _check_stub_clearance(pcb, pcb.vias[0], (12.427, 10), ["B.Cu"], 0.2, 0.127)
-    # Issue #6493: a keyword-less via is a through via to KiCad whatever its
-    # ``(layers ...)`` pair says, so an ``"F.Cu" "F.Cu"`` via still has a
-    # barrel on B.Cu and blocks the B.Cu stub.
-    assert (reason is not None) == (blocked or kind == "via")
+    # The through via (#6493) and the plated pad both have a barrel on B.Cu,
+    # including when the obstacle declares only F.Cu.
+    assert (reason is not None) == (blocked or kind in ("via", "tht"))
 
 
 @pytest.mark.parametrize(
@@ -3706,15 +3705,62 @@ def test_slot_pad_copper_checks_the_whole_landing(
         assert pcb.vias[0].position == (10.0, 10.0)
 
 
+def test_slot_edge_rule_follows_the_candidate_copper_layer(tmp_path):
+    import json
+
+    from kicad_tools.cli.relocate_in_pad_vias import _check_hole_to_copper, _check_stub_clearance
+
+    board = _hole_floor_board(
+        tmp_path,
+        obstacle=(
+            '(footprint "Test:Slot" (layer "F.Cu") (at 12 10.65) '
+            '(property "Reference" "J9" (at 0 0) (layer "F.SilkS") hide) '
+            '(pad "" np_thru_hole oval (at 0 0) (size .15 .30) '
+            '(drill oval .15 .30) (layers "*.Mask")))'
+        ),
+    )
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_copper_edge_clearance": 0.25}}}})
+    )
+    board.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "back slot" (layer "B.Cu") '
+        """(condition "A.NetName == 'SIG' && B.Type == 'Pad'") """
+        "(constraint edge_clearance (min 0.50mm)))\n"
+    )
+    pcb = PCB.load(board)
+    via, target = pcb.vias[0], (12, 10)
+    assert "board-edge clearance" in _check_hole_to_copper(pcb, via, *target, 0.25)
+    assert "board-edge clearance" in _check_stub_clearance(pcb, via, target, ["B.Cu"], 0.2, 0.1)
+    assert _check_stub_clearance(pcb, via, target, ["F.Cu"], 0.2, 0.1) is None
+
+
 @pytest.mark.parametrize(
-    ("shape", "size", "offset", "preferred"),
+    ("geometry", "layers", "pad_y", "edge_floor", "preferred"),
     [
-        ("rect", ".4 1.2", "", False),
-        ("oval", ".15 .30", "", True),
-        ("oval", ".15 .30", "(offset 0 -.5)", False),
+        ("rect (size .4 1.2) (drill oval .15 .30)", '"*.Cu" "*.Mask"', 11, 0.25, False),
+        ("oval (size .15 .30) (drill oval .15 .30)", '"*.Cu" "*.Mask"', 11, 0.25, True),
+        ("oval (size .15 .30) (drill oval .15 .30)", '"*.Cu" "*.Mask"', 11, None, False),
+        ("oval (size .30 .30) (drill oval .30 .30)", '"*.Mask"', 11, None, True),
+        (
+            "oval (size .15 .30) (drill oval .15 .30 (offset 0 -.5))",
+            '"*.Cu" "*.Mask"',
+            11,
+            0.25,
+            False,
+        ),
+        ("circle (size .30 .30) (drill .30)", '"*.Mask"', 10.66, None, False),
+        ('circle (size .30 .30) (drill .30) (net 1 "SIG")', '"*.Mask"', 10.66, None, False),
+        ("circle (size .30 .30) (drill .30)", '"B.Cu" "B.Mask"', 10.66, None, False),
+        ("circle (size .30 .30) (drill .30)", '"*.Cu" "*.Mask"', 10.66, None, False),
+        ("circle (size .30 .30) (drill .30)", '"*.Mask"', 13, None, True),
+        ("oval (size .15 .30) (drill oval .15 .30)", '"*.Mask"', 10.895, None, False),
+        ("oval (size .15 .30) (drill oval .15 .30)", '"*.Cu" "*.Mask"', 10.895, None, False),
+        ("rect (size .4 1.2) (drill oval .15 .30)", '"*.Mask"', 11, 0.25, True),
     ],
 )
-def test_public_npth_slotted_land_native_roundtrip(tmp_path, shape, size, offset, preferred):
+def test_public_npth_drill_and_land_native_roundtrip(
+    tmp_path, geometry, layers, pad_y, edge_floor, preferred
+):
     import json
     import shutil
     import subprocess
@@ -3726,10 +3772,13 @@ def test_public_npth_slotted_land_native_roundtrip(tmp_path, shape, size, offset
     if native is None:
         pytest.skip("kicad-cli is required to check the written relocation")
     obstacle = (
-        '(footprint "Test:Slot" (layer "F.Cu") (at 10.7016 11) '
+        f'(footprint "Test:Slot" (layer "F.Cu") (at 10.7016 {pad_y}) '
         '(property "Reference" "J9" (at 0 0) (layer "F.SilkS") hide) '
-        f'(pad "" np_thru_hole {shape} (at 0 0) (size {size}) (drill oval .15 .30 {offset}) '
-        '(layers "*.Cu" "*.Mask")))'
+        f'(pad "" np_thru_hole {geometry} (at 0 0) (layers {layers}))) '
+        '(footprint "Test:Shield" (layer "F.Cu") (at 17 17) '
+        '(property "Reference" "J10" (at 0 0) (layer "F.SilkS") hide) '
+        '(pad "SH" thru_hole oval (at 0 0 30) (size 1.4 1.8) (drill oval .3 .6) '
+        '(layers "*.Cu" "*.Mask") (net 2 "OTHER")))'
     )
     board = _hole_floor_board(tmp_path, obstacle=obstacle)
     board.write_text(
@@ -3743,18 +3792,19 @@ def test_public_npth_slotted_land_native_roundtrip(tmp_path, shape, size, offset
         .replace("(size .45) (drill .2)", "(size 1) (drill .2)")
     )
     project = board.with_suffix(".kicad_pro")
+    rules = {
+        "min_clearance": 0.1016,
+        "min_hole_clearance": 0.25,
+        "min_hole_to_hole": 0.25,
+        "min_through_hole_diameter": 0.1,
+        "min_via_diameter": 0.4,
+    }
+    if edge_floor is not None:
+        rules["min_copper_edge_clearance"] = edge_floor
     project.write_text(
         json.dumps(
             {
-                "board": {
-                    "design_settings": {
-                        "rules": {
-                            "min_clearance": 0.1016,
-                            "min_hole_clearance": 0.25,
-                            "min_hole_to_hole": 0.25,
-                        }
-                    }
-                },
+                "board": {"design_settings": {"rules": rules}},
                 "net_settings": {
                     "classes": [{"name": "Default", "clearance": 0.1016, "track_width": 0.2}]
                 },
@@ -3783,7 +3833,6 @@ def test_public_npth_slotted_land_native_roundtrip(tmp_path, shape, size, offset
     actual = PCB.load(output).vias[0].position
     assert actual != pytest.approx((10, 10))
     assert (actual == pytest.approx((10.7016, 10))) is preferred
-    relevant = {"shorting_items", "clearance", "hole_clearance", "hole_to_hole", "holes_co_located"}
     for path in (board, output):
         report = path.with_suffix(".native.json")
         subprocess.run(
@@ -3802,9 +3851,9 @@ def test_public_npth_slotted_land_native_roundtrip(tmp_path, shape, size, offset
             capture_output=True,
             timeout=120,
         )
-        assert not [
-            v for v in json.loads(report.read_text())["violations"] if v["type"] in relevant
-        ]
+        native_report = json.loads(report.read_text())
+        assert not [v for v in native_report["violations"] if v["severity"] == "error"]
+        assert not native_report["unconnected_items"]
 
 
 def test_preferred_slide_checks_new_stub_beyond_the_original_track(tmp_path):
