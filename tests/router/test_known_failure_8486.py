@@ -970,6 +970,72 @@ def test_a_worse_or_failed_partial_reroute_keeps_the_entry_copper(worse):
 
 
 @pytest.mark.requires_router_cpp
+def test_entry_copper_is_not_relanded_over_a_net_that_took_the_space():
+    """Another net legally occupying the ripped space blocks the re-land.
+
+    Re-committing the entry copper unconditionally would overlap that net and
+    publish a short into the checkpoints (review of PR #9937).
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _three_pad_board(gap=False)
+    guard = RipupCycleGuard()
+    entry, pairs = _seed_partial_entry(router, guard)
+    seg = entry[0].segments[0]
+    mx, my = (seg.x1 + seg.x2) / 2, (seg.y1 + seg.y2) / 2
+    blocker = Route(
+        50, "n50", segments=[Segment(mx, my - 3.0, mx, my + 3.0, 0.25, seg.layer, 50)], vias=[]
+    )
+    assert isinstance(seg.layer, Layer)
+
+    guard.begin_iteration(1, {1: None})
+    _rip_copper(router, entry)
+    _commit_copper(router, [blocker])  # net 50 takes the vacated space
+    assert not router._entry_copper_still_legal(entry)
+    with patch.object(router, "_route_net_negotiated", return_value=[]):
+        out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 1)
+    assert out == []  # nothing re-landed over the foreign copper
+    assert not any(r in router.routes for r in entry)
+    assert guard.capped_streak[1][2] == 1  # still a no-progress failure
+
+
+@pytest.mark.requires_router_cpp
+def test_equal_connectivity_result_ratchets_the_entry_copper():
+    """A same-connectivity re-search is kept, and a second search in the same
+    iteration must fall back to it, not to the superseded entry copper."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _three_pad_board(gap=False)
+    guard = RipupCycleGuard()
+    entry, pairs = _seed_partial_entry(router, guard)
+    new = [
+        Route(
+            r.net,
+            r.net_name,
+            segments=[Segment(s.x1, s.y1, s.x2, s.y2, s.width, s.layer, s.net) for s in r.segments],
+            vias=list(r.vias),
+        )
+        for r in entry
+    ]
+    assert Layer is not None
+
+    def fake_search(net, pf, per_net_timeout=None):
+        for r in new:
+            router._mark_route(r)
+        return list(new)
+
+    guard.begin_iteration(1, {1: None})
+    _rip_copper(router, entry)
+    with patch.object(router, "_route_net_negotiated", side_effect=fake_search):
+        out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 1)
+    assert [id(r) for r in out] == [id(r) for r in new]
+    assert [id(r) for r in router._known_failure_entry[1][1]] == [id(r) for r in new]
+    assert router._known_failure_entry[1][0] == pairs
+
+
+@pytest.mark.requires_router_cpp
 def test_an_irrelevant_copper_accretion_keeps_the_partial_backoff():
     """Extra foreign copper appearing in the window does not restart the
     streak: additions cannot open a corridor."""

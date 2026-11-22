@@ -18587,18 +18587,50 @@ class Autorouter:
                 self._known_failure_entry[net] = (new_pairs, list(routes))
             elif old_routes and not new_pairs >= old_pairs:
                 # The re-search lost pads (or found none): discard its copper
-                # and re-commit the entry copper, mirroring the relief
-                # rollback's re-land path.  Callers mark usage and append the
-                # returned routes exactly as for a fresh search result.
-                for route in routes:
-                    self.grid.unmark_route(route)
-                for route in old_routes:
-                    self._mark_route(route)
-                routes = list(old_routes)
+                # and re-commit the entry copper -- but only if that copper is
+                # still legal against the CURRENT board.  Another net may have
+                # legally taken the vacated space since the rip-up, and
+                # ``_mark_route`` carries no clearance gate, so an unchecked
+                # re-land could publish a short into the checkpoints.  When
+                # the entry copper no longer fits, keep the re-search result
+                # (legal by construction); the no-progress back-off still
+                # applies.  Callers mark usage and append the returned routes
+                # exactly as for a fresh search result.
+                if self._entry_copper_still_legal(old_routes):
+                    for route in routes:
+                        self.grid.unmark_route(route)
+                    for route in old_routes:
+                        self._mark_route(route)
+                    routes = list(old_routes)
+            elif routes:
+                # Equal connectivity: the new copper is kept, so ratchet the
+                # entry state to it -- a second search of this net in the same
+                # iteration must not re-land the superseded entry copper.
+                self._known_failure_entry[net] = (new_pairs, list(routes))
         guard.note_search(
             net, iteration, used, time.time() - t0, progress, setup_stopped=setup_stopped
         )
         return routes
+
+    def _entry_copper_still_legal(self, old_routes: list[Route]) -> bool:
+        """True iff the entry copper clears every other net on the live board.
+
+        Issue #8486: gate for re-landing a partial net's superseded copper.
+        Uses the precise edge-to-edge primitives the post-route validator
+        uses, against the current grid (same-net copper is excluded, so the
+        net's own fresh search result does not count against it).
+        """
+        grid = self.grid
+        for route in old_routes:
+            for seg in route.segments:
+                if not grid.validate_segment_clearance(seg=seg, exclude_net=route.net)[0]:
+                    return False
+            for via in route.vias:
+                if not grid.validate_via_clearance(via=via, exclude_net=route.net)[0]:
+                    return False
+                if not grid.validate_via_to_via_clearance(via=via, exclude_net=route.net)[0]:
+                    return False
+        return True
 
     def _connected_pad_pairs(self, net: int, routes: list[Route]) -> frozenset[frozenset[int]]:
         """The physical pad pairs ``net``'s copper connects (issue #8486).
