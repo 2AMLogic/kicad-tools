@@ -77,6 +77,36 @@ def _chain(pcb, net_name, start):
         points.append(seg.end if math.dist(seg.start, points[-1]) < 1e-6 else seg.start)
 
 
+@pytest.mark.parametrize(
+    ("shape", "bend"),
+    [("roundrect", (22.6125, 17.3875)), ("rect", (20.0, 17.2))],
+)
+def test_power_escape_respects_the_adjacent_pad_corner(tmp_path, shape, bend):
+    # R5.1 to the VCC via, with the same pad spacing and sizes as Board 02.
+    # The diagonal clears rounded R5.2 by 0.2867 mm. A square corner at the
+    # same location leaves only 0.1831 mm against its 0.25 mm clearance.
+    path = tmp_path / "r5.kicad_pcb"
+    points = [(20, 20), (20, 17.7), (20.5, 17.2), (22.6125, 17.2)]
+    tracks = [
+        _segment(i, a, b).replace("(width 0.2)", "(width 0.5)")
+        for i, (a, b) in enumerate(zip(points, points[1:], strict=False), 1)
+    ]
+    via = '(via (at 22.6125 17.2) (size 0.8) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))'
+    fixture = PCB_TEXT.replace("(at 40 20)", "(at 21.825 20)").replace(
+        "(size 1 1.4)", "(size 1.025 1.4)"
+    )
+    fixture = fixture.replace("smd roundrect", f"smd {shape}").replace(
+        "(roundrect_rratio 0.25)", "(roundrect_rratio 0.243902)" if shape == "roundrect" else ""
+    )
+    path.write_text(fixture.format(items="\n".join([*tracks, via])))
+    pcb = PCB.load(path)
+    assert RECIPE["_minimal_escapes"](pcb) == 1
+    result = _chain(pcb, "A", points[0])
+    assert len(result) == 3
+    assert result[1] == pytest.approx(bend)
+    assert result[-1] == pytest.approx(points[-1])
+
+
 DOGLEG = (
     _segment(1, (20, 20), (20.5, 19.5)),
     _segment(2, (20.5, 19.5), (20.5, 19.2)),

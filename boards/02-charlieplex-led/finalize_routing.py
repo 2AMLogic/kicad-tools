@@ -198,28 +198,38 @@ class _EscapeContext:
     """Copper of one PCB snapshot, indexed for escape re-routing."""
 
     def __init__(self, pcb):
-        from shapely.geometry import Point
+        from shapely.geometry import Point, box
 
+        from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
         from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
 
         self.pcb = pcb
-        self.pads = []  # (ref, pad, bbox, centre, layers)
+        self.pads = []  # (ref, pad, bbox, centre, copper outline)
         for fp in pcb.footprints:
             for pad in fp.pads:
                 x0, y0, x1, y1 = pad_absolute_bbox(pad, fp)
+                # A rounded pad can clear an escape that crosses its bounding
+                # box's empty corner. Keep the conservative box for other
+                # shapes whose copper outline cannot be represented exactly.
+                copper = (
+                    pad_copper_outline(pad, fp.position, fp.rotation)
+                    if pad_outline_is_exact(pad)
+                    else None
+                )
                 self.pads.append(
                     (
                         fp.reference,
                         pad,
                         (x0, y0, x1, y1),
                         _ser_point(((x0 + x1) / 2, (y0 + y1) / 2)),
+                        copper if copper is not None else box(x0, y0, x1, y1),
                     )
                 )
         self.point = Point
 
     def obstacles(self, layer, net_number):
         """Shapely shapes of every other-net copper item that exists on ``layer``."""
-        from shapely.geometry import LineString, box
+        from shapely.geometry import LineString
 
         point = self.point
         line_string = LineString
@@ -230,9 +240,9 @@ class _EscapeContext:
         for via in self.pcb.vias:
             if via.net_number != net_number:
                 shapes.append(point(via.position).buffer(via.size / 2))
-        for _ref, pad, bbox, _centre in self.pads:
+        for _ref, pad, _bbox, _centre, copper in self.pads:
             if pad.net_number != net_number and layer in _pad_layers(pad):
-                shapes.append(box(*bbox))
+                shapes.append(copper)
         return shapes
 
 
@@ -240,7 +250,7 @@ def _is_node_hard(ctx, node, own_pad, layer):
     """A vertex a track chain must not be re-routed through (via, other pad)."""
     if any(_near(v.position, node) for v in ctx.pcb.vias):
         return True
-    for _ref, pad, _bbox, centre in ctx.pads:
+    for _ref, pad, _bbox, centre, _copper in ctx.pads:
         if pad is not own_pad and _near(centre, node) and layer in _pad_layers(pad):
             return True
     return False
@@ -257,7 +267,7 @@ def _slide_ring_vias(pcb):
     """
     ctx = _EscapeContext(pcb)
     moved = 0
-    for ref, pad, bbox, _centre in ctx.pads:
+    for ref, pad, bbox, _centre, _copper in ctx.pads:
         if not pad.net_number or pad.type == "np_thru_hole":
             continue
         for via in list(pcb.vias):
@@ -327,7 +337,7 @@ def _square_pad_escapes(pcb):
         )
         if entry is None:
             continue
-        _ref, pad, bbox, centre = entry
+        _ref, pad, bbox, centre, _copper = entry
         if not pad.net_number:
             continue
         for layer in _pad_layers(pad):
@@ -647,7 +657,7 @@ def _minimal_escapes(pcb):
         entry = next((e for e in ctx.pads if e[0] == ref and e[1].number == pad_num), None)
         if entry is None:
             continue
-        _ref, pad, bbox, centre = entry
+        _ref, pad, bbox, centre, _copper = entry
         if not pad.net_number:
             continue
         for layer in _pad_layers(pad):
@@ -702,7 +712,7 @@ def _trim_pass_throughs(pcb):
     """
     ctx = _EscapeContext(pcb)
     trimmed = 0
-    for ref, pad, bbox, centre in ctx.pads:
+    for ref, pad, bbox, centre, _copper in ctx.pads:
         if not pad.net_number or pad.type == "np_thru_hole":
             continue
         for layer in _pad_layers(pad):
@@ -806,7 +816,7 @@ def _nudge_corridors(pcb):
         entry = next((e for e in ctx.pads if e[0] == ref and e[1].number == pad_num), None)
         if entry is None:
             continue
-        _ref, pad, bbox, centre = entry
+        _ref, pad, bbox, centre, _copper = entry
         if not pad.net_number:
             continue
         ox0, oy0, ox1, oy1 = bbox[0] - 0.05, bbox[1] - 0.05, bbox[2] + 0.05, bbox[3] + 0.05
