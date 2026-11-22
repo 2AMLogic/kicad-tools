@@ -47,6 +47,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -62,6 +63,8 @@ from .violation import DRCViolation, ViolationType
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+    from kicad_tools.schema.pcb import PCB
 
 #: Message marker the mask rule writes for a same-net segment that enters its
 #: own pad (``validate/mask_copper.py``).
@@ -267,10 +270,17 @@ class MaskCopperRepairer(CopperGapRepairer):
     refusal (``_anchored_ends``) and the endpoint update helper.
     """
 
-    def __init__(self, pcb_path: str | Path):
+    def __init__(self, pcb_path: str | Path, *, project_pcb_path: str | Path | None = None):
         # ``DrillClearanceRepairer.__init__`` parses the file and builds the
         # same ``nets`` / ``net_names`` indexes this class historically did.
         super().__init__(pcb_path)
+        self._project_pcb_path = Path(project_pcb_path) if project_pcb_path else self.path
+
+    @cached_property
+    def _board_rules(self) -> BoardClearanceRules:
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+        return BoardClearanceRules.from_board(self._project_pcb_path)
 
     # ------------------------------------------------------------------
     # Board model (absolute file coordinates throughout)
@@ -316,7 +326,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         ox, oy = pcb._board_origin
         pads: dict[str, tuple[BaseGeometry, tuple[float, float], list[str], str, str, str]] = {}
         for fp in pcb.footprints:
-            for pad in fp.pads:
+            for index, pad in enumerate(fp.pads):
                 lx, ly = pad.position
                 rx, ry = rotate_pad_offset(lx, ly, fp.rotation)
                 cx = fp.position[0] + rx + ox
@@ -330,15 +340,15 @@ class MaskCopperRepairer(CopperGapRepairer):
                     shape = "unsupported"
                 else:
                     shape = pad.shape
-                if pad.uuid:
-                    pads[_bare(pad.uuid)] = (
-                        poly,
-                        (cx, cy),
-                        list(pad.layers),
-                        pad.net_name or "",
-                        f"{fp.reference}/{pad.number}",
-                        shape,
-                    )
+                identity = _bare(pad.uuid) if pad.uuid else f"{fp.reference}:pad:{index}"
+                pads[identity] = (
+                    poly,
+                    (cx, cy),
+                    list(pad.layers),
+                    pad.net_name or "",
+                    f"{fp.reference}/{pad.number}",
+                    shape,
+                )
         return pads
 
     @staticmethod
@@ -397,7 +407,11 @@ class MaskCopperRepairer(CopperGapRepairer):
         for poly, _, layers, pad_net, _, _ in pads.values():
             if pad_net == net_name and net_name:
                 continue
-            if layer in layers or "*.Cu" in layers:
+            if (
+                layer in layers
+                or "*.Cu" in layers
+                or ("F&B.Cu" in layers and layer in {"F.Cu", "B.Cu"})
+            ):
                 obstacles.append(poly)
         return obstacles
 
@@ -749,7 +763,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         if blocked:
             return "junction_at_moved_end"
 
-        # Clearance gate: identical to the recentre's.
+        # Every segment dragged by this pull-in must retain its copper clearance.
         required = clearance_mm if clearance_mm is not None else 0.0
         old_shape = LineString([far, near]).buffer(width / 2, quad_segs=16)
         new_shape = LineString([far, centre]).buffer(width / 2, quad_segs=16)
@@ -771,6 +785,15 @@ class MaskCopperRepairer(CopperGapRepairer):
                 if new_d < required - 1e-6 and new_d < old_s.distance(obstacle) - 1e-6:
                     return "would_violate_clearance"
 
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        pcb = PCB(self.doc)
+        if self._board_rules.dru_error:
+            return "unverified_clearance_rules"
+        if self._pull_in_crowds_pad(pcb, layer, net_name, pads, moves):
+            return "would_violate_clearance"
+
         action = MaskRepairAction(
             action="pull_in",
             uuid=seg_uuid,
@@ -787,10 +810,6 @@ class MaskCopperRepairer(CopperGapRepairer):
             joined=[(u, t) for u, _, t in joined],
             end_tag="start" if near_node is start_node else "end",
         )
-        from kicad_tools.schema.pcb import PCB
-        from kicad_tools.validate.connectivity import ConnectivityValidator
-
-        pcb = PCB(self.doc)
         net = pcb.get_net_by_name(net_name)
         if net is None:
             return "net_geometry_unverified"
@@ -814,6 +833,62 @@ class MaskCopperRepairer(CopperGapRepairer):
         self.modified |= keep
         result.repaired += 1
         return None
+
+    def _pull_in_crowds_pad(
+        self,
+        pcb: PCB,
+        layer: str,
+        net_name: str,
+        pads: dict,
+        moves: list[tuple[BaseGeometry, BaseGeometry]],
+    ) -> bool:
+        """Check the candidate and its dragged tracks against each pad's actual rules."""
+        from kicad_tools.router.board_clearance_rules import (
+            item_props_for_type,
+            pad_clearance_override,
+        )
+
+        rules = self._board_rules
+        track = item_props_for_type(
+            "track", net_name, False, layer=layer, footprint_ref="", footprint_lib_id=""
+        )
+        for fp in pcb.footprints:
+            for index, pad in enumerate(fp.pads):
+                if not (
+                    layer in pad.layers
+                    or "*.Cu" in pad.layers
+                    or ("F&B.Cu" in pad.layers and layer in {"F.Cu", "B.Cu"})
+                ):
+                    continue
+                pad_net = pcb.get_net(pad.net_number)
+                pad_name = pad.net_name or (pad_net.name if pad_net else "")
+                obstacle = item_props_for_type(
+                    "pad",
+                    pad_name,
+                    pad.type == "thru_hole",
+                    pad.type,
+                    fp.layer,
+                    fp.reference,
+                    fp.name,
+                )
+                required = rules.physical_clearance(track, obstacle, layer)
+                if pad_name != net_name:
+                    local = pad_clearance_override(fp, pad)
+                    electrical = (
+                        rules.clearance(track, obstacle, layer)
+                        if local is None
+                        else max(local, rules.min_clearance or 0.0)
+                    )
+                    required = max(required, electrical)
+                if required <= 0:
+                    continue
+                identity = _bare(pad.uuid) if pad.uuid else f"{fp.reference}:pad:{index}"
+                polygon = pads[identity][0]
+                for old, new in moves:
+                    gap = new.distance(polygon)
+                    if gap < required - 1e-6 and gap < old.distance(polygon) - 1e-6:
+                        return True
+        return False
 
     @staticmethod
     def _entry_within_angle(

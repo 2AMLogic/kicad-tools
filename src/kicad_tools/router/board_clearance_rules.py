@@ -118,7 +118,10 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import Footprint, Pad
 
 #: KiCad's built-in ``Default`` netclass clearance, in mm.
 KICAD_DEFAULT_CLEARANCE_MM = 0.2
@@ -1136,6 +1139,17 @@ PAD_TYPE_NAMES = {
 }
 
 
+def pad_clearance_override(footprint: Footprint, pad: Pad) -> float | None:
+    """Return the pad's positive electrical clearance or its footprint's override."""
+    for owner in (pad, footprint):
+        node = getattr(owner, "_sexp_node", None)
+        clearance = node.find_child("clearance") if node is not None else None
+        value = clearance.get_float(0) if clearance is not None else None
+        if value is not None and value > 0:
+            return float(value)
+    return None
+
+
 def item_props_for_type(
     kind: str,
     net_name: str | None,
@@ -1189,6 +1203,7 @@ __all__: Sequence[str] = [
     "dru_error_message",
     "evaluate_condition",
     "item_props_for_type",
+    "pad_clearance_override",
     "parse_dru",
     "read_dru_rules",
 ]

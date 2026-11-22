@@ -481,6 +481,105 @@ def test_pull_in_moves_short_terminus_to_pad_centre(tmp_path):
     assert result.actions[0].end_tag == "end"
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("pad_floor", "footprint_floor", "x", "layer", "net", "accept"),
+    [
+        (0.30, 0, 99.75, "F.Cu", 2, False),
+        (0.20, 0, 99.75, "F.Cu", 2, True),
+        (0.30, 0, 99.65, "F.Cu", 2, True),
+        (0, 0.30, 99.75, "F.Cu", 2, False),
+        (0.20, 0.30, 99.75, "F.Cu", 2, True),
+        (0.30, 0, 99.75, "B.Cu", 2, True),
+        (0.30, 0, 99.75, "F.Cu", 1, True),
+    ],
+)
+def test_pull_in_uses_the_foreign_pad_clearance(
+    tmp_path, dry_run, pad_floor, footprint_floor, x, layer, net, accept
+):
+    # KiCad measures 0.2359 mm to the near pad after the pull-in. The pad
+    # has copper only, so a mask opening search alone cannot find it.
+    obstacle = f'''(footprint "test:TP" (layer "{layer}") (at {x} 101.1)
+        (clearance {footprint_floor})
+        (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "{layer}")
+        (clearance {pad_floor}) (net {net} "N{net}") (uuid "pad-tp")))'''
+    segment = _seg("trk-p", (100.35, 102), (100.55, 100.55))
+    board = _board(tmp_path, segment + obstacle)
+    original = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    initial = repairer.doc.to_string()
+    result = repairer.repair(
+        [_finding("trk-p")], max_displacement=1.0, dry_run=dry_run, clearance_mm=0.127
+    )
+    assert result.repaired == int(accept)
+    assert result.skipped("would_violate_clearance") == int(not accept)
+    if dry_run or not accept:
+        assert board.read_bytes() == original
+        assert repairer.doc.to_string() == initial
+    else:
+        repairer.save(board)
+        assert _end(board, "trk-p")[1] == (100, 100)
+
+
+@pytest.mark.parametrize("connectivity", [False, True])
+def test_native_pull_in_check_preserves_prior_output_on_new_error(
+    tmp_path, monkeypatch, capsys, connectivity
+):
+    from collections import Counter
+
+    board = _board(tmp_path, _seg("trk-p", (100.35, 102), (100.55, 100.55)))
+    original = board.read_bytes()
+    output = tmp_path / "other.kicad_pcb"
+    output.write_bytes(b"previous output")
+    native = iter(
+        [(Counter(), 0), (Counter({("clearance", "board rule", ("pad", "track")): 1}), 0)]
+    )
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: next(native))
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda candidate: [])
+    _run(
+        monkeypatch,
+        board,
+        [_report(_finding("trk-p")), _report()],
+        extra=("--output", str(output), "--format", "json"),
+        connectivity=connectivity,
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == 0
+    assert "1 new errors" in result["unrepaired"][-1]["detail"]
+    assert board.read_bytes() == original
+    assert output.read_bytes() == b"previous output"
+
+
+@pytest.mark.parametrize(
+    ("floor", "ref", "accept"), [(0.30, "TP9", False), (0.20, "TP9", True), (0.30, "TP8", True)]
+)
+def test_pull_in_checks_a_dragged_neighbor_against_its_project_rules(tmp_path, floor, ref, accept):
+    # Only the joined track approaches TP9. Its clearance falls from 0.5655
+    # to 0.2384 mm. The primary track stays over a millimetre away.
+    pcb_path = _board(
+        tmp_path,
+        _seg("trk-p", (100.35, 102), (100.55, 100.55))
+        + _seg("joined", (102.3, 99.8), (100.55, 100.55))
+        + """(footprint "test:Probe" (layer "F.Cu") (at 101.15 99.46)
+                          (property "Reference" "TP9" (at 0 2) (layer "F.SilkS"))
+                          (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu")
+                          (clearance 0.2) (net 2 "N2") (uuid "neighbor")))""",
+    )
+    project = tmp_path / "source.kicad_pcb"
+    project.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+        (rule "probe clearance" (condition "A.Type == 'Track' && B.memberOfFootprint('{ref}')")
+          (constraint physical_clearance (min {floor}mm)))"""
+    )
+    # A later --output pass loads this copper while resolving the input project's rules.
+    repairer = MaskCopperRepairer(pcb_path, project_pcb_path=project)
+    result = repairer.repair([_finding("trk-p")], max_displacement=1.0, clearance_mm=0.127)
+    assert result.repaired == int(accept)
+    assert result.skipped("would_violate_clearance") == int(not accept)
+    if accept:
+        assert result.actions[0].joined == [("joined", "end")]
+
+
 @pytest.mark.parametrize(
     ("far_x", "repairable"), [(101.999, True), (102.0, True), (102.001, False)]
 )

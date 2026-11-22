@@ -1535,7 +1535,7 @@ def _run_mask_pass(
     if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
         load_path = output_path
     try:
-        repairer = MaskCopperRepairer(load_path)
+        repairer = MaskCopperRepairer(load_path, project_pcb_path=pcb_path)
         result = repairer.repair(
             mask_violations,
             max_displacement=args.max_displacement,
@@ -1558,7 +1558,12 @@ def _run_mask_pass(
             check_nudges = not args.no_connectivity_check and any(
                 isinstance(action, MaskNudgeAction) for action in result.actions
             )
-            before_native = _mask_native_state(candidate) if has_zones or check_nudges else None
+            # A pull-in extends track copper. Enforce the project's native
+            # electrical and physical rules even when connectivity checks are disabled.
+            has_pull_in = any(action.action == "pull_in" for action in result.actions)
+            before_native = (
+                _mask_native_state(candidate) if has_zones or check_nudges or has_pull_in else None
+            )
             # On a partially connected board one new contact can hide a split,
             # even on the same net. Keep KiCad's actual pad groups for that case.
             native_groups = (
@@ -1578,7 +1583,8 @@ def _run_mask_pass(
             if result.actions and before_native is not None:
                 errors, opens = _mask_native_state(candidate)
                 new_errors = (errors - before_native[0]).total()
-                if new_errors or opens > before_native[1]:
+                check_opens = has_zones or not args.no_connectivity_check
+                if new_errors or (check_opens and opens > before_native[1]):
                     raise RuntimeError(
                         "saved mask repair introduced native errors or opens "
                         f"({new_errors} new errors, native opens {before_native[1]} to {opens})"
