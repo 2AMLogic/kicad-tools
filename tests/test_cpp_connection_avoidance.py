@@ -25,6 +25,7 @@ def test_next_connection_starts_without_prior_clearance_penalties(timing, outcom
         return completed if outcome == "success" else None
 
     finder = SimpleNamespace(
+        _py_router=None,
         _per_call_timing_enabled=timing,
         _per_call_timings=[],
         _route_impl=search,
