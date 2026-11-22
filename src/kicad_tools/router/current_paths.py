@@ -2017,7 +2017,7 @@ def _array_contacts_modeled(
     Unsupported same-net pad stacks and routed arcs conservatively disable this
     recognition subset because their copper is not inventoried by this graph.
     """
-    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+    from shapely.geometry import LineString, Point, Polygon
 
     from kicad_tools.validate.rules.clearance import _pad_on_layer, _pad_polygon
 
