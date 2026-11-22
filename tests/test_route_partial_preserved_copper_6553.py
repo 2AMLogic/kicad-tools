@@ -77,11 +77,13 @@ class _CheckpointThenDeadline:
     """Route for real and checkpoint onto ``<output>``; then hit the deadline.
 
     The deadline lands in the ``deadline_on_call``-th routing call.  Every
-    call checkpoints first. Simulate a rescue pass stripping net C from
-    that staged board so the partial save must use its original capture.
+    call checkpoints first. Supplying a rescue checkpoint also strips net C
+    from that board so the partial save must use its original capture.
     """
 
-    def __init__(self, monkeypatch, output: Path, *, deadline_on_call: int):
+    def __init__(
+        self, monkeypatch, *, deadline_on_call: int, rescue_checkpoint: Path | None = None
+    ):
         self.expected: tuple[int, int] | None = None
         self.expected_length: float | None = None
         self.checkpoints = 0
@@ -95,7 +97,8 @@ class _CheckpointThenDeadline:
             if callback is not None:
                 metrics = SimpleNamespace(iteration=0, routed_count=1, overflow=0)
                 callback(list(router.routes), metrics)
-                assert strip_net_copper(output, ["C"]) == 2
+                if rescue_checkpoint is not None:
+                    assert strip_net_copper(rescue_checkpoint, ["C"]) == 2
                 self.checkpoints += 1
             if self.calls < deadline_on_call:  # pragma: no cover - 1 in all flows
                 return result
@@ -123,7 +126,9 @@ def test_partial_keeps_preserved_copper_exactly_once(monkeypatch, tmp_path, flow
     source.write_text(_board_text())
     output = tmp_path / "output.kicad_pcb"
     flow_args, deadline_on_call = _FLOWS[flow]
-    patch = _CheckpointThenDeadline(monkeypatch, output, deadline_on_call=deadline_on_call)
+    patch = _CheckpointThenDeadline(
+        monkeypatch, deadline_on_call=deadline_on_call, rescue_checkpoint=output
+    )
 
     rc = route_cmd._in_process_main_impl(
         [
