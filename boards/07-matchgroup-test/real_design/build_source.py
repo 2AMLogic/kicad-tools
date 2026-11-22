@@ -21,36 +21,6 @@ from pathlib import Path
 from kicad_tools.schema.pcb import PCB
 
 ROOT = Path(__file__).resolve().parent
-FIDUCIAL_FOOTPRINT = "Fiducial:Fiducial_1mm_Mask2mm"
-
-
-def verify_fiducials(board: PCB, declared: dict[str, str]) -> None:
-    """Verify every declared board-only mark before comparing electrical packages."""
-    present = set()
-    for fp in board.footprints:
-        if fp.reference not in declared:
-            continue
-        if (
-            fp.reference in present
-            or fp.name != FIDUCIAL_FOOTPRINT
-            or fp.value != "Fiducial"
-            or fp.layer != declared[fp.reference]
-            or fp.layer not in {"F.Cu", "B.Cu"}
-            or "board_only" not in fp._attr_unknown_tokens
-            or not fp.exclude_from_bom
-            or not fp.exclude_from_pos_files
-            or len(fp.pads) != 1
-            or fp.pads[0].number
-            or fp.pads[0].net_name
-            or fp.pads[0].net_number
-            or fp.pads[0].size != (1.0, 1.0)
-            or fp.pads[0].drill != 0
-            or set(fp.pads[0].layers) != {fp.layer, fp.layer.replace(".Cu", ".Mask")}
-        ):
-            raise ValueError(f"Invalid board-only fiducial {fp.reference}")
-        present.add(fp.reference)
-    if present != declared.keys():
-        raise ValueError(f"Missing declared fiducials: {sorted(declared.keys() - present)}")
 
 
 def circuit_identity(pcb: PCB) -> dict:
@@ -83,30 +53,24 @@ def annotate_pads(pcb: Path, schematic: Path) -> int:
     return annotation.annotated
 
 
-def apply_library_ids(pcb: Path, schematic: Path, fiducials: dict[str, str] | None = None) -> int:
+def apply_library_ids(pcb: Path, schematic: Path) -> int:
     """Write each schematic symbol's ``Library:Footprint`` ID onto ``pcb`` (issue #7213).
 
     The hash-bound fixtures carry bare footprint names, which kicad-cli reports
     as ``footprint_symbol_mismatch`` against the schematic's Footprint field.
-    Only the footprint name atom changes. Declared board-only fiducials retain
-    their verified stock library ID. Every electrical package needs its symbol.
+    Only the footprint name atom changes; every other byte is kept. A footprint
+    whose reference has no schematic footprint, or whose footprint name differs
+    from the schematic's, is an error.
     """
     from kicad_tools.schema.schematic import Schematic
 
-    fiducials = fiducials or {}
-    if fiducials:
-        verify_fiducials(PCB.load(pcb), fiducials)
     lib_ids = {sym.reference: sym.footprint for sym in Schematic.load(schematic).symbols}
     text = pcb.read_text(encoding="utf-8")
-    heads = list(re.finditer(r'^\t\(footprint\s+"([^"]+)"', text, re.M))
+    heads = list(re.finditer(r'^\t\(footprint "([^"]+)"', text, re.M))
     edits = []
     for i, head in enumerate(heads):
         end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
         ref = re.search(r'\(property "Reference" "([^"]+)"', text[head.start() : end])
-        if ref and ref.group(1) in fiducials:
-            if ref.group(1) in lib_ids or head.group(1) != FIDUCIAL_FOOTPRINT:
-                raise ValueError(f"Fiducial {ref.group(1)} conflicts with the circuit")
-            continue
         lib_id = lib_ids.get(ref.group(1)) if ref else None
         if not lib_id or ":" not in lib_id:
             raise ValueError(f"No schematic library footprint for {ref and ref.group(1)}")
@@ -157,17 +121,12 @@ def build(output: Path) -> dict:
         generator.generate(fresh, 0, 0.175)
         physical = PCB.load(fixture / "sdram_demo.kicad_pcb")
         electrical = PCB.load(fresh / "sdram_demo.kicad_pcb")
-        fiducials = manifest.get("fiducials", {})
-        verify_fiducials(physical, fiducials)
-        packages = circuit_identity(physical)
-        for ref in fiducials:
-            del packages[ref]
-        if packages != circuit_identity(electrical):
+        if circuit_identity(physical) != circuit_identity(electrical):
             raise ValueError(
                 "Authored placement disagrees with freshly generated packages/pin nets"
             )
         count = sum(bool(pad.net_name) for fp in physical.footprints for pad in fp.pads)
-        if len(packages) != manifest["parts"] or count != manifest["bound_pads"]:
+        if len(physical.footprints) != manifest["parts"] or count != manifest["bound_pads"]:
             raise ValueError("Unexpected part or connected-pad count")
         circuit = json.loads((fresh / "circuit.json").read_text())
         if any(not part.get("mpn") or not part.get("lcsc") for part in circuit["parts"]):
@@ -183,9 +142,7 @@ def build(output: Path) -> dict:
         # schematic pin names/types are carried onto the pads of the copy,
         # the first unrouted PCB this recipe writes.
         annotate_pads(output / "sdram_demo.kicad_pcb", output / "sdram_demo.kicad_sch")
-        apply_library_ids(
-            output / "sdram_demo.kicad_pcb", output / "sdram_demo.kicad_sch", fiducials
-        )
+        apply_library_ids(output / "sdram_demo.kicad_pcb", output / "sdram_demo.kicad_sch")
         constraints = json.loads((output / "sdram_constraints.json").read_text())
         constraints.update(stackup=manifest["stackup"], trace_width_mm=0.18)
         (output / "sdram_constraints.json").write_text(json.dumps(constraints, indent=2) + "\n")
@@ -194,7 +151,6 @@ def build(output: Path) -> dict:
             "stackup": manifest["stackup"],
             "fixture_sha256": manifest["sha256"],
         }
-        circuit["pin_nets"].update({ref: {} for ref in fiducials})
         (output / "circuit.json").write_text(json.dumps(circuit, indent=2) + "\n")
     status = {
         "status": "draft",

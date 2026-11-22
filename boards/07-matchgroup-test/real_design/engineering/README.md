@@ -129,7 +129,15 @@ DRC checks before and after saving the refill, native ERC, and both LVS
 checks passed with zero violations, shorts or opens. All 1,738 routed
 segments and 340 authored segments pass the release angle census.
 
-After validation passes, `proposed-design/` holds a scratch pair of manifests
-and their bound files. The ordinary `build.py` regenerates 43 electrical
-components and revalidates that pair into `release/`. Issue #8604 covers the
-independent recheck, production hash update and manufacturing evidence refresh.
+After validation passes, `proposed-design/` holds the two candidate manifests
+and their bound files. The staging step applies
+[`assembly-fiducials.patch`](assembly-fiducials.patch) to its copies of
+`build.py` and `build_source.py`. This lets the release builder verify the six
+board-only marks while it independently regenerates the 43 electrical
+components and 216 bound pads. It runs the ordinary validator on the complete
+pair and writes the result to `release/`.
+
+The published recipes still match the versions in
+`output/manufacturing/design-source.zip`. Issue #8604 owns the independent
+recheck, adoption of the staged recipe and physical hashes, and gated refresh
+of the manufacturing bundle.

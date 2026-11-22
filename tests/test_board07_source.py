@@ -100,19 +100,32 @@ def test_reviewed_build_rejects_hash_bound_off_angle_copper(tmp_path, monkeypatc
 ROOT07 = Path(__file__).resolve().parents[1] / "boards/07-matchgroup-test/real_design"
 
 
-def _load_record(name):
-    spec = importlib.util.spec_from_file_location(f"board07_{name}", ROOT07 / f"{name}.py")
+def _load_record(name, root=ROOT07):
+    spec = importlib.util.spec_from_file_location(f"board07_{name}", root / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land():
+def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land(tmp_path):
+    import subprocess
     from types import SimpleNamespace
+    from zipfile import ZipFile
 
     import pytest
 
-    release = _load_record("build_source")
+    # A caller may stage inside another checkout. Apply only to that scratch
+    # pair, keeping the production recipes byte-identical to their release.
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    proposed = tmp_path / "proposed"
+    _load_record("cleanup_fixture_8603", ROOT07 / "engineering").stage_design(ROOT07, proposed)
+    archive = ROOT07.parent / "output/manufacturing/design-source.zip"
+    with ZipFile(archive) as shipped:
+        for name in ("build.py", "build_source.py"):
+            published = shipped.read(f"real_design/{name}")
+            assert (ROOT07 / name).read_bytes() == published
+            assert (proposed / name).read_bytes() != published
+    release = _load_record("build_source", proposed)
     pad = SimpleNamespace(
         number="", net_name="", net_number=0, size=(1.0, 1.0), drill=0.0, layers=["F.Cu", "F.Mask"]
     )

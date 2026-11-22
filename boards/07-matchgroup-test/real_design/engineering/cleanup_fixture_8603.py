@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -20,7 +21,7 @@ RELEASE_FILES = (
 
 
 def stage_design(design: Path, output: Path, *, original: bool = False) -> None:
-    """Copy the two hash-bound fixtures and their release builder into a fresh directory."""
+    """Stage the original optimizer inputs or the prospective fiducial-aware builder."""
     output.mkdir(parents=True, exist_ok=False)
     repo = design.parents[2]
 
@@ -35,6 +36,20 @@ def stage_design(design: Path, output: Path, *, original: bool = False) -> None:
 
     for name in RELEASE_FILES:
         copy(name)
+    if not original:
+        # Git normally resolves patch paths from the enclosing checkout and
+        # can silently skip both files when output is a subdirectory of it.
+        subprocess.run(
+            [
+                "git",
+                "apply",
+                "--whitespace=error",
+                str((design / "engineering/assembly-fiducials.patch").resolve()),
+            ],
+            cwd=output,
+            env={**os.environ, "GIT_CEILING_DIRECTORIES": str(output.resolve().parent)},
+            check=True,
+        )
     for kind in ("authored-source", "reviewed-routing"):
         manifest = f"{kind}/manifest.json"
         copy(manifest)
