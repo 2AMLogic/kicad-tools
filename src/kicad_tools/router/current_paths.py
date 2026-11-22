@@ -223,14 +223,18 @@ from __future__ import annotations
 import json
 import math
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from kicad_tools.core.geometry import point_to_segment_distance, segments_intersect
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
-from kicad_tools.geometry.copper import collinear_overlap_length, extends_collinear
+from kicad_tools.geometry.copper import (
+    collinear_interval_overlap,
+    collinear_overlap_length,
+    extends_collinear,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -1347,6 +1351,14 @@ def _layer_changes(
 
 
 @dataclass(frozen=True)
+class _CapJoint:
+    first: Segment
+    second: Segment
+    span: Segment
+    pinch: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class PathResolution:
     """Outcome of resolving one :class:`CurrentPathSpec` against a board.
 
@@ -1401,6 +1413,18 @@ class PathResolution:
     #: eligible declaration. Empty when a same-net pour or arc exists (it
     #: could bypass any of them) and for every other status.
     loop_free_segments: tuple[Segment, ...] = ()
+
+    # A bonded pair of rounded ends can have less copper at its joint than
+    # either authored track. Keep these measured sections distinct from PCB
+    # segment identities used for attribution, coverage and reinforcement.
+    cap_joints: tuple[_CapJoint, ...] = ()
+    # Authored traces wholly inside the measured path copper carry no
+    # independent width, but are accounted for by its declared path.
+    overlaid_segments: tuple[Segment, ...] = ()
+
+    @property
+    def covered_segments(self) -> tuple[Segment, ...]:
+        return self.segments + self.overlaid_segments
 
     @property
     def ok(self) -> bool:
@@ -1477,6 +1501,10 @@ class PathResolution:
             if i not in seen and group.branches
         ]
 
+        candidates.extend(
+            MinimumWidth(width_mm=joint.span.width, layer=joint.span.layer, position=joint.pinch)
+            for joint in self.cap_joints
+        )
         if not candidates:
             return None
         return min(candidates, key=lambda c: c.width_mm)
@@ -1578,6 +1606,10 @@ class _GraphEdge:
     """One graph edge; several split edges may retain the same routed segment."""
 
     segment: Segment | None = None  # None is real via barrel copper
+    overlaid: tuple[Segment, ...] = ()
+
+    def tracks(self) -> tuple[Segment, ...]:
+        return (self.segment, *self.overlaid) if self.segment is not None else ()
 
 
 @dataclass
@@ -1585,6 +1617,8 @@ class _CopperGraph:
     adjacency: dict[_Node, list[tuple[_Node, _GraphEdge]]] = field(default_factory=dict)
     # Physical objects keyed by identity, with all their modeled junctions after pad contraction.
     item_nodes: dict[int, set[_Node]] = field(default_factory=dict)
+    # Physical conductor occupying each interval of an overlaid authored track.
+    track_cover: dict[int, set[int]] = field(default_factory=dict)
     pads: dict[tuple[str, str, int], _Node] = field(default_factory=dict)
     internal: dict[_Node, list[Segment]] = field(default_factory=dict)
     # For each external edge landing on a pad hub, the physical points where
@@ -1625,8 +1659,41 @@ def _continuous_bar(first: Segment, second: Segment) -> bool:
     )
 
 
-def _straight_bar_tracks(pcb: PCB, copper: CopperContactGraph) -> dict[int, int]:
-    """Group physically bonded pieces whose centrelines form one straight bar."""
+def _bonded_bar_overlap(first: Segment, second: Segment) -> float | None:
+    """Shared straight interval, negative for a gap bridged by positive-area end caps."""
+    if first.layer != second.layer:
+        return None
+    overlap = collinear_interval_overlap(first.start, first.end, second.start, second.end, _PAD_EPS)
+    # A tangent has no cross-section available to carry the path current.
+    if overlap is None or (
+        overlap < -_PAD_EPS and -overlap >= (first.width + second.width) / 2 - 1e-9
+    ):
+        return None
+    return overlap
+
+
+def _cap_joint(first: Segment, second: Segment, gap: float) -> _CapJoint:
+    """Represent a bonded end-cap joint at its minimum copper width across the run."""
+    start, end = min(
+        ((a, b) for a in (first.start, first.end) for b in (second.start, second.end)),
+        key=lambda pair: math.dist(*pair),
+    )
+    r1, r2 = first.width / 2, second.width / 2
+    # The common chord of the two round caps is the narrowest section. A
+    # wider cap that covers the other end completely leaves its full width.
+    x = (gap * gap + r1 * r1 - r2 * r2) / (2 * gap)
+    width = (
+        2 * math.sqrt(max(0.0, r1 * r1 - x * x)) if 0 < x < gap else min(first.width, second.width)
+    )
+    fraction = min(1.0, max(0.0, x / gap))
+    pinch = (start[0] + fraction * (end[0] - start[0]), start[1] + fraction * (end[1] - start[1]))
+    return _CapJoint(first, second, replace(first, start=start, end=end, width=width), pinch)
+
+
+def _straight_bar_tracks(
+    pcb: PCB, copper: CopperContactGraph
+) -> tuple[dict[int, int], list[_CapJoint]]:
+    """Group bonded straight tracks, retaining joints carried only by their round caps."""
     from kicad_tools.validate.copper_contact import TRACK
 
     from .connectivity import _UnionFind
@@ -1637,19 +1704,36 @@ def _straight_bar_tracks(pcb: PCB, copper: CopperContactGraph) -> dict[int, int]
         for i, item in enumerate(copper.items)
         if item.kind == TRACK and item.key[0] == "segment"
     }
+    gaps = []
     for a, b in copper.bonds:
-        if a in tracks and b in tracks:
-            i, j = tracks[a], tracks[b]
-            if _continuous_bar(pcb.segments[i], pcb.segments[j]):
-                runs.union(i, j)
-    return {i: runs.find(i) for i in tracks.values()}
+        if a not in tracks or b not in tracks:
+            continue
+        i, j = tracks[a], tracks[b]
+        first, second = pcb.segments[i], pcb.segments[j]
+        overlap = _bonded_bar_overlap(first, second)
+        if overlap is None:
+            continue
+        if overlap >= -_PAD_EPS:
+            runs.union(i, j)
+        else:
+            gaps.append((-overlap, i, j))
+
+    joints = []
+    for gap, i, j in sorted(gaps):
+        # Another stroke can already cover this interval. Add a joint only
+        # between separate centreline runs, starting with adjacent ends.
+        if runs.find(i) != runs.find(j):
+            first, second = pcb.segments[i], pcb.segments[j]
+            joints.append(_cap_joint(first, second, gap))
+            runs.union(i, j)
+    return {i: runs.find(i) for i in tracks.values()}, joints
 
 
 def _via_row_ports(
     pcb: PCB, net_number: int, physical_contacts: Callable[[], CopperContactGraph]
-) -> set[tuple[_Node, _Node]]:
-    """Track stations and barrel centres for close vias bonded to two shared bars."""
-    from kicad_tools.validate.copper_contact import TRACK, VIA
+) -> tuple[set[tuple[_Node, _Node]], list[_CapJoint], frozenset[int]]:
+    """Return row ports, bonded end caps and the tracks in their physical components."""
+    from kicad_tools.validate.copper_contact import PAD, TRACK, VIA
 
     # Most nets have no packed via pair. Bound the search by X before
     # asking for the full physical bond inventory.
@@ -1666,16 +1750,36 @@ def _via_row_ports(
             if math.dist(first.position, second.position) <= max_pitch + _PAD_EPS:
                 pairs.append((i, j))
     if not pairs:
-        return set()
+        return set(), [], frozenset()
 
     copper = physical_contacts()
-    runs = _straight_bar_tracks(pcb, copper)
+    runs, joints = _straight_bar_tracks(pcb, copper)
+    # A trace joining two series vias can end at both barrel centres. A
+    # layer-changing row needs an exit on each layer: a track running on past
+    # the pair, a turn off its straight bar, or a load pad on that bar.
+    bounds: dict[int, tuple[int, float, float]] = {}
+    attached: set[int] = set()
+    for index, run in runs.items():
+        seg = pcb.segments[index]
+        axis = 0 if abs(seg.start[0] - seg.end[0]) >= abs(seg.start[1] - seg.end[1]) else 1
+        low, high = sorted((seg.start[axis], seg.end[axis]))
+        if run in bounds:
+            _, old_low, old_high = bounds[run]
+            low, high = min(low, old_low), max(high, old_high)
+        bounds[run] = (axis, low, high)
     # One nearest station per continuous bar and barrel. Round caps on the
     # two pieces of a subdivided bar can both touch the same annulus.
     via_bars: dict[int, dict[int, _Node]] = {}
     touching_vias: set[int] = set()
     for a, b in copper.bonds:
         via, track = copper.items[a], copper.items[b]
+        for bar, other in ((via, track), (track, via)):
+            if bar.kind == TRACK and bar.key[0] == "segment":
+                run = runs[bar.key[1]]
+                if other.kind == PAD or (
+                    other.kind == TRACK and other.key[0] == "segment" and runs[other.key[1]] != run
+                ):
+                    attached.add(run)
         if track.kind == VIA:
             via, track = track, via
         if via.kind == track.kind == VIA:
@@ -1695,16 +1799,25 @@ def _via_row_ports(
                 bars[runs[index]] = station
 
     ports: set[tuple[_Node, _Node]] = set()
+    via_components = {
+        item.key: copper.component[n] for n, item in enumerate(copper.items) if item.kind == VIA
+    }
+    row_components = set()
     for i, j in pairs:
         if i in touching_vias or j in touching_vias:
             continue
         first_bars, second_bars = via_bars.get(i, {}), via_bars.get(j, {})
         pair_ports: list[tuple[_Node, _Node]] = []
+        exits = set()
         for run in first_bars.keys() & second_bars.keys():
             first_station, second_station = first_bars[run], second_bars[run]
             # A transverse lane meeting both annuli at the same station
             # supplies no bar between the barrels.
             if math.dist(first_station[:2], second_station[:2]) > _VIA_CENTRE_EPS:
+                axis, low, high = bounds[run]
+                near, far = sorted((first_station[:2][axis], second_station[:2][axis]))
+                if run in attached or low < near - _PAD_EPS or high > far + _PAD_EPS:
+                    exits.add(first_station[2])
                 pair_ports.append(
                     (first_station, _copper_node(pcb.vias[i].position, first_station[2]))
                 )
@@ -1712,12 +1825,19 @@ def _via_row_ports(
                     (second_station, _copper_node(pcb.vias[j].position, second_station[2]))
                 )
         if len({station[2] for station, _ in pair_ports}) >= 2:
+            if len(exits) >= 2:
+                row_components.add(via_components[i])
             ports.update(
                 (station, barrel)
                 for station, barrel in pair_ports
                 if math.dist(station[:2], barrel[:2]) > _VIA_CENTRE_EPS
             )
-    return ports
+    row_tracks = frozenset(
+        id(pcb.segments[item.key[1]])
+        for n, item in enumerate(copper.items)
+        if copper.component[n] in row_components and item.kind == TRACK and item.key[0] == "segment"
+    )
+    return ports, [joint for joint in joints if id(joint.first) in row_tracks], row_tracks
 
 
 def _build_graph(
@@ -1725,13 +1845,16 @@ def _build_graph(
     pcb: PCB,
     net_name: str,
     row_ports: set[tuple[_Node, _Node]] | None = None,
+    cap_joints: Sequence[_CapJoint] = (),
+    row_tracks: frozenset[int] = frozenset(),
 ) -> _CopperGraph:
     """Build centerline contacts, physical via-row ports and convex pad hubs.
 
     Supported contacts are same-layer track endpoints (including a T landing
     in a segment interior), via centers on a track, and nodes inside supported
     pad copper. A packed pair of vias physically bonded to two common bars
-    may also attach at the nearest track stations on those bars. Other
+    may also attach at the nearest track stations on those bars. Collinear
+    end caps on a bonded run join at their measured copper neck. Other
     width-only overlaps, zone/arc connectivity and arbitrary pad primitives
     are outside this graph. The via-centre snap is limited to 1 µm (#7210).
     This is not a general PCB connectivity solver.
@@ -1774,7 +1897,9 @@ def _build_graph(
         contacts[station[2]].add(station[:2])
 
     edges: list[tuple[_Node, _Node, _GraphEdge]] = []
+    track_spans: dict[tuple[_Node, _Node], _GraphEdge] = {}
     for seg in segments:
+        on_row = id(seg) in row_tracks
         points = [
             point
             for point in contacts[seg.layer]
@@ -1783,13 +1908,22 @@ def _build_graph(
         ]
         points.sort(key=lambda point: math.dist(point, seg.start))
         for point_a, point_b in zip(points, points[1:], strict=False):
-            edges.append(
-                (
-                    _copper_node(point_a, seg.layer),
-                    _copper_node(point_b, seg.layer),
-                    _GraphEdge(seg),
-                )
-            )
+            a, b = _copper_node(point_a, seg.layer), _copper_node(point_b, seg.layer)
+            span_key = (a, b) if a <= b else (b, a)
+            edge = track_spans.get(span_key) if on_row else None
+            if edge is not None and edge.segment is not None and _continuous_bar(edge.segment, seg):
+                # One physical interval has one graph edge before pad or via
+                # contraction. Retain every original for physical contact proof.
+                if (seg.width, _seg_length(seg)) > (edge.segment.width, _seg_length(edge.segment)):
+                    edge.overlaid += (edge.segment,)
+                    edge.segment = seg
+                else:
+                    edge.overlaid += (seg,)
+            else:
+                edge = _GraphEdge(seg)
+                if on_row:
+                    track_spans[span_key] = edge
+                edges.append((a, b, edge))
     for via in vias:
         nodes = [
             _copper_node(via.position, layer)
@@ -1814,9 +1948,14 @@ def _build_graph(
     from kicad_tools.schema.physical_identity import footprint_keys
 
     graph = _CopperGraph()
+    graph.track_cover = {id(track): set() for _, _, edge in edges for track in edge.overlaid}
     pad_contacts: dict[tuple[str, str, int], list[_Node]] = {}
     pad_nodes: set[_Node] = set()
     internal_edges: set[_GraphEdge] = set()
+    for joint in cap_joints:
+        span = joint.span
+        a, b = _copper_node(span.start, span.layer), _copper_node(span.end, span.layer)
+        parents[root(a)] = root(b)
     if row_ports:
         for station, barrel in sorted(row_ports):
             if station in parents and barrel in parents:
@@ -1887,8 +2026,10 @@ def _build_graph(
             graph.pads[key] = hubs.pop()
     for a, b, edge in edges:
         ra, rb = root(a), root(b)
-        if edge.segment is not None:
-            graph.item_nodes.setdefault(id(edge.segment), set()).update((ra, rb))
+        for track in edge.tracks():
+            graph.item_nodes.setdefault(id(track), set()).update((ra, rb))
+            if id(track) in graph.track_cover and edge.segment is not None:
+                graph.track_cover[id(track)].add(id(edge.segment))
         graph.adjacency.setdefault(ra, [])
         graph.adjacency.setdefault(rb, [])
         if edge in internal_edges and a != b:
@@ -2442,33 +2583,13 @@ def _barrel_links(
     links: dict[str, dict[frozenset[tuple[float, float]], _BarPath]] = {}
     terminals = taken.union(graph.pads.values())
 
-    @cache
-    def steps(node: _Node) -> list[tuple[_Node, list[_GraphEdge]]]:
-        # The graph splits at every authored endpoint. Two overlapping strokes
-        # therefore have duplicate edges on their common centreline interval.
-        # Keep both originals as width and contact evidence for that one span.
-        by_end: dict[_Node, list[_GraphEdge]] = {}
-        for end, edge in graph.adjacency[node]:
-            by_end.setdefault(end, []).append(edge)
-        result = []
-        for end, edges in by_end.items():
-            first = edges[0].segment
-            if first is not None and all(
-                edge.segment is not None and _continuous_bar(first, edge.segment)
-                for edge in edges[1:]
-            ):
-                result.append((end, edges))
-            else:
-                result.extend((end, [edge]) for edge in edges)
-        return result
-
     for pos, layers in spans.items():
         for layer in layers:
             start = _copper_node(pos, layer)
-            for first, edges in steps(start):
-                if edges[0].segment is None or first[2] != layer:
+            for first, edge in graph.adjacency[start]:
+                if edge.segment is None or first[2] != layer:
                     continue
-                path = [(start, edges, first)]
+                path = [(start, edge, first)]
                 visited = {start}
                 while True:
                     previous, incoming, current = path[-1]
@@ -2480,23 +2601,22 @@ def _barrel_links(
                         if pos < current[:2] and layer in spans[current[:2]]:
                             same_layer = links.setdefault(layer, {})
                             pair = frozenset((pos, current[:2]))
-                            same_layer.setdefault(pair, []).extend(
-                                (begin, edge, end)
-                                for begin, span_edges, end in path
-                                for edge in span_edges
-                            )
+                            same_layer.setdefault(pair, []).extend(path)
                         break
-                    adjacent = steps(current)
+                    adjacent = graph.adjacency[current]
                     if len(adjacent) != 2:
                         break
                     nxt, outgoing = adjacent[1] if adjacent[0][0] == previous else adjacent[0]
-                    src, dest = incoming[0].segment, outgoing[0].segment
+                    src, dest = incoming.segment, outgoing.segment
                     if src is None or dest is None or nxt[2] != layer:
                         break
+                    if _bonded_bar_overlap(src, dest) is None:
+                        break
+                    station = _track_station(src, current[:2])
                     if not extends_collinear(
                         _track_station(src, previous[:2]),
-                        _track_station(src, current[:2]),
-                        _track_station(dest, current[:2]),
+                        station,
+                        station,
                         _track_station(dest, nxt[:2]),
                         _PAD_EPS,
                     ):
@@ -2605,13 +2725,16 @@ def _mid_path_via_groups(
                     if edge.segment is None and other[:2] == pos and other in nodes:
                         edges.add(edge)
         bar_spans = []
+        members = {}
         for layer in (la, lb):
             for pair in group_pairs:
                 for start, edge, end in links[layer][pair]:
                     nodes.update((start, end))
                     edges.add(edge)
                     if edge.segment is not None:
-                        bar_spans.append((frozenset((start[:2], end[:2])), edge.segment))
+                        members[id(edge.segment)] = edge.segment
+                    for track in edge.tracks():
+                        bar_spans.append((frozenset((start[:2], end[:2])), track))
         internal = [
             edge
             for node in nodes
@@ -2649,13 +2772,12 @@ def _mid_path_via_groups(
             if _edge_route(ends, first, second) is None:
                 unmodeled_edges.update(edges)
             continue
-        members = {id(segment): segment for _, segment in bar_spans}
         track_contacts = {
             pos: {
-                id(edge.segment)
+                id(track)
                 for layer in (la, lb)
                 for _, edge in graph.adjacency[_copper_node(pos, layer)]
-                if edge.segment is not None
+                for track in edge.tracks()
             }
             for pos in group
         }
@@ -2695,7 +2817,7 @@ def _via_group_separates_bars(
             return False
         bar_components.setdefault(segment.layer, set()).add(components.find(track_index))
     first, second = bar_components.values()
-    return first.isdisjoint(second)
+    return len(first) == len(second) == 1 and first.isdisjoint(second)
 
 
 def _packed_barrel_rows(
@@ -3639,8 +3761,8 @@ def resolve_current_path(
 
         return build_copper_contact_graph(ConnectivityValidator(pcb), net_number, with_bonds=True)
 
-    row_ports = _via_row_ports(pcb, net_number, physical_contacts)
-    adjacency = _build_graph(net_segments, pcb, spec.net_name, row_ports)
+    row_ports, cap_joints, row_tracks = _via_row_ports(pcb, net_number, physical_contacts)
+    adjacency = _build_graph(net_segments, pcb, spec.net_name, row_ports, cap_joints, row_tracks)
     # Attach each endpoint by its pad's own extent, not by an exact center
     # hit: a trace terminating anywhere inside the pad is electrically on it,
     # and several traces landing on one pad are shorted by it. Without this,
@@ -3910,13 +4032,27 @@ def resolve_current_path(
                 loop_free_segments=proved_series_segments(evidence.unavoidable),
             )
 
+    on_path = {id(segment) for segment in path_segments}
+    overlaid = tuple(
+        seg
+        for seg in net_segments
+        if id(seg) not in on_path
+        and id(seg) in adjacency.track_cover
+        and adjacency.track_cover[id(seg)] <= on_path
+    )
+    path_joints = tuple(
+        joint for joint in cap_joints if id(joint.first) in on_path and id(joint.second) in on_path
+    )
     return PathResolution(
         spec=spec,
         status=STATUS_RESOLVED,
         source=source,
         sink=sink,
         segments=tuple(path_segments),
-        length_mm=sum(_seg_length(s) for s in path_segments),
+        length_mm=sum(_seg_length(s) for s in path_segments)
+        + sum(_seg_length(joint.span) for joint in path_joints),
+        cap_joints=path_joints,
+        overlaid_segments=overlaid,
         layer_changes=_layer_changes(
             pcb, spec.net_name, path_segments, [*arrays, *on_path_groups], design_rules
         ),
@@ -4001,7 +4137,7 @@ def audit_current_paths(
         if not resolution.ok:
             continue
         bucket = covered_ids.setdefault(resolution.spec.net_name, set())
-        bucket.update(id(seg) for seg in resolution.segments)
+        bucket.update(id(seg) for seg in resolution.covered_segments)
 
     uncovered: dict[str, list[Segment]] = {}
     unmodeled: dict[str, list[UnmodeledCopper]] = {}
@@ -4055,7 +4191,7 @@ def reinforcement_eligible_segment_ids(pcb: PCB, specs: Sequence[CurrentPathSpec
     eligible: set[int] = set()
     partition = reinforcement_path_resolutions(pcb, specs)
     for resolution in partition.eligible:
-        eligible.update(id(seg) for seg in resolution.segments)
+        eligible.update(id(seg) for seg in resolution.covered_segments)
     # A loop-ambiguous eligible path still lends its loop-free segments
     # between the endpoints (Issue #9725); never the looped copper.
     for resolution in partition.partial:

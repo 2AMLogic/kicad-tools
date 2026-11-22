@@ -374,14 +374,14 @@ def segment_copper_polygon(
     return line.buffer(width / 2)
 
 
-def collinear_overlap_length(
+def collinear_interval_overlap(
     a: tuple[float, float],
     b: tuple[float, float],
     c: tuple[float, float],
     d: tuple[float, float],
     tol: float = 1e-6,
 ) -> float | None:
-    """Length shared by two finite collinear centrelines, or None for a gap or bend."""
+    """Signed interval overlap of two collinear centrelines. A negative value measures a gap."""
     dx, dy = b[0] - a[0], b[1] - a[1]
     length = math.hypot(dx, dy)
     if length <= tol or math.dist(c, d) <= tol:
@@ -392,8 +392,19 @@ def collinear_overlap_length(
         if abs(dx * y - dy * x) > tol * length:
             return None
         stations.append((dx * x + dy * y) / length)
-    overlap = min(length, max(stations)) - max(0.0, min(stations))
-    return max(0.0, overlap) if overlap >= -tol else None
+    return min(length, max(stations)) - max(0.0, min(stations))
+
+
+def collinear_overlap_length(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+    tol: float = 1e-6,
+) -> float | None:
+    """Length shared by two finite collinear centrelines, or None for a gap or bend."""
+    overlap = collinear_interval_overlap(a, b, c, d, tol)
+    return max(0.0, overlap) if overlap is not None and overlap >= -tol else None
 
 
 def extends_collinear(

@@ -74,6 +74,7 @@ than leaving the reader to infer it from the ambiguous-status error alone.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import TYPE_CHECKING, NamedTuple
 
 from kicad_tools.physics.ampacity import (
@@ -325,7 +326,10 @@ class PathAmpacityRule(DRCRule):
                 )
                 if violation is not None:
                     results.add(violation)
-            for segment in resolution.segments:
+            # The minimum at a cap-only joint is the common chord of the two
+            # rounded ends. Check its local copper and wire credit at that point.
+            pinches = (replace(j.span, start=j.pinch, end=j.pinch) for j in resolution.cap_joints)
+            for segment in (*resolution.segments, *pinches):
                 layer = getattr(segment, "layer", "F.Cu")
                 external = self._is_external_layer(layer)
                 actual_width_mm = getattr(segment, "width", 0.0)

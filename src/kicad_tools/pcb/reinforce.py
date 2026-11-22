@@ -3173,11 +3173,16 @@ def _reinforce_ends(
 
     if gated:
         leg_spans: dict[str, list[Segment]] = {}
+        cap_spans: dict[str, dict[frozenset[int], Segment]] = {}
         for res in eligible_resolutions or ():
-            for seg in res.segments:
+            for seg in res.covered_segments:
                 covering = path_names.setdefault(id(seg), [])
                 if res.spec.name not in covering:
                     covering.append(res.spec.name)
+            for joint in res.cap_joints:
+                ids = (id(joint.first), id(joint.second))
+                cap_spans.setdefault(joint.span.layer, {})[frozenset(ids)] = joint.span
+                span_sources[id(joint.span)] = ids
             declared_current_a[res.spec.name] = res.spec.thermal_design_current().current_a
         for lay in sorted(by_layer):
             segs = by_layer[lay]
@@ -3187,6 +3192,7 @@ def _reinforce_ends(
             # below still need every original track on the layer, including
             # copper excluded from the declared path.
             leg_spans[lay] = _physical_leg_spans(eligible, span_sources)
+            leg_spans[lay].extend(cap_spans.get(lay, {}).values())
             legs = _derive_legs(leg_spans[lay], lay, original_ids)
             if layer is not None and lay != layer:
                 for c in legs:

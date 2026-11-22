@@ -196,6 +196,37 @@ def test_saved_via_row_attaches_by_pad_overlap(tmp_path, capsys, offsets, expect
     assert report["anchors_placed"] == len(PCB.load(board).vias) - 3 == (2 if expected else 0)
 
 
+def _written_row(pcb, filename, sidecar, capsys):
+    import argparse
+    import json
+
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from tests.test_pcb_reinforce import _reinforce_args
+
+    pcb.save(filename)
+    args = argparse.Namespace(
+        pcb_command="current-paths-audit",
+        pcb=str(filename),
+        current_paths=str(sidecar),
+        format="json",
+    )
+    assert run_pcb_command(args) == 0
+    (path,) = json.loads(capsys.readouterr().out)["resolutions"]
+    args = _reinforce_args(
+        filename,
+        net="P",
+        layer="B.Cu",
+        current_paths=str(sidecar),
+        format="json",
+        anchor_mode="ends",
+    )
+    assert run_pcb_command(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    before = {via.position for via in pcb.vias}
+    anchors = sorted(via.position for via in PCB.load(filename).vias if via.position not in before)
+    return path, report["run_length_mm"], anchors
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize(
     "front_joints,back_joints,offset,return_x,overlap,width_step",
@@ -214,11 +245,7 @@ def test_saved_via_row_attaches_by_pad_overlap(tmp_path, capsys, offsets, expect
 def test_subdividing_bars_preserves_public_audit_and_written_anchors(
     tmp_path, capsys, front_joints, back_joints, offset, return_x, overlap, width_step, reverse
 ):
-    import argparse
     import json
-
-    from kicad_tools.cli.commands.pcb import run_pcb_command
-    from tests.test_pcb_reinforce import _reinforce_args
 
     pcb = _saved_row_board(tmp_path, via_offsets=(offset,) * 3)
     pcb.add_footprint_from_file(tmp_path / "TestPad.kicad_mod", "J4", 216, 44.8)
@@ -234,33 +261,11 @@ def test_subdividing_bars_preserves_public_audit_and_written_anchors(
     sidecar.write_text(json.dumps({"paths": [spec.to_dict()]}))
 
     def measure(filename):
-        pcb.save(filename)
-        args = argparse.Namespace(
-            pcb_command="current-paths-audit",
-            pcb=str(filename),
-            current_paths=str(sidecar),
-            format="json",
-        )
-        assert run_pcb_command(args) == 0
-        (path,) = json.loads(capsys.readouterr().out)["resolutions"]
-        args = _reinforce_args(
-            filename,
-            net="P",
-            layer="B.Cu",
-            current_paths=str(sidecar),
-            format="json",
-            anchor_mode="ends",
-        )
-        assert run_pcb_command(args) == 0
-        report = json.loads(capsys.readouterr().out)
-        before = {via.position for via in pcb.vias}
-        anchors = sorted(
-            via.position for via in PCB.load(filename).vias if via.position not in before
-        )
+        path, run, anchors = _written_row(pcb, filename, sidecar, capsys)
         return (
             path["status"],
             [change["via_count"] for change in path["layer_changes"]],
-            report["run_length_mm"],
+            run,
             anchors,
         )
 
@@ -287,6 +292,84 @@ def test_subdividing_bars_preserves_public_audit_and_written_anchors(
         path = resolve_current_path(pcb, spec)
         assert path.min_width is not None
         assert path.min_width.width_mm == pytest.approx(3.0 - width_step)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("pitch", [2.4, 3.5])
+@pytest.mark.parametrize(
+    "joint", ["lane-overlap", "lane-covered", "lane-caps", "lane-open", "feed-caps"]
+)
+def test_physical_row_joints_preserve_rating_and_written_lane(
+    tmp_path, capsys, pitch, joint, reverse
+):
+    import json
+
+    from tests.test_pcb_reinforce import _write_single_pad_footprint_lib
+
+    pcb = PCB.create(width=245, height=215, layers=4, center=False)
+    far = 40 + 2 * pitch
+    footprint = _write_single_pad_footprint_lib(tmp_path)
+    for ref, point in (("J1", (30, 10)), ("J2", (200, far)), ("J4", (216, far))):
+        pcb.add_footprint_from_file(footprint, ref, *point)
+        pcb.assign_net_to_footprint_pad(ref, "1", "P")
+    for y in (40, 40 + pitch, far):
+        pcb.add_via(30.25, y, size=PAD, drill=DRILL, net="P")
+    pcb.add_trace((30, 10), (30, far), width=0.4, layer="F.Cu", net="P")
+    pcb.add_trace((30, 40), (30, far), width=0.4, layer="B.Cu", net="P")
+    pcb.add_trace((30, far), (200, far), width=4, layer="B.Cu", net="P")
+    pcb.add_trace((200, far), (216, far), width=4, layer="B.Cu", net="P")
+    spec = _spec(source="J4", sink="J1") if reverse else _spec(sink="J4")
+    sidecar = tmp_path / "current_paths.json"
+    sidecar.write_text(json.dumps({"paths": [spec.to_dict()]}))
+    original, run, anchors = _written_row(pcb, tmp_path / "original.kicad_pcb", sidecar, capsys)
+    assert original["status"] == "resolved" and len(anchors) == 2
+
+    if joint == "feed-caps":
+        pcb.remove_segments([next(s for s in pcb.segments if s.layer == "F.Cu")])
+        cuts = [40 + pitch / 2, 40 + 1.5 * pitch]
+        for a, b in zip(
+            (10, *(y + 0.0125 for y in cuts)), (*(y - 0.0125 for y in cuts), far), strict=True
+        ):
+            pcb.add_trace((30, a), (30, b), width=0.4, layer="F.Cu", net="P")
+    elif joint == "lane-covered":
+        pcb.add_trace((60, far), (145, far), width=0.3, layer="B.Cu", net="P")
+    else:
+        pcb.remove_segments(
+            [next(s for s in pcb.segments if s.start == (30, far) and s.end == (200, far))]
+        )
+        overlap = {"lane-overlap": 0.025, "lane-caps": -0.025, "lane-open": -5.0}[joint]
+        pcb.add_trace((30, far), (110 + overlap / 2, far), width=4, layer="B.Cu", net="P")
+        pcb.add_trace((200, far), (110 - overlap / 2, far), width=4, layer="B.Cu", net="P")
+
+    path, actual_run, actual_anchors = _written_row(
+        pcb, tmp_path / "divided.kicad_pcb", sidecar, capsys
+    )
+    if joint == "lane-open":
+        assert (path["status"], path["layer_changes"], actual_run, actual_anchors) == (
+            "unresolved",
+            [],
+            0,
+            [],
+        )
+    else:
+        assert path["status"] == "resolved", path["reason"]
+        (change,) = path["layer_changes"]
+        assert (change["via_count"], change["capacity_a"]) == (3, 14.1398)
+        assert (actual_run, actual_anchors) == (run, anchors)
+        assert reinforcement_eligible_segment_ids(pcb, [spec]) == {id(s) for s in pcb.segments}
+        if joint == "lane-covered":
+            assert path["min_width_mm"] == original["min_width_mm"]
+        if joint == "feed-caps":
+            neck = (0.4**2 - 0.025**2) ** 0.5
+            assert path["min_width_mm"] == pytest.approx(neck, abs=0.0001)
+            result = resolve_current_path(pcb, spec)
+            assert {id(seg) for seg in result.segments} == {id(seg) for seg in pcb.segments}
+            findings = PathAmpacityRule([replace(spec, continuous_a=10)]).check(
+                pcb, _design_rules_2oz()
+            )
+            assert {
+                v.location for v in findings.violations if v.actual_value == pytest.approx(neck)
+            } == {(30, round(y, 3)) for y in cuts}
 
 
 def test_fine_bar_subdivision_connects_distinct_offset_track_contacts(tmp_path):
