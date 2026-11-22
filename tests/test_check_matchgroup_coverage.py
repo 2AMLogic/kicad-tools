@@ -30,8 +30,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests._fixture_silk_findings import BOARD07_SILK
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 HELPER_SCRIPT_PATH = REPO_ROOT / "scripts" / "ci" / "check_matchgroup_coverage.py"
@@ -102,13 +100,12 @@ class TestBoard07Allowance:
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
         assert not hasattr(mod, "check_zero_violations")
 
-    def test_fixture_allowance_matches_mask_nets_and_silk_items(self):
-        """The regenerated board carries the mask nets and silk items tracked in #8858/#9795."""
+    def test_fixture_allowance_matches_mask_nets(self):
+        """The final export carries only the mask net signatures tracked in #8858."""
         mod = _load_helper_module()
         allowed = mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
         assert {i for r, i in allowed if r == "physical_copper_gap"} == set()
         expected = {("mask_to_copper", net): 8858 for net in BOARD07_MASK_NETS}
-        expected.update(dict.fromkeys(BOARD07_SILK, 9795))
         assert allowed == expected
         assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == allowed
 

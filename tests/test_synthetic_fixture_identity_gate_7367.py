@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests._fixture_silk_findings import BOARD06_SILK, BOARD07_SILK
+from tests._fixture_silk_findings import FORMER_BOARD06_SILK, FORMER_BOARD07_SILK
 
 ROOT = Path(__file__).resolve().parents[1]
 TOLERANCE = ROOT / ".github" / "routed-drc-tolerance.yml"
@@ -213,11 +213,10 @@ def test_board07_committed_allowance():
     seed-42 regen's ``mask_to_copper`` net signatures (net-signature keyed
     -- the board is regenerated each CI run, so the mask rule's
     opening/conductor UUID items are ephemeral): board 07's allowance
-    also includes the silk identities tracked in #9795."""
+    holds exactly those 19 mask nets."""
     gate = load("check_matchgroup_coverage")
     expected = fab_gap_allowance(BOARD07_GAP_NETS)
     expected.update(mask_allowance(BOARD07_MASK_NETS))
-    expected.update(dict.fromkeys(BOARD07_SILK, 9795))
     assert expected == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
     assert gate.board_allowance(BOARD07_KEY) == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
 
@@ -360,7 +359,6 @@ def test_board06_committed_allowance():
     gate = load("check_diffpair_coverage")
     expected = fab_gap_allowance(BOARD06_GAP_NETS)
     expected.update(mask_allowance(BOARD06_MASK_NETS))
-    expected.update(dict.fromkeys(BOARD06_SILK, 9795))
     assert expected == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
     assert not hasattr(gate, "DIFFPAIR_SKEW_TRACKER")
     assert gate.DIFFPAIR_ALLOWANCES.get(BOARD06_KEY) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
@@ -537,7 +535,6 @@ def test_board06_measured_mask_population_passes_and_drains():
     gate = load("check_diffpair_coverage")
     found = [mask_violation(net) for net in BOARD06_MASK_NETS]
     found += [gap_violation((net,)) for net in BOARD06_GAP_NETS]
-    found += violations_for(BOARD06_SILK)
     ids = identities_of(found)
     assert gate.unexpected_baseline_errors(BOARD06_KEY, rule_counts(found), ids) == {}
     assert gate.unallowed_blocking(BOARD06_KEY, found) == []
@@ -556,30 +553,24 @@ def test_board06_measured_mask_population_passes_and_drains():
 
 
 @pytest.mark.parametrize(
-    ("module", "key", "silk", "mask", "gaps"),
+    ("module", "key", "former_silk", "mask_nets"),
     [
-        ("check_diffpair_coverage", BOARD06_KEY, BOARD06_SILK, BOARD06_MASK_NETS, BOARD06_GAP_NETS),
-        (
-            "check_matchgroup_coverage",
-            BOARD07_KEY,
-            BOARD07_SILK,
-            BOARD07_MASK_NETS,
-            BOARD07_GAP_NETS,
-        ),
+        ("check_diffpair_coverage", BOARD06_KEY, FORMER_BOARD06_SILK, BOARD06_MASK_NETS),
+        ("check_matchgroup_coverage", BOARD07_KEY, FORMER_BOARD07_SILK, BOARD07_MASK_NETS),
     ],
 )
-def test_replacing_a_silk_identity_is_unallowed_and_leaves_a_stale_entry(
-    module, key, silk, mask, gaps
-):
+def test_repaired_silk_finding_is_rejected_if_it_returns(module, key, former_silk, mask_nets):
     gate = load(module)
-    rule, original = silk[0]
-    replacement = "U9 (reference)/U9 pad 1"
-    found = violations_for(silk[1:])
-    found.extend(mask_violation(net) for net in mask)
-    found.extend(gap_violation((net,)) for net in gaps)
-    found.append(violation(rule, replacement))
-    assert gate.unallowed_blocking(key, found) == [(rule, replacement)]
-    assert gate.stale_allowances(key, identities_of(found)) == [(rule, original, 9795)]
+    baseline = [mask_violation(net) for net in mask_nets]
+    assert gate.stale_allowances(key, identities_of(baseline)) == []
+    assert gate.unallowed_blocking(key, baseline) == []
+
+    for rule, item in former_silk:
+        found = [*baseline, violation(rule, item)]
+        assert gate.unallowed_blocking(key, found) == [(rule, item)]
+        assert gate.unexpected_baseline_errors(key, rule_counts(found), identities_of(found)) == {
+            rule: 1
+        }
 
 
 def test_regenerated_population_passes_and_a_new_net_fails():

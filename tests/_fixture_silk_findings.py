@@ -1,6 +1,6 @@
-"""JLCPCB silk findings from seed-42 CI run 44810362630 (issue #9798)."""
+"""Former seed-42 silk errors from run 44810362630, repaired by the final PCB export."""
 
-BOARD06_SILK = (
+FORMER_BOARD06_SILK = (
     ("silk_over_copper", "U1 (reference)/U1 pad 12"),
     ("silk_over_copper", "U1 (reference)/U1 pad 13"),
     ("silk_over_copper", "U2 (reference)/U2 pad A4"),
@@ -15,7 +15,7 @@ BOARD06_SILK = (
     ("silkscreen_text_thickness", "U4 (reference)"),
 )
 
-BOARD07_SILK = (
+FORMER_BOARD07_SILK = (
     ("silk_over_copper", "U3 (reference)/U3 pad 10"),
     ("silk_over_copper", "U3 (reference)/U3 pad 9"),
     ("silk_over_copper", "U4 (reference)/U4 pad A4"),

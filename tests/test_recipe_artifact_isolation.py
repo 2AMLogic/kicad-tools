@@ -5,8 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from tests._fixture_silk_findings import BOARD06_SILK
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -101,8 +99,6 @@ def _board06_background(gate):
     for rule, identity in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS:
         if rule in ("diffpair_length_skew", "mask_to_copper"):
             found.setdefault(rule, set()).add(identity)
-    for rule, identity in BOARD06_SILK:
-        found.setdefault(rule, set()).add(identity)
     return found
 
 
@@ -116,13 +112,11 @@ def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
     assert not {
         n for (r, n) in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "diffpair_uncoupled_length"
     }
-    # The seed-42 repair cleared every physical_copper_gap allowance (#9846).
-    # Only the measured #9795 silk identities may accompany the skew and masks.
-    assert {
-        (rule, identity): issue
-        for (rule, identity), issue in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items()
-        if rule not in ("diffpair_length_skew", "mask_to_copper")
-    } == dict.fromkeys(BOARD06_SILK, 9795)
+    # The repaired seed-42 export has no physical-gap or silkscreen allowance.
+    assert all(
+        rule in ("diffpair_length_skew", "mask_to_copper")
+        for rule, _ in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+    )
     assert {
         i for (r, _), i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items() if r == "mask_to_copper"
     } == {8858}
