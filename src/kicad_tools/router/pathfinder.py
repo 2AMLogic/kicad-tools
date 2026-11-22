@@ -455,6 +455,7 @@ class Router:
         # is a proof.  ``CppPathfinder`` memoizes the proof so the negotiated
         # loop does not re-run this 10-100x-slower search on an unchanged grid.
         self.last_route_exhausted: bool = False
+        self.last_route_iteration_limited: bool = False
 
         # Issue #6329: True when the most recent ``route()`` stopped because its
         # per-net WALL-CLOCK deadline fired (not the iteration cap, not a
@@ -3078,7 +3079,8 @@ class Router:
         Args:
             allow_sharing: If True (negotiated mode), allow routing through
                           non-obstacle blocked cells (they'll get high cost instead)
-            radius: Override the via half-width in grid cells. When None,
+            radius: Override the via search radius (copper plus clearance)
+                    in grid cells. When None,
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
         # Issue #5617: memoised per cell -- same predicate, same arguments,
@@ -4285,7 +4287,8 @@ class Router:
             gx, gy: Grid coordinates for via placement
             net: Net ID for the route
             allow_sharing: If True (negotiated mode), allow sharing
-            radius: Override the via half-width in grid cells (Issue #1692).
+            radius: Override the via search radius (copper plus clearance)
+                    in grid cells (Issue #1692).
 
         Returns:
             True if via CAN be placed (all layers clear), False if blocked.
@@ -4354,8 +4357,10 @@ class Router:
         # safe -- unlike the QFP in-pad rescue path.
         if self._foreign_pad_tuples or self._foreign_track_adapters:
             wx, wy = self.grid.grid_to_world(gx, gy)
-            # Effective via diameter from grid radius (cells -> mm).
-            eff_diameter = 2 * effective_radius * self.grid.resolution
+            # The raster radius already includes clearance and grid rounding.
+            # This world-coordinate check adds clearance to the copper itself.
+            net_class = self._halo_net_class(net)
+            via_size = net_class.via_size if net_class else self.rules.via_diameter
             # Filter same-net obstacles (passing a superset is allowed
             # by ``point_clear_of_copper``'s contract but the same-net
             # filter avoids spurious rejections on the routing net).
@@ -4369,7 +4374,7 @@ class Router:
             if not point_clear_of_copper(
                 x=wx,
                 y=wy,
-                via_size=eff_diameter,
+                via_size=via_size,
                 clearance=self.rules.via_clearance,
                 other_net_tracks=self._foreign_track_adapters,
                 other_net_pads=other_pads,
@@ -4905,6 +4910,7 @@ class Router:
         # Issue #6098: only a drained open set (set after the A* loop) proves
         # unreachability; every other exit leaves this False.
         self.last_route_exhausted = False
+        self.last_route_iteration_limited = False
         self.last_route_deadline_hit = False  # Issue #6329
         self.last_route_deadline_iterations = 0
 
@@ -6117,6 +6123,7 @@ class Router:
         # search drained (a timeout ``break`` or the iteration cap leaves
         # frontier nodes behind).
         self.last_route_exhausted = not open_set and not goal_rejected
+        self.last_route_iteration_limited = bool(open_set) and iterations >= max_iterations
         return None
 
     def _note_setup_deadline_stop(self) -> None:
@@ -6898,6 +6905,7 @@ class Router:
         # Issue #6527: status attributes mirror ``_route_impl`` (reset first so
         # every early exit leaves them in a defined state).
         self.last_route_exhausted = False
+        self.last_route_iteration_limited = False
         self.last_route_deadline_hit = False
         self.last_route_deadline_iterations = 0
 
@@ -7350,6 +7358,9 @@ class Router:
         # drained open set does in ``_route_impl``; a deadline or the
         # iteration cap does not.
         self.last_route_exhausted = not (forward_open and backward_open) and not bidi_deadline_hit
+        self.last_route_iteration_limited = (
+            bool(forward_open and backward_open) and iterations >= max_iterations
+        )
         return None
 
     def _expand_bidirectional_neighbors(
