@@ -86,6 +86,7 @@ if TYPE_CHECKING:
 # Coincidence tolerance for "a track endpoint lands on the via center", mirroring
 # the 0.001 mm test used by fix_vias_cmd.find_nearby_items.
 _COINCIDENT_TOL = 1e-3
+_NM_PER_MM = 1_000_000
 
 
 @dataclass
@@ -689,6 +690,21 @@ def _pad_copper_shift(pad: Pad) -> tuple[float, float] | None:
     return rotate_pad_offset(ox, oy, float(getattr(pad, "rotation", 0.0) or 0.0))
 
 
+def _pad_drill_axes_nm(pad: Pad) -> tuple[int, int] | None:
+    """Read a positive drill in KiCad's integer nanometres, for either file spelling."""
+    axes = pad.drill_size
+    if axes is None:
+        axes = (pad.drill, pad.drill)
+    try:
+        x, y = axes
+        # A positive half-nanometre rounds up in the pinned native DRC.
+        x_nm = math.floor(x * _NM_PER_MM + 0.5)
+        y_nm = math.floor(y * _NM_PER_MM + 0.5)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return (x_nm, y_nm) if x_nm > 0 and y_nm > 0 else None
+
+
 def _pad_drill_focus(pad: Pad, fp: Footprint) -> tuple[Point | LineString, float] | None:
     """Board-frame geometry of a pad's drill as a swept-circle ``(focus, radius)``.
 
@@ -699,30 +715,20 @@ def _pad_drill_focus(pad: Pad, fp: Footprint) -> tuple[Point | LineString, float
     that rotated axis).  ``None`` when the pad has no positive drill -- the
     caller then has no hole to check.
     """
-    anchor = _pad_board_anchor(pad, fp)
-    slot = getattr(pad, "drill_size", None)
-    if slot is not None:
-        try:
-            dx, dy = float(slot[0]), float(slot[1])
-        except (TypeError, ValueError, IndexError):
-            return None
-        if math.isfinite(dx) and math.isfinite(dy) and dx > 0 and dy > 0:
-            minor = min(dx, dy)
-            half = (max(dx, dy) - minor) / 2.0
-            from kicad_tools.core.geometry import rotate_pad_offset
+    from kicad_tools.core.geometry import rotate_pad_offset
 
-            local = (half, 0.0) if dx >= dy else (0.0, half)
-            rx, ry = rotate_pad_offset(
-                local[0], local[1], float(getattr(pad, "rotation", 0.0) or 0.0)
-            )
-            return (
-                LineString([(anchor[0] - rx, anchor[1] - ry), (anchor[0] + rx, anchor[1] + ry)]),
-                minor / 2.0,
-            )
-    drill = float(getattr(pad, "drill", 0.0) or 0.0)
-    if math.isfinite(drill) and drill > 0:
-        return (Point(anchor), drill / 2.0)
-    return None
+    axes = _pad_drill_axes_nm(pad)
+    if axes is None:
+        return None
+    dx, dy = axes
+    radius = min(dx, dy) / (2 * _NM_PER_MM)
+    anchor = _pad_board_anchor(pad, fp)
+    if dx == dy:
+        return Point(anchor), radius
+    half = abs(dx - dy) / (2 * _NM_PER_MM)
+    local = (half, 0.0) if dx > dy else (0.0, half)
+    rx, ry = rotate_pad_offset(*local, float(getattr(pad, "rotation", 0.0) or 0.0))
+    return LineString([(anchor[0] - rx, anchor[1] - ry), (anchor[0] + rx, anchor[1] + ry)]), radius
 
 
 def _pad_drill_is_unprovable(pad: Pad) -> bool:
@@ -734,18 +740,7 @@ def _pad_drill_is_unprovable(pad: Pad) -> bool:
     """
     node = getattr(pad, "_sexp_node", None)
     drill = node.find("drill") if node is not None else None
-    if drill is None:
-        return False
-    slot = getattr(pad, "drill_size", None)
-    if slot is not None:
-        try:
-            dx, dy = float(slot[0]), float(slot[1])
-        except (TypeError, ValueError, IndexError):
-            return True
-        if math.isfinite(dx) and math.isfinite(dy) and dx > 0 and dy > 0:
-            return False
-    value = float(getattr(pad, "drill", 0.0) or 0.0)
-    return not (math.isfinite(value) and value > 0)
+    return drill is not None and _pad_drill_axes_nm(pad) is None
 
 
 def _raw_copper_bounds(item, transform):
@@ -1037,8 +1032,8 @@ def _pad_floors(
         return current, 0.0
 
     def required(fp: Footprint, pad: Pad) -> _PadFloors:
-        size = pad.drill_size
-        is_slot = size is not None and size[0] != size[1]
+        axes = _pad_drill_axes_nm(pad)
+        is_slot = axes is not None and axes[0] != axes[1]
         foreign = not via.net_number or pad.net_number != via.net_number
         electrical_drill = foreign or pad.type == "np_thru_hole"
         local = _local_pad_clearance(fp, pad) if foreign else None
@@ -1093,7 +1088,7 @@ def _pad_floors(
                 edge = max(edge, rules.edge_clearance(candidate, obstacle, layer))
             # KiCad checks its hole-to-hole rule on round drills. The
             # manufacturer's independent drill spacing still covers slots.
-            if kind == "via" and not is_slot and pad.drill > 0:
+            if kind == "via" and axes is not None and not is_slot:
                 drill_to_drill = max(drill_to_drill, rules.hole_to_hole(candidate, obstacle, layer))
         return _PadFloors(
             via_hole_to_land,
