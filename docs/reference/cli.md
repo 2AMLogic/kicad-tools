@@ -521,6 +521,7 @@ with `--unverified`. In-place by default; use `-o` to write elsewhere.
 kct pcb prune board.kicad_pcb --dry-run
 kct pcb prune board.kicad_pcb --nets VBUS,GND --region 10,10,90,60
 kct pcb prune board.kicad_pcb --current-paths current_paths.json --wide 1.0
+kct pcb prune board.kicad_pcb --voltage-map voltages.json --dry-run --format json
 ```
 
 | Option | Description |
@@ -537,7 +538,20 @@ kct pcb prune board.kicad_pcb --current-paths current_paths.json --wide 1.0
 | `--current-paths` `FILE` | Declared current-path sidecar. Auto-discovered next to the board exactly as `kct check` auto-loads it (#9747); on the nets it names, also break copper loops (including loops closed through vias) by removing each loop's narrowest segment below `--wide`, so `pcb reinforce` can anchor the run |
 | `--no-current-paths` | Suppress sidecar auto-discovery: no sidecar is loaded (only an explicit `--current-paths` names one), so declared nets get no declared-current width test in planning and the post-plan current-path audit gate (#8687) is disabled. Cannot be combined with `--current-paths` |
 | `--wide` `MM` | With a declared sidecar: width at/above which a segment is never cut. Default (unset): net-relative — cut each loop's narrowest segment whatever its width, provided the branch left behind still meets the declared current's IPC-2221 width on its own layer; refused cuts are reported |
+| `--voltage-map` `FILE` | Enable the pairwise creepage check with a JSON map of net voltages in volts. Accepts the same voltages, ranges and `_pair_bounds` as `kct creepage`. The check is off by default. |
+| `--creepage-standard` | IEC table used to calculate required creepage distances in millimetres. Accepts `iec60664` (default) or `iec62368`. |
+| `--pollution-degree` | Pollution degree for the creepage table. Accepts `1`, `2` (default) or `3`. |
+| `--material-group` | Insulation material group for the creepage table. Accepts `I`, `II`, `IIIa` (default) or `IIIb`. |
+| `--hv-threshold` `VOLTS` | Minimum voltage difference for the list of required pairs (default 30 V). The audit selects mapped nets whose worst-case voltage differs from the board-edge potential by at least this amount. It also includes nets with recognized mains or HV names. |
 | `--unverified` | Write the result even when it was not verified with kicad-cli DRC (`--no-drc`, or kicad-cli missing). Without this the file is left untouched |
+
+With a voltage map, prune compares each net's proposed edits with the input
+board. It rejects the net's entire plan if any pair develops a creepage
+shortfall or an existing shortfall increases. JSON lists the rejected plans
+in `rejected_by_creepage` and reports `creepage_pairs_checked` and
+`creepage_pairs_unchecked` under `creepage`. The final board must pass the
+same comparison before prune writes the output. An unavailable audit also
+prevents the write.
 
 The `--no-current-paths` row mirrors the parser help as corrected in #9777
 (on `kct route` the same flag only keeps `path_ampacity` inactive — see
@@ -1477,6 +1491,7 @@ Common flags (the full surface lives in `kct route --help`):
 | Option | Description |
 |--------|-------------|
 | `-o`, `--output PATH` | Output file (default: `<input>_routed.kicad_pcb`) |
+| `--preserve-existing` / `--no-preserve-existing` | Keeps input tracks and vias by default on a board that already has them. Use `--no-preserve-existing` to replace that copper in a full reroute. |
 | `--strategy {basic,negotiated,monte-carlo,evolutionary}` | Routing strategy (default: `negotiated`) |
 | `--differential-pairs` | Route differential pairs coupled. **Deprecated on the grid engine (#6448)** — warns and is removed one release later; use `--route-engine lattice --strategy basic --differential-pairs` |
 | `--trace-width MM` / `--clearance MM` | Trace + clearance overrides |
