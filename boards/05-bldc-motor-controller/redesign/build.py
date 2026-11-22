@@ -11,6 +11,7 @@ from pathlib import Path
 from hardware import ROOT, generate
 from routing import apply_routing
 
+from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
 from kicad_tools.validate.known_warnings import unaccepted_report_warnings
 
 #: Issue #7298: no warning is accepted.  #7296 (the router refuses pad-edge
@@ -42,6 +43,34 @@ ROUTER_NETCLASSES = (
 )
 
 
+def clear_fiducial_openings(routed):
+    """Leave at least 0.2 mm between each fiducial's mask opening and foreign copper."""
+    board = parse_file(routed)
+    setup = board.find_child("setup")
+    board_margin = setup.find_child("pad_to_mask_clearance") if setup is not None else None
+    for footprint in board.find_children("footprint"):
+        if footprint.get_string(0) != "Fiducial:Fiducial_1mm_Mask2mm":
+            continue
+        for pad in footprint.find_children("pad"):
+            # The stock pad opens 0.5 mm beyond its copper disk. KiCad takes
+            # a pad's mask margin from its pad, footprint or board, in that order.
+            margin = (
+                pad.find_child("solder_mask_margin")
+                or footprint.find_child("solder_mask_margin")
+                or board_margin
+            )
+            minimum = round((margin.get_float(0) if margin is not None else 0.0) + 0.2, 6)
+            clearance = pad.find_child("clearance")
+            effective = clearance or footprint.find_child("clearance")
+            if effective is not None and effective.get_float(0) >= minimum:
+                continue
+            if clearance is None:
+                pad.append(parse_string(f"(clearance {minimum})"))
+            else:
+                clearance.set_value(0, minimum)
+    routed.write_text(serialize_sexp(board))
+
+
 def declare_router_netclasses(routed):
     """Declare the router's net classes in the routed sidecars (#6390, #7391).
 
@@ -59,7 +88,9 @@ def declare_router_netclasses(routed):
     its name classifier), exactly as ``scripts/boards/
     declare_router_netclasses_6390.py`` derived the committed sidecars.  The
     sidecar writer keeps stricter authored minima (``min_track_width``
-    0.15 mm, the routed copper's narrowest track).
+    0.15 mm, the routed copper's narrowest track). It also emits the four
+    0.2 mm net- and layer-specific pour rules before the #8048 attach-zone
+    exemptions. KiCad uses the last matching rule when refilling under U2/U3.
     """
     from kicad_tools.cli.route_cmd import _write_drc_constraint_sidecars
     from kicad_tools.manufacturers.project_generator import board_net_names
@@ -109,13 +140,8 @@ def cleanup_copper(routed, max_passes=10):
     raise RuntimeError(f"Copper cleanup did not converge in {max_passes} passes: {totals}")
 
 
-def build(output):
-    output = Path(output).resolve()
-    generate(output)
-    # A local copy lets procurement/export discover exact identities in scratch.
-    (output / "project.kct").write_text((ROOT / "project.kct").read_text().replace("output/", ""))
-    # Published beside the PCB so `kct check` auto-loads the declared ampacity targets.
-    shutil.copy2(ROOT / "net_class_map.json", output / "net_class_map.json")
+def prepare_routed_board(output):
+    """Prepare the staged board, from fingerprinted copper through the pre-refill check."""
     routed = output / "bldc_controller_routed.kicad_pcb"
     shutil.copy2(output / "bldc_controller.kicad_pcb", routed)
     shutil.copy2(output / "bldc_controller.kicad_pro", routed.with_suffix(".kicad_pro"))
@@ -131,15 +157,17 @@ def build(output):
 
     if run_add_fiducials(routed, sides="populated") != 0:
         raise RuntimeError("pcb add-fiducials failed")
+    clear_fiducial_openings(routed)
     if run_add_board_info(routed, auto=True) != 0:
         raise RuntimeError("pcb add-board-info failed")
     evidence = output / "readiness"
     evidence.mkdir(exist_ok=True)
-    cli = [sys.executable, "-m", "kicad_tools.cli"]
     # First check emits current manufacturer DRU. Unfilled zones are not a pass.
     subprocess.run(
-        cli
-        + [
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
             "check",
             str(routed),
             "--mfr",
@@ -153,6 +181,18 @@ def build(output):
         stdout=subprocess.DEVNULL,
         check=False,
     )
+    return routed, fingerprint
+
+
+def build(output):
+    output = Path(output).resolve()
+    generate(output)
+    # A local copy lets procurement/export discover exact identities in scratch.
+    (output / "project.kct").write_text((ROOT / "project.kct").read_text().replace("output/", ""))
+    # Published beside the PCB so `kct check` auto-loads the declared ampacity targets.
+    shutil.copy2(ROOT / "net_class_map.json", output / "net_class_map.json")
+    routed, fingerprint = prepare_routed_board(output)
+    evidence = output / "readiness"
     # The shared stage proves every plane net on actual refilled copper.
     # A failed or dangling stitch never replaces the staged input, and its
     # complete candidate/evidence directory survives outside recipe staging.
@@ -216,8 +256,10 @@ def build(output):
 
     write_lvs_report(output / "bldc_controller.kicad_sch", routed, output, require_clean=True)
     subprocess.run(
-        cli
-        + [
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
             "check",
             str(routed),
             "--mfr",
@@ -265,8 +307,7 @@ def main():
 if __name__ == "__main__":
     from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
 
-    # Issue #6962: every bare ``kicad-cli`` this producer and package.py run
-    # resolves to the pinned evidence toolchain (KCT_KICAD_DOCKER=1 routes it
-    # through CI's image); any other release is refused before anything is
-    # written.
-    raise SystemExit(run_on_evidence_toolchain(main, [ROOT.parents[2]]))
+    # Issue #6962: reject any other KiCad release before writing evidence.
+    # The host-side generator reads the same pinned image's stock land patterns
+    # used by the native commands in both this producer and package.py.
+    raise SystemExit(run_on_evidence_toolchain(main, [ROOT.parents[2]], pin_host_footprints=True))
