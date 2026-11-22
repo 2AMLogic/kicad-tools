@@ -301,27 +301,39 @@ def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: boo
 
 
 def _drc_summary_suffix(stats, cli_drc: dict | None) -> str:
-    """Suffix for the ``DRC errors:`` summary line (Issues #8322, #8419)."""
+    """Suffix for the ``DRC errors:`` summary line (Issues #8322, #8419, #9748)."""
     delta = stats.drc_errors_after - stats.drc_errors_before
     cli_regressed = bool(cli_drc and cli_drc["regression"])
     cli_unchecked = bool(cli_drc and cli_drc["dru_not_evaluated"])
+    # Issue #9748: the line may never claim bare "no regressions" while the
+    # referee was blind to ``mask_to_copper``.  "screened": the conservative
+    # geometric screen ran and its count is inside the totals above;
+    # "not_evaluated": the pure snapshot could not model this board, so the
+    # totals say nothing about mask exposure.  "off" (no cited policy for
+    # this --mfr) changes nothing: ``kct check --mfr`` runs no mask check
+    # for that manufacturer either.
+    mask_note = {
+        "screened": "incl. mask_to_copper screen",
+        "not_evaluated": "mask_to_copper not evaluated",
+    }.get(getattr(stats, "drc_mask_screen", "off"))
+    tail = f"; {mask_note}" if mask_note else ""
     if cli_regressed:
         # Never claim "no regressions" on the in-process referee alone.
-        return "(in-process referee only; see kicad-cli line below)"
+        return f"(in-process referee only; see kicad-cli line below{tail})"
     if cli_unchecked:
-        return "(DRC referee does not evaluate project .kicad_dru rules)"
+        return f"(DRC referee does not evaluate project .kicad_dru rules{tail})"
     if delta > 0 and cli_drc and cli_drc["available"]:
         # kicad-cli arbitrated and found no regression: the in-process delta
         # is advisory only, never "N new errors".
         return (
             f"(in-process advisory: {delta} more; kicad-cli reports no regression, "
-            f"{stats.nets_rolled_back} nets rolled back)"
+            f"{stats.nets_rolled_back} nets rolled back{tail})"
         )
     if delta > 0:
-        return f"({delta} new errors, {stats.nets_rolled_back} nets rolled back)"
+        return f"({delta} new errors, {stats.nets_rolled_back} nets rolled back{tail})"
     if stats.nets_rolled_back > 0:
-        return f"(no regressions, {stats.nets_rolled_back} nets rolled back)"
-    return "(no regressions)"
+        return f"(no regressions, {stats.nets_rolled_back} nets rolled back{tail})"
+    return f"(no regressions{tail})"
 
 
 def _kicad_cli_drc_counts(board: Path, rules_from: Path | None = None) -> dict[str, int] | None:
@@ -1130,11 +1142,24 @@ Examples:
 
     zone_pcb = ZonePCB.load(str(pcb_path))
     origin_x, origin_y = getattr(zone_pcb, "_board_origin", (0.0, 0.0))
+    # Issue #9748: with a manufacturer mask policy (jlcpcb), a rewrite may
+    # not carry new copper into the mask-clearance band around an opening
+    # either -- the same policy floor ``kct check --mfr`` enforces.
+    from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+    # Only ``--drc-aware`` runs with a manufacturer are in scope; every other
+    # mode keeps the pre-#9748 guard (``None``).
+    mask_clearance: float | None = None
+    if args.drc_aware and args.mfr:
+        mask_request = default_request_for_manufacturer(args.mfr)
+        if mask_request is not None and mask_request.policy is not None:
+            mask_clearance = mask_request.policy.clearance_mm
     optimizer.set_pad_zones(
         [
             dataclasses.replace(zone, x=zone.x + origin_x, y=zone.y + origin_y)
             for zone in pad_mask_zones_from_pcb(zone_pcb)
-        ]
+        ],
+        danger_clearance=mask_clearance,
     )
 
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
@@ -1299,6 +1324,7 @@ Examples:
                     "length_reduction_pct": stats.length_reduction,
                     "drc_errors_before": stats.drc_errors_before,
                     "drc_errors_after": stats.drc_errors_after,
+                    "drc_mask_screen": stats.drc_mask_screen,
                     "nets_touched": [n.net for n in stats.per_net if n.changed],
                     "per_net": [
                         {
