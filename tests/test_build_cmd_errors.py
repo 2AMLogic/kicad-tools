@@ -358,6 +358,7 @@ class TestBuildRouteExitCode2:
             result = _run_step_route(ctx, console)
 
         assert result.success is True
+        assert "--no-preserve-existing" in mock_run.call_args.args[0]
 
     def test_route_exit_code_1_is_failure(self, tmp_path: Path) -> None:
         """Route exit code 1 (fatal failure) remains failure."""

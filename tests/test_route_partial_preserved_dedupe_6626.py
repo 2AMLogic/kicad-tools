@@ -80,7 +80,14 @@ def test_checkpoint_drops_preserved_copper_of_rerouted_net(tmp_path: Path):
     assert len(re.findall(r"\(start 9\.5", text)) == 1
 
 
-def test_partial_drops_preserved_copper_of_rerouted_net(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize(
+    ("route_args", "keep_stub"),
+    [([], True), (["--nets", "A"], False)],
+    ids=["default", "reroute-A"],
+)
+def test_partial_keeps_or_replaces_stub_on_routed_net(
+    monkeypatch, tmp_path: Path, route_args, keep_stub
+):
     source = tmp_path / "input.kicad_pcb"
     # The 6553 fixture keeps its stub on a pad-less net; move it onto routed net A.
     source.write_text(_board_text().replace("(net 3))", "(net 1))"))
@@ -94,15 +101,19 @@ def test_partial_drops_preserved_copper_of_rerouted_net(monkeypatch, tmp_path: P
             str(output),
             "--quiet",
             "--skip-drc",
-            "--preserve-existing",
+            *route_args,
             "--no-auto-layers",
         ]
     )
 
     assert rc == route_deadline.TIMEOUT_EXIT
+    assert patch.checkpoints >= 1
     text = output.with_stem(output.stem + "_partial").read_text()
-    # Net 1 is re-routed, so its preserved segment and via are replaced, not doubled.
-    assert _copper(text) == patch.expected
-    assert _copper_length(text) == pytest.approx(patch.expected_length)
-    assert len(re.findall(r"\(start 2(?:\.0+)? 2(?:\.0+)?\)", text)) == 0
-    assert len(re.findall(r"\(at 3(?:\.0+)? 17(?:\.0+)?\)", text)) == 0
+    # Incremental routing keeps the original stub once. Selecting A for a
+    # reroute replaces it with the copper calculated in this attempt.
+    segments, vias = patch.expected
+    expected_stubs = int(keep_stub)
+    assert _copper(text) == (segments + expected_stubs, vias + expected_stubs)
+    assert _copper_length(text) == pytest.approx(patch.expected_length + 2.0 * expected_stubs)
+    assert len(re.findall(r"\(start 2(?:\.0+)? 2(?:\.0+)?\)", text)) == expected_stubs
+    assert len(re.findall(r"\(at 3(?:\.0+)? 17(?:\.0+)?\)", text)) == expected_stubs
