@@ -3077,7 +3077,8 @@ class Router:
         Args:
             allow_sharing: If True (negotiated mode), allow routing through
                           non-obstacle blocked cells (they'll get high cost instead)
-            radius: Override the via half-width in grid cells. When None,
+            radius: Override the via search radius (copper plus clearance)
+                    in grid cells. When None,
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
         # Issue #5617: memoised per cell -- same predicate, same arguments,
@@ -4284,7 +4285,8 @@ class Router:
             gx, gy: Grid coordinates for via placement
             net: Net ID for the route
             allow_sharing: If True (negotiated mode), allow sharing
-            radius: Override the via half-width in grid cells (Issue #1692).
+            radius: Override the via search radius (copper plus clearance)
+                    in grid cells (Issue #1692).
 
         Returns:
             True if via CAN be placed (all layers clear), False if blocked.
@@ -4353,8 +4355,10 @@ class Router:
         # safe -- unlike the QFP in-pad rescue path.
         if self._foreign_pad_tuples or self._foreign_track_adapters:
             wx, wy = self.grid.grid_to_world(gx, gy)
-            # Effective via diameter from grid radius (cells -> mm).
-            eff_diameter = 2 * effective_radius * self.grid.resolution
+            # The raster radius already includes clearance and grid rounding.
+            # This world-coordinate check adds clearance to the copper itself.
+            net_class = self._halo_net_class(net)
+            via_size = net_class.via_size if net_class else self.rules.via_diameter
             # Filter same-net obstacles (passing a superset is allowed
             # by ``point_clear_of_copper``'s contract but the same-net
             # filter avoids spurious rejections on the routing net).
@@ -4368,7 +4372,7 @@ class Router:
             if not point_clear_of_copper(
                 x=wx,
                 y=wy,
-                via_size=eff_diameter,
+                via_size=via_size,
                 clearance=self.rules.via_clearance,
                 other_net_tracks=self._foreign_track_adapters,
                 other_net_pads=other_pads,

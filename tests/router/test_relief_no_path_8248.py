@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from kicad_tools.router.access_ripup import AccessLossWitness, RipupCycleGuard
 
 from .test_relief_cycle_6363 import VICTIM, _fixture, _relief
@@ -221,6 +223,114 @@ def _seg(x1, y1, x2, y2, width=0.2, net=1):
 
 def _need(router) -> float:
     return float(router._relief_corridor_need(1).split("needs a ")[1].split(" mm")[0])
+
+
+@pytest.mark.parametrize(("opening", "fits"), [(0.60, True), (0.55, False)])
+def test_relief_requires_the_entire_usb3_corridor(opening, fits):
+    from shapely.geometry import box
+
+    from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(grid_resolution=0.10, trace_width=0.275, trace_clearance=0.150)
+    router = Autorouter(width=4, height=2, rules=rules, force_python=True)
+    router.add_component("J1", [_pad(1, 0.6, 1, 1)])
+    router.add_component("U2", [_pad(1, 3.4, 1, 1)])
+    # The fixed copper spans both board edges on every layer. Every route
+    # must cross the same measured opening, including routes that use vias.
+    walls = (box(1.8, -1, 2.2, 1 - opening / 2), box(1.8, 1 + opening / 2, 2.2, 3))
+    router.grid.install_fixed_fills(
+        FixedFillObstacles(
+            tuple(
+                FixedFill("GND", 2, layer, 0.0, wall)
+                for layer in range(router.grid.num_layers)
+                for wall in walls
+            )
+        )
+    )
+    partial = _seg(0.6, 1, 1.2, 1, width=rules.trace_width)
+    assert router._mark_route(partial)
+    router.grid.mark_route_usage(partial)
+    router.routes.append(partial)
+    routes = {1: [partial]}
+    pads = {1: [router.pads[key] for key in router.nets[1]]}
+    worker = NegotiatedRouter(router.grid, router.router, rules, router.net_class_map)
+    usage = router.grid._usage_count.copy()
+
+    assert _need(router) == 0.575
+    assert _relief(router, worker, routes, pads, RipupCycleGuard(), []) is fits
+    if fits:
+        assert {segment.width for route in routes[1] for segment in route.segments} == {0.275}
+    else:
+        assert len(router.routes) == len(routes[1]) == 1
+        assert router.routes[0] is routes[1][0] is partial
+        assert (router.grid._usage_count == usage).all()
+
+
+@pytest.mark.parametrize(("configured_weight", "fits"), [(1.0, False), (None, True)])
+def test_two_terminal_pair_relief_escapes_bga_within_the_same_expansion_cap(
+    configured_weight, fits
+):
+    from shapely.geometry import box
+
+    from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
+    from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+    rules = DesignRules(
+        grid_resolution=0.05,
+        trace_width=0.275,
+        trace_clearance=0.15,
+        via_diameter=0.60,
+        via_drill=0.30,
+        via_clearance=0.20,
+    )
+    pair = NetClassRouting(
+        "USB3",
+        trace_width=0.275,
+        clearance=0.15,
+        via_size=0.60,
+        preferred_layers=[1],
+        diffpair_partner="TX+",
+    )
+    router = Autorouter(
+        width=10,
+        height=7,
+        rules=rules,
+        net_class_map={"TX-": pair},
+        force_python=True,
+        per_net_iterations=2000,
+        adaptive_grid=False,
+    )
+
+    def ball(pin, x, y, net, name):
+        return {**_pad(pin, x, y, net), "width": 0.45, "height": 0.45, "net_name": name}
+
+    router.add_component("J1", [ball(1, 1, 2.5, 1, "TX-"), ball(2, 1, 3.5, 2, "TX+")])
+    # Keep the 1.27 mm BGA pitch, off-grid F2 centre and neighbouring F3.
+    balls = [ball("F2", 8.23, 4.04, 1, "TX-"), ball("F3", 8.23, 5.31, 2, "TX+")]
+    for x in (-1, 0, 1):
+        for y in (-1, 0, 1):
+            if (x, y) not in ((0, 0), (0, 1)):
+                balls.append(ball(f"{x},{y}", 8.23 + x * 1.27, 4.04 + y * 1.27, 3, "GND"))
+    router.add_component("U2", balls)
+    router.grid.install_fixed_fills(
+        FixedFillObstacles((FixedFill("GND", 3, 0, 0.15, box(4, -1, 4.6, 8)),))
+    )
+    pads = {n: [router.pads[k] for k in keys] for n, keys in router.nets.items() if n}
+    worker = NegotiatedRouter(router.grid, router.router, router.rules, router.net_class_map)
+    if configured_weight is not None:
+        router._net_astar_weights[1] = configured_weight
+    before = dict(router.router.net_astar_weights)
+
+    assert _relief(router, worker, {n: [] for n in pads}, pads, RipupCycleGuard(), []) is fits
+    if fits:
+        assert len(router.routes) == 1
+        assert len(router.routes[0].vias) == 2
+    assert router.router.net_astar_weights == before
 
 
 # --- Issue #8256: freed corridor and shortfall ------------------------------
