@@ -444,20 +444,9 @@ _GUIDE_SELF_APPROACH_DETOUR_RATIO: float = float(
 # fixed cost over the boosted neighbourhood; one pass is too weak to divert the
 # A* out of a dense escape fan, so accumulate several.
 _GUIDE_BIAS_BOOST_REPEATS: int = int(os.environ.get("KCT_GUIDE_BIAS_BOOST_REPEATS", "6"))
-# Issue #9852: bounded-suboptimal A* weight for the guide probe on the
-# pure-Python backend.  The probe only needs a legal routable path to dilate
-# a corridor from -- optimality is the coupled search's job, not the guide's
-# -- but the pure-Python optimal A* could not fit the bounded probe budget on
-# board 06's USB3 pairs: the captured USB3_RX1 P-side request needs ~350k
-# node expansions at ~0.2 ms each (~77 s) against the 15 s
-# eighth-of-per-pair-budget deadline, so all four probes expired
-# (``last_route_deadline_hit``) and the pairs fell through as
-# ``guide-missing`` while the C++ engine's own optimal search finished the
-# identical state in 1.5-3.2 s.  A weight of 2 makes the same search
-# converge on the same state in ~1 s / ~4k expansions with an 8-segment
-# guide (the optimal route has 6); the corridor dilation does not care.
-# Native-backend probes keep ``weight=1.0`` so their guides stay
-# byte-identical to the measured 21/21 reference run.
+# On board 06's captured USB3_RX1+ request, Python's weight-1 search took
+# about 77 s against a 15 s probe budget. Weight 2 found an eight-segment
+# guide in about 1 s (Issue #9852). The native probe uses weight 1.
 _GUIDE_PROBE_PYTHON_ASTAR_WEIGHT: float = 2.0
 # Issue #4460: opt-in verbose provenance for shadow self-check declines.  When
 # set, every ``self-check overlap`` decline prints WHICH part of the assembled
@@ -12063,16 +12052,9 @@ class DiffPairRouter:
                 for loc in avoid_locations:
                     for _ in range(_GUIDE_BIAS_BOOST_REPEATS):
                         router._boost_avoidance_at(loc, avoid_radius_cells)
-            # Issue #9852: bound the pure-Python guide probe's SUBOPTIMALITY,
-            # not just its wall clock.  ``weight`` is a no-op on the C++
-            # backend's probe (kept at 1.0 so the native guides stay
-            # byte-identical to the measured reference run); on the
-            # pure-Python backend the optimal A* needs ~350k expansions for
-            # board 06's USB3 guide requests and always expires the probe
-            # deadline, so the probe runs bounded-suboptimal instead -- see
-            # ``_GUIDE_PROBE_PYTHON_ASTAR_WEIGHT``.  The route remains a
-            # fully validated legal path (A* only proposes cells it cleared);
-            # only its length/turn count is bounded by 2x optimal.
+            # Weight scales the heuristic in the search priority. The path
+            # cost also includes turn and via penalties. The corridor uses
+            # the resulting clearance-checked guide to seed its dilation.
             from .pathfinder import Router as _PythonRouter
 
             guide_weight = (
