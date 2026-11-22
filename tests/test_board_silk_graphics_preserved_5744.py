@@ -37,9 +37,12 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.schema.pcb import PCB
+from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen
+from kicad_tools.schema.pcb import PCB, Footprint
+from kicad_tools.sexp import SExp, parse_file, serialize_sexp
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+BOARD_02 = REPO_ROOT / "boards/02-charlieplex-led"
 BOARD_03 = REPO_ROOT / "boards/03-usb-joystick"
 UNROUTED_03 = BOARD_03 / "output/usb_joystick.kicad_pcb"
 
@@ -67,6 +70,54 @@ def routed_artifact_pairs() -> list[tuple[Path, Path]]:
         if unrouted.is_file():
             pairs.append((unrouted, routed))
     return pairs
+
+
+def _footprints_by_reference(board: SExp) -> dict[str, SExp]:
+    return {Footprint.from_sexp(fp).reference: fp for fp in board.find_children("footprint")}
+
+
+def _silk_graphic_nodes(footprint: SExp) -> list[SExp]:
+    return [
+        node
+        for node in footprint.children
+        if node.name in {"fp_line", "fp_arc", "fp_circle", "fp_curve", "fp_rect", "fp_poly"}
+        and (layer := node.find_child("layer")) is not None
+        and layer.get_string(0) in SILK_LAYERS
+    ]
+
+
+def _silk_geometry(footprint: SExp) -> list[str]:
+    # The clipper assigns new UUIDs to split pieces. Retain every geometric
+    # field, including stroke type and width, and preserve duplicate counts.
+    return sorted(
+        SExp(node.name, [child for child in node.children if child.name != "uuid"]).to_string(
+            compact=True
+        )
+        for node in _silk_graphic_nodes(footprint)
+    )
+
+
+def _assert_board02_clipped_silk(unrouted: Path, routed: Path, tmp_path: Path) -> None:
+    """Replay the recipe's silk pass on source graphics and the actual routed holes."""
+    source = _footprints_by_reference(parse_file(unrouted))
+    board = parse_file(routed)
+    placed = _footprints_by_reference(board)
+    actual = {ref: _silk_geometry(fp) for ref, fp in placed.items()}
+    for ref in placed.keys() - source.keys():
+        assert ref.startswith("FID") and not actual[ref], f"Unexpected routed footprint {ref}"
+
+    for ref, original in source.items():
+        target = placed[ref]
+        for node in _silk_graphic_nodes(target):
+            target.remove(node)
+        for node in _silk_graphic_nodes(original):
+            target.append(node)
+
+    replay = tmp_path / "source-silk-on-routed-holes.kicad_pcb"
+    replay.write_text(serialize_sexp(board))
+    assert fix_silkscreen([str(replay), "--mfr", "jlcpcb", "--clip-to-holes"]) == 0
+    for ref, footprint in _footprints_by_reference(parse_file(replay)).items():
+        assert actual[ref] == _silk_geometry(footprint), ref
 
 
 @pytest.fixture
@@ -113,9 +164,13 @@ def test_saved_plan_replay_still_applies_reviewed_silk_text_placement(routing, t
     ids=lambda path: path.parent.parent.name if isinstance(path, Path) else path,
 )
 def test_committed_routed_artifact_keeps_footprint_silk_graphics(
-    unrouted: Path, routed: Path
+    unrouted: Path, routed: Path, tmp_path: Path
 ) -> None:
-    """Routing changes copper, never footprint silkscreen geometry."""
+    """Preserve source graphics through each board's routing and manufacturing steps."""
+    if unrouted.parent.parent == BOARD_02:
+        _assert_board02_clipped_silk(unrouted, routed, tmp_path)
+        return
+
     unrouted_silk = silk_graphics_per_footprint(unrouted)
     routed_silk = silk_graphics_per_footprint(routed)
     # Issue #8532: fiducials (FID*) are added after routing; they carry no silk

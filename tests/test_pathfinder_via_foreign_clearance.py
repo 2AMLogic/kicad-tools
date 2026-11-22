@@ -12,11 +12,35 @@ pushed by :meth:`Autorouter._update_router_via_foreign_context`.  When
 no foreign context is set (default / pre-#2947), behavior is unchanged.
 """
 
+import pytest
+
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad, Segment
-from kicad_tools.router.rules import DesignRules
+from kicad_tools.router.rules import DesignRules, NetClassRouting
+from kicad_tools.router.search_radius import search_radius_cells
+
+
+@pytest.mark.parametrize(
+    ("class_diameter", "board_diameter", "fits"),
+    [(0.60, 0.95, True), (0.80, 0.60, False), (None, 0.60, True), (None, 0.80, False)],
+)
+def test_board06_bga_escape_uses_the_physical_via_diameter(class_diameter, board_diameter, fits):
+    # Board 06 J1.B2 -> U2.F2. The native via at (151.45, 69.70)
+    # is 0.567 mm from the bounding box of the neighbouring U2.F3 pad.
+    rules = DesignRules(grid_resolution=0.05, via_diameter=board_diameter, via_clearance=0.20)
+    grid = RoutingGrid(width=4.0, height=4.0, rules=rules)
+    classes = {"TX2+": NetClassRouting("USB3", via_size=class_diameter)} if class_diameter else {}
+    router = Router(grid, rules, net_class_map=classes)
+    router.set_net_name_to_id({"TX2+": 1})
+    gx, gy = grid.world_to_grid(2.0, 2.0)
+    x, y = grid.grid_to_world(gx, gy)
+    foreign = Pad(x=x + 0.78, y=y + 0.34, width=0.45, height=0.45, net=2, net_name="TX2-")
+    router.set_via_foreign_context(foreign_pads=[foreign])
+    radius = search_radius_cells((class_diameter or board_diameter) / 2, 0.20, grid.resolution)
+
+    assert router._check_via_placement_cached(gx, gy, 1, True, radius=radius) is fits
 
 
 def _make_router() -> tuple[Router, RoutingGrid]:
