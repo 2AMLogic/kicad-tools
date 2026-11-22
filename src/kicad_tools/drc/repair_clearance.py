@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..core.geometry import rotate_pad_offset
+from ..core.pcb_item_locks import is_locally_locked as _is_locked
 from ..router.clearance_kernel import KPad, KSegment, KShape, KVia, copper_gap, make_pad
 from ..schema.pcb import (
     _find_all_footprints,
@@ -101,17 +102,6 @@ class _Copper:
     @property
     def movable(self) -> bool:
         return self.kind in ("segment", "via") and not _is_locked(self.node)
-
-
-def _is_locked(node: SExp) -> bool:
-    """KiCad's lock flag: ``(locked yes)`` (8+) or a bare ``locked`` atom (6/7)."""
-    if any(str(atom) == "locked" for atom in node.get_atoms()):
-        return True
-    for child in node.children:
-        if child.name == "locked":
-            atoms = child.get_atoms()
-            return not atoms or str(atoms[0]) in ("yes", "true")
-    return False
 
 
 def _format_mm(value: float) -> str:
