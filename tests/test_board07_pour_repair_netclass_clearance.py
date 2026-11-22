@@ -229,3 +229,33 @@ def test_pour_repair_keeps_diagonal_stubs_out_of_an_adjacent_same_net_pad_slit(
     for segment in segments:
         gap = copper_gap(segment, pad)
         assert gap <= 0 or gap >= 0.15 - 1e-6
+
+
+@pytest.mark.parametrize(
+    ("track_y", "layer", "connected"),
+    [(115.3, "F.Cu", True), (115.45, "F.Cu", False), (115.3, "B.Cu", False)],
+)
+def test_pour_connectivity_uses_the_whole_pad_land(
+    generate_design_mod, tmp_path, track_y, layer, connected
+):
+    # A trace joins the ends of two 0.3 x 0.7 mm lands at the Board 07
+    # pitch. It never touches the 0.15 mm circle about either pad centre.
+    board = tmp_path / "pad_ends.kicad_pcb"
+    source = f'''(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "GND")
+  (footprint "Test:Row" (layer "F.Cu") (at 149.1 115)
+    (property "Reference" "U5" (at 0 0) (layer "F.SilkS"))
+    (pad "13" smd rect (at 0 0) (size 0.3 0.7) (layers "F.Cu") (net 1 "GND"))
+    (pad "14" smd rect (at 0.8 0) (size 0.3 0.7) (layers "F.Cu") (net 1 "GND")))
+  (segment (start 149.2 {track_y}) (end 149.8 {track_y})
+    (width 0.1) (layer "{layer}") (net 1))
+)
+'''
+    board.write_text(source)
+    result = generate_design_mod._audit_pour_nets(board, ["GND"])
+    assert result["GND"]["connected"] is connected
+    if connected:
+        assert generate_design_mod._repair_pour_connectivity(board, ["GND"]) == (0, 0)
+        assert board.read_text() == source
