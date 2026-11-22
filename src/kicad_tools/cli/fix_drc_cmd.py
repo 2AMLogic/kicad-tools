@@ -1472,7 +1472,7 @@ def _mask_native_state(board: Path) -> tuple[Counter, int]:
 
     report = run_geometric_drc(board, refill_zones=False, all_track_errors=True)
     if not report.ran:
-        raise RuntimeError(f"could not check saved zone copper: {report.note}")
+        raise RuntimeError(f"could not check saved copper: {report.note}")
     failures = Counter(
         (v.type_str, v.rule, tuple(sorted(v.item_uuids if any(v.item_uuids) else v.items)))
         for v in report.error_violations
@@ -1526,20 +1526,30 @@ def _run_mask_pass(
                 if not args.no_connectivity_check
                 else {}
             )
-            before_native = _mask_native_state(candidate) if has_zones else None
+            # KiCad can join an annulus and a trace at the edge of contact
+            # even when the strict pad-island graph considers them separate.
+            check_nudges = not args.no_connectivity_check and any(
+                isinstance(action, MaskNudgeAction) for action in result.actions
+            )
+            before_native = _mask_native_state(candidate) if has_zones or check_nudges else None
             proposed = len(result.actions)
             repairer.save(candidate)
             _verify_mask_actions(result, report, args, pcb_path, candidate, pad_islands)
-            if result.actions and before_native is not None:
+            if result.actions and has_zones:
                 from kicad_tools.cli.runner import run_refill_zones
 
                 refill = run_refill_zones(candidate, require_save=True)
                 if not refill.success:
                     raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
+            if result.actions and before_native is not None:
                 errors, opens = _mask_native_state(candidate)
-                if errors - before_native[0] or opens > before_native[1]:
-                    raise RuntimeError("saved zone refill introduced native errors or opens")
-            if result.actions and (before_native is not None or result.repaired < proposed):
+                new_errors = (errors - before_native[0]).total()
+                if new_errors or opens > before_native[1]:
+                    raise RuntimeError(
+                        "saved mask repair introduced native errors or opens "
+                        f"({new_errors} new errors, native opens {before_native[1]} to {opens})"
+                    )
+            if result.actions and (has_zones or result.repaired < proposed):
                 # Undoing one proposal or refilling a pour changes the actual
                 # final copper after the first per-action check.
                 if pad_islands and _split_mask_nets(pad_islands, candidate):

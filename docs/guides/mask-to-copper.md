@@ -16,7 +16,10 @@ moves that would crowd other copper, a drill, another opening or pull an end
 out of a pad it terminates in are declined with a reason, and every kept move
 is re-checked on the saved board. On a partially routed net, the check preserves
 each group of pads already joined by copper. `pad_connection_lost` identifies
-a refused move that would split a group. On boards with pours, the command
+a refused move that would split a group. By default, a pass-through nudge also
+compares KiCad's DRC results before and after the move. A new error or an
+increase in unconnected items rejects the candidate, including on boards
+without pours. On boards with pours, the command
 refills a private copy with the original project rules and checks the saved
 copper before publishing the repair.
 

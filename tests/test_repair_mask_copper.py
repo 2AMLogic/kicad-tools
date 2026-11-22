@@ -773,43 +773,54 @@ def test_fix_drc_reverts_a_pass_through_nudge_that_does_not_clear(tmp_path, monk
     assert "finding_not_cleared" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("via_y, keep", [(100.204, False), (100.601, True), (100.0, True)])
+@pytest.mark.parametrize(
+    "via_y, opens, refusal",
+    [
+        (100.204, 1, "pad_connection_lost"),
+        (100.202, 1, "native opens"),
+        (100.601, 1, None),
+        (100.0, 2, None),
+    ],
+)
 def test_mask_nudge_preserves_existing_pad_island_on_incomplete_net(
-    tmp_path, monkeypatch, capsys, via_y, keep
+    tmp_path, capsys, via_y, opens, refusal
 ):
-    # R1 (the mask opening) is already disconnected. R4 reaches the front track
-    # through the edge of a via annulus, so moving the track can strand R4 too.
-    pads = "".join(
-        f'(footprint "P" (layer "{layer}.Cu") (at {x} {y}) '
-        f'(property "Reference" "{ref}" (at 0 2) (layer "{layer}.Fab")) '
-        f'(pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "{layer}.Cu") '
-        f'(net 1 "N1") (uuid "pad-{ref}")))'
-        for ref, x, y, layer in [
-            ("R2", 95, 100.601, "F"),
-            ("R3", 105, 100.601, "F"),
-            ("R4", 102.5, 96, "B"),
-        ]
-    )
-    board = _board(
-        tmp_path,
-        pads
-        + _seg("front", (95, 100.601), (105, 100.601))
-        + _via("via", (102.5, via_y))
-        + _seg("back", (102.5, via_y), (102.5, 96), layer="B.Cu"),
-    )
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    # R1 is already disconnected. The via joins R4 to the front track at
+    # y=100.601. At y=100.202 KiCad still connects a 1 µm annulus contact.
+    fixture = Path(__file__).parent / "fixtures" / "mask_pass_through_via_contact.kicad_pcb"
+    board = tmp_path / fixture.name
+    # Move the via and the end of its back-layer trace together.
+    board.write_text(fixture.read_text().replace("102.5 100.202", f"102.5 {via_y}"))
     original = board.read_bytes()
-    _run(
-        monkeypatch,
-        board,
-        [_report(_pt_finding("front", measured=0.001)), _report()],
-        extra=("--format", "json"),
-        connectivity=True,
-    )
+    with evidence_toolchain(mounts=[tmp_path]):
+        before = run_geometric_drc(board, refill_zones=False)
+        assert before.ran and before.unconnected_count == opens
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-displacement",
+                "2",
+                "--verify",
+                "--format",
+                "json",
+            ]
+        )
+        after = run_geometric_drc(board, refill_zones=False)
+    assert after.ran and after.unconnected_count == opens
     result = json.loads(capsys.readouterr().out)
-    assert result["total_repaired"] == int(keep)
-    assert (board.read_bytes() != original) == keep
-    if not keep:
-        assert result["mask_copper"]["unrepaired"][0]["reason"] == "pad_connection_lost"
+    assert result["mask_copper"]["violations"] == 1
+    assert result["total_repaired"] == int(refusal is None)
+    assert (board.read_bytes() != original) == (refusal is None)
+    if refusal:
+        rejected = result["mask_copper"]["unrepaired"][0]
+        assert refusal in (rejected.get("detail") or rejected["reason"])
 
 
 @pytest.mark.parametrize("outcome", ["saved", "refill_failed", "saved_error", "mask_reappeared"])
