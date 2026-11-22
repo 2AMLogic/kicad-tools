@@ -21,6 +21,7 @@ import re
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 if TYPE_CHECKING:
@@ -540,9 +541,7 @@ def _physical_loop_witness(
     def describe(path: list[int]) -> dict[str, object]:
         items = [graph.node_items[node] for node in path]
         tracks = dict.fromkeys(
-            a
-            for a, b in zip(items, items[1:], strict=False)
-            if a == b and contacts.items[a].kind == TRACK
+            a for a, b in pairwise(items) if a == b and contacts.items[a].kind == TRACK
         )
         layers = list(dict.fromkeys(graph.track_layers[track] for track in tracks))
         return {
@@ -557,7 +556,7 @@ def _physical_loop_witness(
     common = [(i, positions[node]) for i, node in enumerate(alternative) if node in positions]
     # Successive shared junctions that straddle the cut bound exactly the
     # different parts, including a width-only contact midway along a track.
-    for (i, a), (j, b) in zip(common, common[1:], strict=False):
+    for (i, a), (j, b) in pairwise(common):
         if a <= cut < b:
             return {
                 "kind": "segment",
@@ -594,9 +593,7 @@ def physical_path_segments(
     start, target = pads[source], pads[sink]
     adjacency = {node: {other for other, _ in edges} for node, edges in graph.adjacency.items()}
     path = _junction_path(adjacency, start, target)
-    bridges = _simple_graph_bridges(adjacency) & {
-        _edge_pair(a, b) for a, b in zip(path, path[1:], strict=False)
-    }
+    bridges = _simple_graph_bridges(adjacency) & {_edge_pair(a, b) for a, b in pairwise(path)}
     spans = {
         contacts.items[index].key[1]: {_edge_pair(a, b) for a, b, _ in pieces}
         for index, pieces in graph.track_pieces.items()
@@ -617,7 +614,7 @@ def physical_path_segments(
     }
     modeled_path = _junction_path(modeled, start, target)
     bypassed = _simple_graph_bridges(modeled) - bridges
-    for index, (a, b) in enumerate(zip(modeled_path, modeled_path[1:], strict=False)):
+    for index, (a, b) in enumerate(pairwise(modeled_path)):
         edge = _edge_pair(a, b)
         if owners[a] == owners[b] and edge in bypassed:
             alternative = _junction_path(adjacency, start, target, skip=edge)

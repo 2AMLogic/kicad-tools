@@ -1737,8 +1737,8 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
         centres = graph.pad_centres.pop(hub)
         graph.pad_centres.setdefault(root(hub), set()).update(centres)
 
-    for pad_id, nodes in graph.item_nodes.items():
-        graph.item_nodes[pad_id] = {root(node) for node in nodes}
+    for pad_id, pad_junctions in graph.item_nodes.items():
+        graph.item_nodes[pad_id] = {root(node) for node in pad_junctions}
     for via in vias:
         graph.item_nodes[id(via)] = {
             root(_copper_node(via.position, layer))
@@ -3644,9 +3644,9 @@ def resolve_current_path(
             sink=sink,
         )
 
-    # The new mid-path row contraction can make a formerly cyclic path look
-    # resolved. Its proof covers the layer change itself; separately verify
-    # the current-carrying spans before and after it against actual copper.
+    # Contracting a mid-path row removes its modeled cycle. Its proof covers
+    # the layer change itself; verify that copper before and after the row
+    # still carries the declared current when all physical bonds are present.
     missing_bonds = (
         _unmodeled_bonds(pcb, adjacency, physical_contacts(), parallel_groups)
         if on_path_groups
