@@ -54,8 +54,17 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.router.pathfinder import Router
 from tests.conformance.adapters import BOARD_EDGE, ConsumerAdapter, Verdict
-from tests.conformance.adapters._support import net_ids, router_pad, router_via
+from tests.conformance.adapters._support import (
+    net_ids,
+    pair_contexts,
+    project_rules,
+    router_grid,
+    router_pad,
+    router_via,
+    single_object_route,
+)
 from tests.conformance.adapters.kernel import KERNEL_GROUP
 from tests.conformance.adapters.via_clearance import PAD_FORMS, pad_form_is_clear
 from tests.conformance.board import write_case
@@ -72,6 +81,7 @@ from tests.conformance.generator import (
     PadSpec,
     PairIntent,
     PairKind,
+    ViaSpec,
     generate_case,
     pad_shape,
 )
@@ -1125,17 +1135,11 @@ def test_search_refinement_retires_the_group_three_over_rejection(seed: int) -> 
 @requires_kicad_cli
 @pytest.mark.requires_router_cpp
 @pytest.mark.parametrize("seed", (0, 1))
-def test_other_gates_decide_the_pairs_the_python_commit_gate_cannot(
+def test_other_gates_reject_the_trace_retry_pad_via_residuals(
     seed: int, corpus_oracle: CorpusOracle
 ) -> None:
-    """Group 12's stated reason for accepting its retained gap, checked.
-
-    The classification says the Python commit gate has no via-versus-pad
-    predicate and that the pair is decided elsewhere: by the pad halo in the
-    occupancy model (group 1) upstream, and by the C++ twin (group 13) which
-    does carry the predicate.  If either stopped flagging a pair this gate
-    retains, that pair would reach a committed board with no gate at all,
-    and "accepted because another gate decides it" would be false.
+    """Check the ordinary Python pathfinder, occupancy halo and C++ validator
+    against the foreign-pad pairs the original trace retry accepted (#9924).
     """
     case = generate_case(seed)
     result = corpus_oracle(seed, refill=False)
@@ -1143,19 +1147,29 @@ def test_other_gates_decide_the_pairs_the_python_commit_gate_cannot(
     commit = _ADAPTERS_BY_GROUP[12]
     pairs = _pairs_tagged(commit, case, SAME_RULE_UNDER_LEDGER[(12, seed)])
     assert all(pair.kind == PairKind.PAD_VIA for pair in pairs), (
-        "the Python commit gate's retained gap is a missing via-vs-pad predicate; "
+        "the trace retry's retained gap is a missing via-vs-pad predicate; "
         "any other pair kind here is a different finding"
     )
+    contexts = {context.pair: context for context in pair_contexts(case)}
+    nets = net_ids(case)
+    rules = project_rules(case)
     for pair in pairs:
         assert pair.nets in truth, f"{_pair_tag(pair)} is retained but kicad-cli is clean"
+        context = contexts[pair]
+        assert isinstance(context.existing, PadSpec) and isinstance(context.candidate, ViaSpec)
+        grid = router_grid(case, rules)
+        grid.add_pad(router_pad(context.existing, nets))
+        route = single_object_route(context.candidate, nets)
+        deficit, _ = grid.worst_via_pad_deficit(route.vias[0], route.net)
+        assert deficit > 0, _pair_tag(pair)
+        assert not Router(grid, rules)._validate_route_clearance(route, route.net), _pair_tag(pair)
     for group in (1, 13):
         adapter = _ADAPTERS_BY_GROUP[group]
         flagged = {v.nets for v in adapter.verdicts_at_project_rules(case)}
         for pair in pairs:
             assert pair.nets in flagged, (
                 f"{adapter.name} (group {group}) no longer flags {_pair_tag(pair)} on seed "
-                f"{seed} at the project minimum -- the Python commit gate's retained gap "
-                "would then be decided by no gate"
+                f"{seed} at the project minimum"
             )
 
 

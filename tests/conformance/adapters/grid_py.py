@@ -1,7 +1,7 @@
-"""Group 12 -- the Python commit gate, unmodified.
+"""Group 12 -- the original Python trace-resolver retry checks (#9924).
 
-``RoutingGrid``'s three commit-time validators are what stand between a route
-A* has found and the copper that gets written::
+This row measures the three ``RoutingGrid`` copper validators used by
+``_TraceResolverTransaction.validate_committed_geometry`::
 
     validate_segment_clearance(seg, exclude_net)      -> (ok, min_actual, loc)
     validate_via_clearance(via, exclude_net)          -> (ok, min_actual, loc)
@@ -26,14 +26,11 @@ pairs: both validators now resolve ``max(trace_clearance, via_clearance)``
 through ``clearance_resolver.trace_via_clearance_mm``, so the pinned order no
 longer changes this row's verdict.)
 
-**It has no via-vs-pad predicate at all.**  ``validate_via_clearance`` walks
-``self.routes``' *segments*; ``validate_via_to_via_clearance`` walks their
-*vias*; neither consults ``self._pads``.  The C++ twin does check via-vs-pad
-(``grid.cpp`` ``violation_type = 8``).  A ``pad-via`` pair that kicad-cli flags
-therefore shows up here as an under-reject -- correctly: in production that
-pair is caught by the pad halo in the *occupancy* model (group 1), not by this
-gate, so the gate alone would commit it.  Pair kinds are not narrowed to hide
-this; it is one of the disagreements the table exists to record.
+**Foreign pads.** For a candidate via these checks visit committed segments
+and vias. The original retry transaction omitted the foreign-pad check that
+the ordinary Python pathfinder performs with ``RoutingGrid.worst_via_pad_deficit``
+(#6117). The C++ commit validator also checks foreign pads (violation type 8).
+Group 12 includes pad/via pairs to measure the retry omission owned by #9924.
 """
 
 from __future__ import annotations

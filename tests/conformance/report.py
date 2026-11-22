@@ -889,7 +889,8 @@ CLASSIFICATIONS: dict[int, Classification] = {
     11: Classification(
         group=11,
         caller=(
-            "`Pathfinder.set_via_foreign_context` (`router/core.py`) feeding "
+            "`Router.set_via_foreign_context` in `router/pathfinder.py`, "
+            "called from `router/core.py` and feeding "
             "`point_clear_of_copper`, `segment_clears_foreign_via`, "
             "`via_clears_foreign_segment` and `drill_hole_to_hole_clear`"
         ),
@@ -929,8 +930,9 @@ CLASSIFICATIONS: dict[int, Classification] = {
     12: Classification(
         group=12,
         caller=(
-            "`RoutingGrid.validate_segment_clearance` / `validate_via_clearance` "
-            "/ `validate_via_to_via_clearance`, the Python commit gate"
+            "`_TraceResolverTransaction.validate_committed_geometry` in `router/core.py`, "
+            "represented by `RoutingGrid.validate_segment_clearance`, "
+            "`validate_via_clearance` and `validate_via_to_via_clearance`"
         ),
         rule=(
             "`trace_clearance` 0.15 mm for `seg-seg` and pad pairs, "
@@ -939,20 +941,21 @@ CLASSIFICATIONS: dict[int, Classification] = {
         ),
         dispositions=frozenset({RULE_VALUE, RETAINED_GAP}),
         retained=(
-            "The `seg-seg` and `pad-seg` under-rejections are rule values and are "
-            "flagged at the matched rule. The `pad-via` under-rejection survives "
-            "it: this gate has no via-versus-pad predicate at any rule value -- "
-            "`validate_via_clearance` walks committed *segments* and "
-            "`validate_via_to_via_clearance` committed *vias*; neither consults "
-            "the pad list -- so it accepts the pair however loose or tight the "
-            "rule. Over seeds 0-199 that is the whole matched-rule residual: 26 "
-            "pairs, all `pad-via`. The caller accepts it because the pair is "
-            "decided upstream of the commit gate by the pad halo in the "
-            "occupancy model (group 1), which flags every `pad-via` pair named "
-            "here at the matched rule; the gate alone would commit it, which is "
-            "why the pair kind is scored rather than narrowed away. The C++ twin "
-            "(group 13) does carry the predicate and flags the same pairs; the "
-            "parity gap is tracked in #9924."
+            "At the matched rule the `seg-seg` and `pad-seg` under-rejections "
+            "disappear. The original trace-resolver retry transaction and this "
+            "adapter checked candidate vias against segments and other vias, "
+            "but omitted clearance to foreign pads. Across seeds 0-199 this "
+            "accounts for all 26 residual `pad-via` pairs, or 52 comparisons "
+            "across the two fill states. On seeds 0 and 1, KiCad measures "
+            "0.1782 and 0.1933 mm against the 0.20 mm project minimum. The "
+            "ordinary Python pathfinder already rejects both through "
+            "`Router._validate_route_clearance`, which calls "
+            "`RoutingGrid.worst_via_pad_deficit` (#6117). The occupancy halo "
+            "(group 1) and C++ commit validator (group 13) also flag both. "
+            "#9924 owns the retry transaction's missing check. Its fix in #9928 "
+            "calls the same foreign-pad predicate. At `824cae89e` the retry "
+            "agrees with KiCad on all 1,294 comparisons. This row retains the "
+            "original measurement."
         ),
     ),
     13: Classification(
