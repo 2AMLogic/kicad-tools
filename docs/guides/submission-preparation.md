@@ -1,4 +1,51 @@
-# Offline assembly submission preparation
+# Prepare a board for JLCPCB assembly
+
+Start with the routed KiCad board and its schematic. The example below uses a
+project named `controller` and prepares five assembled boards.
+
+1. **Check the layout and parts.** Run `kct check controller.kicad_pcb --mfr jlcpcb`
+   and review the findings. Give each populated part its intended LCSC catalog
+   number. Use `kct parts lookup C2040` to inspect an individual part.
+2. **Export and sign off.** `kct export controller.kicad_pcb --sch controller.kicad_sch --mfr jlcpcb -o manufacturing`
+   writes the Gerber and drill archive, assembly bill of materials (BOM),
+   component placement list (CPL) and manifest. The `/kct:tapeout` skill walks
+   through the release checks. With a passing readiness receipt for these
+   files, the reviewer records approval using `kct tapeout-sign-off manufacturing --board controller.kicad_pcb --readiness readiness.json --reviewer "Your name"`.
+   [Manufacturing export guide](manufacturing-export.md) · [Tapeout checks](../../.claude/commands/kct/tapeout.md)
+3. **Prepare the submission.** From the project directory, point the dry run at
+   the signed-off bundle, the PCB and schematic it came from, and a new output
+   directory outside the project. The agent command `/kct:submit-jlcpcb`
+   accepts the same arguments.
+
+```sh
+kct submit-jlcpcb manufacturing --dry-run \
+  --board controller.kicad_pcb --schematic controller.kicad_sch \
+  --quantity 5 --output ../jlcpcb-review
+```
+
+Open `../jlcpcb-review/review-page/index.md` to see each line's stock status.
+The directory also contains `handoff/plan.json` and `inventory-snapshot.json`.
+The dry run reads current stock through JLCPCB OpenAPI when credentials are
+configured, or through public LCSC inventory. Short or unknown stock blocks
+submission. The design files stay local during this step.
+
+**Sending files to the factory.** Gerber API upload requires JLCPCB credentials,
+an explicit `--upload` and a named `--reviewer`. For assembly, `--guided`
+prints the manual website checklist. Compare JLCPCB's part-matching export
+with the planned references and catalog numbers, and check the fab viewer
+before saving a cart. An optional `--website` driver assists in a signed-in
+browser with the buyer present. The live quote page has differed from the
+driver's selectors. [Submission skill](../../.claude/commands/kct/submit-jlcpcb.md) · [Live driver report](https://github.com/2AMLogic/kicad-tools/issues/8629)
+
+**Version details.** The dry run above ships in v0.29.0. On `main`, a reviewer
+can also compare JLCDFM category counts with the board's `kct check` JSON
+report using `kct tapeout-sign-off --stage fab-dfm`, and records a separate
+`--stage fab-review` approval before saving the cart. The optional checkout
+on `main` requires the buyer to run it and approve the exact total before
+payment. End-to-end live cart and payment verification is pending.
+[v0.29.0](https://github.com/2AMLogic/kicad-tools/releases/tag/v0.29.0) · [Attended verification](https://github.com/2AMLogic/kicad-tools/issues/8478)
+
+## Offline assembly submission preparation
 
 `kicad_tools.export.submission_plan` implements milestone A of #5142: a local,
 read-only handoff of an existing manufacturing bundle. It does not export a

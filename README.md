@@ -10,6 +10,8 @@
 
 This project provides standalone Python tools that enable AI agents (LLMs, autonomous coding assistants, etc.) to parse, analyze, and manipulate KiCad schematic and PCB files programmatically. All tools output machine-readable JSON and require no running KiCad instance.
 
+**Preparing a board for JLCPCB assembly?** Check the layout against JLCPCB rules, look up LCSC parts, and export Gerbers, a bill of materials and component placements. With a signed-off bundle, `kct submit-jlcpcb --dry-run` checks stock for your board quantity and writes a local submission plan and review page. [JLCPCB assembly walkthrough](docs/guides/submission-preparation.md)
+
 ## Why Agent-Focused?
 
 Traditional EDA tools require GUIs and manual interaction. `kicad-tools` bridges the gap by providing:
@@ -621,6 +623,7 @@ full list (every command and subcommand) lives in
 | `kct datasheet <subcommand>` | Search, download, parse datasheets |
 | `kct parts <subcommand>` | LCSC/JLCPCB part lookup, cache, offline catalog sync |
 | `kct export <pcb>` | Manufacturing bundle export (gerbers, BOM, CPL) |
+| `kct submit-jlcpcb <bundle>` | Prepare a signed-off JLCPCB assembly bundle for review. See the [dry-run example](docs/guides/submission-preparation.md). |
 | `kct export-formats <pcb>` | PDF / SVG / STEP / IPC-2581 / ODB++ via kicad-cli, with a per-format result |
 | `kct mfr <subcommand>` | Manufacturer rule profiles (apply-rules, validate) |
 | `kct spec <subcommand>` | Project specification (`.kct`) management |

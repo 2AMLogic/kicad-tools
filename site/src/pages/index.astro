@@ -195,16 +195,17 @@ kct agent-guide</code></pre>
             <a href="#demo-boards">Board evidence in the gallery</a>
           </li>
           <li>
-            <h3>Parts and manufacturing</h3>
-            <p>Look up LCSC/JLCPCB parts, check BOM availability and find Basic-part
-              alternatives, online or from an offline catalog.
-              <code>kct export</code> writes a fab bundle (Gerbers, BOM, placement,
-              report and manifest) for a manufacturer profile, and
-              <code>kct export-formats</code> adds PDF, SVG, STEP, IPC-2581 and
-              ODB++ through <code>kicad-cli</code>.</p>
+            <h3>JLCPCB assembly and manufacturing export</h3>
+            <p>Check the board against JLCPCB rules, find LCSC parts and export
+              Gerbers, a bill of materials and component placements. Once a reviewer
+              signs off the bundle, <code>kct submit-jlcpcb --dry-run</code> checks
+              stock for your build quantity and writes a local review page.
+              For other deliverables, <code>kct export-formats</code> writes
+              PDF, SVG, STEP, IPC-2581 and ODB++ through <code>kicad-cli</code>.</p>
             <code>kct export board.kicad_pcb --mfr jlcpcb</code>
+            <a href={`${DOCS}/guides/submission-preparation.md`}>JLCPCB assembly walkthrough</a>
             <a href={`${DOCS}/guides/manufacturing-export.md`}>Manufacturing export guide</a>
-            <a href={`${REPO}#parts-lookup-lcsc--jlcpcb`}>Parts lookup</a>
+            <a href={`${REPO}#parts-lookup-lcsc--jlcpcb`}>LCSC parts lookup and offline catalog</a>
           </li>
           <li>
             <h3>Work with an agent</h3>
