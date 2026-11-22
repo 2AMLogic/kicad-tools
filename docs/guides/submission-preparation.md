@@ -1,4 +1,51 @@
-# Offline assembly submission preparation
+# Prepare a board for JLCPCB assembly
+
+Start with the routed KiCad board and its schematic. The example below uses a
+project named `controller` and prepares five assembled boards.
+
+1. **Check the layout and parts.** Run `kct check controller.kicad_pcb --mfr jlcpcb`
+   and review the findings. Give each populated part its intended LCSC catalog
+   number. Use `kct parts lookup C2040` to inspect an individual part.
+2. **Export and sign off.** `kct export controller.kicad_pcb --sch controller.kicad_sch --mfr jlcpcb -o manufacturing`
+   writes the Gerber and drill archive, assembly bill of materials (BOM),
+   component placement list (CPL) and manifest. The `/kct:tapeout` skill walks
+   through the release checks. With a passing readiness receipt for these
+   files, the reviewer records approval using `kct tapeout-sign-off manufacturing --board controller.kicad_pcb --readiness readiness.json --reviewer "Your name"`.
+   [Manufacturing export guide](manufacturing-export.md) · [Tapeout checks](../../.claude/commands/kct/tapeout.md)
+3. **Prepare the submission.** From the project directory, point the dry run at
+   the signed-off bundle, the PCB and schematic it came from, and a new output
+   directory outside the project. The agent command `/kct:submit-jlcpcb`
+   accepts the same arguments.
+
+```sh
+kct submit-jlcpcb manufacturing --dry-run \
+  --board controller.kicad_pcb --schematic controller.kicad_sch \
+  --quantity 5 --output ../jlcpcb-review
+```
+
+Open `../jlcpcb-review/review-page/index.md` to see each line's stock status.
+The directory also contains `handoff/plan.json` and `inventory-snapshot.json`.
+The dry run reads current stock through JLCPCB OpenAPI when credentials are
+configured, or through public LCSC inventory. Short or unknown stock blocks
+submission. The design files stay local during this step.
+
+**Sending files to the factory.** Gerber API upload requires JLCPCB credentials,
+an explicit `--upload` and a named `--reviewer`. For assembly, `--guided`
+prints the manual website checklist. Compare JLCPCB's part-matching export
+with the planned references and catalog numbers, and check the fab viewer
+before saving a cart. An optional `--website` driver assists in a signed-in
+browser with the buyer present. The live quote page has differed from the
+driver's selectors. [Submission skill](../../.claude/commands/kct/submit-jlcpcb.md) · [Live driver report](https://github.com/2AMLogic/kicad-tools/issues/8629)
+
+**Version details.** The dry run above ships in v0.29.0. On `main`, a reviewer
+can also compare JLCDFM category counts with the board's `kct check` JSON
+report using `kct tapeout-sign-off --stage fab-dfm`, and records a separate
+`--stage fab-review` approval before saving the cart. The optional checkout
+on `main` requires the buyer to run it and approve the exact total before
+payment. End-to-end live cart and payment verification is pending.
+[v0.29.0](https://github.com/2AMLogic/kicad-tools/releases/tag/v0.29.0) · [Cart verification](https://github.com/2AMLogic/kicad-tools/issues/8478) · [Checkout verification](https://github.com/2AMLogic/kicad-tools/issues/9240)
+
+## Offline assembly submission preparation
 
 `kicad_tools.export.submission_plan` implements milestone A of #5142: a local,
 read-only handoff of an existing manufacturing bundle. It does not export a
@@ -350,39 +397,29 @@ used only to test that this page itself renders) must use
 "NOT MANUFACTURING EVIDENCE" section — it never counts as proof that any
 factory portal received, matched, or accepted an upload.
 
-States reuse `submission_plan.py`'s own vocabulary
-(`preparation`/`inventory`/`human_approval`/`factory_matching`/`upload`/
-`order`). This module only ever establishes `human_approval` (to
-`"reviewed"`, once and only once a checklist submission validates);
-`upload`, `factory_matching` and `order` remain untouched placeholders —
-no stage is ever inferred from an earlier or later stage's success, and this
-slice adds no upload, factory-matching, or order/purchase operation. Full
-factory-matching/upload/order tracking is left to later slices (#5145,
-#5146).
+A validated checklist sets the review record’s `human_approval` state to
+`reviewed`. The upload ledger described below records a Gerber upload and
+preview. The buyer checks factory part matching separately on the website.
 
 ## Gerber upload transport and durable upload state (#5145)
 
-`kicad_tools.manufacturers.jlc_upload` provides an offline protocol model and
-durable upload ledger for an already-prepared, already-reviewed Gerber bundle.
-**Live upload and preview are disabled** until the complete first-party wire
-contract is verified. This is partial progress on #5145, not completion of its
-live integration. It provides no order, payment, quote, fabrication-parameter,
-BOM/CPL or PCBA-submission operation; assembly remains an explicit manual
-website handoff through `jlc_upload.PCBA_WEBSITE_HANDOFF`.
+With stock checks satisfied, JLCPCB credentials and a named reviewer,
+`kct submit-jlcpcb --upload` sends the reviewed Gerber archive and retrieves
+its preview. `kicad_tools.manufacturers.jlc_upload` implements these two API
+operations. Assembly settings, the BOM and CPL, part matching and ordering
+go through the website.
 
-Call `upload_gerber` and `fetch_preview` only with an injected offline transport
-whose `TransportIdentity.live` is exactly `False`. The ledger and reconciliation
-APIs remain usable with mock protocol responses. A transport declaring live
-operation is rejected with `UploadGateError`, even if a matching receipt exists.
-Direct `RequestsUploadTransport` calls are also blocked, including with an
-injected session. No session is created and no live request is sent. There is
-no verification boolean or environment override to bypass the missing contract.
+The CLI calls `upload_gerber` and then `fetch_preview` with
+`RequestsUploadTransport`. The upload ledger records the intent before the
+transport opens a production session. For an offline test, inject a test
+session or a transport with `TransportIdentity.live=False`. The resulting
+receipt carries `mock-protocol-only` evidence.
 
-`prepare_multipart_request(url, headers=..., fields=..., files=...)` uses
-requests' multipart encoder to inspect the provisional wire format without
-creating a session or sending anything. Its output is not proof that JLCPCB
-accepts the request. Offline tests use dummy credentials and injected responses;
-no real factory receipt is created by this workflow.
+Use `prepare_multipart_request(url, headers=..., fields=..., files=...)` to
+inspect the encoded request locally. The project has verified request
+construction and response handling against the SDK contract. Successful
+acceptance of an archive by a real factory account remains unverified.
+[Protocol and evidence](../jlc-upload-protocol.md)
 
 ### The pre-network gate
 
@@ -404,32 +441,19 @@ A failure at any of those steps raises `UploadGateError` and **nothing is
 sent**. The upload filename is the plan's own bound `artifacts["gerber"]
 ["output_name"]`; nothing is guessed or globbed.
 
-### Protocol evidence and remaining gate
+### Upload and preview protocol
 
-First-party documentation retrieved on 2026-09-11 confirms:
+Upload sends a multipart POST to `/overseas/openapi/pcb/uploadGerber` with
+`meta` and `file` parts. The transport signs the metadata string `{}`, sets
+`Content-MD5` to the lowercase hexadecimal digest of the archive and lets
+Requests generate the multipart boundary. Preview sends a separate POST to
+`/overseas/openapi/pcb/audit/get` with the returned file key and an optional
+integer language code.
 
-- [Basic rules](https://api.jlcpcb.com/docs/start): multipart uploads.
-- [Request signatures](https://api.jlcpcb.com/docs/api-request-signature): sign
-  metadata JSON for uploads, with five newline-terminated fields and Base64
-  HMAC-SHA256.
-- [API keys](https://api.jlcpcb.com/docs/configure-api-key) and
-  [applications](https://api.jlcpcb.com/docs/create-an-application): keys belong
-  to applications.
-- [API list](https://api.jlcpcb.com/docs/api-list): Gerber upload returns a file
-  ID and preview takes that ID and a language.
-
-The public pages were read through their documentation CMS reader; these were
-published-document retrievals, not operational factory requests. They resolved
-the earlier shell-only access limitation but did not establish exact endpoint
-paths, multipart part names, metadata fields or hexadecimal MD5 encoding.
-
-The offline fixture still models `POST /overseas/openapi/pcb/uploadGerber`,
-`meta` containing `{}`, a `file` part, lowercase-hex `Content-MD5`, and preview
-at `/overseas/openapi/pcb/audit/get`. Those details remain the parent issue's
-**user-reported SDK observations**, not verified endpoint requirements. The
-HTTP library generates the multipart boundary. Live enablement requires the
-missing authoritative contract and a separately reviewed implementation;
-a caller assertion cannot supply that evidence.
+These paths, fields and response types were checked against the first-party
+SDK. The empty metadata object was inferred from the SDK’s field definitions.
+The protocol record gives the artifact versions, hashes and supporting public
+documentation. [Wire format and sources](../jlc-upload-protocol.md#wire-format)
 
 ### Durable state machine, not a retry flag
 
@@ -495,24 +519,20 @@ one of:
 | `mock-protocol-only` | `False` | `mock-protocol-only` |
 | `human-reconciliation` | `False` | `reconciled` |
 
-Live evidence values above remain readable for existing ledgers; current calls
-cannot create live evidence while the protocol gate is closed.
-
-The injected transport must declare a `TransportIdentity(name, live)`. A
-success produced by a transport that did not declare `live=True` is recorded
-and labeled `mock-protocol-only` — **a mocked protocol success is never
-logged or labeled as a real factory receipt** — and a human reconciliation is
-recorded as a human attestation, never as a protocol receipt.
+A successful response through the production transport yields
+`live-factory-response`. An injected session yields `mock-protocol-only`,
+and a person resolving an uncertain upload supplies a
+`human-reconciliation` attestation.
 
 ### Failure handling
 
-Success requires a JSON integer `code` of 200 and the exact boolean
-`success: true`, plus a usable receipt and matching identities. An explicit
-rejection requires an integer non-200 code with `success: false`. Strings,
-numeric booleans, missing fields, contradictory outcomes and truncated replies
-cannot establish a receipt. After an upload send, such outcomes and missing
-file keys are recorded as `uncertain`, blocking another send until explicit
-reconciliation. Valid business rejections remain `failed` and permit retry.
+A successful upload requires an HTTP 2xx response, integer JSON `code` 200,
+a usable file key and matching identities. The optional `success` field must
+be boolean and true for success. A well-formed non-200 business code with
+`success` omitted or false records a rejection and permits a fresh attempt.
+If a reply establishes neither a usable receipt nor a definite rejection,
+the ledger records `uncertain` and requires explicit reconciliation.
+
 Failures retain only a fixed
 classification word (`auth-failed`, `ip-not-whitelisted`, `permission-denied`,
 `quota-exceeded`, `incomplete-response`, `identity-mismatch`,
@@ -676,10 +696,9 @@ omitting either keeps readiness false. Changed or unreadable files also make
 it false. At attachment time, an invalid supplied plan/review chain raises
 `DFMError`. Readiness is a current check, not a value to cache across changes.
 
-Mock-protocol and human-reconciled receipts retain their `receipt_sha256` and
-`receipt_evidence` for audit, but leave `upload_binding` unknown and cannot
-promote readiness. Synthetic tests of future live-receipt consumption do not
-provide actual factory evidence or enable the blocked live transport.
+Mock-protocol and human-reconciled receipts keep their `receipt_sha256` and
+`receipt_evidence` for audit. Their `upload_binding` stays unknown. Readiness
+requires a matching factory receipt and the checks above.
 
 Category coordinates preserve original axis text, units, and optional location
 context through `FindingCoordinate`; no rounding or unit inference occurs.
@@ -690,26 +709,27 @@ Coordinate values and receipt provenance participate in the attachment hash.
 
 ## Website ordering: attended driver (#8468)
 
-`kct submit-jlcpcb --website` can fill the jlcpcb.com PCBA order form and stop
-at a saved cart, but only as an **attended** driver. It runs in your own
-signed-in Chrome on a dedicated CDP profile while you watch, one action at a
-time. It never requests a robots.txt-disallowed path (you download JLC's
-part-matching export and the driver checks it), and it never checks out or pays.
-The one exception is the opt-in, attended checkout leg (`--checkout`, issue #8935):
-in your own terminal, it continues from the saved cart to JLC's payment step,
-pays only a total you approve exactly (to the cent and currency, after shipping,
-tax and fees), clicks pay once, and records "ordered" only from JLC's
-confirmation page. Rehearse first (`--checkout --auto` without `--pay` stops
-before the pay button). Its selectors are unverified until an attended run, so
-it asks you to confirm every step. Its "attended" check (terminal, foreground,
-no CI/agent/MCP environment markers) is a heuristic against accidental
-automation, not a security boundary; agents must never run it. The guard
-against paying twice is an order ledger under `$HOME` (`~/.kct/orders/`):
-deleting it or changing `HOME` removes that guard. Details and the card-file
-rules are in the `/kct:submit-jlcpcb` skill.
-kct handles no website credentials. `--guided` prints the same steps as a manual
-checklist, and any failed assertion drops into it. The terms review and the
-2026-11-05 operator ruling behind this are in
-[`docs/jlc-upload-protocol.md`](../jlc-upload-protocol.md#website-automation-terms-finding-8467-part-23-of-8465).
-The driver's selectors are unverified against the live site until the first
-attended run (#8478); see the `/kct:submit-jlcpcb` skill for usage.
+The buyer can follow `kct submit-jlcpcb --guided` as a manual checklist or
+use `--website` for assistance in their own signed-in Chrome with a dedicated
+debug profile. Website credentials stay in the browser. The driver advances
+one action at a time. It compares the factory part-matching export that the
+buyer downloads with the plan. The buyer reviews placement and the fab viewer
+before saving the cart. If a page check fails, the driver switches to the
+guided checklist.
+[Submission skill](../../.claude/commands/kct/submit-jlcpcb.md) · [Website terms and operator ruling](../jlc-upload-protocol.md#operator-ruling-2026-11-05-attended-driver-allowed)
+
+In the first attended run, the v0.28.1 driver could not match its selectors
+on the live quote page. A later operator session reached a saved cart using
+hand-written browser steps. An end-to-end run of the shipped driver through
+the saved cart still needs verification.
+[First driver run](https://github.com/2AMLogic/kicad-tools/issues/8629) · [Saved-cart observations](https://github.com/2AMLogic/kicad-tools/issues/8629#issuecomment-6776455858) · [Driver verification](https://github.com/2AMLogic/kicad-tools/issues/8478)
+
+On `main`, the optional `--checkout` leg continues from the saved cart in the
+buyer’s own interactive terminal. Rehearse with `--checkout --auto` and omit
+`--pay` to stop before payment. For a purchase the buyer approves the exact
+total and currency, including shipping, tax and fees. The driver clicks pay once and
+records the order from JLCPCB’s confirmation page. Keep the order ledger in
+`~/.kct/orders/` so later runs can detect an earlier purchase. Removing the
+ledger or switching home directories removes that protection. Checkout
+selectors and confirmation recognition still need an attended rehearsal.
+[Checkout verification](https://github.com/2AMLogic/kicad-tools/issues/9240)

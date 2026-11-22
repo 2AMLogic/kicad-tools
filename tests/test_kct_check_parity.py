@@ -145,7 +145,12 @@ BOARD_07_EXPECTED_FAMILY_DELTA = {
 # 0.0891 mm via-field pattern) plus 5 different-net pad-involving gaps at
 # 0.115-0.1345 mm, below the table's pad danger edge.  The committed copper
 # did not change.
-BOARD_07_EXPECTED_GAP_ERRORS = 101
+#
+# Issue #9886 makes the facing-angle check independent of edge order. Two more
+# GND pad/trace/via gaps appear on F.Cu, 0.138553 mm near (117.305, 59.609)
+# and 0.120701 mm near (129.099, 98.385), both below the 0.15 mm pad limit.
+# The committed fixture now has 98 same-net and 5 different-net gap errors.
+BOARD_07_EXPECTED_GAP_ERRORS = 103
 
 # Issue #8858: the committed board 07 fixture carries a residual
 # ``mask_to_copper`` population (162 errors on 22 net signatures, measured

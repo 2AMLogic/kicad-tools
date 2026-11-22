@@ -19,6 +19,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation"
       ],
       "files": [
@@ -51,6 +52,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation"
       ],
       "files": [
@@ -84,6 +86,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation"
       ],
       "files": [
@@ -117,6 +120,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation"
       ],
       "files": [
@@ -146,6 +150,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation",
         "Routing Suggestions",
         "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
@@ -192,6 +197,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation",
         "Routing Suggestions",
         "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
@@ -239,6 +245,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation",
         "Routing Suggestions",
         "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
@@ -287,6 +294,7 @@
         "Results",
         "Saving routed PCB",
         "Output Connectivity Verification",
+        "Silk legalisation (default pass, jlcpcb)",
         "DRC Validation",
         "Routing Suggestions",
         "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
