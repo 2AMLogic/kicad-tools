@@ -279,12 +279,24 @@ class CppTraceBlockedAdapter:
         return router_cpp_module() is not None
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same predicate, marked and armed at the clearance kicad-cli applies.
+
+        Issue #9922: the same-rule reading the advisory classification is
+        traced on.  Both the marking radius and the ``Pathfinder``'s own
+        envelope come from :func:`project_rules`, so whatever still disagrees
+        here is cell quantisation, never the #5398 / #5654 rule gap.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules) -> set[Verdict]:
         router_cpp = router_cpp_module()
         if router_cpp is None:  # pragma: no cover - guarded by available()
             return set()
 
         nets = net_ids(case)
-        rules = router_rules(case)
         layer_index = layer_indexer(case)
         found: set[Verdict] = set()
 

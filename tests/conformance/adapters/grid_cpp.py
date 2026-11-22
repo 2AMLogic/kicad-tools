@@ -41,6 +41,7 @@ from tests.conformance.adapters._support import (
     layer_of,
     net_ids,
     pair_contexts,
+    project_rules,
     router_pad,
     router_rules,
     router_segment,
@@ -74,12 +75,24 @@ class GridCppAdapter:
         return _cpp() is not None
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same ``validate_route`` call at the clearance kicad-cli applies.
+
+        Issue #9922: the same-rule reading.  Only the two clearance arguments
+        of the production call move (``project_rules``); ``min_drill_clearance``
+        and ``min_hole_to_hole`` keep the case's own values, as at the
+        production call site.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules) -> set[Verdict]:
         router_cpp = _cpp()
         if router_cpp is None:  # pragma: no cover - guarded by available()
             return set()
 
         nets = net_ids(case)
-        rules = router_rules(case)
         found: set[Verdict] = set()
 
         for context in pair_contexts(case):
