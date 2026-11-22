@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli.sch_check_connections import (
     check_symbol_connections,
 )
@@ -441,3 +443,251 @@ class TestFilterPattern:
         data = json.loads(captured.out)
 
         assert data["summary"]["total_pins"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #9833: undotted T-connections and mid-wire attachments warn
+# ---------------------------------------------------------------------------
+
+# R1 pin 1 wires down to (100, 40), the interior of the bus wire
+# (80, 40)-(140, 40): an undotted T that kicad-cli leaves open.
+T_CONNECTION_NO_DOT = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000011")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "tconn-r1")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "1k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (wire (pts (xy 80 40) (xy 140 40))
+    (stroke (width 0) (type default)) (uuid "w-bus"))
+  (wire (pts (xy 100 46.19) (xy 100 40))
+    (stroke (width 0) (type default)) (uuid "w-r1"))
+%(EXTRA)s
+)
+"""
+
+_JUNCTION_AT_T = '  (junction (at 100 40) (diameter 0) (color 0 0 0 0) (uuid "j-t"))\n'
+_LABEL_AT_T = '  (label "BUS" (at 100 40 0)\n    (effects (font (size 1.27 1.27)) (justify left bottom))\n    (uuid "lbl-bus"))\n'
+
+# A pin lying on a wire's interior with no junction: R1 pin 1 at
+# (100, 46.19) on the long wire (100, 30)-(100, 60).
+PIN_MID_WIRE_NO_DOT = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000012")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pmw2-r1")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "1k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (wire (pts (xy 100 30) (xy 100 60))
+    (stroke (width 0) (type default)) (uuid "w1"))
+%(EXTRA)s
+)
+"""
+
+_JUNCTION_AT_PIN = '  (junction (at 100 46.19) (diameter 0) (color 0 0 0 0) (uuid "j-pin"))\n'
+
+MULTI_UNIT_MID_WIRE = """\
+(kicad_sch
+  (version 20231120) (generator "eeschema")
+  (uuid "00000000-0000-4000-8000-000000000001") (paper "A4")
+  (lib_symbols
+    (symbol "Test:Multi"
+      (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "Multi" (at 0 0 0) (effects (font (size 1.27 1.27))))
+      (symbol "Multi_0_1"
+        (pin passive line (at -5.08 0 0) (length 1.27) (name "COMMON") (number "4")))
+      (symbol "Multi_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "A") (number "1"))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "B") (number "2")))
+      (symbol "Multi_2_1"
+        (pin passive line (at 5.08 0 180) (length 1.27) (name "C") (number "3")))))
+  (symbol (lib_id "Test:Multi") (at 100 50 0) (unit {unit})
+    (in_bom yes) (on_board yes) (uuid "00000000-0000-4000-8000-000000000002")
+    (property "Reference" "U1" (at 100 45 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "Multi" (at 100 55 0) (effects (font (size 1.27 1.27))))
+    (instances (project "multi" (path "/00000000-0000-4000-8000-000000000001"
+      (reference "U1") (unit {unit})))))
+  (wire (pts (xy 90 50) (xy 110 50)) (stroke (width 0) (type default))
+    (uuid "00000000-0000-4000-8000-000000000003")))
+"""
+
+# A power:GND symbol on the bus interior at (120, 40).
+POWER_MID_WIRE = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000013")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pmw3-r1")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "1k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (symbol
+    (lib_id "power:GND") (at 120 40 0) (unit 1)
+    (in_bom no) (on_board no) (dnp no) (uuid "pmw3-gnd")
+    (property "Reference" "#PWR01" (at 120 46.04 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Value" "GND" (at 120 43.5 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pg1"))
+  )
+  (wire (pts (xy 80 40) (xy 140 40))
+    (stroke (width 0) (type default)) (uuid "w-bus"))
+%(EXTRA)s
+)
+"""
+
+
+class TestMidWireAttachmentWarnings:
+    """Issue #9833: undotted Ts and mid-wire pins/power symbols warn."""
+
+    def test_undotted_t_warns(self):
+        from kicad_tools.cli.sch_check_connections import check_mid_wire_attachments
+
+        sch = _load_from_string(T_CONNECTION_NO_DOT % {"EXTRA": ""})
+        warnings = check_mid_wire_attachments(sch)
+        kinds = {w.kind for w in warnings}
+        assert "undotted_t" in kinds
+        t_warn = next(w for w in warnings if w.kind == "undotted_t")
+        assert t_warn.position == (100.0, 40.0)
+
+    def test_dotted_t_does_not_warn(self):
+        from kicad_tools.cli.sch_check_connections import check_mid_wire_attachments
+
+        sch = _load_from_string(T_CONNECTION_NO_DOT % {"EXTRA": _JUNCTION_AT_T})
+        warnings = check_mid_wire_attachments(sch)
+        assert all(w.kind != "undotted_t" for w in warnings)
+
+    def test_label_at_t_does_not_warn(self):
+        from kicad_tools.cli.sch_check_connections import check_mid_wire_attachments
+
+        sch = _load_from_string(T_CONNECTION_NO_DOT % {"EXTRA": _LABEL_AT_T})
+        warnings = check_mid_wire_attachments(sch)
+        assert all(w.kind != "undotted_t" for w in warnings)
+
+    def test_pin_mid_wire_warns_and_pin_is_unconnected(self):
+        from kicad_tools.cli.sch_check_connections import check_mid_wire_attachments
+
+        sch = _load_from_string(PIN_MID_WIRE_NO_DOT % {"EXTRA": ""})
+
+        warnings = check_mid_wire_attachments(sch)
+        kinds = {w.kind for w in warnings}
+        assert "pin_mid_wire" in kinds
+
+        # The pin itself is reported unconnected: kicad-cli leaves it open
+        results = check_symbol_connections(sch)
+        pin1 = next(r for r in results if r.reference == "R1" and r.pin_number == "1")
+        assert pin1.connected is False
+
+    def test_pin_mid_wire_with_junction_does_not_warn(self):
+        from kicad_tools.cli.sch_check_connections import check_mid_wire_attachments
+
+        sch = _load_from_string(PIN_MID_WIRE_NO_DOT % {"EXTRA": _JUNCTION_AT_PIN})
+        warnings = check_mid_wire_attachments(sch)
+        # Pin 1's junction anchors it; pin 2 (also mid-wire, no dot) still warns
+        assert all(w.position != (100.0, 46.2) for w in warnings)
+        assert any(w.position == (100.0, 53.8) and w.kind == "pin_mid_wire" for w in warnings)
+
+    def test_power_mid_wire_warns(self):
+        from kicad_tools.cli.sch_check_connections import check_mid_wire_attachments
+
+        sch = _load_from_string(POWER_MID_WIRE % {"EXTRA": ""})
+        warnings = check_mid_wire_attachments(sch)
+        kinds = {w.kind for w in warnings}
+        assert "power_mid_wire" in kinds
+
+    @pytest.mark.parametrize(
+        ("unit", "pins", "mid_wire_x"),
+        [(1, {"1", "2", "4"}, {94.9}), (2, {"3", "4"}, {94.9, 105.1})],
+    )
+    def test_only_placed_unit_and_common_pins_warn(self, tmp_path, capsys, unit, pins, mid_wire_x):
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        sch_file = tmp_path / "multi.kicad_sch"
+        sch_file.write_text(MULTI_UNIT_MID_WIRE.format(unit=unit))
+        connections_main([str(sch_file), "--format", "json", "--verbose"])
+        doc = json.loads(capsys.readouterr().out)
+        assert {tuple(w["position"]) for w in doc["warnings"] if w["kind"] == "pin_mid_wire"} == {
+            (x, 50) for x in mid_wire_x
+        }
+        assert {p["pin_number"] for p in doc["pins"]} == pins
+        assert set(resolve_pin_map(Schematic.load(str(sch_file)))["U1"]["pins"]) == pins
+
+    def test_json_output_includes_warnings(self, tmp_path, capsys):
+        sch_file = tmp_path / "tconn.kicad_sch"
+        sch_file.write_text(T_CONNECTION_NO_DOT % {"EXTRA": ""})
+
+        connections_main([str(sch_file), "--format", "json", "--verbose"])
+        data = json.loads(capsys.readouterr().out)
+
+        assert "warnings" in data
+        kinds = {w["kind"] for w in data["warnings"]}
+        assert "undotted_t" in kinds
+        warn = next(w for w in data["warnings"] if w["kind"] == "undotted_t")
+        assert warn["position"] == [100.0, 40.0]
+
+    def test_table_output_includes_warnings(self, tmp_path, capsys):
+        sch_file = tmp_path / "tconn.kicad_sch"
+        sch_file.write_text(T_CONNECTION_NO_DOT % {"EXTRA": ""})
+
+        connections_main([str(sch_file), "--verbose"])
+        out = capsys.readouterr().out
+
+        assert "Warnings:" in out
+        assert "undotted_t" in out
+        assert "no junction dot" in out
+
+    def test_table_all_connected_still_shows_warnings(self, tmp_path, capsys):
+        """Warnings print even when the default (non-verbose) filter is on."""
+        sch_file = tmp_path / "tconn.kicad_sch"
+        sch_file.write_text(T_CONNECTION_NO_DOT % {"EXTRA": ""})
+
+        connections_main([str(sch_file)])
+        out = capsys.readouterr().out
+
+        assert "Warnings:" in out
