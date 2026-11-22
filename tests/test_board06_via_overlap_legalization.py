@@ -345,18 +345,25 @@ def test_fixture_relocation_same_net_slit_residual_is_the_accepted_one(tmp_path,
     fixture = ROOT / "regression-fixture/diffpair_test_routed.kicad_pcb"
     path = tmp_path / "fixture.kicad_pcb"
     shutil.copy(fixture, path)
-    before = {(v.layer, v.key) for v in _same_net_slits(path)}
+    before = {(v.layer, v.key): v.actual_value for v in _same_net_slits(path)}
 
     assert recipe._legalize_signal_vias(path) == 7
 
-    new = [v for v in _same_net_slits(path) if (v.layer, v.key) not in before]
-    # F.Cu rows re-keyed by the pad-population findings' boundary order are
-    # not new copper: they pair with an equal-gap row that disappeared.
+    findings = _same_net_slits(path)
+    new = [v for v in findings if (v.layer, v.key) not in before]
     in1 = sorted(round(v.actual_value, 4) for v in new if v.layer == "In1.Cu")
     assert in1 == [0.0664, 0.0841]
     assert {v.nets for v in new if v.layer == "In1.Cu"} == {("USB2_D-",)}
-    after = {(v.layer, v.key) for v in _same_net_slits(path)}
-    assert len(before) == 29 and len(after) == 31
+    after = {(v.layer, v.key): v.actual_value for v in findings}
+    # The symmetric facing check (#9886) also measures this pre-existing GND gap.
+    stable_gap = (
+        "F.Cu",
+        "physical_copper_gap|070c2f52-4049-427d-a76f-5aec3e09de10,"
+        "Trace@F.Cu:w0.2:114.923/65.423~115.641/66.141|GND|F.Cu",
+    )
+    assert before[stable_gap] == after[stable_gap] == pytest.approx(0.112132)
+    assert before.keys() <= after.keys()
+    assert len(before) == 30 and len(after) == 32
 
 
 def write_drill_pair_slide_board(path):

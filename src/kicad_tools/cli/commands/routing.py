@@ -1075,6 +1075,10 @@ def run_optimize_command(args) -> int:
         sub_argv.append("--drc-aware")
     if getattr(args, "project", None):
         sub_argv.extend(["--project", args.project])
+    if getattr(args, "pour_slots", False):
+        sub_argv.append("--pour-slots")
+    if getattr(args, "pour_slots_pack", False):
+        sub_argv.append("--pour-slots-pack")
     if getattr(args, "allow_default_rules", False):
         sub_argv.append("--allow-default-rules")
     if getattr(args, "mfr", None):
