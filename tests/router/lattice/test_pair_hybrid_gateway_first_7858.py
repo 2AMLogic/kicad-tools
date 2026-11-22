@@ -12,10 +12,53 @@ preference reproduces it.
 from __future__ import annotations
 
 import dataclasses
+from types import SimpleNamespace
+
+import pytest
 
 from kicad_tools.router.lattice.coupled import CoupledConnection
 
 from .test_pair_hybrid_6446 import _HS, _board, _coupled_trunk_mm, _route
+
+
+@pytest.mark.parametrize(
+    "via_counts,lengths,before,expected",
+    [
+        ((1, 1), (4.1, 4.1), (3.5, 5.2), True),
+        # Restoring the missing barrel can increase the sum while both the
+        # longest electrical leg and the skew improve (board 03 connector).
+        ((1, 1), (5.64, 5.39), (3.47, 6.82), True),
+        ((1, 2), (4.0, 4.0), (3.5, 5.2), False),
+        ((1, 1), (3.1, 5.5), (3.5, 5.2), False),
+        ((1, 1), (2.0, 4.5), (3.5, 5.2), False),
+        ((4, 4), (4.0, 4.0), (3.5, 5.2), False),
+    ],
+)
+def test_unequal_hybrid_has_a_checked_fallback(monkeypatch, via_counts, lengths, before, expected):
+    pf, pc, _ = _board()
+    pf.pair_gateway_limits[pc.key] = (6.0, 3)
+    pf.pair_length_measure = lambda route: route.length
+
+    def route(count, length):
+        return SimpleNamespace(vias=[None] * count, length=length)
+
+    hybrid = SimpleNamespace(routes=[route(0, before[0]), route(1, before[1])])
+    legs = {
+        pol: (SimpleNamespace(route=route(count, length)), "ok")
+        for pol, count, length in zip(("P", "N"), via_counts, lengths, strict=True)
+    }
+    monkeypatch.setattr(pf, "_partner_aware_legs", lambda *_args, **_kwargs: (legs, False))
+    monkeypatch.setattr(pf, "_legs_shortfalls", lambda *_args: 0)
+    result = pf._balanced_hybrid_fallback(
+        pc,
+        hybrid,
+        committed=pf._fresh_committed(),
+        history={},
+        present=0.0,
+        escape_plan={},
+        vias_used=0,
+    )
+    assert (result is not None) is expected
 
 
 def _prefer_bcu(pc: CoupledConnection) -> CoupledConnection:

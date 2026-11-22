@@ -6144,7 +6144,7 @@ class LatticePathfinder:
                 if best is not None:
                     fans = sum(g.fan_len_p + g.fan_len_n for g in (ga, gb) if g is not None)
                     floor = combo_length_floor(end_a, end_b, fans)
-                    if best[0].sealed == 0 and round(floor, 3) >= best[0].key()[1]:
+                    if best[0].prunes(floor):
                         pruned += 1
                         continue
                 tried += 1
@@ -6173,8 +6173,8 @@ class LatticePathfinder:
                     lengths[0 if net == pc.pad_p_a.net else 1] += sum(
                         dist(a, b) for a, b in zip(poly, poly[1:], strict=False)
                     )
-                # Issue #7650: the coupled body on the gateway layer, the
-                # matched-length tie-break.
+                # Measure the coupled body on the gateway layer for the
+                # uncoupled-length cost or matched-length tie breaker.
                 body = [
                     [poly for net, run_layer, poly in pres.runs if run_layer == layer and net == n]
                     for n in (pc.pad_p_a.net, pc.pad_n_a.net)
@@ -6189,6 +6189,7 @@ class LatticePathfinder:
                     lengths[1],
                     self._escape_sites_sealed(pres, half, pad_layers),
                     coupled,
+                    budgeted=max_fan is not None,
                 )
                 if best is None or scored.key() < best[0].key():
                     desc = []
@@ -7020,6 +7021,57 @@ class LatticePathfinder:
         measure = self.pair_length_measure or _default_pair_length
         lp, ln = (measure(r) for r in res.routes)
         return (round(abs(lp - ln), 3), round(lp + ln, 3))
+
+    def _balanced_hybrid_fallback(
+        self,
+        pc: CoupledConnection,
+        hybrid: _PairResult,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        escape_plan: dict[int, EscapeChoice],
+        vias_used: int,
+        deadline: float | None = None,
+    ) -> tuple[_RouteResult, _RouteResult] | None:
+        """Offer an unequal-via hybrid a pair of shorter, via-balanced escapes.
+
+        Both escapes must fit the protocol limits without increasing the
+        longer electrical length or the skew of the hybrid. Comparing the
+        sum would penalize the extra barrel that restores via parity even
+        when both the required matched length and skew decrease.
+        """
+        cap, max_vias = self.pair_gateway_limits.get(pc.key, (None, None))
+        if (
+            cap is None
+            or len(hybrid.routes[0].vias) == len(hybrid.routes[1].vias)
+            or (deadline is not None and time.monotonic() >= deadline)
+        ):
+            return None
+        trial = committed.begin_trial()
+        previous_memo, self._shortfall_memo = self._shortfall_memo, {}
+        try:
+            legs, _ = self._partner_aware_legs(
+                pc, committed=committed, history=history, present=present, escape_plan=escape_plan
+            )
+            p, n = legs["P"][0], legs["N"][0]
+            if p is None or n is None or len(p.route.vias) != len(n.route.vias):
+                return None
+            if max_vias is not None and vias_used + len(p.route.vias) > max_vias:
+                return None
+            measure = self.pair_length_measure or _default_pair_length
+            before_p, before_n = (measure(route) for route in hybrid.routes)
+            after_p, after_n = measure(p.route), measure(n.route)
+            if (
+                max(after_p, after_n) > min(cap, max(before_p, before_n)) + 1e-6
+                or abs(after_p - after_n) > abs(before_p - before_n) + 1e-6
+                or self._legs_shortfalls(pc, legs)
+            ):
+                return None
+            return p, n
+        finally:
+            self._shortfall_memo = previous_memo
+            committed.rollback_trial(trial)
 
     def _hybrid_parity_candidates(
         self,
@@ -8032,6 +8084,78 @@ class LatticePathfinder:
                         return "self-drc-segment-via-coincident"
         return None
 
+    def _pair_hop_keepouts(
+        self, a: Pt, b: Pt, net: int, half: float
+    ) -> tuple[LatticeKeepoutMask | None, float | None]:
+        """Restore this hop's exemptions and find the neighboring pour via's keepaway."""
+        mask = self._keepouts
+        if not mask or not self.pair_exempt_added:
+            return mask, None
+        areas = []
+        nearby_site_radii = []
+        for area in mask.areas:
+            exempt = self.pair_exempt_added.get(area.name)
+            if exempt and net in exempt:
+                area = replace(area, exempt=area.exempt - exempt)
+                # A pair gateway can occupy the nominal site. The stitcher
+                # then needs a neighboring landing. Near that site, limit
+                # the shortcut's departure from the searched path by the
+                # pour's own via radius plus its clearance.
+                if area.name.startswith("plane-via-site:"):
+                    x0, y0, x1, y1 = area.bbox
+                    radius = (x1 - x0) / 2
+                    center = ((x0 + x1) / 2, (y0 + y1) / 2)
+                    if seg_pt_dist(a, b, center) <= 2 * radius + half:
+                        nearby_site_radii.append(radius)
+            areas.append(area)
+        return LatticeKeepoutMask(areas), min(nearby_site_radii, default=None)
+
+    def _shorten_pair_hop(
+        self, result: _RouteResult, net_class: object | None, committed: CommittedCopper
+    ) -> _RouteResult:
+        """Shorten a single-width, same-layer hop inside a pair's intermediate part."""
+        from ..pairplan.tie import shorter_pair_hop
+
+        if result.via_points or len(result.runs) != 1:
+            return result
+        layer, points, widths = result.runs[0]
+        if len(points) < 5 or len(set(widths)) != 1:
+            return result
+        net = result.route.net
+        half = widths[0] / 2
+        _, clearance = self._conn_geometry(net_class, net)
+        extra = max(0.0, half + clearance - self._agent_radius)
+        stubs = ((points[0], points[1], half), (points[-2], points[-1], half))
+        keepouts, max_shift = self._pair_hop_keepouts(points[0], points[-1], net, half)
+
+        def clear(a: Pt, b: Pt) -> bool:
+            return (
+                self._escape_boundary.segment_clear(a, b, half)
+                and not (keepouts and keepouts.segment_blocked(a, b, layer, net, half))
+                and not self.obstacles.segment_blocked(a, b, layer, net, extra)
+                and not (
+                    self._pairwise
+                    and self.obstacles.pairwise_pad_blocked(
+                        a, b, layer, net, half, extra, self._pairwise
+                    )
+                )
+                and committed.seg_clear(a, b, layer, net, half, clearance)
+                and self._own_net_pad_band_ok(a, b, layer, net, half, attached=stubs)
+            )
+
+        chosen = shorter_pair_hop(points, clear, max_shift=max_shift)
+        if chosen is None:
+            return result
+        segments = [
+            replace(result.route.segments[0], x1=a[0], y1=a[1], x2=b[0], y2=b[1])
+            for a, b in zip(chosen, chosen[1:], strict=False)
+        ]
+        return replace(
+            result,
+            route=replace(result.route, segments=segments),
+            runs=[(layer, chosen, [widths[0]] * len(segments))],
+        )
+
     def _search_single(
         self,
         item: Connection,
@@ -8067,6 +8191,8 @@ class LatticePathfinder:
         )
         if result is None:
             return None, reason
+        if isinstance(_key, tuple) and len(_key) == 3 and _key[1] == "hop":
+            result = self._shorten_pair_hop(result, net_class, committed)
         # Final self-DRC gate (#4318): a route whose own segment body
         # runs across its own via center is malformed copper the
         # checker cannot repair -- decline it honestly rather than
@@ -9434,7 +9560,7 @@ class LatticePathfinder:
                     commit_pair(item, vres)
 
             def flush_hybrids() -> None:
-                nonlocal routed_items, hybrid_count
+                nonlocal routed_items, hybrid_count, fallback_legs
                 pending = list(deferred_hybrid)
                 deferred_hybrid.clear()
                 for item in pending:
@@ -9451,6 +9577,29 @@ class LatticePathfinder:
                     )
                     if hres is None:
                         continue  # keeps its uncoupled fallback
+                    alternative = self._balanced_hybrid_fallback(
+                        item,
+                        hres,
+                        deadline=deadline,
+                        committed=committed,
+                        history=history,
+                        present=present,
+                        escape_plan=escape_plan,
+                        vias_used=pair_vias_used(item),
+                    )
+                    if alternative is not None:
+                        legs = self._fallback_items(item)
+                        for pol, route in zip(("P", "N"), alternative, strict=True):
+                            leg = legs[pol]
+                            self._commit_single(leg, route, routes, committed)
+                            attempted_keys.add(leg[0])
+                            pass_attempted.add(leg[0])
+                        deferred_fallback.remove(item)
+                        self.pair_via_mismatch.pop(item.key, None)
+                        fallback_legs += 2
+                        routed_items += 1
+                        self.pair_hybrid_log[item.key] += "; shorter via-balanced fallback"
+                        continue
                     pair_outcomes[item.key] = SegmentOutcome.hybrid(terminal)
                     hybrid_count += 1
                     routed_items += 1
