@@ -139,6 +139,92 @@ def test_route_runs_pass_and_names_unresolved(tmp_path: Path, capsys):
     assert all(w >= 0.15 for w in widths)  # ...and meet the jlcpcb floor
 
 
+@pytest.mark.parametrize(
+    "flags",
+    [[], ["--no-auto-layers"], ["--adaptive-rules"], ["--adaptive-rules", "--no-auto-layers"]],
+    ids=["layer-escalation", "direct", "combined-escalation", "rule-relaxation"],
+)
+def test_route_json_reports_published_silk(tmp_path, capsys, flags):
+    board = _defect_board(tmp_path / "source")
+    out = tmp_path / "routed.kicad_pcb"
+    rc = kct_main(
+        [
+            "route",
+            str(board),
+            "-o",
+            str(out),
+            "--seed",
+            "7",
+            "--skip-drc",
+            "--format",
+            "json",
+            "--quiet",
+            *flags,
+        ]
+    )
+    assert rc == 0
+    repair = json.loads(capsys.readouterr().out)["silk_fix"]
+    assert Path(repair["board"]) == out
+    assert repair["manufacturer"] == "jlcpcb"
+    assert repair["total_fixed"] > 0
+    assert any(
+        row["kind"] == "silk_over_hole" and "U9" in row["item"] for row in repair["unresolved"]
+    )
+
+
+@pytest.mark.parametrize("flag", ["--no-silk-fix", "--dry-run"])
+def test_route_json_skips_silk_when_board_is_untouched(tmp_path, capsys, flag):
+    board = _defect_board(tmp_path / "source")
+    out = tmp_path / "routed.kicad_pcb"
+    assert (
+        kct_main(
+            [
+                "route",
+                str(board),
+                "-o",
+                str(out),
+                "--seed",
+                "7",
+                "--skip-drc",
+                "--format",
+                "json",
+                "--quiet",
+                flag,
+            ]
+        )
+        == 0
+    )
+    assert "silk_fix" not in json.loads(capsys.readouterr().out)
+    if flag == "--dry-run":
+        assert not out.exists()
+    else:
+        assert next(line[1] for line in _silk_lines(out) if line[2] == 105.0) == 0.08
+
+
+@pytest.mark.parametrize(
+    "command,flags",
+    [("route-auto", ["--net", "NET1"]), ("optimize-placement", ["--max-iterations", "3"])],
+)
+@pytest.mark.parametrize(
+    "source_fab,destination_fab,width", [("jlcpcb", "oshpark", 0.15), ("oshpark", None, 0.127)]
+)
+def test_output_silk_uses_source_fabricator(
+    tmp_path, capsys, command, flags, source_fab, destination_fab, width
+):
+    board = _defect_board(tmp_path / "source")
+    out = tmp_path / "shipping" / "board.kicad_pcb"
+    out.parent.mkdir()
+    for directory, fab in ((board.parent, source_fab), (out.parent, destination_fab)):
+        if fab:
+            (directory / "project.kct").write_text(
+                'kct_version: "1.0"\nproject:\n  name: silk-test\n'
+                f"requirements:\n  manufacturing:\n    target_fab: {fab}\n"
+            )
+    assert kct_main([command, str(board), "-o", str(out), "--format", "json", *flags]) == 0
+    assert json.loads(capsys.readouterr().out)["silk_fix"]["manufacturer"] == source_fab
+    assert next(line[1] for line in _silk_lines(out) if line[2] == 105.0) == pytest.approx(width)
+
+
 def test_route_reports_no_unresolved_for_via_only_crossing(tmp_path: Path, capsys):
     board = _defect_board(tmp_path / "run")
     out = tmp_path / "run" / "routed.kicad_pcb"

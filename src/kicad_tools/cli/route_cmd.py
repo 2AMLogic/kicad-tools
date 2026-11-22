@@ -14697,7 +14697,9 @@ def route_with_layer_escalation(
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
-    _apply_default_silk_pass(output_path, args, layers=final_result.layer_count, quiet=quiet)
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=final_result.layer_count, quiet=quiet
+    )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -15697,7 +15699,9 @@ def route_with_rule_relaxation(
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
-    _apply_default_silk_pass(output_path, args, layers=final_result.layer_count, quiet=quiet)
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=final_result.layer_count, quiet=quiet
+    )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -18258,7 +18262,9 @@ def route_with_combined_escalation(
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
-    _apply_default_silk_pass(output_path, args, layers=final_result.layer_count, quiet=quiet)
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=final_result.layer_count, quiet=quiet
+    )
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -24660,6 +24666,7 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
 
     from kicad_tools.json_stdout import json_stdout
 
+    silk_fix = getattr(args, "_route_silk_fix", None)
     last = getattr(args, "_last_layer_result", None)
     if last is not None:
         from kicad_tools.router import print_routing_diagnostics_json
@@ -24676,17 +24683,15 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 # Issue #6239: the exit code is the run's single final verdict.
                 verdict=_verdict_for_exit(exit_code),
                 grid_selection=getattr(args, "_grid_selection", None),
+                silk_fix=silk_fix,
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
-    print(
-        json.dumps(
-            {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)},
-            indent=2,
-        ),
-        file=json_stdout(),
-    )
+    document = {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)}
+    if silk_fix is not None:
+        document["silk_fix"] = silk_fix
+    print(json.dumps(document, indent=2), file=json_stdout())
 
 
 def _dry_run_layer_counts(pcb_path: Path, args, argv) -> tuple[list[int], bool]:
@@ -27515,7 +27520,9 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
-    _apply_default_silk_pass(output_path, args, layers=layer_stack.num_layers, quiet=quiet)
+    args._route_silk_fix = _apply_default_silk_pass(
+        output_path, args, layers=layer_stack.num_layers, quiet=quiet
+    )
 
     _rss.mark("post-fill-zones")
 
@@ -27866,6 +27873,7 @@ def _run_main_impl(args, parser, argv) -> int:
             routing_plan=_routing_plan_json,
             verdict=_final_verdict,
             grid_selection=getattr(args, "_grid_selection", None),
+            silk_fix=args._route_silk_fix,
         )
 
     # Save partial results on clean partial exit (not just SIGINT)

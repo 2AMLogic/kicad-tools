@@ -2099,6 +2099,11 @@ def run_optimize_placement(
     if not quiet:
         print(f"\nWriting result to: {output_path}")
 
+    silk_mfr = None
+    if silk_fix:
+        from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+        silk_mfr = resolve_cli_manufacturer(None, pcb_path)
     silk_repair: SnapSilkRepair | None = None
     silk_fix_doc: dict | None = None
     try:
@@ -2138,16 +2143,10 @@ def run_optimize_placement(
                 print(f"WARNING: {warning}", file=sys.stderr)
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board.
-    if silk_fix:
-        from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
-
+    if silk_mfr is not None:
         from .silk_default_pass import run_default_silk_pass
 
-        silk_fix_doc = run_default_silk_pass(
-            output_path,
-            mfr=resolve_cli_manufacturer(None, output_path),
-            quiet=quiet,
-        )
+        silk_fix_doc = run_default_silk_pass(output_path, mfr=silk_mfr, quiet=quiet)
 
     if not quiet:
         print("Done.")

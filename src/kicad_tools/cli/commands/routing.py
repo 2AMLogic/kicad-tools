@@ -607,6 +607,12 @@ def run_route_auto_command(args) -> int:
     # last one -- one whole-run verdict over every net.
     gate = None
     requested_output = args.output
+    # Resolve the source project's tier before the gate substitutes its staged output.
+    silk_mfr = (
+        _resolve_route_auto_mfr(args.pcb)
+        if requested_output and not getattr(args, "no_silk_fix", False)
+        else None
+    )
     if getattr(args, "lint_gate", False):
         if not args.output:
             print(
@@ -686,13 +692,13 @@ def run_route_auto_command(args) -> int:
             if passes.active
             else any(d.get("output_path") for d in net_docs)
         )
-        if wrote_output and args.output and not getattr(args, "no_silk_fix", False):
+        if wrote_output and args.output and silk_mfr is not None:
             from ..silk_default_pass import run_default_silk_pass
 
             quiet = bool(getattr(args, "quiet", False) or getattr(args, "global_quiet", False))
             with stdout_to_stderr_when(as_json):
                 silk_fix_doc = run_default_silk_pass(
-                    args.output, mfr=_resolve_route_auto_mfr(args.output), quiet=quiet or as_json
+                    args.output, mfr=silk_mfr, quiet=quiet or as_json
                 )
     except BaseException:
         if gate is not None:
