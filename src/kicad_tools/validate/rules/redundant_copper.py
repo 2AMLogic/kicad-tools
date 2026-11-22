@@ -73,8 +73,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kicad_tools.core.layers import via_spans_layer
 from kicad_tools.pcb_prune import COVERED_TOL_MM  # shared with prune (#8734)
-from kicad_tools.router.clearance_kernel import KSegment, KShape, KVia, copper_gap
 
+from ..clearance_shapes import KSegment, KShape, KVia, copper_gap, segment_shape
 from ..mask_geometry import CURVE_ERROR_MM
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule, drc_clear
@@ -747,7 +747,7 @@ class RedundantCopperRule(DRCRule):
             return False  # net classes cannot be modelled: no shortcut is provably legal
         net = chain[0][0].net_number
         width = max(s.width for s, _f, _t in chain)
-        old = [KSegment(s.start[0], s.start[1], s.end[0], s.end[1], s.width) for s, _f, _t in chain]
+        old = [segment_shape(segment) for segment, _start, _end in chain]
         contacts = [
             terminal
             for terminal in terminal_shapes
