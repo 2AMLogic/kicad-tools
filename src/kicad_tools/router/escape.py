@@ -46,7 +46,7 @@ from kicad_tools.core.types import copper_span_contains
 from .layers import Layer, LayerType
 from .pad_geometry import pad_point_distance
 from .primitives import Pad, Route, Segment, Via, pad_half_extents
-from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
+from .via_clearance import SameNetPadBox, point_clear_of_copper, segment_clears_foreign_via
 from .via_in_pad_eligibility import (
     resolve_component_hole_context,
     resolve_process,
@@ -7182,7 +7182,7 @@ class EscapeRouter:
                     hw, hh = pad_half_extents(p)
                     if net is not None and p.net == net:
                         if band_edge_mm > 0 and not getattr(p, "through_hole", False):
-                            same_net_bboxes.append((p.x - hw, p.y - hh, p.x + hw, p.y + hh))
+                            same_net_bboxes.append(SameNetPadBox.from_router_pad(p, hw, hh))
                         continue
                     pad_tuples.append((p.x, p.y, 2.0 * hw, 2.0 * hh, p.net))
             if same_net_bboxes:
