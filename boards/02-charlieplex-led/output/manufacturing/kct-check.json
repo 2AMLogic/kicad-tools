@@ -8420,10 +8420,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "20e12f0d3d531147cc7aa77da6a5827451ff63b1f54eda82d96b7d37b48524a0",
-            "B.Mask": "06ab1a07f51739502d7cfa97464e2979af8e123cc6b0982ced5c39d76362f4e8",
-            "F.Cu": "1561309e915a26e2f9c101588163c0026e2da26c329dc4c12afda125e52706aa",
-            "B.Cu": "ad387eab731a766decc8925822f38de7843cf64046b015e36a7b43be32565761"
+            "F.Mask": "56dfda74cddc7353f7e9f24c5c3c255228a37586ec2ea1272b3bc494ce2060a9",
+            "B.Mask": "792d218cfbcaad32d682d5799b7564fd8fc93981150d201ee7a458dd08c77c59",
+            "F.Cu": "60e9771d7f672d6a8e007f110511bb22634a3e63ac0e18bab43f054c9203ff8e",
+            "B.Cu": "afd5f6eed4e15339d8b55b36d0d4f6d651a8a8a7c01dcd6876e0e5885dfc6dc4"
           },
           "unsupported": [],
           "source_geometries": {}
