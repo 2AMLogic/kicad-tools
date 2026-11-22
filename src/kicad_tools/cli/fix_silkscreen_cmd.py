@@ -37,6 +37,7 @@ import argparse
 import json
 import sys
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 
 from kicad_tools.drc.repair_silkscreen import (
@@ -464,6 +465,7 @@ def _legalize_json(report: SilkLegalizeReport, mfr: str | None) -> dict:
             for f in report.strokes.fixes
         ],
     }
+    data["footprint_line_edits"] = [asdict(edit) for edit in report.footprint_line_edits]
     data.update(_clip_dicts(report.pads))
     data.update(_hole_dicts(report.holes))
     data["total_keepout_clip_fixed"] = report.keepouts.total_fixed
@@ -505,6 +507,13 @@ def _print_legalize_text(report: SilkLegalizeReport, mfr: str | None) -> None:
         )
     if report.strokes.total_fixed:
         print(f"  thickened {report.strokes.total_fixed} text stroke(s) to {report.min_width_mm}mm")
+    for edit in report.footprint_line_edits:
+        action = (
+            "shifted joined marker" if edit.action == "moved_marker" else "trimmed free end at edge"
+        )
+        print(
+            f"  {edit.footprint_ref}: {action} on {edit.layer} from {edit.old_start} to {edit.old_end}"
+        )
     if report.pads.total_fixed:
         print(
             f"  clipped {report.pads.total_fixed} line(s) to {report.min_pad_clearance_mm}mm pad clearance"

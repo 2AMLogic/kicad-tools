@@ -48,6 +48,7 @@ from kicad_tools.sexp.parser import SExp, parse_file
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
+    from kicad_tools.silkscreen.footprint_lines import FootprintLineEdit
     from kicad_tools.silkscreen.place_refs import PlaceSilkRefsResult
 
 # Silkscreen layer names recognised by KiCad (pre-8.0 and 8.0+).
@@ -206,6 +207,7 @@ class PadClearanceSkip:
     element_type: str
     layer: str
     reason: str
+    graphic_key: str = ""
 
 
 @dataclass
@@ -473,9 +475,13 @@ class SilkscreenRepairer:
         from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
         from kicad_tools.schema.pcb import Footprint, FootprintGraphic
-        from kicad_tools.validate.rules.clearance import _pad_polygon
+        from kicad_tools.validate.rules.factory_clearance import silk_pad_apertures
         from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
-        from kicad_tools.validate.rules.silkscreen import _fp_transform, _silk_side
+        from kicad_tools.validate.rules.silkscreen import (
+            _fp_transform,
+            _graphic_descriptor,
+            _silk_side,
+        )
 
         result = PadClearanceRepairResult(min_clearance_mm=min_clearance_mm)
 
@@ -488,25 +494,8 @@ class SilkscreenRepairer:
 
         footprints = [(node, Footprint.from_sexp(node)) for node in _find_all_footprints(self.doc)]
 
-        # Pad apertures per side, exactly as check_silk_pad_clearance builds them.
-        per_side: dict[str, list] = {"F": [], "B": []}
-        for _node, fp in footprints:
-            for pad in fp.pads:
-                if pad.type not in ("smd", "thru_hole", "connect"):
-                    continue
-                margin = pad.solder_mask_margin
-                if margin is None:
-                    margin = default_margin
-                copper = _pad_polygon(pad, fp)
-                if copper is None:
-                    continue
-                for side in ("F", "B"):
-                    if "*.Cu" not in pad.layers and f"{side}.Cu" not in pad.layers:
-                        continue
-                    exposed = "*.Mask" in pad.layers or f"{side}.Mask" in pad.layers
-                    geom = copper.buffer(max(margin or 0, 0)) if exposed else copper
-                    if not geom.is_empty:
-                        per_side[side].append(geom)
+        apertures = silk_pad_apertures((fp for _, fp in footprints), default_margin)
+        per_side = {side: [shape for shape, _ in entries] for side, entries in apertures.items()}
         trees = {side: STRtree(geoms) for side, geoms in per_side.items() if geoms}
         if not trees:
             return result
@@ -570,6 +559,7 @@ class SilkscreenRepairer:
                             element_type="fp_line",
                             layer=graphic.layer,
                             reason="pin-1 / polarity marker",
+                            graphic_key=_graphic_descriptor("fp", graphic),
                         )
                     )
                     continue
@@ -1626,6 +1616,7 @@ class SilkLegalizeReport:
     #: Silk-keepout clip (Issue #9798); empty when no sibling ``.kicad_dru``
     #: forbids silk.
     keepouts: KeepoutClipRepairResult = field(default_factory=KeepoutClipRepairResult)
+    footprint_line_edits: list[FootprintLineEdit] = field(default_factory=list)
     refs: PlaceSilkRefsResult | None = None
     #: ``silk_hole_overlap`` findings (vias excluded) still present on the
     # finished tree, graphics and text respectively.
@@ -1653,6 +1644,7 @@ class SilkLegalizeReport:
             + self.strokes.total_fixed
             + self.pads.total_fixed
             + self.holes.total_fixed
+            + len(self.footprint_line_edits)
             + self.keepouts.total_fixed
             + moved
         )
@@ -1682,14 +1674,16 @@ def legalize_silk(
     4. clip silk lines back from pad apertures
        (:meth:`SilkscreenRepairer.repair_pad_clearance`) when the profile
        defines a silk-to-pad clearance;
-    5. clip silk graphics off PTH/NPTH drill holes **only** -- vias are
+    5. move connected marker lines as a group when they clear the pads, and
+       trim free footprint-line ends at the board edge;
+    6. clip silk graphics off PTH/NPTH drill holes **only** -- vias are
        excluded, per the #9795 operator ruling
        (:meth:`SilkscreenRepairer.repair_hole_clearance`);
-    6. move obscured references against the repaired geometry
+    7. move obscured references against the repaired geometry
        (:class:`~kicad_tools.silkscreen.place_refs.SilkRefPlacer`), via
        obstacles likewise excluded.
 
-    Steps 1-5 run on one staged tree; the placement is planned against that
+    The graphic repairs run on one staged tree; the placement is planned against that
     edited geometry, so references move clear of the geometry that survives
     the clips.  A dry run stages exactly the same result in memory and
     reports it; it simply never writes.
@@ -1724,6 +1718,7 @@ def legalize_silk(
         DEFAULT_CLEARANCE_MM,
         SILK_EDGE_CLEARANCE_MM,
     )
+    from kicad_tools.silkscreen.footprint_lines import repair_footprint_lines
     from kicad_tools.silkscreen.place_refs import SilkRefPlacer
     from kicad_tools.validate.rules.silkscreen import (
         _silk_keepout_findings,
@@ -1763,6 +1758,19 @@ def legalize_silk(
         pad_result = repairer.repair_pad_clearance(pad_clearance)
         rules_covered.append("silk_pad_clearance")
 
+    dru_path = pcb_path.with_suffix(".kicad_dru")
+    footprint_line_edits = repair_footprint_lines(
+        repairer.doc,
+        skipped_markers={(s.footprint_ref, s.graphic_key) for s in pad_result.skipped},
+        pad_clearance=pad_clearance,
+        mask_clearance=mfr_profile.min_solder_mask_clearance_mm,
+        hole_clearance=mfr_profile.min_silk_to_hole_clearance_mm,
+        dru_path=dru_path,
+    )
+    rules_covered.append("silk_edge_clearance")
+    if pad_clearance is not None and any(e.action == "moved_marker" for e in footprint_line_edits):
+        pad_result.skipped = repairer.repair_pad_clearance(pad_clearance, dry_run=True).skipped
+
     # None keeps the silk_hole_overlap rule's own threshold.
     hole_result = repairer.repair_hole_clearance(
         mfr_profile.min_silk_to_hole_clearance_mm, include_vias=False
@@ -1771,7 +1779,6 @@ def legalize_silk(
     # Clip graphics out of the keepouts the board's own sibling rule file
     # forbids silk in (Issue #9798).  The rules are read from the *original*
     # board's ``.kicad_dru`` -- the staged tree below has no sidecar.
-    dru_path = pcb_path.with_suffix(".kicad_dru")
     keepout_result = KeepoutClipRepairResult()
     if dru_path.exists():
         rules_covered.append("silk_in_keepout")
@@ -1786,6 +1793,7 @@ def legalize_silk(
             edge_clearance_mm=SILK_EDGE_CLEARANCE_MM,
             mask_clearance_mm=mfr_profile.min_solder_mask_clearance_mm,
             include_via_obstacles=False,
+            settle=True,
         )
         # Apply in memory even on a dry run: the report then describes the
         # same staged result either way, and a dry run only skips the write.
@@ -1896,6 +1904,7 @@ def legalize_silk(
             holes=hole_result,
             keepouts=keepout_result,
             refs=ref_result,
+            footprint_line_edits=footprint_line_edits,
             hole_residual=hole_residual,
             text_over_hole=text_over_hole,
             keepout_residual=keepout_residual,
