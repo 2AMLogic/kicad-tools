@@ -3705,6 +3705,107 @@ def test_slot_pad_copper_checks_the_whole_landing(
         assert pcb.vias[0].position == (10.0, 10.0)
 
 
+@pytest.mark.parametrize(
+    ("constraint", "pad_type", "layers", "net", "ref", "minimum", "blocked"),
+    [
+        ("hole_clearance", "np_thru_hole", "*.Mask", "", "j?", 0.5, True),
+        ("hole_clearance", "np_thru_hole", "*.Mask", "", "J9", 0.34, False),
+        ("hole_clearance", "np_thru_hole", "*.Mask", "", "JX", 0.5, False),
+        ("physical_hole_clearance", "thru_hole", "*.Cu", ' (net 2 "OTHER")', "J9", 0.5, True),
+        ("physical_hole_clearance", "thru_hole", "B.Cu", ' (net 1 "SIG")', "J9", 0.5, True),
+        ("physical_hole_clearance", "np_thru_hole", "*.Mask", "", "J9", 0.5, False),
+    ],
+)
+def test_landing_applies_custom_hole_rules_to_the_selected_pad(
+    tmp_path, constraint, pad_type, layers, net, ref, minimum, blocked
+):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_hole_to_copper
+
+    board = _hole_floor_board(
+        tmp_path,
+        floor=0.25,
+        obstacle=(
+            '(footprint "Test:Slot" (layer "F.Cu") (at 12 11) '
+            '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
+            f'(pad "1" {pad_type} circle (at 0 0) (size .6 .6) (drill .30) '
+            f'(layers "{layers}"){net}))'
+        ),
+    )
+    board.write_text(board.read_text().replace("(size .45) (drill .2)", "(size 1) (drill .2)"))
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "selected hole" (condition "A.Type == 'Via' && B.Reference == '{ref}'")
+  (constraint {constraint} (min {minimum}mm)))
+"""
+    )
+    pcb = PCB.load(board)
+    reason = _check_hole_to_copper(pcb, pcb.vias[0], 12.0, 10.0, 0.25)
+    if blocked:
+        assert reason and "0.350mm to pad J9-1" in reason
+    else:
+        assert reason is None
+
+
+@pytest.mark.parametrize(
+    ("hole_x", "end_x", "layer", "reference", "blocked"),
+    [
+        (11.0, 12.0, "In1.Cu", "J9", True),
+        (11.0, 12.0, "B.Cu", "J9", False),
+        (11.0, 12.0, "In1.Cu", "JX", False),
+        (10.05, 10.05, "In1.Cu", "J9", True),
+    ],
+)
+def test_track_specific_hole_rule_checks_the_whole_stub(
+    tmp_path, hole_x, end_x, layer, reference, blocked
+):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    # The long stub passes the hole at its midpoint. The short one fits entirely
+    # inside the original via, which had no track-specific rule on In1.Cu.
+    board = _hole_floor_board(
+        tmp_path,
+        floor=0.1,
+        obstacle=(
+            f'(footprint "Test:Mechanical" (layer "F.Cu") (at {hole_x} 10.5) '
+            '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
+            '(pad "" np_thru_hole circle (at 0 0) (size .3 .3) (drill .3) (layers "*.Mask")))'
+        ),
+    )
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "inner track" (layer "In1.Cu") (condition "B.Type == 'Track' && A.Reference == '{reference}'")
+  (constraint hole_clearance (min 0.4mm)))
+"""
+    )
+    pcb = PCB.load(board)
+    reason = _check_stub_clearance(pcb, pcb.vias[0], (end_x, 10), [layer], 0.2, 0.1)
+    assert bool(reason) is blocked
+
+
+@pytest.mark.parametrize(("rule_layer", "blocked"), [("F.Cu", True), ("B.Cu", False)])
+def test_via_drill_checks_a_pad_land_only_on_its_copper_layer(tmp_path, rule_layer, blocked):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_hole_to_copper
+
+    board = _hole_floor_board(
+        tmp_path,
+        floor=0.25,
+        obstacle=(
+            '(footprint "Test:Land" (layer "B.Cu") (at 12 10.7) '
+            '(property "Reference" "J9" (at 0 0) (layer "B.SilkS")) '
+            '(pad "1" smd circle (at 0 0) (size .2 .2) (layers "F.Cu") (net 2 "OTHER")))'
+        ),
+    )
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "land" (layer "{rule_layer}") (condition "B.Reference == 'J9'")
+  (constraint hole_clearance (min 0.6mm)))
+"""
+    )
+    pcb = PCB.load(board)
+    reason = _check_hole_to_copper(pcb, pcb.vias[0], 12, 10, 0.25)
+    assert bool(reason) is blocked
+
+
 def test_slot_edge_rule_follows_the_candidate_copper_layer(tmp_path):
     import json
 
