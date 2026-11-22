@@ -2597,13 +2597,14 @@ def _dru_unquote_ref(ref: str) -> str:
     return ref.replace("\\'", "'")
 
 
-def _zone_silk_sides(zone: Zone) -> frozenset[str]:
-    """Silk sides a rule area's own layer spec names (empty when none)."""
-    layer_specs = zone.layers or [zone.layer]
+def _matching_silk_sides(layer_specs: Sequence[str]) -> frozenset[str]:
+    """Printable sides selected by the layer names or patterns on a rule or area."""
+    # KiCad layer patterns support * and ? and treat square brackets literally.
+    patterns = [spec.replace("[", "[[]") for spec in layer_specs]
     return frozenset(
         side
         for silk_name, side in _SILK_LAYER_SIDES.items()
-        if any(fnmatch.fnmatchcase(silk_name, spec) for spec in layer_specs)
+        if any(fnmatch.fnmatchcase(silk_name, pattern) for pattern in patterns)
     )
 
 
@@ -2620,8 +2621,9 @@ def _silk_keepout_dru_rules(
     clause of its own -- the caller then resolves sides from the referenced
     area -- and an empty frozenset when the clause names no silk layer (a
     rule scoped to copper cannot forbid printable ink, wherever the area
-    sits).  Rules with no ``intersectsArea`` reference are not area-specific
-    and are skipped.  A rule whose condition is not a plain ``||`` list of
+    sits). An unconditional exemption applies to every referenced area on
+    its matching sides. Other rules without an area reference are skipped.
+    A rule whose condition is not a plain ``||`` list of
     ``A.intersectsArea('...')`` terms (a negation, a conjunction with another
     test, a ``B.`` reference) is skipped as unsupported -- reading the area
     out of such an expression as a positive match would clip legal silk --
@@ -2670,12 +2672,16 @@ def _silk_keepout_dru_rules(
         }
         if not kinds:
             continue
+        severity = node.find_child("severity")
+        ignored = severity is not None and severity.get_string(0) == "ignore"
         condition = node.find("condition")
         condition_text = condition.get_string(0) if condition is not None else ""
         refs = [_dru_unquote_ref(m) for m in _DRU_INTERSECTS_AREA_RE.findall(condition_text or "")]
-        if not refs:
+        if condition is None and ignored:
+            refs = ["*"]
+        elif not refs:
             continue
-        if _DRU_SUPPORTED_CONDITION_RE.fullmatch(condition_text or "") is None:
+        elif _DRU_SUPPORTED_CONDITION_RE.fullmatch(condition_text or "") is None:
             rule_name = node.get_string(0) or "(unnamed)"
             if unsupported is not None:
                 unsupported.append(rule_name)
@@ -2691,11 +2697,7 @@ def _silk_keepout_dru_rules(
             sides: frozenset[str] | None = None
         else:
             layer_names = [str(c.value) for c in layer_node.children if isinstance(c.value, str)]
-            sides = frozenset(
-                side for side in (_SILK_LAYER_SIDES.get(n) for n in layer_names) if side
-            )
-        severity = node.find_child("severity")
-        ignored = severity is not None and severity.get_string(0) == "ignore"
+            sides = _matching_silk_sides(layer_names)
         rules.append((sides, kinds, refs, ignored))
     return rules
 
@@ -2753,7 +2755,7 @@ def resolve_silk_keepouts(
             for index, zone in enumerate(zones):
                 if not _zone_matches_reference(zone, ref):
                     continue
-                resolved = _zone_silk_sides(zone)
+                resolved = _matching_silk_sides(zone.layers or [zone.layer])
                 if rule_sides is not None:
                     resolved &= rule_sides
                 for side in resolved:

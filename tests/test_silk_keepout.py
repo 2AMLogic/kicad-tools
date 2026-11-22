@@ -706,6 +706,12 @@ _OUTSIDE_LINE = (
         ('(layers "F.SilkS" "B.SilkS")', "", {"front-line", "back-line"}),
         ('(layers "*.SilkS")', "", {"front-line", "back-line"}),
         ('(layers "*.SilkS")', '(layer "B.SilkS")', {"back-line"}),
+        ('(layers "F.SilkS" "B.SilkS")', '(layer "*.SilkS")', {"front-line", "back-line"}),
+        ('(layers "F.SilkS" "B.SilkS")', '(layer "F.*")', {"front-line"}),
+        ('(layers "F.SilkS" "B.SilkS")', '(layer "B.*")', {"back-line"}),
+        ('(layers "F.SilkS" "B.SilkS")', '(layer "*.Mask")', set()),
+        ('(layers "F.SilkS" "B.SilkS")', '(layer "?.Silkscreen")', {"front-line", "back-line"}),
+        ('(layers "F.SilkS" "B.SilkS")', '(layer "[FB].SilkS")', set()),
     ],
 )
 def test_public_fix_clips_only_sides_shared_by_rule_and_area(
@@ -764,10 +770,10 @@ def test_public_fix_uses_active_disallow_constraints(
     assert not check_silk_in_keepout(PCB.load(board)).violations
 
 
-@pytest.mark.parametrize("same_area", [True, False])
+@pytest.mark.parametrize("ignore_scope", ["same_area", "overlapping_area", "board"])
 @pytest.mark.parametrize("ignore_last", [True, False])
 def test_ignored_rule_precedence_is_per_item_and_kind(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], same_area: bool, ignore_last: bool
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], ignore_scope: str, ignore_last: bool
 ) -> None:
     from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen_main
 
@@ -784,8 +790,10 @@ def test_ignored_rule_precedence_is_per_item_and_kind(
     ignored = active.replace("printed legend keepout", "allow graphics").replace(
         "(constraint disallow text graphic)", "(severity ignore) (constraint disallow graphic)"
     )
-    if not same_area:
+    if ignore_scope == "overlapping_area":
         ignored = ignored.replace("no_ink", "exception")
+    elif ignore_scope == "board":
+        ignored = ignored.replace("""  (condition "A.intersectsArea('no_ink')")\n""", "")
     rules = "(version 1)\n" + (active + ignored if ignore_last else ignored + active)
     board = _board(tmp_path, _SILK_ZONE + inner + _INSIDE_LINE + _OUTSIDE_LINE + _FRONT_TEXT, rules)
     before = _gr_lines(board)
