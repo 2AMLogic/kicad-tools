@@ -525,6 +525,22 @@ def test_gap_repair_respects_via_lock(tmp_path, flag, locked, copper, items):
     assert result.skipped("locked_via") == int(locked)
 
 
+@pytest.mark.parametrize(
+    ("copper", "items", "via_id"),
+    [(PAD_VIA, [PAD, VIA_PAD], "via-p"), (TANGENT, [TRACE, VIA_TANGENT], "via-t")],
+)
+def test_gap_repair_preserves_group_locked_via(tmp_path, copper, items, via_id):
+    groups = f'(group "fab" (uuid "g") (locked yes) (members "{via_id}"))'
+    board = _board(tmp_path, copper + "\n" + groups)
+    original = board.read_bytes()
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps([_finding(items)], max_displacement=1.0)
+    assert result.repaired == 0
+    assert result.skipped("locked_via") == 1
+    assert not repairer.modified
+    assert board.read_bytes() == original
+
+
 def test_move_longer_than_max_displacement_is_declined(tmp_path):
     board = _board(tmp_path, TANGENT)
     result = CopperGapRepairer(board).repair_gaps(

@@ -661,8 +661,22 @@ PASS_VIA = _via("via-p", (101.35, 99.6))
 
 
 @pytest.mark.parametrize(
-    ("lock_flag", "movable"),
-    [("locked", False), ("(locked yes)", False), ("(locked no)", True), ("", True)],
+    ("lock_flag", "groups", "movable"),
+    [
+        ("locked", "", False),
+        ("(locked yes)", "", False),
+        ("(locked no)", "", True),
+        ("", "", True),
+        ("", '(group "g" (uuid "g") (locked yes) (members "TARGET"))', False),
+        (
+            "(locked no)",
+            '(group "child" (uuid "c") (locked no) (members "TARGET"))'
+            '(group "parent" (uuid "p") (locked yes) (members "c"))',
+            False,
+        ),
+        ("", '(group "g" (uuid "g") (locked no) (members "TARGET"))', True),
+        ("", '(group "g" (uuid "g") (locked yes) (members "other"))', True),
+    ],
 )
 @pytest.mark.parametrize(
     ("conductor", "locked_item", "reason"),
@@ -674,7 +688,7 @@ PASS_VIA = _via("via-p", (101.35, 99.6))
     ],
 )
 def test_nudge_respects_authored_copper_locks(
-    tmp_path, monkeypatch, capsys, conductor, locked_item, reason, lock_flag, movable
+    tmp_path, monkeypatch, capsys, conductor, locked_item, reason, lock_flag, groups, movable
 ):
     if conductor == "via-p":
         copper = PASS_VIA + "\n" + _seg("trk-q", (101.35, 99.6), (103, 99.6))
@@ -683,7 +697,8 @@ def test_nudge_respects_authored_copper_locks(
         copper = PASS + "\n" + _seg("trk-q", (105, 100.62), (108, 103))
         finding = _pt_finding(conductor)
     uuid = f'(uuid "{locked_item}")'
-    board = _board(tmp_path, copper.replace(uuid, f"{lock_flag} {uuid}"))
+    copper = copper.replace(uuid, f"{lock_flag} {uuid}")
+    board = _board(tmp_path, copper + "\n" + groups.replace("TARGET", locked_item))
     original = board.read_bytes()
     before = [_saved_copper(board, item)[1] for item in (conductor, "trk-q")]
     reports = [_report(finding), _report() if movable else _report(finding)]

@@ -38,14 +38,15 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
+from ..core.pcb_item_locks import BoardItemLocks
 from ..sexp import SExp
 from .net_compat import resolve_net_atom
-from .repair_clearance import _is_locked
 from .repair_drill_clearance import DrillClearanceRepairer
 from .violation import DRCViolation, ViolationType
 
@@ -206,6 +207,10 @@ class CopperGapRepairer(DrillClearanceRepairer):
     its ``_target_clearance_reason`` gate that re-validates every computed
     move against the shared clearance engine before it is applied.
     """
+
+    def __init__(self, pcb_path: str | Path):
+        super().__init__(pcb_path)
+        self._locks = BoardItemLocks(self.doc)
 
     def repair_gaps(
         self,
@@ -475,7 +480,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         start, end, width, seg_net = track
         if not vnet or vnet != seg_net:
             return "not_same_net"
-        if _is_locked(via_node):
+        if self._locks.is_locked(via_node):
             return "locked_via"
 
         ux, uy = end[0] - start[0], end[1] - start[1]
@@ -526,7 +531,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         poly, centre, _pad_layers, pad_net, _pad_ref = pad
         if not vnet or vnet != pad_net:
             return "not_same_net"
-        if _is_locked(via_node):
+        if self._locks.is_locked(via_node):
             return "locked_via"
         # ``already_merged`` requires actual copper contact (distance 0);
         # a small positive gap is a real slit the repair must clear, not a
@@ -701,7 +706,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         for seg_node in self.doc.find_all("segment"):
             if not net_name or self._net_name(seg_node) != net_name:
                 continue
-            if _is_locked(seg_node) and self._end_at(seg_node, vx, vy) is not None:
+            if self._locks.is_locked(seg_node) and self._end_at(seg_node, vx, vy) is not None:
                 return None
             for tag in ("start", "end"):
                 xy = _xy(seg_node.find(tag))
