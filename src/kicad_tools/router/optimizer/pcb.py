@@ -69,7 +69,7 @@ def _extract_balanced_blocks(text: str, keyword: str) -> list[tuple[int, int, st
     parentheses.
     """
     blocks: list[tuple[int, int, str]] = []
-    opener = f"({keyword}"
+    opener = re.compile(rf"\(\s*{re.escape(keyword)}(?=[\s)])")
     start: int | None = None
     depth = 0
     # Consume complete strings/comments/atoms so neither quoted parentheses
@@ -79,13 +79,7 @@ def _extract_balanced_blocks(text: str, keyword: str) -> list[tuple[int, int, st
         token = match.group()
         if start is None:
             pos = match.start()
-            after = pos + len(opener)
-            if (
-                token == "("
-                and text.startswith(opener, pos)
-                and after < len(text)
-                and (text[after].isspace() or text[after] == ")")
-            ):
+            if token == "(" and opener.match(text, pos):
                 start = pos
                 depth = 1
         elif token == "(":
@@ -108,7 +102,7 @@ _RE_START = re.compile(r"\(start\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
 _RE_END = re.compile(r"\(end\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
 _RE_WIDTH = re.compile(r"\(width\s+([\d.eE+-]+)\)")
 _RE_LAYER = re.compile(r'\(layer\s+"([^"]+)"\)')
-_RE_NET = re.compile(r"\(net\s+(\d+)\)")
+_RE_NET = re.compile(r'\(net\s+(\d+)(?:\s+("(?:\\.|[^"\\])*"))?\s*\)')
 # Issue #9580: the item uuid KiCad writes on every track and via.  Captured
 # so a re-emitted track/via can keep its input identity.
 _RE_UUID = re.compile(r'\(uuid\s+("(?:\\.|[^"\\])*")\)')
@@ -132,7 +126,8 @@ def _resolve_block_net(
 
     Handles both KiCad net-reference dialects (issue #4413):
 
-    * numeric  ``(net N)``        -> id ``N``, name from the header table.
+    * numeric  ``(net N)`` or ``(net N "NAME")`` -> id ``N``, with the
+      header name or the item's explicit name.
     * name     ``(net "NAME")``   -> id from the ``name_to_id`` reverse map,
       name ``NAME``.
 
@@ -146,6 +141,8 @@ def _resolve_block_net(
     m_net = _RE_NET.search(block)
     if m_net:
         net = int(m_net.group(1))
+        if m_net.group(2):
+            return net, net_names.get(net, _decode_net_string(m_net.group(2)))
         return net, net_names.get(net, f"Net{net}")
 
     m_name = _RE_NET_NAME.search(block)
@@ -172,7 +169,7 @@ def _is_unresolvable_numeric_ref(
     if not name_only_board:
         return False
     m_net = _RE_NET.search(block)
-    if m_net is None:
+    if m_net is None or m_net.group(2):
         return False
     return int(m_net.group(1)) not in net_names
 
@@ -184,6 +181,34 @@ def _is_unresolvable_numeric_ref(
 # regex -- the bug class fixed by issue #4529.  Kept as a thin alias so
 # existing in-module callers of ``_resolve_block_net`` are unaffected.
 resolve_block_net = _resolve_block_net
+
+
+_RE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+_RE_LOCKED = re.compile(r"\(locked\s+yes\s*\)|\(locked\s*\)|(?<=[\s)])locked(?=[\s)])")
+
+
+def locked_segment_nets(pcb_text: str) -> set[str]:
+    """Names of nets that carry at least one locked track segment (Issue #9640).
+
+    A track locked in KiCad (``(locked yes)``, or the bare ``locked`` token of
+    older files) is how a designer marks a run as shaped on purpose.  The
+    optimizer rewrites whole chains, so it leaves every net that owns one
+    untouched rather than guessing which neighbouring segments may move.
+    """
+    net_names = parse_net_names(pcb_text)
+    name_to_id = {name: nid for nid, name in net_names.items()}
+    locked: set[str] = set()
+    # Straight tracks and copper arcs both carry the lock field.
+    for kind in ("segment", "arc"):
+        for _start, _end, block in _extract_balanced_blocks(pcb_text, kind):
+            # Quoted strings (net names, uuids) are data, never lock tokens:
+            # a net called "sense locked rail" does not lock its track.
+            if not _RE_LOCKED.search(_RE_QUOTED.sub('""', block)):
+                continue
+            resolved = _resolve_block_net(block, net_names, name_to_id)
+            if resolved and resolved[1]:
+                locked.add(resolved[1])
+    return locked
 
 
 def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
@@ -1330,9 +1355,18 @@ def optimize_pcb(
 
     vias_by_net = parse_vias(pcb_text) if net_anchors_by_name else {}
 
+    # Issue #9640: a net owning a locked track was shaped on purpose; leave it.
+    locked_nets = locked_segment_nets(pcb_text)
+
     # Optimize each net
     optimized_segments: dict[str, list[Segment]] = {}
     for net, segs in segments_by_net.items():
+        if net in locked_nets:
+            stats.locked_nets_skipped.append(net)
+            optimized_segments[net] = list(segs)
+            if on_net_optimized is not None:
+                on_net_optimized(net, segs, segs)
+            continue
         optimized = (
             kelvin.optimize_net(
                 net, segs, optimize_fn, pad_guard=pad_guard, defer_pad_guard=defer_pad_guard

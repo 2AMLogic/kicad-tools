@@ -13,11 +13,8 @@ Verdicts under test, one test (or group) per row per entry point:
 
 * **Row 2 -- shove/rip-up of existing copper**: ``route-auto`` does not apply
   (append-only persistence; other nets' copper is untouched).  ``kct route``
-  DOES apply to the listing half: without ``--preserve-existing`` a plain run
-  replaces all top-level routing copper (issue #2976 strip) and printed
-  nothing about it.  The fix under test here is the pre-run notice listing
-  every net whose copper the run will replace.  The layer-protection half is
-  #9591 / #9597; the lock-by-default policy change is a child issue.
+  lists the nets whose copper an explicit full reroute will replace. A plain
+  run preserves existing routing copper by default (#9627).
 
 * **Row 4 -- stale write**: ``kct route`` does not apply as reported (SIGINT /
   SIGTERM save partial once then exit, #6324; atomic writes, #2808).  The
@@ -34,8 +31,11 @@ its whole reachable component to exhaustion, so fixture area is test runtime.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+
+import pytest
 
 from kicad_tools.cli import route_cmd
 from kicad_tools.mcp.tools.routing import route_net_auto
@@ -213,6 +213,10 @@ def _route_argv(board: Path, out: Path) -> list[str]:
         # attempt 1" failure mode a loaded host can produce.
         "--timeout",
         "15",
+        # Both fixtures select a 0.10 mm grid. Pin it so the known-open
+        # nets do not trigger the automatic coarser-grid connectivity probe.
+        "--grid",
+        "0.1",
         "--skip-drc",
         "--no-auto-pour",
         # The sealed nets are unroutable by construction; the chained
@@ -359,11 +363,52 @@ class TestRow1RouteAuto:
 
 
 class TestRow2KctRoute:
-    def test_plain_run_notice_lists_existing_copper_nets(self, tmp_path, capsys):
+    @pytest.mark.parametrize(
+        ("with_via", "options", "expected"),
+        [
+            (False, [], False),
+            (True, [], True),
+            (True, ["--no-preserve-existing"], False),
+            (False, ["--complete", "--no-preserve-existing"], True),
+            (False, ["--nets", "EASY", "--no-preserve-existing"], True),
+            (False, ["--region", "1,1,25,21", "--no-preserve-existing"], True),
+            (False, ["--resume", "checkpoint.kicad_pcb", "--no-preserve-existing"], True),
+        ],
+    )
+    def test_preservation_at_route_selection(
+        self, tmp_path, monkeypatch, with_via, options, expected
+    ):
+        board = _partial_seal_board(tmp_path)
+        via = '(via (at 112 121) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 3))'
+        # A closing quote after an escaped backslash must not hide the via.
+        path_text = json.dumps("C:\\boards\\")
+        note = f'(gr_text {path_text} (at 112 119) (layer "F.SilkS"))'
+        with_copper = f"{board.read_text().rstrip()[:-1]}{note}\n{via}\n{note}\n)\n"
+        if with_via:
+            board.write_text(with_copper)
+        checkpoint = tmp_path / "checkpoint.kicad_pcb"
+        checkpoint.write_text(with_copper)
+        monkeypatch.chdir(tmp_path)
+
+        def check_selection(args, pcb_path):
+            assert args.preserve_existing is expected
+            if args.resume:
+                assert pcb_path.resolve() == checkpoint
+            return 17
+
+        monkeypatch.setattr(route_cmd, "_resolve_preserved_connected_nets", check_selection)
+        assert route_cmd._in_process_main_impl([str(board), *options]) == 17
+
+    def test_full_reroute_notice_lists_existing_copper_nets(self, tmp_path, capsys):
+        from kicad_tools.schema.pcb import PCB
+
         board = _partial_seal_board(tmp_path, hand_copper=True)
+        marker = '(via (at 114 120) (size 0.85) (drill 0.4) (layers "F.Cu" "B.Cu") (net 3))'
+        board.write_text(board.read_text().rstrip()[:-1] + marker + "\n)\n")
+        (input_via,) = PCB.load(board).vias
         out = tmp_path / "notice_routed.kicad_pcb"
 
-        rc = route_cmd._in_process_main_impl(_route_argv(board, out))
+        rc = route_cmd._in_process_main_impl([*_route_argv(board, out), "--no-preserve-existing"])
 
         # 2 = partial routing below threshold (SIG3 is partial by
         # construction); the notice is the assertion target here.
@@ -375,6 +420,36 @@ class TestRow2KctRoute:
         assert "HAND" in combined
         assert "SIG3" in combined
         assert "--preserve-existing" in combined
+        assert all(v.position != input_via.position for v in PCB.load(out).vias)
+
+    def test_plain_route_keeps_existing_copper_on_partial_net_and_stitch_via(self, tmp_path):
+        from kicad_tools.schema.pcb import PCB
+
+        board = _partial_seal_board(tmp_path, hand_copper=True)
+        via = (
+            '(via (at 112 121) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (locked yes) (net 3))'
+        )
+        source = board.read_text().replace(
+            "(segment (start 104 121)", "(segment (locked yes) (start 104 121)"
+        )
+        board.write_text(source.rstrip()[:-1] + via + "\n)\n")
+        original = PCB.load(board)
+        out = tmp_path / "partial_routed.kicad_pcb"
+
+        assert route_cmd._in_process_main_impl(_route_argv(board, out)) == 2
+
+        routed = PCB.load(out)
+        tracks = {(s.start, s.end, s.width, s.layer, s.net_number) for s in routed.segments}
+        for s in original.segments:
+            assert (s.start, s.end, s.width, s.layer, s.net_number) in tracks
+        assert any(s.locked and s.net_number == 3 for s in routed.segments)
+        (via_before,) = original.vias
+        assert any(
+            (v.position, v.size, v.drill, v.layers, v.net_number)
+            == (via_before.position, via_before.size, via_before.drill, via_before.layers, 3)
+            for v in routed.vias
+        )
+        assert any(v.find_child("locked") is not None for v in routed._sexp.find_children("via"))
 
     def test_notice_helper_skips_preserve_dry_run_and_quiet(self, tmp_path, capsys):
         """The notice must not fire under --preserve-existing/--dry-run/--quiet."""

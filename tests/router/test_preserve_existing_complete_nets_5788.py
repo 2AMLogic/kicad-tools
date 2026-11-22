@@ -30,8 +30,7 @@ What is pinned here
 2. The same for a **coupled differential pair** -- board 06's failure was on
    coupled pairs, so a single-ended-only regression test would not have caught
    it.
-3. The default (no ``--preserve-existing``) is untouched: a complete net is
-   still re-routed.
+3. An explicit full reroute replaces a complete net's original copper.
 4. An EXPLICIT route set still re-routes a complete net -- ``--nets`` promises
    exactly that, and the fix must not quietly turn it into a no-op.
 5. The detector itself, against board 06's real input: exactly the eight LVDS
@@ -199,20 +198,13 @@ class TestCompleteNetIsLeftAlone:
         path.write_text(board)
         assert fully_connected_nets(path) == ["DONE_NET"]
 
-    def test_default_still_reroutes_a_complete_net(self, tmp_path):
-        """Regression-safety: WITHOUT the flag, a full re-route is still a full re-route.
-
-        ``--preserve-existing`` is documented as opt-in incremental routing; the
-        default must keep replacing existing copper with freshly routed nets, or
-        #5788's fix would have silently changed every plain ``kct route``.
-        """
-        board = _two_lane_board()
-        out_text = _run_route(tmp_path, board)
+    def test_full_reroute_replaces_a_complete_net(self, tmp_path):
+        board = _two_lane_board().replace("(width 0.25)", "(width 0.61)")
+        out_text = _run_route(tmp_path, board, extra_argv=["--no-preserve-existing"])
         out = parse_segments(out_text)
-        # Both lanes are routed from scratch, and the pre-existing copper block
-        # is NOT carried over verbatim -- the writer strips and re-emits.
         assert set(out) == set(_LANES)
-        assert out["DONE_NET"], "the default pass should have routed DONE_NET itself"
+        assert out["DONE_NET"]
+        assert all(segment.width != 0.61 for segment in out["DONE_NET"])
 
     def test_explicit_nets_still_reroutes_a_complete_net(self, tmp_path):
         """``--nets`` promises to route exactly what it lists -- even if complete.

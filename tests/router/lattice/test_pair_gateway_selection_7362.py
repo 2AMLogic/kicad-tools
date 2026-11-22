@@ -16,6 +16,8 @@ before routing (an ``against`` crossing is kept: 06rf PCIE_TX, 07rf DQS).
 
 from __future__ import annotations
 
+from itertools import permutations
+
 import pytest
 
 from kicad_tools.router.lattice.pathfinder import _PairResult
@@ -29,6 +31,27 @@ from kicad_tools.router.pairplan.gateway import (
 )
 from kicad_tools.router.primitives import Route
 from tests.router.lattice.test_pair_gateway_pass_under_6836 import _dual_row_board
+
+
+def test_uncoupled_budget_ranking_does_not_prune_a_better_matched_pair() -> None:
+    """A shorter proposal can leave more of the run uncoupled."""
+    shortest = WorkableCombo(0, 7.32, 7.52, coupled=2.79, budgeted=True)
+    coupled = WorkableCombo(1, 7.63, 7.23, coupled=3.92, budgeted=True)
+    detour = WorkableCombo(2, 10.18, 9.19, coupled=4.77, budgeted=True)
+
+    for ordered in permutations((shortest, coupled, detour)):
+        best = None
+        for candidate in ordered:
+            if best is not None and best.prunes(candidate.score):
+                continue
+            best = candidate if best is None or candidate.key() < best.key() else best
+        assert best is coupled
+
+
+def test_a_length_floor_tie_can_still_improve_coupling() -> None:
+    first = WorkableCombo(0, 5, 5, coupled=1)
+    assert not first.prunes(10)
+
 
 # -- pure model ---------------------------------------------------------------
 
