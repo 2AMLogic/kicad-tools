@@ -1653,13 +1653,13 @@ def _via_row_ports(
         if via.kind == VIA and track.kind == TRACK and track.key[0] == "segment":
             via_tracks.setdefault(via.key, set()).add(track.key[1])
 
-    ports = set()
+    ports: set[tuple[_Node, _Node]] = set()
     for i, j in pairs:
         if i in touching_vias or j in touching_vias:
             continue
         first_pos, second_pos = pcb.vias[i].position, pcb.vias[j].position
         shared = via_tracks.get(i, set()) & via_tracks.get(j, set())
-        pair_ports = []
+        pair_ports: list[tuple[_Node, _Node]] = []
         for track_index in shared:
             bar = pcb.segments[track_index]
             first_station = _track_station(bar, first_pos)
