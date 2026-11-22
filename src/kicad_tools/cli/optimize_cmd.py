@@ -637,6 +637,24 @@ def resolve_board_stackup(
     return layers, copper_oz
 
 
+def add_pour_slot_args(parser: argparse.ArgumentParser) -> None:
+    """Register pour-slot cleanup options for both optimize-traces entry points."""
+    parser.add_argument(
+        "--pour-slots",
+        action="store_true",
+        help="Spread parallel different-net tracks that leave a slot in a copper pour "
+        "(the kct check pour_slot advisory). Requires kicad-cli. Each edit is checked "
+        "after zone refill and reverted if any DRC or unconnected count rises.",
+    )
+    parser.add_argument(
+        "--pour-slots-pack",
+        action="store_true",
+        help="With --pour-slots, also pack a pair when spreading it fails. Packing "
+        "reduces the gap to the clearance limit, removes the ground strip between the "
+        "tracks and leaves the pour_slot advisory in place.",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for trace optimization CLI.
 
@@ -782,24 +800,7 @@ Shaped-on-purpose copper (Issue #9640):
         help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verification "
         "uses (default: the files beside the board)",
     )
-    parser.add_argument(
-        "--pour-slots",
-        dest="pour_slots",
-        action="store_true",
-        help="After optimizing, spread or pack parallel different-net tracks that leave "
-        "a slot in a copper pour (the `kct check` pour_slot advisory).  Every edit is "
-        "refereed by kicad-cli (--refill-zones) and reverted if any DRC or unconnected "
-        "count rises; refuses without kicad-cli.  Spreads only unless --pour-slots-pack "
-        "is given.  Default: off",
-    )
-    parser.add_argument(
-        "--pour-slots-pack",
-        dest="pour_slots_pack",
-        action="store_true",
-        help="With --pour-slots, also pack pairs that cannot be spread (tighten the gap "
-        "to clearance).  Packing removes the slot by removing the ground strip between "
-        "the tracks, and packed pairs still raise the pour_slot advisory.  Default: off",
-    )
+    add_pour_slot_args(parser)
     parser.add_argument(
         "--allow-default-rules",
         action="store_true",
