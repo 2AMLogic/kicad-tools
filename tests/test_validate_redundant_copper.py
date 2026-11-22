@@ -730,8 +730,8 @@ def test_tie_gaps_match_the_pairwise_checker_verdicts(tmp_path):
 _ENTRY_CHAIN = [(0, 3), (1.5, 1.5), (5, 1.5), (5, 0.9), (10, 0.9), (10, 0)]
 
 
-def _entry_board(tmp_path, margin=0.0, extra_pads=""):
-    body = _pad_fp("A1", 0, 3) + _pad_fp("B1", 10, 0) + extra_pads + _seg_text(_ENTRY_CHAIN)
+def _entry_board(tmp_path, margin=0.0, extra_copper=""):
+    body = _pad_fp("A1", 0, 3) + _pad_fp("B1", 10, 0) + extra_copper + _seg_text(_ENTRY_CHAIN)
     return _board(tmp_path, body, margin=margin)
 
 
@@ -744,6 +744,16 @@ def test_own_pad_clean_entry_reported_at_zero_margin(tmp_path):
     """
     (finding,) = _checker_stairs(_entry_board(tmp_path))
     assert "(0.00, 3.00) -> (3.00, 0.00) -> (10.00, 0.00)" in finding.message
+
+
+@pytest.mark.parametrize(("branch_y", "bend"), [(-0.31, "(7.00, 3.00)"), (-0.45, "(3.00, 0.00)")])
+def test_clean_own_pad_entry_checks_the_same_net_slit(tmp_path, branch_y, bend):
+    # The first bend enters the pad cleanly. The branch along its horizontal
+    # leg leaves either a 0.085 mm slit or 0.225 mm of clearance.
+    branch = _seg_text([(4, branch_y), (8, branch_y)], width=0.2, start_uuid=40)
+    pcb = _entry_board(tmp_path, extra_copper=branch)
+    (finding,) = _staircase_findings(_checker(pcb, gap_mm=0.1016))
+    assert f"-> {bend} ->" in finding.message
 
 
 def test_own_pad_entry_through_expansion_stays_rejected(tmp_path):
@@ -760,7 +770,7 @@ def test_trace_beside_or_through_own_pad_still_rejected(tmp_path):
     fail and nothing is reported.
     """
     beside = _pad_fp("C1", 6.5, 0.68) + _pad_fp("C2", 0.9, 3.0)
-    assert _checker_stairs(_entry_board(tmp_path, extra_pads=beside)) == []
+    assert _checker_stairs(_entry_board(tmp_path, extra_copper=beside)) == []
 
 
 # Board 02 [VCC] B.Cu: the chain's interior node joins a same-net via by
