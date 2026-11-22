@@ -698,6 +698,41 @@ _OUTSIDE_LINE = (
 
 
 @pytest.mark.parametrize(
+    ("area_layers", "rule_layer", "forbidden"),
+    [
+        ('(layer "F.SilkS")', '(layer "F.SilkS")', {"front-line"}),
+        ('(layer "B.SilkS")', '(layer "F.SilkS")', set()),
+        ('(layer "F.Cu")', '(layer "F.SilkS")', set()),
+        ('(layers "F.SilkS" "B.SilkS")', "", {"front-line", "back-line"}),
+        ('(layers "*.SilkS")', "", {"front-line", "back-line"}),
+        ('(layers "*.SilkS")', '(layer "B.SilkS")', {"back-line"}),
+    ],
+)
+def test_public_fix_clips_only_sides_shared_by_rule_and_area(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    area_layers: str,
+    rule_layer: str,
+    forbidden: set[str],
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    front = _INSIDE_LINE.replace("inside-line", "front-line")
+    back = _INSIDE_LINE.replace("F.SilkS", "B.SilkS").replace("inside-line", "back-line")
+    zone = _SILK_ZONE.replace('(layer "F.SilkS")', area_layers)
+    board = _board(tmp_path, zone + front + back, dru=_DRU.replace('(layer "F.SilkS")', rule_layer))
+    original = board.read_bytes()
+    findings = check_silk_in_keepout(PCB.load(board)).violations
+    assert {v.items[0] for v in findings} == {f"gr_line {{{uid}}}" for uid in forbidden}
+    assert fix_silkscreen_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["total_keepout_clip_fixed"] == len(forbidden)
+    assert {line[3] for line in _gr_lines(board)} == {"front-line", "back-line"} - forbidden
+    if not forbidden:
+        assert board.read_bytes() == original
+
+
+@pytest.mark.parametrize(
     "clauses,forbidden",
     [
         ("(constraint disallow graphic) (severity ignore)", False),

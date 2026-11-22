@@ -2599,20 +2599,12 @@ def _dru_unquote_ref(ref: str) -> str:
 
 def _zone_silk_sides(zone: Zone) -> frozenset[str]:
     """Silk sides a rule area's own layer spec names (empty when none)."""
-    names = list(zone.layers or []) + ([zone.layer] if zone.layer else [])
-    sides: set[str] = set()
-    for name in names:
-        side = _SILK_LAYER_SIDES.get(name)
-        if side is None and "*" in name:
-            # Wildcard spec (e.g. ``*.Silkscreen``): match against the four
-            # canonical silk names, as ``intersectsArea`` would.
-            for silk_name, silk_side in _SILK_LAYER_SIDES.items():
-                if fnmatch.fnmatchcase(silk_name, name):
-                    side = silk_side
-                    break
-        if side is not None:
-            sides.add(side)
-    return frozenset(sides)
+    layer_specs = zone.layers or [zone.layer]
+    return frozenset(
+        side
+        for silk_name, side in _SILK_LAYER_SIDES.items()
+        if any(fnmatch.fnmatchcase(silk_name, spec) for spec in layer_specs)
+    )
 
 
 def _silk_keepout_dru_rules(
@@ -2728,12 +2720,9 @@ def resolve_silk_keepouts(
     condition the resolver cannot preserve are skipped and named in
     ``unsupported`` (when a list is passed).
 
-    The sides an area forbids silk on come from the rule's own layer clause
-    when it carries one -- a clause naming no silk layer (copper, say)
-    scopes that rule off silk entirely -- and otherwise from the area's own
-    layer spec.  An area that neither the rule nor its own layers place on
-    a silk layer cannot forbid printable ink and is skipped -- a copper
-    keepout, however strict, leaves the silk legal.  Unresolvable
+    The area's layer spec supplies the possible silk sides. An explicit
+    rule layer restricts them to the sides shared by the rule and the area.
+    A copper-only area therefore leaves printable ink legal. Unresolvable
     references are skipped silently: the native DRC reports them on the
     pinned image, not kct.
 
@@ -2764,12 +2753,9 @@ def resolve_silk_keepouts(
             for index, zone in enumerate(zones):
                 if not _zone_matches_reference(zone, ref):
                     continue
-                if rule_sides is None:
-                    # No layer clause of its own: wherever the area sits.
-                    resolved = _zone_silk_sides(zone)
-                else:
-                    # A clause naming no silk layer scopes the rule off silk.
-                    resolved = rule_sides
+                resolved = _zone_silk_sides(zone)
+                if rule_sides is not None:
+                    resolved &= rule_sides
                 for side in resolved:
                     for kind in kinds:
                         pair = (side, kind)
