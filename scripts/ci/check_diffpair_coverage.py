@@ -287,19 +287,11 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # In run 44811568469 boards 00/01 passed and board 07 had only its 54 allowed
 # mask errors. Boards 02-05 remained red (THT/SMD spacing, mask exposure,
 # reviewed drill validation and manufacturer checks, respectively).
-# Issue #9019 (measured 2026-11-21, seed 42, pinned image, main 39c2ebeda vs
-# this fix): the MIPI_CLK+ U4.1 slit came from the taper's fragmentation.
-# The 0.025 mm piece ending at (125.15, 115.15) is its own copper primitive
-# and never touches the pad; the leg unions with U4.1 only through a later
-# piece. Both route conversions now fuse a piece that no width can lift out
-# of the band with its straight-run neighbours, drawn at their narrowest
-# width, until the fused segment reaches the pad
-# (``neck_down.band_safe_taper``; here (125.1, 115.1)->(125.3, 115.3) at
-# 0.1365 mm). The MIPI_CLK+ entry is deleted. physical_copper_gap goes 3 -> 2
-# (the two GND stitcher gaps, #9846) and mask_to_copper 197 -> 156, with
-# 21/21 reach, 175 vias and kicad-cli 0 errors before and after.
+# The #9019 taper repair removed the MIPI_CLK+ slit at U4.1. The #9846
+# stitcher repair removes both GND stub slits at U2.B4 and U3.48.
+# The combined seed-42 fixture has zero physical copper gaps and 153
+# identity-allowed mask findings. Either recurring gap must fail the gate.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "GND"): 8962,
     # Issue #8858 (measured 2026-11-18 at main 304c70e2c, pinned image
     # kicad/kicad@sha256:18693567 -- the digest CI's KICAD_IMAGE pins): the
     # seed-42 regeneration of this board carries 200 ``mask_to_copper``
@@ -312,9 +304,8 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # now names ``nets`` on each finding).  A net that starts carrying
     # mask errors still fails the gate; a net the router stops exposing
     # goes stale and forces its entry out.  Each entry's value is the
-    # tracking issue number (#8858), the same convention as the
-    # physical_copper_gap entries' 8962 -- the gate judges identity,
-    # never count; the measured per-net populations are recorded in the
+    # tracking issue number (#8858). The gate judges identities, and
+    # the measured per-net populations are recorded in the
     # research note.  Verify with:
     #   KCT_KICAD_DOCKER=1 uv run kct check \
     #     boards/06-diffpair-test/regression-output/diffpair_test_routed.kicad_pcb \

@@ -110,6 +110,7 @@ def _build_obstacles(pcb, side: str, keepout: float):
     from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[import-untyped]
 
     from kicad_tools.geometry.courtyard import _courtyard_polygon
+    from kicad_tools.router.rule_area_resolve import all_rule_area_zones
     from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
 
     cu, short = _side_layers(side)
@@ -132,14 +133,19 @@ def _build_obstacles(pcb, side: str, keepout: float):
             geoms.append(LineString([seg.start, seg.end]).buffer(seg.width / 2))
     for via in pcb.vias:
         geoms.append(Point(via.position).buffer(via.size / 2))
-    for zone in pcb.zones:
-        ko = getattr(zone, "keepout", None)
+    for zone in all_rule_area_zones(pcb):
+        ko = zone.keepout
         if ko is None or len(zone.polygon) < 3:
             continue
         zone_layers = set(zone.layers or [zone.layer])
         if not ({cu, "F&B.Cu", "*.Cu"} & zone_layers):
             continue
-        if not (ko.copperpour_allowed and ko.tracks_allowed and ko.footprints_allowed):
+        if not (
+            ko.pads_allowed
+            and ko.footprints_allowed
+            and ko.copperpour_allowed
+            and ko.tracks_allowed
+        ):
             geoms.append(Polygon(zone.polygon).buffer(0))
     return geoms
 
