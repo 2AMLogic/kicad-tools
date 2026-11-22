@@ -213,6 +213,10 @@ def _route_argv(board: Path, out: Path) -> list[str]:
         # attempt 1" failure mode a loaded host can produce.
         "--timeout",
         "15",
+        # Both fixtures select a 0.10 mm grid. Pin it so the known-open
+        # nets do not trigger the automatic coarser-grid connectivity probe.
+        "--grid",
+        "0.1",
         "--skip-drc",
         "--no-auto-pour",
         # The sealed nets are unroutable by construction; the chained

@@ -170,6 +170,28 @@ class OptimizationStats:
     drc_mask_screen: str = "off"
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
+    # Issue #9640: nets left untouched because they own a locked track.
+    locked_nets_skipped: list[str] = field(default_factory=list)
+
+    def revert_to_input(self) -> None:
+        """Report the retained input geometry after a whole-board rollback."""
+        self.segments_after = self.segments_before
+        self.corners_after = self.corners_before
+        self.length_after = self.length_before
+        self.vias_after = self.vias_before
+        self.drc_errors_after = self.drc_errors_before
+        self.duplicates_removed = 0
+        self.nets_kept = 0
+        self.nets_connectivity_partial = 0
+        self.connectivity_partial_nets = []
+        for net in self.per_net:
+            if net.changed:
+                if not net.rolled_back:
+                    self.nets_rolled_back += 1
+                net.rolled_back = True
+                net.changed = False
+            net.segments_after = net.segments_before
+            net.length_after = net.length_before
 
     @property
     def segment_reduction(self) -> float:
