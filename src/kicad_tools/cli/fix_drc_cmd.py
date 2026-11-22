@@ -49,6 +49,8 @@ from kicad_tools.drc.repair_copper_gap import (
 from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer, DrillRepairResult
 from kicad_tools.drc.repair_mask_copper import (
     MaskCopperRepairer,
+    MaskNudgeAction,
+    MaskRepairAction,
     MaskRepairResult,
     MaskUnrepaired,
     finding_key,
@@ -336,7 +338,8 @@ Examples:
         choices=["clearance", "drill-clearance", "mask-copper", "copper-gap"],
         help=(
             "Only fix a specific violation type. 'mask-copper' re-centres a "
-            "track that enters its own pad off-centre (mask_to_copper); it is "
+            "track that enters its own pad off-centre and nudges a same-net "
+            "pass-through clear of its own pad's opening (mask_to_copper); it is "
             "detected with kct check's rules, not kicad-cli, and is also part "
             "of the default set when the report carries such findings. "
             "'copper-gap' moves a via that sits too close to its own pad or "
@@ -1378,7 +1381,12 @@ def _moves_with_new_errors(
         # at 0.25 mm (a rule without a requirement still sits within about a
         # trace width of the copper that caused it) plus 0.1 mm because the
         # reported point lies between the two copper edges, not on either.
-        reach = max(v.required_value_mm or 0.0, 0.25) + 0.1
+        # The measured gap is added too: a finding between a moved conductor
+        # and a via or hole reports at that item's centre/edge, one whole
+        # gap inside its own copper from the moved edge (issue #9896: dragged
+        # tracks' segment-to-via errors report at the via centre, ~0.3 mm
+        # inside its annulus).
+        reach = max(v.required_value_mm or 0.0, 0.25) + 0.1 + max(v.actual_value_mm or 0.0, 0.0)
         flagged |= {
             uuid
             for uuid, geom in geometry.items()
@@ -1386,6 +1394,25 @@ def _moves_with_new_errors(
             or any(geom.distance(Point(loc.x_mm, loc.y_mm)) <= reach for loc in v.locations)
         }
     return flagged
+
+
+def _mask_action_touches(action: MaskRepairAction | MaskNudgeAction, touched: set[str]) -> bool:
+    """Whether a new mask finding names anything a move owns.
+
+    A recentre owns its conductor and pad; a grouped nudge (issue #9896)
+    additionally owns every opening it was computed to clear and every
+    same-net end it dragged, so a new finding on a dragged track or against
+    a second opening reverts the whole grouped edit.
+    """
+    if action.uuid in touched or action.pad_uuid in touched:
+        return True
+    for opening in getattr(action, "openings", ()):
+        if opening in touched:
+            return True
+    for joined in getattr(action, "joined", ()):
+        if joined and joined[0] in touched:
+            return True
+    return any(len(point) >= 2 and point[1] in touched for point in getattr(action, "points", ()))
 
 
 def _run_mask_pass(
@@ -1424,6 +1451,7 @@ def _run_mask_pass(
             max_displacement=args.max_displacement,
             dry_run=args.dry_run,
             clearance_mm=design_rules.min_clearance_mm if design_rules is not None else None,
+            design_rules=design_rules,
         )
         if args.dry_run or result.repaired == 0:
             return result
@@ -1470,7 +1498,7 @@ def _run_mask_pass(
                 revert.append((act, "recheck_unavailable"))
             elif act.uuid in persisting:
                 revert.append((act, "finding_not_cleared"))
-            elif act.uuid in touched or act.pad_uuid in touched:
+            elif _mask_action_touches(act, touched):
                 revert.append((act, "new_mask_finding"))
             elif act.uuid in regressed:
                 revert.append((act, "new_drc_error"))
@@ -2463,7 +2491,9 @@ def _print_text(
         )
         for mask_act in mask_result.actions[:5]:
             mask_suffix = " (reverted)" if _is_reverted(mask_act.uuid) else ""
-            print(f"  [RECENTRE] {mask_act.net_name} pad {mask_act.pad_ref}{mask_suffix}")
+            print(
+                f"  [{mask_act.action.upper()}] {mask_act.net_name} pad {mask_act.pad_ref}{mask_suffix}"
+            )
             print(
                 f"    ({mask_act.old_x:.4f}, {mask_act.old_y:.4f}) -> "
                 f"({mask_act.new_x:.4f}, {mask_act.new_y:.4f}) "
