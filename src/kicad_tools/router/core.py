@@ -18418,14 +18418,15 @@ class Autorouter:
         Include foreign track and via shapes across the board for its budget:
         removing any original shape can open a detour. The guard checks only
         shapes present at the first failure, so extra copper can come and go.
-        Record physical shapes independently of their owners to recognise
-        an unchanged wall even after a different net takes it over.
+        A new owner can change a shape's clearance without moving its copper.
         ``None`` when the net has no terminals.
         """
         keys = self.nets.get(int(failed_net)) or []
         pads = [self.pads[k] for k in keys if k in self.pads]
         if not pads:
             return None
+        if search_geometry:
+            return self._search_copper_obstacles(failed_net, net_routes)
         m = self.FAILURE_NEIGHBOURHOOD_MARGIN_MM
         x0 = min(p.x - p.width / 2 for p in pads) - m
         x1 = max(p.x + p.width / 2 for p in pads) + m
@@ -18445,16 +18446,57 @@ class Autorouter:
                         and max(s.y1, s.y2) + h >= y0
                     ):
                         items.add((net, str(s.layer)))
-                    if search_geometry:
-                        start, end = sorted(((s.x1, s.y1), (s.x2, s.y2)))
-                        items.add(("segment", s.layer, start, end, s.width))
                 for v in route.vias:
                     h = v.diameter / 2
                     if v.x - h <= x1 and v.x + h >= x0 and v.y - h <= y1 and v.y + h >= y0:
                         items.add((net, "via"))
-                    if search_geometry:
-                        items.add(("via", v.x, v.y, v.diameter, v.drill, v.drilled_layers))
-        return frozenset(items) if search_geometry else tuple(sorted(items))
+        return tuple(sorted(items))
+
+    def _search_copper_obstacles(
+        self, failed_net: int, net_routes: dict[int, list[Route]]
+    ) -> frozenset:
+        """Foreign shapes and their clearance rules as seen by this search (#8486)."""
+        from .clearance_resolver import ClearanceQuery
+        from .pairwise_clearance import _norm_net_key
+
+        own_name = self.net_names.get(failed_net, "")
+        own_class = self.net_class_map.get(own_name)
+        partner = own_class.diffpair_partner if own_class else None
+        resolver = self.rules.clearance_resolver(self.net_class_map)
+        zones = [
+            (index, zone)
+            for index, zone in enumerate(self._pairwise_attach_zones_cache or ())
+            if _norm_net_key(own_name) in zone.net_names
+        ]
+        items: set[tuple] = set()
+        for net, routes in net_routes.items():
+            if net == failed_net:
+                continue
+            for route in routes:
+                name = self.net_names.get(net) or route.net_name
+                clearance = resolver.resolve(ClearanceQuery(own_name, name))
+                zone_layers = tuple(
+                    (index, zone.layers_for(name))
+                    for index, zone in zones
+                    if _norm_net_key(name) in zone.net_names
+                )
+                # Same copper may change hands during a re-route. The authored
+                # floor still applies inside a partner or attach-zone exemption,
+                # and an attach zone may waive just the pair-matrix term.
+                clearance_key = (
+                    self.rules.clearance_for_nets(failed_net, net, route.authored_clearance),
+                    clearance.terms if zone_layers else clearance.required_mm,
+                    partner == name,
+                    zone_layers,
+                )
+                for s in route.segments:
+                    start, end = sorted(((s.x1, s.y1), (s.x2, s.y2)))
+                    items.add(("segment", s.layer, start, end, s.width, clearance_key))
+                for v in route.vias:
+                    items.add(
+                        ("via", v.x, v.y, v.diameter, v.drill, v.drilled_layers, clearance_key)
+                    )
+        return frozenset(items)
 
     def _route_net_known_failure_aware(
         self,

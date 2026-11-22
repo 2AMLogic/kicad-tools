@@ -494,7 +494,7 @@ def test_seal_copper_regime_change_resets_the_streak():
 # re-benchmark on the reporter's board.
 
 
-def _wall_board(gap: bool = False, *, terminal_y=(6.0, 14.0), gap_y=(9.4, 10.6)):
+def _wall_board(gap: bool = False, *, terminal_y=(6.0, 14.0), gap_y=(9.4, 10.6), rules=None):
     from kicad_tools.router.core import Autorouter
 
     def pad(num, x, y, net, w=0.6, h=0.6, th=False):
@@ -510,7 +510,7 @@ def _wall_board(gap: bool = False, *, terminal_y=(6.0, 14.0), gap_y=(9.4, 10.6))
             "drill": 0.4 if th else 0.0,
         }
 
-    router = Autorouter(width=30.0, height=20.0)
+    router = Autorouter(width=30.0, height=20.0, rules=rules)
     # The victim: net 1, one pad each side of the wall.
     router.add_component("U1", [pad(1, 6.0, terminal_y[0], 1), pad(2, 24.0, terminal_y[1], 1)])
     # A full-height wall of overlapping through-hole pads at x=15 (each its
@@ -663,6 +663,96 @@ def test_removing_a_replacement_wall_restores_the_first_open_search(
     fresh.grid.mark_route(remote)
     expected = fresh._route_net_negotiated(1, 1.0, per_net_timeout=30.0)
     assert [(r.segments, r.vias) for r in routes] == [(r.segments, r.vias) for r in expected]
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize(
+    "handover_iteration, replacement_floor, cap, expected_budget, reachable",
+    [
+        (3, 0.0, 30.0, 30.0, True),
+        (4, 0.0, 30.0, 30.0, True),
+        (4, 2.0, 30.0, 5.0, False),
+        (4, 0.0, 3.0, 3.0, True),
+    ],
+)
+def test_detour_budget_follows_the_replacement_owners_clearance(
+    handover_iteration, replacement_floor, cap, expected_budget, reachable
+):
+    from kicad_tools.geometry.copper import segment_centerline_distance
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(net_clearance_floors={99: 2.0, 201: replacement_floor})
+    router = _wall_board(gap=True, terminal_y=(9.0, 11.0), gap_y=(15.15, 17.5), rules=rules)
+    original = _corridor_wall(99, (15.45, 16.0), (15.45,))
+    replacement = _corridor_wall(201, (15.45, 16.0), (15.45,))
+    router.routes.append(original)
+    router.grid.mark_route(original)
+    guard = RipupCycleGuard()
+
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for iteration in (1, 2, 3):
+            guard.begin_iteration(iteration, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, cap, guard, iteration)
+        assert run.call_args.kwargs["per_net_timeout"] == min(cap, 5.0)
+
+        # The short gate leaves a 0.45 mm gap to the returned track. Its owner
+        # alone determines whether the authored 2 mm minimum closes that path.
+        router.grid.unmark_route(original)
+        router.routes.remove(original)
+        router.routes.append(replacement)
+        router.grid.mark_route(replacement)
+        if handover_iteration != 3:
+            guard.begin_iteration(handover_iteration, {1: None})
+        routed = router._route_net_known_failure_aware(1, 1.0, cap, guard, handover_iteration)
+        assert run.call_args.kwargs["per_net_timeout"] == expected_budget
+        assert bool(routed) == reachable
+
+    if reachable:
+        # The returned copper actually uses the gap opened by the rule change.
+        wall = replacement.segments[0]
+        gap = min(
+            segment_centerline_distance(
+                (s.x1, s.y1), (s.x2, s.y2), (wall.x1, wall.y1), (wall.x2, wall.y2)
+            )
+            - (s.width + wall.width) / 2
+            for route in routed
+            for s in route.segments
+        )
+        assert 0 < gap < 2.0
+
+
+@pytest.mark.parametrize("copper", ["segments", "vias"])
+def test_search_obstacles_compare_the_pair_rules_for_the_same_copper(copper):
+    from kicad_tools.router.pairwise_clearance import AttachZone, PairwiseClearanceTable
+    from kicad_tools.router.rules import NetClassRouting
+
+    router = _wall_board(gap=True)
+    router.net_names.update({99: "A", 201: "B", 202: "C"})
+    router.rules.pairwise_clearance = PairwiseClearanceTable(
+        0.15, {}, {("A", "N1"): 2.0, ("B", "N1"): 2.0}
+    )
+
+    def snapshot(owner, item_floor=0.0):
+        wall = _corridor_wall(owner)
+        if copper == "segments":
+            wall.vias.clear()
+        else:
+            wall.segments.clear()
+        wall.authored_clearance = item_floor
+        return router._failure_neighbourhood_print(1, {owner: [wall]}, search_geometry=True)
+
+    # An owner change inside the terminal window preserves an equivalent rule.
+    assert snapshot(99) == snapshot(201)
+    assert snapshot(99) != snapshot(202)
+    assert snapshot(202, item_floor=2.0) != snapshot(202)
+
+    # Equal numerical pair minima can still bind differently in a rated zone,
+    # or when only one of the two owners is the failed net's coupled partner.
+    router._pairwise_attach_zones_cache = (AttachZone(0, 0, 30, 20, frozenset({"N1", "A"})),)
+    assert snapshot(99) != snapshot(201)
+    router._pairwise_attach_zones_cache = ()
+    router.net_class_map["N1"] = NetClassRouting("pair", diffpair_partner="B")
+    assert snapshot(99) != snapshot(201)
 
 
 @pytest.mark.requires_router_cpp

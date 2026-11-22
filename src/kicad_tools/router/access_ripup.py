@@ -147,9 +147,7 @@ RIPPABLE_CLOSING_KINDS: frozenset[str] = frozenset({"route_segment", "route_via"
 
 
 def _is_copper_key(signature: Any) -> bool:
-    """True for the coarse ``("copper", ...)`` fallback signature of a net with
-    no sealed terminal (issue #8486): its failure is corridor-shaped, so the
-    memo keys on the foreign copper near its terminals instead of a seal."""
+    """Identify the foreign-copper witness used when no terminal is sealed (#8486)."""
     return isinstance(signature, tuple) and bool(signature) and signature[0] == "copper"
 
 
@@ -718,10 +716,9 @@ class RipupCycleGuard:
 
         A seal must match exactly in consecutive iterations. For an unsealed
         net, the first failed search already saw no path with its original
-        foreign net/layer pairs and physical copper present. Added copper can
-        come and go while that observation still holds. Removing or moving
-        an original shape can open a corridor even when its net still has
-        copper on that layer.
+        foreign copper and its clearance rules. Added copper can come and
+        go while that observation still holds. Removing or moving an original
+        shape, or changing the clearance it imposes, can open a corridor.
         """
         sig = self.entry_signature.get(int(net))
         rec = self.capped_streak.get(int(net))
