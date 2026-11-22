@@ -666,6 +666,24 @@ class TestIdentityAllowance:
         assert "silk_over_copper did not run" in message
         assert "Stale identity allowance" not in message
 
+    @pytest.mark.parametrize("report", ["info", "summary", "legacy-summary"])
+    def test_required_mask_pass_survives_removing_last_allowance(self, report):
+        def check(cmd, **kwargs):
+            mask = _make_violation("mask_to_copper_incomplete", severity="info")
+            if report == "info":
+                payload = _make_kct_json([] if "--errors-only" in cmd else [mask])
+            else:
+                data = {"summary": {"errors": 0, "coverage_blocking_unknown": ["mask_to_copper"]}}
+                if report == "summary":
+                    data["violations"] = []
+                payload = json.dumps(data)
+            return subprocess.CompletedProcess(cmd, 0, payload, "")
+
+        with patch.object(subprocess, "run", side_effect=check):
+            passed, message, errors = self.helper.check_file(Path("strict.kicad_pcb"), allowed=0)
+        assert not passed and errors == 0
+        assert "mask_to_copper did not run" in message
+
     @pytest.mark.parametrize("unknown,expected_pass", [(["mask_to_copper"], False), ([], True)])
     def test_summary_only_report_preserves_allowance_coverage(self, unknown, expected_pass):
         summary: dict[str, object] = {"errors": 0}
@@ -713,18 +731,18 @@ class TestIdentityAllowance:
         assert errors == 0
         assert "connectivity=1" in msg
 
-    def test_release_allowances_cite_the_tracker(self) -> None:
-        """Every shipped identity_allowances entry cites issue #8858 (the
-        umbrella that stays open until the last gate skip is gone), keys a
-        rule the identity model covers, and points at a release PCB that
-        exists in the tree."""
+    def test_release_boards_count_mask_findings(self) -> None:
+        """#9706 removed the five release boards' mask allowances."""
         import yaml
 
         data = yaml.safe_load((REPO_ROOT / ".github" / "routed-drc-tolerance.yml").read_text())
         raw = data.get("identity_allowances", {})
-        assert raw, "identity_allowances block disappeared from the YAML"
         for key, rules in raw.items():
             assert (REPO_ROOT / key).is_file(), f"allowance keys a missing PCB: {key}"
+            if key.startswith(
+                ("boards/01-", "boards/02-", "boards/03-", "boards/05-", "boards/07-")
+            ):
+                assert "mask_to_copper" not in rules, f"{key} exempts real solder-mask findings"
             for rule_id, identities in rules.items():
                 assert rule_id in self.helper_identity_rules(), (
                     f"{key}: rule {rule_id!r} is not identity-keyed by "

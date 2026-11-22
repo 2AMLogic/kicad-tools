@@ -1,7 +1,7 @@
 """Tests for the `routed-pcb-drc-check` CI job and its helper script.
 
 Issue #2546 added a CI gate that validates committed `*_routed.kicad_pcb`
-files via ``kct check --mfr jlcpcb --errors-only``. These tests pin the
+files via ``kct check --mfr jlcpcb --format json``. These tests pin the
 critical structural properties of the workflow YAML, the allowlist file,
 and the helper script's allowlist semantics so regressions in any of the
 three layers are caught immediately rather than at the next CI run.

@@ -35,8 +35,8 @@ Identity-keyed allowances (issue #8858):
     stale until deleted (the #7270 Q3 operator ruling, shared with
     ``check_diffpair_coverage.py`` / ``check_matchgroup_coverage.py`` via
     ``scripts/ci/identity_allowance.py``).  ``mask_to_copper`` -- default-on
-    under ``--mfr`` since #8849 -- is judged this way since #8858 removed
-    this gate's ``--skip``; the YAML count allowlist stays empty.
+    under ``--mfr`` since #8849 -- must complete. The release boards
+    count every mask finding (#9706).
 
 Exit codes:
     0 -- All inputs within tolerance (job passes).
@@ -108,8 +108,8 @@ class IdentityOutcome(NamedTuple):
     the allowance rules whose pass did NOT complete (Issue #9706 -- an
     ``<rule>_incomplete`` record means the rule's findings, including their
     absence, are not evidence, so its entries are neither stale nor clean
-    and the gate must fail loudly instead).  All four are trivially empty
-    when no allowance applies to the board.
+    and the gate must fail loudly instead). A mask coverage gap also fails
+    a board with no identity allowances.
     """
 
     raw_blocking: int
@@ -139,18 +139,19 @@ def identity_outcome(
     falls back to the raw count while retaining any reported coverage gaps.
     """
     blocking, _advisory = count_blocking_errors(data)
-    if allowance is None:
-        return IdentityOutcome(blocking, False, [], [])
     summary = data.get("summary")
     blocking_unknown = (
         summary.get("coverage_blocking_unknown") if isinstance(summary, dict) else None
     ) or []
-    allowance_rules = {rule for rule, _ident in allowance}
-    incomplete = allowance_rules.intersection(str(rule) for rule in blocking_unknown)
+    required_rules = {"mask_to_copper"}
+    if allowance:
+        required_rules.update(rule for rule, _ident in allowance)
+    incomplete = required_rules.intersection(str(rule) for rule in blocking_unknown)
     violations = data.get("violations")
-    if not isinstance(violations, list):
+    if isinstance(violations, list):
+        incomplete.update(required_rules.intersection(incomplete_rules(violations)))
+    if allowance is None or not isinstance(violations, list):
         return IdentityOutcome(blocking, False, [], [], sorted(incomplete))
-    incomplete.update(allowance_rules.intersection(incomplete_rules(violations)))
     unallowed = unallowed_findings(allowance, violations, advisory=_is_advisory)
     stale = [
         entry
@@ -398,16 +399,10 @@ def count_errors(
     classification.  Advisory findings are returned separately so the gate
     can still surface them in diagnostic output without gating on them.
 
-    Issue #8858: the historic ``--skip mask_to_copper`` is GONE.  The rule
-    is default-on under ``--mfr`` and the release boards' residual
-    ``mask_to_copper`` population is excepted by IDENTITY (the YAML's
-    ``identity_allowances:``, see :func:`load_identity_allowances`)
-    instead -- a covered finding never
-    counts against the gate, a net that starts carrying a new mask finding
-    fails it, and an entry whose finding stops firing goes stale and fails
-    the gate until deleted (the #7270 Q3 model, the same one the
-    diffpair/matchgroup coverage gates use).  Pass ``allowance`` to apply
-    one; ``None`` (the default) counts every blocking finding.
+    The full report includes the info-severity markers used to verify
+    required coverage. The release boards run the default manufacturer
+    mask check and count its findings (#9706). Optional identity
+    allowances for other uses go through :func:`identity_outcome`.
 
     Net-class-map awareness (Issue #3151):
         ``kct check``'s diff-pair (``diffpair_length_skew``,
@@ -460,9 +455,6 @@ def count_errors(
         "--format",
         "json",
     ]
-    # An incomplete identity rule may emit its only coverage marker at info severity.
-    if not allowance:
-        cmd.append("--errors-only")
     with resolve_net_class_map_sidecar(pcb_path) as sidecar:
         if sidecar is not None:
             cmd.extend(["--net-class-map", str(sidecar)])
@@ -587,8 +579,8 @@ def check_file(
     gates (#7367).  Without one, every blocking finding counts, exactly
     as before this mechanism existed.
 
-    Issue #9706: a report carrying an ``<rule>_incomplete`` record for a
-    rule with allowance entries fails FIRST with a "did not run / native
+    Issue #9706: a report carrying an ``<rule>_incomplete`` record for
+    the mask check or a rule with allowance entries fails with a "did not run / native
     KiCad toolchain required" error -- an incomplete pass is neither
     stale nor clean -- and no stale-allowance text is emitted for that
     rule.
@@ -627,10 +619,8 @@ def check_file(
             for rule in outcome.incomplete
         )
         msg = (
-            f"Incomplete identity-allowance pass: {detail}. Zero findings "
-            f"for the rule below mean the check did not run, not that the "
-            f"board is clean -- re-run on the pinned KiCad toolchain "
-            f"(KCT_KICAD_DOCKER=1) before judging this board's allowances."
+            f"Incomplete routed DRC: {detail}. "
+            "Re-run on the pinned KiCad toolchain (KCT_KICAD_DOCKER=1)."
         )
         if outcome.stale:
             msg += (
