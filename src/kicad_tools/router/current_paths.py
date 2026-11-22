@@ -103,6 +103,8 @@ bounded model cannot see and rule out.
 Mid-path via groups also use the shared physical copper-contact graph to
 check whether their two bars remain connected after removing the barrels.
 This detects bypasses through width-only contacts anywhere on their feeders.
+Partial reinforcement also checks each piece of a candidate track between
+physical junctions for a return around that piece.
 
 Consumers:
 
@@ -222,6 +224,7 @@ import json
 import math
 from collections import deque
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -229,7 +232,7 @@ from kicad_tools.core.geometry import point_to_segment_distance, segments_inters
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
@@ -2276,7 +2279,11 @@ _VIA_GROUP_PITCH_PADS = 2.0
 
 
 def _mid_path_via_groups(
-    graph: _CopperGraph, pcb: PCB, net_name: str, taken: set[_Node]
+    graph: _CopperGraph,
+    pcb: PCB,
+    net_name: str,
+    taken: set[_Node],
+    physical_contacts: Callable[[], CopperContactGraph],
 ) -> tuple[list[_ViaArray], set[_GraphEdge]]:
     """Prove mid-path layer changes carried by several barrels (Issue #9725).
 
@@ -2367,7 +2374,6 @@ def _mid_path_via_groups(
 
     result: list[_ViaArray] = []
     unmodeled_edges: set[_GraphEdge] = set()
-    physical_contacts = None
     for la, lb, group, group_pairs in candidates:
         if any(claimed[pos] > 1 for pos in group):
             continue
@@ -2417,16 +2423,9 @@ def _mid_path_via_groups(
             if edge.segment is not None
         ]
         rings = [(pos, layer, vias[pos].size / 2.0) for pos in group for layer in spans[pos]]
-        if physical_contacts is None:
-            from kicad_tools.validate.connectivity import ConnectivityValidator
-            from kicad_tools.validate.copper_contact import build_copper_contact_graph
-
-            physical_contacts = build_copper_contact_graph(
-                ConnectivityValidator(pcb), net.number if net else None, with_bonds=True
-            )
         if not _via_group_contacts_modeled(
             pcb, net_name, group, bar_spans, rings, exits
-        ) or not _via_group_separates_bars(pcb, physical_contacts, group, bar_spans):
+        ) or not _via_group_separates_bars(pcb, physical_contacts(), group, bar_spans):
             # A modeled bypass still has its real path and loop-free feeders.
             # A width-only contact is absent from that graph, so its remaining
             # edges cannot prove the row equivalent to ordinary parallel tracks.
@@ -3468,11 +3467,24 @@ def resolve_current_path(
                     sink=sink,
                     reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
                 )
+    net_number = source.net_number
+
+    @cache
+    def physical_contacts() -> CopperContactGraph:
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+        return build_copper_contact_graph(ConnectivityValidator(pcb), net_number, with_bonds=True)
+
     # Mid-path layer changes carried by several barrels (Issue #9725) are
     # contracted like endpoint arrays; only groups the declared path changes
     # layer through become evidence (an off-path group still is no loop).
     via_groups, unmodeled_edges = _mid_path_via_groups(
-        adjacency, pcb, spec.net_name, {node for array in arrays for node in array.nodes}
+        adjacency,
+        pcb,
+        spec.net_name,
+        {node for array in arrays for node in array.nodes},
+        physical_contacts,
     )
     contracted = [*arrays, *via_groups]
     unmodeled_group = bool(unmodeled_edges) and not unmodeled_edges.isdisjoint(
@@ -3510,7 +3522,15 @@ def resolve_current_path(
         # makes that centerline proof incomplete.
         loop_free: tuple[Segment, ...] = ()
         if not unmodeled_group and not unmodeled_copper(pcb, spec.net_name):
-            loop_free = _loop_free_path_segments(adjacency, start, goal, contracted)
+            candidates = _loop_free_path_segments(adjacency, start, goal, contracted)
+            if candidates:
+                from kicad_tools.analysis.trace_length import unavoidable_segment_indices
+
+                unavoidable = unavoidable_segment_indices(
+                    pcb, physical_contacts(), (source.ref, source.pad), (sink.ref, sink.pad)
+                )
+                segment_ids = {id(pcb.segments[i]) for i in unavoidable}
+                loop_free = tuple(s for s in candidates if id(s) in segment_ids)
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,

@@ -143,6 +143,24 @@ def test_offset_inner_layer_track_touching_a_ring_rejects_group():
     assert resolve_current_path(pcb, _spec()).status == "ambiguous"
 
 
+def _saved_row_board(tmp_path, bar_width=3.0, branch="F.Cu", lane="B.Cu", split_feeder=False):
+    from tests.test_pcb_reinforce import _write_single_pad_footprint_lib
+
+    pcb = PCB.create(width=220, height=100, layers=4, center=False)
+    footprint = _write_single_pad_footprint_lib(tmp_path)
+    for ref, x, pad_y in [("J1", 30, 10), ("J2", 200, 44.8)]:
+        pcb.add_footprint_from_file(footprint, ref, x, pad_y)
+        pcb.assign_net_to_footprint_pad(ref, "1", "P")
+    for barrel_y in (40, 42.4, 44.8):
+        pcb.add_via(30, barrel_y, size=PAD, drill=DRILL, net="P")
+    feeder_ys = (10, 40, 44.8) if split_feeder else (10, 44.8)
+    for start, end in zip(feeder_ys, feeder_ys[1:], strict=False):
+        pcb.add_trace((30, start), (30, end), width=bar_width, layer=branch, net="P")
+    pcb.add_trace((30, 40), (30, 44.8), width=3, layer=lane, net="P")
+    pcb.add_trace((30, 44.8), (200, 44.8), width=4, layer=lane, net="P")
+    return pcb
+
+
 @pytest.mark.parametrize(
     "bar_width,y,offset,expected",
     [
@@ -169,20 +187,8 @@ def test_cli_via_group_with_outer_bar_bypass(
     import json
 
     from kicad_tools.cli.commands.pcb import run_pcb_command
-    from tests.test_pcb_reinforce import _write_single_pad_footprint_lib
 
-    pcb = PCB.create(width=220, height=100, layers=4, center=False)
-    footprint = _write_single_pad_footprint_lib(tmp_path)
-    for ref, x, pad_y in [("J1", 30, 10), ("J2", 200, 44.8)]:
-        pcb.add_footprint_from_file(footprint, ref, x, pad_y)
-        pcb.assign_net_to_footprint_pad(ref, "1", "P")
-    for barrel_y in (40, 42.4, 44.8):
-        pcb.add_via(30, barrel_y, size=PAD, drill=DRILL, net="P")
-    feeder_ys = (10, 40, 44.8) if split_feeder else (10, 44.8)
-    for start, end in zip(feeder_ys, feeder_ys[1:], strict=False):
-        pcb.add_trace((30, start), (30, end), width=bar_width, layer=branch, net="P")
-    pcb.add_trace((30, 40), (30, 44.8), width=3, layer=lane, net="P")
-    pcb.add_trace((30, 44.8), (200, 44.8), width=4, layer=lane, net="P")
+    pcb = _saved_row_board(tmp_path, bar_width, branch, lane, split_feeder)
     if offset is not None:
         # Some current can bypass the row through this fourth via if the
         # narrow trace reaches the edge of a bar or ring.
@@ -211,6 +217,60 @@ def test_cli_via_group_with_outer_bar_bypass(
     assert sum(v.severity == "error" and "is ambiguous" in v.message for v in errors) == (
         2 if expected == "ambiguous" else 0
     )
+
+
+@pytest.mark.parametrize(
+    "offset,mid_lane,expected_anchors",
+    [(1.4, False, 0), (1.85, False, 2), (None, False, 2), (1.4, True, 0), (1.85, True, 2)],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_cli_reinforcement_checks_physical_lane_bypasses(
+    tmp_path, capsys, offset, mid_lane, expected_anchors, reverse
+):
+    import json
+
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from tests.test_pcb_reinforce import _reinforce_args
+
+    pcb = _saved_row_board(tmp_path)
+    pcb.add_footprint_from_file(tmp_path / "TestPad.kicad_mod", "J4", 216, 44.8)
+    pcb.assign_net_to_footprint_pad("J4", "1", "P")
+    pcb.add_trace((200, 44.8), (216, 44.8), width=4, layer="B.Cu", net="P")
+
+    # A centered return bypasses only the row. The second return bypasses
+    # the downstream J2–J4 lane when its copper reaches the feeder's edge.
+    pcb.add_trace((30, 38), (60, 38), width=0.4, layer="F.Cu", net="P")
+    pcb.add_via(60, 38, size=1, drill=0.5, net="P")
+    pcb.add_trace((60, 38), (60, 44.8), width=0.4, layer="B.Cu", net="P")
+    if offset is not None:
+        x, y = (208, 46.8) if mid_lane else (216, 44.8)
+        pcb.add_trace((30 + offset, 35), (x, 35), width=0.4, layer="F.Cu", net="P")
+        pcb.add_trace((x, 35), (x, y), width=0.4, layer="F.Cu", net="P")
+        if mid_lane:
+            # Its annulus touches the middle of the B.Cu lane off-center.
+            # Removing the whole lane would also remove its unavoidable half.
+            pcb.add_via(x, y, size=1, drill=0.5, net="P")
+    board = tmp_path / "lane.kicad_pcb"
+    pcb.save(board)
+    spec = _spec(source="J4", sink="J1") if reverse else _spec(sink="J4")
+    sidecar = tmp_path / "current_paths.json"
+    sidecar.write_text(json.dumps({"paths": [spec.to_dict()]}))
+
+    args = _reinforce_args(
+        board, net="P", current_paths=str(sidecar), format="json", anchor_mode="ends"
+    )
+    assert run_pcb_command(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    written = PCB.load(board)
+    assert len(written.vias) == len(pcb.vias) + expected_anchors
+    added = [v for v in written.vias if v.drill > DRILL]
+    assert report["anchors_placed"] == len(added) == expected_anchors
+    assert [p["anchored_segments"] for p in report["unresolved_paths"]] == [expected_anchors // 2]
+    if expected_anchors:
+        assert sorted((round(v.position[0], 3), v.position[1]) for v in added) == [
+            (203.958, 44.8),
+            (213.542, 44.8),
+        ]
 
 
 def test_group_with_oblique_feeder_at_modeled_barrel():
@@ -454,6 +514,20 @@ def test_partial_reinforcement_takes_only_the_loop_free_lane(reverse):
     assert [r.spec.name for r in partition.unresolved] == ["force"]
     assert [r.spec.name for r in partition.partial] == ["force"]
     assert reinforcement_eligible_segment_ids(pcb, [spec]) == lane
+
+
+@pytest.mark.parametrize("landing", ["insulated", "bonded"])
+def test_physical_return_only_excludes_the_lane_it_bypasses(landing):
+    pcb = _lane_with_loop_and_spur()
+    # An opposite-layer trace from the through-hole source ends at the joint
+    # between the lanes. Only a via actually connects those coincident points.
+    pcb.add_trace((10, 50), (100, 50), width=1, layer="B.Cu", net="P")
+    if landing == "bonded":
+        pcb.add_via(100, 50, size=1, drill=0.5, net="P")
+    lane = pcb.segments[4:6] if landing == "insulated" else [pcb.segments[5]]
+    result = resolve_current_path(pcb, _spec())
+    assert result.status == "ambiguous"
+    assert {id(s) for s in result.loop_free_segments} == {id(s) for s in lane}
 
 
 def test_partial_reinforcement_respects_declared_ineligibility():

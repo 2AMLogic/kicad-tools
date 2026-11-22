@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.copper_contact import CopperContactGraph
 
 
 # Pattern for identifying timing-critical nets
@@ -246,6 +247,8 @@ class _PadToPadGraph(NamedTuple):
 def _build_pad_to_pad_graph(
     items: list[Any],
     bonds: list[tuple[int, int]],
+    *,
+    bonded_junctions_only: bool = False,
 ) -> _PadToPadGraph:
     """Weighted point graph over one net's copper-contact graph.
 
@@ -264,6 +267,9 @@ def _build_pad_to_pad_graph(
     plane, so a path across a fill-bearing net measures the track hops
     between contact points, not a physical copper length.  Contact
     decisions are the shared model's (``bonds``), never re-derived.
+    When proving connectivity, keep coincident points on different items
+    distinct until an explicit bond joins them. This preserves insulation
+    between different copper layers at the same XY.
     """
     from shapely.geometry import Point as _Point  # type: ignore[import-untyped]
     from shapely.ops import nearest_points as _nearest_points  # type: ignore[import-untyped]
@@ -272,11 +278,16 @@ def _build_pad_to_pad_graph(
 
     points: list[tuple[float, float]] = []
 
-    def node_for(point: Any) -> int:
+    point_indices: dict[int, list[int]] = defaultdict(list)
+
+    def node_for(point: Any, item: int) -> int:
         px, py = float(point[0]), float(point[1])
-        for index, (nx, ny) in enumerate(points):
+        candidates = point_indices[item if bonded_junctions_only else -1]
+        for index in candidates:
+            nx, ny = points[index]
             if (px - nx) ** 2 + (py - ny) ** 2 < _NODE_MERGE_MM**2:
                 return index
+        candidates.append(len(points))
         points.append((px, py))
         return len(points) - 1
 
@@ -309,19 +320,19 @@ def _build_pad_to_pad_graph(
 
     for index, item in enumerate(items):
         if item.kind == PAD and item.center is not None:
-            pad_nodes[index] = node_for(item.center)
+            pad_nodes[index] = node_for(item.center, index)
         elif item.kind == VIA and item.center is not None:
-            via_nodes[index] = node_for(item.center)
+            via_nodes[index] = node_for(item.center, index)
         elif item.kind == FILL:
             point = item.geom.representative_point()
-            fill_nodes[index] = node_for((point.x, point.y))
+            fill_nodes[index] = node_for((point.x, point.y), index)
         elif item.kind == TRACK:
             start, end = item.endpoints[0], item.endpoints[-1]
             track_length[index] = (
                 math.dist(start, end) if item.straight else max(float(item.line.length), 0.0)
             )
             line_length[index] = max(float(item.line.length), 1e-9)
-            end_nodes[index] = (node_for(start), node_for(end))
+            end_nodes[index] = (node_for(start, index), node_for(end, index))
             track_layers[index] = next(iter(item.layers))
 
     def attach(track_index: int, point: Any) -> int:
@@ -338,7 +349,7 @@ def _build_pad_to_pad_graph(
         if total - distance <= _NODE_MERGE_MM:
             return last
         split = item.line.interpolate(distance)
-        node = node_for((split.x, split.y))
+        node = node_for((split.x, split.y), track_index)
         attachments.setdefault(track_index, []).append((distance, node))
         return node
 
@@ -483,6 +494,45 @@ def _simple_graph_bridges(
                 if low[node] > disc[parent_node]:
                     bridges.add(_edge_pair(parent_node, node))
     return bridges
+
+
+def unavoidable_segment_indices(
+    pcb: PCB,
+    contacts: CopperContactGraph,
+    source: tuple[str, str],
+    sink: tuple[str, str],
+) -> set[int]:
+    """Original track indices fully traversed by every physical source–sink path."""
+    graph = _build_pad_to_pad_graph(contacts.items, contacts.bonds, bonded_junctions_only=True)
+    pads: dict[tuple[str, str], int] = {}
+    for index, node in graph.pad_nodes.items():
+        footprint_index, pad_index = contacts.items[index].key
+        footprint = pcb.footprints[footprint_index]
+        pads[(footprint.reference, footprint.pads[pad_index].number)] = node
+    if source not in pads or sink not in pads:
+        return set()
+    start, target = pads[source], pads[sink]
+    distances, parents = _shortest_path_from(graph.adjacency, start)
+    if target not in distances:
+        return set()
+    # A bridge on any one pad-to-pad path lies on all of them. Requiring
+    # every piece also rules out a bypass that rejoins midway along a track.
+    bridges = _simple_graph_bridges(
+        {node: {other for other, _ in edges} for node, edges in graph.adjacency.items()}
+    )
+    path_bridges = set()
+    while target != start:
+        previous = parents[target]
+        edge = _edge_pair(previous, target)
+        if edge in bridges:
+            path_bridges.add(edge)
+        target = previous
+    return {
+        contacts.items[index].key[1]
+        for index, pieces in graph.track_pieces.items()
+        if contacts.items[index].key[0] == "segment"
+        and all(_edge_pair(a, b) in path_bridges for a, b, _ in pieces)
+    }
 
 
 def _two_edge_connected_labels(
