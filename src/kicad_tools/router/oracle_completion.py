@@ -1387,6 +1387,8 @@ class PourLinkCloser:
     #: route`` reserved for pour pads before signal routing.  The weld tries
     #: them first; ``None`` leaves it unchanged.
     preferred_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None
+    #: Pads for which the last applicable stitch search exhausted its via sites.
+    exhausted_stitch_pads: set[str] = field(default_factory=set, init=False)
     #: Issue #7602: ``run_stitch``'s ``pad_edge_gap`` -- the mask-dam floor a weld
     #: via keeps from every SMD pad (the router's ``min_via_pad_edge_gap``).
     #: ``0`` disables the guard.
@@ -1456,9 +1458,7 @@ class PourLinkCloser:
         self, pcb_path: Path, links: Sequence[OracleLink], banned: frozenset[str]
     ) -> ClosureAttempt:
         attempt = ClosureAttempt()
-        links = canonical_links(links)
-        if self.canonical_clusters:
-            links = self._cluster_links(pcb_path, links, attempt)
+        links = self.canonical_stranded_links(pcb_path, links, attempt)
         # Issue #6671: footprints the loop withdrew wholesale.
         dropped = banned_footprints(banned)
 
@@ -1518,14 +1518,27 @@ class PourLinkCloser:
         else KiCad's own located endpoints; zone ends are outline corners
         and are skipped.  Used to find kept copper that fenced them in.
         """
-        links = canonical_links(links)
-        if self.canonical_clusters:
-            links = self._cluster_links(pcb_path, links, ClosureAttempt())
+        links = self.canonical_stranded_links(pcb_path, links)
         return [
             (lk.net, end.x, end.y) for lk in links for end in (lk.a, lk.b) if end.kind != "zone"
         ]
 
     # -- canonical clusters (Issue #5934) ---------------------------------------
+
+    def canonical_stranded_links(
+        self, pcb_path: Path, links: Sequence[OracleLink], attempt: ClosureAttempt | None = None
+    ) -> list[OracleLink]:
+        """Use the same stranded pads for welding and for a subsequent reservation.
+
+        KiCad can name a zone at either end of a pad-bearing copper island.
+        Reconstruct its pad only when the physical and native island counts agree.
+        """
+        ordered = canonical_links(links)
+        if self.canonical_clusters:
+            return self._cluster_links(
+                pcb_path, ordered, attempt if attempt is not None else ClosureAttempt()
+            )
+        return ordered
 
     def _cluster_links(
         self, pcb_path: Path, links: Sequence[OracleLink], attempt: ClosureAttempt
@@ -1911,6 +1924,11 @@ class PourLinkCloser:
                     for seg in trace_to_track_segments(trace):
                         caps.append((seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg.width / 2))
                 attempt.applied += 1
+        self.exhausted_stitch_pads.difference_update(only)
+        if passes[-1].pads_skipped:
+            self.exhausted_stitch_pads.update(
+                f"{pad.reference}.{pad.pad_number}" for pad, _ in passes[-1].skip_details
+            )
         for pad, reason in passes[-1].pads_skipped:
             attempt.notes.append(f"{pad.net_name} {pad.reference}.{pad.pad_number}: {reason}")
         return {

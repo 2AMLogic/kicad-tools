@@ -1847,7 +1847,7 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     if ctx.dry_run:
         dry_run_msg = (
             f"[dry-run] Would run: kct route {ctx.pcb_file.name} "
-            f"--grid {grid} --clearance {clearance}"
+            f"--no-preserve-existing --grid {grid} --clearance {clearance}"
         )
         if ctx.voltage_map:
             dry_run_msg += f" --voltage-map {ctx.voltage_map}"
@@ -1869,6 +1869,7 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
             "kicad_tools.cli",
             "route",
             str(ctx.pcb_file),
+            "--no-preserve-existing",
             "-o",
             str(output_file),
             "--grid",

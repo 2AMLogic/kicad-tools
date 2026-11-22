@@ -40,6 +40,11 @@ error), each with a location:
     mask-to-copper policy clearance) other than on a same-net pad's own
     copper or as one clean entry of the whole proposed path -- the criteria
     ``mask_to_copper``'s ``within_own_pad`` class applies (Issue #9848).
+    The complete replacement must also clear the active physical copper gap
+    floor against the remaining tracks, pads, vias, and filled zones (Issue
+    #9862). An explicit threshold applies to all copper. The fab-view policy
+    keeps zone-fill gaps informational. A rejected bend falls through to the
+    next candidate.
     Staircase chains end at same-net pad copper and same-net via centres:
     a pad or via centre is a terminal, never a pass-through vertex, so a
     "shortcut" can never bypass and disconnect it; a node joined to
@@ -171,15 +176,29 @@ class RedundantCopperRule(DRCRule):
         "long detours and track ends off a via centre (advisory)."
     )
 
-    def __init__(self, mask_clearance_mm: float = 0.0) -> None:
+    def __init__(
+        self,
+        mask_clearance_mm: float = 0.0,
+        physical_copper_gap_mm: float | None = None,
+        fab_view_gap_policy: Any | None = None,
+    ) -> None:
         """``mask_clearance_mm``: the mask-to-copper policy clearance (mm).
 
         A staircase shortcut may put no new copper within this distance of a
         pad's mask opening (Issue #9817).  ``0`` still keeps new copper out of
         the opening itself.  ``DRCChecker`` passes the active
         ``mask_to_copper`` policy's (strictest) clearance.
+
+        ``physical_copper_gap_mm`` / ``fab_view_gap_policy`` (Issue #9862):
+        the active physical-gap policy -- the explicit threshold, else the
+        resolved fab-view bands.  Each shortcut candidate is additionally
+        judged against the copper slit floor that policy enforces; when
+        neither is given (no active physical-gap pass) the gate is off.
         """
         self.mask_clearance_mm = max(0.0, float(mask_clearance_mm))
+        self._gap_mm = physical_copper_gap_mm
+        self._gap_policy = fab_view_gap_policy
+        self._gap_oracle: Any | None = None
 
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         results = DRCResults()
@@ -210,6 +229,7 @@ class RedundantCopperRule(DRCRule):
         self._requirement = self._pair_requirement(pcb)
         self._foreign_cache: dict[str, list[Any]] = {}
         self._mask_cache: dict[str, list[_MaskZone]] = {}
+        self._gap_oracle = None  # Rebuild lazily for this PCB.
         for segs in groups.values():
             self._check_chains(segs, results)
             self._check_covered(segs, results)
@@ -554,6 +574,22 @@ class RedundantCopperRule(DRCRule):
         assert requirement is not None
         return max(float(self._clearance), float(requirement(net_a, net_b)))
 
+    def _slit_oracle(self) -> Any | None:
+        """The physical-gap slit oracle when a policy is active (Issue #9862).
+
+        ``None`` when no threshold or fab policy was supplied: the
+        physical-gap pass itself is inactive then, so the staircase gate is
+        too.  Constructed lazily -- the oracle collects the board's copper
+        sources once, so a board with no staircase candidates never pays.
+        """
+        if self._gap_mm is None and self._gap_policy is None:
+            return None
+        if self._gap_oracle is None:
+            from .physical_gap import StaircaseSlitOracle
+
+            self._gap_oracle = StaircaseSlitOracle(self._pcb, self._gap_mm, self._gap_policy)
+        return self._gap_oracle
+
     def _mask_zones(self, side: str) -> list[_MaskZone]:
         """One ``_MaskZone`` per pad opening on mask ``side``.
 
@@ -747,7 +783,8 @@ class RedundantCopperRule(DRCRule):
             return False  # net classes cannot be modelled: no shortcut is provably legal
         net = chain[0][0].net_number
         width = max(s.width for s, _f, _t in chain)
-        old = [segment_shape(segment) for segment, _start, _end in chain]
+        chain_segments = [segment for segment, _start, _end in chain]
+        old = [segment_shape(segment) for segment in chain_segments]
         contacts = [
             terminal
             for terminal in terminal_shapes
@@ -763,6 +800,12 @@ class RedundantCopperRule(DRCRule):
             if not self._path_clear(legs, net, layer, width):
                 continue
             if not self._mask_clear(cand, chain, layer, width, net):
+                continue
+            # Issue #9862: the replacement must not open a copper slit the
+            # active physical-gap policy reports (same-net branches and zone
+            # fills included); a rejected bend falls through to the next one.
+            oracle = self._slit_oracle()
+            if oracle is not None and oracle.rejects(layer, chain_segments, cand, width):
                 continue
             ox, oy = getattr(self, "_origin", (0.0, 0.0))
             via_pts = " -> ".join(f"({x + ox:.2f}, {y + oy:.2f})" for x, y in cand)

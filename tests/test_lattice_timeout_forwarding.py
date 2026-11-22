@@ -468,9 +468,10 @@ class TestShortTimeoutTerminatesEarly:
         # Generous CI ceiling; the point is it is bounded at all.
         assert elapsed < 120.0
 
-    def test_default_run_routes_the_board_and_declines_nothing(self, board, tmp_path, capsys):
+    def test_full_reroute_with_default_budget_declines_nothing(self, board, tmp_path, capsys):
         out = tmp_path / "out.kicad_pcb"
-        assert _lattice_route(board, out) == 0
+        # NET1 is already routed. Ask the lattice to negotiate both links.
+        assert _lattice_route(board, out, "--no-preserve-existing") == 0
         captured = capsys.readouterr().out
         assert "deadline-exceeded" not in captured
         assert re.search(r"Lattice negotiation: 2/2 connections", captured)
