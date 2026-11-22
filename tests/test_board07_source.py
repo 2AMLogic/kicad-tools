@@ -100,11 +100,75 @@ def test_reviewed_build_rejects_hash_bound_off_angle_copper(tmp_path, monkeypatc
 ROOT07 = Path(__file__).resolve().parents[1] / "boards/07-matchgroup-test/real_design"
 
 
-def _load_record(name):
-    spec = importlib.util.spec_from_file_location(f"board07_{name}", ROOT07 / f"{name}.py")
+def _load_record(name, root=ROOT07):
+    spec = importlib.util.spec_from_file_location(f"board07_{name}", root / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land(tmp_path):
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+    from zipfile import ZipFile
+
+    import pytest
+
+    # A caller may stage inside another checkout. Apply only to that scratch
+    # pair, keeping the production recipes byte-identical to their release.
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    proposed = tmp_path / "proposed"
+    fixture = _load_record("cleanup_fixture_8603", ROOT07 / "engineering")
+    fixture.stage_design(ROOT07, proposed)
+    # The rehearsal also accepts a source tree that already has the fiducial changes.
+    candidate_patch = Path("engineering/assembly-fiducials.patch")
+    shutil.copyfile(ROOT07 / candidate_patch, proposed / candidate_patch)
+    adopted = tmp_path / "adopted"
+    fixture.stage_design(proposed, adopted)
+    archive = ROOT07.parent / "output/manufacturing/design-source.zip"
+    with ZipFile(archive) as shipped:
+        for name in ("build.py", "build_source.py"):
+            published = shipped.read(f"real_design/{name}")
+            assert (ROOT07 / name).read_bytes() == published
+            assert (adopted / name).read_bytes() == (proposed / name).read_bytes()
+    release = _load_record("build_source", proposed)
+    pad = SimpleNamespace(
+        number="", net_name="", net_number=0, size=(1.0, 1.0), drill=0.0, layers=["F.Cu", "F.Mask"]
+    )
+    mark = SimpleNamespace(
+        reference="FID1",
+        name=release.FIDUCIAL_FOOTPRINT,
+        value="Fiducial",
+        layer="F.Cu",
+        _attr_unknown_tokens=["board_only"],
+        exclude_from_bom=True,
+        exclude_from_pos_files=True,
+        pads=[pad],
+    )
+    board = SimpleNamespace(footprints=[mark])
+    release.verify_fiducials(board, {"FID1": "F.Cu"})
+    for obj, field, invalid in (
+        (mark, "name", "Resistor_SMD:R_0603"),
+        (mark, "_attr_unknown_tokens", []),
+        (mark, "exclude_from_pos_files", False),
+        (mark, "exclude_from_bom", False),
+        (mark, "layer", "B.Cu"),
+        (mark, "pads", [pad, pad]),
+        (pad, "number", "1"),
+        (pad, "net_name", "SDCLK"),
+        (pad, "net_number", 2),
+        (pad, "drill", 0.3),
+        (pad, "size", (1.0, 2.0)),
+        (pad, "layers", ["F.Cu", "B.Cu"]),
+    ):
+        initial = getattr(obj, field)
+        setattr(obj, field, invalid)
+        with pytest.raises(ValueError, match="Invalid board-only fiducial"):
+            release.verify_fiducials(board, {"FID1": "F.Cu"})
+        setattr(obj, field, initial)
+    with pytest.raises(ValueError, match="Missing declared fiducials"):
+        release.verify_fiducials(board, {"FID1": "F.Cu", "FID2": "B.Cu"})
 
 
 def _vias(path):

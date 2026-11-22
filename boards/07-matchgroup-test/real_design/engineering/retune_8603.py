@@ -228,14 +228,16 @@ def prepare(optimized: Path, release: Path, output: Path) -> None:
         staged.rename(output)
 
 
-def reproduce(output: Path) -> int:
+def reproduce(output: Path, *, starting_design: Path | None = None) -> int:
     design = RECORD.parent.parent
     repo = design.parents[2]
     release, optimized = output / "release", output / "optimized.kicad_pcb"
     tuned = output / "retuned"
     output.mkdir(parents=True, exist_ok=False)
     with evidence_toolchain([repo, output], pin_host_footprints=True):
-        build = subprocess.run([sys.executable, design / "build.py", release], cwd=repo)
+        build = subprocess.run(
+            [sys.executable, (starting_design or design) / "build.py", release], cwd=repo
+        )
         if build.returncode:
             # The reviewed starting board already fails its full design check.
             # A different build failure invalidates the starting evidence.
@@ -247,24 +249,36 @@ def reproduce(output: Path) -> int:
         project = release / "validation/checked.kicad_pro"
         if not project.with_suffix(".kicad_dru").is_file():
             raise FileNotFoundError(project.with_suffix(".kicad_dru"))
-        subprocess.run(
-            [
-                "kct",
-                "optimize-traces",
-                release / "sdram_demo_routed.kicad_pcb",
-                "-o",
-                optimized,
-                "--project",
-                project,
-                "--drc-aware",
-                "--mfr",
-                "jlcpcb",
-                "--layers",
-                "6",
-            ],
-            cwd=repo,
-            check=True,
-        )
+        # Native probes create their own trial boards. A failed probe can
+        # consume a different number of UUIDs even for identical final copper.
+        # Preserve the machine report and require both checks before retuning.
+        command = [
+            "kct",
+            "optimize-traces",
+            release / "sdram_demo_routed.kicad_pcb",
+            "-o",
+            optimized,
+            "--project",
+            project,
+            "--drc-aware",
+            "--mfr",
+            "jlcpcb",
+            "--layers",
+            "6",
+            "--format",
+            "json",
+        ]
+        for attempt in range(2):
+            result = subprocess.run(
+                command, cwd=repo, check=True, stdout=subprocess.PIPE, text=True
+            )
+            report = json.loads(result.stdout)
+            (output / f"optimizer-{attempt + 1}.json").write_text(result.stdout)
+            checks = report["output_checks"]
+            if all(checks.get(name) == "ran" for name in ("drc", "opens")):
+                break
+        else:
+            raise RuntimeError(f"Native optimizer checks did not complete: {checks}")
         prepare(optimized, release, tuned)
         return subprocess.run(
             [

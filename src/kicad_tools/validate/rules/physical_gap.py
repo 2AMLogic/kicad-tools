@@ -276,7 +276,7 @@ def _fp_poly_geometry(graphic, transform):
     """
     from shapely.geometry import LineString, Polygon
 
-    points = [transform(point) for point in graphic.points]
+    points = [transform(point) for point in graphic.boundary_points]
     if len(points) < 3:
         return None
     width = graphic.stroke_width or 0.0

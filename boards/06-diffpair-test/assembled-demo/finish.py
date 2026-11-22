@@ -21,6 +21,7 @@ from kicad_tools.cli.runner import (
     _snapshot_element_nets,
     _snapshot_net_declarations,
 )
+from kicad_tools.cli.silk_default_pass import run_default_silk_pass
 from kicad_tools.router.quantize import quantize_pcb_file
 from kicad_tools.sexp import parse_file, parse_string
 
@@ -195,6 +196,9 @@ def main():
         raise RuntimeError("pcb add-fiducials failed")
     if run_add_board_info(path, auto=True) != 0:
         raise RuntimeError("pcb add-board-info failed")
+    silk = run_default_silk_pass(path, mfr="jlcpcb-tier1")
+    if silk is None or not silk["applied"] or silk["unresolved"]:
+        raise RuntimeError(f"Board 06 silkscreen could not be finished: {silk}")
     result = _run_fill_zones_via_drc(path, None, "kicad-cli")
     check_process_geometry(path)
     print(

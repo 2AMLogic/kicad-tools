@@ -318,8 +318,7 @@ def make_pcb(out, parts):
                     (62.18, middle + sign * 0.205),
                     (62.8, termination[1]),
                     termination,
-                    (64, termination[1]),
-                    (64.19, end[1]),
+                    (termination[0] + abs(end[1] - termination[1]), end[1]),
                     end,
                 ],
             )
@@ -497,7 +496,7 @@ def main():
         },
         "requirements": {
             "manufacturing": {
-                "target_fab": "jlcpcb",
+                "target_fab": "jlcpcb-tier1",
                 "layers": {"preferred": 4},
                 "assembly": "both",
             }

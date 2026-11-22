@@ -32,6 +32,7 @@ from ..core.board_outline import (
     legacy_arc_points,
     outline_node_points,
     outline_polygon_points,
+    outline_rect_points,
 )
 from ..core.outline_tessellation import DegenerateArcError, tessellate_arc, tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
@@ -994,6 +995,7 @@ def keep_footprint_texts_upright(footprint_node: SExp) -> int:
 def _transform_zone_object(zone: Zone, mapper, flip_layers: bool) -> None:
     """Re-place one parsed footprint :class:`Zone` (board-relative coords)."""
     zone.polygon = [mapper(x, y) for x, y in zone.polygon]
+    zone.rule_area_contours = [[mapper(x, y) for x, y in ring] for ring in zone.rule_area_contours]
     zone.filled_polygons = [[mapper(x, y) for x, y in poly] for poly in zone.filled_polygons]
     if flip_layers:
         zone.layer = _flip_side_layer(zone.layer)
@@ -1546,23 +1548,49 @@ def _resolves_filled_cutout(graphic_type: str, fill: str, stroke_width: float) -
     return not stroke_width
 
 
+class _GraphicPointGeometry:
+    points: list[tuple[float, float]]
+    arc_boundary: list[tuple[float, float]] | None
+
+    @property
+    def boundary_points(self) -> list[tuple[float, float]]:
+        """Polygon vertices with embedded arcs tessellated for geometric operations."""
+        return self.points if self.arc_boundary is None else self.arc_boundary
+
+
+def _read_graphic_points(graphic: BoardGraphic | FootprintGraphic, node: SExp) -> None:
+    """Read authored points and the physical boundary of an arc-bearing polygon."""
+    kind = graphic.graphic_type
+    if kind == "rect" and node.find_child("radius") is not None:
+        graphic.points = outline_rect_points(node, graphic.start, graphic.end)
+    elif kind in ("poly", "curve") and (pts := node.find_child("pts")) is not None:
+        graphic.points = [
+            (xy.get_float(0) or 0.0, xy.get_float(1) or 0.0) for xy in pts.find_all("xy")
+        ]
+        if kind == "poly" and pts.find_child("arc") is not None:
+            graphic.arc_boundary = _polygon_arc_chain(node)
+            # The board outline API has exposed the tessellated Edge.Cuts ring
+            # since #9847. On other layers, points are the literal xy vertices.
+            if node.name == "gr_poly" and graphic.layer == "Edge.Cuts":
+                graphic.points = graphic.arc_boundary
+
+
 @dataclass
-class FootprintGraphic:
-    """Graphic element within a footprint (fp_line, fp_rect, fp_circle, fp_arc, fp_poly).
+class FootprintGraphic(_GraphicPointGeometry):
+    """Graphic element within a footprint (line, rectangle, circle, arc, polygon or curve).
 
     Used for silkscreen outlines, courtyard outlines, and markings on
-    footprints.  ``fp_poly`` graphics store their vertices in ``points``;
-    all other types leave ``points`` empty.
+    footprints. ``points`` carries the authored polygon vertices, a rounded
+    rectangle boundary, or the four control points of a cubic curve. Use
+    :attr:`boundary_points` for the full boundary of a polygon containing arcs.
 
     ``fill`` carries the raw ``(fill ...)`` token verbatim (``"yes"`` /
     ``"no"`` on KiCad 7+, ``"solid"`` / ``"none"`` on older files, ``""``
-    when the node is absent).  Consumers should read :pyattr:`is_filled`
-    rather than comparing the token themselves -- a filled shape renders
-    its whole interior, which is what silk clearance geometry must model
-    (Issue #5811).
+    when the node is absent). :pyattr:`is_filled` decodes an explicit fill.
+    The default for an absent token depends on the layer and graphic type.
     """
 
-    graphic_type: str  # line, rect, circle, arc, poly
+    graphic_type: str  # line, rect, circle, arc, poly, curve
     layer: str
     stroke_width: float  # in mm
     start: tuple[float, float] = (0.0, 0.0)
@@ -1573,10 +1601,12 @@ class FootprintGraphic:
     uuid: str = ""
     mid: tuple[float, float] | None = None  # Appended for positional compatibility
     fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
+    legacy_width: float | None = None  # top-level (width N), as on BoardGraphic
+    arc_boundary: list[tuple[float, float]] | None = field(default=None, repr=False)
 
     @property
     def is_filled(self) -> bool:
-        """True when the shape's interior is printed, not just its outline."""
+        """Whether the authored fill token requests a solid interior."""
         return _fill_token_is_filled(self.fill)
 
     @classmethod
@@ -1596,6 +1626,8 @@ class FootprintGraphic:
         if stroke := sexp.find("stroke"):
             if width := stroke.find("width"):
                 graphic.stroke_width = width.get_float(0) or 0.0
+        elif width := sexp.find("width"):
+            graphic.legacy_width = width.get_float(0)
 
         # Start/end points (for line, rect)
         if start := sexp.find("start"):
@@ -1618,11 +1650,9 @@ class FootprintGraphic:
                     graphic.end[1] - graphic.center[1],
                 )
 
-        # Polygon vertices (for fp_poly): (pts (xy X Y) ...).
-        if graphic_type == "poly":
-            if pts := sexp.find("pts"):
-                for xy in pts.find_all("xy"):
-                    graphic.points.append((xy.get_float(0) or 0.0, xy.get_float(1) or 0.0))
+        _read_graphic_points(graphic, sexp)
+        if graphic_type == "curve" and graphic.points:
+            graphic.start, graphic.end = graphic.points[0], graphic.points[-1]
 
         # Fill state: (fill yes|no) on KiCad 7+, (fill solid|none) on older
         # files.  A filled shape prints its whole interior, so silk clearance
@@ -1703,7 +1733,7 @@ class GraphicText:
         return self.font_size[1]
 
 
-def _board_polygon_arc_chain(node: SExp) -> list[tuple[float, float]]:
+def _polygon_arc_chain(node: SExp) -> list[tuple[float, float]]:
     """Read an arc polygon without making a malformed drawing prevent PCB loading."""
     try:
         return outline_polygon_points(node)
@@ -1712,20 +1742,22 @@ def _board_polygon_arc_chain(node: SExp) -> list[tuple[float, float]]:
 
 
 @dataclass
-class BoardGraphic:
-    """Board-level graphic element (gr_line, gr_rect, gr_circle, gr_arc, gr_poly).
+class BoardGraphic(_GraphicPointGeometry):
+    """Board-level graphic element (line, rectangle, circle, arc, polygon or curve).
 
     Used for board outlines, silkscreen graphics, and other board-level drawings.
 
-    Mirrors :class:`FootprintGraphic`: ``gr_poly`` vertices land in
-    ``points`` and the ``(fill ...)`` token in ``fill`` (read it through
+    Mirrors :class:`FootprintGraphic`. Polygon ``points`` holds the literal
+    vertices except on Edge.Cuts, where it includes embedded arcs.
+    :attr:`boundary_points` follows the complete outline on every layer. The
+    ``(fill ...)`` token is stored in ``fill`` (read it through
     :pyattr:`is_filled`).  Before Issue #5811 ``gr_poly`` was not parsed at
     all, so a board-level polygon silk marker was invisible to every
     consumer of :pyattr:`PCB.graphics` -- including the silkscreen
     clearance geometry.
     """
 
-    graphic_type: str  # line, rect, circle, arc, poly
+    graphic_type: str  # line, rect, circle, arc, poly, curve
     layer: str
     stroke_width: float  # in mm
     start: tuple[float, float] = (0.0, 0.0)
@@ -1740,10 +1772,11 @@ class BoardGraphic:
     # convention ties the *default* fill of a circle/rect to a zero stroke
     # width (Issue #9690), so the Edge.Cuts fill resolution needs it.
     legacy_width: float | None = None
+    arc_boundary: list[tuple[float, float]] | None = field(default=None, repr=False)
 
     @property
     def is_filled(self) -> bool:
-        """True when the shape's interior is printed, not just its outline."""
+        """Whether the authored fill token requests a solid interior."""
         return _fill_token_is_filled(self.fill)
 
     @property
@@ -1761,10 +1794,9 @@ class BoardGraphic:
           or a legacy ``(width 0)``);
         * with no fill token, a ``gr_poly`` is never filled.
 
-        Only the Edge.Cuts consumers may read this: the silkscreen default
-        for an absent token stays "not filled" (:pyattr:`is_filled`,
-        Issue #5811).  The resolution itself is shared with the
-        footprint-local closed shapes (Issue #9692) through
+        Edge.Cuts and silkscreen have different defaults for omitted fill.
+        The Edge.Cuts resolution is shared with footprint-local closed
+        shapes (Issue #9692) through
         :func:`_resolves_filled_cutout`.
         """
         return _resolves_filled_cutout(
@@ -1789,9 +1821,7 @@ class BoardGraphic:
             if width := stroke.find("width"):
                 graphic.stroke_width = width.get_float(0) or 0.0
         elif width := sexp.find("width"):
-            # Pre-KiCad-6 legacy stroke width; feeds the Edge.Cuts fill
-            # default above (Issue #9690).  Kept out of ``stroke_width`` so
-            # silk consumers keep seeing today's 0.0 for legacy files.
+            # Preserve legacy width separately from the modern stroke token.
             graphic.legacy_width = width.get_float(0)
 
         # Start/end points
@@ -1807,22 +1837,11 @@ class BoardGraphic:
         if center := sexp.find("center"):
             graphic.center = (center.get_float(0) or 0.0, center.get_float(1) or 0.0)
 
-        # Polygon vertices (for gr_poly): (pts (xy X Y) ...).
-        if graphic_type == "poly":
-            if pts := sexp.find("pts"):
-                if graphic.layer == "Edge.Cuts" and has_board_polygon_arcs(sexp):
-                    graphic.points = _board_polygon_arc_chain(sexp)
-                else:
-                    for xy in pts.find_all("xy"):
-                        graphic.points.append((xy.get_float(0) or 0.0, xy.get_float(1) or 0.0))
-            # A ``gr_poly`` has no ``(start ...)`` node, and several consumers
-            # report ``graphic.start`` as the element's location (e.g.
-            # ``check_silkscreen_line_width``, ``_iter_silk_geometries``).
-            # Seed it from the first vertex so a board-level polygon does not
-            # report itself at the origin.  This is new behaviour only in the
-            # sense that ``gr_poly`` was not parsed at all before #5811.
-            if graphic.points:
-                graphic.start = graphic.points[0]
+        _read_graphic_points(graphic, sexp)
+        if graphic_type in ("poly", "curve") and graphic.points:
+            graphic.start = graphic.points[0]
+            if graphic_type == "curve":
+                graphic.end = graphic.points[-1]
 
         # Fill state -- see FootprintGraphic.from_sexp (Issue #5811).
         if fill := sexp.find("fill"):
@@ -2311,8 +2330,8 @@ class Footprint:
             if pad:
                 fp.pads.append(pad)
 
-        # Graphics (fp_line, fp_rect, fp_circle, fp_arc, fp_poly)
-        for graphic_type in ("line", "rect", "circle", "arc", "poly"):
+        # Footprint drawing primitives
+        for graphic_type in ("line", "rect", "circle", "arc", "poly", "curve"):
             for graphic_sexp in sexp.find_all(f"fp_{graphic_type}"):
                 graphic = FootprintGraphic.from_sexp(graphic_sexp, graphic_type)
                 fp.graphics.append(graphic)
@@ -2744,7 +2763,7 @@ class Zone:
     layers: list[str] = field(default_factory=list)
     # Keepout flags when this zone is a rule area; None for pour zones.
     keepout: ZoneKeepout | None = None
-    # Boundary polygon points (x, y) in mm
+    # Literal xy vertices of the first boundary polygon, in mm.
     polygon: list[tuple[float, float]] = field(default_factory=list)
     # Filled polygon regions after DRC (may differ from boundary due to clearances)
     filled_polygons: list[list[tuple[float, float]]] = field(default_factory=list)
@@ -2787,6 +2806,9 @@ class Zone:
     # (Issue #6087).
     parent_reference: str = ""
     parent_uuid: str = ""
+    # For a curved rule area or one with cutouts, the physical exterior followed
+    # by its interior rings. A simple rule area's boundary is already in polygon.
+    rule_area_contours: list[list[tuple[float, float]]] = field(default_factory=list)
 
     def is_stroked_fill(self) -> bool:
         """Whether ``filled_polygons`` are centre-lines rather than final copper.
@@ -2994,6 +3016,10 @@ class Zone:
         # Parse boundary polygon - (polygon (pts (xy X Y) ...))
         if polygon := index.get("polygon"):
             zone.polygon = cls._parse_polygon_pts(polygon)
+            if zone.keepout is not None:
+                contours = sexp.find_children("polygon")
+                if len(contours) > 1 or polygon.find("arc") is not None:
+                    zone.rule_area_contours = [_polygon_arc_chain(contour) for contour in contours]
 
         # Parse filled polygons - (filled_polygon (layer X) (pts (xy X Y) ...))
         for filled_poly in sexp.find_all("filled_polygon"):
@@ -3792,7 +3818,7 @@ class PCB:
             elif tag == "gr_text":
                 text = GraphicText.from_sexp(child)
                 self._texts.append(text)
-            elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+            elif tag in ("gr_rect", "gr_circle", "gr_poly", "gr_curve"):
                 # ``gr_poly`` joined this dispatch in Issue #5811: a
                 # board-level polygon silk marker was previously parsed
                 # nowhere, so the silkscreen clearance geometry could not
@@ -4321,10 +4347,14 @@ class PCB:
                 vx, vy = via.position
                 via.position = (vx - ox, vy - oy)
 
-            # Zones: convert boundary polygon AND every filled polygon.
+            # Zones: convert authored vertices, rule-area contours and copper fills.
             for zone in (*self._zones, *self._footprint_zones):
                 if zone.polygon:
                     zone.polygon = [(x - ox, y - oy) for x, y in zone.polygon]
+                if zone.rule_area_contours:
+                    zone.rule_area_contours = [
+                        [(x - ox, y - oy) for x, y in ring] for ring in zone.rule_area_contours
+                    ]
                 if zone.filled_polygons:
                     zone.filled_polygons = [
                         [(x - ox, y - oy) for x, y in poly] for poly in zone.filled_polygons
@@ -4497,7 +4527,7 @@ class PCB:
         chains: list[list[tuple[float, float]]] = []
         for child in self._sexp.find_children("gr_poly"):
             if _on_edge_cuts(child) and has_board_polygon_arcs(child) == curved:
-                chain = _board_polygon_arc_chain(child) if curved else _chain_from(child)
+                chain = _polygon_arc_chain(child) if curved else _chain_from(child)
                 if chain:
                     chains.append(chain)
         if not curved:
@@ -6214,7 +6244,7 @@ class PCB:
                 elif tag == "gr_arc":
                     self._graphic_arcs.append(GraphicArc.from_sexp(child))
                     self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
-                elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+                elif tag in ("gr_rect", "gr_circle", "gr_poly", "gr_curve"):
                     graphic_type = tag[3:]
                     self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
 
@@ -6279,7 +6309,7 @@ class PCB:
             elif tag == "gr_arc":
                 self._graphic_arcs.append(GraphicArc.from_sexp(child))
                 self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
-            elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+            elif tag in ("gr_rect", "gr_circle", "gr_poly", "gr_curve"):
                 graphic_type = tag[3:]
                 self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
 
