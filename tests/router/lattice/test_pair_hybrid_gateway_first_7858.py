@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kicad_tools.router.lattice import pathfinder
 from kicad_tools.router.lattice.coupled import CoupledConnection
 
 from .test_pair_hybrid_6446 import _HS, _board, _coupled_trunk_mm, _route
@@ -59,6 +60,63 @@ def test_unequal_hybrid_has_a_checked_fallback(monkeypatch, via_counts, lengths,
         vias_used=0,
     )
     assert (result is not None) is expected
+
+
+@pytest.mark.parametrize(
+    "deadline, expected_count", [(0.0, 0), (0.5, 1), (1.5, 2), (5.5, 6), (None, None)]
+)
+def test_balanced_hybrid_fallback_respects_deadline(monkeypatch, deadline, expected_count):
+    pf, pc, _ = _board()
+    pf.pair_gateway_limits[pc.key] = (100.0, 3)
+    pf.pair_length_measure = lambda _route: 10.0
+    hybrid = SimpleNamespace(routes=[SimpleNamespace(vias=[]), SimpleNamespace(vias=[None])])
+    committed = pf._fresh_committed()
+    committed.add_run(0, [(0.5, 0.5), (1.5, 0.5)], 99, 0.1)
+
+    def segments():
+        return {
+            segment
+            for layer in committed.copper
+            for bucket in layer.buckets.values()
+            for segment in bucket
+        }
+
+    original_copper = segments()
+    original_memo = pf._shortfall_memo
+    now = 0.0
+    starts = []
+    search = pf._search_single
+
+    def timed_search(*args, **kwargs):
+        nonlocal now
+        starts.append(now)
+        result = search(*args, **kwargs)
+        now += 1.0
+        return result
+
+    monkeypatch.setattr(pathfinder, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(pf, "_search_single", timed_search)
+    result = pf._balanced_hybrid_fallback(
+        pc,
+        hybrid,
+        committed=committed,
+        history={},
+        present=0.0,
+        escape_plan={},
+        vias_used=0,
+        deadline=deadline,
+    )
+
+    if deadline is None:
+        assert result is not None
+        assert len(result[0].route.vias) == len(result[1].route.vias)
+    else:
+        assert starts == list(range(expected_count))
+        assert result is None
+    assert segments() == original_copper
+    assert not committed.vias
+    assert committed._trial_depth == 0
+    assert pf._shortfall_memo is original_memo
 
 
 def _prefer_bcu(pc: CoupledConnection) -> CoupledConnection:

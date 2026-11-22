@@ -200,6 +200,15 @@ _DEFAULT_VIA_LENGTH_MM = 1.6
 _CROSSING_LAUNCH_MM = 1.5
 
 
+class _FallbackDeadlineExpired(Exception):
+    """Unwind the optional leg searches and their trial copper."""
+
+
+def _check_fallback_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _FallbackDeadlineExpired
+
+
 def _default_pair_length(route: Route) -> float:
     """Track length plus one board thickness per (through) via, in mm."""
     tracks = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments)
@@ -7052,7 +7061,12 @@ class LatticePathfinder:
         previous_memo, self._shortfall_memo = self._shortfall_memo, {}
         try:
             legs, _ = self._partner_aware_legs(
-                pc, committed=committed, history=history, present=present, escape_plan=escape_plan
+                pc,
+                committed=committed,
+                history=history,
+                present=present,
+                escape_plan=escape_plan,
+                deadline=deadline,
             )
             p, n = legs["P"][0], legs["N"][0]
             if p is None or n is None or len(p.route.vias) != len(n.route.vias):
@@ -7068,7 +7082,10 @@ class LatticePathfinder:
                 or self._legs_shortfalls(pc, legs)
             ):
                 return None
+            _check_fallback_deadline(deadline)
             return p, n
+        except _FallbackDeadlineExpired:
+            return None
         finally:
             self._shortfall_memo = previous_memo
             committed.rollback_trial(trial)
@@ -8424,6 +8441,7 @@ class LatticePathfinder:
         history: dict[Resource, float],
         present: float,
         escape_plan: dict[int, EscapeChoice],
+        deadline: float | None = None,
     ) -> tuple[_FallbackLegs, bool]:
         """Route a declined pair's two legs partner-aware (issue #6703; committed).
 
@@ -8454,6 +8472,8 @@ class LatticePathfinder:
         Its legs are committed.  Returns
         ``(legs, is_partner_blind)`` -- the flag is set when the winner is
         exactly the copper :meth:`_partner_blind_legs` would have produced.
+        An optional deadline raises :class:`_FallbackDeadlineExpired` at a leg
+        boundary so the caller can keep its already-routed hybrid.
         """
         items = self._fallback_items(pc)
         kw: dict[str, Any] = {
@@ -8484,12 +8504,15 @@ class LatticePathfinder:
         def search(
             pol: str, guide: PartnerGuide | None = None, mirror: LayerMirror | None = None
         ) -> tuple[_RouteResult | None, str]:
+            _check_fallback_deadline(deadline)
             previous = self._pairwise
             if strict is not None:
                 self._pairwise = strict
             self._search_clearance_floor = floor
             try:
-                return self._search_single(items[pol], guide=guide, mirror=mirror, **kw)
+                result = self._search_single(items[pol], guide=guide, mirror=mirror, **kw)
+                _check_fallback_deadline(deadline)
+                return result
             finally:
                 self._pairwise = previous
                 self._search_clearance_floor = 0.0
