@@ -2497,6 +2497,7 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
             "acknowledged_warning_rules": sorted(options.ack_warnings),
             "acknowledged_trace_quality": dict(sorted(options.ack_trace_quality.items())),
             "copper_cleanup": options.cleanup_record,
+            "assembly_prep": options.assembly_prep_record,
             "copper_weights": _declared_copper_weights(options.pcb),
         }
     )

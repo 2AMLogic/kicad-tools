@@ -460,6 +460,35 @@ def test_manifest_covers_every_bundle_file_including_late_drawings(tmp_path):
     assert manifest["warning_counts_by_rule"] == {}
 
 
+@pytest.mark.parametrize(
+    "flags",
+    [(), ("--skip-fiducials",), ("--skip-board-info",), ("--skip-fiducials", "--skip-board-info")],
+)
+def test_manifest_and_archive_record_assembly_prep(tmp_path, flags):
+    board = make_board(tmp_path)
+    pcb = board_no_hv_source().replace(
+        '(paper "A4")', '(paper "A4") (title_block (title "Demo") (rev "A") (date "2026-11-21"))'
+    )
+    (board / "output" / PCB_NAME).write_text(pcb)
+    code, report = run(board, FakeEngines(board), "--pcb-only", *flags)
+
+    assert code == 0, report.get("blockers")
+    expected = {
+        "fiducials": "skipped (--skip-fiducials)" if "--skip-fiducials" in flags else "applied",
+        "board_info": "skipped (--skip-board-info)" if "--skip-board-info" in flags else "applied",
+    }
+    assert report["metrics"]["assembly_prep"] == expected
+    bundle = board / "output" / "manufacturing"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["assembly_prep"] == expected
+    readme = (bundle / "README.txt").read_bytes()
+    assert hashlib.sha256(readme).hexdigest() == manifest["files"]["README.txt"]["sha256"]
+    for operation, outcome in expected.items():
+        assert f"  {operation}: {outcome}" in readme.decode().splitlines()
+    with zipfile.ZipFile(board / "output" / "manufacturing.zip") as archive:
+        assert json.loads(archive.read("manufacturing/manifest.json")) == manifest
+
+
 def test_waivers_sidecar_is_hash_bound_in_report_inputs(tmp_path):
     board = make_board(tmp_path)
     sidecar = board / "output" / "demo_routed.kct-waivers.json"
