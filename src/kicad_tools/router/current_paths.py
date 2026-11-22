@@ -230,9 +230,10 @@ from typing import TYPE_CHECKING, cast
 
 from kicad_tools.core.geometry import point_to_segment_distance, segments_intersect
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
+from kicad_tools.geometry.copper import extends_collinear
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
 
     from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
@@ -1615,6 +1616,32 @@ def _track_station(seg: Segment, point: tuple[float, float]) -> tuple[float, flo
     return x + t * dx, y + t * dy
 
 
+def _straight_bar_tracks(pcb: PCB, copper: CopperContactGraph) -> dict[int, int]:
+    """Group equal-width track pieces meeting along one straight centreline."""
+    from kicad_tools.validate.copper_contact import TRACK
+
+    from .connectivity import _UnionFind
+
+    runs = _UnionFind()
+    joints: dict[_Node, list[tuple[int, tuple[float, float]]]] = {}
+    tracks = [
+        item.key[1] for item in copper.items if item.kind == TRACK and item.key[0] == "segment"
+    ]
+    for index in tracks:
+        segment = pcb.segments[index]
+        for joint, far in ((segment.start, segment.end), (segment.end, segment.start)):
+            joints.setdefault(_copper_node(joint, segment.layer), []).append((index, far))
+    for joint, ends in joints.items():
+        if len(ends) != 2:
+            continue
+        (i, start), (j, end) = ends
+        if pcb.segments[i].width == pcb.segments[j].width and extends_collinear(
+            start, joint[:2], joint[:2], end, _PAD_EPS
+        ):
+            runs.union(i, j)
+    return {i: runs.find(i) for i in tracks}
+
+
 def _via_row_ports(
     pcb: PCB, net_number: int, physical_contacts: Callable[[], CopperContactGraph]
 ) -> set[tuple[_Node, _Node]]:
@@ -1633,14 +1660,16 @@ def _via_row_ports(
             if other_x - x > max_pitch + _PAD_EPS:
                 break
             second = pcb.vias[j]
-            bound = _VIA_GROUP_PITCH_PADS * max(first.size, second.size)
-            if math.dist(first.position, second.position) <= bound + _PAD_EPS:
+            if math.dist(first.position, second.position) <= max_pitch + _PAD_EPS:
                 pairs.append((i, j))
     if not pairs:
         return set()
 
     copper = physical_contacts()
-    via_tracks: dict[int, set[int]] = {}
+    runs = _straight_bar_tracks(pcb, copper)
+    # One nearest station per continuous bar and barrel. Round caps on the
+    # two pieces of a subdivided bar can both touch the same annulus.
+    via_bars: dict[int, dict[int, _Node]] = {}
     touching_vias: set[int] = set()
     for a, b in copper.bonds:
         via, track = copper.items[a], copper.items[b]
@@ -1651,25 +1680,33 @@ def _via_row_ports(
             # layer. The two-bar projection cannot prove that transfer.
             touching_vias.update((via.key, track.key))
         if via.kind == VIA and track.kind == TRACK and track.key[0] == "segment":
-            via_tracks.setdefault(via.key, set()).add(track.key[1])
+            index = track.key[1]
+            segment = pcb.segments[index]
+            position = pcb.vias[via.key].position
+            station = _copper_node(_track_station(segment, position), segment.layer)
+            bars = via_bars.setdefault(via.key, {})
+            previous = bars.get(runs[index])
+            if previous is None or math.dist(position, station[:2]) < math.dist(
+                position, previous[:2]
+            ):
+                bars[runs[index]] = station
 
     ports: set[tuple[_Node, _Node]] = set()
     for i, j in pairs:
         if i in touching_vias or j in touching_vias:
             continue
-        first_pos, second_pos = pcb.vias[i].position, pcb.vias[j].position
-        shared = via_tracks.get(i, set()) & via_tracks.get(j, set())
+        first_bars, second_bars = via_bars.get(i, {}), via_bars.get(j, {})
         pair_ports: list[tuple[_Node, _Node]] = []
-        for track_index in shared:
-            bar = pcb.segments[track_index]
-            first_station = _track_station(bar, first_pos)
-            second_station = _track_station(bar, second_pos)
-            # A lane ending across the row can touch both rings at the same
-            # station. It cannot supply the bar between them.
-            if math.dist(first_station, second_station) > _VIA_CENTRE_EPS:
-                pair_ports.extend(
-                    (_copper_node(station, bar.layer), _copper_node(pos, bar.layer))
-                    for station, pos in ((first_station, first_pos), (second_station, second_pos))
+        for run in first_bars.keys() & second_bars.keys():
+            first_station, second_station = first_bars[run], second_bars[run]
+            # A transverse lane meeting both annuli at the same station
+            # supplies no bar between the barrels.
+            if math.dist(first_station[:2], second_station[:2]) > _VIA_CENTRE_EPS:
+                pair_ports.append(
+                    (first_station, _copper_node(pcb.vias[i].position, first_station[2]))
+                )
+                pair_ports.append(
+                    (second_station, _copper_node(pcb.vias[j].position, second_station[2]))
                 )
         if len({station[2] for station, _ in pair_ports}) >= 2:
             ports.update(
@@ -2384,10 +2421,61 @@ def _endpoint_via_array(
 
 
 #: Consecutive barrel pitch bound of a mid-path via group, in multiples of
-#: the larger pad diameter of the two barrels (Issue #9725): 4.4 mm for
-#: 2.2 mm pads. Farther apart, two barrels are not one layer-change
+#: the largest pad diameter in that row (Issue #9725): 4.4 mm for
+#: a row containing a 2.2 mm pad. Farther apart, two barrels are not one layer-change
 #: structure and the copper between them stays judged as a loop.
 _VIA_GROUP_PITCH_PADS = 2.0
+
+
+_BarPath = list[tuple[_Node, _GraphEdge, _Node]]
+
+
+def _barrel_links(
+    graph: _CopperGraph,
+    spans: dict[tuple[float, float], list[str]],
+    taken: set[_Node],
+) -> dict[str, dict[frozenset[tuple[float, float]], _BarPath]]:
+    """Follow the original track edges across ordinary straight, two-ended joints."""
+    links: dict[str, dict[frozenset[tuple[float, float]], _BarPath]] = {}
+    terminals = taken.union(graph.pads.values())
+    for pos, layers in spans.items():
+        for layer in layers:
+            start = _copper_node(pos, layer)
+            for first, edge in graph.adjacency[start]:
+                if edge.segment is None or first[2] != layer:
+                    continue
+                path = [(start, edge, first)]
+                visited = {start}
+                while True:
+                    previous, incoming, current = path[-1]
+                    if current in visited or current in terminals:
+                        break
+                    if current[:2] in spans:
+                        # Visit each undirected path once. Retain every physical
+                        # segment for the contact and bypass checks below.
+                        if pos < current[:2] and layer in spans[current[:2]]:
+                            same_layer = links.setdefault(layer, {})
+                            pair = frozenset((pos, current[:2]))
+                            same_layer.setdefault(pair, []).extend(path)
+                        break
+                    adjacent = graph.adjacency[current]
+                    if len(adjacent) != 2:
+                        break
+                    nxt, outgoing = adjacent[1] if adjacent[0][1] is incoming else adjacent[0]
+                    src, dest = incoming.segment, outgoing.segment
+                    if src is None or dest is None or nxt[2] != layer:
+                        break
+                    if not extends_collinear(
+                        _track_station(src, previous[:2]),
+                        _track_station(src, current[:2]),
+                        _track_station(dest, current[:2]),
+                        _track_station(dest, nxt[:2]),
+                        _PAD_EPS,
+                    ):
+                        break
+                    visited.add(current)
+                    path.append((current, outgoing, nxt))
+    return links
 
 
 def _mid_path_via_groups(
@@ -2401,10 +2489,9 @@ def _mid_path_via_groups(
 
     A group is two or more same-net two-layer-spec vias, not in a pad and not
     already in ``taken``, chained in a row in which every consecutive pair is
-    joined DIRECTLY (a modeled copper edge with no other contact between the
-    two barrels) on both of the same two layers ``La``/``Lb`` -- the two bars --
-    at a centre pitch of at most :data:`_VIA_GROUP_PITCH_PADS` x the larger
-    pad diameter. Every barrel therefore has its pad on both bars. Anything
+    joined by a straight bar with no intervening branch on both of the
+    same two layers ``La``/``Lb``. Consecutive barrel pitch is at most
+    :data:`_VIA_GROUP_PITCH_PADS` times the largest pad diameter in the row. Every barrel therefore has its pad on both bars. Anything
     weaker stays a loop, so the net stays ``ambiguous``:
 
     * a barrel touching only one bar breaks the chain on the other layer;
@@ -2455,28 +2542,14 @@ def _mid_path_via_groups(
             continue
         spans[pos], vias[pos] = span, found[0]
 
-    # Direct same-layer links between candidate barrels.
-    links: dict[str, dict[frozenset[tuple[float, float]], list[_GraphEdge]]] = {}
-    for pos, span in spans.items():
-        for layer in span:
-            for other, edge in graph.adjacency[_copper_node(pos, layer)]:
-                q = other[:2]
-                if edge.segment is None or q == pos or q not in spans or other[2] != layer:
-                    continue
-                bound = _VIA_GROUP_PITCH_PADS * max(vias[pos].size, vias[q].size)
-                if math.dist(pos, q) > bound + _PAD_EPS:
-                    continue
-                bucket = links.setdefault(layer, {}).setdefault(frozenset((pos, q)), [])
-                if edge not in bucket:
-                    bucket.append(edge)
-
+    links = _barrel_links(graph, spans, taken)
     candidates: list[tuple[str, str, set[tuple[float, float]], list]] = []
     ordered = [layer for layer in COPPER_LAYER_ORDER if layer in links]
     for i, la in enumerate(ordered):
         for lb in ordered[i + 1 :]:
-            pairs = [p for p in links[la] if p in links[lb]]
-            for group in _linked_components(pairs):
-                group_pairs = [p for p in pairs if p <= group]
+            pairs = [pair for pair, path in links[la].items() if path and links[lb].get(pair)]
+            for group in _packed_barrel_rows(pairs, vias):
+                group_pairs = [pair for pair in pairs if pair <= group]
                 candidates.append((la, lb, group, group_pairs))
 
     claimed: dict[tuple[float, float], int] = {}
@@ -2503,9 +2576,14 @@ def _mid_path_via_groups(
                 for other, edge in graph.adjacency[_copper_node(pos, layer)]:
                     if edge.segment is None and other[:2] == pos and other in nodes:
                         edges.add(edge)
+        bar_spans = []
         for layer in (la, lb):
             for pair in group_pairs:
-                edges.update(links[layer][pair])
+                for start, edge, end in links[layer][pair]:
+                    nodes.update((start, end))
+                    edges.add(edge)
+                    if edge.segment is not None:
+                        bar_spans.append((frozenset((start[:2], end[:2])), edge.segment))
         internal = [
             edge
             for node in nodes
@@ -2527,13 +2605,6 @@ def _mid_path_via_groups(
             continue
         if len(ports[la]) >= 2 and len(ports[lb]) >= 2:
             continue
-        bar_spans = [
-            (pair, edge.segment)
-            for layer in (la, lb)
-            for pair in group_pairs
-            for edge in links[layer][pair]
-            if edge.segment is not None
-        ]
         rings = [(pos, layer, vias[pos].size / 2.0) for pos in group for layer in spans[pos]]
         if not _via_group_contacts_modeled(
             pcb, net_name, group, bar_spans, rings, exits
@@ -2599,27 +2670,32 @@ def _via_group_separates_bars(
     return first.isdisjoint(second)
 
 
-def _linked_components(
+def _packed_barrel_rows(
     pairs: list[frozenset[tuple[float, float]]],
-) -> list[set[tuple[float, float]]]:
-    """Connected components of the barrel positions joined by ``pairs``."""
-    parent: dict[tuple[float, float], tuple[float, float]] = {}
-
-    def find(p: tuple[float, float]) -> tuple[float, float]:
-        parent.setdefault(p, p)
-        while parent[p] != p:
-            parent[p] = parent[parent[p]]
-            p = parent[p]
-        return p
-
+    vias: dict[tuple[float, float], Via],
+) -> Iterator[set[tuple[float, float]]]:
+    """Grow each connected row from its largest remaining pad, at that pad's bound."""
+    adjacent: dict[tuple[float, float], list[tuple[float, float]]] = {}
     for pair in pairs:
         a, b = tuple(pair)
-        parent[find(a)] = find(b)
-    members: dict[tuple[float, float], set[tuple[float, float]]] = {}
-    for pair in pairs:
-        for p in pair:
-            members.setdefault(find(p), set()).add(p)
-    return list(members.values())
+        adjacent.setdefault(a, []).append(b)
+        adjacent.setdefault(b, []).append(a)
+    remaining = set(adjacent)
+    for first in sorted(adjacent, key=lambda pos: vias[pos].size, reverse=True):
+        if first not in remaining:
+            continue
+        bound = _VIA_GROUP_PITCH_PADS * vias[first].size + _PAD_EPS
+        remaining.remove(first)
+        group, pending = {first}, [first]
+        while pending:
+            pos = pending.pop()
+            for other in adjacent[pos]:
+                if other in remaining and math.dist(pos, other) <= bound:
+                    remaining.remove(other)
+                    group.add(other)
+                    pending.append(other)
+        if len(group) > 1:
+            yield group
 
 
 def _via_group_contacts_modeled(

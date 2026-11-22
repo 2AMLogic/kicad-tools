@@ -196,6 +196,133 @@ def test_saved_via_row_attaches_by_pad_overlap(tmp_path, capsys, offsets, expect
     assert report["anchors_placed"] == len(PCB.load(board).vias) - 3 == (2 if expected else 0)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "front_joints,back_joints,offset,return_x",
+    [
+        ((41.2,), (), 0.25, None),
+        ((), (41.2,), 0.25, None),
+        ((41.2, 43.6), (41.2, 43.6), 0.0, None),
+        ((41.2,), (43.6,), 0.25, None),
+        ((41.2,), (43.6,), 0.25, 31.4),
+    ],
+)
+def test_subdividing_bars_preserves_public_audit_and_written_anchors(
+    tmp_path, capsys, front_joints, back_joints, offset, return_x, reverse
+):
+    import argparse
+    import json
+
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from tests.test_pcb_reinforce import _reinforce_args
+
+    pcb = _saved_row_board(tmp_path, via_offsets=(offset,) * 3)
+    pcb.add_footprint_from_file(tmp_path / "TestPad.kicad_mod", "J4", 216, 44.8)
+    pcb.assign_net_to_footprint_pad("J4", "1", "P")
+    pcb.add_trace((200, 44.8), (216, 44.8), width=4, layer="B.Cu", net="P")
+    if return_x is not None:
+        pcb.add_trace((return_x, 39), (60, 39), width=0.4, layer="F.Cu", net="P")
+        pcb.add_via(60, 39, size=1, drill=0.5, net="P")
+        pcb.add_trace((60, 39), (60, 44.8), width=0.4, layer="B.Cu", net="P")
+
+    spec = _spec(source="J4", sink="J1") if reverse else _spec(sink="J4")
+    sidecar = tmp_path / "current_paths.json"
+    sidecar.write_text(json.dumps({"paths": [spec.to_dict()]}))
+
+    def measure(filename):
+        pcb.save(filename)
+        args = argparse.Namespace(
+            pcb_command="current-paths-audit",
+            pcb=str(filename),
+            current_paths=str(sidecar),
+            format="json",
+        )
+        assert run_pcb_command(args) == 0
+        (path,) = json.loads(capsys.readouterr().out)["resolutions"]
+        args = _reinforce_args(
+            filename,
+            net="P",
+            layer="B.Cu",
+            current_paths=str(sidecar),
+            format="json",
+            anchor_mode="ends",
+        )
+        assert run_pcb_command(args) == 0
+        report = json.loads(capsys.readouterr().out)
+        before = {via.position for via in pcb.vias}
+        anchors = sorted(
+            via.position for via in PCB.load(filename).vias if via.position not in before
+        )
+        return (
+            path["status"],
+            [change["via_count"] for change in path["layer_changes"]],
+            report["run_length_mm"],
+            anchors,
+        )
+
+    joined = measure(tmp_path / "joined.kicad_pcb")
+    if return_x is None:
+        assert joined[:3] == ("resolved", [3], 190.8)
+        assert joined[3][0][0] < 34 and joined[3][1][0] > 210
+    else:
+        assert joined[:2] == ("ambiguous", [])
+
+    for layer, joints in (("F.Cu", front_joints), ("B.Cu", back_joints)):
+        if not joints:
+            continue
+        (seg,) = [s for s in pcb.segments if s.layer == layer and s.start[0] == s.end[0] == 30]
+        pcb.remove_segments([seg])
+        ends = [seg.start[1], *joints, seg.end[1]]
+        for y0, y1 in zip(ends, ends[1:], strict=False):
+            # Alternate the authored direction without changing copper.
+            pcb.add_trace((30, y1), (30, y0), width=seg.width, layer=layer, net="P")
+    assert measure(tmp_path / "divided.kicad_pcb") == joined
+
+
+def test_fine_bar_subdivision_connects_distinct_offset_track_contacts(tmp_path):
+    # The small annuli are 2.4 mm apart on a 0.4 mm bar. Its 0.3 mm
+    # pieces cannot individually touch two adjacent barrels.
+    pcb = _saved_row_board(tmp_path, bar_width=0.4)
+    pcb.remove_vias(pcb.vias)
+    for y in (40, 42.4, 44.8):
+        pcb.add_via(30.25, y, size=1.4, drill=0.65, net="P")
+    feeder = next(s for s in pcb.segments if s.layer == "F.Cu")
+    pcb.remove_segments([feeder])
+    stations = [10, *(round(40 + i * 0.3, 6) for i in range(17))]
+    for a, b in zip(stations, stations[1:], strict=False):
+        pcb.add_trace((30, a), (30, b), width=0.4, layer="F.Cu", net="P")
+    path = resolve_current_path(pcb, _spec())
+    assert path.ok, path.reason
+    assert [change.count for change in path.series_layer_changes] == [3]
+    assert {id(s) for s in path.segments} == {id(s) for s in pcb.segments}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("large", [(0,), (1,), (2,), (), (0, 1, 2)])
+def test_pitch_uses_largest_pad_in_this_row(large, reverse):
+    # At 3 mm the small pads' 2.8 mm bound fails, and a row containing a
+    # 2.2 mm pad has a 4.4 mm bound regardless of its position.
+    pcb = tripled(pitch=3)
+    pcb.remove_vias(pcb.vias)
+    drills = []
+    for i, y in enumerate((40, 43, 46)):
+        diameter, drill = (2.2, 1.4) if i in large else (1.4, 0.65)
+        pcb.add_via(30, y, size=diameter, drill=drill, net="P")
+        drills.append(drill)
+    # A larger via outside this row cannot change its pitch bound.
+    pcb.add_via(150, 80, size=4, drill=1.4, net="P")
+    path = resolve_current_path(pcb, _spec(source="J2", sink="J1") if reverse else _spec())
+    if large:
+        assert path.status == "resolved", path.reason
+        (change,) = path.series_layer_changes
+        assert change.count == 3
+        assert change.current_capacity_a() == pytest.approx(
+            sum(via_barrel_current_capacity(d) for d in drills)
+        )
+    else:
+        assert path.status == "ambiguous" and not path.series_layer_changes
+
+
 @pytest.mark.parametrize(
     "bar_width,y,offset,row_offset,expected",
     [
