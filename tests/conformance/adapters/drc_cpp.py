@@ -53,7 +53,7 @@ guess.  ``uv run kct build-native`` builds it alongside ``router_cpp``.
 from __future__ import annotations
 
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
-from tests.conformance.adapters._support import net_ids, pad_pad_pairs, router_rules
+from tests.conformance.adapters._support import net_ids, pad_pad_pairs, project_rules, router_rules
 from tests.conformance.generator import CopperCase, PadSpec, PairKind
 
 __all__ = ["DrcCppAdapter"]
@@ -81,13 +81,25 @@ class DrcCppAdapter:
         return bool(is_cpp_available())
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same pair check with the placer's threshold at kicad-cli's value.
+
+        Issue #9922: the same-rule reading.  The kernel's distance is the
+        consumer's own and does not move -- only the threshold it is compared
+        against does -- so whatever still disagrees here is the disc envelope,
+        never the rule value.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules) -> set[Verdict]:
         from kicad_tools.drc.cpp_backend import check_pair_clearance_cpp, is_cpp_available
 
         if not is_cpp_available():  # pragma: no cover - guarded by available()
             return set()
 
         nets = net_ids(case)
-        rules = router_rules(case)
         found: set[Verdict] = set()
 
         for pair, pad_a, pad_b in pad_pad_pairs(case):
