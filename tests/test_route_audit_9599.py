@@ -31,6 +31,7 @@ its whole reachable component to exhaustion, so fixture area is test runtime.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -375,7 +376,10 @@ class TestRow2KctRoute:
     ):
         board = _partial_seal_board(tmp_path)
         via = '(via (at 112 121) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 3))'
-        with_copper = board.read_text().rstrip()[:-1] + via + "\n)\n"
+        # A closing quote after an escaped backslash must not hide the via.
+        path_text = json.dumps("C:\\boards\\")
+        note = f'(gr_text {path_text} (at 112 119) (layer "F.SilkS"))'
+        with_copper = f"{board.read_text().rstrip()[:-1]}{note}\n{via}\n{note}\n)\n"
         if with_via:
             board.write_text(with_copper)
         checkpoint = tmp_path / "checkpoint.kicad_pcb"

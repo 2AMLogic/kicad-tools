@@ -79,7 +79,7 @@ from kicad_tools.router.neck_report import (
     collect_necked_copper,
     format_neck_report,
 )
-from kicad_tools.sexp.scan import has_unquoted
+from kicad_tools.sexp.scan import has_unquoted, iter_parentheses
 
 from .route_deadline import record_stage, restore_stage
 from .route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG, ROUTE_PERFORMANCE_EPILOG
@@ -1311,6 +1311,31 @@ def _emit_single_pad_net_warning(
     )
 
 
+_ROUTE_BLOCK_HEAD = re.compile(r"(?:\s|[#;][^\n]*\n)*(segment|via)(?=[\s()]|\Z)")
+
+
+def _route_block_spans(pcb_content: str) -> "Iterator[tuple[str, int, int]]":
+    """Yield the kind and verbatim source span of each top-level routing form."""
+    depth = 0
+    kind = ""
+    start = 0
+    for pos, paren in iter_parentheses(pcb_content):
+        if paren == "(":
+            if depth == 1:
+                head = _ROUTE_BLOCK_HEAD.match(pcb_content, pos + 1)
+                if head:
+                    kind, start = head[1], pos
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 1 and kind:
+                yield kind, start, pos + 1
+                kind = ""
+    if kind:
+        # Keep the writer's handling of a truncated terminal route form.
+        yield kind, start, len(pcb_content)
+
+
 def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> tuple[str, int, int]:
     """Strip top-level ``(segment ...)`` and ``(via ...)`` blocks from PCB content.
 
@@ -1345,82 +1370,21 @@ def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> t
         Counts are returned so callers can log a diagnostic when a stale
         write is observed.
     """
-    # Walk the content counting depth, identifying top-level forms whose
-    # first token is "segment" or "via" and excising them.  Footprints
-    # contain their own (pad ...) blocks, never (segment ...) or top-level
-    # (via ...), so stripping at depth=1 is safe.
-    out: list[str] = []
-    i = 0
-    n = len(pcb_content)
-    depth = 0
-    in_string = False
-    prev_char = ""
-    segments_removed = 0
-    vias_removed = 0
-    while i < n:
-        ch = pcb_content[i]
-        if ch == '"' and prev_char != "\\":
-            in_string = not in_string
-            out.append(ch)
-            prev_char = ch
-            i += 1
-            continue
-        if not in_string and ch == "(":
-            # Peek at the token following the paren.
-            j = i + 1
-            while j < n and pcb_content[j].isspace():
-                j += 1
-            token_start = j
-            while (
-                j < n
-                and not pcb_content[j].isspace()
-                and pcb_content[j] != "("
-                and pcb_content[j] != ")"
-            ):
-                j += 1
-            token = pcb_content[token_start:j]
-            if depth == 1 and token in ("segment", "via"):
-                # Skip the entire form: find matching ")".
-                form_depth = 1
-                k = j
-                form_in_string = False
-                form_prev = ""
-                while k < n and form_depth > 0:
-                    c = pcb_content[k]
-                    if c == '"' and form_prev != "\\":
-                        form_in_string = not form_in_string
-                    elif not form_in_string:
-                        if c == "(":
-                            form_depth += 1
-                        elif c == ")":
-                            form_depth -= 1
-                    form_prev = c
-                    k += 1
-                if token == "segment":
-                    segments_removed += 1
-                else:
-                    vias_removed += 1
-                if collect is not None:
-                    collect.append(pcb_content[i:k])
-                # Skip whitespace that was preceding this form (trailing
-                # newline/tab from the previous emission) to keep the
-                # resulting file tidy.
-                while out and out[-1] in (" ", "\t"):
-                    out.pop()
-                # Also drop a single trailing newline so we collapse the
-                # blank line the form previously occupied.
-                if out and out[-1] == "\n":
-                    out.pop()
-                i = k
-                prev_char = ")"
-                continue
-            depth += 1
-        elif not in_string and ch == ")":
-            depth -= 1
-        out.append(ch)
-        prev_char = ch
-        i += 1
-    return "".join(out), segments_removed, vias_removed
+    pieces: list[str] = []
+    cursor = 0
+    segments_removed = vias_removed = 0
+    for kind, start, end in _route_block_spans(pcb_content):
+        # Remove the indentation and one newline belonging to the old form.
+        pieces.append(pcb_content[cursor:start].rstrip(" \t").removesuffix("\n"))
+        if collect is not None:
+            collect.append(pcb_content[start:end])
+        if kind == "segment":
+            segments_removed += 1
+        else:
+            vias_removed += 1
+        cursor = end
+    pieces.append(pcb_content[cursor:])
+    return "".join(pieces), segments_removed, vias_removed
 
 
 # Issue #9599 row 2: the net-declaration table ``(net 3 "NAME")`` maps stripped
@@ -1564,19 +1528,10 @@ def _validate_sexp_parentheses(content: str) -> bool:
         True if parentheses are balanced, False otherwise.
     """
     depth = 0
-    in_string = False
-    prev_char = ""
-    for char in content:
-        if char == '"' and prev_char != "\\":
-            in_string = not in_string
-        elif not in_string:
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth < 0:
-                    return False
-        prev_char = char
+    for _, paren in iter_parentheses(content):
+        depth += 1 if paren == "(" else -1
+        if depth < 0:
+            return False
     return depth == 0
 
 
@@ -25094,11 +25049,12 @@ def _run_main_impl(args, parser, argv) -> int:
     # graphics and zone fills alone do not turn on incremental routing.
     if args.preserve_existing is None:
         try:
-            input_segments, input_vias = _strip_route_blocks(pcb_path.read_text())[1:]
+            args.preserve_existing = (
+                next(_route_block_spans(pcb_path.read_text()), None) is not None
+            )
         except (OSError, UnicodeError) as exc:
             print(f"Error reading input routing copper from {pcb_path}: {exc}", file=sys.stderr)
             return 1
-        args.preserve_existing = bool(input_segments or input_vias)
     else:
         _warn_existing_copper_replacement(pcb_path, args)
 

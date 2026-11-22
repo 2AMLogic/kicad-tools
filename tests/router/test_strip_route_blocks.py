@@ -41,9 +41,13 @@ These tests verify:
 
 from __future__ import annotations
 
+import json
+
 from kicad_tools.cli.route_cmd import (
+    _baseline_copper_nets,
     _insert_sexp_before_closing,
     _strip_route_blocks,
+    _validate_sexp_parentheses,
 )
 
 # A minimal-but-valid KiCad PCB content fragment.  Includes a footprint
@@ -122,6 +126,24 @@ NEW_ROUTE_SEXP = """\t(segment
 
 class TestStripRouteBlocks:
     """Verify the strip helper removes only top-level segments/vias."""
+
+    def test_escaped_strings_and_comments_around_copper(self):
+        note = json.dumps('C:\\boards\\ (via) "quoted"\\')
+        net_name = json.dumps("GUARD\\")
+        track = f"(segment (start 12 10) (end 12 18) (net {net_name}) (locked yes))"
+        via = "(via (at 12 18) (size 0.6) (net 1))"
+        graphic = f'(gr_text {note} (layer "F.SilkS"))'
+        prefix = f'(kicad_pcb\n(net 1 "PWR")\n{graphic}\n; ignore (segment and "\n'
+        source = f"{prefix}{track}\n{via}\n{graphic}\n)"
+
+        blocks = []
+        stripped, tracks, vias = _strip_route_blocks(source, collect=blocks)
+        assert (tracks, vias) == (1, 1)
+        assert blocks == [track, via]
+        assert stripped.count(graphic) == 2
+        assert _baseline_copper_nets(source)[:2] == (1, 1)
+        assert _validate_sexp_parentheses(f"(kicad_pcb {graphic})")
+        assert not _validate_sexp_parentheses(f"(kicad_pcb {graphic}))")
 
     def test_strips_top_level_segment_and_via(self):
         stripped, segs, vias = _strip_route_blocks(PCB_HEADER)
