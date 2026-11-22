@@ -99,12 +99,101 @@ def test_reviewed_build_rejects_hash_bound_off_angle_copper(tmp_path, monkeypatc
 
 ROOT07 = Path(__file__).resolve().parents[1] / "boards/07-matchgroup-test/real_design"
 
+# The #8603 adoption re-optimized both physical boards, so the historical
+# repair records are verified against the last pre-adoption copper instead of
+# the live files. The squash merge keeps this commit reachable as an ancestor
+# of main, and the recorded digests keep the pin self-verifying.
+PRE_ADOPTION_8603 = "8148a4d88"
+PRE_ADOPTION_SHA256_8603 = {
+    "authored-source/sdram_demo.kicad_pcb": "51663e0156b541c9602bef2bf55266bbfde02545fb5264a2909fdd4cf4b7163a",
+    "reviewed-routing/sdram_demo.kicad_pcb": "cb1a2322eba616ebee1c1f66231cf05f898c7213d5e380deb19060bbdd900011",
+}
 
-def _load_record(name):
-    spec = importlib.util.spec_from_file_location(f"board07_{name}", ROOT07 / f"{name}.py")
+
+def _pre_adoption_board(name: str, tmp_path) -> Path:
+    import hashlib
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[1]
+    blob = subprocess.check_output(
+        ["git", "show", f"{PRE_ADOPTION_8603}:boards/07-matchgroup-test/real_design/{name}"],
+        cwd=repo,
+    )
+    assert hashlib.sha256(blob).hexdigest() == PRE_ADOPTION_SHA256_8603[name]
+    target = tmp_path / name.replace("/", "_")
+    target.write_bytes(blob)
+    return target
+
+
+def _load_record(name, root=ROOT07):
+    spec = importlib.util.spec_from_file_location(f"board07_{name}", root / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land(tmp_path):
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+
+    import pytest
+
+    # A caller may stage inside another checkout. Apply only to that scratch
+    # pair, keeping the production recipes byte-identical to their release.
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    proposed = tmp_path / "proposed"
+    fixture = _load_record("cleanup_fixture_8603", ROOT07 / "engineering")
+    fixture.stage_design(ROOT07, proposed)
+    # The rehearsal also accepts a source tree that already has the fiducial changes.
+    candidate_patch = Path("engineering/assembly-fiducials.patch")
+    shutil.copyfile(ROOT07 / candidate_patch, proposed / candidate_patch)
+    adopted = tmp_path / "adopted"
+    fixture.stage_design(proposed, adopted)
+    # Production carries the adopted fiducial support (#8603), so re-staging
+    # it is idempotent and matches the rehearsal output byte for byte. The
+    # published design-source archive still ships the pre-adoption recipes
+    # until #8604's manufacturing evidence refresh re-issues it.
+    for name in ("build.py", "build_source.py"):
+        assert (adopted / name).read_bytes() == (proposed / name).read_bytes()
+        assert (ROOT07 / name).read_bytes() == (adopted / name).read_bytes()
+    release = _load_record("build_source", proposed)
+    pad = SimpleNamespace(
+        number="", net_name="", net_number=0, size=(1.0, 1.0), drill=0.0, layers=["F.Cu", "F.Mask"]
+    )
+    mark = SimpleNamespace(
+        reference="FID1",
+        name=release.FIDUCIAL_FOOTPRINT,
+        value="Fiducial",
+        layer="F.Cu",
+        _attr_unknown_tokens=["board_only"],
+        exclude_from_bom=True,
+        exclude_from_pos_files=True,
+        pads=[pad],
+    )
+    board = SimpleNamespace(footprints=[mark])
+    release.verify_fiducials(board, {"FID1": "F.Cu"})
+    for obj, field, invalid in (
+        (mark, "name", "Resistor_SMD:R_0603"),
+        (mark, "_attr_unknown_tokens", []),
+        (mark, "exclude_from_pos_files", False),
+        (mark, "exclude_from_bom", False),
+        (mark, "layer", "B.Cu"),
+        (mark, "pads", [pad, pad]),
+        (pad, "number", "1"),
+        (pad, "net_name", "SDCLK"),
+        (pad, "net_number", 2),
+        (pad, "drill", 0.3),
+        (pad, "size", (1.0, 2.0)),
+        (pad, "layers", ["F.Cu", "B.Cu"]),
+    ):
+        initial = getattr(obj, field)
+        setattr(obj, field, invalid)
+        with pytest.raises(ValueError, match="Invalid board-only fiducial"):
+            release.verify_fiducials(board, {"FID1": "F.Cu"})
+        setattr(obj, field, initial)
+    with pytest.raises(ValueError, match="Missing declared fiducials"):
+        release.verify_fiducials(board, {"FID1": "F.Cu", "FID2": "B.Cu"})
 
 
 def _vias(path):
@@ -118,11 +207,12 @@ def _vias(path):
     }
 
 
-def test_class_clearance_repair_is_applied_and_bounded():
+def test_class_clearance_repair_is_applied_and_bounded(tmp_path):
     """#6396: every listed via sits at its repaired position, moved <= 50 um.
 
     #9091 later moved two of these vias again; a via counts as in place when it
-    sits where the later record put it.
+    sits where the later record put it. Verified on the pinned pre-adoption
+    copper: the #8603 re-optimization replaced those vias wholesale.
     """
     import math
 
@@ -130,47 +220,65 @@ def test_class_clearance_repair_is_applied_and_bounded():
     later = {
         (net, old): new for net, old, new, _ in _load_record("repair_copper_gap_9091").VIA_MOVES
     }
-    for path in (module.AUTHORED, module.REVIEWED):
+    boards = {
+        "authored": _pre_adoption_board("authored-source/sdram_demo.kicad_pcb", tmp_path),
+        "reviewed": _pre_adoption_board("reviewed-routing/sdram_demo.kicad_pcb", tmp_path),
+    }
+    for path in (boards["authored"], boards["reviewed"]):
         vias = _vias(path)
         for net, old, new, authored in module.VIA_MOVES:
-            if path == module.AUTHORED and not authored:
+            if path == boards["authored"] and not authored:
                 continue
             assert math.dist(old, new) <= 0.05
             final = later.get((net, new), new)
             assert (net, final) in vias and (net, old) not in vias
 
 
-def test_copper_gap_repair_is_applied_and_bounded():
-    """#9091: both sources carry the repair, and it stays a small, on-grid edit."""
+def test_copper_gap_repair_is_applied_and_bounded(tmp_path):
+    """#9091: both sources carry the repair, and it stays a small, on-grid edit.
+
+    Verified on the pinned pre-adoption copper; the #8603 re-optimization
+    replaced that geometry wholesale.
+    """
     import hashlib
     import math
 
     module = _load_record("repair_copper_gap_9091")
-    for path in (module.AUTHORED, module.REVIEWED):
+    boards = {
+        "authored": (
+            _pre_adoption_board("authored-source/sdram_demo.kicad_pcb", tmp_path),
+            module.PRE_REPAIR_SHA256[module.AUTHORED],
+        ),
+        "reviewed": (
+            _pre_adoption_board("reviewed-routing/sdram_demo.kicad_pcb", tmp_path),
+            module.PRE_REPAIR_SHA256[module.REVIEWED],
+        ),
+    }
+    for path, pre_repair in boards.values():
         vias = _vias(path)
         for net, old, new, authored in module.VIA_MOVES:
-            if path == module.AUTHORED and not authored:
+            if path == boards["authored"][0] and not authored:
                 continue
             assert math.dist(old, new) <= 0.09
             assert (net, new) in vias and (net, old) not in vias
         # Re-running the record on its own output must refuse, never re-apply.
-        assert hashlib.sha256(path.read_bytes()).hexdigest() != module.PRE_REPAIR_SHA256[path]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() != pre_repair
     for _net, _layer, points, _ in module.TROMBONES:
         for (x1, y1), (x2, y2) in zip(points, points[1:], strict=False):
             dx, dy = round(abs(x2 - x1), 4), round(abs(y2 - y1), 4)
             assert dx == 0 or dy == 0 or dx == dy
 
 
-def test_copper_gap_repair_keeps_byte1_lengths():
+def test_copper_gap_repair_keeps_byte1_lengths(tmp_path):
     """#9091: the trombones restore exactly the loop length they replace."""
     from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
     from kicad_tools.schema.pcb import PCB
 
-    module = _load_record("repair_copper_gap_9091")
     # Copper lengths of the reviewed artifact before the repair (main 89c2ee058),
-    # vias excluded: the repair moves no via on these nets.
+    # vias excluded: the repair moves no via on these nets. Read from the
+    # pinned pre-adoption board: the #8603 repair re-tuned byte 1 afterwards.
     reviewed = {"DQ13": 73.6572, "DQ15": 73.6558, "UDQM": 73.6411}
-    board = PCB.load(module.REVIEWED)
+    board = PCB.load(str(_pre_adoption_board("reviewed-routing/sdram_demo.kicad_pcb", tmp_path)))
     analyzer = TraceLengthAnalyzer()
     for net, before in reviewed.items():
         assert abs(analyzer.analyze_net(board, net).total_length_mm - before) < 0.002, net

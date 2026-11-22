@@ -74,6 +74,7 @@ than leaving the reader to infer it from the ambiguous-status error alone.
 from __future__ import annotations
 
 import math
+from itertools import chain
 from typing import TYPE_CHECKING, NamedTuple
 
 from kicad_tools.physics.ampacity import (
@@ -325,7 +326,11 @@ class PathAmpacityRule(DRCRule):
                 )
                 if violation is not None:
                     results.add(violation)
-            for segment in resolution.segments:
+            # The minimum at a cap-only joint is the common chord of the two
+            # rounded ends. Check its local copper and wire credit at that point.
+            tracks = ((segment, None) for segment in resolution.segments)
+            joints = ((joint.span, joint.pinch) for joint in resolution.cap_joints)
+            for segment, pinch in chain(tracks, joints):
                 layer = getattr(segment, "layer", "F.Cu")
                 external = self._is_external_layer(layer)
                 actual_width_mm = getattr(segment, "width", 0.0)
@@ -344,6 +349,7 @@ class PathAmpacityRule(DRCRule):
                     external=external,
                     design_rules=design_rules,
                     wire_areas=wire_areas,
+                    pinch=pinch,
                 )
                 for span in credit_spans:
                     credit_leg = span.leg
@@ -554,6 +560,7 @@ class PathAmpacityRule(DRCRule):
         external: bool,
         design_rules: DesignRules,
         wire_areas: Sequence[tuple[WiredLeg, float]],
+        pinch: tuple[float, float] | None = None,
     ) -> list[_CreditSpan]:
         """The judgement stretches of ``segment`` against the wired legs.
 
@@ -578,11 +585,18 @@ class PathAmpacityRule(DRCRule):
         thickness, so adding it to the copper width sums the two
         sections -- exactly how ``width_for_current`` derives width from
         required area. A single bare span when no wired leg covers the
-        segment.
+        segment. For a cap joint, the real span supplies the conductor
+        direction, and only the minimum-width cross-section at ``pinch``
+        is judged.
         """
         seg_len = _segment_length(segment)
-        bare = _CreditSpan(0.0, seg_len, None, 0.0)
         start, end = _segment_end(segment, 0), _segment_end(segment, 1)
+        if seg_len <= 1e-9:
+            pinch = start
+        t0, t1 = 0.0, seg_len
+        if pinch is not None:
+            t0 = t1 = math.dist(start, pinch)
+        bare = _CreditSpan(t0, t1, None, 0.0)
         midpoint = self._segment_midpoint(segment)
         # Every leg whose corridor holds the segment's whole centreline
         # and whose polyline it follows; the winner is picked below,
@@ -600,22 +614,26 @@ class PathAmpacityRule(DRCRule):
             seg_width = float(getattr(segment, "width", 0.0) or leg.width)
             if deviation_mm > min(leg.width, seg_width) / 2.0 + ANCHOR_ON_LEG_SLACK_MM:
                 continue
-            if leg.anchor_arc is not None and seg_len > 1e-9:
+            if leg.anchor_arc is not None or pinch is not None:
                 cum = _cumulative_arc(leg.points)
-                if (
-                    abs(
+                if pinch is not None and leg.anchor_arc is not None:
+                    a0, a1 = sorted(leg.anchor_arc)
+                    at = _arc_on_polyline(leg.points, cum, pinch)
+                    if not a0 - 1e-6 <= at <= a1 + 1e-6:
+                        continue
+                if seg_len > 1e-9:
+                    projection = abs(
                         _arc_on_polyline(leg.points, cum, end)
                         - _arc_on_polyline(leg.points, cum, start)
                     )
-                    <= 1e-6
-                ):
-                    # Degenerate projection: the segment meets this
-                    # polyline side-on (both endpoints project to one
-                    # polyline point), so it does not follow this leg --
-                    # a branch stub inside the trunk's corridor must be
-                    # judged by the leg it follows, never credited by the
-                    # trunk's wire.
-                    continue
+                    # A side-on branch does not run along the wire. At a
+                    # short cap junction even an oblique crossing can fit
+                    # inside the corridor: its projection is shorter than
+                    # the length of the junction it would need to bridge.
+                    if projection <= 1e-6 or (
+                        pinch is not None and not math.isclose(projection, seg_len, abs_tol=1e-6)
+                    ):
+                        continue
             candidates.append((deviation_mm, leg, area_mm2))
         if not candidates:
             return [bare]
@@ -639,10 +657,8 @@ class PathAmpacityRule(DRCRule):
         if thickness_mm <= 0:
             return [bare]
         credit_mm = area_mm2 / thickness_mm
-        full = _CreditSpan(0.0, seg_len, leg, credit_mm)
-        if leg.anchor_arc is None or seg_len <= 1e-9:
-            # No anchor range recorded: credit the whole segment, the
-            # pre-#9654 reading.
+        full = _CreditSpan(t0, t1, leg, credit_mm)
+        if leg.anchor_arc is None or pinch is not None:
             return [full]
         a0, a1 = sorted(leg.anchor_arc)
         cum = _cumulative_arc(leg.points)

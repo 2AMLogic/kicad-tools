@@ -110,8 +110,29 @@ def test_track_splice_uses_the_physical_net_layer_width_and_preserves_other_byte
         recipe.retune_tracks(board, [row], {tracks[0].find("uuid").get_string()})
 
 
-def test_escape_ownership_ends_at_the_recorded_physical_pad_and_via(recipe):
-    board = PCB.load(ENGINEERING.parent / "authored-source/sdram_demo.kicad_pcb")
+def test_escape_ownership_ends_at_the_recorded_physical_pad_and_via(recipe, tmp_path):
+    # The record was measured against the pre-adoption authored copper, whose
+    # A9 escape was still the fragmented 30+-segment staircase; the #8603
+    # adoption simplified it in place.
+    import hashlib
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[1]
+    blob = subprocess.check_output(
+        [
+            "git",
+            "show",
+            "8148a4d88:boards/07-matchgroup-test/real_design/authored-source/sdram_demo.kicad_pcb",
+        ],
+        cwd=repo,
+    )
+    assert (
+        hashlib.sha256(blob).hexdigest()
+        == "51663e0156b541c9602bef2bf55266bbfde02545fb5264a2909fdd4cf4b7163a"
+    )
+    pinned = tmp_path / "authored-pre-adoption.kicad_pcb"
+    pinned.write_bytes(blob)
+    board = PCB.load(str(pinned))
     pin = "U1.55"
     via = RECORD["escape"][pin]
     path, ids, identity = recipe.escape_path(board, pin, via)
@@ -186,3 +207,38 @@ def test_fresh_recipe_stops_on_an_unrelated_build_failure(tmp_path, monkeypatch,
     assert not (output / "retuned").exists()
     with pytest.raises(FileExistsError):
         recipe.reproduce(output)
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_retuning_requires_both_native_optimizer_probes(tmp_path, monkeypatch, recipe, recovers):
+    attempts = []
+    accepted = []
+    monkeypatch.setattr(recipe, "evidence_toolchain", lambda *a, **k: nullcontext())
+
+    def run(argv, **kwargs):
+        if len(argv) > 1 and Path(argv[1]).name == "build.py":
+            project = Path(argv[2]) / "validation/checked.kicad_dru"
+            project.parent.mkdir(parents=True)
+            project.write_text("(version 1)")
+        elif argv[0] == "kct":
+            attempts.append(argv)
+            status = "ran" if len(attempts) == 2 and recovers else "unavailable"
+            return SimpleNamespace(
+                stdout=json.dumps({"output_checks": {"opens": "ran", "drc": status}})
+            )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(recipe.subprocess, "run", run)
+    monkeypatch.setattr(recipe, "prepare", lambda *args: accepted.append(args))
+    out = tmp_path / "probe-test"
+    if recovers:
+        assert recipe.reproduce(out) == 0
+        assert len(accepted) == 1
+    else:
+        with pytest.raises(RuntimeError, match="Native optimizer checks did not complete"):
+            recipe.reproduce(out)
+        assert not accepted
+    assert len(attempts) == 2
+    assert (
+        json.loads((out / "optimizer-1.json").read_bytes())["output_checks"]["drc"] == "unavailable"
+    )

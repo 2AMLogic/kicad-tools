@@ -27,6 +27,35 @@ from kicad_tools.schema.pcb import PCB
 
 ROOT = Path(__file__).resolve().parents[1] / "boards/07-matchgroup-test/real_design"
 
+# The #8603 adoption re-optimized both physical boards, so the historical
+# reconstruction below reads the last pre-adoption reviewed copper from git
+# instead of the live file.
+PRE_ADOPTION_8603 = "8148a4d88"
+PRE_ADOPTION_REVIEWED_SHA256_8603 = (
+    "cb1a2322eba616ebee1c1f66231cf05f898c7213d5e380deb19060bbdd900011"
+)
+
+
+def _pre_adoption_reviewed(tmp_path) -> Path:
+    import hashlib
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[1]
+    blob = subprocess.check_output(
+        [
+            "git",
+            "show",
+            f"{PRE_ADOPTION_8603}:boards/07-matchgroup-test/real_design/"
+            "reviewed-routing/sdram_demo.kicad_pcb",
+        ],
+        cwd=repo,
+    )
+    assert hashlib.sha256(blob).hexdigest() == PRE_ADOPTION_REVIEWED_SHA256_8603
+    target = tmp_path / "reviewed-pre-adoption.kicad_pcb"
+    target.write_bytes(blob)
+    return target
+
+
 BYTE0 = ("DQ0", "DQ1", "DQ2", "DQ3", "DQ4", "DQ5", "DQ6", "DQ7", "LDQM")
 
 
@@ -111,8 +140,11 @@ def test_pre_repair_byte0_copper_fails_the_physical_spread(
     read 57.07/56.02.  Lengths here are the gate's matched length (#9198),
     copper path plus via travel: DQ7 57.59 mm (+0.57 mm of via travel) and
     LDQM 55.21 mm (no path vias), a spread of 8.63 mm.
+
+    Reconstructed from the pinned pre-adoption copper; the #8603 repair later
+    re-optimized the live board, which no longer carries these trombones.
     """
-    text = (ROOT / "reviewed-routing/sdram_demo.kicad_pcb").read_text(encoding="utf-8")
+    text = _pre_adoption_reviewed(tmp_path).read_text(encoding="utf-8")
     for net, layer, points in record.TROMBONES:
         for pair in zip(points, points[1:], strict=False):
             text = record.R.delete_segment(text, net, layer, pair)
@@ -141,14 +173,29 @@ def test_byte0_carries_no_loop_on_any_net(analyzer, reviewed_board, validate):
         )
 
 
-def test_repair_leaves_tolerances_and_authored_source_alone(record):
+def test_repair_leaves_tolerances_and_authored_source_alone(record, tmp_path):
+    import subprocess
+
     constraints = json.loads(
         (ROOT.parent / "output/sdram_constraints.json").read_text(encoding="utf-8")
     )
     assert constraints["group_skew_mm"] == 5.0
     assert constraints["clock_relative_tolerance_mm"] == 10.0
+    # The record's authored input stays byte-identical at the pinned
+    # pre-adoption revision; the #8603 adoption later re-derived
+    # authored-source, so the live file legitimately differs.
     assert (
-        hashlib.sha256(record.AUTHORED.read_bytes()).hexdigest()
+        hashlib.sha256(
+            subprocess.check_output(
+                [
+                    "git",
+                    "show",
+                    "8148a4d88:boards/07-matchgroup-test/real_design/"
+                    "authored-source/sdram_demo.kicad_pcb",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+            )
+        ).hexdigest()
         == record.INPUT_SHA256[record.AUTHORED]
     )
     # Re-running the record on its own output must refuse, never re-apply.

@@ -678,7 +678,7 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
                 # tessellated footprint arc, dropping the whole area.
                 segments.extend(zip(chain[:-1], chain[1:], strict=True))
             elif kind == "poly":
-                points = [fp_point(fp, point) for point in graphic.points]
+                points = [fp_point(fp, point) for point in graphic.boundary_points]
                 if len(points) < 3:
                     raise ValueError("Edge.Cuts fp_poly: missing points")
                 add_chain(points)

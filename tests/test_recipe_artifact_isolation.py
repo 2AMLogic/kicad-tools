@@ -93,23 +93,13 @@ BOARD06_IMPEDANCE_NETS: set[str] = set()
 BOARD06_UNCOUPLED_PAIR = "USB2_D+/USB2_D-"
 
 
-def _skew(gate):
-    """The listed skew pairs (#7367): present in every ``found`` below."""
-    return {
-        "diffpair_length_skew": {
-            n for r, n in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "diffpair_length_skew"
-        }
-    }
-
-
-def _masks(gate):
-    """The #8858 mask_to_copper net signatures: the seed-42 regeneration
-    carries every one of them, so they are present in every ``found``."""
-    return {
-        "mask_to_copper": {
-            n for r, n in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "mask_to_copper"
-        }
-    }
+def _board06_background(gate):
+    """Findings that accompany the impedance cases on the regenerated board."""
+    found = {}
+    for rule, identity in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS:
+        if rule in ("diffpair_length_skew", "mask_to_copper"):
+            found.setdefault(rule, set()).add(identity)
+    return found
 
 
 def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
@@ -122,9 +112,11 @@ def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
     assert not {
         n for (r, n) in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "diffpair_uncoupled_length"
     }
-    # The seed-42 repair drained every physical_copper_gap identity (#9846).
-    allowed_rules = {rule for rule, _ in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS}
-    assert allowed_rules <= {"diffpair_length_skew", "mask_to_copper"}
+    # The repaired seed-42 export has no physical-gap or silkscreen allowance.
+    assert all(
+        rule in ("diffpair_length_skew", "mask_to_copper")
+        for rule, _ in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+    )
     assert {
         i for (r, _), i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items() if r == "mask_to_copper"
     } == {8858}
@@ -132,7 +124,7 @@ def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
 
 def test_board06_listed_impedance_findings_pass():
     gate = load("check_diffpair_coverage")
-    found = {"impedance": set(BOARD06_IMPEDANCE_NETS), **_skew(gate), **_masks(gate)}
+    found = {"impedance": set(BOARD06_IMPEDANCE_NETS), **_board06_background(gate)}
     errors: dict[str, int] = {}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
@@ -157,8 +149,7 @@ def test_board06_new_impedance_net_fails():
     gate = load("check_diffpair_coverage")
     found = {
         "impedance": set(BOARD06_IMPEDANCE_NETS) | {"USB3_TX2+"},
-        **_skew(gate),
-        **_masks(gate),
+        **_board06_background(gate),
     }
     errors = {"impedance": 2}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {"impedance": 1}
@@ -168,7 +159,7 @@ def test_board06_new_impedance_net_fails():
 def test_board06_cleared_impedance_finding_cannot_return():
     """Issue #7575: USB3_TX2-'s in-pad-stub finding is gone; it cannot come back."""
     gate = load("check_diffpair_coverage")
-    found = {"impedance": {"USB3_TX2-"}, **_skew(gate), **_masks(gate)}
+    found = {"impedance": {"USB3_TX2-"}, **_board06_background(gate)}
     errors = {"impedance": 1}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {"impedance": 1}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
@@ -180,7 +171,7 @@ def test_board06_uncoupled_allowance_is_gone():
     assert ("diffpair_uncoupled_length", BOARD06_UNCOUPLED_PAIR) not in (
         gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
     )
-    found = {"impedance": set(BOARD06_IMPEDANCE_NETS), **_skew(gate), **_masks(gate)}
+    found = {"impedance": set(BOARD06_IMPEDANCE_NETS), **_board06_background(gate)}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
 
 

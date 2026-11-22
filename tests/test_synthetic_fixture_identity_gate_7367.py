@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._fixture_silk_findings import FORMER_BOARD06_SILK, FORMER_BOARD07_SILK
+
 ROOT = Path(__file__).resolve().parents[1]
 TOLERANCE = ROOT / ".github" / "routed-drc-tolerance.yml"
 BOARD06_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
@@ -548,6 +550,27 @@ def test_board06_measured_mask_population_passes_and_drains():
     ]
     stale = gate.stale_allowances(BOARD06_KEY, identities_of(drained))
     assert stale == [("mask_to_copper", last_mask_net, 8858)]
+
+
+@pytest.mark.parametrize(
+    ("module", "key", "former_silk", "mask_nets"),
+    [
+        ("check_diffpair_coverage", BOARD06_KEY, FORMER_BOARD06_SILK, BOARD06_MASK_NETS),
+        ("check_matchgroup_coverage", BOARD07_KEY, FORMER_BOARD07_SILK, BOARD07_MASK_NETS),
+    ],
+)
+def test_repaired_silk_finding_is_rejected_if_it_returns(module, key, former_silk, mask_nets):
+    gate = load(module)
+    baseline = [mask_violation(net) for net in mask_nets]
+    assert gate.stale_allowances(key, identities_of(baseline)) == []
+    assert gate.unallowed_blocking(key, baseline) == []
+
+    for rule, item in former_silk:
+        found = [*baseline, violation(rule, item)]
+        assert gate.unallowed_blocking(key, found) == [(rule, item)]
+        assert gate.unexpected_baseline_errors(key, rule_counts(found), identities_of(found)) == {
+            rule: 1
+        }
 
 
 def test_regenerated_population_passes_and_a_new_net_fails():
