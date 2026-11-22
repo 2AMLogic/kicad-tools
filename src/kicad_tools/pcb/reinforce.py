@@ -76,12 +76,14 @@ and mask-open anchors (#8743), wire-list sidecar (#8744), net-class
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from itertools import pairwise
 from typing import Any
 
 from kicad_tools.core.geometry import point_in_polygon, rotate_pad_offset
 from kicad_tools.core.types import CopperLayer
+from kicad_tools.geometry.copper import collinear_overlap_length
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.physics.wire_gauge import (
     DEFAULT_WIRE_GAUGE_AWG,
@@ -92,7 +94,8 @@ from kicad_tools.physics.wire_gauge import (
 from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
-    reinforcement_eligible_segment_ids,
+    PathResolution,
+    ReinforcementPathResolutions,
     reinforcement_path_resolutions,
 )
 from kicad_tools.router.optimizer.algorithms import merge_collinear
@@ -484,6 +487,10 @@ class UnresolvedPath:
     #: coordinates; reporters append ``describe_witness(witness, origin)`` in
     #: their own frame (#8928).
     witness: dict[str, object] = field(default_factory=dict)
+    #: Loop-free segments of this loop-ambiguous path that were still offered
+    #: for anchoring (Issue #9725): the straight run every route between the
+    #: endpoints crosses. ``0`` when the whole path gets no anchors.
+    anchored_segments: int = 0
 
 
 @dataclass
@@ -1565,6 +1572,63 @@ def resolve_min_wire_length_mm(
     return None
 
 
+def _reinforcement_tracks(
+    segments: list[Segment], partition: ReinforcementPathResolutions
+) -> tuple[list[Segment], list[PathResolution]]:
+    """Split the placement view at all declarations' proved interval ends.
+
+    The excluded pieces remain same-net end copper for clearance. The PCB and
+    the whole-track identities returned by the resolver stay intact.
+    """
+    resolutions = [
+        *partition.eligible,
+        *(replace(res, segments=res.loop_free_segments) for res in partition.partial),
+    ]
+    boundaries: dict[int, set[tuple[float, float]]] = {}
+    for resolution in resolutions:
+        for source, spans in resolution.loop_free_spans.items():
+            boundaries.setdefault(source, set()).update(p for s in spans for p in (s.start, s.end))
+    if not boundaries:
+        return segments, resolutions
+
+    pieces: dict[int, list[Segment]] = {}
+    station_indices: dict[int, dict[tuple[float, float], int]] = {}
+    placed_tracks: list[Segment] = []
+    for seg in segments:
+        points = boundaries.get(id(seg))
+        if points is None:
+            placed_tracks.append(seg)
+            continue
+        stops = sorted(points | {seg.start, seg.end}, key=lambda p: math.dist(seg.start, p))
+        station_indices[id(seg)] = {point: index for index, point in enumerate(stops)}
+        pieces[id(seg)] = [replace(seg, start=a, end=b) for a, b in pairwise(stops)]
+        placed_tracks.extend(pieces[id(seg)])
+
+    def end_piece(seg: Segment, point: tuple[float, float]) -> Segment:
+        if id(seg) not in pieces:
+            return seg
+        return pieces[id(seg)][0 if point == seg.start else -1]
+
+    placed_resolutions = []
+    for res in resolutions:
+        covered = [piece for s in res.covered_segments for piece in pieces.get(id(s), [s])]
+        for source, spans in res.loop_free_spans.items():
+            stations = station_indices[source]
+            for span in spans:
+                first, last = sorted((stations[span.start], stations[span.end]))
+                covered.extend(pieces[source][first:last])
+        joints = tuple(
+            replace(
+                j, first=end_piece(j.first, j.span.start), second=end_piece(j.second, j.span.end)
+            )
+            for j in res.cap_joints
+        )
+        placed_resolutions.append(
+            replace(res, segments=tuple(covered), overlaid_segments=(), cap_joints=joints)
+        )
+    return placed_tracks, placed_resolutions
+
+
 def reinforce_net(
     pcb: PCB,
     net_name: str,
@@ -1791,13 +1855,24 @@ def reinforce_net(
     # modes, never silently skipped (Issue #8742).
     net_path_specs = [spec for spec in (current_paths or ()) if spec.net_name == net_name]
     partition = reinforcement_path_resolutions(pcb, net_path_specs) if net_path_specs else None
+    eligible_resolutions = None
     if partition is not None:
+        partial_ids = {id(res) for res in partition.partial}
         result.unresolved_paths = [
             UnresolvedPath(
-                path=res.spec.name, status=res.status, reason=res.reason, witness=res.witness
+                path=res.spec.name,
+                status=res.status,
+                reason=res.reason,
+                witness=res.witness,
+                anchored_segments=(
+                    len(res.loop_free_segments) + sum(map(len, res.loop_free_spans.values()))
+                    if id(res) in partial_ids
+                    else 0
+                ),
             )
             for res in partition.unresolved
         ]
+        net_segments, eligible_resolutions = _reinforcement_tracks(net_segments, partition)
 
     if anchor_mode == ANCHOR_MODE_ENDS:
         if layer is not None and layer not in {s.layer for s in net_segments}:
@@ -1807,7 +1882,9 @@ def reinforce_net(
             result,
             net_segments=net_segments,
             target_net_number=target_net_number,
-            eligible_resolutions=(partition.eligible if partition is not None else None),
+            # A loop-ambiguous eligible path lends only its loop-free
+            # segments (Issue #9725); the looped part stays unhandled.
+            eligible_resolutions=eligible_resolutions,
             layer=layer,
             all_runs=all_runs,
             min_wire_length_mm=resolve_min_wire_length_mm(
@@ -1843,8 +1920,8 @@ def reinforce_net(
     original_ids: dict[int, int] = {}
     runs = _chain_polylines(by_layer[target_layer], original_ids=original_ids)
     classified_runs: list[tuple[list[Segment], str | None]] = []
-    if net_path_specs:
-        allowed_ids = reinforcement_eligible_segment_ids(pcb, net_path_specs)
+    if eligible_resolutions is not None:
+        allowed_ids = {id(seg) for res in eligible_resolutions for seg in res.covered_segments}
         excluded_reason = (
             "excluded by declared current-path intent (Issue #4980): not fully "
             "covered by a resolved, reinforcement-eligible CurrentPathSpec for "
@@ -2034,6 +2111,75 @@ def _reverse_run(run: list[Segment], original_ids: dict[int, int]) -> list[Segme
 
 def _vertex(p: tuple[float, float]) -> tuple[float, float]:
     return (round(p[0], 4), round(p[1], 4))
+
+
+def _physical_leg_spans(
+    segments: list[Segment], sources: dict[int, tuple[int, ...]]
+) -> list[Segment]:
+    """Count overlapping collinear strokes once when walking one layer of eligible copper."""
+    from shapely import LineString, STRtree  # type: ignore[import-untyped]
+
+    from kicad_tools.router.connectivity import _UnionFind
+
+    if len(segments) < 2:
+        return segments
+    lines = [LineString((seg.start, seg.end)) for seg in segments]
+    overlaps = _UnionFind()
+    for i, j in STRtree(lines).query(lines).T:
+        if i >= j:
+            continue
+        a, b = segments[i], segments[j]
+        length = collinear_overlap_length(a.start, a.end, b.start, b.end)
+        if length is not None and length > 1e-6:
+            overlaps.union(i, j)
+    groups: dict[int, list[Segment]] = {}
+    for index, segment in enumerate(segments):
+        groups.setdefault(overlaps.find(index), []).append(segment)
+    result = []
+    for group in groups.values():
+        if len(group) == 1:
+            result.extend(group)
+            continue
+        first = group[0]
+        axis = 0 if abs(first.end[0] - first.start[0]) >= abs(first.end[1] - first.start[1]) else 1
+        points = sorted({p for s in group for p in (s.start, s.end)}, key=lambda p: p[axis])
+        intervals = [
+            (min(s.start[axis], s.end[axis]), max(s.start[axis], s.end[axis]), s) for s in group
+        ]
+        for start, end in zip(points, points[1:], strict=False):
+            if end[axis] - start[axis] <= 1e-9:
+                continue
+            station = (start[axis] + end[axis]) / 2
+            covering = [s for low, high, s in intervals if low <= station <= high]
+            if covering:
+                # On a common centreline the widest stroke occupies this interval.
+                span = replace(max(covering, key=lambda s: s.width), start=start, end=end)
+                sources[id(span)] = tuple(
+                    dict.fromkeys(
+                        source for s in covering for source in sources.get(id(s), (id(s),))
+                    )
+                )
+                result.append(span)
+    return result
+
+
+def _declared_leg_spans(
+    segments: list[Segment],
+    resolutions: Sequence[PathResolution],
+    sources: dict[int, tuple[int, ...]],
+) -> list[Segment]:
+    """Reconstruct the same continuous copper for wire placement and its DRC check."""
+    eligible = {id(segment) for segment in segments}
+    cap_spans: dict[frozenset[int], Segment] = {}
+    for resolution in resolutions:
+        for joint in resolution.cap_joints:
+            ids = (id(joint.first), id(joint.second))
+            if ids[0] in eligible and ids[1] in eligible:
+                cap_spans[frozenset(ids)] = joint.span
+                sources[id(joint.span)] = ids
+    # Authored copper can extend into a rounded joint. Split their common
+    # centreline once so that neither the placer nor DRC creates a second leg.
+    return _physical_leg_spans([*segments, *cap_spans.values()], sources)
 
 
 def _derive_legs(
@@ -3094,14 +3240,22 @@ def _reinforce_ends(
     candidates: list[_LegCandidate] = []
     excluded_runs: list[list[Segment]] = []
     path_names: dict[int, list[str]] = {}
+    span_sources: dict[int, tuple[int, ...]] = {}
+
+    def leg_sources(run: list[Segment]) -> Iterator[int]:
+        for seg in run:
+            source = original_ids.get(id(seg), id(seg))
+            yield from span_sources.get(source, (source,))
+
     # Declared design current per path name (#8950): an SMD end's tie row is
     # sized from the largest current declared over the leg.
     declared_current_a: dict[str, float] = {}
     target_layer: str | None = layer
 
     if gated:
-        for res in eligible_resolutions or ():
-            for seg in res.segments:
+        resolutions = eligible_resolutions or ()
+        for res in resolutions:
+            for seg in res.covered_segments:
                 covering = path_names.setdefault(id(seg), [])
                 if res.spec.name not in covering:
                     covering.append(res.spec.name)
@@ -3110,7 +3264,11 @@ def _reinforce_ends(
             segs = by_layer[lay]
             eligible = [s for s in segs if id(s) in path_names]
             excluded_runs.extend(_chain_polylines([s for s in segs if id(s) not in path_names]))
-            legs = _derive_legs(eligible, lay, original_ids)
+            # Chained copies refer back to these spans. End-clearance checks
+            # below still need every original track on the layer, including
+            # copper excluded from the declared path.
+            spans = _declared_leg_spans(eligible, resolutions, span_sources)
+            legs = _derive_legs(spans, lay, original_ids)
             if layer is not None and lay != layer:
                 for c in legs:
                     if c.status is None:
@@ -3451,8 +3609,8 @@ def _reinforce_ends(
         from kicad_tools.physics.ampacity import via_barrel_current_capacity
 
         names: list[str] = []
-        for s in cand.run:
-            for name in path_names.get(original_ids.get(id(s), id(s)), ()):
+        for source in leg_sources(cand.run):
+            for name in path_names.get(source, ()):
                 if name not in names:
                     names.append(name)
         row_current_a = max(
@@ -3779,8 +3937,8 @@ def _reinforce_ends(
         cand = candidates[index]
         g = geoms[index]
         names: list[str] = []
-        for s in cand.run:
-            for name in path_names.get(original_ids.get(id(s), id(s)), ()):
+        for source in leg_sources(cand.run):
+            for name in path_names.get(source, ()):
                 if name not in names:
                     names.append(name)
         leg = LegSummary(
@@ -3826,7 +3984,7 @@ def _reinforce_ends(
             points = g.points
             cum = _cumulative_arc(points)
             total = cum[-1]
-            own = {original_ids.get(id(s), id(s)) for s in cand.run}
+            own = set(leg_sources(cand.run))
             tracks = _track_components([s for s in by_layer[cand.layer] if id(s) not in own])
             c0 = _end_copper(points, cand.layer, features, tracks, cand.run[0].width / 2.0)
             c1 = _end_copper(points[::-1], cand.layer, features, tracks, cand.run[-1].width / 2.0)

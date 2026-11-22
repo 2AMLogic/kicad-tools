@@ -100,6 +100,12 @@ reports ``"ambiguous"`` -- naming the copper -- for any declared branch
 whose net carries one, because either can form a parallel return path this
 bounded model cannot see and rule out.
 
+Mid-path via groups also use the shared physical copper-contact graph to
+check whether their two bars remain connected after removing the barrels.
+This detects bypasses through width-only contacts anywhere on their feeders.
+Partial reinforcement also checks each piece of a candidate track between
+physical junctions for a return around that piece.
+
 Consumers:
 
 * :class:`kicad_tools.validate.rules.path_ampacity.PathAmpacityRule` --
@@ -217,19 +223,29 @@ from __future__ import annotations
 import json
 import math
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from kicad_tools.core.geometry import point_to_segment_distance, segments_intersect
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
+from kicad_tools.geometry.copper import (
+    collinear_interval_overlap,
+    collinear_overlap_length,
+    extends_collinear,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
 
+    from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
+
+    from kicad_tools.analysis.trace_length import PhysicalPathSegments
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.schema.pcb import PCB, Footprint, Net, Pad, Segment, Via, Zone
     from kicad_tools.sexp.parser import SExp
+    from kicad_tools.validate.copper_contact import CopperContactGraph
 
 __all__ = [
     "CURRENT_PATHS_SIDECAR_BASENAME",
@@ -732,8 +748,8 @@ def _sexp_matches_net(node: SExp, net: Net | None, net_name: str) -> bool:
     )
 
 
-def _matches_net(obj: Pad | Via | Zone, net: Net | None, net_name: str) -> bool:
-    """True if a parsed ``Pad``/``Via``/``Zone`` object sits on ``net_name``."""
+def _matches_net(obj: Pad | Via | Zone | Segment, net: Net | None, net_name: str) -> bool:
+    """True if a parsed ``Pad``/``Via``/``Zone``/``Segment`` object sits on ``net_name``."""
     return obj.net_name == net_name or (net is not None and obj.net_number == net.number)
 
 
@@ -1102,6 +1118,7 @@ def _layer_changes(
     array_of: dict[tuple[float, float], int] = {
         node[:2]: i for i, array in enumerate(arrays) for node in array.nodes
     }
+    row_contacts = {pos: ids for array in arrays for pos, ids in array.track_contacts.items()}
     found: list[tuple[int, Via, str, str]] = []
     for via in pcb.vias:
         if not _matches_net(via, net, net_name):
@@ -1109,7 +1126,10 @@ def _layer_changes(
         touching = [
             (i, seg.layer)
             for i, seg in enumerate(segments)
-            if point_to_segment_distance(*via.position, *seg.start, *seg.end) <= 0.01
+            if (
+                id(seg) in row_contacts.get(_node_key(via.position), ())
+                or point_to_segment_distance(*via.position, *seg.start, *seg.end) <= 0.01
+            )
             and via_spans_layer(via.layers, seg.layer)
         ]
         layers = list(dict.fromkeys(layer for _, layer in touching))
@@ -1331,6 +1351,14 @@ def _layer_changes(
 
 
 @dataclass(frozen=True)
+class _CapJoint:
+    first: Segment
+    second: Segment
+    span: Segment
+    pinch: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class PathResolution:
     """Outcome of resolving one :class:`CurrentPathSpec` against a board.
 
@@ -1377,6 +1405,32 @@ class PathResolution:
     #: Doubled-copper groups the resolution relied on to clear a cycle
     #: (issue #8790). Their segments are part of ``segments``.
     parallel_groups: tuple[ParallelGroup, ...] = ()
+    #: For a loop ambiguity only (Issue #9725): the declared path's segments
+    #: that every source-to-sink route crosses, so they carry the full
+    #: declared current however the loop splits it. ``segments`` stays
+    #: empty -- the path is not resolved -- and the ampacity check never
+    #: reads this. Placement can also use the intervals in ``loop_free_spans``
+    #: of an eligible declaration. Empty when a same-net pour or arc exists (it
+    #: could bypass any of them) and for every other status.
+    loop_free_segments: tuple[Segment, ...] = ()
+
+    # A bonded pair of rounded ends can have less copper at its joint than
+    # either authored track. Keep these measured sections distinct from PCB
+    # segment identities used for attribution, coverage and reinforcement.
+    cap_joints: tuple[_CapJoint, ...] = ()
+    # Authored traces wholly inside the measured path copper carry no
+    # independent width, but are accounted for by its declared path.
+    overlaid_segments: tuple[Segment, ...] = ()
+    # A track crossing a via row can be in series only between its inner
+    # barrels. Keep those intervals separate from the whole-track allow-list.
+    loop_free_spans: dict[int, tuple[Segment, ...]] = field(default_factory=dict)
+    # Proved plated rows remain layer changes even when another part of the
+    # path is ambiguous. Their drill can match the requested wire anchor.
+    row_barrels: frozenset[tuple[float, float]] = frozenset()
+
+    @property
+    def covered_segments(self) -> tuple[Segment, ...]:
+        return self.segments + self.overlaid_segments
 
     @property
     def ok(self) -> bool:
@@ -1453,6 +1507,10 @@ class PathResolution:
             if i not in seen and group.branches
         ]
 
+        candidates.extend(
+            MinimumWidth(width_mm=joint.span.width, layer=joint.span.layer, position=joint.pinch)
+            for joint in self.cap_joints
+        )
         if not candidates:
             return None
         return min(candidates, key=lambda c: c.width_mm)
@@ -1554,11 +1612,21 @@ class _GraphEdge:
     """One graph edge; several split edges may retain the same routed segment."""
 
     segment: Segment | None = None  # None is real via barrel copper
+    overlaid: tuple[Segment, ...] = ()
+    # Authored centreline contacts, before pad hubs and via rows contract nodes.
+    span: tuple[tuple[float, float], tuple[float, float]] | None = None
+
+    def tracks(self) -> tuple[Segment, ...]:
+        return (self.segment, *self.overlaid) if self.segment is not None else ()
 
 
 @dataclass
 class _CopperGraph:
     adjacency: dict[_Node, list[tuple[_Node, _GraphEdge]]] = field(default_factory=dict)
+    # Physical objects keyed by identity, with all their modeled junctions after pad contraction.
+    item_nodes: dict[int, set[_Node]] = field(default_factory=dict)
+    # Physical conductor occupying each interval of an overlaid authored track.
+    track_cover: dict[int, set[int]] = field(default_factory=dict)
     pads: dict[tuple[str, str, int], _Node] = field(default_factory=dict)
     internal: dict[_Node, list[Segment]] = field(default_factory=dict)
     # For each external edge landing on a pad hub, the physical points where
@@ -1579,14 +1647,226 @@ def _copper_node(point: tuple[float, float], layer: str) -> _Node:
     return (*_node_key(point), layer)
 
 
-def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGraph:
-    """Build exact centerline contacts and normalize convex pad-internal copper.
+def _track_station(seg: Segment, point: tuple[float, float]) -> tuple[float, float]:
+    """Nearest point along the finite track centreline."""
+    x, y = seg.start
+    dx, dy = seg.end[0] - x, seg.end[1] - y
+    length_sq = dx * dx + dy * dy
+    if not length_sq:
+        return seg.start
+    t = min(1.0, max(0.0, ((point[0] - x) * dx + (point[1] - y) * dy) / length_sq))
+    return x + t * dx, y + t * dy
+
+
+def _continuous_bar(first: Segment, second: Segment) -> bool:
+    """Whether two same-layer track centrelines share an endpoint or interval on one line."""
+    return (
+        first.layer == second.layer
+        and collinear_overlap_length(first.start, first.end, second.start, second.end, _PAD_EPS)
+        is not None
+    )
+
+
+def _bonded_bar_overlap(first: Segment, second: Segment) -> float | None:
+    """Shared straight interval, negative for a gap bridged by positive-area end caps."""
+    if first.layer != second.layer:
+        return None
+    overlap = collinear_interval_overlap(first.start, first.end, second.start, second.end, _PAD_EPS)
+    # A tangent has no cross-section available to carry the path current.
+    if overlap is None or (
+        overlap < -_PAD_EPS and -overlap >= (first.width + second.width) / 2 - 1e-9
+    ):
+        return None
+    return overlap
+
+
+def _cap_joint(first: Segment, second: Segment, gap: float) -> _CapJoint:
+    """Represent a bonded end-cap joint at its minimum copper width across the run."""
+    start, end = min(
+        ((a, b) for a in (first.start, first.end) for b in (second.start, second.end)),
+        key=lambda pair: math.dist(*pair),
+    )
+    r1, r2 = first.width / 2, second.width / 2
+    # The common chord of the two round caps is the narrowest section. A
+    # wider cap that covers the other end completely leaves its full width.
+    x = (gap * gap + r1 * r1 - r2 * r2) / (2 * gap)
+    width = (
+        2 * math.sqrt(max(0.0, r1 * r1 - x * x)) if 0 < x < gap else min(first.width, second.width)
+    )
+    fraction = min(1.0, max(0.0, x / gap))
+    pinch = (start[0] + fraction * (end[0] - start[0]), start[1] + fraction * (end[1] - start[1]))
+    return _CapJoint(first, second, replace(first, start=start, end=end, width=width), pinch)
+
+
+def _straight_bar_tracks(
+    pcb: PCB, copper: CopperContactGraph
+) -> tuple[dict[int, int], list[_CapJoint]]:
+    """Group bonded straight tracks, retaining joints carried only by their round caps."""
+    from kicad_tools.validate.copper_contact import TRACK
+
+    from .connectivity import _UnionFind
+
+    runs = _UnionFind()
+    tracks = {
+        i: item.key[1]
+        for i, item in enumerate(copper.items)
+        if item.kind == TRACK and item.key[0] == "segment"
+    }
+    gaps = []
+    for a, b in copper.bonds:
+        if a not in tracks or b not in tracks:
+            continue
+        i, j = tracks[a], tracks[b]
+        first, second = pcb.segments[i], pcb.segments[j]
+        overlap = _bonded_bar_overlap(first, second)
+        if overlap is None:
+            continue
+        if overlap >= -_PAD_EPS:
+            runs.union(i, j)
+        elif i not in copper.covered_collinear_tracks and j not in copper.covered_collinear_tracks:
+            # A stroke inside its carrier's copper can end closer to the
+            # opposite cap without defining a separate, narrower joint.
+            gaps.append((-overlap, i, j))
+
+    joints = []
+    for gap, i, j in sorted(gaps):
+        # Another stroke can already cover this interval. Add a joint only
+        # between separate centreline runs, starting with adjacent ends.
+        if runs.find(i) != runs.find(j):
+            first, second = pcb.segments[i], pcb.segments[j]
+            joints.append(_cap_joint(first, second, gap))
+            runs.union(i, j)
+    return {i: runs.find(i) for i in tracks.values()}, joints
+
+
+def _via_row_ports(
+    pcb: PCB, net_number: int, physical_contacts: Callable[[], CopperContactGraph]
+) -> tuple[set[tuple[_Node, _Node]], list[_CapJoint], frozenset[int]]:
+    """Return row ports, bonded end caps and the tracks in their physical components."""
+    from kicad_tools.validate.copper_contact import PAD, TRACK, VIA
+
+    # Most nets have no packed via pair. Bound the search by X before
+    # asking for the full physical bond inventory.
+    vias = sorted((v.position[0], i) for i, v in enumerate(pcb.vias) if v.net_number == net_number)
+    max_pitch = _VIA_GROUP_PITCH_PADS * max((pcb.vias[i].size for _, i in vias), default=0.0)
+    pairs = []
+    for start, (x, i) in enumerate(vias):
+        first = pcb.vias[i]
+        for idx in range(start + 1, len(vias)):
+            other_x, j = vias[idx]
+            if other_x - x > max_pitch + _PAD_EPS:
+                break
+            second = pcb.vias[j]
+            if math.dist(first.position, second.position) <= max_pitch + _PAD_EPS:
+                pairs.append((i, j))
+    if not pairs:
+        return set(), [], frozenset()
+
+    copper = physical_contacts()
+    runs, joints = _straight_bar_tracks(pcb, copper)
+    # A trace joining two series vias can end at both barrel centres. A
+    # layer-changing row needs an exit on each layer: a track running on past
+    # the pair, a turn off its straight bar, or a load pad on that bar.
+    bounds: dict[int, tuple[int, float, float]] = {}
+    attached: set[int] = set()
+    for index, run in runs.items():
+        seg = pcb.segments[index]
+        axis = 0 if abs(seg.start[0] - seg.end[0]) >= abs(seg.start[1] - seg.end[1]) else 1
+        low, high = sorted((seg.start[axis], seg.end[axis]))
+        if run in bounds:
+            _, old_low, old_high = bounds[run]
+            low, high = min(low, old_low), max(high, old_high)
+        bounds[run] = (axis, low, high)
+    # One nearest station per continuous bar and barrel. Round caps on the
+    # two pieces of a subdivided bar can both touch the same annulus.
+    via_bars: dict[int, dict[int, _Node]] = {}
+    touching_vias: set[int] = set()
+    for a, b in copper.bonds:
+        via, track = copper.items[a], copper.items[b]
+        for bar, other in ((via, track), (track, via)):
+            if bar.kind == TRACK and bar.key[0] == "segment":
+                run = runs[bar.key[1]]
+                if other.kind == PAD or (
+                    other.kind == TRACK and other.key[0] == "segment" and runs[other.key[1]] != run
+                ):
+                    attached.add(run)
+        if track.kind == VIA:
+            via, track = track, via
+        if via.kind == track.kind == VIA:
+            # Directly overlapping annuli can also conduct on an inner
+            # layer. The two-bar projection cannot prove that transfer.
+            touching_vias.update((via.key, track.key))
+        if via.kind == VIA and track.kind == TRACK and track.key[0] == "segment":
+            index = track.key[1]
+            segment = pcb.segments[index]
+            position = pcb.vias[via.key].position
+            station = _copper_node(_track_station(segment, position), segment.layer)
+            bars = via_bars.setdefault(via.key, {})
+            previous = bars.get(runs[index])
+            if previous is None or math.dist(position, station[:2]) < math.dist(
+                position, previous[:2]
+            ):
+                bars[runs[index]] = station
+
+    ports: set[tuple[_Node, _Node]] = set()
+    via_components = {
+        item.key: copper.component[n] for n, item in enumerate(copper.items) if item.kind == VIA
+    }
+    row_components = set()
+    for i, j in pairs:
+        if i in touching_vias or j in touching_vias:
+            continue
+        first_bars, second_bars = via_bars.get(i, {}), via_bars.get(j, {})
+        pair_ports: list[tuple[_Node, _Node]] = []
+        exits = set()
+        for run in first_bars.keys() & second_bars.keys():
+            first_station, second_station = first_bars[run], second_bars[run]
+            # A transverse lane meeting both annuli at the same station
+            # supplies no bar between the barrels.
+            if math.dist(first_station[:2], second_station[:2]) > _VIA_CENTRE_EPS:
+                axis, low, high = bounds[run]
+                near, far = sorted((first_station[:2][axis], second_station[:2][axis]))
+                if run in attached or low < near - _PAD_EPS or high > far + _PAD_EPS:
+                    exits.add(first_station[2])
+                pair_ports.append(
+                    (first_station, _copper_node(pcb.vias[i].position, first_station[2]))
+                )
+                pair_ports.append(
+                    (second_station, _copper_node(pcb.vias[j].position, second_station[2]))
+                )
+        if len({station[2] for station, _ in pair_ports}) >= 2:
+            if len(exits) >= 2:
+                row_components.add(via_components[i])
+            ports.update(
+                (station, barrel)
+                for station, barrel in pair_ports
+                if math.dist(station[:2], barrel[:2]) > _VIA_CENTRE_EPS
+            )
+    row_tracks = frozenset(
+        id(pcb.segments[item.key[1]])
+        for n, item in enumerate(copper.items)
+        if copper.component[n] in row_components and item.kind == TRACK and item.key[0] == "segment"
+    )
+    return ports, [joint for joint in joints if id(joint.first) in row_tracks], row_tracks
+
+
+def _build_graph(
+    segments: list[Segment],
+    pcb: PCB,
+    net_name: str,
+    row_ports: set[tuple[_Node, _Node]] | None = None,
+    cap_joints: Sequence[_CapJoint] = (),
+    row_tracks: frozenset[int] = frozenset(),
+) -> _CopperGraph:
+    """Build centerline contacts, physical via-row ports and convex pad hubs.
 
     Supported contacts are same-layer track endpoints (including a T landing
     in a segment interior), via centers on a track, and nodes inside supported
-    pad copper. Width-only overlaps, zone/arc connectivity and arbitrary pad
-    primitives are not modeled; no proximity tolerance invents a connection
-    (except the 1 µm via-centre snap, #7210).
+    pad copper. A packed pair of vias physically bonded to two common bars
+    may also attach at the nearest track stations on those bars. Collinear
+    end caps on a bonded run join at their measured copper neck. Other
+    width-only overlaps, zone/arc connectivity and arbitrary pad primitives
+    are outside this graph. The via-centre snap is limited to 1 µm (#7210).
     This is not a general PCB connectivity solver.
     """
     layers = {layer.name for layer in pcb.copper_layers}
@@ -1623,8 +1903,13 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
                 contacts[layer].add(_node_key(via.position))
                 via_contacts[layer].add(_node_key(via.position))
 
+    for station, _ in row_ports or ():
+        contacts[station[2]].add(station[:2])
+
     edges: list[tuple[_Node, _Node, _GraphEdge]] = []
+    track_spans: dict[tuple[_Node, _Node], _GraphEdge] = {}
     for seg in segments:
+        on_row = id(seg) in row_tracks
         points = [
             point
             for point in contacts[seg.layer]
@@ -1633,13 +1918,22 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
         ]
         points.sort(key=lambda point: math.dist(point, seg.start))
         for point_a, point_b in zip(points, points[1:], strict=False):
-            edges.append(
-                (
-                    _copper_node(point_a, seg.layer),
-                    _copper_node(point_b, seg.layer),
-                    _GraphEdge(seg),
-                )
-            )
+            a, b = _copper_node(point_a, seg.layer), _copper_node(point_b, seg.layer)
+            span_key = (a, b) if a <= b else (b, a)
+            edge = track_spans.get(span_key) if on_row else None
+            if edge is not None and edge.segment is not None and _continuous_bar(edge.segment, seg):
+                # One physical interval has one graph edge before pad or via
+                # contraction. Retain every original for physical contact proof.
+                if (seg.width, _seg_length(seg)) > (edge.segment.width, _seg_length(edge.segment)):
+                    edge.overlaid += (edge.segment,)
+                    edge.segment = seg
+                else:
+                    edge.overlaid += (seg,)
+            else:
+                edge = _GraphEdge(seg, span=(a[:2], b[:2]))
+                if on_row:
+                    track_spans[span_key] = edge
+                edges.append((a, b, edge))
     for via in vias:
         nodes = [
             _copper_node(via.position, layer)
@@ -1664,9 +1958,21 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
     from kicad_tools.schema.physical_identity import footprint_keys
 
     graph = _CopperGraph()
+    graph.track_cover = {id(track): set() for _, _, edge in edges for track in edge.overlaid}
     pad_contacts: dict[tuple[str, str, int], list[_Node]] = {}
     pad_nodes: set[_Node] = set()
     internal_edges: set[_GraphEdge] = set()
+    for joint in cap_joints:
+        span = joint.span
+        a, b = _copper_node(span.start, span.layer), _copper_node(span.end, span.layer)
+        parents[root(a)] = root(b)
+    if row_ports:
+        for station, barrel in sorted(row_ports):
+            if station in parents and barrel in parents:
+                parents[root(station)] = root(barrel)
+        # A short section between a real barrel and its bar station may also
+        # belong to an exiting track. It is internal to this same-layer bond.
+        internal_edges.update(edge for a, b, edge in edges if a != b and root(a) == root(b))
     wholly_internal_ids: set[int] = set()
     for component_id, fp in zip(footprint_keys(pcb.footprints), pcb.footprints, strict=True):
         occurrences: dict[str, int] = {}
@@ -1706,6 +2012,7 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
                     graph.pad_centres.setdefault(hub, set()).add(
                         (fp.position[0] + offset[0], fp.position[1] + offset[1])
                     )
+            graph.item_nodes[id(pad)] = set(nodes)
             pad_contacts[(component_id, pad.number, occurrence)] = nodes
             pad_nodes.update(nodes)
 
@@ -1715,12 +2022,24 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
         centres = graph.pad_centres.pop(hub)
         graph.pad_centres.setdefault(root(hub), set()).update(centres)
 
+    for pad_id, pad_junctions in graph.item_nodes.items():
+        graph.item_nodes[pad_id] = {root(node) for node in pad_junctions}
+    for via in vias:
+        graph.item_nodes[id(via)] = {
+            root(_copper_node(via.position, layer))
+            for layer in layers
+            if via_spans_layer(via.layers, layer)
+        }
     for key, nodes in pad_contacts.items():
         hubs = {root(node) for node in nodes}
         if len(hubs) == 1:
             graph.pads[key] = hubs.pop()
     for a, b, edge in edges:
         ra, rb = root(a), root(b)
+        for track in edge.tracks():
+            graph.item_nodes.setdefault(id(track), set()).update((ra, rb))
+            if id(track) in graph.track_cover and edge.segment is not None:
+                graph.track_cover[id(track)].add(id(edge.segment))
         graph.adjacency.setdefault(ra, [])
         graph.adjacency.setdefault(rb, [])
         if edge in internal_edges and a != b:
@@ -1941,6 +2260,55 @@ class _ViaArray:
     nodes: set[_Node]
     edges: set[_GraphEdge]
     members: list[Segment]
+    # Original tracks attached to each barrel of a proved mid-path row.
+    track_contacts: dict[tuple[float, float], set[int]] = field(default_factory=dict)
+
+
+_BUFFER_SCALE = 1 / math.cos(math.pi / 64)
+
+
+def _outer_buffer(geometry: BaseGeometry, radius: float) -> BaseGeometry:
+    # Circumscribe the 16 chords per quadrant when looking for unmodeled copper.
+    return geometry.buffer(radius * _BUFFER_SCALE, quad_segs=16)
+
+
+def _array_tracks_modeled(
+    pcb: PCB,
+    net_name: str,
+    members: list[Segment],
+    pieces: list[tuple[str, BaseGeometry, float]],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
+) -> bool:
+    """Every nonmember track touching local copper must meet it at a modeled exit."""
+    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+
+    member_ids = {id(s) for s in members}
+    for segment in _net_segments(pcb, net_name):
+        if id(segment) in member_ids:
+            continue
+        copper = _outer_buffer(LineString((segment.start, segment.end)), segment.width / 2)
+        for layer, region, radius in pieces:
+            if layer != segment.layer:
+                continue
+            overlap = copper.intersection(region)
+            if overlap.is_empty:
+                continue
+            for node, _, edge in exits:
+                if edge.segment is segment and node[2] == layer:
+                    # Both pieces are convex straight strokes/discs. Their
+                    # intersection is connected to this proved port, including
+                    # oblique joins whose overlap exceeds the sum of radii.
+                    if region.covers(Point(node[:2])):
+                        overlap = Polygon()
+                    else:
+                        overlap = overlap.difference(
+                            Point(node[:2]).buffer(
+                                (radius + segment.width / 2) * _BUFFER_SCALE**2 + _PAD_EPS
+                            )
+                        )
+            if not overlap.is_empty:
+                return False
+    return True
 
 
 def _array_contacts_modeled(
@@ -1960,7 +2328,7 @@ def _array_contacts_modeled(
     Unsupported same-net pad stacks and routed arcs conservatively disable this
     recognition subset because their copper is not inventoried by this graph.
     """
-    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+    from shapely.geometry import LineString, Point, Polygon
 
     from kicad_tools.validate.rules.clearance import _pad_on_layer, _pad_polygon
 
@@ -1983,20 +2351,12 @@ def _array_contacts_modeled(
         if _sexp_matches_net(raw_via, net, net_name) and raw_via.find_child("padstack") is not None:
             return False
 
-    # Default circular buffers use 16 chords per quadrant. Circumscribe
-    # strokes, and expand existing pad polygons by their maximum chord error.
-    # These envelopes only reject contacts; they never prove connectivity.
-    scale = 1 / math.cos(math.pi / 64)
-
-    def outer_buffer(geometry, radius):
-        return geometry.buffer(radius * scale, quad_segs=16)
-
     def pad_envelope(candidate, footprint):
         polygon = _pad_polygon(candidate, footprint)
         if polygon is None or candidate.shape == "rect":
             return polygon
-        error = max(candidate.size) * (1 - 1 / scale)
-        return outer_buffer(polygon, error)
+        error = max(candidate.size) * (1 - 1 / _BUFFER_SCALE)
+        return _outer_buffer(polygon, error)
 
     trunk = members[-1]
     ordered = sorted(far_nodes, key=lambda n: math.dist(n[:2], trunk.start))
@@ -2005,7 +2365,7 @@ def _array_contacts_modeled(
     for member in members:
         ends = (ordered[0][:2], ordered[-1][:2]) if member is trunk else (member.start, member.end)
         pieces.append(
-            (member.layer, outer_buffer(LineString(ends), member.width / 2), member.width / 2)
+            (member.layer, _outer_buffer(LineString(ends), member.width / 2), member.width / 2)
         )
     source = pad_envelope(pad, fp)
     if source is None:
@@ -2019,34 +2379,12 @@ def _array_contacts_modeled(
                 pieces.append(
                     (
                         copper_layer.name,
-                        outer_buffer(Point(via.position), via.size / 2),
+                        _outer_buffer(Point(via.position), via.size / 2),
                         via.size / 2,
                     )
                 )
-    member_ids = {id(s) for s in members}
-    for segment in _net_segments(pcb, net_name):
-        if id(segment) in member_ids:
-            continue
-        copper = outer_buffer(LineString((segment.start, segment.end)), segment.width / 2)
-        for layer, region, radius in pieces:
-            if layer != segment.layer:
-                continue
-            overlap = copper.intersection(region)
-            for node, _, edge in exits:
-                if edge.segment is segment and node[2] == layer:
-                    # Both pieces are convex straight strokes/discs. Their
-                    # intersection is connected to this proved port, including
-                    # oblique joins whose overlap exceeds the sum of radii.
-                    if region.covers(Point(node[:2])):
-                        overlap = Polygon()
-                    else:
-                        overlap = overlap.difference(
-                            Point(node[:2]).buffer(
-                                (radius + segment.width / 2) * scale * scale + _PAD_EPS
-                            )
-                        )
-            if not overlap.is_empty:
-                return False
+    if not _array_tracks_modeled(pcb, net_name, members, pieces, exits):
+        return False
     for footprint in pcb.footprints:
         for candidate in footprint.pads:
             if candidate is pad or not same_net(candidate) or candidate.type == "np_thru_hole":
@@ -2062,7 +2400,7 @@ def _array_contacts_modeled(
     for via in pcb.vias:
         if via in member_vias or not same_net(via):
             continue
-        copper = outer_buffer(Point(via.position), via.size / 2)
+        copper = _outer_buffer(Point(via.position), via.size / 2)
         if any(
             via_spans_layer(via.layers, layer) and copper.intersects(region)
             for layer, region, _ in pieces
@@ -2236,6 +2574,524 @@ def _endpoint_via_array(
     return _ViaArray(nodes, edges, list({id(seg): seg for seg in members}.values()))
 
 
+#: Consecutive barrel pitch bound of a mid-path via group, in multiples of
+#: the largest pad diameter in that row (Issue #9725): 4.4 mm for
+#: a row containing a 2.2 mm pad. Farther apart, two barrels are not one layer-change
+#: structure and the copper between them stays judged as a loop.
+_VIA_GROUP_PITCH_PADS = 2.0
+
+
+_BarPath = list[tuple[_Node, _GraphEdge, _Node]]
+
+
+def _barrel_links(
+    graph: _CopperGraph,
+    spans: dict[tuple[float, float], list[str]],
+    taken: set[_Node],
+) -> dict[str, dict[frozenset[tuple[float, float]], _BarPath]]:
+    """Follow the original track edges across ordinary straight, two-ended joints."""
+    links: dict[str, dict[frozenset[tuple[float, float]], _BarPath]] = {}
+    terminals = taken.union(graph.pads.values())
+
+    for pos, layers in spans.items():
+        for layer in layers:
+            start = _copper_node(pos, layer)
+            for first, edge in graph.adjacency[start]:
+                if edge.segment is None or first[2] != layer:
+                    continue
+                path = [(start, edge, first)]
+                visited = {start}
+                while True:
+                    previous, incoming, current = path[-1]
+                    if current in visited or current in terminals:
+                        break
+                    if current[:2] in spans:
+                        # Visit each undirected path once. Retain every physical
+                        # segment for the contact and bypass checks below.
+                        if pos < current[:2] and layer in spans[current[:2]]:
+                            same_layer = links.setdefault(layer, {})
+                            pair = frozenset((pos, current[:2]))
+                            same_layer.setdefault(pair, []).extend(path)
+                        break
+                    adjacent = graph.adjacency[current]
+                    if len(adjacent) != 2:
+                        break
+                    nxt, outgoing = adjacent[1] if adjacent[0][0] == previous else adjacent[0]
+                    src, dest = incoming.segment, outgoing.segment
+                    if src is None or dest is None or nxt[2] != layer:
+                        break
+                    if _bonded_bar_overlap(src, dest) is None:
+                        break
+                    station = _track_station(src, current[:2])
+                    if not extends_collinear(
+                        _track_station(src, previous[:2]),
+                        station,
+                        station,
+                        _track_station(dest, nxt[:2]),
+                        _PAD_EPS,
+                    ):
+                        break
+                    visited.add(current)
+                    path.append((current, outgoing, nxt))
+    return links
+
+
+def _mid_path_via_groups(
+    graph: _CopperGraph,
+    pcb: PCB,
+    net_name: str,
+    taken: set[_Node],
+    physical_contacts: Callable[[], CopperContactGraph],
+) -> tuple[list[_ViaArray], set[_GraphEdge]]:
+    """Prove mid-path layer changes carried by several barrels (Issue #9725).
+
+    A group is two or more same-net two-layer-spec vias, not in a pad and not
+    already in ``taken``, chained in a row in which every consecutive pair is
+    joined by a straight bar with no intervening branch on both of the
+    same two layers ``La``/``Lb``. Consecutive barrel pitch is at most
+    :data:`_VIA_GROUP_PITCH_PADS` times the largest pad diameter in the row. Every barrel therefore has its pad on both bars. Anything
+    weaker stays a loop, so the net stays ``ambiguous``:
+
+    * a barrel touching only one bar breaks the chain on the other layer;
+    * any other modeled edge joining two members (a third bar, an inner-layer
+      track, a doubled bar) is copper the group does not account for;
+    * a same-net via, pad or track whose copper meets a bar or barrel
+      without a modeled contact prevents contraction;
+    * after removing the group's barrels, the two bars must lie in
+      separate physical copper components, including their feeders;
+    * the row must be a layer change: copper leaves it on ``La`` AND on
+      ``Lb``, and not on both layers at two or more barrels each (that is a
+      run doubled through the row -- stitching, judged as parallel copper);
+    * a barrel contacting copper on a third layer permits a transfer the two
+      bars do not prove, so the whole row stays uncontracted;
+    * a via that qualifies for two layer pairs is left to neither.
+
+    Contracting a group treats its barrels as sharing the transfer, so the
+    layer change it yields has the summed barrel capacity. Every bar segment
+    is still evidence checked at the full declared current. Return the edges
+    of groups with unmodeled physical contacts as well: a centerline-only
+    parallel-track reduction cannot establish their current split either.
+    """
+    net = pcb.get_net_by_name(net_name)
+    layer_names = {layer.name for layer in pcb.copper_layers}
+    by_pos: dict[tuple[float, float], list[Via]] = {}
+    for via in pcb.vias:
+        if (
+            _matches_net(via, net, net_name)
+            and len(via.layers) == 2
+            and len(set(via.layers)) == 2
+            and all(layer in layer_names for layer in via.layers)
+        ):
+            by_pos.setdefault(_node_key(via.position), []).append(via)
+
+    spans: dict[tuple[float, float], list[str]] = {}
+    vias: dict[tuple[float, float], Via] = {}
+    for pos, found in by_pos.items():
+        if len(found) != 1:
+            continue
+        span = [
+            layer
+            for layer in COPPER_LAYER_ORDER
+            if layer in layer_names and via_spans_layer(found[0].layers, layer)
+        ]
+        own = [_copper_node(pos, layer) for layer in span]
+        # A via inside a pad was contracted into the pad hub: not a candidate.
+        if any(node not in graph.adjacency or node in taken for node in own):
+            continue
+        spans[pos], vias[pos] = span, found[0]
+
+    links = _barrel_links(graph, spans, taken)
+    candidates: list[tuple[str, str, set[tuple[float, float]], list]] = []
+    ordered = [layer for layer in COPPER_LAYER_ORDER if layer in links]
+    for i, la in enumerate(ordered):
+        for lb in ordered[i + 1 :]:
+            pairs = [pair for pair, path in links[la].items() if path and links[lb].get(pair)]
+            for group in _packed_barrel_rows(pairs, vias):
+                group_pairs = [pair for pair in pairs if pair <= group]
+                candidates.append((la, lb, group, group_pairs))
+
+    claimed: dict[tuple[float, float], int] = {}
+    for _, _, group, _ in candidates:
+        for pos in group:
+            claimed[pos] = claimed.get(pos, 0) + 1
+
+    result: list[_ViaArray] = []
+    unmodeled_edges: set[_GraphEdge] = set()
+    for la, lb, group, group_pairs in candidates:
+        if any(claimed[pos] > 1 for pos in group):
+            continue
+        # A row: a simple chain of links, one per consecutive barrel pair.
+        degree: dict[tuple[float, float], int] = {}
+        for pair in group_pairs:
+            for p in pair:
+                degree[p] = degree.get(p, 0) + 1
+        if len(group_pairs) != len(group) - 1 or max(degree.values()) > 2:
+            continue
+        nodes = {_copper_node(pos, layer) for pos in group for layer in spans[pos]}
+        edges: set[_GraphEdge] = set()
+        for pos in group:
+            for layer in spans[pos]:
+                for other, edge in graph.adjacency[_copper_node(pos, layer)]:
+                    if edge.segment is None and other[:2] == pos and other in nodes:
+                        edges.add(edge)
+        bar_spans = []
+        members = {}
+        for layer in (la, lb):
+            for pair in group_pairs:
+                for start, edge, end in links[layer][pair]:
+                    nodes.update((start, end))
+                    edges.add(edge)
+                    if edge.segment is not None:
+                        members[id(edge.segment)] = edge.segment
+                    for track in edge.tracks():
+                        bar_spans.append((frozenset((start[:2], end[:2])), track))
+        internal = [
+            edge
+            for node in nodes
+            for other, edge in graph.adjacency[node]
+            if other in nodes and edge not in edges
+        ]
+        if internal:
+            continue
+        exits = [
+            (node, other, edge)
+            for node in nodes
+            for other, edge in graph.adjacency[node]
+            if other not in nodes
+        ]
+        ports: dict[str, set[tuple[float, float]]] = {la: set(), lb: set()}
+        for node, _, _ in exits:
+            ports.setdefault(node[2], set()).add(node[:2])
+        if len(ports) != 2 or not ports[la] or not ports[lb]:
+            continue
+        if len(ports[la]) >= 2 and len(ports[lb]) >= 2:
+            continue
+        rings = [(pos, layer, vias[pos].size / 2.0) for pos in group for layer in spans[pos]]
+        if not _via_group_contacts_modeled(
+            pcb, net_name, group, bar_spans, rings, exits
+        ) or not _via_group_separates_bars(pcb, physical_contacts(), group, bar_spans):
+            # A modeled bypass still has its real path and loop-free feeders.
+            # A width-only contact is absent from that graph, so its remaining
+            # edges cannot prove the row equivalent to ordinary parallel tracks.
+            pos = next(iter(group))
+            first, second = _copper_node(pos, la), _copper_node(pos, lb)
+            _, ends = _contracted_component(graph, first, ())
+            for edge in edges:
+                if edge.segment is None:
+                    ends.pop(edge, None)
+            if _edge_route(ends, first, second) is None:
+                unmodeled_edges.update(edges)
+            continue
+        track_contacts = {
+            pos: {
+                id(track)
+                for layer in (la, lb)
+                for _, edge in graph.adjacency[_copper_node(pos, layer)]
+                for track in edge.tracks()
+            }
+            for pos in group
+        }
+        result.append(_ViaArray(nodes, edges, list(members.values()), track_contacts))
+    return result, unmodeled_edges
+
+
+def _via_group_separates_bars(
+    pcb: PCB,
+    contacts: CopperContactGraph,
+    group: set[tuple[float, float]],
+    bar_spans: list[tuple[frozenset[tuple[float, float]], Segment]],
+) -> bool:
+    """Removing the group must disconnect its two bars in the physical copper."""
+    from kicad_tools.validate.copper_contact import TRACK, VIA
+
+    from .connectivity import _UnionFind
+
+    barrels = set()
+    tracks = {}
+    for index, item in enumerate(contacts.items):
+        if item.kind == VIA and item.center is not None and _node_key(item.center) in group:
+            barrels.add(index)
+        elif item.kind == TRACK and item.key[0] == "segment":
+            tracks[id(pcb.segments[item.key[1]])] = index
+    if len(barrels) != len(group):
+        return False
+
+    components = _UnionFind()
+    for a, b in contacts.bonds:
+        if a not in barrels and b not in barrels:
+            components.union(a, b)
+    bar_components: dict[str, set[int]] = {}
+    for _, segment in bar_spans:
+        track_index = tracks.get(id(segment))
+        if track_index is None:
+            return False
+        bar_components.setdefault(segment.layer, set()).add(components.find(track_index))
+    first, second = bar_components.values()
+    return len(first) == len(second) == 1 and first.isdisjoint(second)
+
+
+def _packed_barrel_rows(
+    pairs: list[frozenset[tuple[float, float]]],
+    vias: dict[tuple[float, float], Via],
+) -> Iterator[set[tuple[float, float]]]:
+    """Grow each connected row from its largest remaining pad, at that pad's bound."""
+    adjacent: dict[tuple[float, float], list[tuple[float, float]]] = {}
+    for pair in pairs:
+        a, b = tuple(pair)
+        adjacent.setdefault(a, []).append(b)
+        adjacent.setdefault(b, []).append(a)
+    remaining = set(adjacent)
+    for first in sorted(adjacent, key=lambda pos: vias[pos].size, reverse=True):
+        if first not in remaining:
+            continue
+        bound = _VIA_GROUP_PITCH_PADS * vias[first].size + _PAD_EPS
+        remaining.remove(first)
+        group, pending = {first}, [first]
+        while pending:
+            pos = pending.pop()
+            for other in adjacent[pos]:
+                if other in remaining and math.dist(pos, other) <= bound:
+                    remaining.remove(other)
+                    group.add(other)
+                    pending.append(other)
+        if len(group) > 1:
+            yield group
+
+
+def _via_group_contacts_modeled(
+    pcb: PCB,
+    net_name: str,
+    group: set[tuple[float, float]],
+    bar_spans: list[tuple[frozenset[tuple[float, float]], Segment]],
+    rings: list[tuple[tuple[float, float], str, float]],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
+) -> bool:
+    """Reject unmodeled contacts with bar copper or barrel rings (#9725).
+
+    The bar span between two linked barrels follows the actual joining
+    track between their nearest centreline stations at its own width. A same-net
+    feeder can meet local copper at a modeled exit. An offset track that
+    only reaches the edge can bypass the group without a centreline join.
+    """
+    from shapely.geometry import LineString, Point
+
+    from kicad_tools.validate.rules.clearance import _pad_on_layer, _pad_polygon
+
+    net = pcb.get_net_by_name(net_name)
+    pieces = [
+        (
+            segment.layer,
+            _outer_buffer(
+                LineString([_track_station(segment, pos) for pos in pair]), segment.width / 2
+            ),
+            segment.width / 2,
+        )
+        for pair, segment in bar_spans
+    ]
+    pieces.extend(
+        (layer, _outer_buffer(Point(pos), radius), radius) for pos, layer, radius in rings
+    )
+    # An off-centre barrel can short a short section of an exiting track to
+    # the bar station. Both points are real ports of that same convex track.
+    track_exits = list(exits)
+    for node, other, edge in exits:
+        track = edge.segment
+        if track is None:
+            continue
+        for pair, bar in bar_spans:
+            if node[2] != bar.layer or node[:2] not in pair:
+                continue
+            station = _track_station(bar, node[:2])
+            if (
+                station != node[:2]
+                and point_to_segment_distance(*station, *track.start, *track.end) <= _PAD_EPS
+            ):
+                track_exits.append((_copper_node(station, bar.layer), other, edge))
+    # A cut just outside a barrel can leave the next piece's round cap
+    # touching the row. A continuous straight stroke of unchanged width has
+    # the same footprint however many end-to-end records describe it.
+    ends: dict[tuple[float, float], list[Segment]] = {}
+    for seg in _net_segments(pcb, net_name):
+        for point in (seg.start, seg.end):
+            ends.setdefault(_node_key(point), []).append(seg)
+    bar_tracks = {id(s): s for _, s in bar_spans}
+    pending = list(bar_tracks.values())
+    while pending:
+        seg = pending.pop()
+        for point in (seg.start, seg.end):
+            for neighbour in ends[_node_key(point)]:
+                if (
+                    id(neighbour) not in bar_tracks
+                    and seg.width == neighbour.width
+                    and _continuous_bar(seg, neighbour)
+                ):
+                    bar_tracks[id(neighbour)] = neighbour
+                    pending.append(neighbour)
+    if not _array_tracks_modeled(pcb, net_name, list(bar_tracks.values()), pieces, track_exits):
+        return False
+    for via in pcb.vias:
+        if not _matches_net(via, net, net_name) or _node_key(via.position) in group:
+            continue
+        copper = _outer_buffer(Point(via.position), via.size / 2.0)
+        if any(
+            via_spans_layer(via.layers, layer) and copper.intersects(region)
+            for layer, region, _ in pieces
+        ):
+            return False
+    for footprint in pcb.footprints:
+        for pad in footprint.pads:
+            if not _matches_net(pad, net, net_name) or pad.type == "np_thru_hole":
+                continue
+            polygon = _pad_polygon(pad, footprint)
+            if polygon is None:
+                return False
+            if any(
+                _pad_on_layer(pad, layer) and polygon.intersects(region)
+                for layer, region, _ in pieces
+            ):
+                return False
+    return True
+
+
+def _path_changes_layer_through(path_segments: Sequence[Segment], group: _ViaArray) -> bool:
+    """True when path copper meets ``group``'s barrels on two layers (#9725)."""
+    track_ids = set().union(*group.track_contacts.values())
+    touched = {seg.layer for seg in path_segments if id(seg) in track_ids}
+    return len(touched) >= 2
+
+
+def _contracted_component(
+    graph: _CopperGraph, start: _Node, arrays: Sequence[_ViaArray]
+) -> tuple[dict[_Node, _Node], dict[_GraphEdge, tuple[_Node, _Node]]]:
+    """``start``'s component with proved arrays contracted to one node each.
+
+    Returns ``(roots, ends)``: the contraction map and, per surviving edge,
+    its two contracted end nodes -- the same contraction
+    :func:`_component_has_cycle` judges.
+    """
+    roots = {node: next(iter(array.nodes)) for array in arrays for node in array.nodes}
+    contracted = {edge for array in arrays for edge in array.edges}
+    ends: dict[_GraphEdge, tuple[_Node, _Node]] = {}
+    seen, stack = {start}, [start]
+    while stack:
+        cur = stack.pop()
+        for nxt, edge in graph.adjacency.get(cur, []):
+            if edge not in contracted and edge not in ends:
+                ends[edge] = (roots.get(cur, cur), roots.get(nxt, nxt))
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return roots, ends
+
+
+def _edge_route(
+    ends: dict[_GraphEdge, tuple[_Node, _Node]],
+    source: _Node,
+    target: _Node,
+    skip: _GraphEdge | None = None,
+) -> list[tuple[_Node, _GraphEdge, _Node]] | None:
+    """Fewest-edge route ``source`` -> ``target`` over ``ends``, avoiding ``skip``."""
+    adjacency: dict[_Node, list[tuple[_Node, _GraphEdge]]] = {}
+    for edge, (u, v) in ends.items():
+        if edge is skip:
+            continue
+        adjacency.setdefault(u, []).append((v, edge))
+        adjacency.setdefault(v, []).append((u, edge))
+    parent: dict[_Node, tuple[_Node, _GraphEdge]] = {}
+    visited, queue = {source}, deque([source])
+    while queue:
+        cur = queue.popleft()
+        if cur == target:
+            break
+        for nxt, edge in adjacency.get(cur, []):
+            if nxt not in visited:
+                visited.add(nxt)
+                parent[nxt] = (cur, edge)
+                queue.append(nxt)
+    if target not in visited:
+        return None
+    route: list[tuple[_Node, _GraphEdge, _Node]] = []
+    node = target
+    while node != source:
+        prev, edge = parent[node]
+        route.append((prev, edge, node))
+        node = prev
+    route.reverse()
+    return route
+
+
+def _loop_free_path_segments(
+    graph: _CopperGraph, start: _Node, goal: _Node, arrays: Sequence[_ViaArray]
+) -> tuple[tuple[Segment, ...], dict[int, list[tuple[float, float]]]]:
+    """Path segments every ``start`` -> ``goal`` route crosses (Issue #9725).
+
+    Under the same contraction as the cycle test, an edge whose removal
+    disconnects the endpoints is a bridge between them: all the declared
+    current crosses it however a loop elsewhere splits, exactly as on a
+    resolved path. A segment qualifies only when EVERY modeled piece of it is
+    such an edge, so a segment the loop rides for part of its length, an
+    off-path spur and copper inside the loop are all excluded. Returned in
+    route order from ``start``, alongside the modeled series intervals along
+    each original track, measured from its start.
+    """
+    roots, ends = _contracted_component(graph, start, arrays)
+    source, target = roots.get(start, start), roots.get(goal, goal)
+    route = _edge_route(ends, source, target)
+    if route is None:
+        return (), {}
+    separating = {edge for _, edge, _ in route if _edge_route(ends, source, target, edge) is None}
+    pieces: dict[int, list[_GraphEdge]] = {}
+    for edge in ends:
+        if edge.segment is not None:
+            pieces.setdefault(id(edge.segment), []).append(edge)
+    found: dict[int, Segment] = {}
+    series: dict[int, list[tuple[float, float]]] = {}
+    for _, edge, _ in route:
+        seg = edge.segment
+        if seg is None or edge not in separating:
+            continue
+        if edge.span:
+            first, last = sorted(math.dist(seg.start, _track_station(seg, p)) for p in edge.span)
+            series.setdefault(id(seg), []).append((first, last))
+        if all(piece in separating for piece in pieces[id(seg)]):
+            found.setdefault(id(seg), seg)
+    for track_id, intervals in series.items():
+        merged: list[tuple[float, float]] = []
+        for first, last in sorted(intervals):
+            if merged and first <= merged[-1][1] + _PAD_EPS:
+                merged[-1] = (merged[-1][0], max(last, merged[-1][1]))
+            else:
+                merged.append((first, last))
+        series[track_id] = merged
+    return tuple(found.values()), series
+
+
+def _unmodeled_bonds(
+    pcb: PCB, graph: _CopperGraph, contacts: CopperContactGraph, groups: list[ParallelGroup]
+) -> set[tuple[int, int]]:
+    """Physical bonds absent from the centerline model and its proved conductors."""
+    from kicad_tools.validate.copper_contact import PAD, TRACK, VIA
+
+    ids: dict[int, int] = {}
+    for index, item in enumerate(contacts.items):
+        if item.kind == TRACK and item.key[0] == "segment":
+            ids[index] = id(pcb.segments[item.key[1]])
+        elif item.kind == VIA:
+            ids[index] = id(pcb.vias[item.key])
+        elif item.kind == PAD:
+            fp, pad = item.key
+            ids[index] = id(pcb.footprints[fp].pads[pad])
+    doubled = [{id(segment) for segment in group.segments} for group in groups]
+    return {
+        (a, b)
+        for a, b in contacts.bonds
+        if a in ids
+        and b in ids
+        and graph.item_nodes.get(ids[a], set()).isdisjoint(graph.item_nodes.get(ids[b], ()))
+        and not any(ids[a] in group and ids[b] in group for group in doubled)
+    }
+
+
 def _candidate_via_array_leg_count(
     graph: _CopperGraph,
     pcb: PCB,
@@ -2328,13 +3184,18 @@ def _component_has_cycle(
 
 
 def _component_cycle_witness(
-    graph: _CopperGraph, start: _Node, arrays: Sequence[_ViaArray] = ()
+    graph: _CopperGraph,
+    start: _Node,
+    arrays: Sequence[_ViaArray] = (),
+    goal: _Node | None = None,
 ) -> dict[str, object]:
     """Name one edge that closes a loop in ``start``'s component (issue #8368).
 
     Same contraction rules as :func:`_component_has_cycle`; the first edge
     whose ends are already connected (union-find over contracted roots) is the
-    witness.  Empty dict when there is no cycle.
+    witness.  Empty dict when there is no cycle.  ``"loop_branches"`` names
+    both branches of that loop (Issue #9725, see :func:`_loop_branches`);
+    ``goal`` lets a declared endpoint count as one of the loop's junctions.
     """
     roots = {node: next(iter(array.nodes)) for array in arrays for node in array.nodes}
     contracted = {edge for array in arrays for edge in array.edges}
@@ -2356,21 +3217,106 @@ def _component_cycle_witness(
                 seen_edges.add(edge)
                 ra, rb = find(roots.get(cur, cur)), find(roots.get(nxt, nxt))
                 if ra == rb:
+                    witness: dict[str, object]
                     if edge.segment is not None:
                         seg = edge.segment
-                        return {
+                        witness = {
                             "kind": "segment",
                             "layer": seg.layer,
                             "start": list(seg.start),
                             "end": list(seg.end),
                             "width": seg.width,
                         }
-                    return {"kind": "via", "layer": cur[2], "position": [cur[0], cur[1]]}
+                    else:
+                        witness = {"kind": "via", "layer": cur[2], "position": [cur[0], cur[1]]}
+                    branches = _loop_branches(graph, start, arrays, edge, cur, nxt, goal)
+                    if branches:
+                        witness["loop_branches"] = branches
+                    return witness
                 parent[ra] = rb
             if nxt not in seen_nodes:
                 seen_nodes.add(nxt)
                 stack.append(nxt)
     return {}
+
+
+def _loop_branches(
+    graph: _CopperGraph,
+    start: _Node,
+    arrays: Sequence[_ViaArray],
+    closing: _GraphEdge,
+    cur: _Node,
+    nxt: _Node,
+    goal: _Node | None = None,
+) -> list[dict[str, object]]:
+    """Both branches of the loop ``closing`` closes (Issue #9725).
+
+    The loop is ``closing`` plus the fewest-edge route back between its ends.
+    A junction is a loop node with a third edge or a declared endpoint (the
+    current enters or leaves there). Where the loop has exactly two, the
+    branches are the loop's two arcs between them (the two parallel paths the
+    current could split over); otherwise they are ``closing`` itself and the
+    return route. Each branch is ``{"start", "end", "layers", "segments",
+    "vias"}``: its end junctions (board-relative), the copper layers it
+    runs on, and how many routed segments and via barrels it holds.
+    """
+    roots, ends = _contracted_component(graph, start, arrays)
+    if closing not in ends:
+        return []
+    u, v = ends[closing]
+    back = _edge_route(ends, v, u, skip=closing)
+    if back is None:
+        return []
+    # The cycle as an ordered ring of (node, edge to next node).
+    ring = [(u, closing), *[(a, edge) for a, edge, _ in back]]
+    if len(ring) < 2:
+        # ``closing`` returns to the node it left (both ends inside one pad
+        # or contracted array): the other branch is that copper itself, which
+        # the witness already locates.
+        return []
+    degree: dict[_Node, int] = {}
+    for a, b in ends.values():
+        degree[a] = degree.get(a, 0) + 1
+        degree[b] = degree.get(b, 0) + 1
+    endpoints = {roots.get(n, n) for n in (start, goal) if n is not None}
+    junctions = [
+        i for i, (node, _) in enumerate(ring) if degree.get(node, 0) >= 3 or node in endpoints
+    ]
+    if len(junctions) != 2:
+        junctions = [0, 1]
+    first, second = junctions
+    arcs = [ring[first:second], ring[second:] + ring[:first]]
+
+    def point(node: _Node, actual: _Node) -> list[float]:
+        # A contracted array's root is an arbitrary member: quote the real
+        # node the loop edge touched where there is one.
+        shown = actual if roots.get(actual, actual) == node else node
+        return [shown[0], shown[1]]
+
+    def junction_point(node: _Node) -> list[float]:
+        if node == u:
+            return point(node, cur)
+        if node == v:
+            return point(node, nxt)
+        return [node[0], node[1]]
+
+    out: list[dict[str, object]] = []
+    for index, arc in enumerate(arcs):
+        segments = {id(e.segment): e.segment for _, e in arc if e.segment is not None}
+        layers = list(dict.fromkeys(s.layer for s in segments.values()))
+        a, b = arc[0][0], (ring + ring)[ring.index(arc[-1]) + 1][0]
+        if index:
+            a, b = b, a  # both branches read from the same junction
+        out.append(
+            {
+                "start": junction_point(a),
+                "end": junction_point(b),
+                "layers": layers,
+                "segments": len(segments),
+                "vias": sum(1 for _, e in arc if e.segment is None),
+            }
+        )
+    return out
 
 
 @dataclass(eq=False)
@@ -2593,6 +3539,19 @@ def describe_witness(witness: dict[str, object], origin: tuple[float, float] = (
             for b in branches
         ]
         out += f" [blocking branches: {'; '.join(parts)}]"
+    loop = cast("list[dict[str, object]]", witness.get("loop_branches") or [])
+    if loop:
+        parts = []
+        for b in loop:
+            layers = "/".join(cast("list[str]", b.get("layers") or [])) or "via barrels"
+            detail = f"{b['segments']} segment(s)"
+            if b.get("vias"):
+                detail += f", {b['vias']} via barrel(s)"
+            parts.append(
+                f"{_witness_point(b['start'], origin)}->{_witness_point(b['end'], origin)}"
+                f" on {layers} ({detail})"
+            )
+        out += f" [loop branches: {'; '.join(parts)}]"
     return out
 
 
@@ -2829,8 +3788,6 @@ def resolve_current_path(
             spec=spec, status=STATUS_UNRESOLVED, reason=unsupported, source=source, sink=sink
         )
 
-    adjacency = _build_graph(net_segments, pcb, spec.net_name)
-
     if spec.source == spec.sink:
         # Degenerate self-path: a declaration whose source and sink are the
         # same pad covers no copper, so it resolves trivially without needing
@@ -2840,6 +3797,17 @@ def resolve_current_path(
             spec=spec, status=STATUS_RESOLVED, source=source, sink=sink, segments=(), length_mm=0.0
         )
 
+    net_number = source.net_number
+
+    @cache
+    def physical_contacts() -> CopperContactGraph:
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+        return build_copper_contact_graph(ConnectivityValidator(pcb), net_number, with_bonds=True)
+
+    row_ports, cap_joints, row_tracks = _via_row_ports(pcb, net_number, physical_contacts)
+    adjacency = _build_graph(net_segments, pcb, spec.net_name, row_ports, cap_joints, row_tracks)
     # Attach each endpoint by its pad's own extent, not by an exact center
     # hit: a trace terminating anywhere inside the pad is electrically on it,
     # and several traces landing on one pad are shorted by it. Without this,
@@ -2939,12 +3907,86 @@ def resolve_current_path(
                     sink=sink,
                     reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
                 )
+    source_pin, sink_pin = (source.ref, source.pad), (sink.ref, sink.pad)
+
+    def physical_spans(unmodeled_bonds: set[tuple[int, int]] | None = None) -> PhysicalPathSegments:
+        from kicad_tools.analysis.trace_length import physical_path_segments
+
+        return physical_path_segments(
+            pcb, physical_contacts(), source_pin, sink_pin, unmodeled_bonds
+        )
+
+    def proved_series_segments(
+        evidence: PhysicalPathSegments,
+    ) -> tuple[tuple[Segment, ...], dict[int, tuple[Segment, ...]]]:
+        candidates, series = _loop_free_path_segments(adjacency, start, goal, contracted)
+        segment_ids = {id(pcb.segments[i]) for i in evidence.unavoidable}
+        whole = tuple(seg for seg in candidates if id(seg) in segment_ids)
+        partial = {}
+        for index, intervals in evidence.partial.items():
+            seg = pcb.segments[index]
+            if id(seg) not in series:
+                continue
+            # A proved via row can occupy the end of an otherwise series
+            # track. An unrelated track or via touching midway still
+            # withholds that track, even if a shorter tail is a bridge.
+            boundaries = {_node_key(seg.start), _node_key(seg.end)}
+            boundaries.update(
+                _node_key(_track_station(seg, pos))
+                for group in via_groups
+                for pos, tracks in group.track_contacts.items()
+                if id(seg) in tracks
+            )
+            spans = tuple(
+                replace(seg, start=a, end=b)
+                for a, b in intervals
+                if _node_key(a) in boundaries
+                and _node_key(b) in boundaries
+                and any(
+                    low - _PAD_EPS <= math.dist(seg.start, a)
+                    and math.dist(seg.start, b) <= high + _PAD_EPS
+                    for low, high in series[id(seg)]
+                )
+            )
+            if spans:
+                partial[id(seg)] = spans
+        return whole, partial
+
+    # Mid-path layer changes carried by several barrels (Issue #9725) are
+    # contracted like endpoint arrays; only groups the declared path changes
+    # layer through become evidence (an off-path group still is no loop).
+    via_groups, unmodeled_edges = _mid_path_via_groups(
+        adjacency,
+        pcb,
+        spec.net_name,
+        {node for array in arrays for node in array.nodes},
+        physical_contacts,
+    )
+    contracted = [*arrays, *via_groups]
+    # Every proposed port is a measured copper bond. An unproved group can
+    # expose a real return through another barrel. Its component must retain
+    # that cycle rather than reduce it as an ordinary parallel trace pair.
+    unproved_barrels = {barrel for _, barrel in row_ports} - {
+        node for group in contracted for node in group.nodes
+    }
+    component_edges = (
+        _contracted_component(adjacency, start, ())[1]
+        if unmodeled_edges or unproved_barrels
+        else {}
+    )
+    unmodeled_group = not unmodeled_edges.isdisjoint(component_edges)
+    unproved_row = bool(unproved_barrels) and not unproved_barrels.isdisjoint(
+        node for ends in component_edges.values() for node in ends
+    )
     parallel_groups: list[ParallelGroup] = []
-    if _component_has_cycle(adjacency, start, arrays):
-        blockers: list[list[Segment]] = []
-        parallel_groups = _reduce_parallel_groups(adjacency, start, goal, arrays, blockers) or []
-    if not parallel_groups and _component_has_cycle(adjacency, start, arrays):
-        witness = _component_cycle_witness(adjacency, start, arrays)
+    blockers: list[list[Segment]] = []
+    has_cycle = _component_has_cycle(adjacency, start, contracted)
+    if has_cycle and not (unmodeled_group or unproved_row):
+        parallel_groups = (
+            _reduce_parallel_groups(adjacency, start, goal, contracted, blockers) or []
+        )
+    if has_cycle and not parallel_groups:
+        witness = _component_cycle_witness(adjacency, start, contracted, goal)
         if witness and blockers:
             witness["blocking_branches"] = _blocking_branches_witness(blockers)
         reason = (
@@ -2962,6 +4004,14 @@ def resolve_current_path(
                 "overlap into one conductor -- use overlapping tracks, a "
                 "zone, or a two-layer parallel group"
             )
+        # The loop leaves the current split unknown only inside it: copper
+        # every source-to-sink route crosses still carries the full declared
+        # current (Issue #9725). An unmodeled via-group bypass, pour or arc
+        # makes that centerline proof incomplete.
+        loop_free: tuple[Segment, ...] = ()
+        loop_free_spans: dict[int, tuple[Segment, ...]] = {}
+        if not unmodeled_group and not unmodeled_copper(pcb, spec.net_name):
+            loop_free, loop_free_spans = proved_series_segments(physical_spans())
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,
@@ -2969,12 +4019,24 @@ def resolve_current_path(
             source=source,
             sink=sink,
             witness=witness,
+            loop_free_segments=loop_free,
+            loop_free_spans=loop_free_spans,
+            row_barrels=frozenset(pos for group in via_groups for pos in group.track_contacts),
         )
 
     # A parallel arm the BFS chain did not ride still owns its pad-internal
     # copper: each resolved arm's buried continuation to the pad terminal
     # stays evidence. Taking attachments from a single BFS predecessor chain
     # left a second arm's buried neck in or out by file order (#9647 review).
+    if unproved_row:
+        return PathResolution(
+            spec=spec,
+            status=STATUS_AMBIGUOUS,
+            source=source,
+            sink=sink,
+            reason="physical via-to-bar contacts do not form a proved parallel layer change",
+        )
+
     if parallel_groups:
         group_ids = {id(seg) for group in parallel_groups for seg in group.segments}
         arm_edges = {
@@ -2988,6 +4050,9 @@ def resolve_current_path(
             seg for hub in arm_hubs for seg in _hub_continuation_segments(adjacency, hub, arm_edges)
         )
 
+    on_path_groups = [
+        group for group in via_groups if _path_changes_layer_through(path_segments, group)
+    ]
     # Every member remains physical evidence checked at the full current.
     path_segments = list(
         {
@@ -2995,6 +4060,7 @@ def resolve_current_path(
             for seg in [
                 *path_segments,
                 *(seg for array in arrays for seg in array.members),
+                *(seg for group in on_path_groups for seg in group.members),
                 *(seg for group in parallel_groups for seg in group.segments),
             ]
         }.values()
@@ -3024,14 +4090,65 @@ def resolve_current_path(
             sink=sink,
         )
 
+    # Contracting a mid-path row removes its modeled cycle. Its proof covers
+    # the layer change itself; verify that copper before and after the row
+    # still carries the declared current when all physical bonds are present.
+    missing_bonds = (
+        _unmodeled_bonds(pcb, adjacency, physical_contacts(), parallel_groups)
+        if on_path_groups
+        else set()
+    )
+    if missing_bonds:
+        evidence = physical_spans(missing_bonds)
+        if evidence.witness:
+            loop_free, loop_free_spans = proved_series_segments(evidence)
+            return PathResolution(
+                spec=spec,
+                status=STATUS_AMBIGUOUS,
+                reason="physical copper outside the modeled path forms a parallel return around a declared track span",
+                source=source,
+                sink=sink,
+                witness=evidence.witness,
+                loop_free_segments=loop_free,
+                loop_free_spans=loop_free_spans,
+                row_barrels=frozenset(pos for group in via_groups for pos in group.track_contacts),
+            )
+
+    on_path = {id(segment) for segment in path_segments}
+    fully_covered = (
+        {
+            id(pcb.segments[index])
+            for index, carriers in physical_contacts().covered_collinear_tracks.items()
+            if any(id(pcb.segments[i]) in on_path for i in carriers)
+        }
+        if on_path_groups
+        else set()
+    )
+    overlaid = tuple(
+        seg
+        for seg in net_segments
+        if id(seg) not in on_path
+        and (
+            id(seg) in fully_covered
+            or (id(seg) in adjacency.track_cover and adjacency.track_cover[id(seg)] <= on_path)
+        )
+    )
+    path_joints = tuple(
+        joint for joint in cap_joints if id(joint.first) in on_path and id(joint.second) in on_path
+    )
     return PathResolution(
         spec=spec,
         status=STATUS_RESOLVED,
         source=source,
         sink=sink,
         segments=tuple(path_segments),
-        length_mm=sum(_seg_length(s) for s in path_segments),
-        layer_changes=_layer_changes(pcb, spec.net_name, path_segments, arrays, design_rules),
+        length_mm=sum(_seg_length(s) for s in path_segments)
+        + sum(_seg_length(joint.span) for joint in path_joints),
+        cap_joints=path_joints,
+        overlaid_segments=overlaid,
+        layer_changes=_layer_changes(
+            pcb, spec.net_name, path_segments, [*arrays, *on_path_groups], design_rules
+        ),
         sense_taps=tuple({id(seg): seg for seg in sense_taps}.values()),
         parallel_groups=tuple(parallel_groups),
     )
@@ -3113,7 +4230,7 @@ def audit_current_paths(
         if not resolution.ok:
             continue
         bucket = covered_ids.setdefault(resolution.spec.net_name, set())
-        bucket.update(id(seg) for seg in resolution.segments)
+        bucket.update(id(seg) for seg in resolution.covered_segments)
 
     uncovered: dict[str, list[Segment]] = {}
     unmodeled: dict[str, list[UnmodeledCopper]] = {}
@@ -3141,7 +4258,11 @@ def reinforcement_eligible_segment_ids(pcb: PCB, specs: Sequence[CurrentPathSpec
     reinforcement-**ineligible** path (a Kelvin sense tap, a feedback
     branch), copper covered by an *unresolved* or *ambiguous* path
     (regardless of its declared eligibility), and copper not covered by
-    any declared path at all -- is excluded.
+    any declared path at all -- is excluded. The one addition (Issue #9725):
+    an eligible path that is ``ambiguous`` only because of a loop lends its
+    :attr:`PathResolution.loop_free_segments` -- copper every route between
+    its endpoints crosses, so it carries the full declared current whatever
+    the loop does -- and nothing else of its copper.
 
     The allow-list direction is what makes this fail closed for the "pad
     moved/replaced" case: if a *trunk*'s own endpoint mapping breaks, its
@@ -3158,11 +4279,18 @@ def reinforcement_eligible_segment_ids(pcb: PCB, specs: Sequence[CurrentPathSpec
             net by the caller, typically).
 
     Returns:
-        The set of ``id(segment)`` values that may be anchored.
+        The set of ``id(segment)`` values eligible over their whole length.
+        A track with only a proved inter-row interval has no entry here.
+        Placement uses :attr:`PathResolution.loop_free_spans` for that case.
     """
     eligible: set[int] = set()
-    for resolution in reinforcement_path_resolutions(pcb, specs).eligible:
-        eligible.update(id(seg) for seg in resolution.segments)
+    partition = reinforcement_path_resolutions(pcb, specs)
+    for resolution in partition.eligible:
+        eligible.update(id(seg) for seg in resolution.covered_segments)
+    # A loop-ambiguous eligible path still lends its loop-free segments
+    # between the endpoints (Issue #9725); never the looped copper.
+    for resolution in partition.partial:
+        eligible.update(id(seg) for seg in resolution.loop_free_segments)
     return eligible
 
 
@@ -3187,6 +4315,12 @@ class ReinforcementPathResolutions:
     eligible: tuple[PathResolution, ...] = ()
     ineligible: tuple[PathResolution, ...] = ()
     unresolved: tuple[PathResolution, ...] = ()
+    #: Declared-eligible paths in ``unresolved`` that are ``ambiguous`` only
+    #: through a loop and still have loop-free segments between their
+    #: endpoints (Issue #9725). They stay in ``unresolved`` -- the looped part
+    #: is unhandled and reported -- but their
+    #: :attr:`PathResolution.loop_free_segments` may be anchored.
+    partial: tuple[PathResolution, ...] = ()
 
 
 def reinforcement_path_resolutions(
@@ -3200,14 +4334,22 @@ def reinforcement_path_resolutions(
     eligible: list[PathResolution] = []
     ineligible: list[PathResolution] = []
     unresolved: list[PathResolution] = []
+    partial: list[PathResolution] = []
     for spec in specs:
         resolution = resolve_current_path(pcb, spec)
         if not resolution.ok:
             unresolved.append(resolution)
+            if spec.reinforcement_eligible and (
+                resolution.loop_free_segments or resolution.loop_free_spans
+            ):
+                partial.append(resolution)
         elif spec.reinforcement_eligible:
             eligible.append(resolution)
         else:
             ineligible.append(resolution)
     return ReinforcementPathResolutions(
-        eligible=tuple(eligible), ineligible=tuple(ineligible), unresolved=tuple(unresolved)
+        eligible=tuple(eligible),
+        ineligible=tuple(ineligible),
+        unresolved=tuple(unresolved),
+        partial=tuple(partial),
     )

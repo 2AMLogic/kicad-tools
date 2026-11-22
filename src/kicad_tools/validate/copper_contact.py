@@ -60,10 +60,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.geometry.copper import (
     CONTACT_AREA_EPSILON,
+    collinear_overlap_length,
     pad_board_center,
     pad_copper_outline,
     pad_outline_is_exact,
@@ -145,12 +147,54 @@ class CopperContactGraph:
     component: list[int] = field(default_factory=list)
     bonds: list[tuple[int, int]] = field(default_factory=list)
 
+    @cached_property
+    def covered_collinear_tracks(self) -> dict[int, set[int]]:
+        """Map each covered PCB segment index to the collinear strokes containing all its copper."""
+        covered: dict[int, set[int]] = {}
+        for a, b in self.bonds:
+            first, second = self.items[a], self.items[b]
+            if (
+                first.kind != TRACK
+                or second.kind != TRACK
+                or not (first.straight and second.straight)
+            ):
+                continue
+            if first.layers != second.layers or first.net != second.net:
+                continue
+            p, q = first.endpoints
+            r, s = second.endpoints
+            if collinear_overlap_length(p, q, r, s) is None:
+                continue
+            i, j = first.key[1], second.key[1]
+            if first.geom.covers(second.geom):
+                covered.setdefault(j, set()).add(i)
+            elif second.geom.covers(first.geom):
+                covered.setdefault(i, set()).add(j)
+        return covered
+
     def components(self) -> list[list[int]]:
         """Item indices per component, ordered by first item."""
         groups: dict[int, list[int]] = {}
         for index, root in enumerate(self.component):
             groups.setdefault(root, []).append(index)
         return list(groups.values())
+
+    def preserves_connections(self, previous: CopperContactGraph) -> bool:
+        """Whether every previous group still connects after a geometry-only edit.
+
+        Existing items keep their source keys. Additional tracks and joins
+        between previously separate groups are allowed.
+        """
+        membership = {
+            (item.kind, item.key): group
+            for item, group in zip(self.items, self.component, strict=True)
+        }
+        destinations: dict[int, int] = {}
+        for item, old_group in zip(previous.items, previous.component, strict=True):
+            new_group = membership.get((item.kind, item.key))
+            if new_group is None or destinations.setdefault(old_group, new_group) != new_group:
+                return False
+        return True
 
     def _kinds(self, members: list[int]) -> set[str]:
         return {self.items[i].kind for i in members}
