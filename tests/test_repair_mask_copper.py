@@ -824,6 +824,12 @@ def test_fix_drc_reverts_a_pass_through_nudge_that_does_not_clear(tmp_path, monk
     assert "finding_not_cleared" in capsys.readouterr().out
 
 
+# Each case runs the pinned KiCad DRC three times (before, --verify inside
+# fix_drc_cmd, after): #9943 measured 37.8 s and 44.8 s for the two slowest
+# cases serially on the pinned image, close to CI's 60 s default under a
+# contended runner — so these take a 180 s cap like the other native-DRC
+# tests (see tests/test_route_unverified_verdict_6273.py).
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize(
     "via_y, opens, refusal",
     [
