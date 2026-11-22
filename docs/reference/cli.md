@@ -1470,6 +1470,7 @@ Common flags (the full surface lives in `kct route --help`):
 | Option | Description |
 |--------|-------------|
 | `-o`, `--output PATH` | Output file (default: `<input>_routed.kicad_pcb`) |
+| `--preserve-existing` / `--no-preserve-existing` | Keeps input tracks and vias by default on a board that already has them. Use `--no-preserve-existing` to replace that copper in a full reroute. |
 | `--strategy {basic,negotiated,monte-carlo,evolutionary}` | Routing strategy (default: `negotiated`) |
 | `--differential-pairs` | Route differential pairs coupled. **Deprecated on the grid engine (#6448)** — warns and is removed one release later; use `--route-engine lattice --strategy basic --differential-pairs` |
 | `--trace-width MM` / `--clearance MM` | Trace + clearance overrides |

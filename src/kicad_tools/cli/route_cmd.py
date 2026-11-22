@@ -1401,7 +1401,7 @@ def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> t
                 else:
                     vias_removed += 1
                 if collect is not None:
-                    collect.append(pcb_content[token_start - 1 : k])
+                    collect.append(pcb_content[i:k])
                 # Skip whitespace that was preceding this form (trailing
                 # newline/tab from the previous emission) to keep the
                 # resulting file tidy.
@@ -1436,8 +1436,8 @@ def _baseline_copper_nets(pcb_content: str) -> tuple[int, int, list[str]]:
     """Census the input board's existing routing copper (issue #9599 row 2).
 
     Returns ``(segments, vias, sorted net names)`` carried by top-level
-    ``(segment ...)`` / ``(via ...)`` blocks -- the copper a plain ``kct
-    route`` run replaces with its own freshly routed paths.  Net id ``0``
+    ``(segment ...)`` / ``(via ...)`` blocks -- the copper an explicit full
+    reroute replaces with its own freshly routed paths.  Net id ``0``
     copper (orphans) is not attributed to any named net.
     """
     net_names: dict[int, str] = {}
@@ -1460,12 +1460,12 @@ def _baseline_copper_nets(pcb_content: str) -> tuple[int, int, list[str]]:
 
 
 def _warn_existing_copper_replacement(pcb_path: Path, args) -> None:
-    """List the existing copper a plain ``kct route`` run will replace (#9599 row 2).
+    """List the existing copper a full reroute will replace (#9599 row 2).
 
     The save path treats the in-memory router state as authoritative: every
     ``_write_routed_pcb`` call strips ALL top-level ``(segment ...)`` /
     ``(via ...)`` blocks and re-inserts only this run's routes (issue #2976).
-    Without ``--preserve-existing`` that silently removes hand-placed copper;
+    With ``--no-preserve-existing`` that removes hand-placed copper;
     this notice names every affected net before routing starts, and points at
     the flag that locks existing copper (kept verbatim as fixed obstacles and
     re-emitted unchanged, issue #5788).  Skipped for quiet / dry runs, and
@@ -3785,6 +3785,12 @@ def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route
     routes = _capture_preserved_routes(pcb_path) if preserve else []
     disposition = getattr(args, "_placement_disposition", None)
     names = disposition.preserve_copper_nets if disposition is not None else frozenset()
+    if preserve and _keep_input_copper_on_routed_nets(args):
+        # The geometry model supplies routing obstacles. Keep the source forms
+        # for output as well, including locks and per-via fabrication settings.
+        input_blocks: list[str] = []
+        _strip_route_blocks(pcb_path.read_text(), collect=input_blocks)
+        return routes, "\n\t".join(input_blocks)
     name_only = _board_uses_name_only_dialect(pcb_path)
     ordinary = _serialize_preserved_routes(
         [route for route in routes if route.net_name not in names], name_only=name_only
@@ -3820,6 +3826,22 @@ def _kept_preserved_net_ids(router) -> set[int]:
     if callable(method):
         return set(method())
     return set(getattr(router, "_stub_terminals", None) or {})
+
+
+def _keep_input_copper_on_routed_nets(args) -> bool:
+    """Keep hand-routed portions of open nets during incremental completion.
+
+    An explicit net or region selection may replace the selected copper.
+    A completion pass always keeps it, including on the nets it selects.
+    """
+    return bool(
+        getattr(args, "complete", False)
+        or (
+            getattr(args, "preserve_existing", False)
+            and not getattr(args, "nets", None)
+            and getattr(args, "_region_box", None) is None
+        )
+    )
 
 
 def _router_board_net_ids(router) -> dict[str, int]:
@@ -3910,14 +3932,13 @@ def _dedupe_preserved_sexp(
     drop_names = {r.net_name for r in dropped if r.net_name}
     if not dropped:
         return preserved_sexp
-    from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
+    from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks, resolve_block_net
 
     spans = []
     for kind in ("segment", "via"):
         for start, end, block in _extract_balanced_blocks(preserved_sexp, kind):
-            num = re.search(r"\(net\s+(\d+)\s*\)", block)
-            name = re.search(r'\(net\s+"((?:\\.|[^"\\])*)"\s*\)', block)
-            if (num and int(num.group(1)) in drop_ids) or (name and name.group(1) in drop_names):
+            identity = resolve_block_net(block, {}, {})
+            if identity is not None and (identity[0] in drop_ids or identity[1] in drop_names):
                 spans.append((start, end))
     result = preserved_sexp
     for start, end in sorted(spans, reverse=True):
@@ -4160,6 +4181,7 @@ def _finalize_routes(
     aggregate_segment_drop_threshold: float = 0.5,
     preserve_existing: bool = False,
     preserved_routes: list["Route"] | None = None,
+    captured_copper_sexp: str | None = None,
     pcb_path: "Path | str | None" = None,
 ) -> tuple[str, dict, dict]:
     """Run cleanup, compute statistics, and generate S-expressions.
@@ -4335,6 +4357,11 @@ def _finalize_routes(
     # ``_audited_trace_copper`` never has to re-derive (or guess) it.  Always
     # set -- an empty list is the meaningful "nothing preserved" answer.
     _emitted_preserved: list[Route] = []
+    emit_captured_input = (
+        preserve_existing
+        and captured_copper_sexp is not None
+        and getattr(router, "_preserve_listed_copper", False)
+    )
     if preserve_existing:
         source_routes = preserved_routes if preserved_routes is not None else router.existing_routes
         disposition = getattr(router, "placement_disposition", None)
@@ -4346,7 +4373,7 @@ def _finalize_routes(
                 if route.net_name not in disposition.preserve_copper_nets
                 and route not in neutral_routes
             ]
-        if source_routes:
+        if source_routes or emit_captured_input:
             routed_net_ids = {r.net for r in router.routes}
             # Issue #4170 (Phase 2b-1): a stub net IS routed (the in-region
             # reconnection) but its OUTSIDE boundary-stub copper must still be
@@ -4362,12 +4389,15 @@ def _finalize_routes(
             # a name-only board the two can differ once kct has rewritten the
             # staged file, so each preserved route is matched by net name.
             board_net_ids = _router_board_net_ids(router)
-            preserved_sexp = _serialize_preserved_routes(
-                source_routes,
-                exclude_net_ids=routed_net_ids,
-                name_only=name_only,
-                board_net_ids=board_net_ids,
-            )
+            if emit_captured_input:
+                preserved_sexp = captured_copper_sexp or ""
+            else:
+                preserved_sexp = _serialize_preserved_routes(
+                    source_routes,
+                    exclude_net_ids=routed_net_ids,
+                    name_only=name_only,
+                    board_net_ids=board_net_ids,
+                )
             _emitted_preserved = [
                 _rekey_preserved_route(r, _preserved_route_router_net(r, board_net_ids))
                 for r in source_routes
@@ -4386,7 +4416,9 @@ def _finalize_routes(
 
     placement_copper = getattr(router, "placement_preserved_copper", "")
     if placement_copper:
-        route_sexp = f"{route_sexp}\n\t{placement_copper}" if route_sexp else placement_copper
+        # The full input capture already contains placement-excluded nets.
+        if not emit_captured_input:
+            route_sexp = f"{route_sexp}\n\t{placement_copper}" if route_sexp else placement_copper
         _emitted_preserved.extend(getattr(router, "placement_preserved_routes", ()))
 
     # Issue #4699: hand the gate the exact preserved set that was written.
@@ -13963,7 +13995,7 @@ def route_with_layer_escalation(
                     # (it now derives from --per-net-timeout on every lattice run),
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                    preserve_listed_copper=bool(getattr(args, "complete", False)),
+                    preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
                     # Issue #4798: bound by THIS attempt's fair slice, not the
                     # whole remaining run budget -- otherwise the lattice's
@@ -14574,6 +14606,7 @@ def route_with_layer_escalation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
@@ -15202,7 +15235,7 @@ def route_with_rule_relaxation(
                     # (it now derives from --per-net-timeout on every lattice run),
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                    preserve_listed_copper=bool(getattr(args, "complete", False)),
+                    preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
                     # Issue #4798: bound by THIS tier's fair slice, not the
                     # whole remaining run budget.
@@ -15572,6 +15605,7 @@ def route_with_rule_relaxation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
@@ -17719,7 +17753,7 @@ def route_with_combined_escalation(
                         # (it now derives from --per-net-timeout on every lattice run),
                         # and --timeout supplies an absolute ceiling alongside it.
                         localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                        preserve_listed_copper=bool(getattr(args, "complete", False)),
+                        preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                         lattice_link_budget_s=_resolve_lattice_link_budget(args),
                         # Issue #4798: bound by THIS cell's fair slice, not the
                         # whole remaining run budget.
@@ -18130,6 +18164,7 @@ def route_with_combined_escalation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
@@ -20878,15 +20913,13 @@ def _route_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--preserve-existing",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "Incremental routing (Issue #3155): load existing "
-            "(segment ...)/(via ...) copper as immovable obstacles and "
-            "re-emit it unchanged, so only unconnected nets are routed. "
-            "Preserves manually-routed nets, skipped nets' geometry, and "
-            "standalone stitch vias across a route pass. Default off (full "
-            "re-route, existing copper is replaced by freshly routed nets)."
+            "Keep existing tracks and vias as fixed copper and route open connections. "
+            "Enabled by default when the input has top-level segments or vias. "
+            "Use --no-preserve-existing for a full reroute. "
+            "--complete, --nets, --region and a resumed checkpoint require preservation."
         ),
     )
     parser.add_argument(
@@ -25056,6 +25089,19 @@ def _run_main_impl(args, parser, argv) -> int:
         if rc != 0:
             return rc
 
+    # Scoped modes and a loaded checkpoint have already selected preservation.
+    # Use the same top-level forms that the writer can remove (#9627). Pads,
+    # graphics and zone fills alone do not turn on incremental routing.
+    if args.preserve_existing is None:
+        try:
+            input_segments, input_vias = _strip_route_blocks(pcb_path.read_text())[1:]
+        except (OSError, UnicodeError) as exc:
+            print(f"Error reading input routing copper from {pcb_path}: {exc}", file=sys.stderr)
+            return 1
+        args.preserve_existing = bool(input_segments or input_vias)
+    else:
+        _warn_existing_copper_replacement(pcb_path, args)
+
     # Issue #5788: a bare --preserve-existing must honour its own --help ("only
     # unconnected nets are routed") -- detect the nets that are ALREADY fully
     # connected on the input board and stamp them so every routing sub-flow
@@ -25533,12 +25579,6 @@ def _run_main_impl(args, parser, argv) -> int:
             grid_explicit=grid_auto_result is None,
         )
 
-    # Issue #9599 row 2: name the existing copper this run is about to
-    # replace.  All preserve-flag coercions (--nets / --region / --complete)
-    # have run above, so a False ``preserve_existing`` here means the run
-    # really will strip the input board's routing copper at its first write.
-    _warn_existing_copper_replacement(pcb_path, args)
-
     # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
     # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size
     # IMPLIES --auto-layers unless --no-auto-layers was explicit (the
@@ -25879,7 +25919,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 # (it now derives from --per-net-timeout on every lattice run),
                 # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                preserve_listed_copper=bool(getattr(args, "complete", False)),
+                preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
                 lattice_max_iterations=getattr(args, "lattice_iterations", None),
@@ -25972,7 +26012,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 # (it now derives from --per-net-timeout on every lattice run),
                 # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                preserve_listed_copper=bool(getattr(args, "complete", False)),
+                preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
                 lattice_max_iterations=getattr(args, "lattice_iterations", None),
@@ -27197,6 +27237,7 @@ def _run_main_impl(args, parser, argv) -> int:
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
 

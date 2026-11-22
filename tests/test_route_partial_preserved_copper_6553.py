@@ -23,6 +23,7 @@ import pytest
 
 from kicad_tools.cli import route_cmd, route_deadline
 from kicad_tools.router.core import Autorouter
+from kicad_tools.router.partial_rescue import strip_net_copper
 from tests.test_route_layer_escalation_partial_6322 import _copper_length, _router_copper
 
 _PARTS = {"R1": (10.0, 10.0), "R2": (30.0, 10.0)}
@@ -76,11 +77,11 @@ class _CheckpointThenDeadline:
     """Route for real and checkpoint onto ``<output>``; then hit the deadline.
 
     The deadline lands in the ``deadline_on_call``-th routing call.  Every
-    call checkpoints first, so by the time the deadline fires ``<output>``
-    holds routed-only copper.
+    call checkpoints first. Simulate a rescue pass stripping net C from
+    that staged board so the partial save must use its original capture.
     """
 
-    def __init__(self, monkeypatch, *, deadline_on_call: int):
+    def __init__(self, monkeypatch, output: Path, *, deadline_on_call: int):
         self.expected: tuple[int, int] | None = None
         self.expected_length: float | None = None
         self.checkpoints = 0
@@ -94,6 +95,7 @@ class _CheckpointThenDeadline:
             if callback is not None:
                 metrics = SimpleNamespace(iteration=0, routed_count=1, overflow=0)
                 callback(list(router.routes), metrics)
+                assert strip_net_copper(output, ["C"]) == 2
                 self.checkpoints += 1
             if self.calls < deadline_on_call:  # pragma: no cover - 1 in all flows
                 return result
@@ -121,7 +123,7 @@ def test_partial_keeps_preserved_copper_exactly_once(monkeypatch, tmp_path, flow
     source.write_text(_board_text())
     output = tmp_path / "output.kicad_pcb"
     flow_args, deadline_on_call = _FLOWS[flow]
-    patch = _CheckpointThenDeadline(monkeypatch, deadline_on_call=deadline_on_call)
+    patch = _CheckpointThenDeadline(monkeypatch, output, deadline_on_call=deadline_on_call)
 
     rc = route_cmd._in_process_main_impl(
         [
@@ -137,9 +139,8 @@ def test_partial_keeps_preserved_copper_exactly_once(monkeypatch, tmp_path, flow
 
     assert rc == route_deadline.TIMEOUT_EXIT
     assert patch.checkpoints >= 1, "no checkpoint replaced <output> before the deadline"
-    # The checkpoint really did overwrite the placement source: the preserved
-    # copper is gone from <output> on disk ...
-    assert "(start 2 2)" not in output.read_text().replace(".0", "")
+    # A rescue pass removed the input copper from the on-disk checkpoint.
+    assert not re.search(r"\(start 2(?:\.0+)? 2(?:\.0+)?\)", output.read_text())
     partial = output.with_stem(output.stem + "_partial")
     assert partial.is_file(), f"the {flow} flow saved no _partial board"
     text = partial.read_text()
