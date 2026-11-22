@@ -1252,10 +1252,14 @@ class SilkLegalizeReport:
     # finished tree, graphics and text respectively.
     hole_residual: list[str] = field(default_factory=list)
     text_over_hole: list[str] = field(default_factory=list)
-    #: Every item the pass could not make legal; never waived.
+    #: Residual items from the attempted repairs. Run the silkscreen checker
+    #: for findings outside the repair pass.
     unresolved: list[SilkLegalizeUnresolved] = field(default_factory=list)
     dry_run: bool = False
     output_path: str = ""
+    #: Checker rule IDs addressed by the active repair stages. Hole repairs
+    #: consider drilled pads only, and each stage targets supported primitives.
+    rules_covered: list[str] = field(default_factory=list)
 
     @property
     def total_fixed(self) -> int:
@@ -1306,10 +1310,11 @@ def legalize_silk(
     the clips.  A dry run stages exactly the same result in memory and
     reports it; it simply never writes.
 
-    Nothing is ever waived: whatever the pass cannot make legal -- an
-    unclippable graphic still over a hole, an unplaceable reference, a
-    protected pin-1 marker -- is named in ``report.unresolved`` and stays a
-    ``kct check`` finding (grading belongs to #9798).
+    ``report.rules_covered`` lists the rules targeted by the active stages.
+    ``report.unresolved`` names residual repair items such as an unclippable
+    graphic over a hole, an unplaceable reference or a lost pin-1 marker.
+    Run ``kct check --only silkscreen`` on the resulting board for a full
+    silkscreen check.
 
     Args:
         pcb: Path to the ``.kicad_pcb`` file.
@@ -1319,8 +1324,8 @@ def legalize_silk(
         dry_run: Report the staged result without writing any file.
 
     Returns:
-        A :class:`SilkLegalizeReport` naming every edit and every
-        unresolved item.
+        A :class:`SilkLegalizeReport` with the repair scope, edits and
+        unresolved repair items.
 
     Raises:
         ImportError: shapely (or pyyaml) is not installed.
@@ -1346,6 +1351,13 @@ def legalize_silk(
     width_result = repairer.repair_line_widths(min_width)
     height_result = repairer.repair_text_heights(min_height)
     stroke_result = repairer.repair_text_stroke_widths(min_width)
+    rules_covered = [
+        "silkscreen_line_width",
+        "silkscreen_text_height",
+        "silkscreen_text_thickness",
+        "silk_hole_overlap",
+        "silk_ref_obscured",
+    ]
 
     pad_result = PadClearanceRepairResult(min_clearance_mm=0.0)
     pad_clearance = mfr_profile.min_silk_to_pad_clearance_mm
@@ -1362,6 +1374,7 @@ def legalize_silk(
                 warning = danger
             pad_clearance = warning
         pad_result = repairer.repair_pad_clearance(pad_clearance)
+        rules_covered.append("silk_pad_clearance")
 
     # None keeps the silk_hole_overlap rule's own threshold.
     hole_result = repairer.repair_hole_clearance(
@@ -1449,6 +1462,7 @@ def legalize_silk(
             text_over_hole=text_over_hole,
             unresolved=unresolved,
             dry_run=dry_run,
+            rules_covered=rules_covered,
         )
 
         changed = report.total_fixed > 0

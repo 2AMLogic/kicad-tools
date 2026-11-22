@@ -439,6 +439,7 @@ def _print_text(
 def _legalize_json(report: SilkLegalizeReport, mfr: str | None) -> dict:
     data = {
         "mode": "all",
+        "rules_covered": report.rules_covered,
         "manufacturer": mfr,
         "dry_run": report.dry_run,
         "min_width_mm": report.min_width_mm,
@@ -473,10 +474,10 @@ def _legalize_json(report: SilkLegalizeReport, mfr: str | None) -> dict:
 
 
 def _print_legalize_text(report: SilkLegalizeReport, mfr: str | None) -> None:
-    action = "Would legalize" if report.dry_run else "Legalized"
-    source = f" to {mfr.upper()} minimums" if mfr else ""
+    action = "Planned" if report.dry_run else "Applied"
+    source = f" for {mfr.upper()}" if mfr else ""
     print(
-        f"{action} silkscreen{source}: {report.total_fixed} edit(s)"
+        f"{action} {report.total_fixed} silkscreen edit(s){source}"
         f" ({report.total_moved} reference(s) moved)"
     )
     if report.width.total_fixed:
@@ -501,8 +502,10 @@ def _print_legalize_text(report: SilkLegalizeReport, mfr: str | None) -> None:
         for u in report.unresolved:
             detail = f" -- {u.detail}" if u.detail else ""
             print(f"  [{u.kind}] {u.item}{detail}")
-    elif not report.dry_run:
-        print("No unresolved silk findings.")
+    else:
+        print("No unresolved items from this repair pass.")
+    profile = f" --mfr {mfr}" if mfr else ""
+    print(f"Use kct check <board> --only silkscreen{profile} for the full set of silk rules.")
     if report.output_path:
         print(f"\nSaved to: {report.output_path}")
 
@@ -513,8 +516,8 @@ def _print_legalize_results(
     if output_format == "json":
         print(json.dumps(_legalize_json(report, mfr), indent=2))
     elif output_format == "summary":
-        action = "Would legalize" if report.dry_run else "Legalized"
-        source = f" to {mfr.upper()} minimums" if mfr else ""
+        action = "Planned" if report.dry_run else "Applied"
+        source = f" for {mfr.upper()}" if mfr else ""
         unresolved = f"; {len(report.unresolved)} unresolved item(s)" if report.unresolved else ""
         print(
             f"{action} {report.total_fixed} silk edit(s){source}"
