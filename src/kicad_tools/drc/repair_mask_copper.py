@@ -720,7 +720,9 @@ class MaskCopperRepairer:
             return False
         normal = best[1]
         cos = abs(unit[0] * normal[0] + unit[1] * normal[1])
-        return bool(cos >= math.cos(math.radians(_PULL_IN_MAX_ANGLE_DEG)))
+        threshold = math.cos(math.radians(_PULL_IN_MAX_ANGLE_DEG))
+        # Normalizing an exact diagonal can round just below cos(45°).
+        return bool(cos >= threshold or math.isclose(cos, threshold, rel_tol=0.0, abs_tol=1e-12))
 
     # ------------------------------------------------------------------
     # Undo / save

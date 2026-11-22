@@ -61,8 +61,9 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field, replace
+from functools import partial
+from typing import TYPE_CHECKING
 
 from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
 
@@ -1563,26 +1564,11 @@ def _pad_edge_gap(
     x: float,
     y: float,
     candidates: list[tuple[Footprint, Pad, tuple[float, float, float, float]]],
-    pad_to_mask: float,
-    *,
-    ring: bool = False,
+    measure: Callable[[Via, Pad, Footprint], float | None],
 ) -> float | None:
-    """Smallest drill-edge-to-aperture gap of a via placed at ``(x, y)``.
-
-    Negative when the drill reaches into a same-net pad's copper (via-in-pad).
-    ``None`` when no same-net pad has a measurable aperture.  ``ring=True``
-    measures the via's copper *ring* edge (``size / 2``) instead of its drill
-    edge -- the mask-to-copper view (issue #9891).
-    """
-    from types import SimpleNamespace
-
-    probe: Any = SimpleNamespace(position=(x, y), drill=via.size if ring else via.drill)
-    gaps = [
-        gap
-        for fp, pad, _bbox in candidates
-        if (gap := drill_to_mask_aperture_gap(probe, pad, fp, pad_to_mask_clearance=pad_to_mask))
-        is not None
-    ]
+    """Smallest measurable drill or ring gap among the same-net pads at a candidate position."""
+    probe = replace(via, position=(x, y))
+    gaps = [gap for fp, pad, _bbox in candidates if (gap := measure(probe, pad, fp)) is not None]
     return min(gaps) if gaps else None
 
 
@@ -1678,6 +1664,17 @@ def relocate_pad_edge_vias(
         _PAD_EDGE_STEP_MM * i for i in range(1, int(_PAD_EDGE_MAX_SLIDE_MM / _PAD_EDGE_STEP_MM) + 1)
     ]
 
+    drill_to_mask = partial(drill_to_mask_aperture_gap, pad_to_mask_clearance=pad_to_mask)
+    measure = drill_to_mask
+    flag_dam = dam
+    if ring_dam_mm is not None:
+        measure = partial(
+            via_ring_to_mask_aperture_gap,
+            pad_to_mask_clearance=pad_to_mask,
+            board_version=pcb._file_version(),
+        )
+        flag_dam = float(ring_dam_mm)
+
     for via in list(pcb.vias):
         if via.net_number == 0:
             continue
@@ -1685,16 +1682,12 @@ def relocate_pad_edge_vias(
         if not candidates:
             continue
         vx, vy = via.position
-        gap_fn = (
-            via_ring_to_mask_aperture_gap if ring_dam_mm is not None else drill_to_mask_aperture_gap
-        )
-        flag_dam = float(ring_dam_mm) if ring_dam_mm is not None else dam
         flagged = next(
             (
                 (fp, pad)
                 for fp, pad, bbox in candidates
                 if not via_inside_pad(via, bbox, pad, fp)
-                and (gap := gap_fn(via, pad, fp, pad_to_mask_clearance=pad_to_mask)) is not None
+                and (gap := measure(via, pad, fp)) is not None
                 and gap < flag_dam - WRITER_CLEARANCE_MARGIN_MM
             ),
             None,
@@ -1772,15 +1765,13 @@ def relocate_pad_edge_vias(
             for step in steps:
                 # Whole micrometres: what KiCad's own serializer keeps.
                 nx, ny = round(vx + dx * step, 3), round(vy + dy * step, 3)
-                gap = _pad_edge_gap(
-                    via, nx, ny, candidates, pad_to_mask, ring=ring_dam_mm is not None
-                )
+                gap = _pad_edge_gap(via, nx, ny, candidates, measure)
                 if gap is None or gap < flag_dam + 1e-6:
                     # Still in the zone, or into a pad's copper: keep sliding.
                     continue
                 if ring_dam_mm is not None:
                     # The move may not create a plain via_at_pad_edge finding.
-                    drill_gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask)
+                    drill_gap = _pad_edge_gap(via, nx, ny, candidates, drill_to_mask)
                     if drill_gap is None or drill_gap < dam + 1e-6:
                         continue
                 failure = _check_clearance(

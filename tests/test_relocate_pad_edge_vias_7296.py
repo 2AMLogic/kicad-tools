@@ -16,13 +16,14 @@ _HEAD = """(kicad_pcb
   (generator "test")
   (general (thickness 1.6))
   (paper "A4")
-  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (38 "B.Mask" user) (39 "F.Mask" user)
+          (44 "Edge.Cuts" user))
   (setup (pad_to_mask_clearance {mask}))
   (net 0 "")
   (net 1 "SIG1")
   (net 2 "SIG2")
   (footprint "test:pad" (layer "F.Cu") (at 100 100)
-    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu") (net 1 "SIG1"))
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 1 "SIG1"))
   )
 """
 
@@ -36,9 +37,9 @@ _EDGE_VIA = """  (via (at 100.65 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.C
 _RULES = get_profile("jlcpcb").get_design_rules(2)
 
 
-def _load(tmp_path: Path, body: str, mask: float = 0.0) -> PCB:
+def _load(tmp_path: Path, body: str, mask: float = 0.0, *, head: str = _HEAD) -> PCB:
     path = tmp_path / "board.kicad_pcb"
-    path.write_text(_HEAD.format(mask=mask) + body)
+    path.write_text(head.format(mask=mask) + body)
     return PCB.load(path)
 
 
@@ -312,3 +313,73 @@ def test_ring_dam_mode_leaves_a_ring_legal_via_alone(tmp_path):
     ring = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)
     assert ring.moved == [] and ring.unresolvable == []
     assert pcb.vias[0].position[0] == pytest.approx(100.95)
+
+
+@pytest.mark.parametrize(
+    ("mask_layer", "via", "moves"),
+    [
+        ("", "via", False),
+        ("F.Mask", "via", True),
+        ("*.Mask", "via", True),
+        ("B.Mask", "via blind", False),
+    ],
+)
+def test_ring_dam_requires_a_mask_opening_on_the_via_side(tmp_path, mask_layer, via, moves):
+    layers = f'(layers "F.Cu" "{mask_layer}")' if mask_layer else '(layers "F.Cu")'
+    head = _HEAD.replace('(layers "F.Cu" "F.Mask")', layers)
+    body = _EDGE_VIA.replace("100.65", "100.8").replace("(via (at", f"({via} (at")
+    if via == "via blind":
+        head = head.replace('(31 "B.Cu" signal)', '(1 "In1.Cu" signal) (31 "B.Cu" signal)')
+        body = body.replace('(layers "F.Cu" "B.Cu")', '(layers "F.Cu" "In1.Cu")')
+    pcb = _load(tmp_path, body, head=head)
+    result = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)
+    assert len(result.moved) == int(moves)
+    assert not result.unresolvable
+    assert len(pcb.segments) == 1 + int(moves)
+    assert pcb.vias[0].position == pytest.approx((100.9 if moves else 100.8, 100))
+
+
+@pytest.mark.parametrize("neighbor_exposed", [False, True])
+def test_ring_dam_uses_an_opening_when_accepting_a_candidate(tmp_path, neighbor_exposed):
+    # At the first pad's exit (100.9), a second pad has a 0.06 mm ring gap
+    # but a 0.21 mm drill gap. Only its exposed variant can veto that exit.
+    layers = '"F.Cu" "F.Mask"' if neighbor_exposed else '"F.Cu"'
+    neighbor = f"""(footprint "test:neighbor" (layer "F.Cu") (at 101.76 100)
+        (pad "1" smd rect (at 0 0) (size 1 1) (layers {layers}) (net 1 "SIG1")))"""
+    pcb = _load(tmp_path, neighbor + _EDGE_VIA.replace("100.65", "100.8"))
+    result = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)
+    assert len(result.moved) == 1
+    takes_first_exit = pcb.vias[0].position == pytest.approx((100.9, 100))
+    assert takes_first_exit != neighbor_exposed
+
+
+@pytest.mark.parametrize(
+    ("version", "board_margin", "footprint_margin", "pad_margin", "expected_x"),
+    [
+        (20260206, 0.16, None, None, 101.075),
+        (20260206, 0.0, 0.16, None, 101.075),
+        (20260206, 0.0, None, 0.16, 101.075),
+        (20260206, 0.16, 0.03, None, 101.0),
+        (20260206, 0.0, 0.16, 0.03, 101.0),
+        (20240201, 0.0, 0.16, 0.0, 101.075),
+        (20240202, 0.0, 0.16, 0.0, 101.0),
+        (20240201, 0.16, 0.0, None, 101.075),
+        (20240202, 0.16, 0.0, None, 101.0),
+    ],
+)
+def test_ring_dam_resolves_mask_margin_for_detection_and_move(
+    tmp_path, version, board_margin, footprint_margin, pad_margin, expected_x
+):
+    head = _HEAD.replace("20240108", str(version))
+    if footprint_margin is not None:
+        head = head.replace("(at 100 100)", f"(at 100 100) (solder_mask_margin {footprint_margin})")
+    if pad_margin is not None:
+        head = head.replace("(size 1.0 1.0)", f"(size 1.0 1.0) (solder_mask_margin {pad_margin})")
+    pcb = _load(tmp_path, _EDGE_VIA.replace("100.65", "101.0"), board_margin, head=head)
+    result = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)
+    assert len(result.moved) == int(expected_x != 101.0)
+    assert not result.unresolvable
+    pcb.save(tmp_path / "saved.kicad_pcb")
+    saved = PCB.load(tmp_path / "saved.kicad_pcb")
+    assert saved.vias[0].position == pytest.approx((expected_x, 100))
+    assert not relocate_pad_edge_vias(saved, _RULES, ring_dam_mm=0.09).moved

@@ -140,22 +140,9 @@ def drill_to_mask_aperture_gap(
     :func:`pad_mask_margin`.  A negative result means the drill reaches into
     the aperture.  ``None`` for a degenerate pad or a via without a drill.
     """
-    radius = via.drill / 2.0
-    if radius <= DRC_TOLERANCE or not hasattr(pad, "shape"):
-        return None
-    require_shapely("via-at-pad-edge mask-dam geometry")
-    from shapely.geometry import Point
-
-    from .clearance import _pad_polygon
-
-    copper = _pad_polygon(pad, footprint)
-    if copper is None:
-        return None
-    margin = pad_mask_margin(pad, pad_to_mask_clearance)
-    aperture = copper.buffer(margin) if margin != 0 else copper
-    if aperture.is_empty:
-        return None
-    return float(aperture.distance(Point(via.position))) - radius
+    return _via_to_aperture_gap(
+        via.position, via.drill / 2.0, pad, footprint, pad_mask_margin(pad, pad_to_mask_clearance)
+    )
 
 
 def via_ring_to_mask_aperture_gap(
@@ -164,6 +151,7 @@ def via_ring_to_mask_aperture_gap(
     footprint: Footprint,
     *,
     pad_to_mask_clearance: float = 0.0,
+    board_version: int = 0,
 ) -> float | None:
     """Return the gap from a via's copper ring edge to ``pad``'s mask aperture.
 
@@ -173,11 +161,26 @@ def via_ring_to_mask_aperture_gap(
     ``mask_to_copper`` error clearance from a same-net pad's opening, and the
     drill-gap dam alone does not express that (a via can be dam-legal while
     its ring reaches into the danger band beside the aperture -- the board-06
-    escape-via population, issue #9891).  Radius is ``via.size / 2``; the
-    rest of the measurement matches the drill variant.  ``None`` for a
-    degenerate pad or a sizeless via.
+    escape-via population, issue #9891). Only an opening on an outer copper
+    layer reached by the via can expose its ring. The expansion follows the
+    pad, footprint and board settings in that order.
     """
-    radius = via.size / 2.0
+    from kicad_tools.validate.mask_geometry import pad_mask_margin as effective_mask_margin
+    from kicad_tools.validate.mask_geometry import pad_mask_sides
+
+    if not any(f"{side}.Cu" in via.layers for side in pad_mask_sides(pad)):
+        return None
+    margin, _ = effective_mask_margin(
+        pad, footprint, pad_to_mask_clearance, board_declared=True, board_version=board_version
+    )
+    if margin is None:
+        return None
+    return _via_to_aperture_gap(via.position, via.size / 2.0, pad, footprint, margin)
+
+
+def _via_to_aperture_gap(
+    position: tuple[float, float], radius: float, pad: Pad, footprint: Footprint, margin: float
+) -> float | None:
     if radius <= DRC_TOLERANCE or not hasattr(pad, "shape"):
         return None
     require_shapely("via-at-pad-edge mask-dam geometry")
@@ -188,8 +191,7 @@ def via_ring_to_mask_aperture_gap(
     copper = _pad_polygon(pad, footprint)
     if copper is None:
         return None
-    margin = pad_mask_margin(pad, pad_to_mask_clearance)
     aperture = copper.buffer(margin) if margin != 0 else copper
     if aperture.is_empty:
         return None
-    return float(aperture.distance(Point(via.position))) - radius
+    return float(aperture.distance(Point(position))) - radius

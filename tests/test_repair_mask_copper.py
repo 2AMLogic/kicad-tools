@@ -481,6 +481,19 @@ def test_pull_in_moves_short_terminus_to_pad_centre(tmp_path):
     assert result.actions[0].end_tag == "end"
 
 
+@pytest.mark.parametrize(
+    ("far_x", "repairable"), [(101.999, True), (102.0, True), (102.001, False)]
+)
+def test_pull_in_includes_exactly_45_degrees(tmp_path, far_x, repairable):
+    board = _board(tmp_path, _seg("trk-diagonal", (far_x, 102), (100.55, 100.55)))
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_finding("trk-diagonal")], max_displacement=1.0, clearance_mm=0.1)
+    assert result.repaired == int(repairable)
+    assert result.skipped("entry_too_shallow") == int(not repairable)
+    repairer.save(board)
+    assert _end(board, "trk-diagonal")[1] == ((100, 100) if repairable else (100.55, 100.55))
+
+
 def test_pull_in_declined_when_entry_crosses_too_shallow(tmp_path):
     """A pull-in whose entry would cross the pad edge at over 45 degrees cannot
     clear the finding, so it is declined (``entry_too_shallow``)."""
