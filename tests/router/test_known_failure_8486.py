@@ -551,28 +551,38 @@ def _run_wall_board(gap: bool = False):
     return router, {r.net for r in routes}
 
 
-@pytest.mark.requires_router_cpp
-def test_reopening_a_live_corridor_restores_the_first_search_budget():
+def _corridor_wall(net):
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment, Via
 
-    router = _wall_board(gap=True)
     layers = (Layer.F_CU, Layer.B_CU)
-    blocker = Route(
-        99,
+    return Route(
+        net,
         "wall",
-        segments=[Segment(15, 0.35, 15, 19.75, 0.90, layer, 99) for layer in layers],
-        vias=[Via(15, y, 0.5, 1.2, layers, 99) for y in (9.70, 10.55)],
+        segments=[Segment(15, 0.35, 15, 19.75, 0.90, layer, net) for layer in layers],
+        vias=[Via(15, y, 0.5, 1.2, layers, net) for y in (9.70, 10.55)],
     )
+
+
+@pytest.mark.requires_router_cpp
+def test_reopening_a_live_corridor_restores_the_first_search_budget():
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _wall_board(gap=True)
+    blocker = _corridor_wall(99)
     remote = Route(101, "remote", segments=[Segment(8, 12, 8.5, 12, 0.2, Layer.F_CU, 101)])
     router.routes.append(blocker)
     router.grid.mark_route(blocker)
     guard = RipupCycleGuard()
     with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
         for it in range(1, 6):
-            if it == 3:
+            if it in (3, 5):
                 router.routes.append(remote)
                 router.grid.mark_route(remote)
+            elif it == 4:
+                router.grid.unmark_route(remote)
+                router.routes.remove(remote)
             guard.begin_iteration(it, {1: None})
             assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
         caps = [call.kwargs["per_net_timeout"] for call in run.call_args_list]
@@ -597,6 +607,55 @@ def test_reopening_a_live_corridor_restores_the_first_search_budget():
 
 
 @pytest.mark.requires_router_cpp
+@pytest.mark.parametrize("same_iteration", [False, True])
+def test_removing_a_replacement_wall_restores_the_first_open_search(same_iteration):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment, Via
+
+    router = _wall_board(gap=True)
+    guard = RipupCycleGuard()
+    layers = (Layer.F_CU, Layer.B_CU)
+    remote = Route(
+        99,
+        "remote",
+        segments=[Segment(8, 12, 8.5, 12, 0.20, layer, 99) for layer in layers],
+        vias=[Via(8, 12, 0.30, 0.60, layers, 99)],
+    )
+    original, replacement = _corridor_wall(99), _corridor_wall(201)
+    for route in (remote, original):
+        router.routes.append(route)
+        router.grid.mark_route(route)
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for it in (1, 2):
+            guard.begin_iteration(it, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+            assert run.call_args.kwargs["per_net_timeout"] == 30.0
+        router.grid.unmark_route(original)
+        router.routes.remove(original)
+        router.routes.append(replacement)
+        router.grid.mark_route(replacement)
+        guard.begin_iteration(3, {1: None})
+        assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 3)
+        assert 5.0 <= run.call_args.kwargs["per_net_timeout"] < 30.0
+
+        # Net 99 still occupies both layers and has a via after the wall is gone.
+        router.grid.unmark_route(replacement)
+        router.routes.remove(replacement)
+        it = 3 if same_iteration else 4
+        if not same_iteration:
+            guard.begin_iteration(it, {1: None})
+        routes = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+        assert run.call_args.kwargs["per_net_timeout"] == 30.0
+        assert routes and 1 not in guard.capped_streak
+
+    fresh = _wall_board(gap=True)
+    fresh.routes.append(remote)
+    fresh.grid.mark_route(remote)
+    expected = fresh._route_net_negotiated(1, 1.0, per_net_timeout=30.0)
+    assert [(r.segments, r.vias) for r in routes] == [(r.segments, r.vias) for r in expected]
+
+
+@pytest.mark.requires_router_cpp
 def test_stalled_corridor_nets_full_budget_searches_now_back_off():
     """The reproduction: a permanently corridor-failed unsealed net keeps a
     copper-keyed streak, its twice-per-iteration searches are assigned backed
@@ -616,10 +675,10 @@ def test_stalled_corridor_nets_full_budget_searches_now_back_off():
     # The full reorder removes the eight healthy nets between the recovery
     # attempt and the second search of iteration 1.
     assert witnesses[0][0] == "copper" and witnesses[0][1]
-    assert witnesses[1] == ("copper", ())
+    assert witnesses[1] == ("copper", frozenset())
     g = router._ripup_cycle_guard
     rec = g.capped_streak.get(1)
-    assert rec is not None and rec[1][0] == "copper"  # unsealed: coarse key
+    assert rec is not None and rec[1][0] == "copper"  # Unsealed copper witness.
     assert [b for b in g.backoffs if b[1] == 1], "no search was ever backed off"
     assert all(cap < 20.0 for _it, net, cap in g.backoffs if net == 1)
     assert g.known_fail_seconds, "known-fail seconds never reported"

@@ -672,8 +672,8 @@ class RipupCycleGuard:
     """``net -> iteration`` of its last negotiated search that ran at the full
     unshrunk per-net cap (issue #8486).  Anchors the copper-key re-probe: a
     backed-off copper-keyed net is re-searched at the full cap at least once
-    every :data:`KNOWN_FAILURE_REPROBE_EVERY` iterations, so a coarse key can
-    never suppress a full retry for good."""
+    every :data:`KNOWN_FAILURE_REPROBE_EVERY` iterations, even if all the
+    copper observed at the first failure remains."""
 
     last_fail_s: dict[int, float] = field(default_factory=dict)
     """``net -> seconds`` its latest no-path negotiated search took; bounds the
@@ -718,17 +718,17 @@ class RipupCycleGuard:
 
         A seal must match exactly in consecutive iterations. For an unsealed
         net, the first failed search already saw no path with its original
-        foreign net/layer pairs present. Extra pairs may come and go. Losing
-        an original pair can open a corridor and warrants a fresh full search.
-        Copper can also move within a pair, so :meth:`search_cap` periodically
-        grants the full budget even if all original pairs remain.
+        foreign net/layer pairs and physical copper present. Added copper can
+        come and go while that observation still holds. Removing or moving
+        an original shape can open a corridor even when its net still has
+        copper on that layer.
         """
         sig = self.entry_signature.get(int(net))
         rec = self.capped_streak.get(int(net))
         if sig is None or rec is None:
             return None
         if _is_copper_key(sig) and _is_copper_key(rec[1]):
-            if rec[0] <= int(iteration) and set(rec[1][1]).issubset(sig[1]):
+            if rec[0] <= int(iteration) and frozenset(rec[1][1]).issubset(sig[1]):
                 return rec
             return None
         if rec[0] != int(iteration) - 1 or rec[1] != sig:
@@ -748,8 +748,7 @@ class RipupCycleGuard:
         A copper-keyed net whose streak survives on the coarse key (see
         :meth:`_known_capped`) is re-searched at the full ``cap`` at least
         once every :data:`KNOWN_FAILURE_REPROBE_EVERY` iterations since its
-        last full-cap search. This catches geometry changes within a net/layer
-        that its coarse fingerprint cannot distinguish.
+        last full-cap search, including when the observed copper stays in place.
         """
         if cap is None:
             return None

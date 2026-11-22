@@ -18365,7 +18365,9 @@ class Autorouter:
             cands.append(measured)
         return min(cands, key=lambda t: t[0])
 
-    def _relief_witness_signature(self, failed_net: int, net_routes: dict[int, list[Route]]):
+    def _relief_witness_signature(
+        self, failed_net: int, net_routes: dict[int, list[Route]], *, search_geometry: bool = False
+    ):
         """Identity of ``failed_net``'s current seal, or ``None``.
 
         The access-loss witness's ``(stranded pads, closing refs)`` when a
@@ -18387,7 +18389,9 @@ class Autorouter:
             witness = gate.peek_blockers_for(failed_net, rippable)
             if witness is not None:
                 return ("seal", witness.signature())
-            fingerprint = self._failure_neighbourhood_print(failed_net, net_routes)
+            fingerprint = self._failure_neighbourhood_print(
+                failed_net, net_routes, search_geometry=search_geometry
+            )
             return None if fingerprint is None else ("copper", fingerprint)
         except Exception:  # pragma: no cover - diagnostics must never break a rescue
             return None
@@ -18397,18 +18401,22 @@ class Autorouter:
     FAILURE_NEIGHBOURHOOD_MARGIN_MM = 3.0
 
     def _failure_neighbourhood_print(
-        self, failed_net: int, net_routes: dict[int, list[Route]]
-    ) -> tuple | None:
-        """Coarse identity of the foreign copper near ``failed_net`` (#8486).
+        self, failed_net: int, net_routes: dict[int, list[Route]], *, search_geometry: bool = False
+    ) -> tuple | frozenset | None:
+        """Identity of the foreign copper near ``failed_net`` (#8486).
 
-        The set of ``(net, layer)`` pairs of every other net's segments, and
+        Relief rescues use the set of ``(net, layer)`` pairs of foreign segments, and
         ``(net, "via")`` for its vias, whose extent meets the bounding box of
         ``failed_net``'s terminals grown by
         :attr:`FAILURE_NEIGHBOURHOOD_MARGIN_MM`, as a sorted tuple.  Nudging
-        copper of nets already in the window leaves it unchanged (so the memo
+        copper of nets already in the window leaves the relief key unchanged (so the memo
         survives a re-route pass); a foreign net entering or leaving the
         window, or changing layers, changes it.  The memo built on it is
         re-probed every ``KNOWN_FAILURE_REPROBE_EVERY`` iterations regardless.
+        For the search budget, also retain the physical track and via shapes.
+        A net can lose its wall while another branch keeps its net/layer pairs
+        in the window. Separate shapes from ownership so an identical wall
+        can change hands without appearing to open the corridor.
         ``None`` when the net has no terminals.
         """
         keys = self.nets.get(int(failed_net)) or []
@@ -18434,11 +18442,16 @@ class Autorouter:
                         and max(s.y1, s.y2) + h >= y0
                     ):
                         items.add((net, str(s.layer)))
+                        if search_geometry:
+                            start, end = sorted(((s.x1, s.y1), (s.x2, s.y2)))
+                            items.add(("segment", s.layer, start, end, s.width))
                 for v in route.vias:
                     h = v.diameter / 2
                     if v.x - h <= x1 and v.x + h >= x0 and v.y - h <= y1 and v.y + h >= y0:
                         items.add((net, "via"))
-        return tuple(sorted(items))
+                        if search_geometry:
+                            items.add(("via", v.x, v.y, v.diameter, v.drill, v.drilled_layers))
+        return frozenset(items) if search_geometry else tuple(sorted(items))
 
     def _route_net_known_failure_aware(
         self,
@@ -18456,7 +18469,7 @@ class Autorouter:
         """
         if cap is not None and net in guard.entry_signature:
             guard.entry_signature[net] = self._relief_witness_signature(
-                net, self._build_net_routes_map()
+                net, self._build_net_routes_map(), search_geometry=True
             )
         used = guard.search_cap(net, iteration, cap)
         if used is not None and cap is not None and used < cap:
