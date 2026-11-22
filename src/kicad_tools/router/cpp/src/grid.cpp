@@ -1591,19 +1591,33 @@ int Grid3D::segment_pads_pairwise_blocker(const Segment& seg, int exclude_net,
     return blocker;
 }
 
-// A routed leg is emitted one grid step at a time. Grade the closest
-// approaches of the continuous trace, not the cap of every 0.05 mm step:
-// a trace entering the annulus must be able to cross the open band to join it.
+// A routed leg is emitted one grid step at a time. Its sides can leave a
+// slit, but the artificial end cap of a step entering the annulus must not
+// prevent the next step from reaching the via.
 static bool trace_leaves_via_slit(const Segment& s, const StoredVia& via,
                                   const Grid3D::TraceViaBand& band) {
+    const double radius = via.diameter / 2.0;
+    const double gap = annulus_segment_gap(via.x, via.y, radius, s);
+    if (gap >= band.edge_mm - 1e-9) return false;
     const double dx = static_cast<double>(s.x2) - s.x1, dy = static_cast<double>(s.y2) - s.y1;
     const double vx = static_cast<double>(via.x) - s.x1, vy = static_cast<double>(via.y) - s.y1;
+    const double length_squared = dx * dx + dy * dy;
+    if (length_squared > 0.0) {
+        // A leg that skirts or merely grazes the barrel leaves facing copper
+        // even if another leg welds to it. Its supporting line must enter
+        // deeply enough to cover the facing arc, just as for a straight pad edge.
+        const double cross = vx * dy - vy * dx;
+        const double contact_reach = radius + s.width / 2.0
+            - annulus_facing_overlap_depth(radius, band.edge_mm) + 1e-9;
+        if (cross * cross > contact_reach * contact_reach * length_squared) return true;
+    }
+    if (gap <= 1e-9) return false;
     const double along = vx * dx + vy * dy;
     if (along <= 0.0 && vx * band.incoming_dx + vy * band.incoming_dy < 0.0)
         return false;  // the incoming leg was already closer
-    if (!band.terminal && along >= dx * dx + dy * dy)
+    if (!band.terminal && along >= length_squared)
         return false;  // still approaching: assess the join on the next step
-    return same_net_segment_gap_in_band(via.x, via.y, via.diameter / 2.0, s, band.edge_mm);
+    return true;
 }
 
 bool Grid3D::search_trace_vias_clear(const Segment& s, std::optional<float> foreign_clearance,

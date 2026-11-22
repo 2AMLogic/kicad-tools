@@ -180,7 +180,8 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # vias in a roundrect pad's corner air and in shallow overlap wedges that the
 # fab-view checker grades as ``physical_copper_gap``; reject it.
 # v77 (Issue #9273): the native trace search also guards stored same-net vias.
-_REQUIRED_CPP_BUILD_VERSION = 77
+# v78 (Issue #9273): a leg cannot skim a stored barrel and rely on a later weld.
+_REQUIRED_CPP_BUILD_VERSION = 78
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``

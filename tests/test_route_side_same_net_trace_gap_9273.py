@@ -1,5 +1,7 @@
 """The native search must grade a new trace against an already stored via (#9273)."""
 
+from itertools import pairwise
+
 import pytest
 
 from kicad_tools.core.geometry import point_to_segment_distance
@@ -90,3 +92,69 @@ def test_diagonal_closest_approach_falls_between_grid_vertices(method):
     assert 0 < original_gap < EDGE
     gap = _minimum_gap(_route(method, start, end))
     assert gap <= 1e-9 or gap >= EDGE - 1e-9
+
+
+def _saved_via_findings(tmp_path, runs, layer):
+    from kicad_tools.schema.pcb import PCB
+    from tests.test_physical_copper_gap import _fab, _one_oz, track
+
+    tracks = "\n".join(
+        track(start, end, f"trace-{i}").replace("F.Cu", layer)
+        for i, (start, end) in enumerate(runs)
+    )
+    file = tmp_path / "via-approach.kicad_pcb"
+    file.write_text(
+        f"""(kicad_pcb (version 20240108) (generator pcbnew) (general (thickness 1.6))
+        (layers (0 "F.Cu" signal) (1 "In1.Cu" power) (2 "In2.Cu" power) (31 "B.Cu" signal))
+        (net 0 "") (net 1 "GND")
+        (via (at 5 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "stored"))
+        {tracks})"""
+    )
+    return [v for v in _fab(PCB.load(file), _one_oz()) if v.severity == "error"]
+
+
+@pytest.mark.parametrize("method", ["route", "route_resumable"])
+@pytest.mark.parametrize("layer", [0, 3])
+@pytest.mark.parametrize(
+    "dx,dy,offset",
+    [(1, 0, 0.35), (1, 0, 0.40), (1, 0, 0.45), (1, 0, 0.50), (1, 0, 0.55), (1, 1, 0.30)],
+)
+def test_saved_route_has_no_open_air_beside_a_stored_via(tmp_path, method, layer, dx, dy, offset):
+    from kicad_tools.router import router_cpp
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.pairwise_clearance import _fuse_collinear_runs
+    from kicad_tools.router.primitives import Segment
+
+    grid = router_cpp.Grid3D(150, 150, 4, 0.05, 1.25, 1.25)
+    grid.add_stored_via(5, 5, 0.30, 0.60, 1, layer_from=0, layer_to=3)
+    rules = router_cpp.DesignRules()
+    rules.trace_width = 0.125
+    rules.trace_clearance = rules.via_clearance = 0.10
+    rules.same_net_trace_gap_band_edge_mm = 0.1016
+    finder = router_cpp.Pathfinder(grid, rules, True)
+    finder.set_routable_layers([layer])
+    start = (5 - 2 * dx - dy * offset, 5 - 2 * dy + dx * offset)
+    end = (5 + 2 * dx - dy * offset, 5 + 2 * dy + dx * offset)
+    result = getattr(finder, method)(
+        *start, layer, *end, layer, 1, negotiated_mode=True, emit_trace_width=0.20
+    )
+    assert result.success and not result.vias
+    face = Layer.F_CU if layer == 0 else Layer.B_CU
+    segments = _fuse_collinear_runs(
+        [Segment(s.x1, s.y1, s.x2, s.y2, s.width, face, net=1) for s in result.segments]
+    )
+    assert segments[0].start == pytest.approx(start)
+    assert segments[-1].end == pytest.approx(end)
+    if dy == 0 and offset in (0.35, 0.55):  # deep contact and a clear pass
+        assert len(segments) == 1
+    assert not _saved_via_findings(tmp_path, [(s.start, s.end) for s in segments], face.kicad_name)
+
+
+def test_one_via_contact_does_not_exempt_the_incoming_leg(tmp_path):
+    # Both paths have the same endpoints. The diagonal on the first route
+    # touches the stored barrel while its incoming horizontal leg leaves air.
+    bad = [(3, 5.45), (5, 5.45), (5.10, 5.35), (6.90, 5.35), (7, 5.45)]
+    clean = [(3, 5.45), (3.15, 5.60), (6.85, 5.60), (7, 5.45)]
+    findings = _saved_via_findings(tmp_path, pairwise(bad), "F.Cu")
+    assert [v.actual_value for v in findings] == pytest.approx([0.053247], abs=1e-6)
+    assert not _saved_via_findings(tmp_path, pairwise(clean), "F.Cu")
