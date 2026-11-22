@@ -93,6 +93,7 @@ from kicad_tools.physics.wire_gauge import (
 from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
+    PathResolution,
     reinforcement_eligible_segment_ids,
     reinforcement_path_resolutions,
 )
@@ -2101,6 +2102,23 @@ def _physical_leg_spans(
     return result
 
 
+def _declared_leg_spans(
+    segments: list[Segment],
+    resolutions: Sequence[PathResolution],
+    sources: dict[int, tuple[int, ...]],
+) -> list[Segment]:
+    """Reconstruct the same continuous copper for wire placement and its DRC check."""
+    eligible = {id(segment) for segment in segments}
+    cap_spans: dict[frozenset[int], Segment] = {}
+    for resolution in resolutions:
+        for joint in resolution.cap_joints:
+            ids = (id(joint.first), id(joint.second))
+            if ids[0] in eligible and ids[1] in eligible:
+                cap_spans[frozenset(ids)] = joint.span
+                sources[id(joint.span)] = ids
+    return [*_physical_leg_spans(segments, sources), *cap_spans.values()]
+
+
 def _derive_legs(
     segments: list[Segment], layer: str, original_ids: dict[int, int]
 ) -> list[_LegCandidate]:
@@ -3172,17 +3190,12 @@ def _reinforce_ends(
     target_layer: str | None = layer
 
     if gated:
-        leg_spans: dict[str, list[Segment]] = {}
-        cap_spans: dict[str, dict[frozenset[int], Segment]] = {}
-        for res in eligible_resolutions or ():
+        resolutions = eligible_resolutions or ()
+        for res in resolutions:
             for seg in res.covered_segments:
                 covering = path_names.setdefault(id(seg), [])
                 if res.spec.name not in covering:
                     covering.append(res.spec.name)
-            for joint in res.cap_joints:
-                ids = (id(joint.first), id(joint.second))
-                cap_spans.setdefault(joint.span.layer, {})[frozenset(ids)] = joint.span
-                span_sources[id(joint.span)] = ids
             declared_current_a[res.spec.name] = res.spec.thermal_design_current().current_a
         for lay in sorted(by_layer):
             segs = by_layer[lay]
@@ -3191,9 +3204,8 @@ def _reinforce_ends(
             # Chained copies refer back to these spans. End-clearance checks
             # below still need every original track on the layer, including
             # copper excluded from the declared path.
-            leg_spans[lay] = _physical_leg_spans(eligible, span_sources)
-            leg_spans[lay].extend(cap_spans.get(lay, {}).values())
-            legs = _derive_legs(leg_spans[lay], lay, original_ids)
+            spans = _declared_leg_spans(eligible, resolutions, span_sources)
+            legs = _derive_legs(spans, lay, original_ids)
             if layer is not None and lay != layer:
                 for c in legs:
                     if c.status is None:

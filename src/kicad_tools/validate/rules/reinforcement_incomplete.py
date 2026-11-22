@@ -360,7 +360,7 @@ class ReinforcementIncompleteRule(DRCRule):
                 # declaration itself is stale, so say so rather than check.
                 plan.skipped.append(res)
                 continue
-            taken = {id(s) for r in plan.resolved.get(net, []) for s in r.segments}
+            taken = {id(s) for r in plan.resolved.get(net, []) for s in r.covered_segments}
             located, any_strip, any_anchor = self._locate_wire(pcb, rf, net, taken)
             if located:
                 plan.located[net] = located
@@ -714,7 +714,7 @@ class ReinforcementIncompleteRule(DRCRule):
                 seen.add(id(seg))
                 by_layer.setdefault(layer, []).append(seg)
         for res in resolutions:
-            for seg in res.segments:
+            for seg in res.covered_segments:
                 if id(seg) in seen or rf._seg_length(seg) <= 1e-9:
                     continue
                 seen.add(id(seg))
@@ -743,7 +743,10 @@ class ReinforcementIncompleteRule(DRCRule):
         original_ids: dict[int, int] = {}
         legs: list[_Leg] = []
         for layer in sorted(by_layer):
-            for cand in rf._derive_legs(by_layer[layer], layer, original_ids):
+            spans = by_layer[layer]
+            if resolutions:
+                spans = rf._declared_leg_spans(spans, resolutions, {})
+            for cand in rf._derive_legs(spans, layer, original_ids):
                 if cand.status is not None:  # unhandled topology: no wire layout implied
                     continue
                 pts = rf._run_points(cand.run)

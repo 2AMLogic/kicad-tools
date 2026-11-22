@@ -424,6 +424,51 @@ def test_cap_joint_ampacity_only_credits_wire_carried_across_the_pinch(points, a
     assert any("would fuse" in message for message in messages) == (not credited)
 
 
+@pytest.mark.parametrize(("end_offset", "covered"), [(4.0, True), (10.0, False)])
+def test_placed_wire_credit_across_bonded_track_ends(end_offset, covered):
+    from kicad_tools.pcb.reinforce import reinforce_net
+    from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+    from kicad_tools.validate.checker import DRCChecker
+    from tests.test_pcb_reinforce import _add_th_pad_footprint
+
+    pcb = PCB.create(width=165, height=67, layers=4, center=False)
+    y = 36.8
+    for ref, point in (("J1", (30, 10)), ("J2", (145, y))):
+        _add_th_pad_footprint(pcb, ref=ref, x=point[0], y=point[1], net="P", drill=0.9, size=2.2)
+    for via_y in (32, 34.4, y):
+        pcb.add_via(30.25, via_y, size=2.2, drill=1.4, net="P")
+    pcb.add_trace((30, 10), (30, y), width=3, layer="F.Cu", net="P")
+    pcb.add_trace((30, 32), (30, y), width=2, layer="B.Cu", net="P")
+    pcb.add_trace((30, y), (136.325, y), width=2, layer="B.Cu", net="P")
+    pcb.add_trace((137.675, y), (145, y), width=2, layer="B.Cu", net="P")
+
+    spec = _spec(3.6)
+    outcome = reinforce_net(
+        pcb,
+        "P",
+        wire_gauge_awg=16,
+        layer="B.Cu",
+        anchor_mode="ends",
+        current_paths=[spec],
+        end_offset_mm=end_offset,
+        max_end_shift_mm=22,
+    )
+    assert len(outcome.placed) == 2
+    wires = build_wire_records(outcome, 0.0, 0.0)
+    checker = DRCChecker(
+        pcb, manufacturer="jlcpcb", layers=4, current_path_specs=[spec], reinforcement_wires=wires
+    )
+    (joint,) = resolve_current_path(pcb, spec).cap_joints
+    assert joint.pinch == pytest.approx((137, y))
+    # Physical anchor holes independently identify whether the placed wire crosses this station.
+    anchor_xs = sorted(v.position[0] for v in pcb.vias if v.position[0] != 30.25)
+    assert len(anchor_xs) == 2 and (anchor_xs[0] < 137 < anchor_xs[1]) == covered
+    errors = checker.check_path_ampacity().errors
+    assert any(v.location == (137, y) and "too narrow" in v.message for v in errors) == (
+        not covered
+    )
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("large", [(0,), (1,), (2,), (), (0, 1, 2)])
 def test_pitch_uses_largest_pad_in_this_row(large, reverse):
