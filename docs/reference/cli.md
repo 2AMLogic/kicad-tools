@@ -42,7 +42,7 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper + copper-gap) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
-| | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads; `--clip-to-holes` clips footprint silk lines/polygons off every drilled hole (run after routing) |
+| | `fix-silkscreen` | Repair silk widths and text heights. After routing, `--clip-to-pads` trims lines near pads and `--clip-to-holes` clips graphics off drilled holes. `--all` combines width, text, pad and drilled-pad repairs with reference placement. Its JSON `rules_covered` lists the repair scope. Use `kct check <board> --only silkscreen` for a full silk check. |
 | | `place-silk-refs` | Move readable reference designators to clear silk/pad/drill/edge collisions; `--over-holes` moves only those over a drilled hole |
 | | `fix-footprints` | Fix footprint pad spacing issues |
 | | `repair-clearance` | Repair clearance violations by nudging traces |
