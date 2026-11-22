@@ -81,7 +81,7 @@ def _body_polygon(fp: Footprint, side: str, Polygon: Any, box: Any) -> Any | Non
     for g in fp.graphics:
         if g.layer != fab:
             continue
-        raw = [g.start, g.end, *g.points]
+        raw = [g.start, g.end, *g.boundary_points]
         if g.center is not None and g.radius:
             raw += [
                 (g.center[0] - g.radius, g.center[1] - g.radius),

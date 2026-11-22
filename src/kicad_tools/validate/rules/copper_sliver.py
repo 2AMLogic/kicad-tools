@@ -188,13 +188,13 @@ class CopperSliverRule(DRCRule):
                 if (
                     graphic.graphic_type != "poly"
                     or graphic.layer not in copper_by_layer
-                    or len(graphic.points) < 3
+                    or len(graphic.boundary_points) < 3
                 ):
                     continue
                 from shapely import affinity
                 from shapely.geometry import Polygon
 
-                poly = Polygon(graphic.points)
+                poly = Polygon(graphic.boundary_points)
                 if fp.rotation:
                     poly = affinity.rotate(poly, fp.rotation, origin=(0, 0))
                 poly = affinity.translate(poly, fp.position[0], fp.position[1])

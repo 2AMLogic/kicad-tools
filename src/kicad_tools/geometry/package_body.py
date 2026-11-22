@@ -67,8 +67,8 @@ def _fab_body_polygon(footprint: Footprint, side: str) -> Any | None:
             ex, ey = graphic.end
             ring = [(sx, sy), (ex, sy), (ex, ey), (sx, ey)]
             candidates.append(Polygon([transform(p) for p in ring]))
-        elif kind == "poly" and len(graphic.points) >= 3:
-            candidates.append(Polygon([transform(p) for p in graphic.points]))
+        elif kind == "poly" and len(graphic.boundary_points) >= 3:
+            candidates.append(Polygon([transform(p) for p in graphic.boundary_points]))
         elif kind == "circle" and graphic.center is not None:
             radius = graphic.radius
             if radius is None:
