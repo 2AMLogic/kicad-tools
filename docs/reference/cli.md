@@ -1491,6 +1491,7 @@ Common flags (the full surface lives in `kct route --help`):
 | Option | Description |
 |--------|-------------|
 | `-o`, `--output PATH` | Output file (default: `<input>_routed.kicad_pcb`) |
+| `--preserve-existing` / `--no-preserve-existing` | Keeps input tracks and vias by default on a board that already has them. Use `--no-preserve-existing` to replace that copper in a full reroute. |
 | `--strategy {basic,negotiated,monte-carlo,evolutionary}` | Routing strategy (default: `negotiated`) |
 | `--differential-pairs` | Route differential pairs coupled. **Deprecated on the grid engine (#6448)** — warns and is removed one release later; use `--route-engine lattice --strategy basic --differential-pairs` |
 | `--trace-width MM` / `--clearance MM` | Trace + clearance overrides |
@@ -2373,6 +2374,8 @@ kct optimize-traces <pcb_file> [options]
 | `--chamfer-size` | 45-degree chamfer size in mm (default: 0.5) |
 | `--verbose`, `-v` | Print a per-net table (segments and length before/after, `(rolled back)` marker) after the summary |
 | `--dry-run` | Show results without writing |
+| `--pour-slots` | Spread parallel tracks on different nets to clear `pour_slot` advisories. Requires `kicad-cli` and is skipped during a dry run. After each proposed edit, KiCad refills the zones and runs DRC. The optimizer rolls back the edit if any violation count or the number of unconnected items increases. |
+| `--pour-slots-pack` | With `--pour-slots`, try moving a pair closer together when spreading it fails. Packing closes the gap to the clearance limit, removes the intervening strip of ground copper and leaves the `pour_slot` advisory in place. |
 | `--quiet`, `-q` | Suppress progress output |
 | `--drc-aware` | Roll back per-net optimizations that increase DRC violations (requires `--mfr`) |
 | `--mfr` | Target manufacturer for DRC rules (e.g. `jlcpcb`, `oshpark`); required with `--drc-aware` |

@@ -128,7 +128,7 @@ def test_negotiated_random_callsites_use_global_random():
     )
 
 
-def test_route_cmd_accepts_seed_argument():
+def test_route_cmd_accepts_seed_argument(tmp_path):
     """``kct route --seed N`` is accepted by the argparse parser.
 
     Tests the CLI surface: the route command's argparse accepts a
@@ -142,7 +142,7 @@ def test_route_cmd_accepts_seed_argument():
     # "file not found" check, but parse_args must accept --seed first.
     # If --seed weren't registered, argparse would exit(2) before the
     # path check.
-    rc = route_main(["/nonexistent/path/file.kicad_pcb", "--seed", "42"])
+    rc = route_main([str(tmp_path / "missing.kicad_pcb"), "--seed", "42"])
     # Expected: rc == 1 (file not found), NOT exit code 2 (parse error)
     assert rc == 1, (
         f"expected route main() to return 1 (file not found) after "
@@ -151,7 +151,7 @@ def test_route_cmd_accepts_seed_argument():
     )
 
 
-def test_route_cmd_seed_is_optional():
+def test_route_cmd_seed_is_optional(tmp_path):
     """``--seed`` is not required.
 
     Default behaviour (no ``--seed``) must continue to work, otherwise
@@ -160,7 +160,7 @@ def test_route_cmd_seed_is_optional():
     """
     from kicad_tools.cli.route_cmd import main as route_main
 
-    rc = route_main(["/nonexistent/path/file.kicad_pcb"])
+    rc = route_main([str(tmp_path / "missing.kicad_pcb")])
     # Same as above: rc == 1 (file not found), not 2 (parse error)
     assert rc == 1, (
         f"expected route main() to accept invocation with no --seed; "
@@ -168,7 +168,7 @@ def test_route_cmd_seed_is_optional():
     )
 
 
-def test_route_cmd_calls_random_seed_when_seed_provided():
+def test_route_cmd_calls_random_seed_when_seed_provided(tmp_path):
     """When ``--seed N`` is passed, ``random.seed(N)`` is called.
 
     Patches ``random.seed`` and verifies it's invoked with the right
@@ -181,7 +181,7 @@ def test_route_cmd_calls_random_seed_when_seed_provided():
     with patch.object(route_cmd.random, "seed") as mock_seed:
         # Invoke with a bogus PCB so we bail out early (after the
         # seed call but before any router work).
-        route_cmd.main(["/nonexistent/path/file.kicad_pcb", "--seed", "12345"])
+        route_cmd.main([str(tmp_path / "missing.kicad_pcb"), "--seed", "12345"])
 
     # Verify random.seed was called at least once with 12345.
     seed_calls = [c.args[0] for c in mock_seed.call_args_list if c.args]
@@ -191,7 +191,7 @@ def test_route_cmd_calls_random_seed_when_seed_provided():
     )
 
 
-def test_route_cmd_does_not_call_random_seed_when_seed_omitted():
+def test_route_cmd_does_not_call_random_seed_when_seed_omitted(tmp_path):
     """When ``--seed`` is omitted, ``random.seed`` is NOT called.
 
     Preserves existing run-to-run variance behaviour for users who
@@ -203,7 +203,7 @@ def test_route_cmd_does_not_call_random_seed_when_seed_omitted():
     from kicad_tools.cli import route_cmd
 
     with patch.object(route_cmd.random, "seed") as mock_seed:
-        route_cmd.main(["/nonexistent/path/file.kicad_pcb"])
+        route_cmd.main([str(tmp_path / "missing.kicad_pcb")])
 
     assert mock_seed.call_count == 0, (
         f"expected random.seed to NOT be called when --seed is omitted; "

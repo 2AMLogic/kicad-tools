@@ -10,6 +10,7 @@ answered by caller-supplied callbacks, so no engine type is imported here.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -329,6 +330,56 @@ def _dedupe(pts: list[Pt]) -> list[Pt]:
         if not out or dist(out[-1], p) > 1e-9:
             out.append(p)
     return out
+
+
+def shorter_pair_hop(
+    points: list[Pt], clear: Callable[[Pt, Pt], bool], *, max_shift: float | None = None
+) -> list[Pt] | None:
+    """Find a shorter octilinear path between the existing pad-entry stubs.
+
+    Sweep a straight rail between two 45-degree shoulders. An obstacle near
+    the direct line can require the rail to sit outside both endpoint axes.
+    The entry stubs keep their exact endpoints and directions. When a later
+    pour still needs an escape, limit movement out of the searched corridor.
+    """
+    from shapely.geometry import LineString
+
+    if len(points) < 5 or dist(points[0], points[-1]) > MAX_TIE_STUB_MM:
+        return None
+    start, end = points[1], points[-2]
+    axis = 0 if abs(end[0] - start[0]) >= abs(end[1] - start[1]) else 1
+    across = 1 - axis
+    span = abs(end[axis] - start[axis])
+    offset = end[across] - start[across]
+    sign = math.copysign(1.0, end[axis] - start[axis])
+
+    def point(along: float, side: float) -> Pt:
+        x, y = start[axis] + sign * along, start[across] + side
+        return (x, y) if axis == 0 else (y, x)
+
+    # Outside this interval the diagonals pass one another, reversing the
+    # middle leg. Each outward rung then adds length.
+    first = math.ceil((offset - span) / (2 * _GRID_MM))
+    last = math.floor((offset + span) / (2 * _GRID_MM))
+    offsets = {0.0, offset, *(step * _GRID_MM for step in range(first, last + 1))}
+    searched = LineString(points) if max_shift is not None else None
+    candidates = []
+    old_length = _polyline_length(points[1:-1])
+    for side in offsets:
+        core = _dedupe([start, point(abs(side), side), point(span - abs(offset - side), side), end])
+        length = _polyline_length(core)
+        if length < old_length - 1e-6:
+            candidates.append((round(length, 8), len(core), abs(side), side, core))
+    for *_rank, core in sorted(candidates):
+        candidate = [points[0], *core, points[-1]]
+        if searched is not None and max_shift is not None:
+            if searched.hausdorff_distance(LineString(candidate)) > max_shift + 1e-6:
+                continue
+        if max(corner_turns_deg(candidate), default=0.0) >= 180.0 - 1e-6:
+            continue
+        if all(clear(a, b) for a, b in zip(core, core[1:], strict=False)):
+            return candidate
+    return None
 
 
 def corner_turns_deg(points) -> list[float]:

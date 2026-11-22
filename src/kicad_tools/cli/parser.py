@@ -5113,6 +5113,8 @@ def _add_reason_parser(subparsers) -> None:
 
 def _add_optimize_parser(subparsers) -> None:
     """Add optimize-traces subcommand parser."""
+    from .optimize_cmd import add_pour_slot_args
+
     optimize_parser = subparsers.add_parser(
         "optimize-traces",
         help="Optimize PCB traces",
@@ -5201,6 +5203,7 @@ def _add_optimize_parser(subparsers) -> None:
         help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verification "
         "uses (default: the files beside the board)",
     )
+    add_pour_slot_args(optimize_parser)
     optimize_parser.add_argument(
         "--allow-default-rules",
         action="store_true",

@@ -364,6 +364,30 @@ def test_judged_out_of_band_segment_without_a_squeezable_run_is_declined():
 USB_W = 0.275
 
 
+def test_staggered_usb3_rails_with_sub_mm_overlap_stay_measurable():
+    # Board 06 RX2 at J1: each diagonal is 1.34 mm long, but the
+    # longitudinal overlap is only 0.64 mm.
+    rails = {
+        1: [((19.5, 8.15), (20.45, 9.1), USB_W)],
+        2: [((18.5, 8.15), (19.45, 9.1), USB_W)],
+    }
+    pads = [
+        ("J1", 1, (19.5, 8.15)),
+        ("J2", 2, (18.5, 8.15)),
+        ("U1", 1, (20.45, 9.1)),
+        ("U2", 2, (19.45, 9.1)),
+    ]
+    ar = _board("USB3_RX2+", "USB3_RX2-", _class(90.0, 10.0, floor=0.127), rails, pads)
+    assert len(_impedance_findings(ar)) == 2
+    result = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)
+    assert result[("USB3_RX2+", "USB3_RX2-")].reason == "tightened"
+    [gap] = _trunk_gaps(ar)
+    assert 0.127 <= gap <= _gap_for(USB_W, 99.0)
+    assert _impedance_findings(ar) == []
+    assert _connected(ar) == {1: True, 2: True}
+    assert _clearance_errors(ar, floor=0.127) == []
+
+
 def _usb_board(*, gap=None):
     # 45-degree trunk, centre-to-centre 0.707 mm (perpendicular offset
     # (0.5, -0.5)); short (< 1 mm, unjudged) horizontal / vertical breakout
