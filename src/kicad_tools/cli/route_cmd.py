@@ -69,6 +69,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
@@ -79,7 +80,7 @@ from kicad_tools.router.neck_report import (
     collect_necked_copper,
     format_neck_report,
 )
-from kicad_tools.sexp.scan import has_unquoted
+from kicad_tools.sexp.scan import has_unquoted, iter_parentheses
 
 from .route_deadline import record_stage, restore_stage
 from .route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG, ROUTE_PERFORMANCE_EPILOG
@@ -1311,6 +1312,31 @@ def _emit_single_pad_net_warning(
     )
 
 
+_ROUTE_BLOCK_HEAD = re.compile(r"(?:\s|[#;][^\n]*\n)*(segment|via)(?=[\s()]|\Z)")
+
+
+def _route_block_spans(pcb_content: str) -> "Iterator[tuple[str, int, int]]":
+    """Yield the kind and verbatim source span of each top-level routing form."""
+    depth = 0
+    kind = ""
+    start = 0
+    for pos, paren in iter_parentheses(pcb_content):
+        if paren == "(":
+            if depth == 1:
+                head = _ROUTE_BLOCK_HEAD.match(pcb_content, pos + 1)
+                if head:
+                    kind, start = head[1], pos
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 1 and kind:
+                yield kind, start, pos + 1
+                kind = ""
+    if kind:
+        # Keep the writer's handling of a truncated terminal route form.
+        yield kind, start, len(pcb_content)
+
+
 def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> tuple[str, int, int]:
     """Strip top-level ``(segment ...)`` and ``(via ...)`` blocks from PCB content.
 
@@ -1345,82 +1371,21 @@ def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> t
         Counts are returned so callers can log a diagnostic when a stale
         write is observed.
     """
-    # Walk the content counting depth, identifying top-level forms whose
-    # first token is "segment" or "via" and excising them.  Footprints
-    # contain their own (pad ...) blocks, never (segment ...) or top-level
-    # (via ...), so stripping at depth=1 is safe.
-    out: list[str] = []
-    i = 0
-    n = len(pcb_content)
-    depth = 0
-    in_string = False
-    prev_char = ""
-    segments_removed = 0
-    vias_removed = 0
-    while i < n:
-        ch = pcb_content[i]
-        if ch == '"' and prev_char != "\\":
-            in_string = not in_string
-            out.append(ch)
-            prev_char = ch
-            i += 1
-            continue
-        if not in_string and ch == "(":
-            # Peek at the token following the paren.
-            j = i + 1
-            while j < n and pcb_content[j].isspace():
-                j += 1
-            token_start = j
-            while (
-                j < n
-                and not pcb_content[j].isspace()
-                and pcb_content[j] != "("
-                and pcb_content[j] != ")"
-            ):
-                j += 1
-            token = pcb_content[token_start:j]
-            if depth == 1 and token in ("segment", "via"):
-                # Skip the entire form: find matching ")".
-                form_depth = 1
-                k = j
-                form_in_string = False
-                form_prev = ""
-                while k < n and form_depth > 0:
-                    c = pcb_content[k]
-                    if c == '"' and form_prev != "\\":
-                        form_in_string = not form_in_string
-                    elif not form_in_string:
-                        if c == "(":
-                            form_depth += 1
-                        elif c == ")":
-                            form_depth -= 1
-                    form_prev = c
-                    k += 1
-                if token == "segment":
-                    segments_removed += 1
-                else:
-                    vias_removed += 1
-                if collect is not None:
-                    collect.append(pcb_content[token_start - 1 : k])
-                # Skip whitespace that was preceding this form (trailing
-                # newline/tab from the previous emission) to keep the
-                # resulting file tidy.
-                while out and out[-1] in (" ", "\t"):
-                    out.pop()
-                # Also drop a single trailing newline so we collapse the
-                # blank line the form previously occupied.
-                if out and out[-1] == "\n":
-                    out.pop()
-                i = k
-                prev_char = ")"
-                continue
-            depth += 1
-        elif not in_string and ch == ")":
-            depth -= 1
-        out.append(ch)
-        prev_char = ch
-        i += 1
-    return "".join(out), segments_removed, vias_removed
+    pieces: list[str] = []
+    cursor = 0
+    segments_removed = vias_removed = 0
+    for kind, start, end in _route_block_spans(pcb_content):
+        # Remove the indentation and one newline belonging to the old form.
+        pieces.append(pcb_content[cursor:start].rstrip(" \t").removesuffix("\n"))
+        if collect is not None:
+            collect.append(pcb_content[start:end])
+        if kind == "segment":
+            segments_removed += 1
+        else:
+            vias_removed += 1
+        cursor = end
+    pieces.append(pcb_content[cursor:])
+    return "".join(pieces), segments_removed, vias_removed
 
 
 # Issue #9599 row 2: the net-declaration table ``(net 3 "NAME")`` maps stripped
@@ -1436,8 +1401,8 @@ def _baseline_copper_nets(pcb_content: str) -> tuple[int, int, list[str]]:
     """Census the input board's existing routing copper (issue #9599 row 2).
 
     Returns ``(segments, vias, sorted net names)`` carried by top-level
-    ``(segment ...)`` / ``(via ...)`` blocks -- the copper a plain ``kct
-    route`` run replaces with its own freshly routed paths.  Net id ``0``
+    ``(segment ...)`` / ``(via ...)`` blocks -- the copper an explicit full
+    reroute replaces with its own freshly routed paths.  Net id ``0``
     copper (orphans) is not attributed to any named net.
     """
     net_names: dict[int, str] = {}
@@ -1460,12 +1425,12 @@ def _baseline_copper_nets(pcb_content: str) -> tuple[int, int, list[str]]:
 
 
 def _warn_existing_copper_replacement(pcb_path: Path, args) -> None:
-    """List the existing copper a plain ``kct route`` run will replace (#9599 row 2).
+    """List the existing copper a full reroute will replace (#9599 row 2).
 
     The save path treats the in-memory router state as authoritative: every
     ``_write_routed_pcb`` call strips ALL top-level ``(segment ...)`` /
     ``(via ...)`` blocks and re-inserts only this run's routes (issue #2976).
-    Without ``--preserve-existing`` that silently removes hand-placed copper;
+    With ``--no-preserve-existing`` that removes hand-placed copper;
     this notice names every affected net before routing starts, and points at
     the flag that locks existing copper (kept verbatim as fixed obstacles and
     re-emitted unchanged, issue #5788).  Skipped for quiet / dry runs, and
@@ -1564,19 +1529,10 @@ def _validate_sexp_parentheses(content: str) -> bool:
         True if parentheses are balanced, False otherwise.
     """
     depth = 0
-    in_string = False
-    prev_char = ""
-    for char in content:
-        if char == '"' and prev_char != "\\":
-            in_string = not in_string
-        elif not in_string:
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth < 0:
-                    return False
-        prev_char = char
+    for _, paren in iter_parentheses(content):
+        depth += 1 if paren == "(" else -1
+        if depth < 0:
+            return False
     return depth == 0
 
 
@@ -3785,6 +3741,12 @@ def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route
     routes = _capture_preserved_routes(pcb_path) if preserve else []
     disposition = getattr(args, "_placement_disposition", None)
     names = disposition.preserve_copper_nets if disposition is not None else frozenset()
+    if preserve and _keep_input_copper_on_routed_nets(args):
+        # The geometry model supplies routing obstacles. Keep the source forms
+        # for output as well, including locks and per-via fabrication settings.
+        input_blocks: list[str] = []
+        _strip_route_blocks(pcb_path.read_text(), collect=input_blocks)
+        return routes, "\n\t".join(input_blocks)
     name_only = _board_uses_name_only_dialect(pcb_path)
     ordinary = _serialize_preserved_routes(
         [route for route in routes if route.net_name not in names], name_only=name_only
@@ -3820,6 +3782,22 @@ def _kept_preserved_net_ids(router) -> set[int]:
     if callable(method):
         return set(method())
     return set(getattr(router, "_stub_terminals", None) or {})
+
+
+def _keep_input_copper_on_routed_nets(args) -> bool:
+    """Keep hand-routed portions of open nets during incremental completion.
+
+    An explicit net or region selection may replace the selected copper.
+    A completion pass always keeps it, including on the nets it selects.
+    """
+    return bool(
+        getattr(args, "complete", False)
+        or (
+            getattr(args, "preserve_existing", False)
+            and not getattr(args, "nets", None)
+            and getattr(args, "_region_box", None) is None
+        )
+    )
 
 
 def _router_board_net_ids(router) -> dict[str, int]:
@@ -3910,14 +3888,13 @@ def _dedupe_preserved_sexp(
     drop_names = {r.net_name for r in dropped if r.net_name}
     if not dropped:
         return preserved_sexp
-    from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
+    from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks, resolve_block_net
 
     spans = []
     for kind in ("segment", "via"):
         for start, end, block in _extract_balanced_blocks(preserved_sexp, kind):
-            num = re.search(r"\(net\s+(\d+)\s*\)", block)
-            name = re.search(r'\(net\s+"((?:\\.|[^"\\])*)"\s*\)', block)
-            if (num and int(num.group(1)) in drop_ids) or (name and name.group(1) in drop_names):
+            identity = resolve_block_net(block, {}, {})
+            if identity is not None and (identity[0] in drop_ids or identity[1] in drop_names):
                 spans.append((start, end))
     result = preserved_sexp
     for start, end in sorted(spans, reverse=True):
@@ -4160,6 +4137,7 @@ def _finalize_routes(
     aggregate_segment_drop_threshold: float = 0.5,
     preserve_existing: bool = False,
     preserved_routes: list["Route"] | None = None,
+    captured_copper_sexp: str | None = None,
     pcb_path: "Path | str | None" = None,
 ) -> tuple[str, dict, dict]:
     """Run cleanup, compute statistics, and generate S-expressions.
@@ -4335,6 +4313,11 @@ def _finalize_routes(
     # ``_audited_trace_copper`` never has to re-derive (or guess) it.  Always
     # set -- an empty list is the meaningful "nothing preserved" answer.
     _emitted_preserved: list[Route] = []
+    emit_captured_input = (
+        preserve_existing
+        and captured_copper_sexp is not None
+        and getattr(router, "_preserve_listed_copper", False)
+    )
     if preserve_existing:
         source_routes = preserved_routes if preserved_routes is not None else router.existing_routes
         disposition = getattr(router, "placement_disposition", None)
@@ -4346,7 +4329,7 @@ def _finalize_routes(
                 if route.net_name not in disposition.preserve_copper_nets
                 and route not in neutral_routes
             ]
-        if source_routes:
+        if source_routes or emit_captured_input:
             routed_net_ids = {r.net for r in router.routes}
             # Issue #4170 (Phase 2b-1): a stub net IS routed (the in-region
             # reconnection) but its OUTSIDE boundary-stub copper must still be
@@ -4362,12 +4345,15 @@ def _finalize_routes(
             # a name-only board the two can differ once kct has rewritten the
             # staged file, so each preserved route is matched by net name.
             board_net_ids = _router_board_net_ids(router)
-            preserved_sexp = _serialize_preserved_routes(
-                source_routes,
-                exclude_net_ids=routed_net_ids,
-                name_only=name_only,
-                board_net_ids=board_net_ids,
-            )
+            if emit_captured_input:
+                preserved_sexp = captured_copper_sexp or ""
+            else:
+                preserved_sexp = _serialize_preserved_routes(
+                    source_routes,
+                    exclude_net_ids=routed_net_ids,
+                    name_only=name_only,
+                    board_net_ids=board_net_ids,
+                )
             _emitted_preserved = [
                 _rekey_preserved_route(r, _preserved_route_router_net(r, board_net_ids))
                 for r in source_routes
@@ -4386,7 +4372,9 @@ def _finalize_routes(
 
     placement_copper = getattr(router, "placement_preserved_copper", "")
     if placement_copper:
-        route_sexp = f"{route_sexp}\n\t{placement_copper}" if route_sexp else placement_copper
+        # The full input capture already contains placement-excluded nets.
+        if not emit_captured_input:
+            route_sexp = f"{route_sexp}\n\t{placement_copper}" if route_sexp else placement_copper
         _emitted_preserved.extend(getattr(router, "placement_preserved_routes", ()))
 
     # Issue #4699: hand the gate the exact preserved set that was written.
@@ -9153,9 +9141,11 @@ def _apply_plane_via_reservation(
     ``find_all_plane_nets`` set the oracle stage closes); ``route_via=
     "manual"`` nets are not pours and are left alone.  Off with
     ``--no-plane-via-reservation``, and skipped when a placement disposition
-    preserves copper (the oracle stage does not run there either).  Never
-    raises: a failure is a warning and routing proceeds unreserved.
+    preserves copper (the oracle stage does not run there either). On the
+    initial route a missing reservation is advisory. A staged retry must
+    actually reserve the pad that triggered it.
     """
+    requested: frozenset[str] = getattr(args, "_retry_plane_pads", frozenset())
     if getattr(args, "no_plane_via_reservation", False):
         return
     names = set(getattr(args, "_auto_skipped_net_names", None) or ())
@@ -9212,11 +9202,24 @@ def _apply_plane_via_reservation(
             min_pour_footprint_pads=(
                 2 if getattr(args, "reserve_pour_only_passives", True) else None
             ),
+            stranded_pads=requested,
         )
-    except Exception as exc:  # advisory: never fail a route over a reservation
+    except Exception as exc:
+        if requested:
+            raise
         logger.warning("Plane-via reservation skipped: %s", exc)
         return
     args._plane_via_reservation = reservation
+    args._plane_reservation_nets = frozenset(nets)
+    if requested:
+        sites = _reserved_plane_via_sites(args) or {}
+        missing = requested.difference(sites)
+        if missing:
+            raise ValueError(f"No legal plane via and stub for {', '.join(sorted(missing))}")
+        if not quiet:
+            for pad in sorted(requested):
+                x, y = sites[pad][0]
+                print(f"    Reserved {pad} at ({x:g}, {y:g}) mm (sheet coordinates)")
     links = getattr(reservation, "array_links", None) or []
     if links and not quiet:
         # Issue #6673: same-pour ball clusters of an area array on a layer
@@ -10803,10 +10806,13 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     from kicad_tools.router.oracle_completion import (
         DEFAULT_ORACLE_ROUNDS,
         STOP_DEADLINE,
+        STOP_NO_CLOSER,
+        STOP_NO_PROGRESS,
         STOP_NOT_RUN,
     )
 
     args._stranded_pour_links = 0
+    args._exhausted_mixed_plane_pads = frozenset()
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
     args._stranded_pour_unknown = False
@@ -10923,6 +10929,25 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         return 0
     args._stranded_pour_links = result.final_links
     args._oracle_completion = result
+    reserved_nets: frozenset[str] = getattr(args, "_plane_reservation_nets", frozenset())
+    if (
+        result.stop_reason in (STOP_NO_CLOSER, STOP_NO_PROGRESS)
+        and reserved_nets
+        and closer.exhausted_stitch_pads
+        and router is not None
+    ):
+        from kicad_tools.router.plane_via_sites import stranded_mixed_pair_pads
+
+        unresolved = {
+            pad
+            for link in closer.canonical_stranded_links(output_path, result.final_link_details)
+            if link.net in reserved_nets
+            for pad in (link.a.pad_key, link.b.pad_key)
+            if pad is not None
+        }
+        args._exhausted_mixed_plane_pads = stranded_mixed_pair_pads(
+            router.grid._pads, pour_nets, unresolved & closer.exhausted_stitch_pads
+        )
     if not quiet:
         print(
             f"  {result.initial_links} -> {result.final_links} unconnected pour link(s) "
@@ -13989,7 +14014,7 @@ def route_with_layer_escalation(
                     # (it now derives from --per-net-timeout on every lattice run),
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                    preserve_listed_copper=bool(getattr(args, "complete", False)),
+                    preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
                     # Issue #4798: bound by THIS attempt's fair slice, not the
                     # whole remaining run budget -- otherwise the lattice's
@@ -14600,6 +14625,7 @@ def route_with_layer_escalation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
@@ -15234,7 +15260,7 @@ def route_with_rule_relaxation(
                     # (it now derives from --per-net-timeout on every lattice run),
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                    preserve_listed_copper=bool(getattr(args, "complete", False)),
+                    preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
                     # Issue #4798: bound by THIS tier's fair slice, not the
                     # whole remaining run budget.
@@ -15604,6 +15630,7 @@ def route_with_rule_relaxation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
@@ -17757,7 +17784,7 @@ def route_with_combined_escalation(
                         # (it now derives from --per-net-timeout on every lattice run),
                         # and --timeout supplies an absolute ceiling alongside it.
                         localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                        preserve_listed_copper=bool(getattr(args, "complete", False)),
+                        preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                         lattice_link_budget_s=_resolve_lattice_link_budget(args),
                         # Issue #4798: bound by THIS cell's fair slice, not the
                         # whole remaining run budget.
@@ -18168,6 +18195,7 @@ def route_with_combined_escalation(
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
     # Update result with post-cleanup stats
@@ -20922,15 +20950,13 @@ def _route_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--preserve-existing",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "Incremental routing (Issue #3155): load existing "
-            "(segment ...)/(via ...) copper as immovable obstacles and "
-            "re-emit it unchanged, so only unconnected nets are routed. "
-            "Preserves manually-routed nets, skipped nets' geometry, and "
-            "standalone stitch vias across a route pass. Default off (full "
-            "re-route, existing copper is replaced by freshly routed nets)."
+            "Keep existing tracks and vias as fixed copper and route open connections. "
+            "Enabled by default when the input has top-level segments or vias. "
+            "Use --no-preserve-existing for a full reroute. "
+            "--complete, --nets, --region and a resumed checkpoint require preservation."
         ),
     )
     parser.add_argument(
@@ -23266,6 +23292,7 @@ def _budget_retry_static_eligible(args) -> bool:
     """
     return not (
         getattr(args, "dry_run", False)
+        or getattr(args, "_retry_plane_pads", None)
         or getattr(args, "complete", False)
         or getattr(args, "resume", None)
         or getattr(args, "checkpoint", None)
@@ -24060,7 +24087,7 @@ def _staged_export_report_path(original: str) -> Path:
 
 def _budget_retry_argv(
     argv: list[str] | None,
-    grid_mm: float,
+    grid_mm: float | None,
     staged: Path,
     report_map: dict[str, Path] | None = None,
 ) -> list[str]:
@@ -24163,7 +24190,7 @@ def _budget_retry_argv(
                 return [f"{tok.partition('=')[0]}={new_value}"]
             return [f"{tok[:2]}{new_value}"]
 
-        if dest == "grid":
+        if dest == "grid" and grid_mm is not None:
             out.extend(_respell(f"{grid_mm:g}"))
             grid_set = True
         elif dest == "output":
@@ -24182,7 +24209,7 @@ def _budget_retry_argv(
         else:
             out.extend(head[i : i + consumed])
         i += consumed
-    if not grid_set:
+    if grid_mm is not None and not grid_set:
         out.extend(["--grid", f"{grid_mm:g}"])
     if not output_set:
         out.extend(["-o", str(staged)])
@@ -24264,12 +24291,11 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
 
     from kicad_tools.router.partial_rescue import partially_connected_signal_nets
     from kicad_tools.router.stuck_classifier import (
-        _search_failures_sidecar_path,
         is_budget_search_failure,
         load_search_failures_sidecar,
     )
 
-    from .route_deadline import CONTROL_ENV, DEADLINE_ENV
+    from .route_deadline import DEADLINE_ENV
 
     manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
     # Issue #9620 review: the retry is judged against the nets THIS batch
@@ -24338,11 +24364,116 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             f"retrying the batch once on a {retry_grid:g}mm grid "
             f"({first_grid:g}mm x2{capped}) ---"
         )
+    return _stage_route_retry(args, argv, result, output, before, _open_nets, retry_grid=retry_grid)
+
+
+def _plane_retry_eligible(args) -> bool:
+    """Only a fresh whole-board run can replay its input with extra reservations."""
+    return not (
+        getattr(args, "_retry_plane_pads", None)
+        or getattr(args, "no_plane_via_reservation", False)
+        or getattr(args, "allow_stranded_pour_pads", False)
+        or getattr(args, "dry_run", False)
+        or getattr(args, "complete", False)
+        or getattr(args, "resume", None)
+        or getattr(args, "checkpoint", None)
+        or getattr(args, "nets", None)
+        or getattr(args, "region", None)
+        or _interrupt_pending()
+    )
+
+
+def _chain_stranded_plane_pass(args, argv, result: int, started: float) -> int:
+    """Retry a real, exhausted mixed-pad stitch with its site reserved before signals."""
+    pads: frozenset[str] = getattr(args, "_exhausted_mixed_plane_pads", frozenset())
+    if (
+        not pads
+        or result not in (3, 4)
+        or not _plane_retry_eligible(args)
+        or getattr(args, "_pour_completion_cut_by_timeout", False)
+        or getattr(args, "_allow_stranded_pour_pads", False)
+    ):
+        return result
+    from . import route_receipt
+    from .route_deadline import DEADLINE_ENV
+
+    pcb = Path(args.pcb)
+    output = Path(args.output) if args.output else pcb.with_stem(pcb.stem + "_routed")
+    invocation = route_receipt._current.get()
+    if invocation is None or output.absolute() not in invocation.published:
+        return result
+    try:
+        if output.samefile(pcb):
+            # An in-place first run replaced the original layout.
+            return result
+    except OSError:
+        # A disappeared input or output leaves nothing to replay or compare.
+        return result
+    deadline = os.environ.get(DEADLINE_ENV)
+    if deadline is not None:
+        now = time.monotonic()
+        if float(deadline) - now < max(_BUDGET_RETRY_MIN_BUDGET_S, now - started):
+            return result
+
+    def remaining(board: Path) -> list[str]:
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+        from kicad_tools.lvs.copper_lvs import compare_partitions
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        analyzer = NetStatusAnalyzer(board, strict=True)
+        checked = analyzer.analyze()
+        connected_pads = {p.full_name for net in checked.nets for p in net.connected_pads}
+        # Per-net connectivity cannot see two otherwise-complete nets touching.
+        # Compare the physical islands against the ORIGINAL pad assignments.
+        source = PCB.load(pcb)
+        expected: dict[tuple[str, str], str | None] = {
+            (fp.reference, pad.number): source.nets[pad.net_number].name
+            for fp in source.footprints
+            for pad in fp.pads
+            if fp.reference and pad.number and pad.net_number and pad.net_number in source.nets
+        }
+        islands, bindings = ConnectivityValidator(analyzer.pcb).extract_pad_occurrences()
+        copper = compare_partitions(expected, islands, pad_bindings=bindings)
+        absent = expected.keys() - set(bindings.values())
+        return [
+            *sorted(pads - connected_pads),
+            *sorted(f"{ref}.{pin}" for ref, pin in absent),
+            *(f"{m.kind} {m.pad_a}/{m.pad_b}" for m in copper.mismatches),
+            *(net.net_name for net in (*checked.incomplete, *checked.unrouted, *checked.stranded)),
+        ]
+
+    if not getattr(args, "quiet", False):
+        print(
+            f"\n--- Reserving exhausted plane stitch sites before retry: {', '.join(sorted(pads))} ---"
+        )
+    return _stage_route_retry(args, argv, result, output, sorted(pads), remaining, plane_pads=pads)
+
+
+def _stage_route_retry(
+    args,
+    argv: list[str] | None,
+    result: int,
+    output: Path,
+    before: list[str],
+    remaining_nets: Callable[[Path], list[str]],
+    *,
+    retry_grid: float | None = None,
+    plane_pads: frozenset[str] = frozenset(),
+) -> int:
+    """Run one candidate against fresh input and publish its board and reports atomically."""
+    from kicad_tools.router.stuck_classifier import _search_failures_sidecar_path
+
+    from .route_deadline import CONTROL_ENV
+
+    quiet = bool(getattr(args, "quiet", False))
+    kind = "plane-sites" if plane_pads else "coarser"
+    label = "Plane-site retry" if plane_pads else "Coarser-grid retry"
     # Issue #9620 review: staging lives in a private per-invocation directory
     # (unique, dot-prefixed) -- a ``<stem>.coarser*`` glob next to -o matched
     # unrelated files (an input named ``board.coarser.kicad_pcb`` was deleted
     # before the retry could read it; a ``board.coarser-notes.txt`` was lost).
-    stage_dir = _fresh_staging_dir(output, "coarser")
+    stage_dir = _fresh_staging_dir(output, kind)
     staged = stage_dir / output.name
     staged_reports: dict[str, Path] = {}
     retry_argv = _budget_retry_argv(argv, retry_grid, staged, staged_reports)
@@ -24381,10 +24512,14 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
         try:
             if json_capture is not None:
                 _route_json_capture = json_capture
-            retry_rc = _main_impl(retry_argv)
+            retry_rc = (
+                _main_impl(retry_argv, plane_pads=plane_pads)
+                if plane_pads
+                else _main_impl(retry_argv)
+            )
             if staged.is_file():
                 try:
-                    after = _open_nets(staged)
+                    after = remaining_nets(staged)
                 except Exception:
                     # Issue #9620 review: an unreadable connectivity report
                     # means the open-net count is unknown, never zero -- an
@@ -24396,10 +24531,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             # keep unwinding -- the finally below still restores the receipt
             # and supervisor control, and the outer finally discards staging.
             if not quiet:
-                print(
-                    f"  Coarser-grid retry failed ({type(exc).__name__}: {exc}); "
-                    "keeping the first result"
-                )
+                print(f"  {label} failed ({type(exc).__name__}: {exc}); keeping the first result")
             retry_rc, after = None, before
         finally:
             if json_capture is not None:
@@ -24409,9 +24541,11 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             if control and control_snapshot is not None:
                 _restore_supervisor_control(control, control_snapshot)
         if (
-            retry_rc not in _BUDGET_RETRY_ACCEPT_EXITS
+            retry_rc is None
+            or retry_rc not in ({0} if plane_pads else _BUDGET_RETRY_ACCEPT_EXITS)
             or not staged.is_file()
             or after is None
+            or (plane_pads and after)
             or len(after) >= len(before)
         ):
             if not quiet:
@@ -24421,8 +24555,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
                     else f"{len(after)} open vs {len(before)}"
                 )
                 print(
-                    "  Coarser-grid retry did not route more nets "
-                    f"(exit {retry_rc}, {why}); first result kept"
+                    f"  {label} did not route more nets (exit {retry_rc}, {why}); first result kept"
                 )
             return result
         # Promotion: the retry's diagnostics travel with its board, as ONE
@@ -24442,10 +24575,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             _promote_staging_dir(stage_dir, output, staged, args, extra_moves)
         except OSError as exc:
             if not quiet:
-                print(
-                    f"  Coarser-grid retry could not publish its artifacts ({exc}); "
-                    "first result kept"
-                )
+                print(f"  {label} could not publish its artifacts ({exc}); first result kept")
             return result
         _adopt_constraint_receipt(output, staged, inner_invocation, outer_invocation)
         if json_capture:
@@ -24459,7 +24589,9 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
         # Also runs on RouteDeadlineExpired / KeyboardInterrupt: -o was never
         # touched before promotion, so only staging needs removing.
         _discard()
-    if not quiet:
+    if not quiet and plane_pads:
+        print(f"  {label} connected the written board; promoted")
+    elif not quiet and retry_grid is not None:
         print(
             f"  Coarser-grid retry routed {len(before) - len(after)} more net(s) "
             f"on the {retry_grid:g}mm grid; promoted"
@@ -24470,9 +24602,11 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     return retry_rc
 
 
-def _main_impl(argv: list[str] | None = None) -> int:
+def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = frozenset()) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    args._retry_plane_pads = plane_pads
+    started = time.monotonic()
     if getattr(args, "nogood_cache", False):
         # Issue #6353: experiment-only plumbing; read by Autorouter lazily.
         os.environ["KCT_NOGOOD_CACHE"] = "1"
@@ -24525,6 +24659,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     gate is not None
                     or _route_json_capture is not None
                     or _budget_retry_static_eligible(args)
+                    or _plane_retry_eligible(args)
                 )
                 else contextlib.nullcontext(None)
             )
@@ -24543,6 +24678,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                                 args._lint_gate_output = str(gate.output)
                                 args.output = str(staged)
                         result = _run_main_impl(args, parser, argv)
+                        result = _chain_stranded_plane_pass(args, argv, result, started)
                         # Issue #9620: the budget-only coarser retry re-routes the
                         # whole batch before the chained completion pass, so its
                         # classification reads the grid pass's own give-up labels
@@ -25114,6 +25250,20 @@ def _run_main_impl(args, parser, argv) -> int:
         if rc != 0:
             return rc
 
+    # Scoped modes and a loaded checkpoint have already selected preservation.
+    # Use the same top-level forms that the writer can remove (#9627). Pads,
+    # graphics and zone fills alone do not turn on incremental routing.
+    if args.preserve_existing is None:
+        try:
+            args.preserve_existing = (
+                next(_route_block_spans(pcb_path.read_text()), None) is not None
+            )
+        except (OSError, UnicodeError) as exc:
+            print(f"Error reading input routing copper from {pcb_path}: {exc}", file=sys.stderr)
+            return 1
+    else:
+        _warn_existing_copper_replacement(pcb_path, args)
+
     # Issue #5788: a bare --preserve-existing must honour its own --help ("only
     # unconnected nets are routed") -- detect the nets that are ALREADY fully
     # connected on the input board and stamp them so every routing sub-flow
@@ -25591,12 +25741,6 @@ def _run_main_impl(args, parser, argv) -> int:
             grid_explicit=grid_auto_result is None,
         )
 
-    # Issue #9599 row 2: name the existing copper this run is about to
-    # replace.  All preserve-flag coercions (--nets / --region / --complete)
-    # have run above, so a False ``preserve_existing`` here means the run
-    # really will strip the input board's routing copper at its first write.
-    _warn_existing_copper_replacement(pcb_path, args)
-
     # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
     # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size
     # IMPLIES --auto-layers unless --no-auto-layers was explicit (the
@@ -25937,7 +26081,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 # (it now derives from --per-net-timeout on every lattice run),
                 # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                preserve_listed_copper=bool(getattr(args, "complete", False)),
+                preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
                 lattice_max_iterations=getattr(args, "lattice_iterations", None),
@@ -26030,7 +26174,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 # (it now derives from --per-net-timeout on every lattice run),
                 # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
-                preserve_listed_copper=bool(getattr(args, "complete", False)),
+                preserve_listed_copper=_keep_input_copper_on_routed_nets(args),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
                 lattice_max_iterations=getattr(args, "lattice_iterations", None),
@@ -27255,6 +27399,7 @@ def _run_main_impl(args, parser, argv) -> int:
         verbose=bool(getattr(args, "verbose", False)),
         preserve_existing=bool(getattr(args, "preserve_existing", False)),
         preserved_routes=_preserved_routes,
+        captured_copper_sexp=_preserved_sexp,
         pcb_path=pcb_path,
     )
 

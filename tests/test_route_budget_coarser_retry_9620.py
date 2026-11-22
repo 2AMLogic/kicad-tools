@@ -96,6 +96,80 @@ def _published(monkeypatch, *boards: Path) -> None:
 # --- kct route: retry fires on a budget-only failed batch ------------------
 
 
+@pytest.mark.parametrize(
+    "requested,outcome,rc,promote",
+    [
+        ("R1.1", "routed", 0, True),
+        ("R1.1", "open", 0, False),
+        ("R1.1", "short", 0, False),
+        ("missing.1", "routed", 0, False),
+        ("R1.1", "routed", 3, False),
+    ],
+)
+def test_exhausted_plane_retry_keeps_only_complete_written_copper(
+    board, monkeypatch, requested, outcome, rc, promote
+):
+    from kicad_tools.schema.pcb import PCB
+
+    artifacts = Path(__file__).resolve().parents[1] / "boards/02-charlieplex-led/output"
+    initial = artifacts / "charlieplex_3x3.kicad_pcb"
+    source = artifacts / (
+        "charlieplex_3x3.kicad_pcb" if outcome == "open" else "charlieplex_3x3_routed.kicad_pcb"
+    )
+    first = board.read_bytes()
+    calls = []
+
+    def retry(argv, *, plane_pads):
+        calls.append(plane_pads)
+        assert argv[argv.index("--grid") + 1] == "auto"
+        staged = Path(argv[argv.index("-o") + 1])
+        assert staged.parent != board.parent
+        staged.write_bytes(source.read_bytes())
+        if outcome == "short":
+            shorted = PCB.load(staged)
+            shorted.add_trace(("R1", "1"), ("R1", "2"))
+            shorted.save(staged)
+        return rc
+
+    _published(monkeypatch, board)
+    monkeypatch.setattr(route_cmd, "_main_impl", retry)
+    args = _args(board, route_engine="lattice", _exhausted_mixed_plane_pads=frozenset({requested}))
+    Path(args.pcb).write_bytes(initial.read_bytes())
+    status = route_cmd._chain_stranded_plane_pass(
+        args, [args.pcb, "--grid", "auto"], 3, time.monotonic()
+    )
+    assert calls == [frozenset({requested})]
+    assert status == (0 if promote else 3)
+    assert board.read_bytes() == (source.read_bytes() if promote else first)
+    assert not list(board.parent.glob(f".{board.stem}.plane-sites-*"))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"_exhausted_mixed_plane_pads": frozenset()},
+        {"_retry_plane_pads": frozenset({"R1.1"})},
+        {"_pour_completion_cut_by_timeout": True},
+        {"no_plane_via_reservation": True},
+        {"_allow_stranded_pour_pads": True},
+    ],
+)
+def test_plane_retry_leaves_unpressured_opted_out_or_already_retried_board(
+    board, monkeypatch, overrides
+):
+    _published(monkeypatch, board)
+    monkeypatch.setattr(route_cmd, "_main_impl", lambda *a, **k: pytest.fail("unexpected retry"))
+    args = _args(board, **({"_exhausted_mixed_plane_pads": {"R1.1"}} | overrides))
+    assert route_cmd._chain_stranded_plane_pass(args, None, 3, time.monotonic()) == 3
+
+
+def test_plane_retry_cannot_replay_an_overwritten_input(board, monkeypatch):
+    _published(monkeypatch, board)
+    monkeypatch.setattr(route_cmd, "_main_impl", lambda *a, **k: pytest.fail("unexpected retry"))
+    args = _args(board, pcb=str(board), _exhausted_mixed_plane_pads=frozenset({"R1.1"}))
+    assert route_cmd._chain_stranded_plane_pass(args, None, 3, time.monotonic()) == 3
+
+
 def test_retry_on_budget_only_failure(board, monkeypatch):
     _stub_open(monkeypatch, [["VCP"], []])
     seen = {}
