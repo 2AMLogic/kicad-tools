@@ -6,9 +6,22 @@ expansion, pad-size and annular-ring checks. See [mask geometry](mask-geometry.m
 for the underlying geometry inspection APIs.
 
 To repair a track that enters its own pad off-centre (the `same-net own-pad
-entry` relation) instead of only flagging it, run the `fix-drc` repair pass:
+entry` relation), or to nudge a disjoint `same-net pass-through` track or via
+clear of its own pad's opening, run the `fix-drc` repair pass:
 `kct fix-drc board.kicad_pcb --only mask-copper` — see the
-[CLI reference](../reference/cli.md#fix-drc).
+[CLI reference](../reference/cli.md#fix-drc). The pass-through nudge
+translates the whole conductor (dragging every same-net end joined to it)
+away from the opening until it clears the policy clearance plus a margin;
+moves that would crowd other copper, a drill, another opening or pull an end
+out of a pad it terminates in are declined with a reason, and every kept move
+is re-checked on the saved board. On a partially routed net, the check preserves
+each group of pads already joined by copper. `pad_connection_lost` identifies
+a refused move that would split a group. By default, a pass-through nudge also
+compares KiCad's DRC results before and after the move. A new error or an
+increase in unconnected items rejects the candidate, including on boards
+without pours. On boards with pours, the command
+refills a private copy with the original project rules and checks the saved
+copper before publishing the repair.
 
 Supply a process-specific clearance requirement with its source, process and
 revision. A manufacturer profile, mask expansion or minimum mask-web width does
