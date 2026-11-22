@@ -3107,7 +3107,7 @@ def test_plane_stitch_preserves_isolated_land(tmp_path, pad_layer, zone_layer):
     )
 
 
-def _hole_floor_board(tmp_path, gap=0.2421, floor=None, obstacle=None):
+def _hole_floor_board(tmp_path, gap=0.2421, floor=None, obstacle=None, *, clearance=None):
     import json
 
     obstacle = (
@@ -3129,10 +3129,12 @@ def _hole_floor_board(tmp_path, gap=0.2421, floor=None, obstacle=None):
       (segment (start 10 10) (end 12 10) (width .2) (layer "F.Cu") (net 1))
       {obstacle})""",
     )
-    if floor is not None:
-        board.with_suffix(".kicad_pro").write_text(
-            json.dumps({"board": {"design_settings": {"rules": {"min_hole_clearance": floor}}}})
-        )
+    if floor is not None or clearance is not None:
+        rules = {"min_hole_clearance": floor} if floor is not None else {}
+        project = {"board": {"design_settings": {"rules": rules}}}
+        if clearance is not None:
+            project["net_settings"] = {"classes": [{"name": "Default", "clearance": clearance}]}
+        board.with_suffix(".kicad_pro").write_text(json.dumps(project))
     return board
 
 
@@ -3196,7 +3198,7 @@ def test_hole_floor_cli_uses_input_project_with_renamed_output(tmp_path):
 def test_hole_floor_foreign_copper_and_mixed_annuli(tmp_path, obstacle):
     from dataclasses import replace
 
-    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle, clearance=0.1016))
     result = relocate_in_pad_vias(
         pcb, replace(get_mfr_design_rules("jlcpcb", 4, 1.0), min_hole_to_hole_mm=0.25), nets={"SIG"}
     )
@@ -3687,7 +3689,7 @@ def test_slot_pad_copper_checks_the_whole_landing(
         f'(pad "{pad_id}" {pad_type} rect (at 0 0) (size .4 1.2) (drill oval .15 .30) '
         f'(layers "*.Cu" "*.Mask") {net}))'
     )
-    board = _hole_floor_board(tmp_path, obstacle=obstacle)
+    board = _hole_floor_board(tmp_path, obstacle=obstacle, clearance=0.1016)
     board.write_text(
         board.read_text()
         .replace("(size 1 1)", "(size 1 .5)")
@@ -3966,7 +3968,7 @@ def test_preferred_slide_checks_new_stub_beyond_the_original_track(tmp_path):
         '(pad "2" thru_hole rect (at 0 0) (size .4 1.2) (drill oval .15 .30) '
         '(layers "*.Cu" "*.Mask") (net 2 "OTHER")))'
     )
-    board = _hole_floor_board(tmp_path, obstacle=obstacle)
+    board = _hole_floor_board(tmp_path, obstacle=obstacle, clearance=0.1016)
     board.write_text(
         board.read_text()
         .replace("(size 1 1)", "(size 1 .5)")
@@ -4576,3 +4578,184 @@ def test_alternative_invalid_outline_coordinates_refuse_without_mutation(tmp_pat
     )
     assert not result.changed
     assert pcb._sexp.to_string() == before
+
+
+def _pair_floor_board(tmp_path, x, y, *, drill="oval .15 .30", same_net=False):
+    net = '1 "SIG"' if same_net else '2 "OTHER"'
+    obstacle = (
+        f'(footprint "Test:Land" (layer "F.Cu") (at {x} {y}) '
+        '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
+        f'(pad "1" thru_hole oval (at 0 0) (size .45 .6) (drill {drill}) '
+        f'(layers "*.Cu" "*.Mask") (net {net})))'
+    )
+    board = _hole_floor_board(tmp_path, obstacle=obstacle, clearance=0.1016)
+    board.write_text(board.read_text().replace("(size .45) (drill .2)", "(size 1.0) (drill .2)"))
+    return board
+
+
+def _write_pair_floor(board, kind, minimum, item="Via", ref="J9", layer="F.Cu"):
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "pad pair" (layer "{layer}") (condition "A.Type == '{item}' && B.Reference == '{ref}'")
+  (constraint {kind} (min {minimum}mm)))
+"""
+    )
+
+
+@pytest.mark.parametrize(
+    ("rule", "minimum", "same_net", "reference", "expected"),
+    [
+        ("clearance", 0.29, False, "J9", True),
+        ("clearance", 0.15, False, "J9", False),
+        ("clearance", 0.29, False, "JX", False),
+        ("clearance", 0.29, True, "J9", False),
+        ("physical_clearance", 0.29, True, "J9", True),
+        ("min_clearance", 0.29, False, "J9", True),
+        ("netclass", 0.29, False, "J9", True),
+        ("standalone", 0.0, False, "J9", True),
+        ("hole_to_hole", 0.85, False, "J9", True),
+        ("hole_to_hole", 0.72, False, "J9", False),
+        ("min_hole_to_hole", 0.85, True, "J9", True),
+        ("slotted_hole_to_hole", 0.85, False, "J9", False),
+    ],
+)
+def test_resolved_via_pad_land_and_drill_floors(
+    tmp_path, rule, minimum, same_net, reference, expected
+):
+    import json
+
+    drill = ".30 (offset 0 .03)" if rule in {"hole_to_hole", "min_hole_to_hole"} else "oval .15 .30"
+    board = _pair_floor_board(
+        tmp_path, 10.7016, 10.95 if rule == "standalone" else 11.0, drill=drill, same_net=same_net
+    )
+    pro = board.with_suffix(".kicad_pro")
+    project = json.loads(pro.read_text())
+    if rule == "standalone":
+        pro.unlink()  # Pinned standalone KiCad uses the built-in 0.2 mm default class.
+    elif rule.startswith("min_"):
+        project["board"]["design_settings"]["rules"][rule] = minimum
+        pro.write_text(json.dumps(project))
+    elif rule == "netclass":
+        project["net_settings"]["classes"].append({"name": "Wide", "clearance": minimum})
+        project["net_settings"]["netclass_patterns"] = [{"netclass": "Wide", "pattern": "OTHER"}]
+        pro.write_text(json.dumps(project))
+    else:
+        _write_pair_floor(board, rule.removeprefix("slotted_"), minimum, ref=reference)
+    pcb = PCB.load(board)
+    reason = _check_clearance(
+        pcb,
+        pcb.vias[0],
+        10.7016,
+        10,
+        _collect_smd_pads_by_net(pcb),
+        _collect_tht_pads(pcb),
+        0.1016,
+        0.25,
+        0.25,
+    )
+    assert bool(reason) is expected
+    if expected:
+        assert "J9-1" in reason
+
+
+@pytest.mark.parametrize(
+    ("constraint", "floor", "same_net", "track_layer", "blocked"),
+    [
+        ("clearance", 0.57, False, "In1.Cu", True),
+        ("clearance", 0.15, False, "In1.Cu", False),
+        ("clearance", 0.57, False, "B.Cu", False),
+        ("clearance", 0.57, True, "In1.Cu", False),
+        ("physical_clearance", 0.57, True, "In1.Cu", True),
+    ],
+)
+def test_track_pad_land_floor_in_the_source_via_envelope(
+    tmp_path, constraint, floor, same_net, track_layer, blocked
+):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    board = _pair_floor_board(tmp_path, 9.45, 10.85, same_net=same_net)
+    _write_pair_floor(board, constraint, floor, item="Track", layer="In1.Cu")
+    pcb = PCB.load(board)
+    # The track is closest to the actual rounded land at its old-via end.
+    # Native DRC measures 0.2253 mm; the corner of its enclosing box is closer.
+    reason = _check_stub_clearance(pcb, pcb.vias[0], (10, 9.1484), [track_layer], 1.0, 0.1016)
+    assert bool(reason) is blocked
+
+
+@pytest.mark.parametrize(("pad_layer", "blocked"), [("*.Cu", True), ("*.Mask", False)])
+def test_bare_drill_physical_clearance_follows_its_declared_copper_layers(
+    tmp_path, pad_layer, blocked
+):
+    board = _hole_floor_board(
+        tmp_path,
+        clearance=0.1016,
+        obstacle=(
+            '(footprint "Test:Hole" (layer "F.Cu") (at 10.7016 11) '
+            '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
+            f'(pad "" np_thru_hole circle (at 0 0) (size .3 .3) (drill .3) (layers "{pad_layer}")))'
+        ),
+    )
+    board.write_text(board.read_text().replace("(size .45) (drill .2)", "(size 1.0) (drill .2)"))
+    _write_pair_floor(board, "physical_clearance", 0.50, layer="In1.Cu")
+    pcb = PCB.load(board)
+    reason = _check_clearance(
+        pcb,
+        pcb.vias[0],
+        10.7016,
+        10,
+        _collect_smd_pads_by_net(pcb),
+        _collect_tht_pads(pcb),
+        0.1016,
+        0.25,
+        0.25,
+    )
+    assert bool(reason) is blocked
+
+
+@pytest.mark.parametrize(
+    ("pad_floor", "fp_floor", "board_floor", "custom", "kind", "same_net", "blocked"),
+    [
+        (0.29, None, 0.1, 0.15, "clearance", False, True),
+        (None, 0.29, 0.1, 0.15, "clearance", False, True),
+        (0.15, None, 0.1, 0.29, "clearance", False, False),
+        (0.15, 0.29, 0.1, 0.29, "clearance", False, False),
+        (0.15, None, 0.29, 0.15, "clearance", False, True),
+        (0.15, None, 0.1, 0.29, "physical_clearance", False, True),
+        (0.29, None, 0.1, 0.15, "clearance", True, False),
+        (0.0, None, 0.1, 0.29, "clearance", False, True),
+        (0.0, 0.29, 0.1, 0.15, "clearance", False, True),
+    ],
+)
+def test_local_electrical_clearance_precedence(
+    tmp_path, pad_floor, fp_floor, board_floor, custom, kind, same_net, blocked
+):
+    import json
+
+    from kicad_tools.sexp import SExp
+
+    board = _pair_floor_board(tmp_path, 10.7016, 11, same_net=same_net)
+    pcb = PCB.load(board)
+    fp = next(f for f in pcb.footprints if f.reference == "J9")
+    if fp_floor is not None:
+        fp._sexp_node.append(SExp.list("clearance", fp_floor))
+    if pad_floor is not None:
+        fp.pads[0]._sexp_node.append(SExp.list("clearance", pad_floor))
+    pcb.save(board)
+    project = board.with_suffix(".kicad_pro")
+    data = json.loads(project.read_text())
+    data["board"]["design_settings"]["rules"]["min_clearance"] = board_floor
+    project.write_text(json.dumps(data))
+    _write_pair_floor(board, kind, custom)
+    pcb = PCB.load(board)
+    reason = _check_clearance(
+        pcb,
+        pcb.vias[0],
+        10.7016,
+        10,
+        _collect_smd_pads_by_net(pcb),
+        _collect_tht_pads(pcb),
+        0.1016,
+        0.25,
+        0.25,
+    )
+    assert bool(reason) is blocked
