@@ -46,7 +46,7 @@ from .layers import Layer, LayerType
 from .neck_down import band_safe_taper, taper_width_fn, tapered_run_pieces
 from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via, pad_half_extents
-from .quantize import is_45_aligned, normalize_direction, same_direction
+from .quantize import emits_trace_segment, is_45_aligned, normalize_direction, same_direction
 from .route_via_gap import route_own_via_slit
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
 from .search_radius import search_radius_cells
@@ -6368,7 +6368,10 @@ class Router:
 
         # Issue #972: Inline segment merging - track segment start point and direction
         # to merge collinear cells into single segments
-        seg_start_x, seg_start_y = start_pad.x, start_pad.y
+        # Use the written pad centres before computing taper cuts, as the
+        # native adapter does for every received vertex.
+        seg_start_x, seg_start_y = round(start_pad.x, 4), round(start_pad.y, 4)
+        end_x, end_y = round(end_pad.x, 4), round(end_pad.y, 4)
         current_x, current_y = seg_start_x, seg_start_y
         current_direction: tuple[float, float] | None = None  # (dx_normalized, dy_normalized)
 
@@ -6423,7 +6426,7 @@ class Router:
             the own-net pad slit band (see
             ``neck_down.tapered_run_pieces``).
             """
-            if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
+            if emits_trace_segment(x1, y1, x2, y2):
                 # Issue #9019: a taper that only narrows must not open an air
                 # gap beside the net's own pad (the slit band).
                 band_bboxes = (
@@ -6507,7 +6510,9 @@ class Router:
                 seg_start_x, seg_start_y = current_x, current_y
                 current_direction = None
             else:
-                # Check if we've moved
+                # An omitted source stub leaves the next run anchored at the pad centre.
+                if not emits_trace_segment(current_x, current_y, wx, wy):
+                    continue
                 dx = wx - current_x
                 dy = wy - current_y
                 new_direction = normalize_direction(dx, dy)
@@ -6533,19 +6538,19 @@ class Router:
         # pre-#9851 code emitted the run to the last node, popped its last
         # taper piece and re-tapered from the cut point to the pad, which
         # no other emitter reproduced.)
-        dx = end_pad.x - current_x
-        dy = end_pad.y - current_y
-        if abs(dx) > 0.01 or abs(dy) > 0.01:
+        dx = end_x - current_x
+        dy = end_y - current_y
+        if emits_trace_segment(current_x, current_y, end_x, end_y):
             end_dir = normalize_direction(dx, dy)
             if same_direction(current_direction, end_dir) and is_45_aligned(
-                end_pad.x - seg_start_x, end_pad.y - seg_start_y
+                end_x - seg_start_x, end_y - seg_start_y
             ):
                 # Extend the open run through to the pad centre.
-                current_x, current_y = end_pad.x, end_pad.y
+                current_x, current_y = end_x, end_y
             else:
                 _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
                 seg_start_x, seg_start_y = current_x, current_y
-                current_x, current_y = end_pad.x, end_pad.y
+                current_x, current_y = end_x, end_y
 
         # Emit the final (possibly pad-extended) open run.
         _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)

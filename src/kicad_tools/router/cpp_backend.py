@@ -23,7 +23,6 @@ import contextlib
 import logging
 import math
 import os
-import struct
 import time
 import zlib
 from dataclasses import dataclass
@@ -184,7 +183,8 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # fab-view checker grades as ``physical_copper_gap``; reject it.
 # v77 (Issue #9273): the native trace search also guards stored same-net vias.
 # v78 (Issue #9273): a leg cannot skim a stored barrel and rely on a later weld.
-_REQUIRED_CPP_BUILD_VERSION = 78
+# v79 (Issue #9851): native pad-stub emission uses the serialized coordinate grid.
+_REQUIRED_CPP_BUILD_VERSION = 79
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -256,17 +256,6 @@ _CPP_IMPORT_ERROR: str | None = None
 # can report the numbers the staleness guard actually cares about, even after
 # the version guard below nulls out ``router_cpp``.
 _CPP_BUILD_VERSION: int | None = None
-
-
-def _roundtrip_f32(value: float) -> float:
-    """Round ``value`` through a C++ ``float`` (float32) exactly once.
-
-    The native ``reconstruct_path`` receives pad centres as C++ floats and
-    stores segment endpoints as float32; the adapter's tail re-derivation
-    (#9851) must reproduce the endpoint the native side actually emitted,
-    not the float64 pad coordinate it was derived from.
-    """
-    return float(struct.unpack("<f", struct.pack("<f", float(value)))[0])
 
 
 def _allow_smd_vias(rules) -> bool:
@@ -2970,12 +2959,13 @@ class CppPathfinder:
                 partner_net_id,
                 search_intra_pair_clearance if partner_net_id >= 0 else -1.0,
             )
+            # Round to the writer's grid before the binding narrows to float32.
             return self._impl.route_resumable(
-                start.x,
-                start.y,
+                round(start.x, 4),
+                round(start.y, 4),
                 start_layer,
-                end.x,
-                end.y,
+                round(end.x, 4),
+                round(end.y, 4),
                 end_layer,
                 start.net,
                 start_layers or [],
@@ -3679,7 +3669,12 @@ class CppPathfinder:
         """
         from .layers import Layer
         from .primitives import Route, Segment, Via
-        from .quantize import is_45_aligned, normalize_direction, same_direction
+        from .quantize import (
+            emits_trace_segment,
+            is_45_aligned,
+            normalize_direction,
+            same_direction,
+        )
 
         route = Route(net=start.net, net_name=start.net_name)
 
@@ -3749,7 +3744,7 @@ class CppPathfinder:
             band), so the two backends emit identical segment bytes for the
             same path.
             """
-            if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
+            if emits_trace_segment(x1, y1, x2, y2):
                 layer_enum_value = self._grid.index_to_layer(layer_idx)
                 # Issue #9019: mirror ``PathFinder._convert_path_to_route`` --
                 # a taper must not open an air gap beside the net's own pad.
@@ -3825,8 +3820,8 @@ class CppPathfinder:
         # a run ends at a turn, a reversal, a coordinate gap, or a
         # via/layer change, exactly where the Python converter's run
         # formation ends one.
-        end_x = round(_roundtrip_f32(end.x), 4)
-        end_y = round(_roundtrip_f32(end.y), 4)
+        end_x = round(end.x, 4)
+        end_y = round(end.y, 4)
 
         # Keep the native pad tail separate until the grid runs are formed. A
         # via on the accepted goal cell can leave this tail as the only copper
@@ -3846,7 +3841,7 @@ class CppPathfinder:
                 is_tail = (last[2], last[3]) == (end_x, end_y)
             if is_tail:
                 tail = raw.pop()
-            elif abs(end_x - last[2]) > 0.01 or abs(end_y - last[3]) > 0.01:
+            elif emits_trace_segment(last[2], last[3], end_x, end_y):
                 # Some callers supply only grid segments; close their last run to the pad.
                 tail = (last[2], last[3], end_x, end_y, last[4], last[5])
 

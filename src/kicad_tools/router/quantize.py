@@ -42,6 +42,7 @@ __all__ = [
     "SERIALIZE_QUANTUM_MM",
     "off_angle_degrees",
     "is_45_aligned",
+    "emits_trace_segment",
     "normalize_direction",
     "same_direction",
     "snap_direction_8",
@@ -123,6 +124,19 @@ def snap_direction_8(dx: float, dy: float) -> tuple[float, float]:
     ang = math.atan2(dy, dx)
     idx = round(ang / (math.pi / 4.0)) % 8
     return EIGHT_DIRECTIONS[idx]
+
+
+def emits_trace_segment(x1: float, y1: float, x2: float, y2: float) -> bool:
+    """Does the move exceed 0.01 mm on either serialized coordinate axis?
+
+    The native reconstructor and its via checks use the same 0.1 µm units.
+    Comparing the written positions keeps float32 and float64 subtraction
+    from making opposite decisions at exactly 0.01 mm.
+    """
+    return (
+        abs(round(x2 * 10_000) - round(x1 * 10_000)) > 100
+        or abs(round(y2 * 10_000) - round(y1 * 10_000)) > 100
+    )
 
 
 def normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:

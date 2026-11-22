@@ -549,6 +549,64 @@ class TestConversionSegmentParity:
         assert cpp_finder._narrowest_emit_width(a, b, self.BASE_W) == pytest.approx(self.MIN_W)
 
     @pytest.mark.requires_router_cpp
+    @pytest.mark.parametrize(
+        "dx,dy,first_end",
+        [
+            (0.0, 0.0, (8.1, 8.0)),
+            (0.006, 0.0, (8.106, 8.0)),
+            (0.0, 0.006, (8.006, 8.0)),
+            (0.006, 0.006, (8.012, 8.0)),
+            (0.01, 0.0, (8.11, 8.0)),
+            (0.0101, 0.0, (8.0, 8.0)),
+            (0.010051, 0.0, (8.0, 8.0)),
+        ],
+        ids=[
+            "centred",
+            "axial",
+            "transverse",
+            "diagonal",
+            "threshold",
+            "above-threshold",
+            "rounds-above",
+        ],
+    )
+    def test_public_route_from_off_grid_source(
+        self, tmp_path: Path, dx: float, dy: float, first_end: tuple[float, float]
+    ) -> None:
+        # Both searches traverse the straight row from (80, 80) to (110, 80).
+        # Only the source pad's displacement from the first grid vertex varies.
+        board = _endpoint_board(
+            tmp_path,
+            [("U1", 8 + dx, 8 + dy, Layer.F_CU), ("U2", 11, 8, Layer.F_CU)],
+            (0.2, 0.2),
+            pitch=0.5,
+        )
+        rules = DesignRules(
+            trace_width=self.BASE_W,
+            min_trace_width=self.MIN_W,
+            trace_clearance=0.12,
+            grid_resolution=0.1,
+        )
+        grid = RoutingGrid(15, 10, rules, layer_stack=LayerStack.two_layer())
+        pads = load_pads_for_analysis(board)
+        for pad in pads:
+            grid.add_pad(pad)
+        start, end = (p for p in pads if p.net_name == "SIG")
+        py = Router(grid, rules, diagonal_routing=True)
+        native = CppPathfinder(CppGrid.from_routing_grid(grid), rules, diagonal_routing=True)
+        for a, b in ((start, end), (end, start)):
+            py_route = py.route(a, b, per_net_timeout=5)
+            native_route = native.route(a, b, per_net_timeout=5)
+            assert py_route is not None and native_route is not None
+            assert self._sexps(py_route) == self._sexps(native_route)
+            assert not py_route.vias and not native_route.vias
+            if a is start:
+                first = py_route.segments[0]
+                assert (first.x1, first.y1) == (round(a.x, 4), round(a.y, 4))
+                assert (first.x2, first.y2) == pytest.approx(first_end)
+                assert round(first.width, 4) == self.MIN_W
+
+    @pytest.mark.requires_router_cpp
     def test_unidentified_programmatic_pads_keep_the_base_width(self) -> None:
         rules = self._rules()
         grid = RoutingGrid(8, 8, rules, layer_stack=LayerStack.two_layer())
