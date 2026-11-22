@@ -50,15 +50,16 @@
       "returncode": 2,
       "summary": {
         "errors": 124,
-        "warnings": 183,
+        "warnings": 182,
         "infos": 179,
         "waived": 0,
-        "rules_checked": 85,
+        "rules_checked": 86,
         "rules_checked_by_rule": {
           "connectivity": 1,
           "copper_sliver": 1,
           "track_dangling": 1,
           "via_dangling": 1,
+          "plane_split": 1,
           "pour_slot": 1,
           "redundant_copper_duplicate": 1,
           "redundant_copper_fragments": 1,
@@ -93,7 +94,7 @@
         "passed": false,
         "stale_waivers": 0,
         "orphan_waivers": 0,
-        "coverage_checked": 47,
+        "coverage_checked": 48,
         "coverage_skipped": 6,
         "coverage_unknown": [
           "model_coverage"
