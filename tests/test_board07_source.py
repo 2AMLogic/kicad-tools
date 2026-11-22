@@ -108,6 +108,7 @@ def _load_record(name, root=ROOT07):
 
 
 def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land(tmp_path):
+    import shutil
     import subprocess
     from types import SimpleNamespace
     from zipfile import ZipFile
@@ -118,13 +119,19 @@ def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land(tm
     # pair, keeping the production recipes byte-identical to their release.
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
     proposed = tmp_path / "proposed"
-    _load_record("cleanup_fixture_8603", ROOT07 / "engineering").stage_design(ROOT07, proposed)
+    fixture = _load_record("cleanup_fixture_8603", ROOT07 / "engineering")
+    fixture.stage_design(ROOT07, proposed)
+    # Keep the rehearsal reproducible after #8604 adopts the staged recipes.
+    candidate_patch = Path("engineering/assembly-fiducials.patch")
+    shutil.copyfile(ROOT07 / candidate_patch, proposed / candidate_patch)
+    adopted = tmp_path / "adopted"
+    fixture.stage_design(proposed, adopted)
     archive = ROOT07.parent / "output/manufacturing/design-source.zip"
     with ZipFile(archive) as shipped:
         for name in ("build.py", "build_source.py"):
             published = shipped.read(f"real_design/{name}")
             assert (ROOT07 / name).read_bytes() == published
-            assert (proposed / name).read_bytes() != published
+            assert (adopted / name).read_bytes() == (proposed / name).read_bytes()
     release = _load_record("build_source", proposed)
     pad = SimpleNamespace(
         number="", net_name="", net_number=0, size=(1.0, 1.0), drill=0.0, layers=["F.Cu", "F.Mask"]

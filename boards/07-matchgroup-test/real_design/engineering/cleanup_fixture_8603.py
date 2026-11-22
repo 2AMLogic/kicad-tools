@@ -39,17 +39,19 @@ def stage_design(design: Path, output: Path, *, original: bool = False) -> None:
     if not original:
         # Git normally resolves patch paths from the enclosing checkout and
         # can silently skip both files when output is a subdirectory of it.
-        subprocess.run(
-            [
-                "git",
-                "apply",
-                "--whitespace=error",
-                str((design / "engineering/assembly-fiducials.patch").resolve()),
-            ],
+        env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(output.resolve().parent)}
+        patch = (design / "engineering/assembly-fiducials.patch").resolve()
+        # After #8604 adopts these recipes, the patch is already present.
+        applied = subprocess.run(
+            ["git", "apply", "--reverse", "--check", patch],
             cwd=output,
-            env={**os.environ, "GIT_CEILING_DIRECTORIES": str(output.resolve().parent)},
-            check=True,
+            env=env,
+            stderr=subprocess.DEVNULL,
         )
+        if applied.returncode:
+            subprocess.run(
+                ["git", "apply", "--whitespace=error", patch], cwd=output, env=env, check=True
+            )
     for kind in ("authored-source", "reviewed-routing"):
         manifest = f"{kind}/manifest.json"
         copy(manifest)

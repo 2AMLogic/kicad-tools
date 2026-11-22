@@ -132,7 +132,8 @@ segments and 340 authored segments pass the release angle census.
 After validation passes, `proposed-design/` holds the two candidate manifests
 and their bound files. The staging step applies
 [`assembly-fiducials.patch`](assembly-fiducials.patch) to its copies of
-`build.py` and `build_source.py`. This lets the release builder verify the six
+`build.py` and `build_source.py` if those copies do not already contain it.
+This lets the release builder verify the six
 board-only marks while it independently regenerates the 43 electrical
 components and 216 bound pads. It runs the ordinary validator on the complete
 pair and writes the result to `release/`.
