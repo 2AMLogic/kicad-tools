@@ -538,8 +538,10 @@ def test_joined_end_is_not_moved_twice_by_a_later_finding(tmp_path):
     """A joined member's near-pad end is often its own pull-in candidate; the
     second finding on it must be declined (``segment_end_already_moved``)
     rather than stacked on the first move, which undo cannot revert."""
-    copper = _seg("trk-a", (100.5, 100.6), (100.3, 100.6)) + "\n" + _seg(
-        "trk-b", (100.1, 100.6), (100.3, 100.6)
+    copper = (
+        _seg("trk-a", (100.5, 100.6), (100.3, 100.6))
+        + "\n"
+        + _seg("trk-b", (100.1, 100.6), (100.3, 100.6))
     )
     board = _board(tmp_path, copper)
     repairer = MaskCopperRepairer(board)

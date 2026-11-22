@@ -677,7 +677,10 @@ class MaskCopperRepairer:
 
     @staticmethod
     def _entry_within_angle(
-        poly: BaseGeometry, crossing: BaseGeometry, far: tuple[float, float], centre: tuple[float, float]
+        poly: BaseGeometry,
+        crossing: BaseGeometry,
+        far: tuple[float, float],
+        centre: tuple[float, float],
     ) -> bool:
         """True when the ``far -> centre`` entry crosses the pad edge within 45°.
 

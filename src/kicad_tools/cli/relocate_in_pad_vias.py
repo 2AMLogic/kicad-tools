@@ -1686,9 +1686,7 @@ def relocate_pad_edge_vias(
             continue
         vx, vy = via.position
         gap_fn = (
-            via_ring_to_mask_aperture_gap
-            if ring_dam_mm is not None
-            else drill_to_mask_aperture_gap
+            via_ring_to_mask_aperture_gap if ring_dam_mm is not None else drill_to_mask_aperture_gap
         )
         flag_dam = float(ring_dam_mm) if ring_dam_mm is not None else dam
         flagged = next(
@@ -1696,10 +1694,7 @@ def relocate_pad_edge_vias(
                 (fp, pad)
                 for fp, pad, bbox in candidates
                 if not via_inside_pad(via, bbox, pad, fp)
-                and (
-                    gap := gap_fn(via, pad, fp, pad_to_mask_clearance=pad_to_mask)
-                )
-                is not None
+                and (gap := gap_fn(via, pad, fp, pad_to_mask_clearance=pad_to_mask)) is not None
                 and gap < flag_dam - WRITER_CLEARANCE_MARGIN_MM
             ),
             None,
@@ -1777,7 +1772,9 @@ def relocate_pad_edge_vias(
             for step in steps:
                 # Whole micrometres: what KiCad's own serializer keeps.
                 nx, ny = round(vx + dx * step, 3), round(vy + dy * step, 3)
-                gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask, ring=ring_dam_mm is not None)
+                gap = _pad_edge_gap(
+                    via, nx, ny, candidates, pad_to_mask, ring=ring_dam_mm is not None
+                )
                 if gap is None or gap < flag_dam + 1e-6:
                     # Still in the zone, or into a pad's copper: keep sliding.
                     continue
