@@ -903,3 +903,46 @@ def test_boardview_renders_footprint_outline_polylines() -> None:
     xs = [x for line in polylines for x, _ in line]
     assert min(xs) == pytest.approx(A_BOUNDS[0], abs=1e-3)
     assert max(xs) == pytest.approx(A_BOUNDS[2], abs=1e-3)
+
+
+_BOARD_ARC_POLY = (
+    "(gr_poly (pts (xy 35 35) (xy 65 35) (xy 65 65)"
+    " (arc (start 65 65) (mid 50 80) (end 35 65)) (xy 35 65))"
+    ' (stroke (width 0.05) (type solid)) (fill no) (layer "Edge.Cuts"))'
+)
+
+
+def test_board_arc_polygon_geometry_view_and_filled_cutout():
+    from kicad_tools.boardview.model import _outline_polylines
+    from kicad_tools.pcb.board_geometry import BoardGeometry
+
+    pcb = PCB(parse_string(_variant_board(_BOARD_ARC_POLY, [])))
+    area = 900 + 112.5 * math.pi
+    assert BoardGeometry.from_pcb(pcb).polygon.area == pytest.approx(area, rel=0.001)
+    (line,) = _outline_polylines(pcb, shift=(0.0, 0.0))
+    assert line[0] == line[-1]
+    assert max(y for _, y in line) == pytest.approx(80, abs=0.001)
+    assert pcb.get_board_outline_filled_regions() == []
+
+    outer = '(gr_rect (start 10 10) (end 90 90) (stroke (width 0.05) (type solid)) (fill no) (layer "Edge.Cuts"))'
+    filled = _BOARD_ARC_POLY.replace("(fill no)", "(fill yes)")
+    pcb = PCB(parse_string(_variant_board(outer + filled, [])))
+    geometry = BoardGeometry.from_pcb(pcb).polygon
+    assert len(geometry.interiors) == 1
+    assert geometry.area == pytest.approx(6400 - area, abs=1)
+    (cutout,) = pcb.get_board_outline_filled_regions()
+    assert max(y for _, y in cutout.ring) == pytest.approx(70, abs=0.001)
+
+
+def test_board_polygon_arc_edge_clearance_matches_native(tmp_path):
+    probes = {
+        "INSIDE_NEAR": ((48.9, 79.7), (49.4, 79.7)),
+        "OUTSIDE_NEAR": ((50.6, 80.2), (51.1, 80.2)),
+        "OLD_CHORD": ((48, 65.2), (49, 65.2)),
+        "CLEAR": ((50, 76), (51, 76)),
+    }
+    path = tmp_path / "board_polygon_arc.kicad_pcb"
+    path.write_text(_variant_board(_BOARD_ARC_POLY, [(n, *ends) for n, ends in probes.items()]))
+    expected = {"INSIDE_NEAR", "OUTSIDE_NEAR"}
+    assert _kicad_cli_edge_probes(path, tmp_path) == expected
+    assert _kct_edge_probes(path, probes, KICAD_DEFAULT_EDGE_CLEARANCE_MM) == expected
