@@ -76,13 +76,10 @@ def clear_fiducial_openings(routed):
 #: every rated part's courtyard the #8048 attach-zone exemptions drop that
 #: pair to the 0.1016 mm fab floor, so the pour fills 0.1021 mm from these
 #: pads' mask openings -- inside JLCPCB's 0.15 mm mask-to-copper warning
-#: band (#8842).  A pad-local clearance restores the authored standoff for
-#: exactly that pad: KiCad resolves the local value above the courtyard
-#: exemption when filling (measured on the pinned toolchain; the fiducial
-#: step below relies on the same resolution), and the shared DRU rules,
-#: the exemptions and the pre-routing fingerprint are untouched.  U2 and
-#: U3's land-pattern pads are deliberately absent: their openings' ownership
-#: and lead pitch await the operator decisions tracked in #9921.
+#: band (#8842). KiCad applies each pad's local clearance when it fills the
+#: zone. U2's numbered leads have room for 0.2 mm. Its exposed pad and
+#: thermal barrels retain their stock clearances. At U3, the 0.15 mm gaps
+#: between adjacent leads require a separate zone-to-pad rule for the pour.
 POUR_STANDOFF_MM = 0.2
 POUR_STANDOFF_PADS = {
     "U1": frozenset(
@@ -110,6 +107,33 @@ POUR_STANDOFF_PADS = {
             "29",
             "30",
             "32",
+        }
+    ),
+    "U2": frozenset(
+        {
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+            "12",
+            "13",
+            "15",
+            "16",
+            "17",
+            "18",
+            "22",
+            "23",
+            "24",
+            "25",
+            "26",
+            "27",
         }
     ),
     "J1": frozenset({"1"}),

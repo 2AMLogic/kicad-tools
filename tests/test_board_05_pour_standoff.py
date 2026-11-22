@@ -70,9 +70,12 @@ def test_declared_pads_carry_the_authored_standoff(tmp_path):
     expected = {f"{ref}/{pad}" for ref, pads in build.POUR_STANDOFF_PADS.items() for pad in pads}
     assert set(found) == expected, sorted(set(found) ^ expected)
     assert set(found.values()) == {build.POUR_STANDOFF_MM}
-    # U2 and U3's land-pattern pads stay untouched pending the operator
-    # decisions tracked in the issue.
-    assert not any(key.startswith(("U2/", "U3/")) for key in found)
+    # Only these numbered U2 leads have a pour-opening finding. The exposed
+    # pad, its barrels and the unnumbered thermal aperture retain stock values.
+    u2_pads = {key.removeprefix("U2/") for key in found if key.startswith("U2/")}
+    assert u2_pads == {str(n) for n in (*range(1, 14), *range(15, 19), *range(22, 28))}
+    # A pad-local 0.2 mm minimum conflicts with U3's 0.15 mm lead gaps.
+    assert not any(key.startswith("U3/") for key in found)
 
 
 def test_standoff_is_idempotent_and_preserves_the_fingerprint(tmp_path):
