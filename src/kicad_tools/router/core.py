@@ -15825,8 +15825,18 @@ class Autorouter:
                             if fn in stalled_nets or net_routes.get(fn):
                                 continue
                             attempted += 1
-                            routes = self._route_net_negotiated(
-                                fn, recovery_factor, per_net_timeout=iter_per_net_cap
+                            # Issue #8486: through the known-failure wrapper so
+                            # the search counts against (and is capped by) the
+                            # net's failing streak -- on the reported stalled
+                            # board these elevated searches were invisible to
+                            # the back-off and ran at the full cap every
+                            # iteration.
+                            routes = self._route_net_known_failure_aware(
+                                fn,
+                                recovery_factor,
+                                iter_per_net_cap,
+                                ripup_guard,
+                                iteration,
                             )
                             if routes:
                                 net_routes[fn] = routes
@@ -16097,10 +16107,14 @@ class Autorouter:
                                     neg_router.rip_up_nets(routed_nets, net_routes, self.routes)
 
                                     # Route the failed net first (it now has priority)
-                                    routes = self._route_net_negotiated(
+                                    # Issue #8486: through the known-failure
+                                    # wrapper so the search feeds the streak.
+                                    routes = self._route_net_known_failure_aware(
                                         failed_net,
                                         present_factor,
-                                        per_net_timeout=iter_per_net_cap,
+                                        iter_per_net_cap,
+                                        ripup_guard,
+                                        iteration,
                                     )
                                     if routes:
                                         net_routes[failed_net] = routes
@@ -16134,10 +16148,19 @@ class Autorouter:
                                     full_reorder_used_this_iter = True
                                 else:
                                     # Fallback: try regular reroute
-                                    routes = self._route_net_negotiated(
+                                    # Issue #8486: through the known-failure
+                                    # wrapper so this every-iteration search of
+                                    # an entry-unrouted net is capped by (and
+                                    # feeds) its failing streak -- on the
+                                    # reported board the narrow corridor-failed
+                                    # nets landed here each targeted iteration
+                                    # and never saw the back-off.
+                                    routes = self._route_net_known_failure_aware(
                                         failed_net,
                                         present_factor,
-                                        per_net_timeout=iter_per_net_cap,
+                                        iter_per_net_cap,
+                                        ripup_guard,
+                                        iteration,
                                     )
                                     if routes:
                                         net_routes[failed_net] = routes

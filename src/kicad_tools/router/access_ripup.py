@@ -133,7 +133,9 @@ KNOWN_FAILURE_CAPPED_FRACTION = 0.9
 #: Issue #8486: a memo keyed on the *coarse* copper key (foreign nets near a
 #: failed net with no sealed terminal) is re-probed at least once every this
 #: many iterations, so a key that is too coarse can never suppress a rescue
-#: for good.
+#: for good.  The same bound caps the per-net search back-off's staleness: a
+#: copper-keyed net whose budget was halved is re-searched at its full cap at
+#: least once every this many iterations (Nov 2026 re-scope).
 KNOWN_FAILURE_REPROBE_EVERY = 3
 
 #: Closing-copper kinds a rip-up can actually remove: route copper of a net the
@@ -142,6 +144,13 @@ KNOWN_FAILURE_REPROBE_EVERY = 3
 #: ``board_edge`` -- survives any rip-up, and ``kelvin_isolated`` is the failed
 #: net's own isolated branch.
 RIPPABLE_CLOSING_KINDS: frozenset[str] = frozenset({"route_segment", "route_via"})
+
+
+def _is_copper_key(signature: Any) -> bool:
+    """True for the coarse ``("copper", ...)`` fallback signature of a net with
+    no sealed terminal (issue #8486): its failure is corridor-shaped, so the
+    memo keys on the foreign copper near its terminals instead of a seal."""
+    return isinstance(signature, tuple) and bool(signature) and signature[0] == "copper"
 
 
 def rippable_closing_nets(
@@ -660,6 +669,13 @@ class RipupCycleGuard:
     negotiated search ran to its cap with no path, ``streak`` consecutive
     iterations in a row under that same entry signature."""
 
+    full_search_iter: dict[int, int] = field(default_factory=dict)
+    """``net -> iteration`` of its last negotiated search that ran at the full
+    unshrunk per-net cap (issue #8486).  Anchors the copper-key re-probe: a
+    backed-off copper-keyed net is re-searched at the full cap at least once
+    every :data:`KNOWN_FAILURE_REPROBE_EVERY` iterations, so a coarse key can
+    never suppress a full retry for good."""
+
     last_fail_s: dict[int, float] = field(default_factory=dict)
     """``net -> seconds`` its latest no-path negotiated search took; bounds the
     next cap of a net that fails before reaching it."""
@@ -695,15 +711,36 @@ class RipupCycleGuard:
             self.last_fail_s,
             self.setup_floor_s,
             self.futile_rescue_iter,
+            self.full_search_iter,
         ):
             for net in [n for n in memo if n not in self.entry_signature]:
                 memo.pop(net)
 
     def _known_capped(self, net: int, iteration: int) -> tuple[int, Any, int] | None:
-        """The capped-search record still valid for ``net`` at ``iteration``."""
+        """The capped-search record still valid for ``net`` at ``iteration``.
+
+        A seal-keyed record is valid only in the iteration right after it was
+        set and only under the identical seal (an exact key: any change in the
+        closing set can change reachability).  A copper-keyed record (issue
+        #8486, Nov 2026 re-scope) is coarser: the neighbouring copper the key
+        summarises wobbles every re-route pass on a dense board, so requiring
+        an identical key made the streak restart before it ever reached the
+        back-off -- the reported six narrow signal nets ran at the full cap
+        every iteration and exactly one ever backed off.  The copper streak
+        therefore survives a changed copper key and an iteration gap (a search
+        the negotiated loop made outside the reroute wrapper); the full-cap
+        re-probe every :data:`KNOWN_FAILURE_REPROBE_EVERY` iterations
+        (:meth:`search_cap`) bounds how long a stale streak can delay a full
+        retry.  A seal/copper regime change still invalidates it: the net's
+        failure mode changed structurally.
+        """
         sig = self.entry_signature.get(int(net))
         rec = self.capped_streak.get(int(net))
-        if sig is None or rec is None or rec[0] != int(iteration) - 1 or rec[1] != sig:
+        if sig is None or rec is None:
+            return None
+        if _is_copper_key(sig) and _is_copper_key(rec[1]) and rec[0] <= int(iteration):
+            return rec
+        if rec[0] != int(iteration) - 1 or rec[1] != sig:
             return None
         return rec
 
@@ -717,11 +754,24 @@ class RipupCycleGuard:
         whose failures ended before its cap is also bounded by its own last
         failing search time (still floored, never above ``cap``).  ``None``
         (no wall-clock cap, the deterministic arm) is never touched.
+
+        A copper-keyed net whose streak survives on the coarse key (see
+        :meth:`_known_capped`) is re-searched at the full ``cap`` at least
+        once every :data:`KNOWN_FAILURE_REPROBE_EVERY` iterations since its
+        last full-cap search, so a meaningful blocker change is rediscovered
+        in bounded time (the same staleness bound the rescue memo uses).
         """
         if cap is None:
             return None
         rec = self._known_capped(net, iteration)
         if rec is None or rec[2] < KNOWN_FAILURE_BACKOFF_AFTER:
+            self.full_search_iter[int(net)] = int(iteration)
+            return cap
+        if _is_copper_key(rec[1]) and (
+            int(iteration) - self.full_search_iter.get(int(net), int(iteration))
+            >= KNOWN_FAILURE_REPROBE_EVERY
+        ):
+            self.full_search_iter[int(net)] = int(iteration)
             return cap
         shrunk = cap * 0.5 ** (rec[2] - KNOWN_FAILURE_BACKOFF_AFTER + 1)
         last = self.last_fail_s.get(int(net))
@@ -751,24 +801,32 @@ class RipupCycleGuard:
         A search that routed, or ran with no entry signature, resets the net's
         streak; a no-path search extends it whether or not it reached its cap
         (a sub-cap failure additionally bounds the next cap, :meth:`search_cap`).
-        Seconds spent on a net already known to fail are added
-        to :attr:`known_fail_seconds`.
+        A *second* failing search in the same iteration (the negotiated loop
+        searches a failed net both in the zero-overflow recovery and in the
+        reroute pass) is counted as known-fail seconds but neither extends nor
+        resets the streak.  Seconds spent on a net already known to fail are
+        added to :attr:`known_fail_seconds`.
         """
         net, iteration = int(net), int(iteration)
+        prior = self.capped_streak.get(net)
+        same_iter = prior is not None and prior[0] == iteration
         prev = self._known_capped(net, iteration)
-        if prev is not None:
+        if prev is not None or same_iter:
             self.add_known_fail_seconds(iteration, elapsed)
         sig = self.entry_signature.get(net)
         if routed or cap is None or sig is None:
             self.capped_streak.pop(net, None)
             self.last_fail_s.pop(net, None)
             self.setup_floor_s.pop(net, None)
+            self.full_search_iter.pop(net, None)
             return
         self.last_fail_s[net] = float(elapsed)
         if setup_stopped:
             self.setup_floor_s[net] = float(elapsed) + KNOWN_FAILURE_MIN_SEARCH_SLICE_S
         else:
             self.setup_floor_s.pop(net, None)
+        if same_iter:
+            return
         streak = prev[2] + 1 if prev is not None else 1
         self.capped_streak[net] = (iteration, sig, streak)
 
@@ -812,6 +870,7 @@ class RipupCycleGuard:
             self.last_fail_s,
             self.setup_floor_s,
             self.futile_rescue_iter,
+            self.full_search_iter,
         ):
             memo.pop(int(net), None)
 
