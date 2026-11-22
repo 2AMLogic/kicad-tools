@@ -58,3 +58,33 @@ The issue #5044 angle repair subdivides fourteen authored clock/neighbor/data es
 45-degree doglegs to retain the clock-spacing screen and the original 0.320 mm minimum data/control gap. These measurements and
 the illustrative coupling scenarios were rerun on that geometry; placement,
 trace widths, layer assignments and through-via construction are unchanged.
+
+## Reproduce the six-layer post-optimization candidate
+
+Run the Board 07 repair from the repository root with a new output directory.
+The recipe builds the reviewed starting layout, optimizes against its generated
+KiCad project and custom rules with the JLCPCB six-layer profile, applies the
+measured paths in `retune-8603.toml`, and runs the release validator.
+
+```sh
+KCT_KICAD_DOCKER=1 uv run python boards/07-matchgroup-test/real_design/engineering/retune_8603.py /tmp/board07-retune
+```
+
+`retuned/candidate.kicad_pcb` is the saved layout. Its matching validator
+inputs are in `retuned/source/`. The recipe checks the SHA-256 of both the
+optimized layout and the generated authored PCB before applying the path data.
+It recovers authored tracks by copper coverage. Fourteen changed front-side
+escapes connect the same physical pad and original through-via at the same
+length. The tuning adds series length on the bus tracks and moves six clock
+corridor junctions on B.Cu. All coordinates in the record are absolute
+KiCad millimeters.
+
+On the November 22 candidate, the shortest pad-to-pad paths including via
+travel gave group spreads of 0.050 mm (byte 0), 4.388 mm (byte 1), 4.237 mm
+(address), and 3.770 mm (command). The largest clock-relative difference was
+9.370 mm. The minimum clock-to-signal track/via edge gap was 0.567 mm. Pinned
+KiCad 10.0.6 reported zero DRC violations and opens, and copper LVS bound 216
+pads. The full validator returned 2 for the remaining design check, including
+nine mask errors and 193 warnings. The design check still reports 16 fragment,
+22 covered-track, 20 staircase and 11 detour warnings. See
+`evidence/validation.json` and `evidence/check.json` for the current result.
