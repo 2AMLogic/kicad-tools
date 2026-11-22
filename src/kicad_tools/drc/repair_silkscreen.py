@@ -884,7 +884,7 @@ class SilkscreenRepairer:
             if kind != "text":
                 continue
             for area in board_areas:
-                if side in area.sides and geom.intersects(area.polygon):
+                if area.forbids(side, "text") and geom.intersects(area.polygon):
                     item = f"{label} {{{uuid}}}" if uuid else label
                     result.text_residual.append(f"{item} in {area.label}")
 
@@ -894,9 +894,7 @@ class SilkscreenRepairer:
         areas = [
             SilkKeepoutArea(
                 polygon=translate(area.polygon, xoff=ox, yoff=oy),
-                sides=area.sides,
-                disallow_text=area.disallow_text,
-                disallow_graphic=area.disallow_graphic,
+                forbidden=area.forbidden,
                 label=area.label,
             )
             for area in board_areas
@@ -940,7 +938,8 @@ class SilkscreenRepairer:
             return [
                 areas[int(i)]
                 for i in tree.query(ink)
-                if silk_side in areas[int(i)].sides and ink.intersects(areas[int(i)].polygon)
+                if areas[int(i)].forbids(silk_side, "graphic")
+                and ink.intersects(areas[int(i)].polygon)
             ]
 
         def outline_of(kind: str, graphic, xf) -> tuple[list[tuple[float, float]], bool]:
@@ -1056,7 +1055,7 @@ class SilkscreenRepairer:
                     PadClearanceSkip(
                         footprint_ref="board",
                         element_type=str(node.name),
-                        layer=graphic.layer,
+                        layer=board_graphic.layer,
                         reason="clipped shape has a hole no bridge can reach",
                     )
                 )
@@ -1113,10 +1112,8 @@ class SilkscreenRepairer:
                 owner=owner,
                 element_type=str(node.name),
                 layer=(
-                    str(layer_atom.get_first_atom())
+                    (layer_node.get_string(0) or "")
                     if (layer_node := node.find("layer")) is not None
-                    and (layer_atom := layer_node.children[0] if layer_node.children else None)
-                    is not None
                     else ""
                 ),
                 action="trimmed" if pieces else "removed",
@@ -1616,11 +1613,18 @@ class SilkLegalizeReport:
     strokes: TextStrokeRepairResult = field(default_factory=TextStrokeRepairResult)
     pads: PadClearanceRepairResult = field(default_factory=PadClearanceRepairResult)
     holes: HoleClearanceRepairResult = field(default_factory=HoleClearanceRepairResult)
+    #: Silk-keepout clip (Issue #9798); empty when no sibling ``.kicad_dru``
+    #: forbids silk.
+    keepouts: KeepoutClipRepairResult = field(default_factory=KeepoutClipRepairResult)
     refs: PlaceSilkRefsResult | None = None
     #: ``silk_hole_overlap`` findings (vias excluded) still present on the
     # finished tree, graphics and text respectively.
     hole_residual: list[str] = field(default_factory=list)
     text_over_hole: list[str] = field(default_factory=list)
+    #: ``silk_in_keepout`` findings on the finished tree: graphics (which the
+    #: clip should have removed) and text (never moved by this pass).
+    keepout_residual: list[str] = field(default_factory=list)
+    text_in_keepout: list[str] = field(default_factory=list)
     #: Residual items from the attempted repairs. Run the silkscreen checker
     #: for findings outside the repair pass.
     unresolved: list[SilkLegalizeUnresolved] = field(default_factory=list)
@@ -1639,6 +1643,7 @@ class SilkLegalizeReport:
             + self.strokes.total_fixed
             + self.pads.total_fixed
             + self.holes.total_fixed
+            + self.keepouts.total_fixed
             + moved
         )
 
@@ -1710,7 +1715,11 @@ def legalize_silk(
         SILK_EDGE_CLEARANCE_MM,
     )
     from kicad_tools.silkscreen.place_refs import SilkRefPlacer
-    from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
+    from kicad_tools.validate.rules.silkscreen import (
+        check_silk_hole_overlap,
+        check_silk_in_keepout,
+        resolve_silk_keepouts,
+    )
 
     pcb_path = Path(pcb)
     repairer = SilkscreenRepairer(pcb_path)
@@ -1750,6 +1759,16 @@ def legalize_silk(
         mfr_profile.min_silk_to_hole_clearance_mm, include_vias=False
     )
 
+    # Clip graphics out of the keepouts the board's own sibling rule file
+    # forbids silk in (Issue #9798).  The rules are read from the *original*
+    # board's ``.kicad_dru`` -- the staged tree below has no sidecar.
+    dru_path = pcb_path.with_suffix(".kicad_dru")
+    unsupported_keepout_rules: list[str] = []
+    keepout_result = KeepoutClipRepairResult()
+    if dru_path.exists():
+        rules_covered.append("silk_in_keepout")
+        keepout_result = repairer.repair_keepout_clearance()
+
     with tempfile.TemporaryDirectory(prefix="kct-legalize-silk-") as tmp:
         staged = Path(tmp) / "staged.kicad_pcb"
         save_pcb(repairer.doc, staged)
@@ -1779,6 +1798,18 @@ def legalize_silk(
         hole_result.residual = hole_residual
         hole_result.text_residual = text_over_hole
 
+        # Keepouts, re-measured after the reference placement so a moved
+        # reference that landed in an area is surfaced as well.
+        keepout_residual: list[str] = []
+        text_in_keepout: list[str] = []
+        if dru_path.exists():
+            resolve_silk_keepouts(
+                final_pcb, dru_path=dru_path, unsupported=unsupported_keepout_rules
+            )
+            for violation in check_silk_in_keepout(final_pcb, dru_path=dru_path).violations:
+                target = keepout_residual if graphic.search(violation.items[0]) else text_in_keepout
+                target.append(" / ".join(violation.items))
+
         unresolved = [
             SilkLegalizeUnresolved("silk_over_hole", i, "graphic still overlaps a drilled hole")
             for i in hole_residual
@@ -1798,6 +1829,25 @@ def legalize_silk(
         unresolved += [
             SilkLegalizeUnresolved("reference", f"{p.footprint_ref} (reference)", p.reason)
             for p in ref_result.unplaceable + ref_result.under_component_fallback
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved("silk_in_keepout", i, "graphic still lies in a silk keepout")
+            for i in keepout_residual
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved(
+                "silk_in_keepout", i, "text in a silk keepout is never moved; move or rephrase it"
+            )
+            for i in text_in_keepout
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved(
+                "silk_keepout_rule_unsupported",
+                f"rule {name!r}",
+                "condition not understood (only plain A.intersectsArea('...') terms "
+                "joined by || are read); the rule was not applied",
+            )
+            for name in unsupported_keepout_rules
         ]
         unresolved += [
             SilkLegalizeUnresolved(
@@ -1826,9 +1876,12 @@ def legalize_silk(
             strokes=stroke_result,
             pads=pad_result,
             holes=hole_result,
+            keepouts=keepout_result,
             refs=ref_result,
             hole_residual=hole_residual,
             text_over_hole=text_over_hole,
+            keepout_residual=keepout_residual,
+            text_in_keepout=text_in_keepout,
             unresolved=unresolved,
             dry_run=dry_run,
             rules_covered=rules_covered,

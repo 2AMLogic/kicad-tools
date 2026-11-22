@@ -466,6 +466,22 @@ def _legalize_json(report: SilkLegalizeReport, mfr: str | None) -> dict:
     }
     data.update(_clip_dicts(report.pads))
     data.update(_hole_dicts(report.holes))
+    data["total_keepout_clip_fixed"] = report.keepouts.total_fixed
+    data["keepout_clip_fixes"] = [
+        {
+            "owner": f.owner,
+            "element_type": f.element_type,
+            "layer": f.layer,
+            "action": f.action,
+            "areas": f.areas,
+            "old_area_mm2": round(f.old_area, 6),
+            "new_area_mm2": round(f.new_area, 6),
+            "pieces": f.pieces,
+        }
+        for f in report.keepouts.fixes
+    ]
+    data["keepout_residual"] = report.keepout_residual
+    data["text_in_keepout"] = report.text_in_keepout
     data["reference_placements"] = (
         [p.to_dict() for p in report.refs.placements] if report.refs is not None else []
     )
@@ -497,6 +513,8 @@ def _print_legalize_text(report: SilkLegalizeReport, mfr: str | None) -> None:
             f"  clipped {report.holes.total_fixed} graphic(s) off drilled holes"
             f" (vias untouched, {report.min_hole_clearance_mm}mm clearance)"
         )
+    if report.keepouts.total_fixed:
+        print(f"  clipped {report.keepouts.total_fixed} graphic(s) out of silk keepouts")
     if report.unresolved:
         print("Unresolved (left illegal; no waiver created, kct check still reports them):")
         for u in report.unresolved:
@@ -568,6 +586,12 @@ def _run_legalize(args, pcb_path: Path) -> int:
         # save): fail loud rather than ship silk the fab will remove.
         print(
             f"Error: {len(report.hole_residual)} silk graphic(s) still overlap a drilled hole",
+            file=sys.stderr,
+        )
+        return 1
+    if report.keepout_residual:
+        print(
+            f"Error: {len(report.keepout_residual)} silk graphic(s) still lie in a silk keepout",
             file=sys.stderr,
         )
         return 1

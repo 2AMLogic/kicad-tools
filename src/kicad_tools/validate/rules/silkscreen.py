@@ -2520,6 +2520,17 @@ _SILK_LAYER_SIDES: dict[str, str] = {
 # by :func:`_dru_unquote_ref`.
 _DRU_INTERSECTS_AREA_RE = re.compile(r"\.intersectsArea\(\s*'((?:\\.|[^'\\])*)'\s*\)")
 
+# The only condition shapes whose meaning the resolver preserves: one or more
+# ``A.intersectsArea('...')`` terms joined by ``||``, optionally wrapped in one
+# pair of parentheses.  A negation, a conjunction with another test or a
+# ``B.`` reference changes *where* the rule fires, so such a rule is reported
+# as unsupported instead of being read as a positive area match.
+_DRU_TERM = r"A\.intersectsArea\(\s*'(?:\\.|[^'\\])*'\s*\)"
+_DRU_SUPPORTED_CONDITION_RE = re.compile(
+    rf"\s*(?:{_DRU_TERM}(?:\s*\|\|\s*{_DRU_TERM})*"
+    rf"|\(\s*{_DRU_TERM}(?:\s*\|\|\s*{_DRU_TERM})*\s*\))\s*"
+)
+
 
 @dataclass(frozen=True)
 class SilkKeepoutArea:
@@ -2541,10 +2552,29 @@ class SilkKeepoutArea:
     """
 
     polygon: Any
-    sides: frozenset[str]
-    disallow_text: bool
-    disallow_graphic: bool
+    #: ``(side, kind)`` pairs the area forbids, ``kind`` being ``"text"`` or
+    #: ``"graphic"``.  Pairing is kept per rule: a rule that forbids text on
+    #: the front and another that forbids graphics on the back must not
+    #: forbid all four combinations.
+    forbidden: frozenset[tuple[str, str]]
     label: str
+
+    def forbids(self, side: str, kind: str) -> bool:
+        """Whether silk of ``kind`` on ``side`` is forbidden in this area."""
+        return (side, kind) in self.forbidden
+
+    @property
+    def sides(self) -> frozenset[str]:
+        """Every side the area forbids some kind of silk on."""
+        return frozenset(side for side, _kind in self.forbidden)
+
+    @property
+    def disallow_text(self) -> bool:
+        return any(kind == "text" for _side, kind in self.forbidden)
+
+    @property
+    def disallow_graphic(self) -> bool:
+        return any(kind == "graphic" for _side, kind in self.forbidden)
 
 
 def _dru_unquote_ref(ref: str) -> str:
@@ -2577,6 +2607,7 @@ def _zone_silk_sides(zone: Zone) -> frozenset[str]:
 
 def _silk_keepout_dru_rules(
     dru_path: Path,
+    unsupported: list[str] | None = None,
 ) -> list[tuple[frozenset[str] | None, frozenset[str], list[str]]]:
     """Parse silk-forbidding rules from a ``.kicad_dru`` file.
 
@@ -2587,7 +2618,12 @@ def _silk_keepout_dru_rules(
     area -- and an empty frozenset when the clause names no silk layer (a
     rule scoped to copper cannot forbid printable ink, wherever the area
     sits).  Rules with no ``intersectsArea`` reference are not area-specific
-    and are skipped.  A malformed file warns on stderr and yields nothing,
+    and are skipped.  A rule whose condition is not a plain ``||`` list of
+    ``A.intersectsArea('...')`` terms (a negation, a conjunction with another
+    test, a ``B.`` reference) is skipped as unsupported -- reading the area
+    out of such an expression as a positive match would clip legal silk --
+    and its name is appended to ``unsupported`` when the caller passes a
+    list.  A malformed file warns on stderr and yields nothing,
     mirroring :func:`keepout_rules_for_board`'s tolerance.
     """
     try:
@@ -2622,6 +2658,17 @@ def _silk_keepout_dru_rules(
         refs = [_dru_unquote_ref(m) for m in _DRU_INTERSECTS_AREA_RE.findall(condition_text or "")]
         if not refs:
             continue
+        if _DRU_SUPPORTED_CONDITION_RE.fullmatch(condition_text or "") is None:
+            rule_name = node.get_string(0) or "(unnamed)"
+            if unsupported is not None:
+                unsupported.append(rule_name)
+            print(
+                f"Warning: {dru_path}: rule {rule_name!r} has a condition the silk keepout "
+                "resolver cannot preserve (only plain A.intersectsArea('...') terms "
+                "joined by || are read); the rule was not applied.",
+                file=sys.stderr,
+            )
+            continue
         layer_node = node.find("layer") or node.find("layers")
         if layer_node is None:
             sides: frozenset[str] | None = None
@@ -2637,6 +2684,7 @@ def _silk_keepout_dru_rules(
 def resolve_silk_keepouts(
     pcb: PCB,
     dru_path: str | Path | None = None,
+    unsupported: list[str] | None = None,
 ) -> list[SilkKeepoutArea]:
     """Resolve every rule area where the board forbids silk (Issue #9798).
 
@@ -2645,7 +2693,11 @@ def resolve_silk_keepouts(
     ``graphic``, and resolves their ``intersectsArea`` references (UUID or
     name, wildcards as KiCad resolves them) against ``PCB.rule_areas`` and
     ``PCB.footprint_rule_areas`` -- both carry board-relative polygons.
-    Several rules may address one area; their sides and kinds accumulate.
+    Several rules may address one area; each contributes its own
+    ``(side, kind)`` pairs, so a front-text rule and a back-graphic rule on
+    one area never forbid front graphics or back text.  Rules whose
+    condition the resolver cannot preserve are skipped and named in
+    ``unsupported`` (when a list is passed).
 
     The sides an area forbids silk on come from the rule's own layer clause
     when it carries one -- a clause naming no silk layer (copper, say)
@@ -2672,10 +2724,9 @@ def resolve_silk_keepouts(
         return []
 
     zones = pcb.rule_areas + pcb.footprint_rule_areas
-    # Per zone index: accumulated sides and disallowed kinds.
-    sides_by_zone: dict[int, set[str]] = {}
-    kinds_by_zone: dict[int, set[str]] = {}
-    for rule_sides, kinds, refs in _silk_keepout_dru_rules(dru_path):
+    # Per zone index: the (side, kind) pairs the rules forbid.
+    pairs_by_zone: dict[int, set[tuple[str, str]]] = {}
+    for rule_sides, kinds, refs in _silk_keepout_dru_rules(dru_path, unsupported):
         for ref in refs:
             for index, zone in enumerate(zones):
                 if not _zone_matches_reference(zone, ref):
@@ -2688,10 +2739,11 @@ def resolve_silk_keepouts(
                     resolved = rule_sides
                 if not resolved:
                     continue
-                sides_by_zone.setdefault(index, set()).update(resolved)
-                kinds_by_zone.setdefault(index, set()).update(kinds)
+                pairs_by_zone.setdefault(index, set()).update(
+                    (side, kind) for side in resolved for kind in kinds
+                )
     areas: list[SilkKeepoutArea] = []
-    for index in sorted(sides_by_zone):
+    for index in sorted(pairs_by_zone):
         zone = zones[index]
         polygon = _Polygon(zone.polygon)
         if not polygon.is_valid:
@@ -2704,13 +2756,10 @@ def resolve_silk_keepouts(
         parent = (getattr(zone, "parent_reference", "") or "").strip()
         if parent:
             label = f"{label} in {parent}"
-        zone_kinds = kinds_by_zone[index]
         areas.append(
             SilkKeepoutArea(
                 polygon=polygon,
-                sides=frozenset(sides_by_zone[index]),
-                disallow_text="text" in zone_kinds,
-                disallow_graphic="graphic" in zone_kinds,
+                forbidden=frozenset(pairs_by_zone[index]),
                 label=label,
             )
         )
@@ -2876,11 +2925,7 @@ def check_silk_in_keepout(
     for side, kind, geom, label, _owner, layer, silk_uuid, location in _iter_silk_typed(pcb):
         for idx in tree.query(geom):
             area = areas[int(idx)]
-            if side not in area.sides:
-                continue
-            if kind == "text" and not area.disallow_text:
-                continue
-            if kind == "graphic" and not area.disallow_graphic:
+            if not area.forbids(side, kind):
                 continue
             if not geom.intersects(area.polygon):
                 continue

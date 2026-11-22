@@ -627,3 +627,156 @@ def test_obscured_reference_error_under_jlcpcb(tmp_path: Path) -> None:
     assert under_jlc and all(v.severity == "error" for v in under_jlc)
     under_other = check_silk_ref_obscured(pcb, _other()).violations
     assert under_other and all(v.severity == "warning" for v in under_other)
+
+
+# ---------------------------------------------------------------------------
+# Review regressions (PR #9823): public legalizer, negated conditions, and
+# per-side / per-kind pairing across rules on one area.
+# ---------------------------------------------------------------------------
+
+
+def _back_text(x: float = 130.0, y: float = 130.0) -> str:
+    return (
+        f'  (gr_text "BACKTXT" (at {x} {y}) (layer "B.SilkS") '
+        "(effects (font (size 1 1) (thickness 0.15)) (justify mirror)))\n"
+    )
+
+
+def test_fix_silkscreen_all_clips_keepout_through_public_command(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    board = _board(tmp_path, _SILK_ZONE + _FRONT_LINE)
+    assert check_silk_in_keepout(PCB.load(board)).violations  # the defect is real
+
+    code = fix_silkscreen_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert report["total_fixed"] >= 1
+    assert "silk_in_keepout" in report["rules_covered"]
+    assert report["total_keepout_clip_fixed"] == 1
+    fix = report["keepout_clip_fixes"][0]
+    assert fix["action"] == "trimmed" and fix["pieces"] == 2
+    assert fix["layer"] == "F.SilkS"  # not the literal string "None"
+    assert report["keepout_residual"] == []
+    assert check_silk_in_keepout(PCB.load(board)).violations == []
+    assert len([l for l in _gr_lines(board) if l[0] == "F.SilkS"]) == 2
+
+
+def test_fix_silkscreen_all_surfaces_text_left_in_keepout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    board = _board(tmp_path, _SILK_ZONE + _FRONT_TEXT)
+
+    code = fix_silkscreen_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 0  # text is reported, never silently moved or waived
+    assert len(report["text_in_keepout"]) == 1
+    assert any(u["kind"] == "silk_in_keepout" for u in report["unresolved"])
+
+
+_NEGATED_DRU = """(version 1)
+(rule "everywhere but the area"
+  (layer "F.SilkS")
+  (condition "!A.intersectsArea('no_ink')")
+  (constraint disallow graphic))
+"""
+
+_INSIDE_LINE = (
+    "  (gr_line (start 125 126) (end 129 126) (stroke (width 0.15) (type solid)) "
+    '(layer "F.SilkS") (uuid "inside-line"))\n'
+)
+_OUTSIDE_LINE = (
+    "  (gr_line (start 150 150) (end 154 150) (stroke (width 0.15) (type solid)) "
+    '(layer "F.SilkS") (uuid "outside-line"))\n'
+)
+
+
+def test_negated_condition_is_unsupported_not_a_positive_match(tmp_path: Path) -> None:
+    board = _board(tmp_path, _SILK_ZONE + _INSIDE_LINE + _OUTSIDE_LINE, dru=_NEGATED_DRU)
+    pcb = PCB.load(board)
+
+    unsupported: list[str] = []
+    assert resolve_silk_keepouts(pcb, unsupported=unsupported) == []
+    assert unsupported == ["everywhere but the area"]
+    assert check_silk_in_keepout(pcb).violations == []
+
+    repairer = SilkscreenRepairer(board)
+    assert repairer.repair_keepout_clearance().total_fixed == 0
+    repairer.save()
+    assert {l[3] for l in _gr_lines(board)} == {"inside-line", "outside-line"}
+
+
+def test_legalize_reports_unsupported_keepout_rule(tmp_path: Path) -> None:
+    from kicad_tools.drc.repair_silkscreen import legalize_silk
+
+    board = _board(tmp_path, _SILK_ZONE + _INSIDE_LINE + _OUTSIDE_LINE, dru=_NEGATED_DRU)
+    report = legalize_silk(board, _jlcpcb(), dry_run=True)
+
+    assert [u.kind for u in report.unresolved if "keepout" in u.kind] == [
+        "silk_keepout_rule_unsupported"
+    ]
+    assert report.keepouts.total_fixed == 0
+
+
+_OR_DRU = """(version 1)
+(rule "either area"
+  (layer "F.SilkS")
+  (condition "A.intersectsArea('no_ink') || A.intersectsArea('elsewhere')")
+  (constraint disallow graphic))
+"""
+
+
+def test_or_of_area_references_stays_supported(tmp_path: Path) -> None:
+    board = _board(tmp_path, _SILK_ZONE + _FRONT_LINE, dru=_OR_DRU)
+    unsupported: list[str] = []
+    areas = resolve_silk_keepouts(PCB.load(board), unsupported=unsupported)
+    assert unsupported == [] and len(areas) == 1
+
+
+_TWO_SIDED_ZONE = """  (zone (net 0) (net_name "") (layers "F.SilkS" "B.SilkS") (name "no_ink") (hatch edge 0.5)
+    (priority 0) (uuid "aaaaaaaa-0000-0000-0000-000000000001")
+    (keepout (tracks allowed) (vias allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+    (polygon (pts (xy 120 120) (xy 140 120) (xy 140 140) (xy 120 140))))
+"""
+
+_PAIRED_DRU = """(version 1)
+(rule "front text only"
+  (layer "F.SilkS")
+  (condition "A.intersectsArea('no_ink')")
+  (constraint disallow text))
+(rule "back graphics only"
+  (layer "B.SilkS")
+  (condition "A.intersectsArea('no_ink')")
+  (constraint disallow graphic))
+"""
+
+
+def test_two_rules_on_one_area_keep_side_kind_pairing(tmp_path: Path) -> None:
+    body = _TWO_SIDED_ZONE + _FRONT_LINE + _BACK_LINE + _FRONT_TEXT + _back_text()
+    board = _board(tmp_path, body, dru=_PAIRED_DRU)
+    pcb = PCB.load(board)
+
+    areas = resolve_silk_keepouts(pcb)
+    assert len(areas) == 1
+    assert areas[0].forbidden == frozenset({("F", "text"), ("B", "graphic")})
+
+    flagged = sorted(v.items[0] for v in check_silk_in_keepout(pcb).violations)
+    assert len(flagged) == 2
+    assert any(i.startswith("gr_line {back-line}") for i in flagged)
+    assert any(i.startswith("LEGEND") for i in flagged)
+
+    repairer = SilkscreenRepairer(board)
+    result = repairer.repair_keepout_clearance()
+    repairer.save()
+
+    # Only the back line is clipped; the legal front line is untouched.
+    assert [(f.layer, f.action) for f in result.fixes] == [("B.SilkS", "trimmed")]
+    front = [l for l in _gr_lines(board) if l[0] == "F.SilkS"]
+    assert [(l[1], l[2]) for l in front] == [((110.0, 130.0), (150.0, 130.0))]
+    assert result.text_residual and all("LEGEND" in t for t in result.text_residual)
