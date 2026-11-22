@@ -137,6 +137,9 @@ class BoardConfig:
     # ``(mirror_dir, source_dir)``: every file already in ``mirror_dir`` is
     # refreshed from ``source_dir`` before the archives are rebuilt.
     mirrors: tuple[tuple[str, str], ...] = ()
+    # New release sources to add to the existing design-source.zip inventory
+    # and bind in the receipt. Scratch or untracked files are never discovered.
+    additional_design_sources: tuple[str, ...] = ()
     # Directories searched (relative to the board) when rebuilding
     # ``output/manufacturing.zip``.  Its member names are relative to the first
     # entry that holds them: boards 04-09 ship bare names (``README.txt``), the
@@ -254,6 +257,19 @@ BOARDS: dict[str, BoardConfig] = {
         routed_pcb="output/matchgroup_test_routed.kicad_pcb",
         schematic="output/matchgroup_test.kicad_sch",
         tier="jlcpcb",
+        mirrors=(("output/manufacturing/engineering", "real_design/engineering"),),
+        additional_design_sources=(
+            "real_design/repair_class_clearance_6396.py",
+            "real_design/repair_copper_gap_9091.py",
+            "real_design/repair_byte0_loops_9118.py",
+            "real_design/engineering/retune_8603.py",
+            "real_design/engineering/retune-8603.toml",
+            "real_design/engineering/cleanup_8603.py",
+            "real_design/engineering/cleanup_artwork_8603.py",
+            "real_design/engineering/cleanup_fixture_8603.py",
+            "real_design/engineering/cleanup-8603.json",
+            "real_design/engineering/assembly-fiducials.patch",
+        ),
         drc_targets=(
             "output/drc_report.json",
             "output/readiness/native-drc.json",
@@ -308,8 +324,10 @@ def write_deterministic_zip(archive: Path, members: dict[str, bytes]) -> None:
             out.writestr(info, members[name], compresslevel=9)
 
 
-def rebuild_archive(archive: Path, search: list[Path]) -> list[str]:
-    """Refill ``archive``'s existing members from the first matching current file.
+def rebuild_archive(
+    archive: Path, search: list[Path], *, additional_members: tuple[str, ...] = ()
+) -> list[str]:
+    """Refresh existing and explicitly requested members from current files.
 
     Returns the members whose content changed.  When none did, the archive is
     left byte-for-byte as it is (Issue #7384): its committed bytes may come
@@ -321,7 +339,7 @@ def rebuild_archive(archive: Path, search: list[Path]) -> list[str]:
     with zipfile.ZipFile(archive) as existing:
         old = {name: existing.read(name) for name in existing.namelist() if not name.endswith("/")}
     members: dict[str, bytes] = {}
-    for name in old:
+    for name in sorted(old.keys() | set(additional_members)):
         for base in search:
             candidate = base / name
             if candidate.is_file():
@@ -329,7 +347,7 @@ def rebuild_archive(archive: Path, search: list[Path]) -> list[str]:
                 break
         else:
             raise GateFailure(f"{archive.name}: no current file for member {name}")
-    changed = sorted(name for name in members if members[name] != old[name])
+    changed = sorted(name for name in members if members[name] != old.get(name))
     if changed:
         write_deterministic_zip(archive, members)
     return changed
@@ -787,7 +805,10 @@ def repin_staged(
         log(f"  {mirror}: refreshed from {source}")
 
     for archive, search in cfg.archives:
-        changed = rebuild_archive(staged / archive, [staged / s for s in search])
+        extra = cfg.additional_design_sources if Path(archive).name == "design-source.zip" else ()
+        changed = rebuild_archive(
+            staged / archive, [staged / s for s in search], additional_members=extra
+        )
         log(f"  {archive}: rebuilt; members with new content {changed}")
 
     before = json.loads((mfg / "manifest.json").read_text())
@@ -848,6 +869,8 @@ def repin_staged(
 
     for name in [n for n in report["inputs"] if _is_render_artifact(Path(n))]:
         del report["inputs"][name]
+    for name in cfg.additional_design_sources:
+        report["inputs"].setdefault(name, "")
     for name in report["inputs"]:
         report["inputs"][name] = readiness_input_hash(name, (staged / name).read_bytes())
     report["checked_at"] = checked_at

@@ -48,25 +48,6 @@ EXPECTED_STALE: dict[str, str] = {
         "was last refreshed; the gate-pass rebuild + re-pin (blocked by the "
         "#8399 warning-flood stalemate) re-emits the zip."
     ),
-    "07-matchgroup-test/real_design/validate.py": (
-        "Issue #8399: #9117/#9175/#9198 moved board 07's matched-length and "
-        "off-path gate in real_design/validate.py after the archive was last "
-        "refreshed; refresh_readiness.py refuses to re-emit the zip while "
-        "redundant_copper_* warnings remain, so the last child of #8399 owns "
-        "the re-pin."
-    ),
-    "07-matchgroup-test/real_design/build.py": (
-        "Issue #8604: the #8603 adoption added the declared-fiducials pass "
-        "through to build.py after the archive was last refreshed; the gate "
-        "now passes with zero warnings, and #8604's manufacturing evidence "
-        "refresh re-emits the zip."
-    ),
-    "07-matchgroup-test/real_design/build_source.py": (
-        "Issue #8604: the #8603 adoption added fiducial verification and the "
-        "board-only package exclusion to build_source.py after the archive "
-        "was last refreshed; #8604's manufacturing evidence refresh re-emits "
-        "the zip."
-    ),
 }
 
 

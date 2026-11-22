@@ -1,14 +1,14 @@
 {
   "file": "checked.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "f33256dd8f495a765069d8868dbf9fb964c0b59a6b90cc11fab65539f7a64958",
+  "pcb_sha256": "716d270e82df33950d7bc65c27aecc02cd4932ca9c6112429361a13db21791fb",
   "layers": 6,
   "summary": {
     "errors": 0,
     "warnings": 0,
     "infos": 252,
     "waived": 0,
-    "rules_checked": 94,
+    "rules_checked": 96,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -6847,10 +6847,10 @@
         "warning_clearance_mm": 0.15
       },
       "binding": {
-        "source_sha256": "f33256dd8f495a765069d8868dbf9fb964c0b59a6b90cc11fab65539f7a64958",
+        "source_sha256": "716d270e82df33950d7bc65c27aecc02cd4932ca9c6112429361a13db21791fb",
         "project_sha256": "631b225f4cd529c8a2d8ce94d5e40cbedb01139984528a132430dcc3adae63b7",
         "rules_sha256": "51c411e4dbbb48d70364da6ada60a327b4c61ad718c503b5db7503836919d2b3",
-        "export_profile_sha256": "20bb2bff60cafe1c4e216c0b7b0a04139a881c9aa17d8a770e91906e72daa039"
+        "export_profile_sha256": "c86b9f8dcf97866857452b92e9b035350ad98ac1b517d1b795155460e155be0e"
       },
       "measurements": [
         {
@@ -10551,7 +10551,7 @@
             101.75
           ],
           "clearance_mm": 0.0,
-          "exposed_area_mm2": 0.1455481543128856,
+          "exposed_area_mm2": 0.14554815431288554,
           "relation": "overlap",
           "disposition": "within_own_pad",
           "uncertainty_mm": 0.010004,
@@ -10566,7 +10566,7 @@
           "same_net": true,
           "own_pad_entry": true,
           "owner_ref": "U1/12",
-          "exposed_beyond_owner_mm2": 6.582880505025218e-09,
+          "exposed_beyond_owner_mm2": 6.5828805050252174e-09,
           "beside_owner_excess_mm2": 0.0,
           "owner_run": null,
           "pour_spokes": null,
@@ -16091,7 +16091,7 @@
       "intent_audit": [],
       "geometry_provenance": {
         "export": {
-          "source_sha256": "f33256dd8f495a765069d8868dbf9fb964c0b59a6b90cc11fab65539f7a64958",
+          "source_sha256": "716d270e82df33950d7bc65c27aecc02cd4932ca9c6112429361a13db21791fb",
           "project_sha256": "631b225f4cd529c8a2d8ce94d5e40cbedb01139984528a132430dcc3adae63b7",
           "rules_sha256": "51c411e4dbbb48d70364da6ada60a327b4c61ad718c503b5db7503836919d2b3",
           "native_version": "10.0.6",
@@ -16116,7 +16116,7 @@
             "profile": "macro-free-native-gerber",
             "board_plot_params": false,
             "variables": [],
-            "plot_profile_source_sha256": "f33256dd8f495a765069d8868dbf9fb964c0b59a6b90cc11fab65539f7a64958",
+            "plot_profile_source_sha256": "716d270e82df33950d7bc65c27aecc02cd4932ca9c6112429361a13db21791fb",
             "stdout": "Plotted to '<scratch>/gerbers/checked-F_Cu.gbr'.\nPlotted to '<scratch>/gerbers/checked-B_Cu.gbr'.\nPlotted to '<scratch>/gerbers/checked-F_Mask.gbr'.\nPlotted to '<scratch>/gerbers/checked-B_Mask.gbr'.\n",
             "stderr": ""
           },
@@ -38681,27 +38681,27 @@
           "curve_error_mm_per_construction": 1e-06,
           "layers_wkt": {
             "B.Cu": {
-              "sha256": "6be70879757d992e33ca4b4458729d8ac8106fc80f96d8e91f4bf8abf5e2ab09",
+              "sha256": "37a6203996572e369606abc8510bcc732f3b9bc640cc4efdb2e7e862c9924fab",
               "bytes": 14667135
             },
             "B.Mask": {
-              "sha256": "a74c334d782abaebb61176e5f609e14ccf2bbba4d4fedbb4e3524d1878dfb28b",
+              "sha256": "8179f8b6bc49ac23978697fb9b3c1147bddb01785a9bb59d7b26b4f0d21a1220",
               "bytes": 2901996
             },
             "F.Cu": {
-              "sha256": "3af0f74ec321fe388a99b1cdca19ee17699b357154e32dd7bcc383adfd7ec7be",
-              "bytes": 17992991
+              "sha256": "a1585d12cda4707461a9600752df440e3bdbcb04ecea2c3ce558ab136e0a47c7",
+              "bytes": 17992986
             },
             "F.Mask": {
-              "sha256": "4ff368fa9b3280a01c6675faf6bde8c83400428f075792da2bbbb008fe8325b9",
-              "bytes": 5351355
+              "sha256": "76ff606e4909faf2c4202cb7d176ce3fd7493d2bb5a0fa15e5cd73f781411dd6",
+              "bytes": 5351351
             }
           },
           "gerber_sha256": {
-            "F.Mask": "0a2ad92b6d0c758d444c0bf864429d603f483a969306140df02c87225b699ef0",
-            "B.Mask": "7b4670def832488e4dc29d1960b8ba31d31a1b28658d482b23e630129815eb01",
-            "F.Cu": "16050bbf17fd3fc9c974b55f58884f7737ca8ada4c8a08fcc25947c8b0350a89",
-            "B.Cu": "70c0b4d8b1c6deac3c570222710cd172b060f47acffde1517cf162d11948edd6"
+            "F.Mask": "b5ea019ec9ccdc09140c3acc29d4c83bb94954f81648d570ad511bc666497493",
+            "B.Mask": "9ee6d3caefb4c237dde84457fbc601bd12dc322e0f2b2aed32198724ca791945",
+            "F.Cu": "0895cbc40517b5df90906a9b36aa97f2154067506d262e4f466e86b8edd81820",
+            "B.Cu": "9a5e8f4515269230a50a809a316bf03296f8541c5650c9d2a3fe559fd75e7325"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -38715,7 +38715,7 @@
             "python3"
           ],
           "native_version": "10.0.6",
-          "objects_sha256": "eb2321b827898b27cb61e5683876de6f91f0c4a9a9872ab1057e14ece876d2d2",
+          "objects_sha256": "b59280e4b19616f8e6b328823445a7e8cef91af7456a03fa7ed16d3c7229c105",
           "max_error_mm_per_construction": 0.005,
           "attribution": "native full-board object UUID; no neighbor removal"
         },
@@ -64129,7 +64129,7 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "94 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "96 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",

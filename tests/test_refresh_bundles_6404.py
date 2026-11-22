@@ -227,6 +227,32 @@ def _fake_build(root: Path, dru: str) -> Path:
     return build
 
 
+def test_board07_package_follows_the_checked_board(mod):
+    board = REPO / "boards/07-matchgroup-test"
+    cfg = mod.rr.BOARDS[board.name]
+    routed = board / cfg.routed_pcb
+    mfg = board / "output/manufacturing"
+    manifest = json.loads((mfg / "manifest.json").read_bytes())
+    preflight = {entry["name"]: entry for entry in manifest["preflight"]}
+    assert preflight["pcb_file"]["details"] == "Footprints: 49"
+    assert [preflight[key]["status"] for key in ("drc", "erc")] == ["OK", "OK"]
+    with zipfile.ZipFile(mfg.parent / "manufacturing.zip") as outer:
+        for name in ("kicad_project.zip", "design-source.zip", "bom_jlcpcb.csv", "cpl_jlcpcb.csv"):
+            assert outer.read(name) == (mfg / name).read_bytes()
+        positions = mod.cpl_frame.read_cpl(outer.read("cpl_jlcpcb.csv"))
+        assert len({row["Designator"] for row in positions}) == 43
+        assert mod.cpl_frame.coordinate_mismatches(positions, routed) == []
+    with zipfile.ZipFile(mfg / "kicad_project.zip") as project:
+        for suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+            member = routed.with_suffix(suffix)
+            assert project.read(member.name) == member.read_bytes()
+    receipt = json.loads((mfg.parent / "readiness.json").read_bytes())
+    with zipfile.ZipFile(mfg / "design-source.zip") as source:
+        for name in cfg.additional_design_sources:
+            assert name in receipt["inputs"]
+            assert source.read(name) == (board / name).read_bytes()
+
+
 def test_board07_evidence_refuses_evidence_under_other_rules(mod, tmp_path):
     board, cfg = _staged(tmp_path)
     routed = board / cfg.routed_pcb
