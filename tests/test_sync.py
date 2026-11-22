@@ -3100,18 +3100,23 @@ class TestPadNetMismatches:
         load.return_value.save.assert_called_once_with(str(out))
         assert changes[0].applied
 
-    def test_hidden_power_pin_joins_net_by_name(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("visibility", "joined"),
+        [("(hide yes)", True), ("hide", True), ("(hide no)", False), ("", False)],
+    )
+    def test_hidden_power_pin_joins_net_by_name(self, tmp_path, visibility, joined):
         """Issue #8988: a legacy power symbol (no library ``(power)`` flag)
         names its net through a hidden ``power_in`` pin, as KiCad does, so
-        two such symbols on separate wires are one net."""
-        lib = """
+        two such symbols on separate wires are one net. A visible pin, by
+        ``(hide no)`` or by omission, names no net."""
+        lib = f"""
     (symbol "demo:R" (property "Reference" "R" (at 0 0 0))
       (symbol "R_1_1"
         (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
         (pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))))
     (symbol "demo:VPP" (property "Reference" "#PWR" (at 0 0 0))
       (symbol "VPP_0_0"
-        (pin power_in line (at 0 0 90) (length 0) (hide yes) (name "VPP") (number "1"))))"""
+        (pin power_in line (at 0 0 90) (length 0) {visibility} (name "VPP") (number "1"))))"""
         parts = []
         for i, x in enumerate((100, 120), 1):
             parts.append(
@@ -3139,7 +3144,7 @@ class TestPadNetMismatches:
         rec = Reconciler.__new__(Reconciler)
         rec._schematic_path = sch
         rec._pcb_path = pcb
-        assert rec._find_pad_net_mismatches() == []
+        assert (rec._find_pad_net_mismatches() == []) is joined
 
     def test_strict_assign_failure_is_reported(self):
         rec = self._reconciler()

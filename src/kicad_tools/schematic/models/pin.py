@@ -95,10 +95,12 @@ class Pin:
         number_node = node.get("number")
         number = str(number_node.children[0].value) if number_node else ""
 
-        # ``(hide yes)`` in KiCad 7+, a bare ``hide`` atom before that
-        hidden = node.find_child("hide") is not None or any(
-            c.is_atom and c.value == "hide" for c in node.children
-        )
+        # ``(hide yes)`` / ``(hide no)`` in KiCad 7+, a bare ``hide`` atom before that
+        hide_node = node.find_child("hide")
+        if hide_node is not None:
+            hidden = not hide_node.children or hide_node.get_string(0) == "yes"
+        else:
+            hidden = any(c.is_atom and c.value == "hide" for c in node.children)
 
         return cls(
             name=name,
