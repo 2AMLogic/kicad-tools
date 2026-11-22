@@ -286,10 +286,12 @@ def circle_tessellation_points(
     ]
 
 
-def outline_graphics(root: SExp) -> Iterator[SExp]:
+def outline_graphics(root: SExp, *, expanded_only: bool = False) -> Iterator[SExp]:
     """Yield every board outline graphic in sheet-absolute board coordinates.
 
-    Top-level ``gr_*`` graphics on Edge.Cuts pass through unchanged. Graphics
+    Board-level polygons with arcs expand to their ordered line and arc
+    primitives. Other top-level graphics pass through unchanged unless
+    ``expanded_only`` is set by a consumer that already read them. Graphics
     stored inside a footprint (``fp_line``/``fp_arc``/``fp_circle``/``fp_poly``/
     ``fp_rect``/``fp_curve`` carrying a ``(layer "Edge.Cuts")`` child) are
     re-emitted as equivalent ``gr_*`` nodes transformed into board coordinates,
@@ -320,7 +322,10 @@ def outline_graphics(root: SExp) -> Iterator[SExp]:
     for node in root.iter_children():
         layer = node.find_child("layer")
         if node.tag and node.tag.startswith("gr_") and layer and layer.get_string(0) == "Edge.Cuts":
-            yield node
+            if has_board_polygon_arcs(node):
+                yield from _poly_boundary_nodes(_poly_pieces(node), lambda point: point)
+            elif not expanded_only:
+                yield node
     yield from footprint_outline_graphics(root)
 
 
@@ -435,7 +440,7 @@ def _footprint_outline_nodes(node: SExp, anchor: Point, angle_deg: float) -> lis
         ]
 
     if tag == "fp_poly":
-        pieces = _fp_poly_pieces(node)
+        pieces = _poly_pieces(node)
         if sum(len(points) for _kind, points in pieces) < 3:
             raise ValueError(f"Malformed Edge.Cuts {tag}: missing points")
         if all(kind == "xy" for kind, _points in pieces):
@@ -449,10 +454,10 @@ def _footprint_outline_nodes(node: SExp, anchor: Point, angle_deg: float) -> lis
         # ``(arc ...)`` pieces inside ``(pts ...)`` (Issue #9759): emit the
         # closed boundary as ``gr_line`` edges plus one ``gr_arc`` per arc
         # piece, read through the same piece reader as the filled-region side
-        # (:func:`_fp_poly_chain`).  Arcs stay arcs, so every consumer's
+        # (:func:`outline_polygon_points`).  Arcs stay arcs, so every consumer's
         # certified arc path -- and its ``max_error_mm`` accounting -- applies
         # instead of a tessellation baked in here.
-        return _fp_poly_boundary_nodes(pieces, board)
+        return _poly_boundary_nodes(pieces, board)
 
     if tag == "fp_curve":
         pts = node.find_child("pts")
@@ -577,48 +582,47 @@ def _closed_shape_fill_and_stroke(node: SExp) -> tuple[str, float]:
     return fill, width
 
 
-#: Footprint poly/rect piece: ``("xy", (p,))`` for a vertex or
-#: ``("arc", (start, mid, end))`` for a circular arc, footprint-local.
-_FpPiece = tuple[str, tuple[Point, ...]]
+#: Polygon piece in the graphic's own coordinates: ``("xy", (p,))`` for a vertex or
+#: ``("arc", (start, mid, end))`` for a circular arc.
+_PolyPiece = tuple[str, tuple[Point, ...]]
 
 
-def _fp_poly_pieces(node: SExp) -> list[_FpPiece]:
+def _poly_pieces(node: SExp) -> list[_PolyPiece]:
     """Authored pieces of an ``fp_poly``'s ``(pts ...)``, in authored order.
 
     ``(pts ...)`` may interleave ``(xy x y)`` vertices with
     ``(arc (start) (mid) (end))`` segments (KiCad 9+).  This is the single
     reading of that structure shared by the filled-region reader
-    (:func:`_fp_poly_chain`) and the stroke reader
+    (:func:`outline_polygon_points`) and the stroke reader
     (:func:`_footprint_outline_nodes`, Issue #9759), so the two cannot
     disagree about which arcs a polygon has.
     """
     pts = node.find_child("pts")
-    pieces: list[_FpPiece] = []
+    pieces: list[_PolyPiece] = []
     if pts is None:
         return pieces
     for child in pts.iter_children():
         tag = child.tag or ""
         if tag == "xy":
-            pieces.append(("xy", (_coordinate(child, "fp_poly xy"),)))
+            pieces.append(("xy", (_coordinate(child, f"{node.tag} xy"),)))
         elif tag == "arc":
             pieces.append(("arc", tuple(_point(child, name) for name in ("start", "mid", "end"))))
     return pieces
 
 
-def _fp_poly_chain(node: SExp) -> list[Point]:
-    """Ordered vertex chain of an ``fp_poly``, arcs tessellated in place.
+def outline_polygon_points(node: SExp, max_error: float = DEFAULT_MAX_ERROR_MM) -> list[Point]:
+    """Polygon vertices, following arcs in authored order and leaving closure implicit."""
+    pieces = _poly_pieces(node)
+    if all(kind == "xy" for kind, _points in pieces):
+        return [points[0] for _kind, points in pieces]
 
-    The arc's start joins the previous vertex by a straight edge, then the
-    arc is followed through its authored midpoint to its end, preserving
-    authored order and sweep.
-    """
     chain: list[Point] = []
-    for kind, points in _fp_poly_pieces(node):
-        if kind == "xy":
-            chain.append(points[0])
-        else:
+    for kind, points in _poly_edges(pieces):
+        if kind == "arc":
             start, mid, end = points
-            chain.extend(tessellate_arc(start, mid, end))
+            chain.extend(tessellate_arc(start, mid, end, max_error=max_error)[:-1])
+        else:
+            chain.append(points[0])
     return chain
 
 
@@ -634,20 +638,8 @@ def _coincident(a: Point, b: Point) -> bool:
     return abs(a[0] - b[0]) <= _COINCIDENT_MM and abs(a[1] - b[1]) <= _COINCIDENT_MM
 
 
-def _fp_poly_boundary_nodes(pieces: list[_FpPiece], board: Callable[[Point], Point]) -> list[SExp]:
-    """Board-frame ``gr_line``/``gr_arc`` boundary of an arc-bearing ``fp_poly``.
-
-    The stroke counterpart of :func:`_fp_poly_chain`, over the same pieces
-    and with the same joins: each vertex or arc start is reached from the
-    previous point by a straight edge, each arc runs start -> mid -> end, and
-    the polygon closes back to its first point.  Zero-length edges (an arc
-    whose start repeats the previous vertex, a closing edge onto a shared
-    point) carry no boundary and are omitted.  "Zero-length" means within
-    :data:`_COINCIDENT_MM`, and the omitted edge's two ends are snapped to one
-    point, so the emitted primitives still join exactly (a ring with an
-    ulp-wide gap does not polygonize into a cut-out).
-    """
-    # Footprint-local boundary primitives: ("line", [a, b]) / ("arc", [s, m, e]).
+def _poly_edges(pieces: list[_PolyPiece]) -> list[tuple[str, list[Point]]]:
+    """Closed line/arc boundary in polygon coordinates, with exactly joined endpoints."""
     edges: list[tuple[str, list[Point]]] = []
     first: Point | None = None
     current: Point | None = None
@@ -672,8 +664,13 @@ def _fp_poly_boundary_nodes(pieces: list[_FpPiece], board: Callable[[Point], Poi
         elif edges:
             edges[-1][1][-1] = first  # closing edge omitted: close exactly
 
+    return edges
+
+
+def _poly_boundary_nodes(pieces: list[_PolyPiece], board: Callable[[Point], Point]) -> list[SExp]:
+    """Emit a polygon's line and arc primitives in board coordinates."""
     nodes: list[SExp] = []
-    for edge_kind, edge_points in edges:
+    for edge_kind, edge_points in _poly_edges(pieces):
         if edge_kind == "line":
             nodes.append(
                 SExp.list(
@@ -695,6 +692,12 @@ def _fp_poly_boundary_nodes(pieces: list[_FpPiece], board: Callable[[Point], Poi
                 )
             )
     return nodes
+
+
+def has_board_polygon_arcs(node: SExp) -> bool:
+    """Whether a top-level polygon contains an authored arc."""
+    pts = node.find_child("pts") if node.tag == "gr_poly" else None
+    return pts is not None and pts.find_child("arc") is not None
 
 
 def _fp_rect_corner_arcs(
@@ -806,7 +809,7 @@ def footprint_outline_closed_shapes(root: SExp) -> Iterator[FootprintClosedShape
                     stroke_width=stroke_width,
                 )
             else:  # fp_poly
-                chain = _fp_poly_chain(node)
+                chain = outline_polygon_points(node)
                 if len(chain) < 3:
                     raise ValueError("Malformed Edge.Cuts fp_poly: missing points")
                 yield FootprintClosedShape(
@@ -822,9 +825,9 @@ def outline_node_points(node: SExp) -> list[Point]:
 
     ``gr_line``/``gr_rect`` yield ``[start, end]``; ``gr_arc`` yields
     ``[start, mid, end]`` (legacy centre/angle encodings normalized);
-    ``gr_circle`` yields ``[center, end]``; ``gr_poly``/``gr_curve`` yield the
-    ``(pts (xy ...))`` vertex chain. Raises ``ValueError`` on malformed
-    geometry, matching the module's fail-loud contract.
+    ``gr_circle`` yields ``[center, end]``; ``gr_curve`` yields its control points
+    and ``gr_poly`` its vertices with any authored arcs tessellated. Malformed
+    geometry raises ``ValueError``.
     """
     tag = node.tag or ""
     if tag in ("gr_line", "gr_rect"):
@@ -841,8 +844,13 @@ def outline_node_points(node: SExp) -> list[Point]:
     if tag == "gr_circle":
         return [_point(node, "center"), _point(node, "end")]
     if tag in ("gr_poly", "gr_curve"):
-        pts = node.find_child("pts")
-        chain = [_coordinate(xy, f"{tag} xy") for xy in pts.find_children("xy")] if pts else []
+        if tag == "gr_poly":
+            chain = outline_polygon_points(node)
+        else:
+            pts = node.find_child("pts")
+            chain = (
+                [_coordinate(xy, "gr_curve xy") for xy in pts.find_children("xy")] if pts else []
+            )
         if len(chain) < 3:
             raise ValueError(f"Malformed Edge.Cuts {tag}: missing points")
         return chain
@@ -858,7 +866,7 @@ class OutlineSegments(list[tuple[Point, Point]]):
     true board outline it stands for.
 
     ``max_error_mm`` is ``0.0`` when every Edge.Cuts element was already
-    straight (``gr_line``/``gr_rect``/``gr_poly``), and the largest
+    straight (lines, rectangles and arc-free polygons), and the largest
     per-element tessellation sagitta otherwise. It is a *geometry* bound and
     must never be conflated with a consumer's floating-point comparison
     epsilon.

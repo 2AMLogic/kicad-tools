@@ -132,10 +132,9 @@ BOARD07_GAP_NETS: tuple[str, ...] = ()
 # regeneration carries.  Three independent regenerations (two in the pinned
 # image, one on a worker through KCT_KICAD_DOCKER) reproduced all 19
 # signatures and their per-net counts exactly (54 findings: 52 violation +
-# 2 uncertain, all same-net).  The committed allowance must list exactly
-# these; a net that starts failing or stops failing trips the gate.
+# 2 uncertain, all same-net). Issue #9436 identified all 18 +1V8 findings
+# as solid own-pour connections. A new blocking error on +1V8 trips the gate.
 BOARD07_MASK_NETS = (
-    "+1V8",
     "A0",
     "A2",
     "A3",
