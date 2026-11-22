@@ -15041,16 +15041,15 @@ class Autorouter:
                     else:
                         iter_per_net_cap = derive_iter_per_net_cap(per_net_timeout, iter_remaining)
 
-                    # Issue #8486: the seal each still-unrouted net enters this
-                    # iteration under.  Keys the per-net search back-off below
-                    # and drops every known-failure memo of a net routed since.
+                    # Track only entry-unrouted nets. Sample their seal or
+                    # copper when searched, after any intervening rip-ups.
                     ripup_guard.begin_iteration(
                         iteration,
-                        {
-                            n: self._relief_witness_signature(n, net_routes)
+                        dict.fromkeys(
+                            n
                             for n in net_order
                             if not net_routes.get(n) and len(pads_by_net.get(n, [])) >= 2
-                        },
+                        ),
                     )
 
                     # Issue #2540 + #2803: Snapshot state at top of each iteration
@@ -15840,8 +15839,18 @@ class Autorouter:
                             if fn in stalled_nets or net_routes.get(fn):
                                 continue
                             attempted += 1
-                            routes = self._route_net_negotiated(
-                                fn, recovery_factor, per_net_timeout=iter_per_net_cap
+                            # Issue #8486: through the known-failure wrapper so
+                            # the search counts against (and is capped by) the
+                            # net's failing streak -- on the reported stalled
+                            # board these elevated searches were invisible to
+                            # the back-off and ran at the full cap every
+                            # iteration.
+                            routes = self._route_net_known_failure_aware(
+                                fn,
+                                recovery_factor,
+                                iter_per_net_cap,
+                                ripup_guard,
+                                iteration,
                             )
                             if routes:
                                 net_routes[fn] = routes
@@ -16112,10 +16121,14 @@ class Autorouter:
                                     neg_router.rip_up_nets(routed_nets, net_routes, self.routes)
 
                                     # Route the failed net first (it now has priority)
-                                    routes = self._route_net_negotiated(
+                                    # Issue #8486: through the known-failure
+                                    # wrapper so the search feeds the streak.
+                                    routes = self._route_net_known_failure_aware(
                                         failed_net,
                                         present_factor,
-                                        per_net_timeout=iter_per_net_cap,
+                                        iter_per_net_cap,
+                                        ripup_guard,
+                                        iteration,
                                     )
                                     if routes:
                                         net_routes[failed_net] = routes
@@ -16149,10 +16162,19 @@ class Autorouter:
                                     full_reorder_used_this_iter = True
                                 else:
                                     # Fallback: try regular reroute
-                                    routes = self._route_net_negotiated(
+                                    # Issue #8486: through the known-failure
+                                    # wrapper so this every-iteration search of
+                                    # an entry-unrouted net is capped by (and
+                                    # feeds) its failing streak -- on the
+                                    # reported board the narrow corridor-failed
+                                    # nets landed here each targeted iteration
+                                    # and never saw the back-off.
+                                    routes = self._route_net_known_failure_aware(
                                         failed_net,
                                         present_factor,
-                                        per_net_timeout=iter_per_net_cap,
+                                        iter_per_net_cap,
+                                        ripup_guard,
+                                        iteration,
                                     )
                                     if routes:
                                         net_routes[failed_net] = routes
@@ -18344,7 +18366,9 @@ class Autorouter:
             cands.append(measured)
         return min(cands, key=lambda t: t[0])
 
-    def _relief_witness_signature(self, failed_net: int, net_routes: dict[int, list[Route]]):
+    def _relief_witness_signature(
+        self, failed_net: int, net_routes: dict[int, list[Route]], *, search_geometry: bool = False
+    ):
         """Identity of ``failed_net``'s current seal, or ``None``.
 
         The access-loss witness's ``(stranded pads, closing refs)`` when a
@@ -18366,7 +18390,9 @@ class Autorouter:
             witness = gate.peek_blockers_for(failed_net, rippable)
             if witness is not None:
                 return ("seal", witness.signature())
-            fingerprint = self._failure_neighbourhood_print(failed_net, net_routes)
+            fingerprint = self._failure_neighbourhood_print(
+                failed_net, net_routes, search_geometry=search_geometry
+            )
             return None if fingerprint is None else ("copper", fingerprint)
         except Exception:  # pragma: no cover - diagnostics must never break a rescue
             return None
@@ -18376,24 +18402,31 @@ class Autorouter:
     FAILURE_NEIGHBOURHOOD_MARGIN_MM = 3.0
 
     def _failure_neighbourhood_print(
-        self, failed_net: int, net_routes: dict[int, list[Route]]
-    ) -> tuple | None:
-        """Coarse identity of the foreign copper near ``failed_net`` (#8486).
+        self, failed_net: int, net_routes: dict[int, list[Route]], *, search_geometry: bool = False
+    ) -> tuple | frozenset | None:
+        """Foreign copper used by the rescue and search memos (#8486).
 
-        The set of ``(net, layer)`` pairs of every other net's segments, and
+        Relief rescues use the set of ``(net, layer)`` pairs of foreign segments, and
         ``(net, "via")`` for its vias, whose extent meets the bounding box of
         ``failed_net``'s terminals grown by
         :attr:`FAILURE_NEIGHBOURHOOD_MARGIN_MM`, as a sorted tuple.  Nudging
-        copper of nets already in the window leaves it unchanged (so the memo
+        copper of nets already in the window leaves the relief key unchanged (so the memo
         survives a re-route pass); a foreign net entering or leaving the
         window, or changing layers, changes it.  The memo built on it is
         re-probed every ``KNOWN_FAILURE_REPROBE_EVERY`` iterations regardless.
+        A negotiated search can leave this window to reach the other pad.
+        Include foreign track and via shapes across the board for its budget:
+        removing any original shape can open a detour. The guard checks only
+        shapes present at the first failure, so extra copper can come and go.
+        A new owner can change a shape's clearance without moving its copper.
         ``None`` when the net has no terminals.
         """
         keys = self.nets.get(int(failed_net)) or []
         pads = [self.pads[k] for k in keys if k in self.pads]
         if not pads:
             return None
+        if search_geometry:
+            return self._search_copper_obstacles(failed_net, net_routes)
         m = self.FAILURE_NEIGHBOURHOOD_MARGIN_MM
         x0 = min(p.x - p.width / 2 for p in pads) - m
         x1 = max(p.x + p.width / 2 for p in pads) + m
@@ -18419,6 +18452,52 @@ class Autorouter:
                         items.add((net, "via"))
         return tuple(sorted(items))
 
+    def _search_copper_obstacles(
+        self, failed_net: int, net_routes: dict[int, list[Route]]
+    ) -> frozenset:
+        """Foreign shapes and their clearance rules as seen by this search (#8486)."""
+        from .clearance_resolver import ClearanceQuery
+        from .pairwise_clearance import _norm_net_key
+
+        own_name = self.net_names.get(failed_net, "")
+        own_class = self.net_class_map.get(own_name)
+        partner = own_class.diffpair_partner if own_class else None
+        resolver = self.rules.clearance_resolver(self.net_class_map)
+        zones = [
+            (index, zone)
+            for index, zone in enumerate(self._pairwise_attach_zones_cache or ())
+            if _norm_net_key(own_name) in zone.net_names
+        ]
+        items: set[tuple] = set()
+        for net, routes in net_routes.items():
+            if net == failed_net:
+                continue
+            for route in routes:
+                name = self.net_names.get(net) or route.net_name
+                clearance = resolver.resolve(ClearanceQuery(own_name, name))
+                zone_layers = tuple(
+                    (index, zone.layers_for(name))
+                    for index, zone in zones
+                    if _norm_net_key(name) in zone.net_names
+                )
+                # Same copper may change hands during a re-route. The authored
+                # floor still applies inside a partner or attach-zone exemption,
+                # and an attach zone may waive just the pair-matrix term.
+                clearance_key = (
+                    self.rules.clearance_for_nets(failed_net, net, route.authored_clearance),
+                    clearance.terms if zone_layers else clearance.required_mm,
+                    partner == name,
+                    zone_layers,
+                )
+                for s in route.segments:
+                    start, end = sorted(((s.x1, s.y1), (s.x2, s.y2)))
+                    items.add(("segment", s.layer, start, end, s.width, clearance_key))
+                for v in route.vias:
+                    items.add(
+                        ("via", v.x, v.y, v.diameter, v.drill, v.drilled_layers, clearance_key)
+                    )
+        return frozenset(items)
+
     def _route_net_known_failure_aware(
         self,
         net: int,
@@ -18429,18 +18508,19 @@ class Autorouter:
     ) -> list[Route]:
         """The main reroute's negotiated search, with the #8486 back-off.
 
-        A net that ran to its per-net cap with no path in consecutive
-        iterations under an unchanged entry seal gets a shrinking cap
-        (:meth:`RipupCycleGuard.search_cap`); the outcome is fed back so the
-        streak resets the moment the net routes, fails fast, or its seal
-        changes.  ``cap is None`` (the deterministic arm) is passed through.
+        Sample the live routes immediately before the search. A full reorder
+        can remove a blocker after an earlier attempt in the same iteration.
+        Healthy nets and searches without a wall-clock budget need no witness.
         """
+        if cap is not None and net in guard.entry_signature:
+            guard.entry_signature[net] = self._relief_witness_signature(
+                net, self._build_net_routes_map(), search_geometry=True
+            )
         used = guard.search_cap(net, iteration, cap)
         if used is not None and cap is not None and used < cap:
             print(
                 f"      back-off: {self.net_names.get(net, f'Net_{net}')} search capped at "
-                f"{used:.1f}s (was {cap:.1f}s) -- ran to its cap with no path under "
-                f"an unchanged seal (issue #8486)",
+                f"{used:.1f}s (was {cap:.1f}s) after repeated no-path searches (issue #8486)",
                 flush=True,
             )
         t0 = time.time()
