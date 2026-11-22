@@ -43,9 +43,10 @@ from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid, SetupDeadlineExpired
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer, LayerType
+from .neck_down import band_safe_taper, taper_width_fn, tapered_run_pieces
 from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via, pad_half_extents
-from .quantize import dogleg_points, is_45_aligned
+from .quantize import emits_trace_segment, is_45_aligned, normalize_direction, same_direction
 from .route_via_gap import route_own_via_slit
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
 from .search_radius import search_radius_cells
@@ -6370,7 +6371,10 @@ class Router:
 
         # Issue #972: Inline segment merging - track segment start point and direction
         # to merge collinear cells into single segments
-        seg_start_x, seg_start_y = start_pad.x, start_pad.y
+        # Use the written pad centres before computing taper cuts, as the
+        # native adapter does for every received vertex.
+        seg_start_x, seg_start_y = round(start_pad.x, 4), round(start_pad.y, 4)
+        end_x, end_y = round(end_pad.x, 4), round(end_pad.y, 4)
         current_x, current_y = seg_start_x, seg_start_y
         current_direction: tuple[float, float] | None = None  # (dx_normalized, dy_normalized)
 
@@ -6397,73 +6401,19 @@ class Router:
         _nc = self._get_net_class(start_pad.net_name)
         net_via_diameter = _nc.via_size if _nc else self.rules.via_diameter
 
-        def _normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:
-            """Normalize direction vector, return None if no movement."""
-            length = (dx * dx + dy * dy) ** 0.5
-            if length < 0.001:
-                return None
-            return (dx / length, dy / length)
-
-        def _same_direction(d1: tuple[float, float] | None, d2: tuple[float, float] | None) -> bool:
-            """Check if two directions are the same (within tolerance)."""
-            if d1 is None or d2 is None:
-                return False
-            # Check if normalized directions match (collinear)
-            return abs(d1[0] - d2[0]) < 0.01 and abs(d1[1] - d2[1]) < 0.01
-
-        def _distance(x1: float, y1: float, x2: float, y2: float) -> float:
-            """Calculate Euclidean distance between two points."""
-            return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-
-        def _calculate_segment_width(x1: float, y1: float, x2: float, y2: float) -> float:
-            """Calculate trace width for a segment based on net class and distance to pads.
-
-            Issue #1543: Uses net-class-aware base width (e.g., POWER=0.5mm)
-            instead of the global rules.trace_width.
-
-            Issue #1018: For segments near fine-pitch pads, the width tapers
-            from the base trace width to minimum trace width. The width is
-            determined by the minimum distance from the segment endpoints
-            to either pad that needs neck-down.
-            """
-            # If no neck-down needed at either end, use net-class base width
-            if not start_needs_neckdown and not end_needs_neckdown:
-                return base_trace_width
-
-            # Calculate distances from segment endpoints to pads
-            min_width = base_trace_width
-
-            # Check start pad influence
-            # Issue #3313: pass base_trace_width as the corridor width so
-            # the taper interpolates from the (possibly impedance-driven)
-            # per-net-class width down to ``rules.min_trace_width``
-            # instead of the global ``rules.trace_width``.  Without this
-            # the ``min()`` step below would collapse a 0.387 mm
-            # impedance-resolved width back down to the 0.20 mm global
-            # default whenever the segment was far from any fine-pitch
-            # pad, defeating the impedance solver's contribution.
-            if start_needs_neckdown:
-                dist_to_start_1 = _distance(x1, y1, start_pad.x, start_pad.y)
-                dist_to_start_2 = _distance(x2, y2, start_pad.x, start_pad.y)
-                # Use minimum distance from either endpoint
-                min_dist_start = min(dist_to_start_1, dist_to_start_2)
-                width_from_start = self.rules.get_neck_down_width(
-                    min_dist_start, start_pitch, base_width=base_trace_width
-                )
-                min_width = min(min_width, width_from_start)
-
-            # Check end pad influence
-            if end_needs_neckdown:
-                dist_to_end_1 = _distance(x1, y1, end_pad.x, end_pad.y)
-                dist_to_end_2 = _distance(x2, y2, end_pad.x, end_pad.y)
-                # Use minimum distance from either endpoint
-                min_dist_end = min(dist_to_end_1, dist_to_end_2)
-                width_from_end = self.rules.get_neck_down_width(
-                    min_dist_end, end_pitch, base_width=base_trace_width
-                )
-                min_width = min(min_width, width_from_end)
-
-            return min_width
+        # Issue #9851: the per-piece taper width and the per-run taper
+        # pipeline are the SHARED ``neck_down`` helpers, so this converter
+        # and ``CppPathfinder._convert_result_to_route`` emit identical
+        # segment bytes for the same path (the flags below also gate the
+        # taper-disk centers and the #9019 band guard).
+        segment_width_fn, start_needs_neckdown, end_needs_neckdown = taper_width_fn(
+            self.rules, start_pad, end_pad, start_pitch, end_pitch, base_trace_width
+        )
+        taper_centers: list[tuple[float, float]] = []
+        if start_needs_neckdown:
+            taper_centers.append((start_pad.x, start_pad.y))
+        if end_needs_neckdown:
+            taper_centers.append((end_pad.x, end_pad.y))
 
         def _emit_segment(x1: float, y1: float, x2: float, y2: float, layer_idx: int) -> None:
             """Create and add a segment if there's meaningful distance.
@@ -6473,17 +6423,13 @@ class Router:
             two-leg dogleg instead of a single skewed segment.  Grid-to-
             grid emissions are naturally 45-aligned and pass through as
             one segment.
-            """
-            if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
-                # Issue #1018: Calculate width with neck-down support
-                from .neck_down import band_safe_taper, band_safe_width, taper_points
 
-                centers = []
-                if start_needs_neckdown:
-                    centers.append((start_pad.x, start_pad.y))
-                if end_needs_neckdown:
-                    centers.append((end_pad.x, end_pad.y))
-                dogleg = dogleg_points(x1, y1, x2, y2)
+            Issue #1018/#9019: each dogleg leg is cut inside the taper
+            disks at grid resolution and each piece's width is held out of
+            the own-net pad slit band (see
+            ``neck_down.tapered_run_pieces``).
+            """
+            if emits_trace_segment(x1, y1, x2, y2):
                 # Issue #9019: a taper that only narrows must not open an air
                 # gap beside the net's own pad (the slit band).
                 band_bboxes = (
@@ -6491,27 +6437,19 @@ class Router:
                     if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
                     else None
                 )
-                pieces: list[tuple[tuple[float, float], tuple[float, float], float]] = []
-                for a, b in zip(dogleg, dogleg[1:], strict=False):
-                    points = taper_points(
-                        a,
-                        b,
-                        centers,
-                        self.rules.neck_down_distance,
-                        self.rules.grid_resolution,
-                    )
-                    for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
-                        width = _calculate_segment_width(sx, sy, ex, ey)
-                        if band_bboxes:
-                            width = band_safe_width(
-                                (sx, sy),
-                                (ex, ey),
-                                width,
-                                base_trace_width,
-                                band_bboxes,
-                                band_edge_mm,
-                            )
-                        pieces.append(((sx, sy), (ex, ey), width))
+                pieces = tapered_run_pieces(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    taper_centers,
+                    self.rules.neck_down_distance,
+                    self.rules.grid_resolution,
+                    segment_width_fn,
+                    base_trace_width,
+                    band_bboxes,
+                    band_edge_mm,
+                )
                 # Issue #9019: fuse a taper piece no width can lift out of the
                 # band into one that reaches the pad (U4.1, board 06).
                 pieces = band_safe_taper(pieces, band_bboxes, band_edge_mm)
@@ -6575,14 +6513,16 @@ class Router:
                 seg_start_x, seg_start_y = current_x, current_y
                 current_direction = None
             else:
-                # Check if we've moved
+                # An omitted source stub leaves the next run anchored at the pad centre.
+                if not emits_trace_segment(current_x, current_y, wx, wy):
+                    continue
                 dx = wx - current_x
                 dy = wy - current_y
-                new_direction = _normalize_direction(dx, dy)
+                new_direction = normalize_direction(dx, dy)
 
                 if new_direction is not None:
                     # Direction changed - emit current segment and start new one
-                    if not _same_direction(current_direction, new_direction):
+                    if not same_direction(current_direction, new_direction):
                         _emit_segment(
                             seg_start_x, seg_start_y, current_x, current_y, current_layer_idx
                         )
@@ -6592,36 +6532,31 @@ class Router:
                     current_x, current_y = wx, wy
                     current_layer_idx = layer_idx
 
-        # Emit final segment of the path
-        _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
-
-        # Final segment to end pad (if needed)
-        dx = end_pad.x - current_x
-        dy = end_pad.y - current_y
-        if abs(dx) > 0.01 or abs(dy) > 0.01:
-            # Check if final segment is collinear with last emitted segment
-            if route.segments:
-                last_seg = route.segments[-1]
-                last_dx = last_seg.x2 - last_seg.x1
-                last_dy = last_seg.y2 - last_seg.y1
-                last_dir = _normalize_direction(last_dx, last_dy)
-                end_dir = _normalize_direction(dx, dy)
-
-                if _same_direction(last_dir, end_dir) and is_45_aligned(
-                    end_pad.x - last_seg.x1, end_pad.y - last_seg.y1
-                ):
-                    # Extend last segment to end pad.  Issue #3532: only
-                    # when the EXTENDED segment stays on the 45-degree
-                    # set -- ``_same_direction``'s 0.01 component
-                    # tolerance (~0.6 deg) would otherwise let a slightly
-                    # skewed tail absorb the whole last segment.
-                    # Issue #1018: Recalculate width for the extended segment
-                    route.segments.pop()
-                    _emit_segment(last_seg.x1, last_seg.y1, end_pad.x, end_pad.y, current_layer_idx)
-                else:
-                    _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
+        # Final open run + tail to the end pad (#9851): extend the open run
+        # through the pad centre when the tail is collinear with the run's
+        # last step AND the EXTENDED run stays on the 45-degree set (#3532)
+        # -- the same extend-or-close rule the native adapter applies after
+        # merging its per-cell segments, so the #1018 taper is cut once
+        # over the whole run and both backends emit identical bytes.  (The
+        # pre-#9851 code emitted the run to the last node, popped its last
+        # taper piece and re-tapered from the cut point to the pad, which
+        # no other emitter reproduced.)
+        dx = end_x - current_x
+        dy = end_y - current_y
+        if emits_trace_segment(current_x, current_y, end_x, end_y):
+            end_dir = normalize_direction(dx, dy)
+            if same_direction(current_direction, end_dir) and is_45_aligned(
+                end_x - seg_start_x, end_y - seg_start_y
+            ):
+                # Extend the open run through to the pad centre.
+                current_x, current_y = end_x, end_y
             else:
-                _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
+                _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
+                seg_start_x, seg_start_y = current_x, current_y
+                current_x, current_y = end_x, end_y
+
+        # Emit the final (possibly pad-extended) open run.
+        _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
 
     def _validate_route_clearance(
         self,

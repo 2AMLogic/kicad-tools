@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from . import wall_deadline as _wall_deadline
+from .neck_down import band_safe_taper, taper_width_fn, tapered_run_pieces
 from .pad_landing import pad_landing_geometry
 from .resource_guard import reraise_if_resource_exhaustion
 from .route_via_gap import route_own_via_slit
@@ -182,7 +183,8 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # fab-view checker grades as ``physical_copper_gap``; reject it.
 # v77 (Issue #9273): the native trace search also guards stored same-net vias.
 # v78 (Issue #9273): a leg cannot skim a stored barrel and rely on a later weld.
-_REQUIRED_CPP_BUILD_VERSION = 78
+# v79 (Issue #9851): native pad-stub emission uses the serialized coordinate grid.
+_REQUIRED_CPP_BUILD_VERSION = 79
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -2970,12 +2972,13 @@ class CppPathfinder:
                 partner_net_id,
                 search_intra_pair_clearance if partner_net_id >= 0 else -1.0,
             )
+            # Round to the writer's grid before the binding narrows to float32.
             return self._impl.route_resumable(
-                start.x,
-                start.y,
+                round(start.x, 4),
+                round(start.y, 4),
                 start_layer,
-                end.x,
-                end.y,
+                round(end.x, 4),
+                round(end.y, 4),
                 end_layer,
                 start.net,
                 start_layers or [],
@@ -3679,7 +3682,12 @@ class CppPathfinder:
         """
         from .layers import Layer
         from .primitives import Route, Segment, Via
-        from .quantize import dogleg_points
+        from .quantize import (
+            emits_trace_segment,
+            is_45_aligned,
+            normalize_direction,
+            same_direction,
+        )
 
         route = Route(net=start.net, net_name=start.net_name)
 
@@ -3694,48 +3702,22 @@ class CppPathfinder:
         # Python backend's ``_get_trace_width_for_net`` (Issue #1543).
         base_trace_width = float(net_class.trace_width if net_class else self._rules.trace_width)
 
-        # Issue #1018 parity: the C++ pathfinder has no neck-down support.
-        # Apply the same width taper as the Python backend
-        # (``PathFinder._convert_path_to_route``) as post-processing on the
-        # C++-returned segments.  Semantics match exactly: per-segment
-        # width is the minimum over both pads of
-        # ``rules.get_neck_down_width(min endpoint distance, pitch,
-        # base_width=net-class width)``, gated per pad by
-        # ``rules.should_apply_neck_down``.
+        # Issue #1018 parity / #9851: the C++ pathfinder has no neck-down
+        # support.  Apply the same width taper as the Python backend
+        # (``PathFinder._convert_path_to_route``) via the SHARED
+        # ``neck_down.taper_width_fn`` closure, so a piece's width is
+        # bit-identical whichever backend converted the path.
         pitches = self._get_component_pitches()
-        start_pitch = pitches.get(start.ref) if start.ref else None
-        end_pitch = pitches.get(end.ref) if end.ref else None
-        start_needs_neckdown = self._rules.should_apply_neck_down(start.ref, start_pitch)
-        end_needs_neckdown = self._rules.should_apply_neck_down(end.ref, end_pitch)
-
-        def _segment_width(x1: float, y1: float, x2: float, y2: float) -> float:
-            """Trace width for one segment, with Issue #1018 neck-down taper."""
-            if not start_needs_neckdown and not end_needs_neckdown:
-                return base_trace_width
-            min_width = base_trace_width
-            if start_needs_neckdown:
-                min_dist_start = min(
-                    math.hypot(x1 - start.x, y1 - start.y),
-                    math.hypot(x2 - start.x, y2 - start.y),
-                )
-                min_width = min(
-                    min_width,
-                    self._rules.get_neck_down_width(
-                        min_dist_start, start_pitch, base_width=base_trace_width
-                    ),
-                )
-            if end_needs_neckdown:
-                min_dist_end = min(
-                    math.hypot(x1 - end.x, y1 - end.y),
-                    math.hypot(x2 - end.x, y2 - end.y),
-                )
-                min_width = min(
-                    min_width,
-                    self._rules.get_neck_down_width(
-                        min_dist_end, end_pitch, base_width=base_trace_width
-                    ),
-                )
-            return min_width
+        start_pitch = pitches.get(start.component_key) if start.component_key else None
+        end_pitch = pitches.get(end.component_key) if end.component_key else None
+        segment_width_fn, start_needs_neckdown, end_needs_neckdown = taper_width_fn(
+            self._rules, start, end, start_pitch, end_pitch, base_trace_width
+        )
+        taper_centers: list[tuple[float, float]] = []
+        if start_needs_neckdown:
+            taper_centers.append((start.x, start.y))
+        if end_needs_neckdown:
+            taper_centers.append((end.x, end.y))
 
         # Issue #9019: the own-net pad slit-band edge (0 = guard off) and the
         # net's own SMD pad boxes per layer (built lazily, once per route).
@@ -3764,106 +3746,152 @@ class CppPathfinder:
                 _band_cache[layer_value] = hit
             return hit
 
-        from .neck_down import band_safe_taper, band_safe_width, taper_points
+        def _emit_run(x1: float, y1: float, x2: float, y2: float, layer_idx: int, net: int) -> None:
+            """Emit one straight run as tapered, band-safe segments.
 
-        # Issue #9019: the native adapter hands over one segment per grid
-        # cell, so taper pieces are collected per (layer, net) block of
-        # consecutive segments and fused over the whole block -- the same
-        # straight runs ``PathFinder._convert_path_to_route`` sees after its
-        # inline collinear merge.
-        pending: list[tuple[tuple[float, float], tuple[float, float], float]] = []
-        pending_key: tuple[int, int] | None = None
-
-        def _flush() -> None:
-            if pending_key is None or not pending:
-                return
-            layer_value, net = pending_key
-            band_bboxes = (
-                _own_net_band_bboxes(start.net, layer_value)
-                if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
-                else None
-            )
-            for (sx, sy), (ex, ey), seg_width in band_safe_taper(
-                pending, band_bboxes, band_edge_mm
-            ):
-                route.segments.append(
-                    Segment(
-                        x1=sx,
-                        y1=sy,
-                        x2=ex,
-                        y2=ey,
-                        width=seg_width,
-                        layer=Layer(layer_value),
-                        net=net,
-                        net_name=start.net_name,
-                    )
+            Runs through the SAME shared pipeline as
+            ``PathFinder._convert_path_to_route``'s ``_emit_segment``
+            (``neck_down.tapered_run_pieces``: #3532 dogleg, #1018 taper
+            cuts, per-piece width, #9019 slit-band guard, then
+            ``band_safe_taper`` to fuse pieces no width can lift out of the
+            band), so the two backends emit identical segment bytes for the
+            same path.
+            """
+            if emits_trace_segment(x1, y1, x2, y2):
+                layer_enum_value = self._grid.index_to_layer(layer_idx)
+                # Issue #9019: mirror ``PathFinder._convert_path_to_route`` --
+                # a taper must not open an air gap beside the net's own pad.
+                band_bboxes = (
+                    _own_net_band_bboxes(start.net, layer_enum_value)
+                    if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
+                    else None
                 )
-            pending.clear()
-
-        for cpp_seg in result.segments:
-            layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
-            if pending_key != (layer_enum_value, cpp_seg.net):
-                _flush()
-                pending_key = (layer_enum_value, cpp_seg.net)
-            # Issue #3532: the C++ ``reconstruct_path`` connects the
-            # exact (off-grid) pad centres to the first/last grid cell
-            # with a single straight tail, which is off the 0/45/90/135
-            # angle set in general.  Split such segments into an exact
-            # two-leg dogleg HERE, in float64.
-            #
-            # Issue #9734: the C++ ``Segment`` stores float32 coordinates,
-            # whose ulp at board scale (~1.5e-5 mm at 130 mm) round-trips a
-            # grid-exact 132.855 as 132.854996.  Feeding those to the exact
-            # float64 clearance gates turns pairs DESIGNED to sit exactly at
-            # ``(w_a + w_b) / 2 + trace_clearance`` into sub-clearance by a
-            # few nm, and the finalize seg-seg SHORT gate correctly refuses
-            # to ship them (board 05: VCP's escape stub vs VM's committed
-            # trace at 0.324997 vs 0.325 required -- VCP demoted to
-            # unrouted, exit 3).  Snap every received coordinate back onto
-            # the 4-decimal (0.1 um) lattice -- the same contract
-            # ``RoutingGrid.grid_to_world`` already applies to every
-            # Python-backend cell coordinate -- so both backends emit
-            # identical, lattice-exact geometry.  (The width sibling of
-            # this fix is the #3456 float64 echo.)
-            points = dogleg_points(
-                round(float(cpp_seg.x1), 4),
-                round(float(cpp_seg.y1), 4),
-                round(float(cpp_seg.x2), 4),
-                round(float(cpp_seg.y2), 4),
-            )
-            centers = []
-            if start_needs_neckdown:
-                centers.append((start.x, start.y))
-            if end_needs_neckdown:
-                centers.append((end.x, end.y))
-            # Issue #9019: mirror ``PathFinder._convert_path_to_route`` -- a
-            # taper must not open an air gap beside the net's own pad.
-            band_bboxes = (
-                _own_net_band_bboxes(start.net, layer_enum_value)
-                if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
-                else None
-            )
-            for a, b in zip(points, points[1:], strict=False):
-                piece_points = taper_points(
-                    a,
-                    b,
-                    centers,
+                pieces = tapered_run_pieces(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    taper_centers,
                     self._rules.neck_down_distance,
                     self._rules.grid_resolution,
+                    segment_width_fn,
+                    base_trace_width,
+                    band_bboxes,
+                    band_edge_mm,
                 )
-                for (sx, sy), (ex, ey) in zip(piece_points, piece_points[1:], strict=False):
-                    seg_width = _segment_width(sx, sy, ex, ey)
-                    if band_bboxes:
-                        seg_width = band_safe_width(
-                            (sx, sy),
-                            (ex, ey),
-                            seg_width,
-                            base_trace_width,
-                            band_bboxes,
-                            band_edge_mm,
+                for (sx, sy), (ex, ey), seg_width in band_safe_taper(
+                    pieces, band_bboxes, band_edge_mm
+                ):
+                    if sx == ex and sy == ey:
+                        continue
+                    route.segments.append(
+                        Segment(
+                            x1=sx,
+                            y1=sy,
+                            x2=ex,
+                            y2=ey,
+                            width=seg_width,
+                            layer=Layer(layer_enum_value),
+                            net=net,
+                            net_name=start.net_name,
                         )
-                    pending.append(((sx, sy), (ex, ey), seg_width))
-        _flush()
+                    )
+
+        # Issue #9734: the C++ ``Segment`` stores float32 coordinates,
+        # whose ulp at board scale (~1.5e-5 mm at 130 mm) round-trips a
+        # grid-exact 132.855 as 132.854996.  Feeding those to the exact
+        # float64 clearance gates turns pairs DESIGNED to sit exactly at
+        # ``(w_a + w_b) / 2 + trace_clearance`` into sub-clearance by a
+        # few nm, and the finalize seg-seg SHORT gate correctly refuses
+        # to ship them (board 05: VCP's escape stub vs VM's committed
+        # trace at 0.324997 vs 0.325 required -- VCP demoted to
+        # unrouted, exit 3).  Snap every received coordinate back onto
+        # the 4-decimal (0.1 um) lattice -- the same contract
+        # ``RoutingGrid.grid_to_world`` already applies to every
+        # Python-backend cell coordinate -- so both backends emit
+        # identical, lattice-exact geometry.  (The width sibling of
+        # this fix is the #3456 float64 echo.)
+        raw: list[tuple[float, float, float, float, int, int]] = [
+            (
+                round(float(s.x1), 4),
+                round(float(s.y1), 4),
+                round(float(s.x2), 4),
+                round(float(s.y2), 4),
+                int(s.layer),
+                int(s.net),
+            )
+            for s in result.segments
+        ]
+
+        # Issue #9851: the native ``reconstruct_path`` emits one segment
+        # per grid cell (plus pad-centre tails), while the Python
+        # converter merges collinear steps into straight runs inline
+        # (#972) and tapers each run ONCE.  Tapering per cell put the
+        # #1018 cut positions -- and therefore the per-piece widths -- at
+        # different places in the two backends for identical A* paths.
+        # Regroup the per-cell segments into the same straight runs here:
+        # a run ends at a turn, a reversal, a coordinate gap, or a
+        # via/layer change, exactly where the Python converter's run
+        # formation ends one.
+        end_x = round(end.x, 4)
+        end_y = round(end.y, 4)
+
+        # Keep the native pad tail separate until the grid runs are formed. A
+        # via on the accepted goal cell can leave this tail as the only copper
+        # on its outgoing layer. Older result doubles have no goal coordinates.
+        tail: tuple[float, float, float, float, int, int] | None = None
+        if raw:
+            goal_gx = int(getattr(result, "goal_gx", -1))
+            goal_gy = int(getattr(result, "goal_gy", -1))
+            node_end: tuple[float, float] | None = None
+            if goal_gx >= 0 and goal_gy >= 0 and hasattr(self._grid, "grid_to_world"):
+                node_wx, node_wy = self._grid.grid_to_world(goal_gx, goal_gy)
+                node_end = (round(float(node_wx), 4), round(float(node_wy), 4))
+            last = raw[-1]
+            if node_end is not None:
+                is_tail = (last[2], last[3]) != node_end
+            else:
+                is_tail = (last[2], last[3]) == (end_x, end_y)
+            if is_tail:
+                tail = raw.pop()
+            elif emits_trace_segment(last[2], last[3], end_x, end_y):
+                # Some callers supply only grid segments; close their last run to the pad.
+                tail = (last[2], last[3], end_x, end_y, last[4], last[5])
+
+        # [x1, y1, x2, y2, layer, net, last-step direction]
+        runs: list[list] = []
+        for x1, y1, x2, y2, layer, net in raw:
+            step_dir = normalize_direction(x2 - x1, y2 - y1)
+            if runs:
+                r = runs[-1]
+                if (
+                    r[4] == layer
+                    and r[5] == net
+                    and (r[2], r[3]) == (x1, y1)
+                    and step_dir is not None
+                    and same_direction(r[6], step_dir)
+                ):
+                    r[2], r[3], r[6] = x2, y2, step_dir
+                    continue
+            runs.append([x1, y1, x2, y2, layer, net, step_dir])
+
+        # Extend through the pad only when the tail continues the last run on
+        # the same copper and the extended chord remains axial or 45 degrees.
+        if runs and tail is not None:
+            x1, y1, x2, y2, layer, net = tail
+            last_run = runs[-1]
+            if (
+                (last_run[2], last_run[3], last_run[4], last_run[5]) == (x1, y1, layer, net)
+                and same_direction(last_run[6], normalize_direction(x2 - x1, y2 - y1))
+                and is_45_aligned(x2 - last_run[0], y2 - last_run[1])
+            ):
+                last_run[2], last_run[3] = x2, y2
+                tail = None
+
+        for x1, y1, x2, y2, layer, net, _direction in runs:
+            _emit_run(x1, y1, x2, y2, layer, net)
+        if tail is not None:
+            _emit_run(*tail)
 
         # Issue #3130: Mirror the segment-width override for via diameter.
         # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``
@@ -4166,7 +4194,7 @@ class CppPathfinder:
         width = float(base_width)
         pitches = self._get_component_pitches()
         for pad in (start, end):
-            pitch = pitches.get(pad.ref) if pad.ref else None
+            pitch = pitches.get(pad.component_key) if pad.component_key else None
             if self._rules.should_apply_neck_down(pad.ref, pitch):
                 width = min(
                     width,

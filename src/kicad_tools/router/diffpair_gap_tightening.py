@@ -64,9 +64,7 @@ if TYPE_CHECKING:
 #: post-condition guarantees such a run is only committed in band.
 DEFAULT_CANDIDATE_WINDOW_MM = 1.0
 
-#: Minimum longitudinal overlap (mm) for a parallel P/N run to be squeezed.
-#: Matches ``ImpedanceRule.NECK_DOWN_EXEMPT_LENGTH_MM``: shorter runs are not
-#: judged.
+#: Minimum judged segment length and preferred overlap for a squeeze (mm).
 MIN_RUN_MM = 1.0
 
 #: Shortest squeezed trunk (mm) left between the two jogs.
@@ -361,7 +359,12 @@ class _Run:
 
 
 def _find_runs(
-    p_segs: list[Segment], n_segs: list[Segment], *, min_run_mm: float, max_gap_mm: float
+    p_segs: list[Segment],
+    n_segs: list[Segment],
+    *,
+    min_run_mm: float,
+    max_gap_mm: float,
+    allow_staggered: bool = False,
 ) -> list[_Run]:
     """Parallel, longitudinally overlapping same-layer P/N segment runs."""
     runs: list[_Run] = []
@@ -384,7 +387,12 @@ def _find_runs(
             tc = (sn.x1 - sp.x1) * ux + (sn.y1 - sp.y1) * uy
             td = (sn.x2 - sp.x1) * ux + (sn.y2 - sp.y1) * uy
             t0, t1 = max(0.0, min(tc, td)), min(lp, max(tc, td))
-            if t1 - t0 < min_run_mm:
+            # The impedance rule judges long rails even when only a
+            # trace-width of their lengths overlaps (board 06 USB3_RX2).
+            min_overlap = (
+                min(min_run_mm, max(sp.width, sn.width)) if allow_staggered else min_run_mm
+            )
+            if t1 - t0 < min_overlap:
                 continue
             centre = abs((sn.x1 - sp.x1) * uy - (sn.y1 - sp.y1) * ux)
             gap = centre - sp.width / 2 - sn.width / 2
@@ -416,6 +424,8 @@ def _rail_chain(
     The part of ``seg`` inside the run's overlap ``[t0, t1]`` is translated
     by ``shift_mm`` along ``toward`` (perpendicular to the run), joined to
     the untouched remainder by 45-degree jogs that sit inside the overlap.
+    For a short overlap, use the whole rail for the jogs
+    so the resulting trunk can still be measured by the impedance rule.
     Returns ``(chain, moved)`` -- the full replacement in ``seg``'s own
     orientation and the subset of new (jog / trunk) segments -- or None when
     the overlap is too short for the jogs.
@@ -454,6 +464,8 @@ def _rail_chain(
     qa, qb = sorted(((run.t0 - t_p0) * sign / e_len, (run.t1 - t_p0) * sign / e_len))
     qa = min(max(_r4(qa), 0.0), q_total)
     qb = min(max(_r4(qb), 0.0), q_total)
+    if run.t1 - run.t0 < MIN_RUN_MM:
+        qa, qb = 0.0, q_total
     trunk_q = qb - qa - 2 * advance_q
     if trunk_q * e_len < MIN_TRUNK_MM:
         return None
@@ -836,7 +848,11 @@ def tighten_pair(
             p_merged, p_origins = _merge_fragments(routes, p_id, any_length=True)
             n_merged, n_origins = _merge_fragments(routes, n_id, any_length=True)
             all_runs = _find_runs(
-                p_merged, n_merged, min_run_mm=MIN_RUN_MM, max_gap_mm=candidate_window_mm
+                p_merged,
+                n_merged,
+                min_run_mm=MIN_RUN_MM,
+                max_gap_mm=candidate_window_mm,
+                allow_staggered=True,
             )
         origins = {**p_origins, **n_origins}
         runs = [r for r in all_runs if r.key not in attempted]

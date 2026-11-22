@@ -784,9 +784,8 @@ def test_rows_8_10_route_auto_partial_progress_is_reported(tmp_path: Path):
     written copper for the reachable pads is evidence the engine
     continued past that failure -- asserted per pad by geometry.
     """
-    import re
-
     from kicad_tools.mcp.tools.routing import route_net_auto
+    from kicad_tools.validate.connectivity import ConnectivityValidator
 
     out_path = tmp_path / "out.kicad_pcb"
     result = route_net_auto(
@@ -799,23 +798,9 @@ def test_rows_8_10_route_auto_partial_progress_is_reported(tmp_path: Path):
     assert result["partial"] is True, "copper plus a stranded pad is partial, not failed"
     assert result["pads_connected"] == 3, result.get("error_message")
     assert result["pads_total"] == 4
-    written = out_path.read_text()
-    assert written.count("(segment") >= 10, (
-        "the reachable links' copper is missing from the written board"
-    )
-    # Per-pad: every reachable pad centre is touched by written copper
-    # (pad centres are 0.5 mm inside their 1 mm pads; U1 sits at (10, 10)).
-    endpoints = [
-        (float(m[0]), float(m[1]))
-        for m in re.findall(r"\((?:start|end) (-?[\d.]+) (-?[\d.]+)\)", written)
-    ]
-    assert endpoints, "no segment endpoints parsed from the written board"
-    for name, (px, py) in {"U1.1": (10.0, 2.0), "U1.2": (2.0, 10.0), "U1.3": (18.0, 10.0)}.items():
-        nearest = min(((x - px) ** 2 + (y - py) ** 2) ** 0.5 for x, y in endpoints)
-        assert nearest <= 0.6, (
-            f"pad {name} has no written copper nearer than {nearest:.3f} mm -- "
-            "its link was abandoned after the sealed pad's failure"
-        )
+    partition = ConnectivityValidator(out_path).extract_pad_partition()
+    assert {"U1.1", "U1.2", "U1.3"} in partition
+    assert {"U1.4"} in partition
 
 
 # The sealed pad (U1.4, inside the GND ring) is declared FIRST on purpose
