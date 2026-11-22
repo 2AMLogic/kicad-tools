@@ -726,11 +726,11 @@ def count_errors_via_kct_check(
 # Issue #8858 (board 07 increment, measured 2026-11-18 at main 163f4a175,
 # pinned image kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a
 # 6033f5b9c80aa3b19dd3ec -- the digest CI's KICAD_IMAGE pins, kicad-cli
-# 10.0.6, python 3.12): the seed-42 regeneration of this board carries 54
+# 10.0.6, python 3.12): the seed-42 regeneration of this board carried 54
 # ``mask_to_copper`` errors -- 52 violation + 2 uncertain, all same-net
 # (same-net pass-throughs and entries whose copper sits beside the opening
 # beyond the one clean crossing; the fab-danger shapes from #8914) -- across
-# the 19 net signatures listed below.  Three independent regenerations (two
+# 19 net signatures.  Three independent regenerations (two
 # in this image, one on a worker through KCT_KICAD_DOCKER) reproduced every
 # signature and per-net count exactly; the findings' coordinates shift with
 # the recipe's board origin between environments, but the per-net
@@ -747,7 +747,9 @@ def count_errors_via_kct_check(
 # 8962 -- the gate judges identity, never count; the measured per-net
 # populations (+1V8 18, GND 8, DQ0-DQ7 and DM0 2 each, A0/A7 2 each,
 # A2/A3/A5/MIPI_CLK_P/TMDS_D2_P/TMDS_D2_N 1 each) are recorded in the
-# research note.  Verify with:
+# research note.  Both Board 07 CI artifacts show that the 18 +1V8 pads
+# connect solidly to their own pour and qualify as info under #9436.
+# The 36 remaining errors span the 18 net signatures below.  Verify with:
 #   KCT_KICAD_DOCKER=1 uv run kct check \
 #     boards/07-matchgroup-test/regression-output/matchgroup_test_routed.kicad_pcb \
 #     --mfr jlcpcb --errors-only --format json
@@ -755,7 +757,6 @@ def count_errors_via_kct_check(
 #   native kicad-cli disagree on the pour-stitch via population but agree
 #   on every mask_to_copper finding.)
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("mask_to_copper", "+1V8"): 8858,
     ("mask_to_copper", "A0"): 8858,
     ("mask_to_copper", "A2"): 8858,
     ("mask_to_copper", "A3"): 8858,

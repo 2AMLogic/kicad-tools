@@ -46,6 +46,7 @@ from .layers import Layer, LayerType
 from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via, pad_half_extents
 from .quantize import dogleg_points, is_45_aligned
+from .route_via_gap import route_own_via_slit
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
 from .search_radius import search_radius_cells
 from .via_clearance import (
@@ -6649,6 +6650,8 @@ class Router:
         Returns:
             True if route passes clearance validation, False otherwise.
         """
+        if route_own_via_slit(route, self.rules.same_net_trace_gap_band_edge_mm) is not None:
+            return False
         # Final emitted geometry may differ from the search candidate after
         # reconstruction or legalization. Component holes are physical on
         # every net/layer; copper-sharing exceptions cannot waive their floor.
