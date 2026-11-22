@@ -698,6 +698,141 @@ _OUTSIDE_LINE = (
 
 
 @pytest.mark.parametrize(
+    ("zone_name", "ref", "forbidden"),
+    [
+        ("no_ink", "no_[i]*", False),
+        ("no_[i]nk", "no_[i]*", True),
+        ("no_ink", "aaaaaa*", False),
+        ("no_ink", "aaaaaaaa-0000-0000-0000-000000000001", True),
+        ("no_ink", "AAAAAAAA-0000-0000-0000-000000000001", True),
+        ("bbbbbbbb-0000-0000-0000-000000000002", "bbbbbbbb-0000-0000-0000-000000000002", False),
+        (" no_ink ", "no_ink", False),
+        (" no_ink ", " no_ink ", True),
+        ("", "*", True),
+        ("no_ink", "no_in?", True),
+        ("no_ink", "no_*", True),
+    ],
+)
+def test_area_reference_selects_the_same_printed_ink_for_check_and_repair(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], zone_name: str, ref: str, forbidden: bool
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    zone = _SILK_ZONE.replace("no_ink", zone_name)
+    board = _board(tmp_path, zone + _INSIDE_LINE + _BACK_LINE, _DRU.replace("no_ink", ref))
+    original = board.read_bytes()
+    assert [v.items[0] for v in check_silk_in_keepout(PCB.load(board)).violations] == (
+        ["gr_line {inside-line}"] if forbidden else []
+    )
+    assert fix_silkscreen_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["total_keepout_clip_fixed"] == int(forbidden)
+    assert {line[3] for line in _gr_lines(board)} == (
+        {"back-line"} if forbidden else {"inside-line", "back-line"}
+    )
+    if not forbidden:
+        assert board.read_bytes() == original
+
+
+@pytest.mark.parametrize("layer,kind", [("B.SilkS", "graphic"), ("F.SilkS", "text")])
+def test_unresolved_exemption_preserves_repair_of_other_sides_and_kinds(
+    tmp_path: Path, layer: str, kind: str
+) -> None:
+    rules = _DRU + (
+        f'(rule "conditional exception" (layer "{layer}") (condition "A.Layer == \'{layer}\'") '
+        f"(severity ignore) (constraint disallow {kind}))"
+    )
+    board = _board(tmp_path, _SILK_ZONE + _INSIDE_LINE + _BACK_LINE, rules)
+    repairer = SilkscreenRepairer(board)
+    result = repairer.repair_keepout_clearance()
+    assert [name for name, _ in result.unsupported_rules] == ["conditional exception"]
+    assert [(f.layer, f.action) for f in result.fixes] == [("F.SilkS", "removed")]
+    repairer.save()
+    assert {line[3] for line in _gr_lines(board)} == {"back-line"}
+
+
+@pytest.mark.parametrize(
+    ("type_pattern", "items"),
+    [
+        ("gRa*", {"LEGEND"}),
+        ("t?xT", {"gr_line {inside-line}"}),
+        ("Via", {"gr_line {inside-line}", "LEGEND"}),
+        ("*", set()),
+    ],
+)
+def test_item_type_selects_graphics_and_text_for_both_check_and_repair(
+    tmp_path: Path, type_pattern: str, items: set[str]
+) -> None:
+    rules = _DRU + (
+        f'(rule "typed exception" (condition "A.Type == \'{type_pattern}\'") '
+        "(constraint disallow graphic text) (severity ignore))"
+    )
+    board = _board(tmp_path, _SILK_ZONE + _INSIDE_LINE + _FRONT_TEXT, rules)
+    assert {v.items[0] for v in check_silk_in_keepout(PCB.load(board)).violations} == items
+    preview = SilkscreenRepairer(board).repair_keepout_clearance(dry_run=True)
+    assert preview.unsupported_rules == []
+    assert preview.total_fixed == int("gr_line {inside-line}" in items)
+    assert bool(preview.text_residual) == ("LEGEND" in items)
+
+
+@pytest.mark.parametrize("ignore_last", [False, True])
+@pytest.mark.parametrize(
+    ("condition", "applies", "unknown"),
+    [
+        ("A.Type == 'Graphic'", True, False),
+        ("A.Type == 'Pad'", False, False),
+        ("A.intersectsArea('no_ink') && A.Type == 'Graphic'", True, False),
+        ("A.Type == 'Graphic' && A.intersectsArea('elsewhere')", False, False),
+        ("!A.intersectsArea('elsewhere')", True, True),
+        ("A.Layer == 'F.SilkS'", True, True),
+    ],
+)
+def test_conditional_exemption_keeps_priority_in_the_public_writer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    condition: str,
+    applies: bool,
+    unknown: bool,
+    ignore_last: bool,
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    active = _DRU.removeprefix("(version 1)\n")
+    ignored = (
+        f'(rule "conditional exception" (layer "F.SilkS") (condition "{condition}") '
+        "(severity ignore) (constraint disallow graphic))\n"
+    )
+    rules = "(version 1)\n" + (active + ignored if ignore_last else ignored + active)
+    elsewhere = _SILK_ZONE.replace("no_ink", "elsewhere").replace("000000000001", "000000000002")
+    elsewhere = elsewhere.replace("120", "145").replace("140", "155")
+    board = _board(tmp_path, _SILK_ZONE + elsewhere + _INSIDE_LINE + _BACK_LINE, rules)
+    original = board.read_bytes()
+    forbidden = not (applies and ignore_last)
+    assert [v.items[0] for v in check_silk_in_keepout(PCB.load(board)).violations] == (
+        ["gr_line {inside-line}"] if forbidden else []
+    )
+    preview = SilkscreenRepairer(board).repair_keepout_clearance(dry_run=True)
+    assert preview.total_fixed == int(forbidden)
+    assert [name for name, _ in preview.unsupported_rules] == (
+        ["conditional exception"] if unknown else []
+    )
+    assert board.read_bytes() == original
+    assert fix_silkscreen_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["total_keepout_clip_fixed"] == int(forbidden)
+    unresolved = [u for u in report["unresolved"] if u["kind"] == "silk_keepout_rule_unsupported"]
+    assert [u["item"] for u in unresolved] == (["rule 'conditional exception'"] if unknown else [])
+    if unknown:
+        assert condition in unresolved[0]["detail"]
+        assert "graphic on F.SilkS" in unresolved[0]["detail"]
+    assert {line[3] for line in _gr_lines(board)} == (
+        {"back-line"} if forbidden else {"inside-line", "back-line"}
+    )
+    if not forbidden:
+        assert board.read_bytes() == original
+
+
+@pytest.mark.parametrize(
     ("area_layers", "rule_layer", "forbidden"),
     [
         ('(layer "F.SilkS")', '(layer "F.SilkS")', {"front-line"}),

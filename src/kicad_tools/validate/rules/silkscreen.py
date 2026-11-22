@@ -2519,16 +2519,18 @@ _SILK_LAYER_SIDES: dict[str, str] = {
 # The capture keeps KiCad's one escape (``\'``) and the string is unescaped
 # by :func:`_dru_unquote_ref`.
 _DRU_INTERSECTS_AREA_RE = re.compile(r"\.intersectsArea\(\s*'((?:\\.|[^'\\])*)'\s*\)")
+_DRU_AREA_UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
-# The only condition shapes whose meaning the resolver preserves: one or more
-# ``A.intersectsArea('...')`` terms joined by ``||``, optionally wrapped in one
-# pair of parentheses.  A negation, a conjunction with another test or a
-# ``B.`` reference changes *where* the rule fires, so such a rule is reported
-# as unsupported instead of being read as a positive area match.
+# The area form is one or more positive terms joined by OR.
 _DRU_TERM = r"A\.intersectsArea\(\s*'(?:\\.|[^'\\])*'\s*\)"
 _DRU_SUPPORTED_CONDITION_RE = re.compile(
     rf"\s*(?:{_DRU_TERM}(?:\s*\|\|\s*{_DRU_TERM})*"
     rf"|\(\s*{_DRU_TERM}(?:\s*\|\|\s*{_DRU_TERM})*\s*\))\s*"
+)
+_DRU_TYPED_CONDITION_RE = re.compile(
+    rf"(?:(?P<before>{_DRU_TERM})\s*&&\s*)?"
+    r"A\.Type\s*==\s*'(?P<kind>(?:\\.|[^'\\])*)'"
+    rf"(?:\s*&&\s*(?P<after>{_DRU_TERM}))?"
 )
 
 
@@ -2597,20 +2599,42 @@ def _dru_unquote_ref(ref: str) -> str:
     return ref.replace("\\'", "'")
 
 
+def _kicad_name_matches(name: str, pattern: str) -> bool:
+    """KiCad name patterns support * and ? and leave brackets literal."""
+    return fnmatch.fnmatchcase(name, pattern.replace("[", "[[]"))
+
+
 def _matching_silk_sides(layer_specs: Sequence[str]) -> frozenset[str]:
     """Printable sides selected by the layer names or patterns on a rule or area."""
-    # KiCad layer patterns support * and ? and treat square brackets literally.
-    patterns = [spec.replace("[", "[[]") for spec in layer_specs]
     return frozenset(
         side
         for silk_name, side in _SILK_LAYER_SIDES.items()
-        if any(fnmatch.fnmatchcase(silk_name, pattern) for pattern in patterns)
+        if any(_kicad_name_matches(silk_name, spec) for spec in layer_specs)
     )
+
+
+def _silk_keepout_scope(
+    condition: str | None, kinds: frozenset[str]
+) -> tuple[frozenset[str], list[str]] | None:
+    """Return item kinds and area references, or None for an unresolved condition."""
+    if condition is None:
+        return kinds, []
+    condition = condition.strip()
+    if not _DRU_SUPPORTED_CONDITION_RE.fullmatch(condition):
+        # A single equality alone or ANDed with one positive area term.
+        typed = _DRU_TYPED_CONDITION_RE.fullmatch(condition)
+        if typed is None or (typed["before"] and typed["after"]):
+            return None
+        # KiCad matches Type strings case-insensitively and accepts * and ?.
+        pattern = _dru_unquote_ref(typed["kind"]).casefold()
+        kinds = frozenset(kind for kind in kinds if _kicad_name_matches(kind, pattern))
+        condition = typed["before"] or typed["after"] or ""
+    return kinds, [_dru_unquote_ref(ref) for ref in _DRU_INTERSECTS_AREA_RE.findall(condition)]
 
 
 def _silk_keepout_dru_rules(
     dru_path: Path,
-    unsupported: list[str] | None = None,
+    unsupported: list[tuple[str, str]],
 ) -> list[tuple[frozenset[str] | None, frozenset[str], list[str], bool]]:
     """Parse silk-forbidding rules from a ``.kicad_dru`` file.
 
@@ -2622,14 +2646,10 @@ def _silk_keepout_dru_rules(
     area -- and an empty frozenset when the clause names no silk layer (a
     rule scoped to copper cannot forbid printable ink, wherever the area
     sits). An unconditional exemption applies to every referenced area on
-    its matching sides. Other rules without an area reference are skipped.
-    A rule whose condition is not a plain ``||`` list of
-    ``A.intersectsArea('...')`` terms (a negation, a conjunction with another
-    test, a ``B.`` reference) is skipped as unsupported -- reading the area
-    out of such an expression as a positive match would clip legal silk --
-    and its name is appended to ``unsupported`` when the caller passes a
-    list.  A malformed file warns on stderr and yields nothing,
-    mirroring :func:`keepout_rules_for_board`'s tolerance.
+    its matching sides. Active rules must name an area. An exemption with
+    an unresolved condition could apply anywhere on its sides and item
+    kinds. It protects those items from lower-priority rules and is named
+    in ``unsupported``. A malformed file warns on stderr and yields nothing.
     """
     try:
         from kicad_tools.sexp.parser import parse_string
@@ -2655,13 +2675,9 @@ def _silk_keepout_dru_rules(
             # KiCad rejects the rule file when one rule repeats a constraint
             # type. Clipping from the remaining rules would destroy legal ink.
             rule_name = node.get_string(0) or "(unnamed)"
-            if unsupported is not None:
-                unsupported.append(rule_name)
-            print(
-                f"Warning: {dru_path}: rule {rule_name!r} repeats a constraint type; "
-                "silk keepout rules were not applied.",
-                file=sys.stderr,
-            )
+            detail = "Repeated constraint type. The sidecar cannot establish any silk keepouts."
+            unsupported.append((rule_name, detail))
+            print(f"Warning: {dru_path}: rule {rule_name!r}: {detail}", file=sys.stderr)
             return []
         constraint = by_type.get("disallow")
         if constraint is None:
@@ -2672,32 +2688,39 @@ def _silk_keepout_dru_rules(
         }
         if not kinds:
             continue
+        layer_node = node.find("layer") or node.find("layers")
+        sides: frozenset[str] | None = None
+        if layer_node is not None:
+            layer_names = [str(c.value) for c in layer_node.children if isinstance(c.value, str)]
+            sides = _matching_silk_sides(layer_names)
+            if not sides:
+                continue
         severity = node.find_child("severity")
         ignored = severity is not None and severity.get_string(0) == "ignore"
         condition = node.find("condition")
-        condition_text = condition.get_string(0) if condition is not None else ""
-        refs = [_dru_unquote_ref(m) for m in _DRU_INTERSECTS_AREA_RE.findall(condition_text or "")]
-        if condition is None and ignored:
-            refs = ["*"]
-        elif not refs:
-            continue
-        elif _DRU_SUPPORTED_CONDITION_RE.fullmatch(condition_text or "") is None:
+        condition_text = (condition.get_string(0) or "") if condition is not None else None
+        scope = _silk_keepout_scope(condition_text, kinds)
+        if scope is None:
+            if not ignored and not _DRU_INTERSECTS_AREA_RE.search(condition_text or ""):
+                continue  # This active rule does not specify a silk keepout area.
             rule_name = node.get_string(0) or "(unnamed)"
-            if unsupported is not None:
-                unsupported.append(rule_name)
-            print(
-                f"Warning: {dru_path}: rule {rule_name!r} has a condition the silk keepout "
-                "resolver cannot preserve (only plain A.intersectsArea('...') terms "
-                "joined by || are read); the rule was not applied.",
-                file=sys.stderr,
+            layers = ", ".join(f"{side}.SilkS" for side in sorted(sides or {"F", "B"}))
+            detail = (
+                f"Cannot evaluate {condition_text!r} for {', '.join(sorted(kinds))} on {layers}."
             )
-            continue
-        layer_node = node.find("layer") or node.find("layers")
-        if layer_node is None:
-            sides: frozenset[str] | None = None
+            if ignored:
+                detail += (
+                    " Potentially exempt items retain their ink under lower-priority keepouts."
+                )
+            unsupported.append((rule_name, detail))
+            print(f"Warning: {dru_path}: rule {rule_name!r}: {detail}", file=sys.stderr)
+            if not ignored:
+                continue
+            refs: list[str] = []  # It may exempt any area on these sides for these kinds.
         else:
-            layer_names = [str(c.value) for c in layer_node.children if isinstance(c.value, str)]
-            sides = _matching_silk_sides(layer_names)
+            kinds, refs = scope
+        if not kinds or (not refs and not ignored):
+            continue
         rules.append((sides, kinds, refs, ignored))
     return rules
 
@@ -2706,6 +2729,8 @@ def resolve_silk_keepouts(
     pcb: PCB,
     dru_path: str | Path | None = None,
     unsupported: list[str] | None = None,
+    *,
+    unsupported_details: list[tuple[str, str]] | None = None,
 ) -> list[SilkKeepoutArea]:
     """Resolve every rule area where the board forbids silk (Issue #9798).
 
@@ -2718,9 +2743,10 @@ def resolve_silk_keepouts(
     ``(side, kind)`` pairs, so a front-text rule and a back-graphic rule on
     one area never forbid front graphics or back text. A later ignored
     rule exempts matching items even if its area only partly overlaps
-    the active keepout. Rules whose
-    condition the resolver cannot preserve are skipped and named in
-    ``unsupported`` (when a list is passed).
+    the active keepout. Unresolved exemptions withhold lower-priority
+    findings on their sides and item kinds. Their names are returned in
+    ``unsupported`` when a list is passed. ``unsupported_details`` also
+    records the affected condition, side and item kinds for a repair report.
 
     The area's layer spec supplies the possible silk sides. An explicit
     rule layer restricts them to the sides shared by the rule and the area.
@@ -2748,27 +2774,30 @@ def resolve_silk_keepouts(
     # higher-priority exceptions in effect when each active rule is reached.
     ignored_zones: dict[tuple[str, str], set[int]] = {}
     pairs_by_zone: dict[int, dict[tuple[str, str], frozenset[int]]] = {}
-    for rule_sides, kinds, refs, ignored in reversed(
-        _silk_keepout_dru_rules(dru_path, unsupported)
-    ):
-        for ref in refs:
-            for index, zone in enumerate(zones):
-                if not _zone_matches_reference(zone, ref):
-                    continue
-                resolved = _matching_silk_sides(zone.layers or [zone.layer])
-                if rule_sides is not None:
-                    resolved &= rule_sides
-                for side in resolved:
-                    for kind in kinds:
-                        pair = (side, kind)
-                        if ignored:
-                            ignored_zones.setdefault(pair, set()).add(index)
-                        else:
-                            exceptions = ignored_zones.get(pair, set())
-                            if index not in exceptions:
-                                pairs_by_zone.setdefault(index, {}).setdefault(
-                                    pair, frozenset(exceptions)
-                                )
+    issues: list[tuple[str, str]] = []
+    rules = _silk_keepout_dru_rules(dru_path, issues)
+    if unsupported is not None:
+        unsupported.extend(name for name, _ in issues)
+    if unsupported_details is not None:
+        unsupported_details.extend(issues)
+    for rule_sides, kinds, refs, ignored in reversed(rules):
+        for index, zone in enumerate(zones):
+            if refs and not any(_zone_matches_reference(zone, ref) for ref in refs):
+                continue
+            resolved = _matching_silk_sides(zone.layers or [zone.layer])
+            if rule_sides is not None:
+                resolved &= rule_sides
+            for side in resolved:
+                for kind in kinds:
+                    pair = (side, kind)
+                    if ignored:
+                        ignored_zones.setdefault(pair, set()).add(index)
+                    else:
+                        exceptions = ignored_zones.get(pair, set())
+                        if index not in exceptions:
+                            pairs_by_zone.setdefault(index, {}).setdefault(
+                                pair, frozenset(exceptions)
+                            )
     if not pairs_by_zone:
         return []
     indices = set(pairs_by_zone).union(*ignored_zones.values())
@@ -2785,7 +2814,7 @@ def resolve_silk_keepouts(
         if index not in polygons:
             continue
         uuid = (zone.uuid or "").strip()
-        name = (zone.name or "").strip()
+        name = zone.name or ""
         label = f"{name} [{uuid}]" if name and uuid else (name or uuid)
         parent = (getattr(zone, "parent_reference", "") or "").strip()
         if parent:
@@ -2808,16 +2837,12 @@ def resolve_silk_keepouts(
 def _zone_matches_reference(zone: Zone, ref: str) -> bool:
     """Whether an ``intersectsArea`` reference addresses ``zone``.
 
-    Matches the zone's UUID or its name; references containing wildcards
-    (``*`` / ``?``) match either, as they do in KiCad's DRC expressions.
+    A complete UUID selects by ID even if another area carries that name.
+    All other references match the authored area name with * and ? wildcards.
     """
-    uuid = (zone.uuid or "").strip()
-    name = (zone.name or "").strip()
-    if not ref:
-        return False
-    if "*" in ref or "?" in ref:
-        return any(fnmatch.fnmatchcase(candidate, ref) for candidate in (uuid, name) if candidate)
-    return ref in (uuid, name)
+    if _DRU_AREA_UUID_RE.fullmatch(ref):
+        return ref.lower() == (zone.uuid or "").lower()
+    return bool(ref) and _kicad_name_matches(zone.name or "", ref)
 
 
 def _iter_silk_typed(

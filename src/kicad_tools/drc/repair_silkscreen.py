@@ -89,6 +89,8 @@ class KeepoutClipRepairResult:
     #: with the real rule (empty on a dry run).  Unfixable silk stays an
     #: error; these are its names.
     residual: list[str] = field(default_factory=list)
+    #: Sidecar rules whose conditions could not be evaluated before clipping.
+    unsupported_rules: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def total_fixed(self) -> int:
@@ -869,7 +871,9 @@ class SilkscreenRepairer:
         result = KeepoutClipRepairResult()
         dru_path = self.path.with_suffix(".kicad_dru")
         scratch = PCB(parse_string(serialize_sexp(self.doc)))
-        board_areas = resolve_silk_keepouts(scratch, dru_path=dru_path)
+        board_areas = resolve_silk_keepouts(
+            scratch, dru_path=dru_path, unsupported_details=result.unsupported_rules
+        )
         if not board_areas:
             return result
 
@@ -1719,7 +1723,6 @@ def legalize_silk(
     from kicad_tools.validate.rules.silkscreen import (
         check_silk_hole_overlap,
         check_silk_in_keepout,
-        resolve_silk_keepouts,
     )
 
     pcb_path = Path(pcb)
@@ -1764,7 +1767,6 @@ def legalize_silk(
     # forbids silk in (Issue #9798).  The rules are read from the *original*
     # board's ``.kicad_dru`` -- the staged tree below has no sidecar.
     dru_path = pcb_path.with_suffix(".kicad_dru")
-    unsupported_keepout_rules: list[str] = []
     keepout_result = KeepoutClipRepairResult()
     if dru_path.exists():
         rules_covered.append("silk_in_keepout")
@@ -1804,9 +1806,6 @@ def legalize_silk(
         keepout_residual: list[str] = []
         text_in_keepout: list[str] = []
         if dru_path.exists():
-            resolve_silk_keepouts(
-                final_pcb, dru_path=dru_path, unsupported=unsupported_keepout_rules
-            )
             for violation in check_silk_in_keepout(final_pcb, dru_path=dru_path).violations:
                 target = keepout_residual if graphic.search(violation.items[0]) else text_in_keepout
                 target.append(" / ".join(violation.items))
@@ -1845,10 +1844,9 @@ def legalize_silk(
             SilkLegalizeUnresolved(
                 "silk_keepout_rule_unsupported",
                 f"rule {name!r}",
-                "custom rule could not be applied; check its condition and constraint types "
-                "in the sibling .kicad_dru",
+                detail,
             )
-            for name in unsupported_keepout_rules
+            for name, detail in keepout_result.unsupported_rules
         ]
         unresolved += [
             SilkLegalizeUnresolved(
