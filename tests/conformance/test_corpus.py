@@ -54,17 +54,9 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.router.pathfinder import Router
 from tests.conformance.adapters import BOARD_EDGE, ConsumerAdapter, Verdict
-from tests.conformance.adapters._support import (
-    net_ids,
-    pair_contexts,
-    project_rules,
-    router_grid,
-    router_pad,
-    router_via,
-    single_object_route,
-)
+from tests.conformance.adapters._support import net_ids, pair_contexts, router_pad, router_via
+from tests.conformance.adapters.grid_py import pathfinder_via_pad_control
 from tests.conformance.adapters.kernel import KERNEL_GROUP
 from tests.conformance.adapters.via_clearance import PAD_FORMS, pad_form_is_clear
 from tests.conformance.board import write_case
@@ -1151,18 +1143,13 @@ def test_other_gates_reject_the_trace_retry_pad_via_residuals(
         "any other pair kind here is a different finding"
     )
     contexts = {context.pair: context for context in pair_contexts(case)}
-    nets = net_ids(case)
-    rules = project_rules(case)
     for pair in pairs:
         assert pair.nets in truth, f"{_pair_tag(pair)} is retained but kicad-cli is clean"
         context = contexts[pair]
         assert isinstance(context.existing, PadSpec) and isinstance(context.candidate, ViaSpec)
-        grid = router_grid(case, rules)
-        grid.add_pad(router_pad(context.existing, nets))
-        route = single_object_route(context.candidate, nets)
-        deficit, _ = grid.worst_via_pad_deficit(route.vias[0], route.net)
+        deficit, accepted = pathfinder_via_pad_control(case, context.existing, context.candidate)
         assert deficit > 0, _pair_tag(pair)
-        assert not Router(grid, rules)._validate_route_clearance(route, route.net), _pair_tag(pair)
+        assert not accepted, _pair_tag(pair)
     for group in (1, 13):
         adapter = _ADAPTERS_BY_GROUP[group]
         flagged = {v.nets for v in adapter.verdicts_at_project_rules(case)}

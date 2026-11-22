@@ -18,14 +18,14 @@ Each pair is routed to whichever of the four production consults for that
 shape, so the row is the *union* verdict of the module as a consumer, not one
 arbitrary function's.
 
-**Pad copper is measured through the rect-aware 5-tuple -- the
-``Pathfinder`` caller's form.** ``point_clear_of_copper`` accepts a foreign
+**Pad copper is measured through the rect-aware 5-tuple used by the
+Python pathfinder.** ``point_clear_of_copper`` accepts a foreign
 pad either as a disc-bound ``(x, y, radius, net)`` 4-tuple or as a rect-aware
 ``(x, y, width, height, net)`` 5-tuple (issue #2951), and the production
 callers do not agree on which or on what size to put in it.  This row passes
 the 5-tuple built from ``Pad.width`` / ``Pad.height`` -- the pad's
 *pre-rotation* local size -- which is exactly what
-``Pathfinder.set_via_foreign_context`` (``router/pathfinder.py``) passes.
+``Router.set_via_foreign_context`` (``router/pathfinder.py``) passes.
 It is reproduced faithfully rather than corrected, and the consequence is a
 finding, not an artefact: a rotated pad is scored against an unrotated box,
 which under-reaches toward a via when the pad's long side is turned toward
@@ -189,7 +189,7 @@ class ViaClearanceAdapter:
                     via.y,
                     via.diameter,
                     rules.via_clearance,
-                    # Rect-aware 5-tuple in the ``Pathfinder`` caller's form:
+                    # Rect-aware 5-tuple used by the Python pathfinder:
                     # pre-rotation local size (see the module docstring).
                     other_net_pads=[(pad.x, pad.y, pad.width, pad.height, pad.net)],
                 )
@@ -215,7 +215,7 @@ class ViaClearanceAdapter:
 PAD_FORMS: tuple[tuple[str, str], ...] = (
     (
         "pathfinder_local_box",
-        "`Pathfinder.set_via_foreign_context`: pre-rotation local `width` / `height`",
+        "`Router.set_via_foreign_context`: pre-rotation local `width` / `height`",
     ),
     (
         "escape_rotation_aware_box",

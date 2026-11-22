@@ -50,7 +50,7 @@ from tests.conformance.adapters._support import (
     router_via,
     single_object_route,
 )
-from tests.conformance.generator import CopperCase, PadSpec, SegmentSpec
+from tests.conformance.generator import CopperCase, PadSpec, SegmentSpec, ViaSpec
 
 __all__ = ["GridPyAdapter"]
 
@@ -125,6 +125,20 @@ class GridPyAdapter:
         ok_via, actual_via, _ = grid.validate_via_to_via_clearance(via, exclude_net)
         actual = min(actual_seg, actual_via)
         return (not (ok_seg and ok_via), _finite(actual), grid.rules.via_clearance)
+
+
+def pathfinder_via_pad_control(case: CopperCase, pad: PadSpec, via: ViaSpec) -> tuple[float, bool]:
+    """Return the measured deficit and ordinary Python pathfinder decision at the project rule."""
+    from kicad_tools.router.pathfinder import Router
+
+    nets = net_ids(case)
+    rules = project_rules(case)
+    grid = router_grid(case, rules)
+    grid.add_pad(router_pad(pad, nets))
+    route = single_object_route(via, nets)
+    deficit, _ = grid.worst_via_pad_deficit(route.vias[0], route.net)
+    accepted = Router(grid, rules)._validate_route_clearance(route, route.net)
+    return deficit, accepted
 
 
 def _contexts(case: CopperCase) -> list[PairContext]:
