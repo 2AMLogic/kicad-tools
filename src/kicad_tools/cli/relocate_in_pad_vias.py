@@ -64,7 +64,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
+from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[import-untyped]
 
 from kicad_tools.cli.stitch_cmd import point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
@@ -885,7 +885,7 @@ def _check_raw_copper(
     return None
 
 
-def _pad_copper_extent(pad: Pad, fp: Footprint, shift: tuple[float, float]) -> BaseGeometry | None:
+def _pad_outer_extent(pad: Pad, fp: Footprint, shift: tuple[float, float]) -> BaseGeometry | None:
     """Copper enclosing the pad at its board-frame offset, or None if unprovable."""
     node = getattr(pad, "_sexp_node", None)
     if node is not None and node.find_child("padstack") is not None:
@@ -918,6 +918,31 @@ def _pad_copper_extent(pad: Pad, fp: Footprint, shift: tuple[float, float]) -> B
         return bound.geometry if bound is not None else None
     left, top, right, bottom = pad_absolute_bbox(pad, fp)
     return box(left + shift[0], top + shift[1], right + shift[0], bottom + shift[1])
+
+
+def _pad_copper_extent(
+    pad: Pad,
+    fp: Footprint,
+    shift: tuple[float, float],
+    drill: tuple[Point | LineString, float] | None,
+) -> BaseGeometry | None:
+    """Bound the copper left around an unplated drill, including unassigned lands."""
+    outer = _pad_outer_extent(pad, fp, shift)
+    if outer is None or drill is None or pad.type != "np_thru_hole":
+        return outer
+
+    if pad.shape in {"circle", "oval"} and shift == (0.0, 0.0):
+        # A centered oval/circular pad and drill share axes. Comparing both
+        # dimensions also recognizes a bare slot at any pad rotation.
+        from kicad_tools.router.foreign_copper import _npth_is_bare
+
+        if _npth_is_bare(pad, *pad.size):
+            return Polygon()
+
+    # The outer bound contains the land. Subtracting an inscribed drill
+    # polygon keeps the remaining bound conservative even at a slot end.
+    focus, radius = drill
+    return outer.difference(focus.buffer(radius, quad_segs=64))
 
 
 def _check_hole_to_copper(
@@ -981,10 +1006,10 @@ def _check_hole_to_copper(
             if shift is None or _pad_drill_is_unprovable(pad):
                 return f"hole-to-copper unmodeled drill at pad {label}"
             gap = math.inf
-            if pad.type != "np_thru_hole" or pad.shape == "custom":
-                pad_copper = _pad_copper_extent(pad, fp, shift)
-                if pad_copper is None:
-                    return f"hole-to-copper unproven for {pad.shape} pad {label}"
+            pad_copper = _pad_copper_extent(pad, fp, shift, drill)
+            if pad_copper is None:
+                return f"hole-to-copper unproven for {pad.shape} pad {label}"
+            if not pad_copper.is_empty:
                 center_to_copper = point.distance(pad_copper)
                 if min_copper_clearance is not None:
                     copper_floor = (
@@ -1222,12 +1247,12 @@ def _check_stub_clearance(
             drill = _pad_drill_focus(pad, fp)
             if shift is None or _pad_drill_is_unprovable(pad):
                 return f"hole-to-copper unmodeled drill at pad {label}"
-            copper = _pad_copper_extent(pad, fp, shift)
+            copper = _pad_copper_extent(pad, fp, shift, drill)
             if copper is None:
                 return f"stub clearance unproven for {pad.shape} pad {label}"
             if drill is not None and too_close(drill[0], drill[1], hole_floor):
                 return f"stub hole-to-copper to pad {label}"
-            if too_close(copper, 0.0, required(pad.net_number)):
+            if not copper.is_empty and too_close(copper, 0.0, required(pad.net_number)):
                 return f"stub clearance to pad {label}"
 
     for zone in pcb.zones:

@@ -3675,13 +3675,18 @@ def test_hole_floor_distant_unmodeled_drills_do_not_veto(tmp_path, drill, gate):
     ("diameter", "drill", "pad_y", "legal"),
     [(0.65, 0.30, 11.005, False), (1.0, 0.20, 11.0, False), (0.45, 0.20, 11.0, True)],
 )
-def test_plated_slot_copper_checks_the_whole_landing(tmp_path, diameter, drill, pad_y, legal):
+@pytest.mark.parametrize(
+    ("pad_id", "pad_type", "net"), [("2", "thru_hole", '(net 2 "OTHER")'), ("", "np_thru_hole", "")]
+)
+def test_slot_pad_copper_checks_the_whole_landing(
+    tmp_path, diameter, drill, pad_y, legal, pad_id, pad_type, net
+):
     target_x = 10.5 + drill / 2 + 0.1016
     obstacle = (
         f'(footprint "Test:Slot" (layer "F.Cu") (at {target_x} {pad_y}) '
         '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
-        '(pad "2" thru_hole rect (at 0 0) (size .4 1.2) (drill oval .15 .30) '
-        '(layers "*.Cu" "*.Mask") (net 2 "OTHER")))'
+        f'(pad "{pad_id}" {pad_type} rect (at 0 0) (size .4 1.2) (drill oval .15 .30) '
+        f'(layers "*.Cu" "*.Mask") {net}))'
     )
     board = _hole_floor_board(tmp_path, obstacle=obstacle)
     board.write_text(
@@ -3695,8 +3700,111 @@ def test_plated_slot_copper_checks_the_whole_landing(tmp_path, diameter, drill, 
     if legal:
         assert pcb.vias[0].position == pytest.approx((target_x, 10.0))
     else:
-        assert "clearance" in result.skipped[0].reason and "J9-2" in result.skipped[0].reason
+        assert (
+            "clearance" in result.skipped[0].reason and f"J9-{pad_id}" in result.skipped[0].reason
+        )
         assert pcb.vias[0].position == (10.0, 10.0)
+
+
+@pytest.mark.parametrize(
+    ("shape", "size", "offset", "preferred"),
+    [
+        ("rect", ".4 1.2", "", False),
+        ("oval", ".15 .30", "", True),
+        ("oval", ".15 .30", "(offset 0 -.5)", False),
+    ],
+)
+def test_public_npth_slotted_land_native_roundtrip(tmp_path, shape, size, offset, preferred):
+    import json
+    import shutil
+    import subprocess
+
+    from kicad_tools.cli import main as public_main
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    native = find_kicad_cli()
+    if native is None:
+        pytest.skip("kicad-cli is required to check the written relocation")
+    obstacle = (
+        '(footprint "Test:Slot" (layer "F.Cu") (at 10.7016 11) '
+        '(property "Reference" "J9" (at 0 0) (layer "F.SilkS") hide) '
+        f'(pad "" np_thru_hole {shape} (at 0 0) (size {size}) (drill oval .15 .30 {offset}) '
+        '(layers "*.Cu" "*.Mask")))'
+    )
+    board = _hole_floor_board(tmp_path, obstacle=obstacle)
+    board.write_text(
+        board.read_text()
+        .replace(
+            '(net 0 "")',
+            "(gr_rect (start 0 0) (end 20 20) (stroke (width .1) (type default)) "
+            '(fill none) (layer "Edge.Cuts")) (net 0 "")',
+        )
+        .replace("(size 1 1)", "(size 1 .5)")
+        .replace("(size .45) (drill .2)", "(size 1) (drill .2)")
+    )
+    project = board.with_suffix(".kicad_pro")
+    project.write_text(
+        json.dumps(
+            {
+                "board": {
+                    "design_settings": {
+                        "rules": {
+                            "min_clearance": 0.1016,
+                            "min_hole_clearance": 0.25,
+                            "min_hole_to_hole": 0.25,
+                        }
+                    }
+                },
+                "net_settings": {
+                    "classes": [{"name": "Default", "clearance": 0.1016, "track_width": 0.2}]
+                },
+            }
+        )
+    )
+    output = tmp_path / "moved.kicad_pcb"
+    assert (
+        public_main(
+            [
+                "fix-vias",
+                str(board),
+                "--relocate-in-pad",
+                "--search-alternatives",
+                "--mfr",
+                "jlcpcb",
+                "--layers",
+                "4",
+                "-o",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    shutil.copyfile(project, output.with_suffix(".kicad_pro"))
+    actual = PCB.load(output).vias[0].position
+    assert actual != pytest.approx((10, 10))
+    assert (actual == pytest.approx((10.7016, 10))) is preferred
+    relevant = {"shorting_items", "clearance", "hole_clearance", "hole_to_hole", "holes_co_located"}
+    for path in (board, output):
+        report = path.with_suffix(".native.json")
+        subprocess.run(
+            [
+                native,
+                "pcb",
+                "drc",
+                "--refill-zones",
+                "--format",
+                "json",
+                "-o",
+                str(report),
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        assert not [
+            v for v in json.loads(report.read_text())["violations"] if v["type"] in relevant
+        ]
 
 
 def test_preferred_slide_checks_new_stub_beyond_the_original_track(tmp_path):
