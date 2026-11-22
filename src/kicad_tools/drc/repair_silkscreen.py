@@ -1723,8 +1723,8 @@ def legalize_silk(
     )
     from kicad_tools.silkscreen.place_refs import SilkRefPlacer
     from kicad_tools.validate.rules.silkscreen import (
+        _silk_keepout_findings,
         check_silk_hole_overlap,
-        check_silk_in_keepout,
     )
 
     pcb_path = Path(pcb)
@@ -1808,9 +1808,14 @@ def legalize_silk(
         keepout_residual: list[str] = []
         text_in_keepout: list[str] = []
         if dru_path.exists():
-            for violation in check_silk_in_keepout(final_pcb, dru_path=dru_path).violations:
-                target = keepout_residual if graphic.search(violation.items[0]) else text_in_keepout
-                target.append(" / ".join(violation.items))
+            for kind, violation in _silk_keepout_findings(final_pcb, dru_path):
+                item = " / ".join(violation.items)
+                if kind == "graphic":
+                    keepout_residual.append(
+                        f"{item} (approx. {violation.actual_value:.4f} mm² overlap)"
+                    )
+                else:
+                    text_in_keepout.append(item)
 
         unresolved = [
             SilkLegalizeUnresolved("silk_over_hole", i, "graphic still overlaps a drilled hole")

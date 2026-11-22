@@ -894,38 +894,17 @@ def _text_bbox_geometry(
 def _poly_geometry(
     graphic: FootprintGraphic | BoardGraphic,
     xf: _Transform,
+    filled: bool,
     width: float,
 ) -> _Geometry | None:
-    """Build the printed ink of an ``fp_poly`` / ``gr_poly`` silk polygon.
-
-    Issue #5811.  Both KiCad fill states are modeled, because they print
-    different shapes and the distinction decides whether a pad *inside* the
-    polygon is covered by ink:
-
-    * **filled** (``(fill yes)`` / legacy ``(fill solid)``) -- the interior
-      is printed, so the geometry is the polygon itself, dilated by
-      ``width / 2`` when the outline is also stroked.  A filled marker
-      routinely carries ``(stroke (width 0))``, which is why the zero-width
-      early return that guards lines must NOT apply here: a
-      zero-stroke filled polygon is the single most common pin-1 marker
-      shape and used to be dropped entirely.
-    * **unfilled** -- only the boundary is printed, so the geometry is the
-      closed vertex ring buffered by ``width / 2``.  The interior stays
-      empty, so a pad inside an unfilled outline is correctly NOT reported
-      as covered.
-
-    Vertices are transformed through ``xf`` first, so footprint rotation
-    and board placement apply exactly as they do for line/rect strokes.
-    Returns ``None`` when the polygon prints nothing: fewer than three
-    vertices, or an unfilled outline with no stroke width.
-    """
+    """Printed polygon interior and outline, or the outline alone, in the PCB frame."""
     from shapely.geometry import LineString, Polygon
 
     points = [xf(p) for p in getattr(graphic, "points", ()) or ()]
     if len(points) < 3:
         return None
 
-    if getattr(graphic, "is_filled", False):
+    if filled:
         polygon = Polygon(points)
         if not polygon.is_valid:
             # Self-intersecting outlines (bow-ties, repeated vertices) are
@@ -943,12 +922,13 @@ def _poly_geometry(
 
 def _silk_graphic_style(graphic: FootprintGraphic | BoardGraphic) -> tuple[bool, float]:
     """Resolve fill and printed stroke width for silkscreen intersection and clipping."""
-    if graphic.graphic_type != "rect":
-        return graphic.graphic_type != "line" and graphic.is_filled, max(graphic.stroke_width, 0.0)
     width = max(graphic.stroke_width or graphic.legacy_width or 0.0, 0.0)
-    # KiCad 10.0.6 plots a zero-width rectangle with no fill token as a
-    # solid region. Explicitly unfilled rectangles use a 0.100 mm pen.
-    filled = graphic.is_filled or (not graphic.fill and width == 0)
+    # KiCad 10.0.6 front-silk Gerbers: with no fill token, polygons are
+    # solid at any width. Rectangles and circles are solid only at zero.
+    # A zero-width open path or explicit outline uses a 0.100 mm pen.
+    kind = graphic.graphic_type
+    implicit_fill = not graphic.fill and (kind == "poly" or width == 0)
+    filled = kind in ("rect", "circle", "poly") and (graphic.is_filled or implicit_fill)
     return filled, width if filled or width > 0 else 0.1
 
 
@@ -969,7 +949,8 @@ def _rect_geometry(
 
 def _circle_geometry(
     graphic: FootprintGraphic | BoardGraphic,
-    xf: Callable[[tuple[float, float]], tuple[float, float]],
+    xf: _Transform,
+    filled: bool,
     width: float,
 ) -> _Geometry | None:
     """Printed ink of a silk circle: a disc when filled, else a ring.
@@ -985,14 +966,14 @@ def _circle_geometry(
     cx, cy = graphic.center
     radius = math.hypot(graphic.end[0] - cx, graphic.end[1] - cy)
     centre = Point(xf((cx, cy)))
-    if graphic.is_filled:
-        disc = centre.buffer(radius + max(width, 0.0) / 2.0) if radius > 0 else None
-        if disc is None and width > 0:
-            disc = centre.buffer(width / 2.0)
-        return disc
-    if width <= 0 or radius <= 0:
+    outer_radius = radius + width / 2.0
+    if outer_radius <= 0 or (radius <= 0 and not filled):
         return None
-    return centre.buffer(radius).exterior.buffer(width / 2.0)
+    outer = centre.buffer(outer_radius, quad_segs=64)
+    inner_radius = radius - width / 2.0
+    if filled or inner_radius <= 0:
+        return outer
+    return outer.difference(centre.buffer(inner_radius, quad_segs=64))
 
 
 def _arc_geometry(
@@ -1068,40 +1049,27 @@ def _stroke_geometry(
     graphic: FootprintGraphic | BoardGraphic,
     transform: _Transform | None,
 ) -> _Geometry | None:
-    """Build a shapely polygon for a silk line/rect/poly graphic's printed ink.
-
-    Returns ``None`` for graphic types we do not model (see
-    :func:`iter_unmodeled_silk_graphics`, which keeps those visible as
-    incomplete coverage rather than letting them read as clean) and for
-    primitives that print nothing (a zero-width line or unfilled outline).
-    """
+    """Build the printed ink of a modeled silk graphic in the target frame."""
     from shapely.geometry import LineString
 
     if graphic.graphic_type not in MODELED_SILK_GRAPHIC_TYPES:
         return None
-    width = graphic.stroke_width
+    filled, width = _silk_graphic_style(graphic)
 
     def xf(p: tuple[float, float]) -> tuple[float, float]:
         return transform(p) if transform is not None else p
 
     if graphic.graphic_type == "circle":
-        # Before the zero-width return: a filled disc prints with width 0.
-        return _circle_geometry(graphic, xf, width)
+        return _circle_geometry(graphic, xf, filled, width)
 
     if graphic.graphic_type == "arc":
         return _arc_geometry(graphic, xf, width)
 
     if graphic.graphic_type == "rect":
-        filled, width = _silk_graphic_style(graphic)
         return _rect_geometry(graphic, xf, filled, width)
 
     if graphic.graphic_type == "poly":
-        # Checked BEFORE the zero-width return: a filled polygon prints its
-        # interior even with ``(stroke (width 0))`` (#5811).
-        return _poly_geometry(graphic, xf, width)
-
-    if width <= 0:
-        return None
+        return _poly_geometry(graphic, xf, filled, width)
 
     coords = [xf(graphic.start), xf(graphic.end)]
     if coords[0] == coords[1]:
@@ -1875,7 +1843,7 @@ def _mask_graphic_geometry(
     if gtype == "arc":
         return _mask_arc_geometry(graphic, xf)
     if gtype == "poly":
-        return _poly_geometry(graphic, xf, width)
+        return _poly_geometry(graphic, xf, graphic.is_filled, width)
     if gtype == "line":
         if width <= 0:
             return None
@@ -2978,7 +2946,8 @@ def check_silk_in_keepout(
     forbidden kind whose printed geometry intersects such an area is one
     ``silk_in_keepout`` **error** per (silk item, area) pair -- the board
     author wrote the disallow, so printing there is a defect, whatever the
-    fab profile says.  Where kicad-cli evaluates the same rule it reports
+    fab profile says. ``actual_value`` measures the modeled overlap in mm².
+    Where kicad-cli evaluates the same rule it reports
     ``items_not_allowed`` on the same items; kct keeps its own rule id and
     severity so the native finding and the manufacturer verdict stay
     separable.
@@ -2989,35 +2958,40 @@ def check_silk_in_keepout(
     tree that has no file path of its own).
     """
     del design_rules
+    results = DRCResults(rules_checked=1)
+    for _kind, violation in _silk_keepout_findings(pcb, dru_path):
+        results.add(violation)
+    return results
+
+
+def _silk_keepout_findings(pcb: PCB, dru_path: str | Path | None) -> list[tuple[str, DRCViolation]]:
+    """Pair each finding with its original item kind for check and repair."""
     require_shapely("silk keepout geometry")
     from shapely import STRtree
 
-    results = DRCResults(rules_checked=1)
     areas = resolve_silk_keepouts(pcb, dru_path=dru_path)
     if not areas:
-        return results
+        return []
 
     tree = STRtree([area.polygon for area in areas])
-    found: list[DRCViolation] = []
+    found: list[tuple[str, DRCViolation]] = []
     for side, kind, geom, label, _owner, layer, silk_uuid, location in _iter_silk_typed(pcb):
         for idx in tree.query(geom):
             area = areas[int(idx)]
             if not area.forbids_item(side, kind, geom):
                 continue
             silk_item = f"{label} {{{silk_uuid}}}" if silk_uuid else label
-            found.append(
-                DRCViolation(
-                    rule_id="silk_in_keepout",
-                    severity="error",
-                    message=f"Silkscreen {label} lies in silk keepout {area.label}",
-                    location=location,
-                    layer=layer,
-                    items=(silk_item, area.label),
-                )
+            violation = DRCViolation(
+                rule_id="silk_in_keepout",
+                severity="error",
+                message=f"Silkscreen {label} lies in silk keepout {area.label}",
+                location=location,
+                layer=layer,
+                items=(silk_item, area.label),
+                actual_value=geom.intersection(area.polygon).area,
             )
-    for violation in sorted(found, key=lambda v: (v.items[0], v.items[1])):
-        results.add(violation)
-    return results
+            found.append((kind, violation))
+    return sorted(found, key=lambda hit: hit[1].items)
 
 
 def check_silk_under_body(

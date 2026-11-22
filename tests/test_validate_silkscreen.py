@@ -1647,11 +1647,12 @@ class TestSilkPolygonGeometry:
         assert _stroke_geometry(graphic, None) is not None
 
     @pytest.mark.parametrize("fill", ["no", "none", ""])
-    def test_unfilled_fill_tokens_with_zero_stroke_print_nothing(self, fill):
-        """Unfilled AND unstroked prints no ink at all, so there is no geometry."""
+    def test_zero_width_polygon_prints_solid_or_with_default_pen(self, fill):
+        # KiCad 10.0.6 front-silk Gerber areas for this 6 mm square.
         graphic = _silk_poly(points=_RING_AROUND_ORIGIN, stroke_width=0.0, fill=fill)
-        assert graphic.is_filled is False
-        assert _stroke_geometry(graphic, None) is None
+        assert _stroke_geometry(graphic, None).area == pytest.approx(
+            36.0 if not fill else 2.39785, abs=1e-5
+        )
 
     @pytest.mark.parametrize("points", [[], [(0.0, 0.0)], [(0.0, 0.0), (1.0, 0.0)]])
     def test_degenerate_poly_is_skipped(self, points):

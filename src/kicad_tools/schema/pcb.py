@@ -1556,10 +1556,8 @@ class FootprintGraphic:
 
     ``fill`` carries the raw ``(fill ...)`` token verbatim (``"yes"`` /
     ``"no"`` on KiCad 7+, ``"solid"`` / ``"none"`` on older files, ``""``
-    when the node is absent).  Consumers should read :pyattr:`is_filled`
-    rather than comparing the token themselves -- a filled shape renders
-    its whole interior, which is what silk clearance geometry must model
-    (Issue #5811).
+    when the node is absent). :pyattr:`is_filled` decodes an explicit fill.
+    The default for an absent token depends on the layer and graphic type.
     """
 
     graphic_type: str  # line, rect, circle, arc, poly
@@ -1577,7 +1575,7 @@ class FootprintGraphic:
 
     @property
     def is_filled(self) -> bool:
-        """True when the shape's interior is printed, not just its outline."""
+        """Whether the authored fill token requests a solid interior."""
         return _fill_token_is_filled(self.fill)
 
     @classmethod
@@ -1746,7 +1744,7 @@ class BoardGraphic:
 
     @property
     def is_filled(self) -> bool:
-        """True when the shape's interior is printed, not just its outline."""
+        """Whether the authored fill token requests a solid interior."""
         return _fill_token_is_filled(self.fill)
 
     @property
@@ -1764,10 +1762,9 @@ class BoardGraphic:
           or a legacy ``(width 0)``);
         * with no fill token, a ``gr_poly`` is never filled.
 
-        Only the Edge.Cuts consumers may read this: the silkscreen default
-        for an absent token stays "not filled" (:pyattr:`is_filled`,
-        Issue #5811).  The resolution itself is shared with the
-        footprint-local closed shapes (Issue #9692) through
+        Edge.Cuts and silkscreen have different defaults for omitted fill.
+        The Edge.Cuts resolution is shared with footprint-local closed
+        shapes (Issue #9692) through
         :func:`_resolves_filled_cutout`.
         """
         return _resolves_filled_cutout(
@@ -1792,9 +1789,7 @@ class BoardGraphic:
             if width := stroke.find("width"):
                 graphic.stroke_width = width.get_float(0) or 0.0
         elif width := sexp.find("width"):
-            # Pre-KiCad-6 legacy stroke width; feeds the Edge.Cuts fill
-            # default above (Issue #9690).  Kept out of ``stroke_width`` so
-            # silk consumers keep seeing today's 0.0 for legacy files.
+            # Preserve legacy width separately from the modern stroke token.
             graphic.legacy_width = width.get_float(0)
 
         # Start/end points

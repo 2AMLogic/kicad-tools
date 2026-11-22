@@ -752,6 +752,114 @@ def test_rectangle_ink_in_keepout_and_saved_repair(
     assert board.read_bytes() == saved
 
 
+@pytest.mark.parametrize("footprint", [False, True], ids=["board", "footprint"])
+@pytest.mark.parametrize("has_uuid", [False, True], ids=["no-uuid", "authored-uuid"])
+@pytest.mark.parametrize("width", [0, 0.2])
+def test_public_keepout_preserves_graphic_and_text_kinds(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    footprint: bool,
+    has_uuid: bool,
+    width: float,
+) -> None:
+    from kicad_tools.cli.check_cmd import main as check_main
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_main
+
+    prefix = "fp" if footprint else "gr"
+    offset = 0 if footprint else 110
+
+    def xy(x: int, y: int) -> str:
+        return f"{offset + x} {offset + y}"
+
+    def uuid(n: int) -> str:
+        return f' (uuid "fb5658fe-0010-4050-9000-{n:012d}")' if has_uuid else ""
+
+    # Six printed shapes inside no_ink. Real text named like a board graphic
+    # must still be reported as text even when it has no UUID.
+    shapes = [
+        ("line", f"(start {xy(11, 12)}) (end {xy(14, 12)})", ""),
+        ("arc", f"(start {xy(15, 14)}) (mid {xy(17, 12)}) (end {xy(19, 14)})", ""),
+        ("circle", f"(center {xy(23, 13)}) (end {xy(25, 13)})", ""),
+        ("poly", f"(pts (xy {xy(11, 20)}) (xy {xy(13, 20)}) (xy {xy(13, 22)}))", ""),
+        ("circle", f"(center {xy(17, 21)}) (end {xy(19, 21)})", "(fill no)"),
+        ("poly", f"(pts (xy {xy(22, 20)}) (xy {xy(24, 20)}) (xy {xy(24, 22)}))", "(fill no)"),
+    ]
+    art = "".join(
+        f"({prefix}_{kind} {coords} (stroke (width {width}) (type solid)) {fill} "
+        f'(layer "F.SilkS"){uuid(n)})'
+        for n, (kind, coords, fill) in enumerate(shapes, 31)
+    )
+    text = "fp_text user" if footprint else "gr_text"
+    art += (
+        f'({text} "gr_arc" (at {xy(26, 27)}) (layer "F.SilkS"){uuid(37)} '
+        "(effects (font (size 1.5 1.5) (thickness 0.2))))"
+    )
+    if footprint:
+        art = f'(footprint "Test:Legend" (layer "F.Cu") (at 110 110) {art})'
+    board = _board(tmp_path, _SILK_ZONE + art)
+    args = [str(board), "--mfr", "jlcpcb", "--format", "json"]
+
+    def findings() -> list[dict]:
+        assert check_main([*args, "--only", "silkscreen"]) == 2
+        result = json.loads(capsys.readouterr().out)
+        return [v for v in result["violations"] if v["rule_id"] == "silk_in_keepout"]
+
+    assert len(findings()) == 7
+    assert fix_main([*args, "--all"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert [fix["action"] for fix in report["keepout_clip_fixes"]] == ["removed"] * 3
+    graphics, texts = report["keepout_residual"], report["text_in_keepout"]
+    assert len(graphics) == 3 and len(texts) == 1
+    assert all(_AREA_LABEL in item and "mm² overlap" in item for item in graphics)
+    if has_uuid:
+        assert all(any(f"{n:012d}" in item for item in graphics) for n in (32, 33, 35))
+        assert f"{37:012d}" in texts[0]
+    assert len(report["unresolved"]) == 4
+    assert len(findings()) == 4
+    saved = board.read_bytes()
+    assert fix_main([*args, "--all"]) == 1
+    assert json.loads(capsys.readouterr().out)["total_fixed"] == 0
+    assert board.read_bytes() == saved
+
+
+@pytest.mark.parametrize("shape", ["poly", "circle"])
+@pytest.mark.parametrize("width", [0, 0.2])
+@pytest.mark.parametrize("fill", ["", "(fill no)"], ids=["omitted", "outline"])
+def test_keepout_inside_printed_solid_or_outside_its_outline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], shape: str, width: float, fill: str
+) -> None:
+    from kicad_tools.cli.fix_silkscreen_cmd import main as fix_main
+
+    coords = (
+        "(pts (xy 115 115) (xy 145 115) (xy 145 145) (xy 115 145))"
+        if shape == "poly"
+        else "(center 130 130) (end 146 130)"
+    )
+    art = (
+        f"(gr_{shape} {coords} (stroke (width {width}) (type solid)) "
+        f'{fill} (layer "F.SilkS") (uuid "fb5658fe-0010-4050-9000-000000000001"))'
+    )
+    board = _board(tmp_path, _SILK_ZONE + art)
+    original = board.read_bytes()
+    # Pinned KiCad prints an omitted-fill polygon solid even at positive
+    # width. Positive-width circles and explicitly unfilled shapes are outlines.
+    solid = not fill and (shape == "poly" or width == 0)
+    findings = check_silk_in_keepout(PCB.load(board)).violations
+    assert len(findings) == int(solid)
+    if solid:
+        assert findings[0].actual_value == pytest.approx(400.0)
+    unresolved = solid and shape == "circle"
+    assert fix_main([str(board), "--all", "--mfr", "jlcpcb", "--format", "json"]) == int(unresolved)
+    result = json.loads(capsys.readouterr().out)
+    if solid and shape == "poly":
+        (fix,) = result["keepout_clip_fixes"]
+        assert fix["action"] == "trimmed"
+        assert fix["new_area_mm2"] == pytest.approx(fix["old_area_mm2"] - 400, abs=0.1)
+    else:
+        assert board.read_bytes() == original
+    assert len(check_silk_in_keepout(PCB.load(board)).violations) == int(unresolved)
+
+
 def test_fix_silkscreen_all_surfaces_text_left_in_keepout(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
