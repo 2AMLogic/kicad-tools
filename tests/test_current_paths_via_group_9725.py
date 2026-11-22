@@ -143,6 +143,79 @@ def test_offset_inner_layer_track_touching_a_ring_rejects_group():
     assert resolve_current_path(pcb, _spec()).status == "ambiguous"
 
 
+@pytest.mark.parametrize(
+    "bar_width,y,offset,expected",
+    [
+        (3, 41.2, None, "resolved"),
+        (3, 41.2, 0, "ambiguous"),
+        (3, 41.2, 1.25, "ambiguous"),
+        (3, 41.2, 1.4, "ambiguous"),
+        (3, 41.2, 1.61, "ambiguous"),
+        (3, 41.2, 1.85, "resolved"),
+        # A narrow bar leaves the barrel ring exposed on the outer layer.
+        (0.4, 42.4, 1.2, "ambiguous"),
+        (0.4, 42.4, 1.45, "resolved"),
+    ],
+)
+@pytest.mark.parametrize("branch,lane", [("F.Cu", "B.Cu"), ("B.Cu", "F.Cu")])
+def test_cli_via_group_with_outer_bar_bypass(
+    tmp_path, capsys, bar_width, y, offset, expected, branch, lane
+):
+    import argparse
+    import json
+
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from tests.test_pcb_reinforce import _write_single_pad_footprint_lib
+
+    pcb = PCB.create(width=220, height=100, layers=4, center=False)
+    footprint = _write_single_pad_footprint_lib(tmp_path)
+    for ref, x, pad_y in [("J1", 30, 10), ("J2", 200, 44.8)]:
+        pcb.add_footprint_from_file(footprint, ref, x, pad_y)
+        pcb.assign_net_to_footprint_pad(ref, "1", "P")
+    for barrel_y in (40, 42.4, 44.8):
+        pcb.add_via(30, barrel_y, size=PAD, drill=DRILL, net="P")
+    pcb.add_trace((30, 10), (30, 44.8), width=bar_width, layer=branch, net="P")
+    pcb.add_trace((30, 40), (30, 44.8), width=3, layer=lane, net="P")
+    pcb.add_trace((30, 44.8), (200, 44.8), width=4, layer=lane, net="P")
+    if offset is not None:
+        # Some current can bypass the row through this fourth via if the
+        # narrow trace reaches the edge of a bar or ring.
+        pcb.add_trace((30 + offset, y), (60, y), width=0.4, layer=branch, net="P")
+        pcb.add_via(60, y, size=1, drill=0.5, net="P")
+        pcb.add_trace((60, y), (60, 44.8), width=0.4, layer=lane, net="P")
+    board = tmp_path / "group.kicad_pcb"
+    pcb.save(board)
+    specs = [_spec(), replace(_spec(source="J2", sink="J1"), name="reverse")]
+    sidecar = tmp_path / "current_paths.json"
+    sidecar.write_text(json.dumps({"paths": [spec.to_dict() for spec in specs]}))
+    args = argparse.Namespace(
+        pcb_command="current-paths-audit", pcb=str(board), current_paths=str(sidecar), format="json"
+    )
+    assert run_pcb_command(args) == 0
+    results = json.loads(capsys.readouterr().out)["resolutions"]
+    assert len(results) == 2
+    for result in results:
+        assert result["status"] == expected
+        assert [c["via_count"] for c in result["layer_changes"]] == (
+            [3] if expected == "resolved" else []
+        )
+        if expected == "ambiguous":
+            assert len(result["witness"]["loop_branches"]) == 2
+    errors = PathAmpacityRule(specs).check(pcb, _design_rules_2oz()).violations
+    assert sum(v.severity == "error" and "is ambiguous" in v.message for v in errors) == (
+        2 if expected == "ambiguous" else 0
+    )
+
+
+def test_group_with_oblique_feeder_at_modeled_barrel():
+    pcb = tripled()
+    _add_pad_footprint(pcb, ref="J3", x=80, y=25, net="P")
+    pcb.add_trace((80, 25), (30, 42.4), width=2, layer="F.Cu", net="P")
+    result = resolve_current_path(pcb, _spec(source="J3"))
+    assert result.ok, result.reason
+    assert [change.count for change in result.series_layer_changes] == [3]
+
+
 def test_two_vias_only_resolve_with_two_barrels():
     """(d) two vias."""
     result = resolve_current_path(tripled(count=2), _spec())

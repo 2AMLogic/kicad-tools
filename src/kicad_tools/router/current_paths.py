@@ -227,6 +227,8 @@ from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+    from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
+
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.schema.pcb import PCB, Footprint, Net, Pad, Segment, Via, Zone
     from kicad_tools.sexp.parser import SExp
@@ -1951,6 +1953,53 @@ class _ViaArray:
     members: list[Segment]
 
 
+_BUFFER_SCALE = 1 / math.cos(math.pi / 64)
+
+
+def _outer_buffer(geometry: BaseGeometry, radius: float) -> BaseGeometry:
+    # Circumscribe the 16 chords per quadrant when looking for unmodeled copper.
+    return geometry.buffer(radius * _BUFFER_SCALE, quad_segs=16)
+
+
+def _array_tracks_modeled(
+    pcb: PCB,
+    net_name: str,
+    members: list[Segment],
+    pieces: list[tuple[str, BaseGeometry, float]],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
+) -> bool:
+    """Every nonmember track touching local copper must meet it at a modeled exit."""
+    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+
+    member_ids = {id(s) for s in members}
+    for segment in _net_segments(pcb, net_name):
+        if id(segment) in member_ids:
+            continue
+        copper = _outer_buffer(LineString((segment.start, segment.end)), segment.width / 2)
+        for layer, region, radius in pieces:
+            if layer != segment.layer:
+                continue
+            overlap = copper.intersection(region)
+            if overlap.is_empty:
+                continue
+            for node, _, edge in exits:
+                if edge.segment is segment and node[2] == layer:
+                    # Both pieces are convex straight strokes/discs. Their
+                    # intersection is connected to this proved port, including
+                    # oblique joins whose overlap exceeds the sum of radii.
+                    if region.covers(Point(node[:2])):
+                        overlap = Polygon()
+                    else:
+                        overlap = overlap.difference(
+                            Point(node[:2]).buffer(
+                                (radius + segment.width / 2) * _BUFFER_SCALE**2 + _PAD_EPS
+                            )
+                        )
+            if not overlap.is_empty:
+                return False
+    return True
+
+
 def _array_contacts_modeled(
     pcb: PCB,
     net_name: str,
@@ -1991,20 +2040,12 @@ def _array_contacts_modeled(
         if _sexp_matches_net(raw_via, net, net_name) and raw_via.find_child("padstack") is not None:
             return False
 
-    # Default circular buffers use 16 chords per quadrant. Circumscribe
-    # strokes, and expand existing pad polygons by their maximum chord error.
-    # These envelopes only reject contacts; they never prove connectivity.
-    scale = 1 / math.cos(math.pi / 64)
-
-    def outer_buffer(geometry, radius):
-        return geometry.buffer(radius * scale, quad_segs=16)
-
     def pad_envelope(candidate, footprint):
         polygon = _pad_polygon(candidate, footprint)
         if polygon is None or candidate.shape == "rect":
             return polygon
-        error = max(candidate.size) * (1 - 1 / scale)
-        return outer_buffer(polygon, error)
+        error = max(candidate.size) * (1 - 1 / _BUFFER_SCALE)
+        return _outer_buffer(polygon, error)
 
     trunk = members[-1]
     ordered = sorted(far_nodes, key=lambda n: math.dist(n[:2], trunk.start))
@@ -2013,7 +2054,7 @@ def _array_contacts_modeled(
     for member in members:
         ends = (ordered[0][:2], ordered[-1][:2]) if member is trunk else (member.start, member.end)
         pieces.append(
-            (member.layer, outer_buffer(LineString(ends), member.width / 2), member.width / 2)
+            (member.layer, _outer_buffer(LineString(ends), member.width / 2), member.width / 2)
         )
     source = pad_envelope(pad, fp)
     if source is None:
@@ -2027,34 +2068,12 @@ def _array_contacts_modeled(
                 pieces.append(
                     (
                         copper_layer.name,
-                        outer_buffer(Point(via.position), via.size / 2),
+                        _outer_buffer(Point(via.position), via.size / 2),
                         via.size / 2,
                     )
                 )
-    member_ids = {id(s) for s in members}
-    for segment in _net_segments(pcb, net_name):
-        if id(segment) in member_ids:
-            continue
-        copper = outer_buffer(LineString((segment.start, segment.end)), segment.width / 2)
-        for layer, region, radius in pieces:
-            if layer != segment.layer:
-                continue
-            overlap = copper.intersection(region)
-            for node, _, edge in exits:
-                if edge.segment is segment and node[2] == layer:
-                    # Both pieces are convex straight strokes/discs. Their
-                    # intersection is connected to this proved port, including
-                    # oblique joins whose overlap exceeds the sum of radii.
-                    if region.covers(Point(node[:2])):
-                        overlap = Polygon()
-                    else:
-                        overlap = overlap.difference(
-                            Point(node[:2]).buffer(
-                                (radius + segment.width / 2) * scale * scale + _PAD_EPS
-                            )
-                        )
-            if not overlap.is_empty:
-                return False
+    if not _array_tracks_modeled(pcb, net_name, members, pieces, exits):
+        return False
     for footprint in pcb.footprints:
         for candidate in footprint.pads:
             if candidate is pad or not same_net(candidate) or candidate.type == "np_thru_hole":
@@ -2070,7 +2089,7 @@ def _array_contacts_modeled(
     for via in pcb.vias:
         if via in member_vias or not same_net(via):
             continue
-        copper = outer_buffer(Point(via.position), via.size / 2)
+        copper = _outer_buffer(Point(via.position), via.size / 2)
         if any(
             via_spans_layer(via.layers, layer) and copper.intersects(region)
             for layer, region, _ in pieces
@@ -2267,8 +2286,8 @@ def _mid_path_via_groups(
     * a barrel touching only one bar breaks the chain on the other layer;
     * any other modeled edge joining two members (a third bar, an inner-layer
       track, a doubled bar) is copper the group does not account for;
-    * a same-net via or pad whose copper meets a bar span without being a
-      member is an unmodeled contact;
+    * a same-net via, pad or track whose copper meets a bar or barrel
+      without a modeled contact prevents contraction;
     * the row must be a layer change: copper leaves it on ``La`` AND on
       ``Lb``, and not on both layers at two or more barrels each (that is a
       run doubled through the row -- stitching, judged as parallel copper);
@@ -2366,14 +2385,18 @@ def _mid_path_via_groups(
         ]
         if internal:
             continue
-        exits: dict[str, set[tuple[float, float]]] = {la: set(), lb: set()}
-        for node in nodes:
-            for other, edge in graph.adjacency[node]:
-                if other not in nodes:
-                    exits.setdefault(node[2], set()).add(node[:2])
-        if len(exits) != 2 or not exits[la] or not exits[lb]:
+        exits = [
+            (node, other, edge)
+            for node in nodes
+            for other, edge in graph.adjacency[node]
+            if other not in nodes
+        ]
+        ports: dict[str, set[tuple[float, float]]] = {la: set(), lb: set()}
+        for node, _, _ in exits:
+            ports.setdefault(node[2], set()).add(node[:2])
+        if len(ports) != 2 or not ports[la] or not ports[lb]:
             continue
-        if len(exits[la]) >= 2 and len(exits[lb]) >= 2:
+        if len(ports[la]) >= 2 and len(ports[lb]) >= 2:
             continue
         bar_spans = [
             (pair, edge.segment)
@@ -2382,13 +2405,8 @@ def _mid_path_via_groups(
             for edge in links[layer][pair]
             if edge.segment is not None
         ]
-        other_rings = [
-            (pos, layer, vias[pos].size / 2.0)
-            for pos in group
-            for layer in spans[pos]
-            if layer not in (la, lb)
-        ]
-        if not _via_group_contacts_modeled(pcb, net_name, group, bar_spans, other_rings):
+        rings = [(pos, layer, vias[pos].size / 2.0) for pos in group for layer in spans[pos]]
+        if not _via_group_contacts_modeled(pcb, net_name, group, bar_spans, rings, exits):
             continue
         members = {id(segment): segment for _, segment in bar_spans}
         result.append(_ViaArray(nodes, edges, list(members.values())))
@@ -2423,42 +2441,41 @@ def _via_group_contacts_modeled(
     net_name: str,
     group: set[tuple[float, float]],
     bar_spans: list[tuple[frozenset[tuple[float, float]], Segment]],
-    other_rings: list[tuple[tuple[float, float], str, float]],
+    rings: list[tuple[tuple[float, float], str, float]],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
 ) -> bool:
-    """Reject unmodeled bar contacts and any contact on another ring (#9725).
+    """Reject unmodeled contacts with bar copper or barrel rings (#9725).
 
     The bar span between two linked barrels is the straight stroke between
-    their centres at the width of the segment that joins them. A non-member
-    same-net via whose pad reaches it, or a same-net pad whose copper does,
-    is a contact the centreline graph never saw: the group is not proved.
+    their centres at the width of the segment that joins them. A same-net
+    feeder can meet local copper at a modeled exit. An offset track that
+    only reaches the edge can bypass the group without a centreline join.
     """
     from shapely.geometry import LineString, Point
 
     from kicad_tools.validate.rules.clearance import _pad_on_layer, _pad_polygon
 
     net = pcb.get_net_by_name(net_name)
-    strokes = [
-        (segment.layer, LineString(tuple(pair)).buffer(segment.width / 2.0))
+    pieces = [
+        (
+            segment.layer,
+            _outer_buffer(LineString(tuple(pair)), segment.width / 2),
+            segment.width / 2,
+        )
         for pair, segment in bar_spans
     ]
-    # An offset track can touch a ring without meeting its centre. Pads
-    # and non-member vias must clear these same rings as well as the bars.
-    for pos, layer, radius in other_rings:
-        if any(
-            seg.layer == layer
-            and _matches_net(seg, net, net_name)
-            and point_to_segment_distance(*pos, *seg.start, *seg.end) <= radius + seg.width / 2.0
-            for seg in pcb.segments
-        ):
-            return False
-        strokes.append((layer, Point(pos).buffer(radius)))
+    pieces.extend(
+        (layer, _outer_buffer(Point(pos), radius), radius) for pos, layer, radius in rings
+    )
+    if not _array_tracks_modeled(pcb, net_name, [s for _, s in bar_spans], pieces, exits):
+        return False
     for via in pcb.vias:
         if not _matches_net(via, net, net_name) or _node_key(via.position) in group:
             continue
-        copper = Point(via.position).buffer(via.size / 2.0)
+        copper = _outer_buffer(Point(via.position), via.size / 2.0)
         if any(
             via_spans_layer(via.layers, layer) and copper.intersects(region)
-            for layer, region in strokes
+            for layer, region, _ in pieces
         ):
             return False
     for footprint in pcb.footprints:
@@ -2470,7 +2487,7 @@ def _via_group_contacts_modeled(
                 return False
             if any(
                 _pad_on_layer(pad, layer) and polygon.intersects(region)
-                for layer, region in strokes
+                for layer, region, _ in pieces
             ):
                 return False
     return True
