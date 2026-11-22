@@ -283,6 +283,52 @@ def test_lost_probe_failure_preserves_preexisting_destination(monkeypatch, tmp_p
     assert src.read_text() == UNFILLED_BOARD
 
 
+def test_report_allocation_failure_preserves_preexisting_destination(monkeypatch, tmp_path):
+    """Setup failing before the native run (unwritable report dir) never touches the destination."""
+    src = tmp_path / "in.kicad_pcb"
+    src.write_text(UNFILLED_BOARD)
+    dest = tmp_path / "out.kicad_pcb"
+    dest.write_bytes(FILLED_BOARD.encode())
+    _FakeCli(monkeypatch)
+
+    def _denied(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(runner.tempfile, "mkstemp", _denied)
+
+    with pytest.raises(PermissionError):
+        runner.run_fill_zones(src, output_path=dest, kicad_cli=CLI)
+
+    assert dest.read_bytes() == FILLED_BOARD.encode()
+    assert src.read_text() == UNFILLED_BOARD
+
+
+def test_unreadable_preexisting_destination_is_refused_not_overwritten(monkeypatch, tmp_path):
+    """A destination whose bytes cannot be snapshotted is left as it is."""
+    src = tmp_path / "in.kicad_pcb"
+    src.write_text(UNFILLED_BOARD)
+    dest = tmp_path / "out.kicad_pcb"
+    dest.write_bytes(FILLED_BOARD.encode())
+    _FakeCli(monkeypatch)
+
+    real_read_bytes = Path.read_bytes
+
+    def _read_bytes(self):
+        if self == dest:
+            raise PermissionError(13, "Permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+
+    result = runner.run_fill_zones(src, output_path=dest, kicad_cli=CLI)
+
+    monkeypatch.undo()
+    assert result.success is False
+    assert "refused" in result.stderr
+    assert dest.read_bytes() == FILLED_BOARD.encode()
+    assert src.read_text() == UNFILLED_BOARD
+
+
 def test_lost_probe_successful_separate_output_writes_filled_copy(monkeypatch, tmp_path):
     src = tmp_path / "in.kicad_pcb"
     src.write_text(UNFILLED_BOARD)

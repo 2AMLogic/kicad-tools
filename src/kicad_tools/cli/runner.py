@@ -2787,21 +2787,38 @@ def _run_fill_zones_via_drc(
     # does not verifiably complete must leave the caller's file as it was,
     # never silently replaced with unfilled source bytes.
     prior_output_bytes: bytes | None = None
+    # Issue #9938: allocate the throwaway DRC report BEFORE the destination is
+    # touched, so a failure here (unwritable temp dir) cannot leave the
+    # caller's previous output replaced by unfilled source bytes.
+    fd, drc_report_path = tempfile.mkstemp(suffix=".json", prefix="drc_fill_")
+    os.close(fd)
+    drc_report = Path(drc_report_path)
     if output_path is not None:
         if output_path.exists():
             try:
                 prior_output_bytes = output_path.read_bytes()
-            except OSError:
-                prior_output_bytes = None
-        shutil.copy2(pcb_path, output_path)
+            except OSError as e:
+                # Cannot snapshot the destination, so cannot guarantee a
+                # rollback: refuse rather than overwrite it blindly.
+                drc_report.unlink(missing_ok=True)
+                return KiCadCLIResult(
+                    success=False,
+                    stderr=(
+                        f"Zone fill via DRC refused — cannot read existing output "
+                        f"{output_path} to preserve it: {e}"
+                    ),
+                )
+        try:
+            shutil.copy2(pcb_path, output_path)
+        except BaseException:
+            drc_report.unlink(missing_ok=True)
+            if prior_output_bytes is not None:
+                with contextlib.suppress(OSError):
+                    output_path.write_bytes(prior_output_bytes)
+            raise
         target_pcb = output_path
     else:
         target_pcb = pcb_path
-
-    # Create a temp file for the DRC report (we don't need it).
-    fd, drc_report_path = tempfile.mkstemp(suffix=".json", prefix="drc_fill_")
-    os.close(fd)
-    drc_report = Path(drc_report_path)
 
     cmd = [
         str(kicad_cli),
@@ -2821,9 +2838,18 @@ def _run_fill_zones_via_drc(
     # request the explicit refill and save and let kicad-cli's own parser
     # decide, mirroring ``run_kicad_drc_command``; a genuine rejection is
     # retried once without the flags further below.
-    refills = (_kicad_drc_supports_refill(kicad_cli) is True) or _refill_probe_inconclusive(
-        kicad_cli
-    )
+    try:
+        refills = (_kicad_drc_supports_refill(kicad_cli) is True) or _refill_probe_inconclusive(
+            kicad_cli
+        )
+    except BaseException:
+        # Issue #9938: a setup failure before the guarded run must still
+        # leave a pre-existing separate destination as the caller had it.
+        drc_report.unlink(missing_ok=True)
+        if prior_output_bytes is not None:
+            with contextlib.suppress(OSError):
+                target_pcb.write_bytes(prior_output_bytes)
+        raise
     if refills:
         cmd.extend(["--refill-zones", "--save-board"])
 
