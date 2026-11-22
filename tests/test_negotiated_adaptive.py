@@ -1888,10 +1888,12 @@ class TestRouteAllBlockedComponentRipup:
             pads_by_net,
             present_cost_factor,
             mark_route_callback,
+            refresh_foreign_context,
             ripup_history=None,
             max_ripups_per_net=3,
             per_net_timeout=None,
         ):
+            assert refresh_foreign_context == ar._refresh_ripup_foreign_context
             new_route = Route(net=failed_net, net_name="NET_1", segments=[], vias=[])
             routes_list.append(new_route)
             return True
@@ -1947,10 +1949,12 @@ class TestRouteAllBlockedComponentRipup:
             pads_by_net,
             present_cost_factor,
             mark_route_callback,
+            refresh_foreign_context,
             ripup_history=None,
             max_ripups_per_net=3,
             per_net_timeout=None,
         ):
+            assert refresh_foreign_context == ar._refresh_ripup_foreign_context
             new_route = Route(net=failed_net, net_name="NET_1", segments=[], vias=[])
             routes_list.append(new_route)
             return True
@@ -2415,12 +2419,14 @@ class TestAttemptBlockedComponentRipupNegotiated:
             pads_by_net,
             present_cost_factor,
             mark_route_callback,
+            refresh_foreign_context,
             ripup_history=None,
             max_ripups_per_net=3,
             per_net_timeout=None,
             progress_callback=None,
             net_names=None,
         ):
+            assert refresh_foreign_context == ar._refresh_ripup_foreign_context
             new_route = Route(net=failed_net, net_name="DAC_CLK", segments=[], vias=[])
             net_routes.setdefault(failed_net, []).append(new_route)
             routes_list.append(new_route)

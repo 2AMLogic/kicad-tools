@@ -2711,6 +2711,7 @@ class NegotiatedRouter:
         progress_callback: ProgressCallback | None = None,
         net_names: dict[int, str] | None = None,
         allow_trade: bool = False,
+        refresh_foreign_context: Callable[[int], None] | None = None,
     ) -> bool:
         """Perform targeted rip-up of blocking nets and re-route.
 
@@ -2755,6 +2756,8 @@ class NegotiatedRouter:
                 blockers (and that keeps a best-state snapshot, so a losing
                 trade cannot survive to the end of the run) should opt in.
                 Default ``False`` is the pre-#6342 all-or-nothing rule.
+            refresh_foreign_context: Rebuild the pathfinder's clearance context from
+                committed copper for each search and after the transaction.
 
             The structured reason for the result is recorded on
             :attr:`last_ripup_outcome` (a :class:`TargetedRipupOutcome`).
@@ -2807,21 +2810,26 @@ class NegotiatedRouter:
         history: dict[int, int] = ripup_history
 
         def _attempt() -> bool:
-            return self._targeted_ripup_txn(
-                failed_net,
-                blocking_nets,
-                net_routes,
-                routes_list,
-                pads_by_net,
-                present_cost_factor,
-                mark_route_callback,
-                ripup_history=history,
-                max_ripups_per_net=max_ripups_per_net,
-                per_net_timeout=per_net_timeout,
-                progress_callback=progress_callback,
-                net_names=net_names,
-                allow_trade=allow_trade,
-            )
+            try:
+                return self._targeted_ripup_txn(
+                    failed_net,
+                    blocking_nets,
+                    net_routes,
+                    routes_list,
+                    pads_by_net,
+                    present_cost_factor,
+                    mark_route_callback,
+                    ripup_history=history,
+                    max_ripups_per_net=max_ripups_per_net,
+                    per_net_timeout=per_net_timeout,
+                    progress_callback=progress_callback,
+                    net_names=net_names,
+                    allow_trade=allow_trade,
+                    refresh_foreign_context=refresh_foreign_context,
+                )
+            finally:
+                if refresh_foreign_context is not None:
+                    refresh_foreign_context(failed_net)
 
         history_before = {net: ripup_history.get(net) for net in blocking_nets}
         queue_start = self._pending_cpp_unmarks()
@@ -2932,6 +2940,7 @@ class NegotiatedRouter:
         progress_callback: ProgressCallback | None = None,
         net_names: dict[int, str] | None = None,
         allow_trade: bool = False,
+        refresh_foreign_context: Callable[[int], None] | None = None,
     ) -> bool:
         """The :meth:`targeted_ripup` transaction body (see there)."""
         if ripup_history is None:
@@ -3006,7 +3015,9 @@ class NegotiatedRouter:
         total_steps = 1 + len(nets_to_ripup)
         start_time = time.time()
 
-        def _emit_progress(phase: str, net_id: int, index: int) -> None:
+        def _prepare_search(phase: str, net_id: int, index: int) -> None:
+            if refresh_foreign_context is not None:
+                refresh_foreign_context(net_id)
             if progress_callback is None:
                 return
             if net_names is not None:
@@ -3042,7 +3053,7 @@ class NegotiatedRouter:
 
         failed_net_success = False  # Issue #858: Track if failed net was routed
         if failed_pads and len(failed_pads) >= 2:
-            _emit_progress("failed_net", failed_net, 1)
+            _prepare_search("failed_net", failed_net, 1)
             routes = self.route_net_negotiated(
                 failed_pads,
                 present_cost_factor,
@@ -3084,7 +3095,7 @@ class NegotiatedRouter:
         for sibling_index, net in enumerate(sibling_order, start=2):
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
-                _emit_progress("sibling", net, sibling_index)
+                _prepare_search("sibling", net, sibling_index)
                 routes = self.route_net_negotiated(
                     net_pads,
                     present_cost_factor,
