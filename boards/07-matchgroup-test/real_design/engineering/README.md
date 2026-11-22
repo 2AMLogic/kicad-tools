@@ -139,6 +139,7 @@ components and 216 bound pads. It runs the ordinary validator on the complete
 pair and writes the result to `release/`.
 
 The published recipes still match the versions in
-`output/manufacturing/design-source.zip`. Issue #8604 owns the independent
-recheck, adoption of the staged recipe and physical hashes, and gated refresh
-of the manufacturing bundle.
+`output/manufacturing/design-source.zip`. Issue #8603 remains open until
+the production checkout adopts both physical boards, their bound manifests
+and the matching build recipes together. Issue #8604 then independently
+rechecks the routing and refreshes the manufacturing evidence.

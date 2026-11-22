@@ -121,7 +121,7 @@ def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land(tm
     proposed = tmp_path / "proposed"
     fixture = _load_record("cleanup_fixture_8603", ROOT07 / "engineering")
     fixture.stage_design(ROOT07, proposed)
-    # Keep the rehearsal reproducible after #8604 adopts the staged recipes.
+    # The rehearsal also accepts a source tree that already has the fiducial changes.
     candidate_patch = Path("engineering/assembly-fiducials.patch")
     shutil.copyfile(ROOT07 / candidate_patch, proposed / candidate_patch)
     adopted = tmp_path / "adopted"

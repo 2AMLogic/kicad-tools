@@ -41,7 +41,7 @@ def stage_design(design: Path, output: Path, *, original: bool = False) -> None:
         # can silently skip both files when output is a subdirectory of it.
         env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(output.resolve().parent)}
         patch = (design / "engineering/assembly-fiducials.patch").resolve()
-        # After #8604 adopts these recipes, the patch is already present.
+        # A source tree that already contains the fiducial changes can be staged again.
         applied = subprocess.run(
             ["git", "apply", "--reverse", "--check", patch],
             cwd=output,
