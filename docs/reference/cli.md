@@ -1079,6 +1079,13 @@ declares an `HV` net class) runs the same measured creepage/clearance audit
 of the requirement is recorded in the report but can never by itself produce
 `passed`; only a thresholded census bound to that PCB and net-class-map can.
 
+**Cross-face creepage.** Use `kct creepage board.kicad_pcb --min 3.3
+--order-thickness-mm 0.80` when ordering a board with a nominal finished
+thickness of 0.80 mm. The census uses this value for paths through a bore or
+around a slot or board edge. When the PCB header and stackup disagree, the
+command reports both declarations and requires the purchase thickness to
+resolve a cross-face measurement. Single-face geometry uses no board thickness.
+
 **Derived clearance (IEC 60664-1, issue #7057).** With `--standard` /
 `--hv-standard`, the required clearance is
 `max(Table F.2[U_imp], Table F.8[V_rms x sqrt(2)], pollution-degree floor)`

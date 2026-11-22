@@ -10,6 +10,9 @@ only get stricter, never looser.
 
 from __future__ import annotations
 
+import json
+import math
+
 import pytest
 
 from kicad_tools._shapely import has_shapely
@@ -92,9 +95,8 @@ def test_cross_face_bore_path_reported_failing(tmp_path):
     # The binding row names the bore (as the island hop names its island).
     assert pair.via_bore == "MH1.1"
     assert pair.to_dict()["via_bore"] == "MH1.1"
-    # Cross-face-only pair: the clearance is the in-plan projection (0 here,
-    # the F.Cu track crosses the B.Cu run in plan), never above the creepage.
-    assert pair.clearance_mm <= pair.creepage_mm
+    # The tracks overlap in plan and are on opposite board faces.
+    assert pair.clearance_mm == pytest.approx(1.6)
     assert pair.witness is not None
 
 
@@ -134,9 +136,9 @@ def test_cross_face_bore_binds_below_same_face_row(tmp_path):
     assert pair.creepage_mm == pytest.approx(3.75, abs=0.01)
     assert pair.via_bore == "MH1.1"
     assert not pair.passed
-    # Same-face results unchanged: the binding same-face layer is still F.Cu
-    # and the clearance is still the same-face straight-line gap.
+    # The binding face stays F.Cu, while the opposite-face gap limits clearance.
     assert pair.layer == "F.Cu"
+    assert pair.clearance_mm == pytest.approx(1.6)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +167,7 @@ def test_cross_face_slot_wall_path(tmp_path):
     # The slot wall is crossed at ONE rim point: 1.0 (F.Cu pad -> near wall)
     # + 1.6 (thickness) + 3.0 (wall -> B.Cu pad across the 2 mm slot).
     assert pair.creepage_mm == pytest.approx(5.6, abs=0.05)
+    assert pair.clearance_mm == pytest.approx(math.hypot(4.0, 1.6), abs=0.01)
     assert pair.via_bore is not None and "slot" in pair.via_bore
     assert not pair.passed
 
@@ -240,17 +243,18 @@ def test_thickness_defaults_to_1_6_without_stackup(tmp_path):
     assert d["board_thickness_source"] == "default"
 
 
-def test_thickness_from_stackup_when_present(tmp_path):
+def _with_stackup(source, core_mm):
     stackup = (
-        "(setup (pad_to_mask_clearance 0)\n"
-        "  (stackup\n"
+        "(setup (pad_to_mask_clearance 0)\n  (stackup\n"
         '    (layer "F.Cu" (type "copper") (thickness 0.035))\n'
-        '    (layer "dielectric 1" (type "core") (thickness 1.5))\n'
-        '    (layer "B.Cu" (type "copper") (thickness 0.035))\n'
-        "  )\n"
-        ")\n"
+        f'    (layer "dielectric 1" (type "core") (thickness {core_mm}))\n'
+        '    (layer "B.Cu" (type "copper") (thickness 0.035))\n  )\n)\n'
     )
-    source = board_cross_face_bore_source().replace("(setup (pad_to_mask_clearance 0))\n", stackup)
+    return source.replace("(setup (pad_to_mask_clearance 0))\n", stackup)
+
+
+def test_thickness_from_stackup_when_present(tmp_path):
+    source = _with_stackup(board_cross_face_bore_source().replace(_GENERAL_1_6, ""), 1.5)
     pcb = _load(tmp_path, source)
     hv = resolve_hv_nets(pcb, "HV", _hv_map())
     report = _census(pcb, hv)
@@ -289,28 +293,105 @@ def test_thickness_from_general_when_no_stackup(tmp_path):
     assert not report3.passed
 
 
-def test_stackup_wins_over_general_thickness(tmp_path):
-    stackup = (
-        "(setup (pad_to_mask_clearance 0)\n"
-        "  (stackup\n"
-        '    (layer "F.Cu" (type "copper") (thickness 0.035))\n'
-        '    (layer "dielectric 1" (type "core") (thickness 1.5))\n'
-        '    (layer "B.Cu" (type "copper") (thickness 0.035))\n'
-        "  )\n"
-        ")\n"
-    )
-    source = (
-        board_cross_face_bore_source()
-        .replace("(setup (pad_to_mask_clearance 0))\n", stackup)
-        .replace(_GENERAL_1_6, "(general (thickness 0.8))")
-    )
-    pcb = _load(tmp_path, source)
-    assert pcb.general_thickness == pytest.approx(0.8)
-    hv = resolve_hv_nets(pcb, "HV", _hv_map())
-    report = _census(pcb, hv)
+def _run_thickness_cli(tmp_path, capsys, source, *flags, fmt="json"):
+    from kicad_tools.cli.commands.creepage import run_creepage_command
+    from kicad_tools.cli.parser import create_parser
 
-    assert report.board_thickness_mm == pytest.approx(1.57)
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(source)
+    net_map = tmp_path / "net-class-map.json"
+    net_map.write_text(json.dumps({"L_MAINS": {"name": "HV"}}))
+    argv = [
+        "creepage",
+        str(board),
+        "--net-class-map",
+        str(net_map),
+        "--min",
+        "3.30",
+        "--format",
+        fmt,
+    ]
+    code = run_creepage_command(create_parser().parse_args(argv + list(flags)))
+    out = capsys.readouterr()
+    return code, json.loads(out.out) if fmt == "json" else out.out + out.err
+
+
+@pytest.mark.parametrize(("order", "distance", "code"), [(0.80, 2.95, 1), (1.60, 3.75, 0)])
+def test_ordered_thickness_governs_cross_face_bore(tmp_path, capsys, order, distance, code):
+    source = _with_stackup(
+        board_cross_face_bore_source().replace(_GENERAL_1_6, "(general (thickness 0.8))"), 1.5
+    )
+    # Keep the bore and copper fixed, moving the unrelated left board edge out
+    # so its 1 mm margin cannot mask the gate transition for the conductor pair.
+    source = source.replace("100 100)", "95 100)").replace("100 120)", "95 120)")
+    rc, report = _run_thickness_cli(tmp_path, capsys, source, "--order-thickness-mm", str(order))
+    assert rc == code
+    assert report["board_thickness_mm"] == order
+    assert report["board_thickness_source"] == "order"
+    assert report["board_thickness_declarations_mm"] == {"general": 0.8, "stackup": 1.57}
+    assert report["gate_passed"] is (code == 0)
+    row = next(pair for pair in report["pairs"] if pair["net_b"] == "GND")
+    assert row["creepage_mm"] == pytest.approx(distance, abs=0.01)
+    assert row["pass"] is (code == 0)
+    table_rc, table = _run_thickness_cli(
+        tmp_path, capsys, source, "--order-thickness-mm", str(order), fmt="table"
+    )
+    assert table_rc == code
+    assert f"{order:g} mm (order)" in table
+    assert "header 0.8 mm, stackup 1.57 mm" in table
+
+
+def test_order_keeps_independent_edge_failure(tmp_path, capsys):
+    source = _with_stackup(board_cross_face_bore_source(), 0.73)
+    rc, report = _run_thickness_cli(tmp_path, capsys, source, "--order-thickness-mm", "1.6")
+    pairs = {row["kind"]: row for row in report["pairs"]}
+    assert rc == 1 and report["gate_passed"] is False
+    assert pairs["conductor"]["pass"] and pairs["conductor"]["creepage_mm"] == pytest.approx(3.75)
+    assert not pairs["edge"]["pass"] and pairs["edge"]["creepage_mm"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(("header", "core"), [(0.8, 1.5), (1.6, 0.73)])
+def test_unresolved_cross_face_conflict_requests_order(tmp_path, capsys, header, core):
+    source = _with_stackup(
+        board_cross_face_bore_source().replace(_GENERAL_1_6, f"(general (thickness {header}))"),
+        core,
+    )
+    rc, report = _run_thickness_cli(tmp_path, capsys, source)
+    assert rc != 0 and report["gate_passed"] is False
+    assert report["board_thickness_declarations_mm"] == {
+        "general": header,
+        "stackup": pytest.approx(core + 0.07),
+    }
+    assert "--order-thickness-mm" in report["error"]
+    rc, table = _run_thickness_cli(tmp_path, capsys, source, fmt="table")
+    assert rc != 0 and "--order-thickness-mm" in table
+
+
+def test_same_face_skips_conflicting_thickness(tmp_path, capsys):
+    same = _with_stackup(board_same_face_with_bore_source(), 0.73)
+    expected_rc, expected = _run_thickness_cli(tmp_path, capsys, board_same_face_with_bore_source())
+    rc, same_report = _run_thickness_cli(tmp_path, capsys, same)
+    assert (rc, same_report) == (expected_rc, expected)
+
+
+def test_agreeing_cross_face_uses_cad(tmp_path):
+    agreeing = _with_stackup(board_cross_face_bore_source(), 1.53)
+    pcb = _load(tmp_path, agreeing)
+    report = _census(pcb, resolve_hv_nets(pcb, "HV", _hv_map()))
+    assert report.board_thickness_mm == pytest.approx(1.6)
     assert report.board_thickness_source == "stackup"
+    assert "board_thickness_declarations_mm" not in report.to_dict()
+
+
+@pytest.mark.parametrize("order", [0.0, -1.0, float("nan"), float("inf"), -float("inf")])
+def test_invalid_order_rejected_even_on_same_face(tmp_path, capsys, order):
+    pcb = _load(tmp_path, board_same_face_with_bore_source())
+    with pytest.raises(ValueError, match="positive finite"):
+        _census(pcb, resolve_hv_nets(pcb, "HV", _hv_map()), order_thickness_mm=order)
+    rc, result = _run_thickness_cli(
+        tmp_path, capsys, board_same_face_with_bore_source(), f"--order-thickness-mm={order}"
+    )
+    assert rc != 0 and "positive finite" in result["error"]
 
 
 @pytest.mark.parametrize("short_first", [True, False])
