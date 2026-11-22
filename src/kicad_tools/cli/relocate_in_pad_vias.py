@@ -598,8 +598,8 @@ def _collect_tht_pads(pcb: PCB) -> list[ThtPad]:
     via drill may not crowd any plated hole, even one on its own net), mirroring
     the existing other-via hole-to-hole logic in :func:`_check_clearance`.
     Copper-clearance callers additionally filter on net number.  The hole center
-    is the pad's absolute position (the bbox midpoint); the drill diameter is
-    ``pad.drill``.  This is the coverage gap the #4376 judge flagged: the
+    is the pad's absolute position (the bbox midpoint). Oval drills carry
+    both dimensions in ``pad.drill_size``. This is the gap flagged in #4376: the
     ``kicad-cli pcb drc --refill-zones`` cross-gate catches foreign-pour shorts
     but does **not** cover hole-to-hole, so it must be checked here.
     """
@@ -608,7 +608,7 @@ def _collect_tht_pads(pcb: PCB) -> list[ThtPad]:
         for pad in fp.pads:
             if pad.type not in ("thru_hole", "np_thru_hole"):
                 continue
-            if pad.drill <= 0:
+            if pad.drill <= 0 and pad.drill_size is None:
                 continue
             bbox = pad_absolute_bbox(pad, fp)
             hole_center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
@@ -885,23 +885,49 @@ def _check_raw_copper(
     return None
 
 
-def _custom_pad_extent(pad: Pad, center: tuple[float, float]):
-    """Exact board-frame copper of a ``custom`` pad, or ``None`` when refused.
+def _pad_copper_extent(pad: Pad, fp: Footprint, shift: tuple[float, float]) -> BaseGeometry | None:
+    """Copper enclosing the pad at its board-frame offset, or None if unprovable."""
+    node = getattr(pad, "_sexp_node", None)
+    if node is not None and node.find_child("padstack") is not None:
+        return None  # Per-layer shapes can extend beyond the common copper.
+    if pad.shape in {"custom", "trapezoid"}:
+        anchor = _pad_board_anchor(pad, fp)
+        center = (anchor[0] + shift[0], anchor[1] + shift[1])
+        if pad.shape == "custom":
+            from kicad_tools.geometry.copper import custom_pad_board_outline
 
-    ``center`` is the pad's copper centre (anchor plus any rotated drill
-    offset).  Delegates to the one custom-outline builder the DSN export,
-    router and connectivity already share (``custom_pad_board_outline``,
-    Issues #5376/#7545/#9468); ``None`` means the primitives are something
-    that builder refuses, and the caller keeps its named fail-closed
-    obstruction -- an unprovable extent must never read as absent copper.
-    """
-    from kicad_tools.geometry.copper import custom_pad_board_outline
+            return custom_pad_board_outline(pad, center)
+        # rect_delta can extend a trapezoid beyond the nominal size rectangle.
+        from kicad_tools.router.fixed_copper import bounding_pad_copper
 
-    return custom_pad_board_outline(pad, center)
+        if node is None:
+            return None
+        try:
+            bound = bounding_pad_copper(
+                node.to_string(),
+                reference=fp.reference,
+                pad_number=str(pad.number),
+                x=center[0],
+                y=center[1],
+                rotation=pad.rotation,
+                source_net=pad.net_name or "",
+                source_net_id=pad.net_number,
+            )
+        except ValueError:
+            return None
+        return bound.geometry if bound is not None else None
+    left, top, right, bottom = pad_absolute_bbox(pad, fp)
+    return box(left + shift[0], top + shift[1], right + shift[0], bottom + shift[1])
 
 
 def _check_hole_to_copper(
-    pcb: PCB, via: Via, x: float, y: float, floor: float, min_copper_clearance: float | None = None
+    pcb: PCB,
+    via: Via,
+    x: float,
+    y: float,
+    floor: float,
+    min_copper_clearance: float | None = None,
+    clearance_for: Callable[[int], float] | None = None,
 ) -> str | None:
     """Check both drill/copper directions independently of annulus width.
 
@@ -954,19 +980,23 @@ def _check_hole_to_copper(
             drill = _pad_drill_focus(pad, fp)
             if shift is None or _pad_drill_is_unprovable(pad):
                 return f"hole-to-copper unmodeled drill at pad {label}"
-            if pad.shape == "custom":
-                anchor = _pad_board_anchor(pad, fp)
-                pad_copper = _custom_pad_extent(pad, (anchor[0] + shift[0], anchor[1] + shift[1]))
+            gap = math.inf
+            if pad.type != "np_thru_hole" or pad.shape == "custom":
+                pad_copper = _pad_copper_extent(pad, fp, shift)
                 if pad_copper is None:
-                    return f"hole-to-copper unproven for custom pad {label}"
-            elif pad.type == "np_thru_hole":
-                pad_copper = None
-            else:
-                bbox = pad_absolute_bbox(pad, fp)
-                pad_copper = box(
-                    bbox[0] + shift[0], bbox[1] + shift[1], bbox[2] + shift[0], bbox[3] + shift[1]
-                )
-            gap = math.inf if pad_copper is None else point.distance(pad_copper) - hole_r
+                    return f"hole-to-copper unproven for {pad.shape} pad {label}"
+                center_to_copper = point.distance(pad_copper)
+                if min_copper_clearance is not None:
+                    copper_floor = (
+                        clearance_for(pad.net_number)
+                        if clearance_for is not None
+                        else min_copper_clearance
+                    )
+                    annulus_gap = center_to_copper - via.size / 2
+                    if annulus_gap < copper_floor - 1e-6:
+                        kind = "THT pad" if pad.type == "thru_hole" else "pad"
+                        return f"clearance {annulus_gap:.3f}mm to {kind} {label}"
+                gap = center_to_copper - hole_r
             if drill is not None:
                 # The moving via's annulus against the pad's actual hole:
                 # a slot contributes its rotated stadium (focus + radius).
@@ -1053,21 +1083,18 @@ def _check_clearance(
             if cu_gap < required(net_number) - 1e-6:
                 return f"clearance {cu_gap:.3f}mm to pad {fp.reference}-{pad.number}"
 
-    # THT / NP-THT plated pads: hole-to-hole (any net) + copper clearance
-    # (different net only).  Hole-to-hole is the #4376 judge-flagged gap: the
-    # ``--refill-zones`` DRC cross-gate covers foreign-pour copper but NOT the
-    # drill-to-drill spacing between a relocated via and a plated through-hole.
-    for fp, pad, bbox, hole_center in tht_pads:
-        d = math.hypot(hole_center[0] - new_x, hole_center[1] - new_y)
-        hole_gap = d - hole_r - pad.drill / 2.0
+    # Drill spacing applies even to same-net pads. The foreign copper checks
+    # below use the shifted land and the same slot geometry as the swept stub.
+    for fp, pad, _bbox, hole_center in tht_pads:
+        if pad.drill_size is None:
+            hole_gap = math.dist(hole_center, (new_x, new_y)) - hole_r - pad.drill / 2
+        else:
+            slot = _pad_drill_focus(pad, fp)
+            if slot is None:
+                return f"hole-to-copper unmodeled drill at pad {fp.reference}-{pad.number}"
+            hole_gap = Point(new_x, new_y).distance(slot[0]) - hole_r - slot[1]
         if hole_gap < min_hole_to_hole - 1e-6:
             return f"hole-to-hole {hole_gap:.3f}mm to THT pad {fp.reference}-{pad.number}"
-        # Non-plated holes (net 0) carry no copper, so only plated pads on a
-        # different net can violate copper clearance.
-        if pad.net_number != 0 and pad.net_number != via.net_number:
-            cu_gap = _dist_point_to_aabb(new_x, new_y, bbox) - via_r
-            if cu_gap < required(pad.net_number) - 1e-6:
-                return f"clearance {cu_gap:.3f}mm to THT pad {fp.reference}-{pad.number}"
 
     # Routed segments on other nets: copper clearance.
     for seg in pcb.segments:
@@ -1078,7 +1105,13 @@ def _check_clearance(
             return f"clearance {cu_gap:.3f}mm to track on net {seg.net_number}"
 
     return _check_hole_to_copper(
-        pcb, via, new_x, new_y, _resolve_hole_clearance(pcb, min_hole_clearance), required(0)
+        pcb,
+        via,
+        new_x,
+        new_y,
+        _resolve_hole_clearance(pcb, min_hole_clearance),
+        required(0),
+        clearance_for,
     )
 
 
@@ -1189,16 +1222,9 @@ def _check_stub_clearance(
             drill = _pad_drill_focus(pad, fp)
             if shift is None or _pad_drill_is_unprovable(pad):
                 return f"hole-to-copper unmodeled drill at pad {label}"
-            if pad.shape == "custom":
-                anchor = _pad_board_anchor(pad, fp)
-                copper = _custom_pad_extent(pad, (anchor[0] + shift[0], anchor[1] + shift[1]))
-                if copper is None:
-                    return f"stub clearance unproven for custom pad {label}"
-            else:
-                bbox = pad_absolute_bbox(pad, fp)
-                copper = box(
-                    bbox[0] + shift[0], bbox[1] + shift[1], bbox[2] + shift[0], bbox[3] + shift[1]
-                )
+            copper = _pad_copper_extent(pad, fp, shift)
+            if copper is None:
+                return f"stub clearance unproven for {pad.shape} pad {label}"
             if drill is not None and too_close(drill[0], drill[1], hole_floor):
                 return f"stub hole-to-copper to pad {label}"
             if too_close(copper, 0.0, required(pad.net_number)):

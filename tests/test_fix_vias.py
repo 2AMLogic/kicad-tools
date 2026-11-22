@@ -3671,6 +3671,124 @@ def test_hole_floor_distant_unmodeled_drills_do_not_veto(tmp_path, drill, gate):
         assert _check_stub_clearance(pcb, via, target, ["F.Cu"], 0.2, 0.1016) is None
 
 
+@pytest.mark.parametrize(
+    ("diameter", "drill", "pad_y", "legal"),
+    [(0.65, 0.30, 11.005, False), (1.0, 0.20, 11.0, False), (0.45, 0.20, 11.0, True)],
+)
+def test_plated_slot_copper_checks_the_whole_landing(tmp_path, diameter, drill, pad_y, legal):
+    target_x = 10.5 + drill / 2 + 0.1016
+    obstacle = (
+        f'(footprint "Test:Slot" (layer "F.Cu") (at {target_x} {pad_y}) '
+        '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
+        '(pad "2" thru_hole rect (at 0 0) (size .4 1.2) (drill oval .15 .30) '
+        '(layers "*.Cu" "*.Mask") (net 2 "OTHER")))'
+    )
+    board = _hole_floor_board(tmp_path, obstacle=obstacle)
+    board.write_text(
+        board.read_text()
+        .replace("(size 1 1)", "(size 1 .5)")
+        .replace("(size .45) (drill .2)", f"(size {diameter}) (drill {drill})")
+    )
+    pcb = PCB.load(board)
+    result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 4, 1.0))
+    assert bool(result.moved) is legal
+    if legal:
+        assert pcb.vias[0].position == pytest.approx((target_x, 10.0))
+    else:
+        assert "clearance" in result.skipped[0].reason and "J9-2" in result.skipped[0].reason
+        assert pcb.vias[0].position == (10.0, 10.0)
+
+
+def test_preferred_slide_checks_new_stub_beyond_the_original_track(tmp_path):
+    # The via's annulus clears the plated pad. The wider stub extends beyond
+    # the existing track and would approach the pad within 0.085 mm.
+    obstacle = (
+        '(footprint "Test:Slot" (layer "F.Cu") (at 10.88 11.01) '
+        '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
+        '(pad "2" thru_hole rect (at 0 0) (size .4 1.2) (drill oval .15 .30) '
+        '(layers "*.Cu" "*.Mask") (net 2 "OTHER")))'
+    )
+    board = _hole_floor_board(tmp_path, obstacle=obstacle)
+    board.write_text(
+        board.read_text()
+        .replace("(size 1 1)", "(size 1 .5)")
+        .replace("(end 12 10) (width .2)", "(end 10.501 10) (width .65)")
+    )
+    pcb = PCB.load(board)
+    result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 4, 1.0))
+    assert not result.moved
+    assert "stub clearance to pad J9-2" in result.unresolvable[0].reason
+    assert pcb.vias[0].position == (10.0, 10.0)
+
+
+@pytest.mark.parametrize(("rotation", "legal"), [(0, False), (90, True)])
+def test_slot_hole_to_hole_applies_on_the_same_net(tmp_path, rotation, legal):
+    obstacle = (
+        '(footprint "Test:Slot" (layer "F.Cu") (at 10.7016 11) '
+        '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
+        f'(pad "2" thru_hole oval (at 0 0 {rotation}) (size .5 1.9) (drill oval .2 1.6) '
+        '(layers "*.Cu" "*.Mask") (net 1 "SIG")))'
+    )
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
+    result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 4, 1.0))
+    assert bool(result.moved) is legal
+    if not legal:
+        assert "hole-to-hole 0.100mm to THT pad J9-2" in result.skipped[0].reason
+
+
+def test_plated_slot_annulus_respects_pair_clearance(tmp_path):
+    obstacle = (
+        '(footprint "Test:Slot" (layer "F.Cu") (at 10.7016 11) '
+        '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
+        '(pad "2" thru_hole rect (at 0 0) (size .4 1.2) (drill oval .15 .30) '
+        '(layers "*.Cu" "*.Mask") (net 2 "OTHER")))'
+    )
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
+    candidate = (10.7016, 10.0)
+    reason = _check_clearance(
+        pcb,
+        pcb.vias[0],
+        *candidate,
+        _collect_smd_pads_by_net(pcb),
+        _collect_tht_pads(pcb),
+        0.1016,
+        0.25,
+        0.25,
+        lambda net: 0.20 if net == 2 else 0.1016,
+    )
+    assert reason == "clearance 0.175mm to THT pad J9-2"
+
+
+@pytest.mark.parametrize(("delta", "clear"), [(0.50, False), (0.0, True)])
+def test_swept_stub_checks_the_extended_edge_of_a_slotted_trapezoid(tmp_path, delta, clear):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    obstacle = (
+        '(footprint "Test:Slot" (layer "F.Cu") (at 15 10.8) '
+        '(property "Reference" "J9" (at 0 0) (layer "F.SilkS")) '
+        f'(pad "2" thru_hole trapezoid (at 0 0) (size .6 .6) (rect_delta {delta} 0) '
+        '(drill oval .15 .20) (layers "*.Cu" "*.Mask") (net 2 "OTHER")))'
+    )
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=obstacle))
+    via = pcb.vias[0]
+    target = (20.0, 10.0)
+    assert (
+        _check_clearance(
+            pcb,
+            via,
+            *target,
+            _collect_smd_pads_by_net(pcb),
+            _collect_tht_pads(pcb),
+            0.1016,
+            0.25,
+            0.25,
+        )
+        is None
+    )
+    reason = _check_stub_clearance(pcb, via, target, ["B.Cu"], 0.4, 0.1016, 0.25)
+    assert (reason is None) is clear
+
+
 def test_hole_floor_rotated_slot_clears_and_blocks_in_its_own_direction(tmp_path):
     from kicad_tools.cli.relocate_in_pad_vias import _check_hole_to_copper
 
