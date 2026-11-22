@@ -219,6 +219,14 @@ def test_cli_via_group_with_outer_bar_bypass(
     )
 
 
+def _saved_row_with_downstream_lane(tmp_path):
+    pcb = _saved_row_board(tmp_path)
+    pcb.add_footprint_from_file(tmp_path / "TestPad.kicad_mod", "J4", 216, 44.8)
+    pcb.assign_net_to_footprint_pad("J4", "1", "P")
+    pcb.add_trace((200, 44.8), (216, 44.8), width=4, layer="B.Cu", net="P")
+    return pcb
+
+
 @pytest.mark.parametrize(
     "offset,mid_lane,expected_anchors",
     [(1.4, False, 0), (1.85, False, 2), (None, False, 2), (1.4, True, 0), (1.85, True, 2)],
@@ -232,10 +240,7 @@ def test_cli_reinforcement_checks_physical_lane_bypasses(
     from kicad_tools.cli.commands.pcb import run_pcb_command
     from tests.test_pcb_reinforce import _reinforce_args
 
-    pcb = _saved_row_board(tmp_path)
-    pcb.add_footprint_from_file(tmp_path / "TestPad.kicad_mod", "J4", 216, 44.8)
-    pcb.assign_net_to_footprint_pad("J4", "1", "P")
-    pcb.add_trace((200, 44.8), (216, 44.8), width=4, layer="B.Cu", net="P")
+    pcb = _saved_row_with_downstream_lane(tmp_path)
 
     # A centered return bypasses only the row. The second return bypasses
     # the downstream J2–J4 lane when its copper reaches the feeder's edge.
@@ -271,6 +276,85 @@ def test_cli_reinforcement_checks_physical_lane_bypasses(
             (203.958, 44.8),
             (213.542, 44.8),
         ]
+
+
+@pytest.mark.parametrize(
+    "return_y,bypassed", [(None, False), (44.8, True), (46.7, True), (47.25, False)]
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_downstream_return_after_a_genuine_via_row(tmp_path, capsys, return_y, bypassed, reverse):
+    import json
+
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from tests.test_pcb_reinforce import _reinforce_args
+
+    pcb = _saved_row_with_downstream_lane(tmp_path)
+    if return_y is not None:
+        # At y=46.7 the track's copper overlaps the 4 mm lane while the
+        # centerlines never meet. At y=47.25 the same return is 0.25 mm clear.
+        points = [(194, return_y), (194, 60), (216, 60), (216, 44.8)]
+        for start, end in zip(points, points[1:], strict=False):
+            pcb.add_trace(start, end, width=0.4, layer="B.Cu", net="P")
+    board = tmp_path / "downstream.kicad_pcb"
+    pcb.save(board)
+    original = board.read_bytes()
+    spec = _spec(source="J4", sink="J1") if reverse else _spec(sink="J4")
+    sidecar = tmp_path / "current_paths.json"
+    sidecar.write_text(json.dumps({"paths": [spec.to_dict()]}))
+
+    result = resolve_current_path(PCB.load(board), spec)
+    assert result.status == ("ambiguous" if bypassed else "resolved")
+    assert [change.count for change in result.layer_changes] == ([] if bypassed else [3])
+    args = _reinforce_args(
+        board, net="P", layer="B.Cu", current_paths=str(sidecar), format="json", anchor_mode="ends"
+    )
+    assert run_pcb_command(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    added = [via for via in PCB.load(board).vias if via.drill > DRILL]
+    assert report["anchors_placed"] == len(added) == (0 if bypassed else 2)
+    if bypassed:
+        branches = result.witness["loop_branches"]
+        assert sorted(branch["segments"] for branch in branches) == [2, 3]
+        assert branches[0]["start"] == branches[1]["start"]
+        assert branches[0]["end"] == branches[1]["end"]
+        assert "loop branches" in report["unresolved_paths"][0]["reason"]
+        assert board.read_bytes() == original
+    else:
+        assert sorted((round(v.position[0], 3), v.position[1]) for v in added) == [
+            (32.145, 44.8),
+            (213.542, 44.8),
+        ]
+
+
+@pytest.mark.parametrize(
+    "landing,expected", [("via", "ambiguous"), ("gap", "resolved"), ("no_via", "resolved")]
+)
+def test_downstream_return_only_through_a_physical_layer_contact(tmp_path, landing, expected):
+    pcb = _saved_row_with_downstream_lane(tmp_path)
+    # Only the annulus can connect this front-layer return to the back lane.
+    y = 47.55 if landing == "gap" else 46.9
+    pcb.add_trace((194, y), (194, 60), width=0.4, layer="F.Cu", net="P")
+    pcb.add_trace((194, 60), (216, 44.8), width=0.4, layer="F.Cu", net="P")
+    if landing != "no_via":
+        pcb.add_via(194, y, size=1, drill=0.5, net="P")
+    for source, sink in [("J1", "J4"), ("J4", "J1")]:
+        result = resolve_current_path(pcb, _spec(source=source, sink=sink))
+        assert result.status == expected
+        assert not result.loop_free_segments
+
+
+def test_downstream_return_shunting_only_the_middle_of_a_long_track(tmp_path):
+    pcb = _saved_row_with_downstream_lane(tmp_path)
+    lane = pcb.segments[-1]
+    points = [(80, 46.7), (80, 60), (125, 60), (125, 46.7)]
+    for start, end in zip(points, points[1:], strict=False):
+        pcb.add_trace(start, end, width=0.4, layer="B.Cu", net="P")
+    # Cutting the whole long track would open the board, but its middle is
+    # shunted. Only the separate track beyond J2 remains eligible.
+    for source, sink in [("J1", "J4"), ("J4", "J1")]:
+        result = resolve_current_path(pcb, _spec(source=source, sink=sink))
+        assert result.status == "ambiguous"
+        assert result.loop_free_segments == (lane,)
 
 
 def test_group_with_oblique_feeder_at_modeled_barrel():

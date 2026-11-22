@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
 from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
@@ -242,6 +242,8 @@ class _PadToPadGraph(NamedTuple):
     #: (Issue #9767: shed structures are reported per layer so a
     #: per-layer-delay consumer charges the copper where it sits).
     track_layers: dict[int, str]
+    #: Source copper item for each node when only explicit bonds join items.
+    node_items: list[int]
 
 
 def _build_pad_to_pad_graph(
@@ -277,6 +279,7 @@ def _build_pad_to_pad_graph(
     from kicad_tools.validate.copper_contact import FILL, PAD, TRACK, VIA
 
     points: list[tuple[float, float]] = []
+    node_items: list[int] = []
 
     point_indices: dict[int, list[int]] = defaultdict(list)
 
@@ -289,6 +292,8 @@ def _build_pad_to_pad_graph(
                 return index
         candidates.append(len(points))
         points.append((px, py))
+        if bonded_junctions_only:
+            node_items.append(item)
         return len(points) - 1
 
     adjacency: dict[int, list[tuple[int, float]]] = {}
@@ -422,6 +427,7 @@ def _build_pad_to_pad_graph(
         total_track_length_mm=sum(track_length.values()),
         track_pieces=track_pieces,
         track_layers=track_layers,
+        node_items=node_items,
     )
 
 
@@ -496,13 +502,87 @@ def _simple_graph_bridges(
     return bridges
 
 
-def unavoidable_segment_indices(
+def _junction_path(
+    adjacency: dict[int, set[int]], start: int, target: int, skip: tuple[int, int] | None = None
+) -> list[int]:
+    """One pad-to-pad path, optionally with a single copper span cut."""
+    parents = {start: start}
+    pending = deque([start])
+    while pending and target not in parents:
+        node = pending.popleft()
+        for other in sorted(adjacency.get(node, ())):
+            if other not in parents and _edge_pair(node, other) != skip:
+                parents[other] = node
+                pending.append(other)
+    if target not in parents:
+        return []
+    path = [target]
+    while path[-1] != start:
+        path.append(parents[path[-1]])
+    return path[::-1]
+
+
+class PhysicalPathSegments(NamedTuple):
+    unavoidable: set[int]
+    witness: dict[str, object]
+
+
+def _physical_loop_witness(
+    graph: _PadToPadGraph,
+    contacts: CopperContactGraph,
+    modeled: list[int],
+    alternative: list[int],
+    cut: int,
+) -> dict[str, object]:
+    """Find the two branches across the cut and their physical junctions."""
+    from kicad_tools.validate.copper_contact import TRACK, VIA
+
+    def describe(path: list[int]) -> dict[str, object]:
+        items = [graph.node_items[node] for node in path]
+        tracks = dict.fromkeys(
+            a
+            for a, b in zip(items, items[1:], strict=False)
+            if a == b and contacts.items[a].kind == TRACK
+        )
+        layers = list(dict.fromkeys(graph.track_layers[track] for track in tracks))
+        return {
+            "start": list(graph.points[path[0]]),
+            "end": list(graph.points[path[-1]]),
+            "layers": layers,
+            "segments": len(tracks),
+            "vias": sum(contacts.items[item].kind == VIA for item in set(items)),
+        }
+
+    positions = {node: i for i, node in enumerate(modeled)}
+    common = [(i, positions[node]) for i, node in enumerate(alternative) if node in positions]
+    # Successive shared junctions that straddle the cut bound exactly the
+    # different parts, including a width-only contact midway along a track.
+    for (i, a), (j, b) in zip(common, common[1:], strict=False):
+        if a <= cut < b:
+            return {
+                "kind": "segment",
+                "layer": graph.track_layers[graph.node_items[modeled[cut]]],
+                "start": list(graph.points[modeled[cut]]),
+                "end": list(graph.points[modeled[cut + 1]]),
+                "loop_branches": [describe(modeled[a : b + 1]), describe(alternative[i : j + 1])],
+            }
+    raise AssertionError("alternative pad-to-pad path did not cross the cut")
+
+
+def physical_path_segments(
     pcb: PCB,
     contacts: CopperContactGraph,
     source: tuple[str, str],
     sink: tuple[str, str],
-) -> set[int]:
-    """Original track indices fully traversed by every physical source–sink path."""
+    unmodeled_bonds: set[tuple[int, int]] | None = None,
+) -> PhysicalPathSegments:
+    """Prove complete track spans and detect physical returns outside a modeled route.
+
+    Both proofs use identical split points, including mid-track width contacts.
+    A via row or doubled conductor can split current within the modeled route.
+    A physical return bypasses it when adding bonds that the model omitted
+    takes a previously unavoidable piece of track out of series.
+    """
     graph = _build_pad_to_pad_graph(contacts.items, contacts.bonds, bonded_junctions_only=True)
     pads: dict[tuple[str, str], int] = {}
     for index, node in graph.pad_nodes.items():
@@ -510,29 +590,42 @@ def unavoidable_segment_indices(
         footprint = pcb.footprints[footprint_index]
         pads[(footprint.reference, footprint.pads[pad_index].number)] = node
     if source not in pads or sink not in pads:
-        return set()
+        return PhysicalPathSegments(set(), {})
     start, target = pads[source], pads[sink]
-    distances, parents = _shortest_path_from(graph.adjacency, start)
-    if target not in distances:
-        return set()
-    # A bridge on any one pad-to-pad path lies on all of them. Requiring
-    # every piece also rules out a bypass that rejoins midway along a track.
-    bridges = _simple_graph_bridges(
-        {node: {other for other, _ in edges} for node, edges in graph.adjacency.items()}
-    )
-    path_bridges = set()
-    while target != start:
-        previous = parents[target]
-        edge = _edge_pair(previous, target)
-        if edge in bridges:
-            path_bridges.add(edge)
-        target = previous
-    return {
-        contacts.items[index].key[1]
+    adjacency = {node: {other for other, _ in edges} for node, edges in graph.adjacency.items()}
+    path = _junction_path(adjacency, start, target)
+    bridges = _simple_graph_bridges(adjacency) & {
+        _edge_pair(a, b) for a, b in zip(path, path[1:], strict=False)
+    }
+    spans = {
+        contacts.items[index].key[1]: {_edge_pair(a, b) for a, b, _ in pieces}
         for index, pieces in graph.track_pieces.items()
         if contacts.items[index].key[0] == "segment"
-        and all(_edge_pair(a, b) in path_bridges for a, b, _ in pieces)
     }
+    unavoidable = {index for index, pieces in spans.items() if pieces <= bridges}
+    if not unmodeled_bonds:
+        return PhysicalPathSegments(unavoidable, {})
+
+    owners = graph.node_items
+    modeled = {
+        node: {
+            other
+            for other in neighbours
+            if _edge_pair(owners[node], owners[other]) not in unmodeled_bonds
+        }
+        for node, neighbours in adjacency.items()
+    }
+    modeled_path = _junction_path(modeled, start, target)
+    bypassed = _simple_graph_bridges(modeled) - bridges
+    for index, (a, b) in enumerate(zip(modeled_path, modeled_path[1:], strict=False)):
+        edge = _edge_pair(a, b)
+        if owners[a] == owners[b] and edge in bypassed:
+            alternative = _junction_path(adjacency, start, target, skip=edge)
+            return PhysicalPathSegments(
+                unavoidable,
+                _physical_loop_witness(graph, contacts, modeled_path, alternative, index),
+            )
+    return PhysicalPathSegments(unavoidable, {})
 
 
 def _two_edge_connected_labels(

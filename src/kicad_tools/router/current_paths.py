@@ -236,6 +236,7 @@ if TYPE_CHECKING:
 
     from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
+    from kicad_tools.analysis.trace_length import PhysicalPathSegments
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.schema.pcb import PCB, Footprint, Net, Pad, Segment, Via, Zone
     from kicad_tools.sexp.parser import SExp
@@ -1577,6 +1578,8 @@ class _GraphEdge:
 @dataclass
 class _CopperGraph:
     adjacency: dict[_Node, list[tuple[_Node, _GraphEdge]]] = field(default_factory=dict)
+    # Physical objects keyed by identity, with all their modeled junctions after pad contraction.
+    item_nodes: dict[int, set[_Node]] = field(default_factory=dict)
     pads: dict[tuple[str, str, int], _Node] = field(default_factory=dict)
     internal: dict[_Node, list[Segment]] = field(default_factory=dict)
     # For each external edge landing on a pad hub, the physical points where
@@ -1724,6 +1727,7 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
                     graph.pad_centres.setdefault(hub, set()).add(
                         (fp.position[0] + offset[0], fp.position[1] + offset[1])
                     )
+            graph.item_nodes[id(pad)] = set(nodes)
             pad_contacts[(component_id, pad.number, occurrence)] = nodes
             pad_nodes.update(nodes)
 
@@ -1733,12 +1737,22 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
         centres = graph.pad_centres.pop(hub)
         graph.pad_centres.setdefault(root(hub), set()).update(centres)
 
+    for pad_id, nodes in graph.item_nodes.items():
+        graph.item_nodes[pad_id] = {root(node) for node in nodes}
+    for via in vias:
+        graph.item_nodes[id(via)] = {
+            root(_copper_node(via.position, layer))
+            for layer in layers
+            if via_spans_layer(via.layers, layer)
+        }
     for key, nodes in pad_contacts.items():
         hubs = {root(node) for node in nodes}
         if len(hubs) == 1:
             graph.pads[key] = hubs.pop()
     for a, b, edge in edges:
         ra, rb = root(a), root(b)
+        if edge.segment is not None:
+            graph.item_nodes.setdefault(id(edge.segment), set()).update((ra, rb))
         graph.adjacency.setdefault(ra, [])
         graph.adjacency.setdefault(rb, [])
         if edge in internal_edges and a != b:
@@ -2661,6 +2675,32 @@ def _loop_free_path_segments(
     return tuple(found.values())
 
 
+def _unmodeled_bonds(
+    pcb: PCB, graph: _CopperGraph, contacts: CopperContactGraph, groups: list[ParallelGroup]
+) -> set[tuple[int, int]]:
+    """Physical bonds absent from the centerline model and its proved conductors."""
+    from kicad_tools.validate.copper_contact import PAD, TRACK, VIA
+
+    ids: dict[int, int] = {}
+    for index, item in enumerate(contacts.items):
+        if item.kind == TRACK and item.key[0] == "segment":
+            ids[index] = id(pcb.segments[item.key[1]])
+        elif item.kind == VIA:
+            ids[index] = id(pcb.vias[item.key])
+        elif item.kind == PAD:
+            fp, pad = item.key
+            ids[index] = id(pcb.footprints[fp].pads[pad])
+    doubled = [{id(segment) for segment in group.segments} for group in groups]
+    return {
+        (a, b)
+        for a, b in contacts.bonds
+        if a in ids
+        and b in ids
+        and graph.item_nodes.get(ids[a], set()).isdisjoint(graph.item_nodes.get(ids[b], ()))
+        and not any(ids[a] in group and ids[b] in group for group in doubled)
+    }
+
+
 def _candidate_via_array_leg_count(
     graph: _CopperGraph,
     pcb: PCB,
@@ -3476,6 +3516,20 @@ def resolve_current_path(
 
         return build_copper_contact_graph(ConnectivityValidator(pcb), net_number, with_bonds=True)
 
+    source_pin, sink_pin = (source.ref, source.pad), (sink.ref, sink.pad)
+
+    def physical_spans(unmodeled_bonds: set[tuple[int, int]] | None = None) -> PhysicalPathSegments:
+        from kicad_tools.analysis.trace_length import physical_path_segments
+
+        return physical_path_segments(
+            pcb, physical_contacts(), source_pin, sink_pin, unmodeled_bonds
+        )
+
+    def proved_series_segments(indices: set[int]) -> tuple[Segment, ...]:
+        segment_ids = {id(pcb.segments[i]) for i in indices}
+        candidates = _loop_free_path_segments(adjacency, start, goal, contracted)
+        return tuple(seg for seg in candidates if id(seg) in segment_ids)
+
     # Mid-path layer changes carried by several barrels (Issue #9725) are
     # contracted like endpoint arrays; only groups the declared path changes
     # layer through become evidence (an off-path group still is no loop).
@@ -3522,15 +3576,7 @@ def resolve_current_path(
         # makes that centerline proof incomplete.
         loop_free: tuple[Segment, ...] = ()
         if not unmodeled_group and not unmodeled_copper(pcb, spec.net_name):
-            candidates = _loop_free_path_segments(adjacency, start, goal, contracted)
-            if candidates:
-                from kicad_tools.analysis.trace_length import unavoidable_segment_indices
-
-                unavoidable = unavoidable_segment_indices(
-                    pcb, physical_contacts(), (source.ref, source.pad), (sink.ref, sink.pad)
-                )
-                segment_ids = {id(pcb.segments[i]) for i in unavoidable}
-                loop_free = tuple(s for s in candidates if id(s) in segment_ids)
+            loop_free = proved_series_segments(physical_spans().unavoidable)
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,
@@ -3597,6 +3643,27 @@ def resolve_current_path(
             source=source,
             sink=sink,
         )
+
+    # The new mid-path row contraction can make a formerly cyclic path look
+    # resolved. Its proof covers the layer change itself; separately verify
+    # the current-carrying spans before and after it against actual copper.
+    missing_bonds = (
+        _unmodeled_bonds(pcb, adjacency, physical_contacts(), parallel_groups)
+        if on_path_groups
+        else set()
+    )
+    if missing_bonds:
+        evidence = physical_spans(missing_bonds)
+        if evidence.witness:
+            return PathResolution(
+                spec=spec,
+                status=STATUS_AMBIGUOUS,
+                reason="physical copper outside the modeled path forms a parallel return around a declared track span",
+                source=source,
+                sink=sink,
+                witness=evidence.witness,
+                loop_free_segments=proved_series_segments(evidence.unavoidable),
+            )
 
     return PathResolution(
         spec=spec,
