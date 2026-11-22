@@ -660,6 +660,42 @@ def test_pass_through_between_facing_pads_is_infeasible(tmp_path):
 PASS_VIA = _via("via-p", (101.35, 99.6))
 
 
+@pytest.mark.parametrize(
+    ("lock_flag", "movable"),
+    [("locked", False), ("(locked yes)", False), ("(locked no)", True), ("", True)],
+)
+@pytest.mark.parametrize(
+    ("conductor", "locked_item", "reason"),
+    [
+        ("via-p", "via-p", "locked_via"),
+        ("via-p", "trk-q", "locked_attached_track"),
+        ("trk-p", "trk-p", "locked_segment"),
+        ("trk-p", "trk-q", "junction_at_moved_end"),
+    ],
+)
+def test_nudge_respects_authored_copper_locks(
+    tmp_path, monkeypatch, capsys, conductor, locked_item, reason, lock_flag, movable
+):
+    if conductor == "via-p":
+        copper = PASS_VIA + "\n" + _seg("trk-q", (101.35, 99.6), (103, 99.6))
+        finding = _pt_finding(conductor, measured=0.05, location=(101.05, 99.6))
+    else:
+        copper = PASS + "\n" + _seg("trk-q", (105, 100.62), (108, 103))
+        finding = _pt_finding(conductor)
+    uuid = f'(uuid "{locked_item}")'
+    board = _board(tmp_path, copper.replace(uuid, f"{lock_flag} {uuid}"))
+    original = board.read_bytes()
+    before = [_saved_copper(board, item)[1] for item in (conductor, "trk-q")]
+    reports = [_report(finding), _report() if movable else _report(finding)]
+    _run(monkeypatch, board, reports, extra=("--format", "json"))
+    repair = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert repair["repaired"] == int(movable)
+    assert [item["reason"] for item in repair["unrepaired"]] == ([] if movable else [reason])
+    assert (board.read_bytes() != original) == movable
+    after = [_saved_copper(board, item)[1] for item in (conductor, "trk-q")]
+    assert [old != new for old, new in zip(before, after, strict=True)] == [movable, movable]
+
+
 def test_pass_through_via_moves_away_dragging_its_tracks(tmp_path):
     copper = (
         PASS_VIA

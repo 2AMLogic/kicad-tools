@@ -45,6 +45,7 @@ from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
 from ..sexp import SExp
 from .net_compat import resolve_net_atom
+from .repair_clearance import _is_locked
 from .repair_drill_clearance import DrillClearanceRepairer
 from .violation import DRCViolation, ViolationType
 
@@ -474,7 +475,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         start, end, width, seg_net = track
         if not vnet or vnet != seg_net:
             return "not_same_net"
-        if via_node.find("locked") is not None:
+        if _is_locked(via_node):
             return "locked_via"
 
         ux, uy = end[0] - start[0], end[1] - start[1]
@@ -525,7 +526,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         poly, centre, _pad_layers, pad_net, _pad_ref = pad
         if not vnet or vnet != pad_net:
             return "not_same_net"
-        if via_node.find("locked") is not None:
+        if _is_locked(via_node):
             return "locked_via"
         # ``already_merged`` requires actual copper contact (distance 0);
         # a small positive gap is a real slit the repair must clear, not a
@@ -700,7 +701,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         for seg_node in self.doc.find_all("segment"):
             if not net_name or self._net_name(seg_node) != net_name:
                 continue
-            if seg_node.find("locked") is not None and self._end_at(seg_node, vx, vy) is not None:
+            if _is_locked(seg_node) and self._end_at(seg_node, vx, vy) is not None:
                 return None
             for tag in ("start", "end"):
                 xy = _xy(seg_node.find(tag))
