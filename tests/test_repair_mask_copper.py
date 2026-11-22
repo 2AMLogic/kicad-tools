@@ -234,7 +234,7 @@ def _report(*violations: DRCViolation) -> DRCReport:
     )
 
 
-def _run(monkeypatch, board: Path, reports: list[DRCReport], extra=()):
+def _run(monkeypatch, board: Path, reports: list[DRCReport], extra=(), *, connectivity=False):
     """Run fix-drc --only mask-copper; ``reports`` feed successive kct-check runs."""
     feed = iter(reports)
     last = [reports[-1]]
@@ -249,7 +249,7 @@ def _run(monkeypatch, board: Path, reports: list[DRCReport], extra=()):
             str(board),
             "--only",
             "mask-copper",
-            "--no-connectivity-check",
+            *([] if connectivity else ["--no-connectivity-check"]),
             "--max-displacement",
             "1.0",
             *extra,
@@ -771,6 +771,96 @@ def test_fix_drc_reverts_a_pass_through_nudge_that_does_not_clear(tmp_path, monk
     assert code != 0
     assert _end(board, "trk-p") == [(95.0, 100.62), (105.0, 100.62)]  # reverted
     assert "finding_not_cleared" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("via_y, keep", [(100.204, False), (100.601, True), (100.0, True)])
+def test_mask_nudge_preserves_existing_pad_island_on_incomplete_net(
+    tmp_path, monkeypatch, capsys, via_y, keep
+):
+    # R1 (the mask opening) is already disconnected. R4 reaches the front track
+    # through the edge of a via annulus, so moving the track can strand R4 too.
+    pads = "".join(
+        f'(footprint "P" (layer "{layer}.Cu") (at {x} {y}) '
+        f'(property "Reference" "{ref}" (at 0 2) (layer "{layer}.Fab")) '
+        f'(pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "{layer}.Cu") '
+        f'(net 1 "N1") (uuid "pad-{ref}")))'
+        for ref, x, y, layer in [
+            ("R2", 95, 100.601, "F"),
+            ("R3", 105, 100.601, "F"),
+            ("R4", 102.5, 96, "B"),
+        ]
+    )
+    board = _board(
+        tmp_path,
+        pads
+        + _seg("front", (95, 100.601), (105, 100.601))
+        + _via("via", (102.5, via_y))
+        + _seg("back", (102.5, via_y), (102.5, 96), layer="B.Cu"),
+    )
+    original = board.read_bytes()
+    _run(
+        monkeypatch,
+        board,
+        [_report(_pt_finding("front", measured=0.001)), _report()],
+        extra=("--format", "json"),
+        connectivity=True,
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["total_repaired"] == int(keep)
+    assert (board.read_bytes() != original) == keep
+    if not keep:
+        assert result["mask_copper"]["unrepaired"][0]["reason"] == "pad_connection_lost"
+
+
+@pytest.mark.parametrize("outcome", ["saved", "refill_failed", "saved_error", "mask_reappeared"])
+def test_mask_refill_publishes_only_verified_saved_copper(tmp_path, monkeypatch, capsys, outcome):
+    from collections import Counter
+
+    from kicad_tools.cli import runner
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a") (priority 2))'
+    board = _board(tmp_path, PASS + zone)
+    board.with_suffix(".kicad_dru").write_text("(version 1)")
+    original = board.read_bytes()
+    output = tmp_path / "other.kicad_pcb"
+    if outcome != "saved":
+        output.write_bytes(b"previous output")
+    original_output = output.read_bytes() if output.exists() else None
+
+    def native_state(candidate):
+        assert candidate != board
+        assert candidate.name == board.name
+        assert candidate.with_suffix(".kicad_dru").read_text() == "(version 1)"
+        saved = "priority 3" in candidate.read_text()
+        return (Counter({"clearance": 1}) if saved and outcome == "saved_error" else Counter(), 0)
+
+    def refill(candidate, *, require_save):
+        assert require_save
+        assert candidate != board
+        assert board.read_bytes() == original
+        assert (output.read_bytes() if output.exists() else None) == original_output
+        candidate.write_text(candidate.read_text().replace("priority 2", "priority 3"))
+        return runner.KiCadCLIResult(success=outcome != "refill_failed", stderr="refill refused")
+
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", native_state)
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    finding = _report(_pt_finding("trk-p"))
+    final = finding if outcome == "mask_reappeared" else _report()
+    _run(
+        monkeypatch,
+        board,
+        [finding, _report(), final],
+        extra=("--output", str(output), "--format", "json"),
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert board.read_bytes() == original
+    assert result["total_repaired"] == int(outcome == "saved")
+    if outcome == "saved":
+        assert "priority 3" in output.read_text()
+        assert _end(output, "trk-p") != _end(board, "trk-p")
+    else:
+        assert output.read_bytes() == original_output
+        assert result["mask_copper"]["unrepaired"][-1]["reason"] == "recheck_unavailable"
 
 
 def test_moves_with_new_errors_attributes_a_via_centre_location(tmp_path, monkeypatch):

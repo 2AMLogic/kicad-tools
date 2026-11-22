@@ -14,7 +14,11 @@ translates the whole conductor (dragging every same-net end joined to it)
 away from the opening until it clears the policy clearance plus a margin;
 moves that would crowd other copper, a drill, another opening or pull an end
 out of a pad it terminates in are declined with a reason, and every kept move
-is re-checked on the saved board.
+is re-checked on the saved board. On a partially routed net, the check preserves
+each group of pads already joined by copper. `pad_connection_lost` identifies
+a refused move that would split a group. On boards with pours, the command
+refills a private copy with the original project rules and checks the saved
+copper before publishing the repair.
 
 Supply a process-specific clearance requirement with its source, process and
 revision. A manufacturer profile, mask expansion or minimum mask-web width does
