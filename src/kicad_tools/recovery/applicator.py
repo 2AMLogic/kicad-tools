@@ -519,6 +519,8 @@ class StrategyApplicator:
                 graphic.center = (cx, -cy)
             if getattr(graphic, "points", None):
                 graphic.points = [(px, -py) for (px, py) in graphic.points]
+            if getattr(graphic, "arc_boundary", None) is not None:
+                graphic.arc_boundary = [(px, -py) for px, py in graphic.arc_boundary]
             if hasattr(graphic, "layer"):
                 graphic.layer = _flip_layer_side(graphic.layer)
 
@@ -570,6 +572,8 @@ class StrategyApplicator:
                 y = xy.get_float(1)
                 if y is not None:
                     xy.set_value(1, -y)
+            for arc in pts.find_children("arc"):
+                StrategyApplicator._mirror_cosmetic_node(arc)
 
         layer_node = node.find_child("layer")
         if layer_node is not None:

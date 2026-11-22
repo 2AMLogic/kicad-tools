@@ -58,6 +58,9 @@ def main():
             str(out / "diffpair_test.kicad_pcb"),
             "--output",
             str(routed),
+            # The reviewed process uses ordinary through vias and prohibits drills on SMT lands.
+            "--manufacturer",
+            "jlcpcb",
             "--nets",
             "IN1,IN2,IN3,IN4,OUT1,OUT2,OUT3,OUT4",
             "--preserve-existing",
@@ -131,6 +134,8 @@ def main():
             "kicad_tools.cli",
             "check",
             str(routed),
+            "--mfr",
+            "jlcpcb-tier1",
             "--format",
             "json",
             "--output",

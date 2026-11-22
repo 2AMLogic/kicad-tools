@@ -757,3 +757,43 @@ def test_plain_board_polygon_keeps_exact_segment_order():
     assert pcb.get_board_outline() == relative
     (silk_graphic,) = pcb.graphics_on_layer("F.SilkS")
     assert silk_graphic.points == [(90, 90), (90, 92)]
+
+
+@pytest.mark.parametrize(
+    "layer", ["F.SilkS", "B.SilkS", "F.Mask", "F.Fab", "Dwgs.User", "F.Cu", "Edge.Cuts"]
+)
+@pytest.mark.parametrize("owner", ["board", "footprint"])
+def test_curved_polygon_points_and_manufactured_boundary(layer, owner):
+    from shapely.geometry import Point, Polygon
+
+    from kicad_tools.validate.rules.physical_gap import _fp_poly_geometry
+    from kicad_tools.validate.rules.silkscreen import _mask_graphic_geometry, _stroke_geometry
+
+    chain = "(pts (xy 90 90) (arc (start 92 90) (mid 93 91) (end 92 92)) (xy 90 92))"
+    style = f'(fill solid) (layer "{layer}")'
+    if owner == "board":
+        pcb = PCB(parse_string(f"(kicad_pcb (gr_poly {chain} {style}))"))
+        (graphic,) = pcb.graphics_on_layer(layer)
+    else:
+        pcb = PCB(
+            parse_string(
+                f'(kicad_pcb (footprint "Test:Lobe" (layer "F.Cu") (fp_poly {chain} {style})))'
+            )
+        )
+        (graphic,) = pcb.footprints[0].graphics
+    if owner == "board" and layer == "Edge.Cuts":
+        assert graphic.points == graphic.boundary_points
+    else:
+        assert graphic.points == [(90, 90), (90, 92)]
+
+    # The straight strip is 2 by 2 mm with a semicircle of radius 1 on its right.
+    boundary = Polygon(graphic.boundary_points)
+    assert boundary.area == pytest.approx(4 + math.pi / 2, abs=0.0003)
+    assert boundary.covers(Point(92.75, 91))
+    assert not boundary.covers(Point(93.1, 91))
+    if layer.endswith("SilkS"):
+        assert _stroke_geometry(graphic, None).equals(boundary)
+    elif layer == "F.Mask":
+        assert _mask_graphic_geometry(graphic, None).equals(boundary)
+    elif owner == "footprint" and layer == "F.Cu":
+        assert _fp_poly_geometry(graphic, lambda point: point).equals(boundary)
