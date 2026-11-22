@@ -336,6 +336,152 @@ bool Pathfinder::own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, i
                                     search_gate_clamp_refs_);
 }
 
+// Issue #9019: own-net pad slit-band step gate.  Exact segment-vs-box gap, a
+// line-for-line port of ``via_clearance._segment_box_gap_mm`` so the native and
+// Python searches decide a step identically.
+namespace {
+
+constexpr double kOwnNetBandTolMm = 5e-5;  // == OWN_NET_BAND_STEP_TOL_MM
+
+double band_point_box_distance(double x, double y, double min_x, double min_y,
+                               double max_x, double max_y) {
+    const double dx = std::max({min_x - x, 0.0, x - max_x});
+    const double dy = std::max({min_y - y, 0.0, y - max_y});
+    return std::hypot(dx, dy);
+}
+
+double band_point_segment_distance(double px, double py, double ax, double ay,
+                                   double bx, double by) {
+    const double dx = bx - ax, dy = by - ay;
+    const double len2 = dx * dx + dy * dy;
+    if (len2 == 0.0) return std::hypot(px - ax, py - ay);
+    double t = ((px - ax) * dx + (py - ay) * dy) / len2;
+    t = std::max(0.0, std::min(1.0, t));
+    return std::hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+double band_segment_box_gap(double ax, double ay, double bx, double by, double half,
+                            double min_x, double min_y, double max_x, double max_y) {
+    // Slab clip (Liang-Barsky): does the centreline reach the rectangle?
+    double t0 = 0.0, t1 = 1.0;
+    bool parallel_outside = false;
+    const double deltas[2] = {bx - ax, by - ay};
+    const double origins[2] = {ax, ay};
+    const double los[2] = {min_x, min_y};
+    const double his[2] = {max_x, max_y};
+    for (int i = 0; i < 2; ++i) {
+        const double delta = deltas[i], origin = origins[i];
+        if (std::fabs(delta) < 1e-12) {
+            if (origin < los[i] || origin > his[i]) parallel_outside = true;
+        } else {
+            double ta = (los[i] - origin) / delta;
+            double tb = (his[i] - origin) / delta;
+            if (ta > tb) std::swap(ta, tb);
+            t0 = std::max(t0, ta);
+            t1 = std::min(t1, tb);
+            if (t0 > t1) {
+                parallel_outside = true;
+                break;
+            }
+        }
+    }
+    if (!parallel_outside) return 0.0;
+    double best = std::min(band_point_box_distance(ax, ay, min_x, min_y, max_x, max_y),
+                           band_point_box_distance(bx, by, min_x, min_y, max_x, max_y));
+    const double cxs[4] = {min_x, max_x, max_x, min_x};
+    const double cys[4] = {min_y, min_y, max_y, max_y};
+    for (int i = 0; i < 4; ++i) {
+        best = std::min(best, band_point_segment_distance(cxs[i], cys[i], ax, ay, bx, by));
+    }
+    return std::max(0.0, best - half);
+}
+
+// Issue #9461: twin of Python ``primitives.pad_half_extents`` (#4910), in
+// double and in the same operation order, so both engines build the same
+// band box for a non-cardinally rotated pad.  A circle is its bounding
+// square; ``rotation == 0`` keeps the plain ``width/2, height/2`` box with no
+// trig (byte-identical to the pre-#9461 gate); any other angle projects the
+// rectangle onto the board axes (the angle's sign is immaterial).
+void band_pad_half_extents(const PadInfo& p, double& half_w, double& half_h) {
+    const double w = static_cast<double>(p.width);
+    const double h = static_cast<double>(p.height);
+    if (p.is_circular) {
+        half_w = half_h = std::max(w, h) / 2.0;
+        return;
+    }
+    if (p.rotation == 0.0f) {
+        half_w = w / 2.0;
+        half_h = h / 2.0;
+        return;
+    }
+    // ``math.radians`` multiplies by the folded constant pi/180.
+    constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+    const double theta = static_cast<double>(p.rotation) * kDegToRad;
+    const double cos_t = std::fabs(std::cos(theta));
+    const double sin_t = std::fabs(std::sin(theta));
+    half_w = cos_t * w / 2.0 + sin_t * h / 2.0;
+    half_h = sin_t * w / 2.0 + cos_t * h / 2.0;
+}
+
+}  // namespace
+
+bool Pathfinder::own_net_band_step_ok(int x1, int y1, int x2, int y2, int layer, int net,
+                                      float width,
+                                      double exclude_sx, double exclude_sy,
+                                      double exclude_ex, double exclude_ey) const {
+    const double edge = static_cast<double>(search_band_edge_mm_);
+    if (edge <= 0.0) return true;
+    const auto& pads = grid_.pads();
+    if (band_pads_net_ != net || band_pads_count_ != pads.size()) {
+        band_pads_.clear();
+        for (const auto& p : pads) {
+            // SMD pads only (layer_idx -1 = through-hole), as the #9012 predicate.
+            if (p.net != net || p.layer_idx < 0) continue;
+            // Issue #9461: the rotation-aware board-space AABB, the same box
+            // ``Router._own_net_band_bboxes`` builds via ``pad_half_extents``.
+            double hw = 0.0, hh = 0.0;
+            band_pad_half_extents(p, hw, hh);
+            band_pads_.push_back({static_cast<double>(p.x) - hw,
+                                  static_cast<double>(p.y) - hh,
+                                  static_cast<double>(p.x) + hw,
+                                  static_cast<double>(p.y) + hh,
+                                  p.layer_idx});
+        }
+        band_pads_net_ = net;
+        band_pads_count_ = pads.size();
+    }
+    if (band_pads_.empty()) return true;
+    const auto [ax_f, ay_f] = grid_.grid_to_world(x1, y1);
+    const auto [bx_f, by_f] = grid_.grid_to_world(x2, y2);
+    const double ax = ax_f, ay = ay_f, bx = bx_f, by = by_f;
+    const double half = static_cast<double>(width) / 2.0;
+    const double reach = half + edge;
+    const double lo_x = std::min(ax, bx) - reach, hi_x = std::max(ax, bx) + reach;
+    const double lo_y = std::min(ay, by) - reach, hi_y = std::max(ay, by) + reach;
+    for (const auto& bb : band_pads_) {
+        if (bb.layer != layer) continue;
+        if (bb.x1 < lo_x || bb.x0 > hi_x || bb.y1 < lo_y || bb.y0 > hi_y) continue;
+        // A pad the leg is UNIONED with (its own start/end: the exclusion
+        // points sit in its metal) is skipped -- measuring the step against
+        // it in isolation invents a slit that does not exist and refused
+        // every planar exit (9019 review).  The -1e30 sentinels never land
+        // in a real pad box, so unset exclusions skip nothing.
+        if ((bb.x0 <= exclude_sx && exclude_sx <= bb.x1 && bb.y0 <= exclude_sy &&
+             exclude_sy <= bb.y1) ||
+            (bb.x0 <= exclude_ex && exclude_ex <= bb.x1 && bb.y0 <= exclude_ey &&
+             exclude_ey <= bb.y1)) {
+            continue;
+        }
+        const double gap = band_segment_box_gap(ax, ay, bx, by, half,
+                                                bb.x0, bb.y0, bb.x1, bb.y1);
+        if (kOwnNetBandTolMm < gap && gap < edge - kOwnNetBandTolMm) {
+            ++band_gate_rejects_;
+            return false;
+        }
+    }
+    return true;
+}
+
 // Issue #7887: the own-pad step gate measures the validator's verdict, which
 // widens a foreign-domain pad's requirement to the pairwise (HV) floor
 // (``Grid3D::segment_pad_clear``).  On a TO-220-style HV pad ringed by LV pads
@@ -1097,6 +1243,54 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         }
     }
 
+    // Issue #8994: same-net pad slit band -- the fab-view ``physical_copper_gap``
+    // population #8957 graded and #8974 drained on the Python producers.  The
+    // annulus (NOT the drill: that is the #7296 block above) must either union
+    // with its own SMD pad or clear the stackup-resolved detection edge;
+    // the open band in between is a slit the checker rejects, so the seat is
+    // refused.  Own net only (a foreign pad here is min_via_pad_edge_gap's /
+    // clearance's job), SMD only (``layer_idx < 0`` is a through-hole annulus,
+    // excluded exactly as the Python predicate's SMD bboxes exclude it), and
+    // OFF when the caller resolved no stackup edge -- never a literal
+    // (#8974 AC-3).  Same arithmetic as Python
+    // ``via_clearance.same_net_pad_gap_acceptable`` (types.hpp's
+    // ``same_net_pad_gap_in_band`` holds the single shared copy).
+    if (rules_.same_net_pad_gap_band_edge_mm > 0.0f) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const double half = search_via_half_diam_mm_ > 0
+            ? search_via_half_diam_mm_ : rules_.via_diameter / 2.0;
+        for (const auto& pad : grid_.pads()) {
+            if (pad.net != net || pad.layer_idx < 0) continue;
+            if (same_net_pad_gap_in_band(static_cast<double>(wx),
+                                         static_cast<double>(wy), half, pad,
+                                         rules_.same_net_pad_gap_band_edge_mm))
+                return true;
+        }
+    }
+
+    // Issue #9208: the trace-population twin of the block above -- the annulus
+    // against its OWN net's stored trace copper (any layer: a through via's
+    // annulus exists on every layer).  Same two acceptable regions at the
+    // ``trace_spacing`` detection edge; OFF when no edge was resolved.  Sees
+    // COMMITTED routes only (``Grid3D::stored_segments``); copper of the route
+    // being searched is the segment-emit side's job.
+    if (rules_.same_net_trace_gap_band_edge_mm > 0.0f) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const double half = search_via_half_diam_mm_ > 0
+            ? search_via_half_diam_mm_ : rules_.via_diameter / 2.0;
+        const double edge = rules_.same_net_trace_gap_band_edge_mm;
+        const float reach = static_cast<float>(half + edge);
+        const auto candidates = grid_.route_geometry_candidates(wx - reach, wy - reach,
+                                                                wx + reach, wy + reach);
+        for (const size_t i : candidates.first) {
+            const auto& seg = grid_.stored_segments()[i];
+            if (seg.net != net) continue;
+            if (same_net_segment_gap_in_band(static_cast<double>(wx),
+                                             static_cast<double>(wy), half, seg, edge))
+                return true;
+        }
+    }
+
     if (!rules_.allow_smd_vias) {
         const auto [wx, wy] = grid_.grid_to_world(x, y);
         const float drill_radius = rules_.via_drill / 2.0f;
@@ -1544,6 +1738,60 @@ static float landing_cost(const PadBounds& pb, int ax, int ay, int bx, int by,
     return 2.0f * rules.cost_turn + rules.cost_straight * off;
 }
 
+// Search and reconstruction must agree on which short pad-center stubs
+// become copper on the board.
+static bool emits_trace_segment(float dx, float dy) {
+    return std::abs(dx) > 0.01f || std::abs(dy) > 0.01f;
+}
+
+bool Pathfinder::trace_step_vias_clear(const AStarNode& current, const Segment& step,
+                                       float start_x, float start_y) const {
+    if (grid_.stored_via_count() == 0) return true;
+    const float edge = rules_.same_net_trace_gap_band_edge_mm;
+    Grid3D::TraceViaBand band{edge, current.via_from_parent ? 0.0f : static_cast<float>(current.dx),
+                              current.via_from_parent ? 0.0f : static_cast<float>(current.dy)};
+    if (current.parent_idx < 0 && edge > 0.0f) {
+        // The reconstructed trace starts at the pad center. Include its initial
+        // stub and remember its direction when grading the join at this seed.
+        band.incoming_dx = step.x1 - start_x;
+        band.incoming_dy = step.y1 - start_y;
+        if (emits_trace_segment(band.incoming_dx, band.incoming_dy)) {
+            const Segment stub{start_x, start_y, step.x1, step.y1, step.width, step.layer, step.net};
+            if (!grid_.search_trace_vias_clear(stub, std::nullopt, 0.0f, {edge})) return false;
+        } else if (band.incoming_dx != 0.0f || band.incoming_dy != 0.0f) {
+            // The tiny stub is omitted. Check the actual first segment, while
+            // retaining the existing foreign-barrel check on the grid step.
+            Segment first = step;
+            first.x1 = start_x;
+            first.y1 = start_y;
+            if (!grid_.search_trace_vias_clear(first, std::nullopt, 0.0f, {edge})) return false;
+            band = {};
+        }
+    }
+    const float clearance = trace_via_clearance(
+        search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+        search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance);
+    return grid_.search_trace_vias_clear(step, clearance, physical_partner_clearance_, band);
+}
+
+bool Pathfinder::goal_stub_vias_clear(const AStarNode& node, float end_x, float end_y,
+                                      int net, float emit_trace_width) const {
+    const float edge = rules_.same_net_trace_gap_band_edge_mm;
+    if (edge <= 0.0f || grid_.stored_via_count() == 0) return true;
+    const auto [wx, wy] = grid_.grid_to_world(node.x, node.y);
+    // An omitted tail still has a round end cap at the last emitted vertex.
+    if (!emits_trace_segment(end_x - wx, end_y - wy)) {
+        end_x = wx;
+        end_y = wy;
+        if (node.via_from_parent) return true;  // the trace ends in its new via
+    }
+    const Segment tail{wx, wy, end_x, end_y,
+                       emit_trace_width > 0.0f ? emit_trace_width : rules_.trace_width, node.layer, net};
+    return grid_.search_trace_vias_clear(tail, std::nullopt, 0.0f,
+        {edge, node.via_from_parent ? 0.0f : static_cast<float>(node.dx),
+               node.via_from_parent ? 0.0f : static_cast<float>(node.dy), true});
+}
+
 RouteResult Pathfinder::route(
     float start_x, float start_y, int start_layer,
     float end_x, float end_y, int end_layer,
@@ -1767,13 +2015,7 @@ RouteResult Pathfinder::route(
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = emit_trace_width > 0 ? emit_trace_width : rules_.trace_width;
                 edge.layer = nlayer; edge.net = net;
-                // Issue #6272: the trace/via floor, not the bare trace floor,
-                // so search and commit agree in either insertion order.
-                if (!grid_.trace_stored_vias_clear(edge,
-                        trace_via_clearance(
-                            search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
-                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
-                        physical_partner_net_, physical_partner_clearance_)) continue;
+                if (!trace_step_vias_clear(current, edge, start_x, start_y)) continue;
                 // Issue #6243: authored per-net minimum on the swept step,
                 // before any pad-exit / sharing / partner relief below.
                 if (grid_.authored_active() &&
@@ -2006,6 +2248,27 @@ RouteResult Pathfinder::route(
                 continue;
             }
 
+            // Issue #9019: own-net pad slit-band gate (see
+            // ``set_search_own_net_band``), twin of the Python A* gate.  The
+            // exclusion points are the search's own start/end (the pads this
+            // leg is unioned with).
+            if (search_band_edge_mm_ > 0.0f && nlayer == current.layer &&
+                !own_net_band_step_ok(current.x, current.y, nx, ny, nlayer, net,
+                                      emit_trace_width > 0.0f ? emit_trace_width
+                                                              : rules_.trace_width,
+                                      static_cast<double>(start_x),
+                                      static_cast<double>(start_y),
+                                      static_cast<double>(end_x),
+                                      static_cast<double>(end_y))) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                        "REJECT reason=own_net_pad_slit_band\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
+
             if (astar_trace_enabled()) {
                 std::fprintf(stderr,
                     "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
@@ -2039,6 +2302,27 @@ RouteResult Pathfinder::route(
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
 
+            // Issue #9597: soft foreign plane-zone crossing cost.  A foreign
+            // zone cell on a PLANE layer costs ``cost_zone_foreign_plane``
+            // per cell so the search prefers an around-path but may still
+            // cross when nothing else exists -- exactly the Python
+            // ``zone_cost_arr`` term.  Issue #9826: on any other layer a
+            // foreign zone is blocked, as the Python ``zone_blocked_arr``
+            // does (``Grid3D::set_plane_layers`` carries the PLANE mask).
+            const GridCell& step_cell = grid_.at(nx, ny, nlayer);
+            const bool foreign_zone =
+                step_cell.is_zone && step_cell.net != 0 && step_cell.net != net;
+            if (foreign_zone && !grid_.is_plane_layer(nlayer)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                        "REJECT reason=zone_blocked\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
+            const float zone_cost = foreign_zone ? rules_.cost_zone_foreign_plane : 0.0f;
+
             // Issue #3143: per-pad channel budget cost.  Returns 0.0 when
             // the budget list is empty (the default) or when the candidate
             // cell does not sit inside a configured budget bbox.  When
@@ -2064,7 +2348,7 @@ RouteResult Pathfinder::route(
             float positive_step_cost =
                 cost_mult * rules_.cost_straight +
                 turn_cost + congestion_cost + negotiated_cost +
-                avoidance + pad_channel_cost + pairwise_cost;
+                avoidance + zone_cost + pad_channel_cost + pairwise_cost;
             if (attractor_bonus > 0.0f) {
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
@@ -2083,12 +2367,16 @@ RouteResult Pathfinder::route(
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
-                g_scores[neighbor_key] = new_g;
                 float h = heuristic(nx, ny, nlayer, end_gx, end_gy, valid_end_layers[0]);
                 float f = new_g + weight * h;
 
                 AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy,
                                    seq_counter++};
+                // Refuse the incoming edge before recording its score: another
+                // direction can reach the same goal with continuous copper.
+                if (is_in_end_metal &&
+                    !goal_stub_vias_clear(neighbor, end_x, end_y, net, emit_trace_width)) continue;
+                g_scores[neighbor_key] = new_g;
                 open_set.push(neighbor);
             }
         }
@@ -2175,7 +2463,6 @@ RouteResult Pathfinder::route(
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
-                g_scores[neighbor_key] = new_g;
                 float h = heuristic(current.x, current.y, new_layer,
                                     end_gx, end_gy, valid_end_layers[0]);
                 float f = new_g + weight * h;
@@ -2183,6 +2470,10 @@ RouteResult Pathfinder::route(
                 AStarNode neighbor{f, new_g, current.x, current.y, new_layer,
                                    current_idx, true, current.dx, current.dy,
                                    seq_counter++};
+                if (in_end_metal &&
+                    std::find(valid_end_layers.begin(), valid_end_layers.end(), new_layer) != valid_end_layers.end() &&
+                    !goal_stub_vias_clear(neighbor, end_x, end_y, net, emit_trace_width)) continue;
+                g_scores[neighbor_key] = new_g;
                 open_set.push(neighbor);
             }
         }
@@ -2519,13 +2810,7 @@ RouteResult Pathfinder::run_astar_loop() {
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = search_emit_trace_width_ > 0 ? search_emit_trace_width_ : rules_.trace_width;
                 edge.layer = nlayer; edge.net = search_net_;
-                // Issue #6272: the trace/via floor, not the bare trace floor,
-                // so search and commit agree in either insertion order.
-                if (!grid_.trace_stored_vias_clear(edge,
-                        trace_via_clearance(
-                            search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
-                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
-                        physical_partner_net_, physical_partner_clearance_)) continue;
+                if (!trace_step_vias_clear(current, edge, search_start_x_, search_start_y_)) continue;
                 // Issue #6243: authored per-net minimum on the swept step,
                 // before any pad-exit / sharing / partner relief below.
                 if (grid_.authored_active() &&
@@ -2776,6 +3061,28 @@ RouteResult Pathfinder::run_astar_loop() {
                 continue;
             }
 
+            // Issue #9019: own-net pad slit-band gate, as in the one-shot loop.
+            // The exclusion points are the search's own start/end (the pads
+            // this leg is unioned with).
+            if (search_band_edge_mm_ > 0.0f && nlayer == current.layer &&
+                !own_net_band_step_ok(current.x, current.y, nx, ny, nlayer, search_net_,
+                                      search_emit_trace_width_ > 0.0f
+                                          ? search_emit_trace_width_
+                                          : rules_.trace_width,
+                                      static_cast<double>(search_start_x_),
+                                      static_cast<double>(search_start_y_),
+                                      static_cast<double>(search_end_x_),
+                                      static_cast<double>(search_end_y_))) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                        "reason=own_net_pad_slit_band net=%d\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer,
+                        search_net_);
+                }
+                continue;
+            }
+
             if (astar_trace_enabled()) {
                 std::fprintf(stderr,
                     "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
@@ -2810,6 +3117,24 @@ RouteResult Pathfinder::run_astar_loop() {
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
 
+            // Issue #9597: soft foreign plane-zone crossing cost (mirrors
+            // the one-shot loop and the Python ``zone_cost_arr`` term).
+            // Issue #9826: cost on PLANE layers only; blocked elsewhere.
+            const GridCell& step_cell = grid_.at(nx, ny, nlayer);
+            const bool foreign_zone =
+                step_cell.is_zone && step_cell.net != 0 && step_cell.net != search_net_;
+            if (foreign_zone && !grid_.is_plane_layer(nlayer)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                        "reason=zone_blocked net=%d\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer,
+                        search_net_);
+                }
+                continue;
+            }
+            const float zone_cost = foreign_zone ? rules_.cost_zone_foreign_plane : 0.0f;
+
             // Issue #3143: per-pad channel budget cost.  Mirrors the
             // one-shot ``route()`` cost contribution above; consults the
             // lookup populated at ``route_resumable()`` entry.  Empty
@@ -2835,7 +3160,7 @@ RouteResult Pathfinder::run_astar_loop() {
             float positive_step_cost =
                 cost_mult * rules_.cost_straight +
                 turn_cost + congestion_cost + negotiated_cost +
-                avoidance + pad_channel_cost + pairwise_cost;
+                avoidance + zone_cost + pad_channel_cost + pairwise_cost;
             if (attractor_bonus > 0.0f) {
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
@@ -2855,13 +3180,16 @@ RouteResult Pathfinder::run_astar_loop() {
             // so the ``new_g < ...`` compare matches the pre-#3309 semantics
             // of the ``find() == end()`` branch.
             if (new_g < g_score_at(nbr_idx)) {
-                set_g_score(nbr_idx, new_g);
                 float h = heuristic(nx, ny, nlayer, search_end_gx_, search_end_gy_,
                                     search_valid_end_layers_[0]);
                 float f = new_g + search_weight_ * h;
 
                 AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy,
                                    search_seq_counter_++};
+                if (is_in_end_metal && !rejected_goals_.count(std::make_tuple(nx, ny, nlayer)) &&
+                    !goal_stub_vias_clear(neighbor, search_end_x_, search_end_y_,
+                                          search_net_, search_emit_trace_width_)) continue;
+                set_g_score(nbr_idx, new_g);
                 search_open_set_.push(neighbor);
             }
         }
@@ -2947,7 +3275,6 @@ RouteResult Pathfinder::run_astar_loop() {
 
             // Issue #3309: flat-array g_score relax for via expansion.
             if (new_g < g_score_at(via_idx)) {
-                set_g_score(via_idx, new_g);
                 float h = heuristic(current.x, current.y, new_layer,
                                     search_end_gx_, search_end_gy_,
                                     search_valid_end_layers_[0]);
@@ -2956,6 +3283,13 @@ RouteResult Pathfinder::run_astar_loop() {
                 AStarNode neighbor{f, new_g, current.x, current.y, new_layer,
                                    current_idx, true, current.dx, current.dy,
                                    search_seq_counter_++};
+                if (in_end_metal &&
+                    std::find(search_valid_end_layers_.begin(), search_valid_end_layers_.end(), new_layer)
+                        != search_valid_end_layers_.end() &&
+                    !rejected_goals_.count(std::make_tuple(current.x, current.y, new_layer)) &&
+                    !goal_stub_vias_clear(neighbor, search_end_x_, search_end_y_,
+                                          search_net_, search_emit_trace_width_)) continue;
+                set_g_score(via_idx, new_g);
                 search_open_set_.push(neighbor);
             }
         }
@@ -3092,7 +3426,7 @@ RouteResult Pathfinder::reconstruct_path(
             current_layer = layer;
         } else {
             // Add segment if position changed
-            if (std::abs(wx - current_x) > 0.01f || std::abs(wy - current_y) > 0.01f) {
+            if (emits_trace_segment(wx - current_x, wy - current_y)) {
                 Segment seg;
                 seg.x1 = current_x;
                 seg.y1 = current_y;
@@ -3110,7 +3444,7 @@ RouteResult Pathfinder::reconstruct_path(
     }
 
     // Final segment to end
-    if (std::abs(end_x - current_x) > 0.01f || std::abs(end_y - current_y) > 0.01f) {
+    if (emits_trace_segment(end_x - current_x, end_y - current_y)) {
         Segment seg;
         seg.x1 = current_x;
         seg.y1 = current_y;

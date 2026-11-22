@@ -34,15 +34,18 @@ pad corner is no longer judged against the corner's bounding square.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.geometry.copper import pad_gate_polygon as _pad_gate_polygon
 from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygon
 
 from ..clearance_shapes import pad_kernel_params
 from ..primitives import Pad, pad_half_extents
+from ..via_clearance import SAME_NET_BAND_WRITE_SLACK_MM
 from . import kernel_adapter as ka
 from .geometry import (
     Pt,
@@ -267,12 +270,17 @@ class LatticeObstacleModel:
         agent_radius: float,
         pad_extra: list[float] | None = None,
         pad_class_extra: list[float] | None = None,
+        base_clearance: float = 0.0,
     ) -> None:
         self.lattice = lattice
         self.pads = pads
         self.pad_layer_indices = pad_layer_indices
         self.num_layers = num_layers
         self.agent_radius = agent_radius
+        # The board-global trace clearance (issue #9636 review): the floor a
+        # relaxed sibling pad is still held to, so the sibling relaxation
+        # waives only the class surcharge above it -- never the board rule.
+        self._base_clearance = base_clearance
 
         # Inflated keep-out rectangle per pad (pad half-extent + agent radius).
         # Issue #6243: ``pad_extra[i]`` grows pad ``i``'s keep-out by the
@@ -378,17 +386,55 @@ class LatticeObstacleModel:
                 out.update(self._pad_buckets.get((ix, iy), ()))
         return out
 
-    def node_blocked(self, key: NodeKey, layer: int, net: int) -> bool:
-        """True if the node sits in an OTHER-net pad keep-out on ``layer``."""
-        return any(self.pads[idx].net != net for idx in self.node_pads[layer].get(key, ()))
+    def node_blocked(
+        self,
+        key: NodeKey,
+        layer: int,
+        net: int,
+        relax: Mapping[int, float] | None = None,
+        point: Pt | None = None,
+    ) -> bool:
+        """True if the node sits in an OTHER-net pad keep-out on ``layer``.
+
+        ``relax`` / ``point`` (issue #9636): see :meth:`segment_blocked`.
+        """
+        for idx in self.node_pads[layer].get(key, ()):
+            if self.pads[idx].net == net:
+                continue
+            if (
+                relax is not None
+                and point is not None
+                and idx in relax
+                and self.pad_centerline_gap(idx, point, point)
+                > relax[idx] + ka.LATTICE_CLEARANCE_EPSILON_MM
+            ):
+                continue
+            return True
+        return False
 
     def edge_blocked(self, edge: EdgeKey, layer: int, net: int) -> bool:
         """True if the edge crosses an OTHER-net pad keep-out on ``layer``."""
         return any(self.pads[idx].net != net for idx in self.edge_pads[layer].get(edge, ()))
 
-    def segment_blocked(self, a: Pt, b: Pt, layer: int, net: int, extra: float = 0.0) -> bool:
+    def segment_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        extra: float = 0.0,
+        relax: Mapping[int, float] | None = None,
+    ) -> bool:
         """True if free segment ``a-b`` (e.g. a stub leg) enters an other-net
         pad keep-out on ``layer`` (geometric, not lattice-resource, check).
+
+        ``relax`` (issue #9636) maps a pad index to a smaller centreline-to-
+        outline gap that pad is held to instead of its full keep-out: the
+        caller passes the OTHER pads of the footprint a stub leaves from, whose
+        distance to the origin pad is fixed by the part (so an authored class
+        clearance on their net must not wall that pad in).  The floor is never
+        below the board's base clearance, so only the class surcharge above it
+        is waived.  Pads not in ``relax`` are judged exactly as before.
 
         ``extra`` (issue #4271) inflates every pad keep-out beyond the
         global ``agent_radius`` -- the per-connection surcharge for a net
@@ -407,7 +453,262 @@ class LatticeObstacleModel:
             if extra > 0.0:
                 rect = (rect[0] - extra, rect[1] - extra, rect[2] + extra, rect[3] + extra)
             if seg_rect_intersect(a, b, rect) and self.pad_keepout_hit(idx, a, b, extra):
+                if (
+                    relax is not None
+                    and idx in relax
+                    and self.pad_centerline_gap(idx, a, b)
+                    > relax[idx] + ka.LATTICE_CLEARANCE_EPSILON_MM
+                ):
+                    continue
                 return True
+        return False
+
+    def footprint_sibling_floors(
+        self, pad: Pad, net: int, half: float, extra: float = 0.0
+    ) -> dict[int, float]:
+        """Centreline-gap floors for the other-net pads of ``pad``'s footprint (#9636).
+
+        The gap between two pads of one footprint is fixed by the part, so the
+        keep-out an authored class clearance grows around a sibling pad must
+        not wall the origin pad in: copper leaving ``pad`` is held to the gap
+        the part itself leaves between the two pads (``half`` + that
+        outline-to-outline gap) rather than the full class keep-out.  The
+        floor never drops below the board's base clearance (``half`` +
+        ``base_clearance``): a fine-pitch part whose pad gap is narrower than
+        the board rule keeps that rule -- only the class surcharge above base
+        is waived.  Only siblings whose full keep-out (``extra`` is the
+        caller's surcharge over the global agent radius, as for
+        :meth:`segment_blocked`) reaches further than that floor are listed --
+        an ordinary neighbour whose keep-out the part already satisfies is
+        judged exactly as before.  Empty for a pad without a reference
+        designator.
+        """
+        if not pad.ref:
+            return {}
+        out: dict[int, float] = {}
+        own = self._outline_of(pad)
+        for idx, other in enumerate(self.pads):
+            if other is pad or other.ref != pad.ref or other.net == net:
+                continue
+            gap = ka.gap(self._outline_of(other, idx), own)
+            floor = half + max(gap, self._base_clearance)
+            if floor < self._pad_reach[idx] + extra - ka.LATTICE_CLEARANCE_EPSILON_MM:
+                out[idx] = floor
+        return out
+
+    def _outline_of(self, pad: Pad, idx: int | None = None) -> Any:
+        if idx is not None and idx in self._pad_outlines:
+            return self._pad_outlines[idx]
+        shape, rratio = pad_kernel_params(pad)
+        outline = ka.pad_outline(shape, pad.width, pad.height, rratio, pad.rotation, (pad.x, pad.y))
+        if idx is not None:
+            self._pad_outlines[idx] = outline
+        return outline
+
+    def same_net_pad_band_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        half: float,
+        edge_mm: float,
+        attached: Sequence[tuple[Pt, Pt, float]] = (),
+    ) -> bool:
+        """True when the copper swept by segment ``a-b`` parks in the fab
+        slit band beside an own-net SMD pad on ``layer`` (issue #9018).
+
+        The leg form of the #8974 via-seat guard.  A same-net pad is not an
+        obstacle -- ``segment_blocked`` skips it above -- so a leg-acceptance
+        predicate that never looks at it lets A* pick lines parallel to an
+        own-net pad edge inside the fab ``pad_spacing`` band: copper the fab
+        grades as a slit (board 07's 14 same-net findings, #9011).  The
+        acceptable regions are exactly two, as in
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        (#9012): the swept copper UNIONS the pad (gap <= 0 -- the pad's own
+        stub or attach necessarily qualifies) or keeps the detection edge
+        ``edge_mm`` (the ``GapBand.detection_edge_mm`` of the resolved
+        ``pad_spacing`` dfm entry, never ``error_edge_mm`` -- #8976).  The
+        open band ``(0, edge_mm)`` in between is rejected.
+
+        The gap is exact swept-copper geometry: the kernel's true pad outline
+        (rotated, oval, roundrect -- the #7503 discipline) minus the sweep
+        identity, ``gap = centreline-to-outline distance - half``, never a
+        grown rectangle.  Pads with a drill are skipped -- the #9012
+        predicate's SMD scope, mirroring ``_via_ok_at``'s band branch (a
+        through-hole neighbour is the hole-to-hole floor's business).  The
+        degenerate ``a == b`` form is the point probe.  ``edge_mm <= 0``
+        keeps the guard off (an unresolvable stackup changes nothing).
+
+        Issue #9517: the guard judged every leg in isolation and so
+        deadlocked any pad whose stub ends inside the band -- no leg could
+        leave the stub end, hence ``no-path`` (board 05's VCP).  The rule it
+        mirrors exempts exactly this shape:
+        ``check_physical_copper_gap``'s connector-coverage ``continue``
+        (``validate/rules/physical_gap.py``) does not flag a gap whose
+        connector is covered by other same-net copper -- which a collinear
+        continuation of a pad-joined stub is.  ``attached`` carries the
+        already-placed same-net copper segments ``(c, d, half_width)`` the
+        leg may ride: a band-violating leg that stays ON the line of such a
+        segment, whose copper unions the pad, is copper stacked on an
+        existing escape -- it lays no band copper of its own and is accepted.
+        Everything else -- above all a leg running parallel to the pad edge
+        beside its stub (the #9011 slit shape) -- is rejected as before.
+        """
+        if edge_mm <= 0.0:
+            return False
+        reach = half + edge_mm + 0.5
+        x0, x1 = min(a[0], b[0]) - reach, max(a[0], b[0]) + reach
+        y0, y1 = min(a[1], b[1]) - reach, max(a[1], b[1]) + reach
+        ax0, ax1 = min(a[0], b[0]), max(a[0], b[0])
+        ay0, ay1 = min(a[1], b[1]), max(a[1], b[1])
+        eps = ka.LATTICE_CLEARANCE_EPSILON_MM
+        for idx in self.pads_near(x0, y0, x1, y1):
+            pad = self.pads[idx]
+            if pad.net != net or pad.through_hole or pad.drill > 0:
+                continue
+            if layer not in self.pad_layer_indices[idx]:
+                continue
+            hw, hh = pad_half_extents(pad)
+            # Perf (#6182 pattern): the exact centreline-to-outline distance
+            # is >= the axis-aligned bbox separation, so a separation that
+            # already clears the band skips the kernel call without moving a
+            # verdict.
+            sep = max(pad.x - hw - ax1, ax0 - (pad.x + hw), pad.y - hh - ay1, ay0 - (pad.y + hh))
+            if sep - half > edge_mm + eps:
+                continue
+            gap = self.pad_centerline_gap(idx, a, b) - half
+            if eps < gap < edge_mm - eps:
+                # #9517: a leg riding a pad-attached same-net segment is the
+                # validator's covered connector, not a slit.  Clean legs pay
+                # nothing: the ride set is scanned only for band-violating
+                # ones.
+                if attached and self._band_continuation_exempt(idx, a, b, half, attached, eps):
+                    continue
+                return True
+        return False
+
+    def same_net_pad_band_point_clear(
+        self,
+        point: Pt,
+        layer: int,
+        net: int,
+        half: float,
+        edge_mm: float,
+    ) -> bool:
+        """True when ``point`` keeps the detection edge from every own-net SMD pad.
+
+        The point form of :meth:`same_net_pad_band_blocked`'s CLEAR region
+        only -- a point that sits inside or unions an own-net pad (the
+        degenerate probe's other acceptance) is NOT clear here.  Issue #9708:
+        the escape scan uses this to recognise a pad whose whole near node
+        cloud sits inside the ``(union, band)`` shell of its own pads and to
+        hunt landing nodes a straight exit can thread out through.  Pads with
+        a drill, on other layers, or of other nets never make a point unclear.
+        ``edge_mm <= 0`` keeps the guard off (everything is clear).
+        """
+        if edge_mm <= 0.0:
+            return True
+        reach = half + edge_mm + 0.5
+        eps = ka.LATTICE_CLEARANCE_EPSILON_MM
+        for idx in self.pads_near(
+            point[0] - reach, point[1] - reach, point[0] + reach, point[1] + reach
+        ):
+            pad = self.pads[idx]
+            if pad.net != net or pad.through_hole or pad.drill > 0:
+                continue
+            if layer not in self.pad_layer_indices[idx]:
+                continue
+            hw, hh = pad_half_extents(pad)
+            sep = max(
+                pad.x - hw - point[0],
+                point[0] - (pad.x + hw),
+                pad.y - hh - point[1],
+                point[1] - (pad.y + hh),
+            )
+            if sep - half > edge_mm + eps:
+                continue
+            if self.pad_centerline_gap(idx, point, point) - half < edge_mm - eps:
+                return False
+        return True
+
+    def _band_continuation_exempt(
+        self,
+        idx: int,
+        a: Pt,
+        b: Pt,
+        half: float,
+        rides: Sequence[tuple[Pt, Pt, float]],
+        eps: float,
+    ) -> bool:
+        """#9517 exemption: leg ``a-b`` rides a pad-attached same-net segment.
+
+        True when some ``(c, d, hw)`` ride candidate satisfies all three:
+
+        * **pad-attached** -- its own swept copper unions pad ``idx``'s
+          outline (``pad_centerline_gap <= hw``); stub copper that never
+          reaches the pad cannot exempt anything;
+        * **ridden** -- the leg rides that segment's swept copper: the
+          NEARER of the leg's two endpoints lies within ``half + hw`` of it
+          (``min(seg_pt_dist(c, d, a), seg_pt_dist(c, d, b))``).  Both
+          endpoints, not just whichever comes first: the leg can extend past
+          the segment's end, and A* edge legality is memoised per UNORDERED
+          edge -- a start-only test would let the node-key order decide the
+          verdict.  The collinearity test below pins the other endpoint to
+          the same line, so the leg's copper and the attached copper are one
+          connected shape -- the join the validator's shoulder test sees;
+        * **collinear** -- ``a-b`` stays on that segment's LINE: parallel
+          (unit cross product ~ 0) AND on the supporting line (each
+          endpoint's perpendicular distance ~ 0 -- the cross products below
+          are distance-times-``slen``, at the same 1e-6-of-length scale).
+          Parallel alone is not enough (#9538 review): a leg laterally
+          offset inside the combined half-widths still rides (contact) and
+          is parallel, yet its copper sits beside the attached escape and
+          the validator measures the slit between them.  The tolerance is
+          loose enough for float lattice coordinates, tight enough that any
+          45-degree dogleg corner or real lateral offset fails it.  The
+          degenerate ``a == b`` point probe skips the line test: a node
+          sitting on pad-attached copper is covered copper, whatever
+          brought the search there.
+
+        Direction-free on purpose: A* edge legality is memoised per
+        UNORDERED edge, so the outward egress and the goal-side arrival
+        evaluate the same edge in opposite orders and must agree.  Both
+        directions are validator-clean anyway -- copper stacked on the
+        pad-attached line lays no band copper of its own; only a LATERAL
+        offset (which fails the ride test) can open a slit.
+        """
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        leg_len = math.hypot(dx, dy)
+        degenerate = leg_len <= 1e-12
+        ux = uy = 0.0
+        if not degenerate:
+            ux, uy = dx / leg_len, dy / leg_len
+        for c, d, hw in rides:
+            sdx, sdy = d[0] - c[0], d[1] - c[1]
+            slen = math.hypot(sdx, sdy)
+            if slen <= 1e-12:
+                continue
+            if self.pad_centerline_gap(idx, c, d) > hw + eps:
+                continue
+            if min(seg_pt_dist(c, d, a), seg_pt_dist(c, d, b)) > half + hw + eps:
+                continue
+            if degenerate:
+                return True
+            if abs(ux * sdy - uy * sdx) > 1e-6 * slen:
+                continue
+            # Parallel is not on the line (#9538 review): each endpoint's
+            # cross product with the segment is its perpendicular distance
+            # to the supporting line times ``slen`` -- a lateral offset the
+            # ride/contact tests above still tolerate (inside the combined
+            # half-widths) must fail here, or the leg's copper sits beside
+            # the attached escape opening a validator slit.
+            if (
+                abs((a[0] - c[0]) * sdy - (a[1] - c[1]) * sdx) > 1e-6 * slen
+                or abs((b[0] - c[0]) * sdy - (b[1] - c[1]) * sdx) > 1e-6 * slen
+            ):
+                continue
+            return True
         return False
 
     def pairwise_pad_blocked(
@@ -1055,6 +1356,32 @@ class CommittedCopper:
                     ):
                         return False
         return True
+
+    def same_net_segments_near(
+        self, point: Pt, net: int, reach: float
+    ) -> list[tuple[float, float, float, float, float]]:
+        """Own-net committed segments, on ANY layer, within ``reach`` of ``point``.
+
+        ``(x1, y1, x2, y2, width)`` centrelines for the via-vs-own-trace slit
+        band (Issue #9272).  ``reach`` is the annulus radius plus the band
+        edge; the query pad adds the write slack plus the global default
+        half-width, and each stored segment's OWN half-width and clearance
+        widen its index registration (``_cells_for_seg(pad=hw + clr + 0.5)``),
+        so a segment of any width that can sit in the band is returned --
+        the pad never has to guess a maximum width.  (Issue #9279 tightened
+        this from the ``via_clear``-style ``+ 2.0`` window: the band is a
+        ``~0.13 mm`` question and the wide window was pulling ~60 segments
+        into a scan per A* candidate.)  A segment stored on several layers is
+        returned once per layer (harmless: the band test is a pure ``any``).
+        """
+        out: list[tuple[float, float, float, float, float]] = []
+        for layer in range(self.num_layers):
+            for c, d, cnet, hw, _iclr in self.copper[layer].query_seg(
+                point, point, pad=reach + self.trace_half + SAME_NET_BAND_WRITE_SLACK_MM
+            ):
+                if cnet == net:
+                    out.append((c[0], c[1], d[0], d[1], 2.0 * hw))
+        return out
 
     def via_clear(self, point: Pt, net: int, clearance: float | None = None) -> bool:
         """True if a through-via at ``point`` clears committed copper (ALL

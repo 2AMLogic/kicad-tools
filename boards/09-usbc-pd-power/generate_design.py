@@ -269,7 +269,7 @@ def parts() -> list[Part]:
         ("C3", "1u 16V", "VREG_2V7", "GND", (10, 23), C),
         ("C4", "4.7n 50V", "PMOS_SOURCE", "PMOS_GATE", (39, 31), C),
         ("C5", "10u 50V", "VIN", "GND", (53, 29), "Capacitor_SMD:C_1206_3216Metric"),
-        ("C6", "100n 50V", "VIN", "GND", (55.15, 29), C),
+        ("C6", "100n 50V", "VIN", "GND", (55.2, 29), C),
         ("C7", "100n 50V", "BOOT_CAP", "SW", (61, 23), C),
         ("C8", "22u 25V", "VOUT_PRE", "GND", (50, 16), "Capacitor_SMD:C_1206_3216Metric"),
         ("C9", "22u 25V", "VOUT_PRE", "GND", (56, 16), "Capacitor_SMD:C_1206_3216Metric"),
@@ -471,13 +471,16 @@ def add_critical_copper(pcb: PCB) -> None:
     for endpoint, via in [(("R5", "1"), (62.4, 35)), (("R4", "1"), (23.5, 26))]:
         pcb.add_trace(endpoint, via, width=0.25, net="VIN")
         pcb.add_via(*via, net="VIN")
+        # R5's feed lands on the far end of the 45-degree leg, (53, 32.5),
+        # arriving at 45 degrees: landing at (52, 33.5) left a 53-degree
+        # wedge against that leg (sharp_trace_corner, issue #8840).
         pcb.add_trace(
             via,
-            (52, 33.5) if endpoint[0] == "R5" else (39.8, 33.5),
+            (53, 32.5) if endpoint[0] == "R5" else (39.8, 33.5),
             width=0.25,
             layer="B.Cu",
             net="VIN",
-            waypoints=None if endpoint[0] == "R5" else [(23.5, 35.5), (39.8, 35.5)],
+            waypoints=[(55.5, 35)] if endpoint[0] == "R5" else [(23.5, 35.5), (39.8, 35.5)],
         )
     for ref in ("Q1", "Q2"):
         pcb.add_trace((ref, "1"), (ref, "2"), width=1.2, net="PMOS_SOURCE")
@@ -487,9 +490,13 @@ def add_critical_copper(pcb: PCB) -> None:
         ("Q2", "1"),
         width=1.2,
         net="PMOS_SOURCE",
-        waypoints=[(29.5, 18.635), (29.5, 22), (34, 22), (46.475, 22)],
+        waypoints=[(29.5, 18.635), (29.5, 22), (32.175, 22), (34, 22), (46.475, 22)],
     )
-    pcb.add_trace((34, 22), ("R1", "1"), width=0.25, net="PMOS_SOURCE", waypoints=[(32.175, 25)])
+    # R1's branch drops at 90 degrees from the wide run; leaving it at
+    # (34, 22) towards (32.175, 25) made a 58.7-degree wedge (issue #8840).
+    pcb.add_trace(
+        (32.175, 22), ("R1", "1"), width=0.25, net="PMOS_SOURCE", waypoints=[(32.175, 25)]
+    )
     pcb.add_trace(
         ("R1", "1"),
         ("D1", "1"),
@@ -1048,6 +1055,16 @@ def generate(output: Path) -> dict:
         "hardware_tested": False,
         "manufacturing_ready": False,
     }
+    # Commit which toolchain -- and which footprint-library content -- produced
+    # the geometry above (Issue #9526): the CLI version gate constrains only
+    # the kicad-cli binary, while add_footprint reads whatever standard
+    # library this host resolved, so its identity is recorded, not gated.
+    # None outside the evidence toolchain (tests calling generate() directly).
+    from kicad_tools.cli.kicad_toolchain import evidence_provenance
+
+    provenance = evidence_provenance()
+    if provenance is not None:
+        result["toolchain"] = provenance
     (output / "circuit.json").write_text(json.dumps(result, indent=2) + "\n")
     (output / "readiness.json").write_text(
         json.dumps(
@@ -1072,7 +1089,24 @@ def generate(output: Path) -> dict:
     return result
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, nargs="?", default=ROOT / "output")
-    generate(parser.parse_args().output)
+    generate(parser.parse_args(argv).output)
+    return 0
+
+
+if __name__ == "__main__":
+    # Footprints resolve from the installed KiCad library, so the producing
+    # release decides committed geometry; refuse any other than the pinned one
+    # (Issue #9495, contract of #6962).  Under KCT_KICAD_DOCKER=1 the Python
+    # step still runs on the host, so pin_host_footprints sources its standard
+    # footprint reads from the image's libraries too -- otherwise add_footprint
+    # embeds the host library's geometry (Issue #9502 review).
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    raise SystemExit(
+        run_on_evidence_toolchain(
+            main, [Path(__file__).resolve().parents[2]], pin_host_footprints=True
+        )
+    )

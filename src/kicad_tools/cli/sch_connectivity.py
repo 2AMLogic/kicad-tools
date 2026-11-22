@@ -8,6 +8,7 @@ construction, and BFS-based net-name resolution.  Used by
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.label import PowerSymbol
@@ -80,9 +81,20 @@ def build_wire_graph(
 ) -> tuple[dict[Coord, set[Coord]], dict[Coord, str]]:
     """Build a connectivity graph from wires, labels, and power symbols.
 
-    Wire segments are split at label positions, junctions, power-symbol
-    positions, wire endpoints of other wires, and any *extra_points* so
-    that BFS can traverse through them.
+    Connectivity mirrors ``kicad-cli sch export netlist`` (Issue #9833,
+    black-box probed on the pinned KiCad 10.0.6 image):
+
+    * wires join at shared endpoints, or where a junction dot sits on a
+      wire (including its interior);
+    * labels (local, global, hierarchical) attach to a wire anywhere
+      along it, so they split the interior;
+    * pins and power symbols attach to a wire only at its endpoints:
+      their coordinates are graph nodes but never split an interior.
+      A T-connection without a dot, a pin or a power symbol on a wire's
+      middle is left open by KiCad's netlist.
+
+    This also subsumes the collinear-overlap rule of Issue #9827: a wire
+    end lying inside another wire never splits it, perpendicular or not.
 
     Returns:
         adjacency: coordinate -> set of connected neighbor coordinates
@@ -90,24 +102,33 @@ def build_wire_graph(
     """
     net_names: dict[Coord, str] = {}
     special_points: set[Coord] = set()
+    # Only labels and junction dots connect to a wire anywhere along it,
+    # interior included; kicad-cli joins them there.  Wire endpoints,
+    # pins and power symbols connect at wire endpoints only.
+    mid_wire_connectors: set[Coord] = set()
 
     for lbl in schematic.labels:
         coord = to_coord(*lbl.position)
         net_names[coord] = lbl.text
         special_points.add(coord)
+        mid_wire_connectors.add(coord)
 
     for lbl in schematic.global_labels:
         coord = to_coord(*lbl.position)
         net_names[coord] = lbl.text
         special_points.add(coord)
+        mid_wire_connectors.add(coord)
 
     for lbl in schematic.hierarchical_labels:
         coord = to_coord(*lbl.position)
         net_names[coord] = lbl.text
         special_points.add(coord)
+        mid_wire_connectors.add(coord)
 
     for junc in schematic.junctions:
-        special_points.add(to_coord(*junc.position))
+        coord = to_coord(*junc.position)
+        special_points.add(coord)
+        mid_wire_connectors.add(coord)
 
     for sym_sexp in schematic.sexp.find_children("symbol"):
         ps = PowerSymbol.from_symbol_sexp(sym_sexp)
@@ -115,9 +136,9 @@ def build_wire_graph(
             coord = to_coord(*ps.position)
             net_name = ps.value or ps.lib_id.split(":", 1)[-1]
             # PWR_FLAG is an ERC annotation, not a real net name.
-            # It must not contribute a net name, but its coordinate
-            # still needs to be a split point so wires are properly
-            # split at that location.
+            # It must not contribute a net name; like every pin or power
+            # symbol it connects at wire endpoints only and never splits
+            # a wire's interior.
             if net_name == "PWR_FLAG":
                 special_points.add(coord)
                 continue
@@ -127,17 +148,22 @@ def build_wire_graph(
     if extra_points:
         special_points.update(extra_points)
 
-    for wire in schematic.wires:
-        special_points.add(to_coord(*wire.start))
-        special_points.add(to_coord(*wire.end))
-
-    adjacency: dict[Coord, set[Coord]] = defaultdict(set)
-
+    segments: list[tuple[Coord, Coord]] = []
     for wire in schematic.wires:
         start = to_coord(*wire.start)
         end = to_coord(*wire.end)
+        segments.append((start, end))
+        special_points.add(start)
+        special_points.add(end)
 
-        on_wire = [p for p in special_points if _point_on_segment(p, start, end)]
+    adjacency: dict[Coord, set[Coord]] = defaultdict(set)
+
+    for start, end in segments:
+        # Split the interior at labels and junction dots only.  Another
+        # wire's endpoint (T-connection, collinear or perpendicular),
+        # a pin or a power symbol on the middle does NOT connect there
+        # in KiCad's netlist, so it must not split the wire.
+        on_wire = [p for p in mid_wire_connectors if _point_on_segment(p, start, end)]
 
         if not on_wire:
             adjacency[start].add(end)
@@ -154,6 +180,121 @@ def build_wire_graph(
             adjacency[p] = set()
 
     return dict(adjacency), net_names
+
+
+@dataclass(frozen=True)
+class MidWireAttachment:
+    """An attachment KiCad's netlist leaves open (Issue #9833).
+
+    kicad-cli joins a wire's interior only at a junction dot or a label.
+    A wire endpoint meeting another wire's middle (a T-connection
+    without a dot), a pin or a power symbol on a wire's middle is open
+    in the exported netlist, so :func:`build_wire_graph` no longer
+    connects it; report it so ``sch_check_connections`` can warn.
+    """
+
+    kind: str  # "undotted_t" | "pin_mid_wire" | "power_mid_wire"
+    coord: Coord
+    description: str
+
+
+def find_open_mid_wire_attachments(
+    schematic: Schematic,
+    extra_points: set[Coord] | None = None,
+) -> list[MidWireAttachment]:
+    """Find attachments on a wire's interior that KiCad's netlist leaves open.
+
+    *extra_points* are pin coordinates (as passed to
+    :func:`build_wire_graph`).  A junction dot or a label at the same
+    point anchors the connection in KiCad, so such points are skipped.
+    """
+    segments = [(to_coord(*w.start), to_coord(*w.end)) for w in schematic.wires]
+
+    # Labels (all three kinds) and junctions anchor a mid-wire point.
+    anchored: set[Coord] = set()
+    for lbl in schematic.labels:
+        anchored.add(to_coord(*lbl.position))
+    for glbl in schematic.global_labels:
+        anchored.add(to_coord(*glbl.position))
+    for hlbl in schematic.hierarchical_labels:
+        anchored.add(to_coord(*hlbl.position))
+    for junc in schematic.junctions:
+        anchored.add(to_coord(*junc.position))
+
+    def _on_interior(point: Coord) -> bool:
+        return any(_point_on_segment(point, s, e) for s, e in segments)
+
+    def _fmt(point: Coord) -> str:
+        return f"({point[0] / 10:g}, {point[1] / 10:g})"
+
+    wire_endpoints: set[Coord] = set()
+    for start, end in segments:
+        wire_endpoints.add(start)
+        wire_endpoints.add(end)
+
+    # A point within snap tolerance of a wire endpoint is joined by the
+    # connectivity tools (sub-grid placement, e.g. a pin at 69.8500000000001
+    # against a wire end serialized as 69.85); KiCad stores full precision
+    # and joins them too, so it must not be reported as open.
+    def _snaps_to_wire_endpoint(point: Coord) -> bool:
+        if point in wire_endpoints:
+            # snap_coord returns an exact member unchanged, so look for a
+            # *different* endpoint within tolerance.
+            return any(
+                (point[0] + dx, point[1] + dy) in wire_endpoints
+                for dx in range(-1, 2)
+                for dy in range(-1, 2)
+                if (dx, dy) != (0, 0)
+            )
+        return snap_coord(point, wire_endpoints) != point
+
+    found: dict[tuple[str, Coord], MidWireAttachment] = {}
+
+    for p in wire_endpoints:
+        if p in anchored or _snaps_to_wire_endpoint(p) or not _on_interior(p):
+            continue
+        found[("undotted_t", p)] = MidWireAttachment(
+            kind="undotted_t",
+            coord=p,
+            description=(
+                f"wire endpoint {_fmt(p)} meets another wire's middle "
+                "with no junction dot; the KiCad netlist treats it as open"
+            ),
+        )
+
+    for p in extra_points or ():
+        if p in anchored or p in wire_endpoints or _snaps_to_wire_endpoint(p):
+            continue
+        if not _on_interior(p):
+            continue
+        found[("pin_mid_wire", p)] = MidWireAttachment(
+            kind="pin_mid_wire",
+            coord=p,
+            description=(
+                f"pin {_fmt(p)} lies on a wire's middle with no junction "
+                "dot; the KiCad netlist leaves it unconnected"
+            ),
+        )
+
+    for sym_sexp in schematic.sexp.find_children("symbol"):
+        ps = PowerSymbol.from_symbol_sexp(sym_sexp)
+        if not ps:
+            continue
+        p = to_coord(*ps.position)
+        if p in anchored or p in wire_endpoints or _snaps_to_wire_endpoint(p):
+            continue
+        if not _on_interior(p):
+            continue
+        found[("power_mid_wire", p)] = MidWireAttachment(
+            kind="power_mid_wire",
+            coord=p,
+            description=(
+                f"power symbol {_fmt(p)} lies on a wire's middle with no "
+                "junction dot; the KiCad netlist leaves it unconnected"
+            ),
+        )
+
+    return list(found.values())
 
 
 def propagate_net_names(

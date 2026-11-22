@@ -1,8 +1,11 @@
 """Pytest fixtures for kicad-tools tests."""
 
+import ctypes
+import gc
 import hashlib
 import importlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +25,96 @@ EXTERNAL_BOARDS_ENV_VAR = "KICAD_TOOLS_EXTERNAL_BOARDS_DIR"
 # bounded even if it never imports ``kicad_tools``. No-op unless
 # ``KCT_NATIVE_MAX_CONCURRENCY`` is set; idempotent with the package import.
 install_from_environment()
+
+# Issue #9705: a test case that needs the C++ router backend FAILS when the
+# extension is not built, never silently skips. Before this, ~116 modules
+# carried per-file availability guards that turned every native case into a
+# silent skip, so a worktree (or a CI leg) whose ``kct build-native`` step
+# broke or was skipped reported a green run with every native parity case
+# missing.
+# Two shared mechanisms, used instead of any per-file guard:
+#
+# * the ``requires_router_cpp`` marker (registered in pyproject.toml): the
+#   ``pytest_runtest_setup`` hook below fails a marked item with the build
+#   hint when the extension is missing;
+#
+# * :func:`require_router_cpp` for runtime gating inside a test body or a
+#   fixture (mixed-parametrize cases, helper functions), replacing the old
+#   inline availability-probe skip guards.
+#
+# ``tests/test_router_cpp_no_skip_guards.py`` scans the tree so a new skip
+# guard on this backend cannot be reintroduced unnoticed.
+ROUTER_CPP_BUILD_HINT = "C++ router backend not built: run uv run kct build-native"
+
+from kicad_tools.router.cpp_backend import is_cpp_available  # noqa: E402
+
+
+def require_router_cpp() -> None:
+    """Fail the current test unless the C++ router extension is loaded.
+
+    The runtime counterpart of the ``requires_router_cpp`` marker, for cases
+    the marker cannot express directly (a ``"cpp"`` parameter of an otherwise
+    mixed parametrization, a shared fixture, a helper called only on the
+    native path). Raises ``Failed`` with :data:`ROUTER_CPP_BUILD_HINT`, so the
+    case shows up as a failure carrying the fix, not as a silent skip.
+    """
+    if not is_cpp_available():
+        pytest.fail(ROUTER_CPP_BUILD_HINT, pytrace=False)
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Fail ``requires_router_cpp`` items when the extension is missing."""
+    if item.get_closest_marker("requires_router_cpp") is not None:
+        require_router_cpp()
+
+
+# Issue #9804: the static scanner (tests/router_cpp_skip_scanner.py) only
+# catches skip guards it can parse. This runtime backstop catches any wording
+# it cannot: a skipped report whose reason mentions the C++ router backend
+# fails with the build hint instead, so no phrasing can restore the silent
+# skip #9705 removed. Skips about other backends (drc, placement) and xfail
+# results (``wasxfail``) pass through untouched.
+_ROUTER_CPP_SKIP_REASONS = re.compile(
+    r"router_cpp|c\+\+\s+router|cpp\s+backend",
+    re.IGNORECASE,
+)
+
+
+def _skip_reason(report) -> str:
+    """Reason text of a skipped *report*, without its file path.
+
+    A call-phase ``pytest.skip()`` stores a ``(path, lineno, reason)`` tuple
+    as ``longrepr``; matching on the whole tuple would trip over any test
+    file *named* ``test_router_cpp_*.py``.
+    """
+    longrepr = getattr(report, "longrepr", None)
+    if isinstance(longrepr, tuple) and len(longrepr) == 3:
+        return str(longrepr[2])
+    return str(longrepr or "")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Fail router-C++-reasoned skips instead of reporting them as skips.
+
+    Runtime backstop for the static scanner (Issue #9804): a skip is only a
+    verdict about test *infrastructure*, but a skip reasoned on the C++
+    router backend means a native case silently went missing -- exactly the
+    green-run-with-no-parity failure mode #9705 closed. Convert it to a
+    failure carrying the build hint so the run is honest about what ran.
+    """
+    outcome = yield
+    report = outcome.get_result()
+    if report.outcome != "skipped" or getattr(report, "wasxfail", False):
+        return
+    reason = _skip_reason(report)
+    if _ROUTER_CPP_SKIP_REASONS.search(reason):
+        report.outcome = "failed"
+        report.longrepr = (
+            f"{ROUTER_CPP_BUILD_HINT} (skipped with a C++-router-backend "
+            f"reason: {reason!r}; Issue #9804)"
+        )
+
 
 # Issue #5240: each test ``kicad-cli pcb drc`` loads only the footprint
 # libraries its board names, not all 155 in the pinned table (~5 CPU-s a
@@ -218,6 +311,71 @@ def pytest_report_header(config):
     from tests.kicad_docker_session import report_header
 
     return report_header()
+
+
+# Issue #9089: each native router / coupled-search replay leaks its nanobind
+# wrapper objects into cyclic garbage (nanobind itself reports "leaked type
+# CenterlineRouteResult ... leaked 383 functions"), and the automatic
+# generational GC does not fire often enough between tests to reclaim them.
+# On top of that, glibc keeps freed pages in its malloc arenas. An xdist
+# worker's RSS therefore ratchets toward multi-GB across the bulk suite
+# (measured: 4.4 GB after one 37-test Board07 replay file) until the
+# runner's OOM killer kills the worker mid-test -- the "worker 'gw0'
+# crashed while running ..." flake. After every test, when RSS grew since
+# the previous teardown, a full gc.collect() reclaims the cyclic garbage
+# (measured: it alone returned 140 MB of one replay) and glibc's
+# malloc_trim(0) returns the freed pages to the OS (measured: this bounds
+# the same file at a 523 MB peak instead of a 4.4 GB ratchet). No-op when
+# glibc's malloc_trim is unavailable.
+try:
+    _malloc_trim = ctypes.CDLL("libc.so.6").malloc_trim
+    _malloc_trim.argtypes = [ctypes.c_size_t]
+    _malloc_trim.restype = ctypes.c_int
+except (OSError, AttributeError):
+    _malloc_trim = None
+
+# Issue #9154: /proc/self/statm reports RSS in pages, not bytes. Use the
+# kernel's real page size instead of a hard-coded 4096 so a 16K/64K-page
+# runner (aarch64, some container hosts) does not silently under-report
+# RSS 4x/16x, which would raise the effective trigger below just as
+# silently. The fallback keeps conftest importable where os.sysconf or
+# the name is unavailable.
+try:
+    _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+except (AttributeError, OSError, ValueError):
+    _PAGE_SIZE = 4096
+
+_rss_floor_mb = 0.0
+_RSS_GROWTH_TRIGGER_MB = 32.0
+
+
+def _statm_rss_mb():
+    """Return this process's RSS in MB, or None when statm is unreadable.
+
+    Issue #9154: /proc can be unmounted in stripped containers; an OSError
+    here must leave the hook inert rather than erroring every teardown.
+    """
+    try:
+        with open("/proc/self/statm") as fh:
+            return int(fh.read().split()[1]) * _PAGE_SIZE / 1048576
+    except OSError:
+        return None
+
+
+def pytest_runtest_teardown(item, nextitem):
+    global _rss_floor_mb
+    if _malloc_trim is None or sys.platform != "linux":
+        return
+    rss_mb = _statm_rss_mb()
+    if rss_mb is None:
+        return
+    if rss_mb - _rss_floor_mb < _RSS_GROWTH_TRIGGER_MB:
+        return
+    gc.collect()
+    _malloc_trim(0)
+    rss_mb = _statm_rss_mb()
+    if rss_mb is not None:
+        _rss_floor_mb = rss_mb
 
 
 @pytest.fixture(scope="session", autouse=True)

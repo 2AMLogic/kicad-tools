@@ -2190,6 +2190,13 @@ def _staircase_clear_path(
     return None, width, net
 
 
+def _reviewed_design_rules() -> Any:
+    """The reviewed paid-drill ``DesignRules`` the board's own gate checks against."""
+    return runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))[
+        "process_rules"
+    ]()
+
+
 def compress_staircases(routed_path: Path) -> bool:
     """Collapse every ``redundant_copper_staircase`` chain in the copper (#8844).
 
@@ -2224,11 +2231,18 @@ def compress_staircases(routed_path: Path) -> bool:
     print("Compressing track staircases (issue #8844)...")
     print("=" * 60)
 
+    # Issue #9097: judge the chains with the SAME clearance the reviewed gate
+    # (``check_manufacturing.make_checker``) hands the rule -- the paid
+    # process's ``min_clearance_mm``.  A bare ``check(pcb, None)`` falls back to
+    # the rule's 0.2 mm default, under which the [OSC_IN] chain has no clear
+    # replacement, so the reviewed gate kept flagging a chain this pass never saw.
+    reviewed_rules = _reviewed_design_rules()
+
     collapsed = 0
     for round_number in range(1, _STAIRCASE_MAX_ROUNDS + 1):
         pcb = PCB.load(routed_path)
         rule = _FlaggedChains()
-        rule.check(pcb, None)
+        rule.check(pcb, reviewed_rules)
         if not rule.flagged:
             print(f"   No staircase findings ({collapsed} chain(s) collapsed)")
             return True
@@ -2254,6 +2268,705 @@ def compress_staircases(routed_path: Path) -> bool:
         pcb.save(routed_path)
 
     print("\n   FAILED: staircase findings remain after compression")
+    return False
+
+
+def _line_intersection(
+    p: tuple[float, float],
+    d: tuple[float, float],
+    q: tuple[float, float],
+    e: tuple[float, float],
+) -> tuple[float, float, float, float] | None:
+    """Intersect ``p + t*d`` with ``q + u*e``: ``(x, y, t, u)``; None if parallel."""
+    det = d[0] * e[1] - d[1] * e[0]
+    if abs(det) < 1e-9:
+        return None
+    t = ((q[0] - p[0]) * e[1] - (q[1] - p[1]) * e[0]) / det
+    u = ((q[0] - p[0]) * d[1] - (q[1] - p[1]) * d[0]) / det
+    return p[0] + t * d[0], p[1] + t * d[1], t, u
+
+
+def merge_fragment_runs(routed_path: Path) -> bool:
+    """Replace every ``redundant_copper_fragments`` run with one clean corner (#9097).
+
+    The router leaves a sub-0.1 mm jog where an escape leaves a fine-pitch pad
+    (board 04's [BOOT0] at U2.44: ``0.05 mm`` of lateral shift spread over
+    three sub-0.1 mm segments).  ``cleanup_copper`` (#8399) cannot merge them
+    because that would bend the track off the 0/45/90/135 grid.
+
+    The fix keeps the grid by construction: the segment before the run and the
+    segment after it are each *extended along their own direction* to where the
+    two lines meet, and that corner replaces the jog.  Both neighbours keep
+    their angle and their far end, so every node outside the run is unchanged;
+    the new corner is validated with the rule's own clearance oracle (the one
+    that decided the finding was reportable) before any copper is touched.  A
+    run it cannot merge that way (no neighbour on a side, parallel neighbours,
+    a via inside the run, or no clear corner) is reported and fails the recipe,
+    rather than guessed at.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import (
+        FRAGMENT_MAX_MM,
+        FRAGMENT_RUN_MIN,
+        RedundantCopperRule,
+    )
+
+    class _Chains(RedundantCopperRule):
+        """The rule, plus every chain that carries a fragment run."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.flagged: list[tuple[list[Any], str]] = []
+
+        def _report_chain(self, chain, results):  # type: ignore[no-untyped-def]
+            before = sum(v.rule_id == "redundant_copper_fragments" for v in results.violations)
+            super()._report_chain(chain, results)
+            after = sum(v.rule_id == "redundant_copper_fragments" for v in results.violations)
+            if after > before:
+                self.flagged.append((chain, chain[0][0].layer))
+
+    print("\n" + "=" * 60)
+    print("Merging fragment runs (issue #9097)...")
+    print("=" * 60)
+
+    reviewed_rules = _reviewed_design_rules()
+    merged = 0
+    for round_number in range(1, _STAIRCASE_MAX_ROUNDS + 1):
+        pcb = PCB.load(routed_path)
+        rule = _Chains()
+        rule.check(pcb, reviewed_rules)
+        if not rule.flagged:
+            print(f"   No fragment runs ({merged} merged)")
+            return True
+
+        vias = [v.position for v in pcb.vias]
+        changed = False
+        for chain, layer in rule.flagged:
+            lengths = [math.dist(step[0].start, step[0].end) for step in chain]
+            # Every maximal run of sub-threshold segments, not just the first:
+            # a stray short segment elsewhere in the chain must not hide the
+            # flagged run (#9133).
+            runs: list[tuple[int, int]] = []
+            i = 0
+            while i < len(chain):
+                if lengths[i] >= FRAGMENT_MAX_MM:
+                    i += 1
+                    continue
+                stop = i
+                while stop + 1 < len(chain) and lengths[stop + 1] < FRAGMENT_MAX_MM:
+                    stop += 1
+                runs.append((i, stop))
+                i = stop + 1
+            for start, stop in runs:
+                if stop - start + 1 < FRAGMENT_RUN_MIN:
+                    print(
+                        f"   run of {stop - start + 1} in chain on {layer}: "
+                        f"shorter than the {FRAGMENT_RUN_MIN}-segment run minimum; not merged"
+                    )
+                    continue
+                if start == 0:
+                    print(
+                        f"   run in chain on {layer}: no neighbour before the run "
+                        f"(chain start); not merged"
+                    )
+                    continue
+                if stop == len(chain) - 1:
+                    print(
+                        f"   run in chain on {layer}: no neighbour after the run "
+                        f"(chain end); not merged"
+                    )
+                    continue
+                before_seg, _bf, before_to = chain[start - 1]
+                after_seg, after_from, _at = chain[stop + 1]
+                a_from = chain[start - 1][1]
+                b_to = chain[stop + 1][2]
+                interior = [step[1] for step in chain[start : stop + 1]] + [after_from]
+                if any(math.dist(node, via) < 1e-3 for node in interior for via in vias):
+                    print(f"   run in chain on {layer}: a via sits inside the run; not merged")
+                    continue
+                d_a = (before_to[0] - a_from[0], before_to[1] - a_from[1])
+                d_b = (b_to[0] - after_from[0], b_to[1] - after_from[1])
+                hit = _line_intersection(a_from, d_a, after_from, d_b)
+                if hit is None:
+                    print(f"   run in chain on {layer}: neighbours are parallel; not merged")
+                    continue
+                corner, t, u = (hit[0], hit[1]), hit[2], hit[3]
+                if t <= 1e-6 or u >= 1.0 - 1e-6:
+                    print(f"   run in chain on {layer}: corner falls outside the neighbours")
+                    continue
+                width = max(step[0].width for step in chain[start - 1 : stop + 2])
+                net = before_seg.net_number
+                legs = [(a_from, corner), (corner, b_to)]
+                if not rule._path_clear(legs, net, layer, width):
+                    print(f"   run in chain on {layer}: no clear corner at {corner}")
+                    continue
+                pcb.remove_segments([step[0] for step in chain[start - 1 : stop + 2]])
+                for point_a, point_b in legs:
+                    pcb.add_trace(point_a, point_b, width=width, layer=layer, net=net)
+                print(
+                    f"   run of {stop - start + 1} on {layer}: {stop - start + 3} segments -> "
+                    f"2 meeting at corner ({corner[0]:.4f}, {corner[1]:.4f}) at {width} mm"
+                )
+                merged += 1
+                changed = True
+                break
+            else:
+                continue  # no run in this chain merged; the next chain is still valid
+            break  # chains are stale after an edit; re-flag
+        if not changed:
+            break
+        pcb.save(routed_path)
+
+    print("\n   FAILED: fragment runs remain after merging")
+    return False
+
+
+#: Largest slide (mm) and step (mm, the routing grid) ``slide_vias_off_silk``
+#: tries when it moves a via's drill out from under footprint silk.
+_SILK_SLIDE_MAX_MM = 0.6
+_SILK_SLIDE_STEP_MM = 0.05
+
+
+def _silk_hole_hits(pcb: Any) -> list[tuple[Any, str]]:
+    """``(via, silk label)`` for every via drill the silk-hole rule flags.
+
+    Uses the rule's own hole set, silk set and threshold
+    (``iter_drill_holes`` / ``_iter_silk_geometries`` / ``silk_hits_hole``),
+    so "clear" here means ``silk_hole_overlap`` is clean for vias.
+    """
+    from kicad_tools.silkscreen._silk_defaults import SILK_HOLE_CLEARANCE_MM
+    from kicad_tools.validate.rules.silkscreen import (
+        _iter_silk_geometries,
+        iter_drill_holes,
+        silk_hits_hole,
+    )
+
+    silks = list(_iter_silk_geometries(pcb))
+    hits: list[tuple[Any, str]] = []
+    for via in pcb.vias:
+        for geom, _label, sides in iter_drill_holes([via], []):
+            for side, silk, label, _loc, _layer, _uuid in silks:
+                if side in sides and silk_hits_hole(silk, geom, SILK_HOLE_CLEARANCE_MM):
+                    hits.append((via, label))
+    return hits
+
+
+def slide_vias_off_silk(routed_path: Path) -> bool:
+    """Slide a via off footprint silk instead of cutting the silk (#9455).
+
+    ``silk_hole_overlap`` fires when a stitch/escape via's drill lands under a
+    footprint silk stroke (J1's right edge, via (174.85, 96.35)).  The first
+    fix (#9097) trimmed the stroke with ``SilkscreenRepairer``, but that edits
+    footprint graphics and breaks the #5744 invariant (routing never changes
+    footprint silkscreen).  A board-level silk gap cannot help either: the
+    rule adds up *all* silk, so a ``gr_line`` pair never removes the
+    footprint's own ink.  What is left is moving the copper, which is what this
+    step does.
+
+    For each flagged via it tries axis-aligned then diagonal slides on the
+    routing grid, nearest first, and takes the first spot where the drill
+    clears every silk stroke, the copper-clearance and hole-to-hole checks
+    that ``relocate_drill_clearance`` uses pass, and the connecting stub is
+    clear.  The old position is bridged to the new one with a stub on each
+    layer the via's own tracks use.  Silk is never edited.  Returns False when
+    a via is boxed in (no legal slide).
+
+    It must run before the staircase / fragment / sharp-corner passes and the
+    re-pour, so they see the final copper.
+    """
+    from kicad_tools.cli.relocate_in_pad_vias import (
+        _check_clearance,
+        _check_stub_clearance,
+        _collect_smd_pads_by_net,
+        _collect_tht_pads,
+        _endpoint_at,
+        _persist_via_with_stubs,
+    )
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.silkscreen._silk_defaults import SILK_HOLE_CLEARANCE_MM
+    from kicad_tools.validate.rules.silkscreen import (
+        _iter_silk_geometries,
+        silk_hits_hole,
+    )
+
+    print("\n" + "=" * 60)
+    print("Sliding vias off footprint silkscreen (issue #9455)...")
+    print("=" * 60)
+
+    from shapely.geometry import Point
+
+    rules = get_profile("jlcpcb-tier1").get_design_rules()
+    pcb = PCB.load(str(routed_path))
+    flagged = {via.uuid: via for via, _label in _silk_hole_hits(pcb)}
+    if not flagged:
+        print("   no via drill under silk")
+        return True
+
+    silks = list(_iter_silk_geometries(pcb))
+    pads_by_net = _collect_smd_pads_by_net(pcb)
+    tht_pads = _collect_tht_pads(pcb)
+
+    steps = int(round(_SILK_SLIDE_MAX_MM / _SILK_SLIDE_STEP_MM))
+    directions = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+    ok = True
+    for via in sorted(flagged.values(), key=lambda v: (v.position[1], v.position[0])):
+        vx, vy = via.position
+        connected = [
+            (seg, far)
+            for seg in pcb.segments_in_net(via.net_number)
+            if (far := _endpoint_at(seg, vx, vy)) is not None
+        ]
+        stub_layers = list(dict.fromkeys(seg.layer for seg, _ in connected))
+        widths = [seg.width for seg, _ in connected if seg.width > 0]
+        stub_width = min(widths) if widths else 0.2
+        net_name = next((n.name for n in pcb.nets.values() if n.number == via.net_number), "")
+
+        moved = False
+        for k in range(1, steps + 1):
+            for dx, dy in directions:
+                scale = k * _SILK_SLIDE_STEP_MM
+                target = (round(vx + dx * scale, 4), round(vy + dy * scale, 4))
+                hole = Point(*target).buffer(via.drill / 2.0, quad_segs=32)
+                if any(
+                    silk_hits_hole(silk, hole, SILK_HOLE_CLEARANCE_MM) for _s, silk, *_r in silks
+                ):
+                    continue
+                if (
+                    _check_clearance(
+                        pcb,
+                        via,
+                        target[0],
+                        target[1],
+                        pads_by_net,
+                        tht_pads,
+                        rules.min_clearance_mm,
+                        rules.min_hole_to_hole_mm,
+                    )
+                    is not None
+                ):
+                    continue
+                if (
+                    _check_stub_clearance(
+                        pcb, via, target, stub_layers, stub_width, rules.min_clearance_mm
+                    )
+                    is not None
+                ):
+                    continue
+                if _persist_via_with_stubs(pcb, via, target, stub_layers, stub_width, net_name):
+                    print(
+                        f"   via ({vx:.3f}, {vy:.3f}) -> ({target[0]:.3f}, {target[1]:.3f}) "
+                        f"net '{net_name}'"
+                    )
+                    moved = True
+                    break
+            if moved:
+                break
+        if not moved:
+            print(f"   FAILED: via at ({vx:.3f}, {vy:.3f}) has no legal slide off the silk")
+            ok = False
+
+    pcb.save(str(routed_path))
+    return ok
+
+
+def check_silk_clear_of_holes(routed_path: Path) -> bool:
+    """Read-only gate: no via/pad drill under any silk (``silk_hole_overlap``, #9455).
+
+    Runs last, after the fiducials and board-ID silk land, so ink added late
+    is covered too.  It never edits the board: footprint silk is #5744's, and
+    the vias were already slid by :func:`slide_vias_off_silk`.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.silkscreen._silk_defaults import SILK_HOLE_CLEARANCE_MM
+    from kicad_tools.validate.rules.silkscreen import (
+        _iter_silk_geometries,
+        iter_drill_holes,
+        silk_hits_hole,
+    )
+
+    print("\n" + "=" * 60)
+    print("Checking silkscreen against drilled holes (issue #9455)...")
+    print("=" * 60)
+
+    pcb = PCB.load(str(routed_path))
+    holes = list(iter_drill_holes(pcb.vias, pcb.footprints, getattr(pcb, "board_origin", (0, 0))))
+    bad = [
+        (silk_label, hole_label)
+        for side, silk, silk_label, _loc, _layer, _uuid in _iter_silk_geometries(pcb)
+        for hole, hole_label, sides in holes
+        if side in sides and silk_hits_hole(silk, hole, SILK_HOLE_CLEARANCE_MM)
+    ]
+    if bad:
+        print(f"   FAILED: silk still over a hole: {bad}")
+        return False
+    print("   no silk over a drilled hole")
+    return True
+
+
+#: How far (in segments) a ``sharp_trace_corner`` repair may walk along the
+#: leg it re-joins, and how many apply/re-check rounds it runs.
+_SHARP_CORNER_CHAIN_DEPTH = 8
+_SHARP_CORNER_MAX_ROUNDS = 4
+_SHARP_CORNER_TOL = 0.01  # mm, the rule's own junction tolerance
+
+
+def _netclass_clearance(routed_path: Path) -> Any:
+    """``net name -> clearance (mm)`` from the routed project's net classes.
+
+    A repair path must clear foreign copper by the larger of the two nets'
+    class clearances, the pairing the routed ``.kicad_dru``'s ``kct net class
+    clearance`` rules encode.  Unassigned nets take the ``Default`` class.
+    """
+    project = json.loads(routed_path.with_suffix(".kicad_pro").read_text())
+    settings = project["net_settings"]
+    by_class = {c["name"]: float(c.get("clearance") or 0.0) for c in settings["classes"]}
+    default = by_class.get("Default", 0.0)
+    assigned = settings.get("netclass_assignments") or {}
+
+    def clearance(net_name: str | None) -> float:
+        return by_class.get(assigned.get(net_name or "", ""), default)
+
+    return clearance
+
+
+def _two_leg_paths(
+    start: tuple[float, float], end: tuple[float, float]
+) -> list[list[tuple[float, float]]]:
+    """Straight, else diagonal-first and orthogonal-first 45 degree doglegs."""
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    diag = min(abs(dx), abs(dy))
+    mid_diagonal = (start[0] + math.copysign(diag, dx), start[1] + math.copysign(diag, dy))
+    mid_orthogonal = (end[0] - math.copysign(diag, dx), end[1] - math.copysign(diag, dy))
+    if diag < 1e-6 or math.dist(mid_diagonal, end) < 1e-6:
+        return [[start, end]]
+    return [[start, mid_diagonal, end], [start, mid_orthogonal, end]]
+
+
+def _sharp_corner_candidates(pcb: Any, finding: Any) -> list[tuple[list[Any], list]]:
+    """Replacement candidates for one two-segment ``sharp_trace_corner`` vertex.
+
+    Every fold-back the router leaves on this board (issue #8919: committed
+    NRST and SWCLK, fresh-regen USER_LED) has one leg ending at a terminal --
+    a pad centre or a via -- and the vertex has exactly two segments.  Keep
+    one leg's far end ``A`` and walk the other leg's chain while it stays a
+    plain degree-2 path; for each point ``C`` on it, propose the 45 degree
+    path ``A -> C`` in place of everything between them.  Returns
+    ``(removed segments, path points)``; junctions of three or
+    more segments yield nothing (they are not this repair's shape).
+    """
+    loc = finding.location
+    layer = finding.layer
+    net_name = finding.nets[0]
+    net = pcb.get_net_by_name(net_name)
+    if net is None:
+        return []
+    number = net.number
+    same = [s for s in pcb.segments if s.layer == layer and s.width > 0 and s.net_number == number]
+
+    def touching(pt: tuple[float, float]) -> list[Any]:
+        return [
+            s for s in same if min(math.dist(pt, s.start), math.dist(pt, s.end)) < _SHARP_CORNER_TOL
+        ]
+
+    def far_end(seg: Any, pt: tuple[float, float]) -> tuple[float, float]:
+        if math.dist(pt, seg.start) < _SHARP_CORNER_TOL:
+            return (float(seg.end[0]), float(seg.end[1]))
+        return (float(seg.start[0]), float(seg.start[1]))
+
+    terminals = [via.position for via in pcb.vias if via.net_name == net_name]
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name == net_name:
+                dx, dy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+                terminals.append((fp.position[0] + dx, fp.position[1] + dy))
+
+    def is_terminal(pt: tuple[float, float]) -> bool:
+        return any(math.dist(pt, t) < _SHARP_CORNER_TOL for t in terminals)
+
+    legs = touching(loc)
+    if len(legs) != 2:
+        return []
+    candidates: list[tuple[list[Any], list]] = []
+    for fixed, walked in ((legs[0], legs[1]), (legs[1], legs[0])):
+        anchor = far_end(fixed, loc)
+        chain, points, cur = [walked], [far_end(walked, loc)], walked
+        pt = points[0]
+        while len(chain) < _SHARP_CORNER_CHAIN_DEPTH and not is_terminal(pt):
+            onward = [s for s in touching(pt) if s is not cur]
+            if len(onward) != 1:
+                break
+            cur = onward[0]
+            pt = far_end(cur, pt)
+            chain.append(cur)
+            points.append(pt)
+        for k, target in enumerate(points):
+            for path in _two_leg_paths(anchor, target):
+                candidates.append(([fixed, *chain[: k + 1]], path))
+    return candidates
+
+
+def _joins_acutely(pcb: Any, path: list, removed: list[Any], layer: str, net_number: int) -> bool:
+    """True if ``path`` would meet kept same-net copper below 90 degrees.
+
+    Checked at both ends, even where the rule would call the joint
+    width-filled: a repair should not trade one acute joint for another.
+    """
+    gone = {id(s) for s in removed}
+    for end, inner in ((path[0], path[1]), (path[-1], path[-2])):
+        out = (inner[0] - end[0], inner[1] - end[1])
+        for seg in pcb.segments:
+            if id(seg) in gone or seg.layer != layer or seg.net_number != net_number:
+                continue
+            if math.dist(end, seg.start) < _SHARP_CORNER_TOL:
+                other = (seg.end[0] - end[0], seg.end[1] - end[1])
+            elif math.dist(end, seg.end) < _SHARP_CORNER_TOL:
+                other = (seg.start[0] - end[0], seg.start[1] - end[1])
+            else:
+                continue
+            norm = math.hypot(*out) * math.hypot(*other)
+            if norm < 1e-12:
+                continue
+            cos = max(-1.0, min(1.0, (out[0] * other[0] + out[1] * other[1]) / norm))
+            if math.degrees(math.acos(cos)) < 89.0:
+                return True
+    return False
+
+
+def _rule_area_blocks_tracks(zone: Any, layer: str) -> bool:
+    """True when keepout rule area ``zone`` forbids tracks on ``layer``.
+
+    Honours the zone's layer spec: a single ``layer`` name or the
+    multi-layer ``layers`` list with the wildcards KiCad writes for rule
+    areas (``*.Cu`` covers every copper layer, ``F&B.Cu`` the outer pair,
+    ``*.In.Cu`` the inner layers).
+    """
+    keepout = getattr(zone, "keepout", None)
+    if keepout is None or getattr(keepout, "tracks_allowed", True):
+        return False
+    names = list(getattr(zone, "layers", None) or [])
+    if not names:
+        single = getattr(zone, "layer", "") or ""
+        if single:
+            names = [single]
+    for name in names:
+        if name == layer:
+            return True
+        if (
+            (name == "*.Cu" and layer.endswith(".Cu"))
+            or (name == "F&B.Cu" and layer in ("F.Cu", "B.Cu"))
+            or (name == "*.In.Cu" and layer.startswith("In") and layer.endswith(".Cu"))
+        ):
+            return True
+    return False
+
+
+def repair_sharp_corners(routed_path: Path) -> bool:
+    """Remove every two-segment ``sharp_trace_corner`` fold-back (issue #8840).
+
+    ``sharp_trace_corner`` gates board 04's strict manufacturing check
+    (operator ruling on PR #8848), and the router's own #8919 fold-back pass
+    leaves the shapes it cannot express (it reports them as "NOT
+    repairable").  Driven by the rule's verdict, like
+    :func:`compress_staircases`: for each finding, every candidate from
+    :func:`_sharp_corner_candidates` is checked against foreign copper at the
+    routed net-class clearance (the larger of the two nets'), against the
+    board outline at the manufacturer profile's copper-to-edge minimum and
+    against track-blocking keepout rule areas, applied to a scratch copy,
+    and kept only if the rule then reports a strict subset of the previous
+    findings and no new ``redundant_copper_*`` finding appears.  A repair
+    that cannot be checked -- no board outline -- is refused, not assumed
+    clear (issue #9239).  The fewest resulting segments win, then the
+    shortest copper.  No board geometry is hard-coded, so a fresh re-route
+    is repaired the same way.  The repaired piece keeps the removed
+    segments' widest width; the old narrower fallback, which could silently
+    thin a trace, is gone (issue #9239).
+
+    Runs after every copper-mutating pass and before
+    :func:`compress_staircases` / :func:`fill_zones`, so a staircase it
+    leaves is compressed and the re-pour backs off the new copper.  New legs
+    are on the 0/45/90/135 grid by construction.  Returns False (fails the
+    recipe) if a finding remains.
+    """
+    import tempfile
+
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.router.clearance_kernel import (
+        ALL_LAYERS,
+        CLEARANCE_EPSILON_MM,
+        KSegment,
+        copper_gap,
+    )
+    from kicad_tools.router.quantize import segment_angle_census
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.clearance_shapes import (
+        min_gap_to_outline,
+        outline_shapes,
+        zone_shape,
+    )
+    from kicad_tools.validate.rules.clearance import CopperElement, _calculate_clearance
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+    from kicad_tools.validate.rules.sharp_trace_corner import SharpTraceCornerRule
+
+    print("\n" + "=" * 60)
+    print("Repairing sharp trace corners (issue #8840)...")
+    print("=" * 60)
+
+    clearance_of = _netclass_clearance(routed_path)
+    # Issue #9239: the same copper-to-edge minimum the recipe's own DRC gate
+    # enforces, from the same manufacturer profile -- never hard-coded.
+    edge_clearance = get_profile("jlcpcb-tier1").get_design_rules().min_copper_to_edge_mm
+
+    def keys(pcb: Any) -> set[tuple]:
+        return {
+            (v.nets[0], v.layer, round(v.location[0], 3), round(v.location[1], 3))
+            for v in SharpTraceCornerRule().check(pcb, None).violations
+        }
+
+    def redundant(pcb: Any) -> set[tuple]:
+        return {
+            (v.rule_id, v.message)
+            for v in RedundantCopperRule().check(pcb, None).violations
+            if v.rule_id != "redundant_copper_staircase"
+        }
+
+    def off_angle(path: Path) -> set[tuple]:
+        return {(b["start"], b["end"]) for b in segment_angle_census(path)[1]}
+
+    def clear(pcb: Any, path: list, net: int, net_name: str, layer: str, width: float) -> bool:
+        oracle = RedundantCopperRule()
+        oracle._pcb = pcb
+        oracle._foreign_cache = {}
+
+        def name_of(number: int) -> str:
+            found = pcb.get_net(number)
+            return found.name if found else ""
+
+        own = clearance_of(net_name)
+        for a, b in zip(path, path[1:], strict=False):
+            cand = CopperElement(
+                element_type="segment",
+                layer=layer,
+                net_number=net,
+                geometry=(a[0], a[1], b[0], b[1], width),
+                reference="",
+            )
+            for other in oracle._foreign_elements(layer):
+                if other.net_number == net:
+                    continue
+                need = max(own, clearance_of(name_of(other.net_number)))
+                if _calculate_clearance(cand, other)[0] < need - 1e-9:
+                    return False
+
+        # Issue #9239: copper clearance alone is not the whole check -- the
+        # candidate must also keep the board's copper-to-edge distance and
+        # stay out of track-blocking keepout rule areas.  An outline that
+        # cannot be read refuses the repair rather than assuming clear.
+        outline = pcb.get_board_outline_segments()
+        if not outline:
+            return False
+        edges = outline_shapes(outline)
+        keepouts = [
+            zone_shape([zone.polygon])
+            for zone in (*pcb.rule_areas, *pcb.footprint_rule_areas)
+            if _rule_area_blocks_tracks(zone, layer) and len(zone.polygon) >= 3
+        ]
+        for a, b in zip(path, path[1:], strict=False):
+            shape = KSegment(x1=a[0], y1=a[1], x2=b[0], y2=b[1], width=width, layer=ALL_LAYERS)
+            if min_gap_to_outline(shape, edges) < edge_clearance - CLEARANCE_EPSILON_MM:
+                return False
+            # The keepout test measures the candidate's copper, not its
+            # centerline: the trace's width is in ``shape``, so copper that
+            # reaches into the keepout is refused even when the centerline
+            # stays outside (issue #9239).  Boundary convention: overlap only
+            # is refused -- copper exactly touching the keepout edge (zero
+            # gap) is accepted, with the same CLEARANCE_EPSILON_MM float-noise
+            # tolerance the edge check above grants a trace that exactly
+            # meets its minimum.
+            for shape_ko in keepouts:
+                if copper_gap(shape, shape_ko) < -CLEARANCE_EPSILON_MM:
+                    return False
+        return True
+
+    repaired = 0
+    with tempfile.TemporaryDirectory() as scratch:
+        trial_path = Path(scratch) / routed_path.name
+        for round_number in range(1, _SHARP_CORNER_MAX_ROUNDS + 1):
+            pcb = PCB.load(routed_path)
+            findings = SharpTraceCornerRule().check(pcb, None).violations
+            if not findings:
+                print(f"   No sharp trace corners ({repaired} repaired)")
+                return True
+            print(f"   Round {round_number}: {len(findings)} sharp trace corner(s)")
+            before, before_redundant = keys(pcb), redundant(pcb)
+            before_off_angle = off_angle(routed_path)
+            changed = False
+            for finding in findings:
+                net_name, layer = finding.nets[0], finding.layer
+                best = None
+                for removed, path in _sharp_corner_candidates(pcb, finding):
+                    net = removed[0].net_number
+                    if _joins_acutely(pcb, path, removed, layer, net):
+                        continue
+                    # Issue #9239: no narrower fallback -- the repaired piece
+                    # keeps the removed segments' widest width, so a repair can
+                    # never silently thin the trace it replaces.
+                    width = max(s.width for s in removed)
+                    if not clear(pcb, path, net, net_name, layer, width):
+                        continue
+                    trial = PCB.load(routed_path)
+                    drop = {(s.start, s.end, s.width) for s in removed}
+                    trial.remove_segments(
+                        [
+                            s
+                            for s in trial.segments
+                            if s.layer == layer
+                            and s.net_number == net
+                            and (s.start, s.end, s.width) in drop
+                        ]
+                    )
+                    for a, b in zip(path, path[1:], strict=False):
+                        trial.add_trace(a, b, width=width, layer=layer, net=net_name)
+                    trial.save(trial_path)
+                    trial = PCB.load(trial_path)
+                    after = keys(trial)
+                    if not after < before:
+                        continue
+                    if not redundant(trial) <= before_redundant:
+                        continue
+                    # The writer keeps 6 significant digits, so a point
+                    # like 152.3875 lands off the 45 degree grid once
+                    # saved: judge the copper as written.
+                    if not off_angle(trial_path) <= before_off_angle:
+                        continue
+                    # Fewest segments, then least copper, for this net on
+                    # this layer: comparable across every candidate.
+                    mine = [s for s in trial.segments if s.layer == layer and s.net_number == net]
+                    score = (len(mine), round(sum(math.dist(s.start, s.end) for s in mine), 6))
+                    if best is None or score < best[0]:
+                        best = (score, trial_path.read_text(), path, width)
+                if best is None:
+                    print(f"      {net_name} {layer} {finding.location}: no clear repair")
+                    continue
+                routed_path.write_text(best[1])
+                repaired += 1
+                changed = True
+                print(
+                    f"      {net_name} {layer} {finding.location}: "
+                    f"{' -> '.join(f'({x:.4f},{y:.4f})' for x, y in best[2])} at {best[3]} mm"
+                )
+                # Re-derive candidates from the edited board.
+                break
+            if not changed:
+                break
+
+    remaining_findings = SharpTraceCornerRule().check(PCB.load(routed_path), None).violations
+    if not remaining_findings:
+        print(f"   No sharp trace corners ({repaired} repaired)")
+        return True
+    print("\n   FAILED: sharp trace corners remain after repair")
     return False
 
 
@@ -2317,9 +3030,23 @@ def fill_zones(routed_path: Path) -> bool:
     return True
 
 
+CURATED_README = """\
+STM32 development board — fabrication and assembly package
+
+Order TWO layers, 1.6 mm FR4, 1 oz copper, tented through vias, and the PAID 0.15 mm minimum MECHANICAL via-hole option. See manufacturing-requirements.json. No laser microvias or via-in-pad process is used.
+
+Use bom_jlcpcb.csv and cpl_jlcpcb.csv for 17 placements: 15 SMT parts plus the through-hole Y1 crystal (C114147) and J1 SWD header (C37208), which JLCPCB assembles (issue #7268). Procurement must review the Y1/J1 rows before ordering. U1 MUST be Microchip MCP1825S-3302E/DB (C148031); AMS1117 has the wrong pinout for this board. No automatic substitutions.
+
+Power with regulated 5 V only, maximum 6 V. Verify 3.3 V before attaching peripherals; then verify SWD programming, crystal, reset/BOOT0 and PB12 LED. Thermal/load qualification remains required on assembled hardware.
+
+Gerbers: gerbers/gerbers.zip. Editable sources: kicad_project.zip. Engineering review: DESIGN_REVIEW.md. Source scripts: design-source/. Native DRC/ERC and reviewed Python checks accompany the final package.
+"""
+
+
 def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
     """Export the assembly bundle with the reviewed paid-drill native rules."""
     from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig
 
     process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
     process["validate_process"](routed_path)
@@ -2332,11 +3059,25 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
     # The stock tier1 export would overwrite the paid process's .15/.30/.075
     # via floors before preflight and packaging. Preserve the validated native
     # constraints throughout export, including the project ZIP and final gate.
+    # Issue #9536: the report/manifest also describe the reviewed process --
+    # the report audits under the paid ``process_rules()`` (not the stock
+    # tier1 floors that read the reviewed vias as 68 blocking errors and a
+    # 0.300 mm drill order), and the manifest's ERC preflight leg reads the
+    # shipped zero-violation native ERC report instead of "no ERC report
+    # found".  The curated README (order instructions, U1 no-substitution,
+    # power limits) is rewritten after the export so the generic generator
+    # cannot drop it again.
+    erc_report = routed_path.parent / "native-erc.json"
     package = ManufacturingPackage(
         pcb_path=routed_path,
         schematic_path=output_dir / "stm32_devboard.kicad_sch",
         manufacturer="jlcpcb-tier1",
-        config=ManufacturingConfig(output_dir=mfr_dir, emit_drc_constraints=False),
+        config=ManufacturingConfig(
+            output_dir=mfr_dir,
+            emit_drc_constraints=False,
+            report_design_rules=process["process_rules"](),
+            preflight=PreflightConfig(erc_report_path=erc_report if erc_report.is_file() else None),
+        ),
     )
     result = package.export(mfr_dir)
     for warning in result.warnings:
@@ -2345,6 +3086,7 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
         for error in result.errors:
             print(f"   Export error: {error}")
         return False
+    (mfr_dir / "README.txt").write_text(CURATED_README, encoding="utf-8")
 
     process["validate_process"](routed_path)
 
@@ -2628,6 +3370,13 @@ def main() -> int:
         # relocated via).
         drill_clearance_success = relocate_drill_clearance_step(routed_path)
 
+        # Step 6.35 (#9455): slide any via whose drill sits under footprint
+        # silk.  Footprint silk is never edited (#5744); a board-level gap
+        # cannot clear the rule, so the copper moves.  Before the quantize /
+        # staircase / fragment passes and the re-pour so they see final copper.
+        if not slide_vias_off_silk(routed_path):
+            raise RuntimeError("slide_vias_off_silk did not pass (#9455)")
+
         # Step 6.4: 45-degree quantize the escape copper (#3797 / #3532) -- the
         # fresh deterministic route + the fix_osc_escape re-aim + the kct stitch
         # GND pad-tails ship a few arbitrary-angle hops (the OSC_OUT re-aim
@@ -2672,9 +3421,26 @@ def main() -> int:
         # leave behind, rather than recording them as ``known_issues``.  Runs
         # after every copper-mutating pass and the #8399 prune, and before the
         # re-pour below so the GND plane backs off the compressed copper.
+        # Issue #8840 (operator ruling on PR #8848): ``sharp_trace_corner``
+        # gates this board, and the router's #8919 fold-back pass leaves the
+        # shapes it cannot express.  Repair them here, before the staircase
+        # compression and the re-pour, so both see the final copper.
+        if not repair_sharp_corners(routed_path):
+            raise RuntimeError("repair_sharp_corners did not pass (#8840)")
+
         staircase_success = compress_staircases(routed_path)
         if not staircase_success:
             raise RuntimeError("compress_staircases did not pass (#8844)")
+
+        # Issue #9097: the zero-warning reviewed gate also flags the router's
+        # sub-0.1 mm jog at a fine-pitch escape (``redundant_copper_fragments``)
+        # and silk over a via drill (``silk_hole_overlap``).  Both are fixed
+        # from the rule's own verdict, so a fresh re-route that moves a via or
+        # a track does not need a hand-edited artifact.
+        if not merge_fragment_runs(routed_path):
+            raise RuntimeError("merge_fragment_runs did not pass (#9097)")
+        if not check_silk_clear_of_holes(routed_path):
+            raise RuntimeError("check_silk_clear_of_holes did not pass (#9455)")
 
         fill_success = fill_zones(routed_path)
 

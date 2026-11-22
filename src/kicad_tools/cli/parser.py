@@ -233,6 +233,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_check_parser(subparsers)
     _add_creepage_parser(subparsers)
     _add_creepage_export_rules_parser(subparsers)
+    _add_voltage_map_merge_parser(subparsers)
     _add_sch_parser(subparsers)
     _add_pcb_parser(subparsers)
     _add_lib_parser(subparsers)
@@ -243,6 +244,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_route_stub(subparsers)
     _add_route_auto_parser(subparsers)
     _add_route_link_parser(subparsers)
+    _add_probe_parser(subparsers)
+    _add_apply_parser(subparsers)
     _add_retune_lengths_parser(subparsers)
     _add_reason_parser(subparsers)
     _add_optimize_parser(subparsers)
@@ -708,6 +711,13 @@ def _add_creepage_parser(subparsers) -> None:
         ),
     )
     creepage_parser.add_argument(
+        "--order-thickness-mm",
+        type=float,
+        metavar="MM",
+        help="Nominal finished board thickness selected for purchase, in mm. "
+        "Required for cross-face measurements when the PCB header and stackup disagree.",
+    )
+    creepage_parser.add_argument(
         "--min",
         type=float,
         default=None,
@@ -804,9 +814,14 @@ def _add_creepage_parser(subparsers) -> None:
             "reference (default 0 V); the reserved key _pair_bounds is a list of "
             '{"nets": [a, b], "max_dv": V, "why": "..."} device-bounded caps that '
             "can only LOWER that pair's |ΔV| (transitive pairs are the author's "
-            "to declare); other _-prefixed keys (e.g. _comment) are "
+            "to declare; `kct voltage-map-merge` also generates them to restore "
+            "scenario correlations, and max_dv: 0 declares 'always the same "
+            "potential'); other _-prefixed keys (e.g. _comment) are "
             "ignored.  Potentials are worst-case DC-equivalent magnitudes -- AC "
             "phase is not modelled, so |ΔV| is conservative for in-phase nets.  "
+            "Authoring one map per operating scenario?  Merge them into a single "
+            "envelope map with `kct voltage-map-merge a.json b.json -o env.json` "
+            "instead of hand-writing ranges + _pair_bounds (issue #9582).  "
             "Requires --standard (and --pollution-degree)."
         ),
     )
@@ -937,7 +952,10 @@ def _add_creepage_export_rules_parser(subparsers) -> None:
         help=(
             "Path to a JSON sidecar mapping net names to their RMS working "
             "potential (volts), same format as `kct creepage --voltage-map`.  "
-            "Without it the command is a clean no-op (nothing written)."
+            "Without it the command is a clean no-op (nothing written).  "
+            "Multiple operating scenarios?  Pre-merge them into one envelope "
+            "map with `kct voltage-map-merge a.json b.json -o env.json` "
+            "(issue #9582)."
         ),
     )
     p.add_argument(
@@ -989,6 +1007,47 @@ def _add_creepage_export_rules_parser(subparsers) -> None:
         help="Print the derived netclasses + rules without writing any files.",
     )
     add_format_flag(p)
+
+
+def _add_voltage_map_merge_parser(subparsers) -> None:
+    """Add voltage-map-merge parser (multi-scenario envelope map, #9582).
+
+    A NEW sibling top-level command: merges two or more per-scenario voltage
+    maps (one per operating mode of the board) into a single envelope map --
+    per-net ``{min, max}`` spans plus generated ``_pair_bounds`` entries
+    restoring each pair's worst per-scenario |dV| -- accepted unchanged by the
+    interval-aware ``--voltage-map`` consumers.  ``kct route``/``kct pcb``
+    collapse ranges to one signed endpoint (#4411) and can understate a
+    sign-flipping pair; the command warns on stderr when its output has such
+    pairs (and carries them in the ``--format json`` document).
+    """
+    p = subparsers.add_parser(
+        "voltage-map-merge",
+        help=(
+            "Merge two or more per-scenario voltage maps into one envelope map "
+            "for the interval-aware --voltage-map consumers (Issue #9582)"
+        ),
+    )
+    p.add_argument(
+        "inputs",
+        nargs="+",
+        metavar="SCENARIO",
+        help="Path to a per-scenario voltage-map JSON sidecar (two or more)",
+    )
+    p.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Path to write the merged envelope map JSON",
+    )
+    add_format_flag(
+        p,
+        help_text=(
+            "Output format (default: text).  json emits one JSON document on "
+            "stdout with the merge summary and the route-understated pairs "
+            '(errors surface as {"error": ...}, exit codes unchanged)'
+        ),
+    )
 
 
 def _add_check_parser(subparsers) -> None:
@@ -1296,6 +1355,25 @@ def _add_check_parser(subparsers) -> None:
             "board (<board>.kct-waivers.json, then .kct_waivers.json) when "
             "this flag is omitted (Issue #4417)."
         ),
+    )
+    # Issue #9454: ev3 -> ev4 waiver migration.  Declared on BOTH parsers +
+    # forwarded by the shim (parser-drift guard, issue #4633).
+    check_parser.add_argument(
+        "--migrate-waivers",
+        dest="migrate_waivers",
+        action="store_true",
+        help=(
+            "Re-bind evidence-bound waivers recorded under the previous "
+            "evidence version (ev3) to the current one (ev4) without "
+            "re-recording them (Issue #9454). Previews by default; add "
+            "--write to apply. Run it without --only/--skip."
+        ),
+    )
+    check_parser.add_argument(
+        "--write",
+        dest="migrate_write",
+        action="store_true",
+        help="With --migrate-waivers: apply the migration to the waivers file",
     )
     # Issue #3061: per-board auto-derive of the pad_grid tolerance is the
     # default for the CLI.  --pad-grid-strict opts back into the PR #3057
@@ -2610,7 +2688,7 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_reinforce.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_reinforce.add_argument(
         "--net",
-        help="Net name to reinforce (must have routed copper; required unless --list-wires)",
+        help="Net name to reinforce (must have routed copper; required unless --list-wires or --adopt)",
     )
     pcb_reinforce.add_argument(
         "--list-wires",
@@ -2618,6 +2696,16 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Read-only: print the wire list from BOARD's .reinforcement.json sidecar "
         "(#8744) and exit; --net filters it. Honours --format json.",
+    )
+    pcb_reinforce.add_argument(
+        "--adopt",
+        action="store_true",
+        help="Record the wires ALREADY on BOARD in its .reinforcement.json sidecar "
+        "(#9419): each solder-mask strip chain between two same-net anchor holes of a "
+        "wire gauge's drill becomes a record (net, layer, anchors, length). Moves no "
+        "copper and writes no board; --net restricts it, --dry-run reports without "
+        "writing. Wires already in the sidecar are kept; strips that cannot be "
+        "resolved are reported, never guessed.",
     )
     pcb_reinforce.add_argument(
         "--wire-gauge",
@@ -2907,7 +2995,9 @@ def _add_pcb_parser(subparsers) -> None:
         "segment -- runs whose joints are pure two-segment joints directly, and "
         "runs whose joints also sit on a same-net via, pad or zone only when the "
         "merged run leaves every terminal, neighbour, zone anchor and via/pad "
-        "centre joint as it was. Locked tracks are never touched. With kicad-cli available each "
+        "centre joint as it was. Locked tracks are never touched (this is how to mark a "
+        "run as shaped on purpose; each locked track is skipped individually, while "
+        "unlocked tracks on the same net may still be snapped or merged). With kicad-cli available each "
         "net's edits are checked with 'pcb drc --refill-zones' and dropped if "
         "they add violations; without that check the file is only written with "
         "--unverified. In-place by default; use -o to write elsewhere.",
@@ -2928,8 +3018,9 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_prune.add_argument(
         "--region",
         metavar="x1,y1,x2,y2",
-        help="Only apply a net's plan when every edit lies inside this box (mm); "
-        "plans straddling it are skipped and reported as region_skipped",
+        help="Only apply a net's plan when every edit lies inside this box "
+        "(board-relative mm); plans straddling it are skipped and reported as "
+        "region_skipped",
     )
     pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
     pcb_prune.add_argument(
@@ -2952,7 +3043,20 @@ def _add_pcb_parser(subparsers) -> None:
         "loops (including loops closed through vias) by removing each loop's "
         "narrowest segment below --wide, so 'pcb reinforce' can anchor the run. "
         "Loops whose segments are all >= --wide are reported, not cut, as is any "
-        "loop the current-path audit still sees afterwards (with its witness).",
+        "loop the current-path audit still sees afterwards (with its witness). "
+        "Without this flag a current_paths.json sidecar next to the board is "
+        "auto-discovered, exactly as 'kct check' auto-loads it (Issue #9747); "
+        "use --no-current-paths to suppress that.",
+    )
+    pcb_prune.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help="Suppress current-paths sidecar auto-discovery for 'pcb prune': "
+        "no sidecar is loaded (only an explicit --current-paths names one), "
+        "so declared nets get no declared-current width test in planning "
+        "and the post-plan current-path audit gate (Issue #8687) is "
+        "disabled. Cannot be combined with --current-paths.",
     )
     pcb_prune.add_argument(
         "--wide",
@@ -2965,6 +3069,50 @@ def _add_pcb_parser(subparsers) -> None:
         "declared current's IPC-2221 width on its own layer (external for "
         "F.Cu/B.Cu, internal otherwise, at the stackup's copper weight); refused "
         "cuts are reported.",
+    )
+    pcb_prune.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        metavar="FILE",
+        help="JSON per-net voltage map (same format as 'kct creepage' / 'kct route', "
+        "ranges and _pair_bounds included). Each net's plan is also dropped when "
+        "applying it leaves any pair further under its creepage requirement than "
+        "the input board (a new failure, or a deeper shortfall on one that already "
+        "failed); the JSON lists rejected_by_creepage, creepage_pairs_checked and "
+        "creepage_pairs_unchecked. Plans are judged per net, so a net's merges and "
+        "snaps stand or fall together. If the creepage audit cannot run nothing is "
+        "written. Absent, prune takes no creepage input",
+    )
+    pcb_prune.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for --voltage-map (default: iec60664)",
+    )
+    pcb_prune.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for --voltage-map (default: 2)",
+    )
+    pcb_prune.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb for --voltage-map (default: IIIa)",
+    )
+    pcb_prune.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help="Minimum voltage difference for the required-pair list (default: 30 V). "
+        "The audit selects mapped nets at least this far from the board-edge potential "
+        "and includes nets with mains or HV names.",
     )
     pcb_prune.add_argument(
         "--unverified",
@@ -3011,7 +3159,11 @@ def _add_pcb_parser(subparsers) -> None:
         help="Sync PCB footprints from schematic netlist",
         description="Compare schematic components against PCB footprints. "
         "Adds missing footprints (placed at board edge), detects renamed "
-        "references, and reports orphaned footprints.",
+        "references, and reports orphaned footprints. Assigns pad nets from "
+        "the schematic netlist, annotates pad pin functions/types, and "
+        "copies schematic values onto matched footprints. Footprint lib ID "
+        "drift is reported, not swapped (kct sync --apply owns swaps); "
+        "exits 1 while a footprint difference is unresolved.",
     )
     pcb_sync_netlist.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_sync_netlist.add_argument(
@@ -3211,7 +3363,8 @@ def _add_pcb_parser(subparsers) -> None:
         "--sides",
         default="front,back",
         help="Sides to populate: 'front', 'back', 'front,back' or 'populated' "
-        "(sides that carry BOM parts). Default: front,back",
+        "(sides that carry at least one SMD BOM part; through-hole-only sides are "
+        "skipped). Default: front,back",
     )
     pcb_add_fid.add_argument("--count", type=int, default=3, help="Fiducials per side (default: 3)")
     pcb_add_fid.add_argument(
@@ -3322,7 +3475,15 @@ def _add_pcb_parser(subparsers) -> None:
         dest="batch_map",
         help="JSON map for batch moves; x/y are board-relative by default "
         "(or absolute page coords with --absolute), "
-        'e.g. \'{"J2": {"x": 10, "y": 10}}\'',
+        'e.g. \'{"J2": {"x": 10, "y": 10}}\'. '
+        'An entry may add "side": "front"|"back": a part not already on that '
+        "side is flipped about its anchor first, then x/y/rotation are applied. "
+        "With a side change, rotation is the stored KiCad angle written AFTER "
+        "the flip (omitted: the flip's 180 - theta), not a front-view angle. "
+        "Explicit rotation: pads land where that same stored angle puts them "
+        "on the front (anchor-at-pad-1 diode, rotation 0: pad 2 at +7.62 mm "
+        "on either face). Omitted rotation: the 180 - theta rewrite mirrors "
+        "pads about the anchor (that diode: pad 2 at -7.62 mm)",
     )
     pcb_move_fp.add_argument(
         "-o",
@@ -4231,12 +4392,19 @@ def _add_zones_parser(subparsers) -> None:
     zones_add.add_argument("--min-thickness", type=float, default=0.25, help="Min thickness in mm")
     zones_add.add_argument("-v", "--verbose", action="store_true")
     zones_add.add_argument("--dry-run", action="store_true")
+    zones_add.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_add)
 
     # zones list
     zones_list = zones_subparsers.add_parser("list", help="List existing zones")
     zones_list.add_argument("pcb", help="Path to .kicad_pcb file")
     zones_list.add_argument("--format", choices=["text", "json"], default="text")
+    zones_list.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Accepted for consistency; the listing is always printed",
+    )
 
     # zones batch
     zones_batch = zones_subparsers.add_parser("batch", help="Add multiple zones from spec")
@@ -4254,6 +4422,7 @@ def _add_zones_parser(subparsers) -> None:
     zones_batch.add_argument("--clearance", type=float, default=0.3, help="Clearance in mm")
     zones_batch.add_argument("-v", "--verbose", action="store_true")
     zones_batch.add_argument("--dry-run", action="store_true")
+    zones_batch.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_batch)
 
     # zones hv-keepout
@@ -4292,6 +4461,7 @@ def _add_zones_parser(subparsers) -> None:
     )
     zones_hv.add_argument("-v", "--verbose", action="store_true")
     zones_hv.add_argument("--dry-run", action="store_true")
+    zones_hv.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_hv)
 
     # zones fill
@@ -4303,7 +4473,26 @@ def _add_zones_parser(subparsers) -> None:
     zones_fill.add_argument(
         "--dry-run", action="store_true", help="Show what would be done, no output"
     )
+    zones_fill.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_fill)
+
+    # zones relieve (Issue #9808: reachable from the unified CLI, matching zones_cmd.py)
+    zones_relieve = zones_subparsers.add_parser(
+        "relieve",
+        help="Retry thermal relief on stale solid pad overrides, then refill",
+    )
+    zones_relieve.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_relieve.add_argument(
+        "-o", "--output", help="Output file path (default: overwrites input)"
+    )
+    zones_relieve.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (also accepted after the command; "
+        "the leading global -q works too)",
+    )
+    add_format_flag(zones_relieve)
 
 
 def _add_stitch_parser(subparsers) -> None:
@@ -4633,6 +4822,28 @@ def _add_route_link_parser(subparsers) -> None:
     add_route_link_arguments(route_link_parser)
 
 
+def _add_probe_parser(subparsers) -> None:
+    """Add probe subcommand parser (Issue #9590)."""
+    from .probe_cmd import add_probe_arguments
+
+    probe_parser = subparsers.add_parser(
+        "probe",
+        help="Check a batch of proposed tracks/vias/arcs against the board; write nothing",
+    )
+    add_probe_arguments(probe_parser)
+
+
+def _add_apply_parser(subparsers) -> None:
+    """Add apply subcommand parser (Issue #9590)."""
+    from .probe_cmd import add_apply_arguments
+
+    apply_parser = subparsers.add_parser(
+        "apply",
+        help="Apply a batch of proposed copper --checked: probe first, write only if all pass",
+    )
+    add_apply_arguments(apply_parser)
+
+
 def _add_route_auto_parser(subparsers) -> None:
     """Add route-auto subcommand parser."""
     route_auto_parser = subparsers.add_parser(
@@ -4734,6 +4945,20 @@ def _add_route_auto_parser(subparsers) -> None:
             "the board's net-class via constraints."
         ),
     )
+    route_auto_parser.add_argument(
+        "--grid",
+        default="auto",
+        metavar="AUTO|MM",
+        help=(
+            "Routing grid pitch in mm, or 'auto' (default; Issue #9620). "
+            "'auto' reuses the 'kct route --grid auto' selector: a "
+            "pad-aligned pitch under the memory cap (500k cells), chosen from "
+            "the board's pads and declared clearance, instead of the legacy "
+            "fixed clearance/2 lattice that could time out long nets on big "
+            "boards. An explicit value (e.g. --grid 0.2) is honoured as given; "
+            "pass the board's clearance/2 to restore the legacy pitch."
+        ),
+    )
     route_auto_parser.add_argument("-o", "--output", help="Output PCB file path")
     route_auto_parser.add_argument(
         "--checkpoint",
@@ -4800,6 +5025,18 @@ def _add_route_auto_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Preview strategy selection without routing",
+    )
+    # Issue #9799 (#9795 phase 3): the shared silk legalisation pass runs on
+    # the published output by default; this is the opt-out.
+    route_auto_parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "otherwise runs on the accumulated output after per-net rollback "
+            "and before the lint gate judges it (Issue #9799)."
+        ),
     )
     route_auto_parser.add_argument(
         "-v",
@@ -4876,7 +5113,21 @@ def _add_reason_parser(subparsers) -> None:
 
 def _add_optimize_parser(subparsers) -> None:
     """Add optimize-traces subcommand parser."""
-    optimize_parser = subparsers.add_parser("optimize-traces", help="Optimize PCB traces")
+    optimize_parser = subparsers.add_parser(
+        "optimize-traces",
+        help="Optimize PCB traces",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Shaped-on-purpose copper (Issue #9640):\n"
+            "  Lock a track (or arc) in KiCad to mark a run as shaped on purpose.\n"
+            "  optimize-traces leaves every net that owns a locked track untouched\n"
+            "  and lists it as locked_nets_skipped. With --voltage-map, the finished\n"
+            "  candidate (after zone refill and --pour-slots) is audited and the\n"
+            "  affected nets are rolled back, or the input kept, when any pair ends\n"
+            "  further under its creepage requirement. `kct pcb prune` also skips\n"
+            "  locked tracks (individually, not per net)."
+        ),
+    )
     optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     optimize_parser.add_argument("-o", "--output", help="Output file (default: modify in place)")
     optimize_net_group = optimize_parser.add_mutually_exclusive_group()
@@ -5200,6 +5451,31 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
         ),
     )
     fix_silk_parser.add_argument(
+        "--clip-to-holes",
+        action="store_true",
+        help=(
+            "Also clip footprint silk lines/polygons/rects off drilled holes "
+            "(every via, tented or not, and PTH/NPTH), clearing silk_hole_overlap. "
+            "Run after routing; text is left for place-silk-refs --over-holes"
+        ),
+    )
+    fix_silk_parser.add_argument(
+        "--hole-clearance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Silk-to-hole clearance for --clip-to-holes/--all (default: the silk_hole_overlap rule's, 0)",
+    )
+    fix_silk_parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "One shared legalisation pass (legalize_silk, #9795 phase 1): widen, "
+            "rescale, thicken, clip off pads and PTH/NPTH holes (vias untouched) "
+            "and relocate obscured references"
+        ),
+    )
+    fix_silk_parser.add_argument(
         "--min-width",
         type=float,
         help="Minimum silkscreen line width in mm (overrides manufacturer rules)",
@@ -5295,6 +5571,14 @@ def _add_place_silk_refs_parser(subparsers) -> None:
         "--refs",
         metavar="REF[,REF...]",
         help="Comma-separated reference designators to move; others stay put as obstacles",
+    )
+    place_refs_parser.add_argument(
+        "--over-holes",
+        action="store_true",
+        help=(
+            "Move only references whose text overlaps a drilled hole (the "
+            "silk_hole_overlap findings); combined with --refs, the intersection"
+        ),
     )
     place_refs_parser.add_argument(
         "-o", "--output", help="Output file path (default: overwrite input)"
@@ -5436,8 +5720,16 @@ def _add_fix_drc_parser(subparsers) -> None:
     )
     fix_drc_parser.add_argument(
         "--only",
-        choices=["clearance", "drill-clearance"],
-        help="Only fix a specific violation type",
+        choices=["clearance", "drill-clearance", "mask-copper", "copper-gap"],
+        help=(
+            "Only fix a specific violation type. 'mask-copper' re-centres a "
+            "track that enters its own pad off-centre (mask_to_copper); it is "
+            "detected with kct check's rules, not kicad-cli, and is also part "
+            "of the default set when the report carries such findings. "
+            "'copper-gap' moves a via that sits too close to its own pad or "
+            "track (same-net physical_copper_gap slits), also detected with "
+            "kct check's rules and part of the default set."
+        ),
     )
     fix_drc_parser.add_argument(
         "-o",
@@ -6440,6 +6732,18 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "production cap: enough to rank two placements of the same board."
         ),
     )
+    # Issue #9799 (#9795 phase 3): the shared silk legalisation pass runs on
+    # the written board by default; this is the opt-out.
+    op_parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) on the "
+            "written board, and the snap reference repair it supersedes "
+            "(Issue #9799). With this flag authored silk is byte-identical."
+        ),
+    )
     op_parser.add_argument("-v", "--verbose", action="store_true")
     op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(op_parser)
@@ -7372,7 +7676,7 @@ def _add_submit_jlcpcb_parser(subparsers) -> None:
     add_arguments(
         subparsers.add_parser(
             "submit-jlcpcb",
-            help="Prepare a JLCPCB PCBA submission from a tapeout bundle (never orders)",
+            help="Prepare a JLCPCB PCBA submission from a tapeout bundle (orders only via the opt-in, attended --checkout leg)",
         )
     )
 
@@ -7568,6 +7872,16 @@ def _add_readiness_parser(subparsers) -> None:
         dest="readiness_no_archive",
         action="store_true",
         help="Skip building output/manufacturing.zip",
+    )
+    rd_parser.add_argument(
+        "--no-silk-fix",
+        dest="readiness_no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "--generate otherwise runs on the staged board before the checks, "
+            "plots and hashes consume it (Issue #9799). Verify never mutates."
+        ),
     )
     rd_parser.add_argument(
         "--hv-net-class",
@@ -10275,6 +10589,16 @@ def _add_export_parser(subparsers) -> None:
         dest="export_no_ampacity_rules",
         action="store_true",
         help="Do not emit ampacity track_width floors into the sibling .kicad_dru",
+    )
+    export_parser.add_argument(
+        "--no-silk-fix",
+        dest="export_no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "otherwise runs on the board before preflight and plotting judge "
+            "silk (Issue #9799). With this flag authored silk is byte-identical."
+        ),
     )
     export_parser.add_argument(
         "--auto-lcsc",

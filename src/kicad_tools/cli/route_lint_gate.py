@@ -763,13 +763,17 @@ class LintGate:
         The supervised ``--timeout`` worker installs ``_deadline_signal`` (its
         :class:`RouteDeadlineExpired` unwind is left intact); only the default
         disposition -- which would kill the process with no cleanup at all --
-        is replaced.
+        is replaced.  The run-lock early net counts as default here: it only
+        spans acquisition until the first deliberate handler, so this gate
+        replaces it (issue #9628 review).
         """
         if self._sigterm_installed or threading.current_thread() is not threading.main_thread():
             return
         try:
+            from .route_deadline import is_lock_sigterm_net
+
             previous = signal.getsignal(signal.SIGTERM)
-            if previous is not signal.SIG_DFL:
+            if previous is not signal.SIG_DFL and not is_lock_sigterm_net(previous):
                 return
             signal.signal(signal.SIGTERM, _raise_terminated)
         except (ValueError, OSError):
@@ -1169,6 +1173,8 @@ def merge_into_json_document(
         doc = relocate(parsed) if relocate is not None else parsed
     doc["lint_gate"] = outcome.to_dict()
     if outcome.rolled_back:
+        # The repaired candidate and its silk were rejected with the copper.
+        doc.pop("silk_fix", None)
         if "exit_code" in doc:
             doc["exit_code"] = exit_code
         if "success" in doc:

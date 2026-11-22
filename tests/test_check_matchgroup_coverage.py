@@ -60,6 +60,30 @@ def _load_board_recipe_module():
 # ---------------------------------------------------------------------------
 
 
+BOARD07_MASK_NETS: tuple[str, ...] = (
+    # Issue #8858 (board 07 increment, seed-42 regen): every ``mask_to_copper``
+    # error net signature the regeneration carries, each entry citing #8858.
+    "A0",
+    "A2",
+    "A3",
+    "A5",
+    "A7",
+    "DM0",
+    "DQ0",
+    "DQ1",
+    "DQ2",
+    "DQ3",
+    "DQ4",
+    "DQ5",
+    "DQ6",
+    "DQ7",
+    "GND",
+    "MIPI_CLK_P",
+    "TMDS_D2_N",
+    "TMDS_D2_P",
+)
+
+
 class TestBoard07Allowance:
     """Issue #3828 / #7339 / #7367: the allowance names identities, never a count."""
 
@@ -76,29 +100,26 @@ class TestBoard07Allowance:
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
         assert not hasattr(mod, "check_zero_violations")
 
-    def test_fixture_finding_allowance_is_fab_gap_only(self):
-        """Issues #5333/#6448 emptied the pair/impedance/skew entries, so the
-        identity allowance holds only the #8957 fab-view ``physical_copper_gap``
-        nets (PR #8956): every other blocking finding counts."""
+    def test_fixture_finding_allowance_is_mask_signatures(self):
+        """Issues #5333/#6448 emptied the pair/impedance/skew entries,
+        #8974's route-side slit-band fix drained DQS_P, DQS_N, GND and
+        +1V2 (entries deleted, survivors re-pointed to the #8962 parent
+        tracker), #9018's leg-side band guard drained the pad-vs-trace
+        population (MIPI_CLK_N / MIPI_DAT0_N / MIPI_DAT1_N deleted), and
+        issue #9124's tangent-seat rejection drained the last six fab-view
+        ``physical_copper_gap`` entries (the re-sited gateway fan vias'
+        tangency wedges): board 07's fab-gap allowance is empty, so every
+        blocking fab-gap finding counts.  Issue #8858's board 07 increment
+        then baselined the seed-42 regen's ``mask_to_copper`` error net
+        signatures (net-signature keyed -- the board is regenerated each
+        CI run, so the mask rule's opening/conductor UUID items are
+        ephemeral), each citing #8858: the committed allowance is exactly
+        those entries and nothing else."""
         mod = _load_helper_module()
-        assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS) == {
-            ("physical_copper_gap", net)
-            for net in (
-                "DQS_N",
-                "DQS_P",
-                "GND",
-                "MIPI_CLK_N",
-                "MIPI_DAT0_N",
-                "MIPI_DAT1_N",
-                "TMDS_D0_N",
-                "TMDS_D1_N",
-                "TMDS_D2_N",
-            )
-        }
-        assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS.values()) == {8957}
-        assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == (
-            mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
-        )
+        allowed = mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
+        assert {i for r, i in allowed if r == "physical_copper_gap"} == set()
+        assert allowed == {("mask_to_copper", net): 8858 for net in BOARD07_MASK_NETS}
+        assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == allowed
 
 
 class TestBoard07SkewRetune:
@@ -429,16 +450,23 @@ class TestMatchgroupJobContainer:
             None,
         )
         assert probe_idx is not None, "no kicad-cli --version probe step found"
+        # Issue #9340: the re-route + check command lives in the shared job
+        # script (2am#7561 ruling); the workflow step that calls it is what
+        # must stay after the probe.
         reroute_idx = next(
             (
                 i
                 for i, s in enumerate(steps)
-                if "check_matchgroup_coverage.py" in (s.get("run") or "")
+                if "scripts/ci/jobs/matchgroup-routing-regression.sh" in (s.get("run") or "")
             ),
             None,
         )
         assert reroute_idx is not None, "no re-route step found"
         assert probe_idx < reroute_idx
+        job_script = (
+            REPO_ROOT / "scripts" / "ci" / "jobs" / "matchgroup-routing-regression.sh"
+        ).read_text()
+        assert "check_matchgroup_coverage.py" in job_script
 
     def test_job_timeout_has_container_headroom(self):
         """Container pull + apt + real fills need more than the prior

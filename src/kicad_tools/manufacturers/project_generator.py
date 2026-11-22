@@ -49,9 +49,10 @@ import tempfile
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from .base import DesignRules
+from .zone_clearance_dru import zone_clearance_targets
 
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
@@ -1147,6 +1148,21 @@ def board_net_names(pcb_path: str | Path) -> set[str] | None:
     }
 
 
+def _zone_clearance_floor(rules: DesignRules, layer: str) -> float:
+    """The fab floor that governs a zone on ``layer`` (Issue #8937 review).
+
+    ``min_clearance_mm`` is the *outer*-layer floor; the 2 oz profiles split
+    the floors (#8836) and bind inner layers at ``min_inner_clearance_mm``
+    when it is set and lighter (``DesignRules.__post_init__`` enforces that
+    ordering, Issue #9113).  The zone arm must compare against the floor
+    that actually governs the zone's own layer, or a zone authored between
+    the two floors is skipped as "redundant" while no rule protects it.
+    """
+    if layer.startswith("In") and rules.min_inner_clearance_mm is not None:
+        return rules.min_inner_clearance_mm
+    return rules.min_clearance_mm
+
+
 def generate_project_dru(
     rules: DesignRules,
     project_data: dict,
@@ -1156,6 +1172,7 @@ def generate_project_dru(
     preserve_board_rules: str | None = None,
     max_ampacity_width_mm: float | None = None,
     route_edge_clearance_mm: float | None = None,
+    zone_clearances: Sequence[tuple[str, str, float]] | None = None,
 ) -> str:
     """Render the factory-floor ``.kicad_dru`` text, honouring project minima.
 
@@ -1169,13 +1186,26 @@ def generate_project_dru(
       clearance, via drill/diameter, annular ring, copper-to-edge) becomes
       ``max(profile, native project minimum)``.  A ``Reviewed clearance -
       <class>`` rule is emitted only for netclasses whose clearance is
-      strictly greater than that clearance floor; a rule at or below the
-      floor is redundant and, because later matching KiCad rules win, could
-      only shadow more specific rules.
+      strictly greater than the clearance floor of a layer it can govern;
+      a rule at or below the floor is redundant and, because later
+      matching KiCad rules win, could only shadow more specific rules.
+      The floor is per layer (#9015): with the 2 oz profiles' split floors
+      a class authored between the two is redundant on the outer layers
+      only, and its rule is emitted scoped ``(layer inner)`` at the
+      authored value.  A ``Zone clearance - <net>
+      (<layer>)`` rule is emitted the same way for each zone whose
+      ``connect_pads`` clearance exceeds the floor (Issue #8937: the
+      unconditional floor rule *replaces* the zone's own clearance during
+      native refill otherwise), and ``SMD Pad Clearance`` is raised to the
+      weakest protected netclass clearance.  Zone rules, class rules and
+      the SMD raise are inactive under mode ``0`` -- that mode deliberately
+      replaces the board's rules with the profile.
     * **``1`` / ``true``** -- the same floors, plus one ``Reviewed clearance``
       rule for every netclass (ascending clearance, so the stricter class
-      wins where two classes meet), exactly as #5023 shipped.
-    * **``0`` / ``false``** -- plain profile floors, no reviewed rules.
+      wins where two classes meet) and one ``Zone clearance`` rule for every
+      zone target, exactly as #5023 shipped its per-class arm.
+    * **``0`` / ``false``** -- plain profile floors, no reviewed or zone
+      rules.
 
     Args:
         rules: Manufacturer design rules.
@@ -1186,6 +1216,10 @@ def generate_project_dru(
             :func:`~kicad_tools.manufacturers.dru_generator.generate_dru`.
         preserve_board_rules: Caller override for the project's
             ``KCT_PRESERVE_BOARD_RULES``; see :func:`merge_project_rules`.
+        zone_clearances: The board's zone clearance targets -- ``(layer,
+            net, clearance_mm)`` triples from
+            :func:`~kicad_tools.manufacturers.zone_clearance_dru.zone_clearance_targets`
+            -- restored by the zone arm in the non-``0`` modes.
 
     Returns:
         The ``.kicad_dru`` text.
@@ -1222,13 +1256,45 @@ def generate_project_dru(
         # Later matching rules win in KiCad. Ascending order preserves
         # the stricter class when two differently classified nets meet.
         from .netclass_dru import netclass_condition
+        from .zone_clearance_dru import zone_clearance_rule
 
         router_classes = set(router_netclass_provenance(project_data)[0])
         coupled_pairs = recorded_router_coupled_pairs(project_data)
         classes = project_data.get("net_settings", {}).get("classes", [])
+        # Issue #8937: the conditional ``SMD Pad Clearance`` rule replaces
+        # (it is not a floor for) the net-class clearance an SMD pad pair
+        # would otherwise keep, so it is raised to the weakest authored
+        # class the reviewed rules protect -- a class at or below the
+        # clearance floor needs no protection (the floor governs it).
+        smd_raise = [
+            cls.get("clearance", 0)
+            for cls in classes
+            if cls.get("clearance", 0) > dru_rules.min_clearance_mm
+        ]
+        if dru_rules.min_smd_pad_clearance_mm is not None and smd_raise:
+            dru_rules = replace(
+                dru_rules,
+                min_smd_pad_clearance_mm=max(dru_rules.min_smd_pad_clearance_mm, min(smd_raise)),
+            )
+        # Issue #8937: one arm per protected clearance source, merged into a
+        # single ascending-clearance emission.  KiCad gives the last
+        # matching rule precedence, so a global ascending order makes the
+        # strictest matching rule win for every pair -- for a (zone, item)
+        # pair that reproduces the native ``max(zone, net class)`` semantics
+        # a flat last-match-wins file cannot otherwise express.
+        emitted: list[tuple[float, str, str]] = []
+        # Issue #9015: redundancy is per layer, not global.  The 2 oz
+        # profiles bind inner layers at ``min_inner_clearance_mm`` (#8836),
+        # so the skip predicate is the floor of the layers a rule would
+        # govern -- a class authored between the two floors is redundant on
+        # the outer layers only.  An unsplit profile (``None`` inner floor)
+        # keeps the single floor for every layer, byte-identical to before.
+        inner_floor = _zone_clearance_floor(dru_rules, "In1.Cu")
         for cls in sorted(classes, key=lambda c: c.get("clearance", 0)):
-            clearance = max(dru_rules.min_clearance_mm, cls.get("clearance", 0))
-            if mode == PRESERVE_MODE_STRICTER and clearance <= dru_rules.min_clearance_mm:
+            authored = cls.get("clearance", 0)
+            inner_clearance = max(inner_floor, authored)
+            clearance = max(dru_rules.min_clearance_mm, authored)
+            if mode == PRESERVE_MODE_STRICTER and inner_clearance <= inner_floor:
                 continue
             # Issue #6390: a router-declared class does not govern pad pairs
             # inside one footprint (see ``netclass_dru.netclass_condition``).
@@ -1236,11 +1302,52 @@ def generate_project_dru(
             condition = netclass_condition(
                 cls["name"], router=cls["name"] in router_classes, extra_pairs=coupled_pairs
             )
-            preserved_clearances += (
-                f"\n(rule {json.dumps('Reviewed clearance - ' + cls['name'])}\n"
-                f"  (condition {json.dumps(condition)})\n"
-                f"  (constraint clearance (min {clearance}mm)))\n"
+            if mode == PRESERVE_MODE_STRICTER and clearance <= dru_rules.min_clearance_mm:
+                # Between the two floors: the outer floor already binds
+                # outer-layer pairs at >= the authored value, so the rule
+                # is scoped to the inner layers only (the same
+                # ``(layer inner)`` scope the split floor itself carries)
+                # instead of being skipped as globally redundant.
+                emitted.append(
+                    (
+                        inner_clearance,
+                        f"class:{cls['name']}",
+                        f"\n(rule {json.dumps('Reviewed clearance - ' + cls['name'])}\n"
+                        f"  (layer inner)\n"
+                        f"  (condition {json.dumps(condition)})\n"
+                        f"  (constraint clearance (min {inner_clearance}mm)))\n",
+                    )
+                )
+                continue
+            emitted.append(
+                (
+                    clearance,
+                    f"class:{cls['name']}",
+                    f"\n(rule {json.dumps('Reviewed clearance - ' + cls['name'])}\n"
+                    f"  (condition {json.dumps(condition)})\n"
+                    f"  (constraint clearance (min {clearance}mm)))\n",
+                )
             )
+        # The zone arm: each zone's ``connect_pads`` clearance restored at
+        # ``max(fab floor for its layer, authored)``, so the floor still
+        # binds a zone authored below it (the bare zone exclusion the
+        # issue's Option 2 proposed would have left such a zone
+        # unprotected).  The floor is per layer: the 2 oz profiles bind
+        # inner layers at ``min_inner_clearance_mm``, not the outer one.
+        for layer, net, authored in zone_clearances or ():
+            floor = _zone_clearance_floor(dru_rules, layer)
+            clearance = max(floor, authored)
+            if mode == PRESERVE_MODE_STRICTER and clearance <= floor:
+                continue
+            emitted.append(
+                (
+                    clearance,
+                    f"zone:{layer}:{net}",
+                    "\n" + zone_clearance_rule(layer, net, clearance),
+                )
+            )
+        emitted.sort(key=lambda item: (item[0], item[1]))
+        preserved_clearances = "".join(text for _value, _key, text in emitted)
 
     return (
         generate_dru(
@@ -1467,6 +1574,7 @@ def write_drc_constraints(
     max_ampacity_width_mm: float | None = None,
     route_edge_clearance_mm: float | None = None,
     _board_path: str | Path | None = None,
+    _report_dru_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
 
@@ -1558,6 +1666,8 @@ def write_drc_constraints(
             applied to both sidecars without being written into the project;
             ``None`` (default) reads the project.  See
             :func:`merge_project_rules`.
+        _report_dru_path: Internal -- ``.kicad_dru`` path to name in
+            diagnostics when ``pcb_path`` is a scratch copy (#9430).
         _board_path: Internal -- board to read keepout rule areas from when
             ``pcb_path`` is a staged sibling with no ``.kicad_pcb`` beside it.
         source_pcb_path: Original board when routing to a renamed destination.
@@ -1699,7 +1809,22 @@ def write_drc_constraints(
     if write_dru:
         from .dru_generator import merge_dru_floors
 
+        # Issue #9448: a project-declared designator height splits the
+        # silkscreen-height rule.  Probe the board being written, then the
+        # authored source board (``-o <scratch>`` must not drop it).
+        if rules.declared_reference_height_mm is None:
+            from kicad_tools.sync.discover import resolve_declared_reference_height_for_pcb
+
+            declared_height = resolve_declared_reference_height_for_pcb(pcb_path)
+            if declared_height is None and source_pcb_path is not None:
+                declared_height = resolve_declared_reference_height_for_pcb(source_pcb_path)
+            if declared_height is not None:
+                rules = replace(rules, declared_reference_height_mm=declared_height)
+
         dru_path = pcb_path.with_suffix(".kicad_dru")
+        # Name in diagnostics (#9430): the real sidecar when ``pcb_path`` is a
+        # scratch copy (``export --dry-run``), so messages never cite a temp dir.
+        report_path = Path(_report_dru_path) if _report_dru_path is not None else dru_path
         try:
             existing_dru: str | None = (
                 dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
@@ -1710,6 +1835,24 @@ def write_drc_constraints(
             existing_dru = None
         from .keepout_dru import apply_keepout_rules
 
+        # Issue #8937: the board's zone ``connect_pads`` clearances feed the
+        # zone arm of the emitted block (and the loosening gate's authored
+        # baselines, together with the merged project's net classes).
+        zone_targets = zone_clearance_targets(board) if board.exists() else []
+        authored_state: dict[str, Any] = {
+            "netclasses": {
+                str(cls.get("name")): cls.get("clearance")
+                for cls in project_data.get("net_settings", {}).get("classes", [])
+                if isinstance(cls.get("clearance"), (int, float))
+                and not isinstance(cls.get("clearance"), bool)
+            },
+            "zones": [[layer, net, value] for layer, net, value in zone_targets],
+        }
+        allow_dru = (
+            ("*",)
+            if preserve_board_rules_mode(project_data, preserve_board_rules) == (PRESERVE_MODE_OFF)
+            else ()
+        )
         merged_dru = merge_dru_floors(
             existing_dru,
             generate_project_dru(
@@ -1720,14 +1863,17 @@ def write_drc_constraints(
                 preserve_board_rules=preserve_board_rules,
                 max_ampacity_width_mm=max_ampacity_width_mm,
                 route_edge_clearance_mm=route_edge_clearance_mm,
+                zone_clearances=zone_targets,
             ),
-            path=dru_path,
+            path=report_path,
+            authored=authored_state,
+            allow=allow_dru,
         )
         # Issue #6039: explicit per-rule-area keepout rules, since headless
         # kicad-cli < 10.0.6 does not enforce rule areas on its own (#7198).
         if board.exists():
             keepout_dru = apply_keepout_rules(
-                merged_dru, board, _installed_kicad_cli_version(), path=dru_path
+                merged_dru, board, _installed_kicad_cli_version(), path=report_path
             )
             if keepout_dru is not None:
                 merged_dru = keepout_dru
@@ -1752,6 +1898,6 @@ def write_drc_constraints(
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have
         # installed will silently ignore its SMD pad floor (#5724).
-        _warn_if_smd_pad_clearance_is_inert(rules, dru_path)
+        _warn_if_smd_pad_clearance_is_inert(rules, report_path)
 
     return written

@@ -70,6 +70,29 @@ DFM_THRESHOLD_NAMES: tuple[str, ...] = (
 #: Max |declared - offered| oz still treated as the offered weight (0.434 -> 0.5).
 DFM_OZ_SNAP_TOLERANCE = 0.1
 
+#: Smallest reference-designator height (mm) a project may declare for itself
+#: (Issue #9448).  0.8 mm is the size the issue asks for and equals the
+#: PCBWay/Seeed/FlashPCB silkscreen floor; it is not a legibility threshold for
+#: every fab (JLCPCB publishes 1.0 mm, OSHPark 0.762 mm).  A smaller declaration
+#: is rejected rather than recorded.
+MIN_DECLARED_REFERENCE_HEIGHT_MM = 0.8
+
+
+def is_valid_declared_reference_height(value: object) -> bool:
+    """True for a finite real number >= ``MIN_DECLARED_REFERENCE_HEIGHT_MM``.
+
+    The single definition of a valid ``silkscreen_min_reference_height_mm``
+    (Issue #9448), shared by the spec schema, the ``project.kct`` resolver and
+    :class:`DesignRules` so they cannot drift.  Booleans, strings, ``nan`` and
+    ``inf`` are all invalid (``nan < 0.8`` is False, so a bare bound check
+    would let NaN through).
+    """
+    import math
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value >= MIN_DECLARED_REFERENCE_HEIGHT_MM
+
 
 @dataclass(frozen=True)
 class DfmThreshold:
@@ -274,6 +297,13 @@ class DesignRules:
     # Silkscreen constraints
     min_silkscreen_width_mm: float = 0.15
     min_silkscreen_height_mm: float = 0.8
+    # Project-declared reference-designator height (Issue #9448).  ``None``
+    # (the default) means no declaration: designators are held to the fab's
+    # ``min_silkscreen_height_mm`` like every other silk text.  Set from the
+    # project spec (``requirements.manufacturing.silkscreen_min_reference_height_mm``),
+    # never from a fab profile.  Only ever relaxes the designator floor; see
+    # :attr:`min_silkscreen_reference_height_mm`.
+    declared_reference_height_mm: float | None = None
 
     # Solder mask
     min_solder_mask_dam_mm: float = 0.1
@@ -281,6 +311,13 @@ class DesignRules:
 
     # Optional process-specific clearances; None preserves legacy profiles.
     min_silk_to_pad_clearance_mm: float | None = None
+    # Silk-to-drilled-hole clearance (Issue #9797).  ``None`` (the default)
+    # keeps the legacy behaviour: the shared ``SILK_HOLE_CLEARANCE_MM``
+    # overlap threshold of the ``silk_hole_overlap`` rule, which every
+    # hole-clearing tool falls back to.  A profile that publishes a real fab
+    # figure (e.g. the #9421 stackup measurements) sets it so
+    # ``legalize_silk`` clips silk to the fab's value instead.
+    min_silk_to_hole_clearance_mm: float | None = None
     # Two-tier silk-to-pad bands (Issue #8844): error at/below ``danger``,
     # warning at/below ``warning``.  None keeps the single-tier legacy
     # behaviour driven by ``min_silk_to_pad_clearance_mm``.
@@ -358,6 +395,44 @@ class DesignRules:
     # Plated component pads can require wider rings than vias. None keeps
     # existing profiles' shared annular-ring behavior.
     min_pth_annular_ring_mm: float | None = None
+
+    def __post_init__(self) -> None:
+        """Enforce ``min_inner_clearance_mm <= min_clearance_mm`` (Issue #9113).
+
+        The inner floor models lighter inner copper, so it is never stricter
+        than the outer floor.  The project DRU generator's skip predicates
+        (the class arm and ``_zone_clearance_floor``) rely on that ordering:
+        with an inverted profile they would treat an outer-layer authored
+        clearance as redundant while no rule protects it.  Checking here,
+        rather than in the YAML loader, also covers ``dataclasses.replace``
+        and hand-built profiles.
+        """
+        inner = self.min_inner_clearance_mm
+        if inner is not None and inner > self.min_clearance_mm:
+            raise ValueError(
+                f"min_inner_clearance_mm ({inner}) must not exceed "
+                f"min_clearance_mm ({self.min_clearance_mm}): the inner-layer "
+                "floor is the looser one (lighter inner copper)"
+            )
+
+    @property
+    def min_silkscreen_reference_height_mm(self) -> float:
+        """Height floor for reference designators (Issue #9448).
+
+        The fab floor ``min_silkscreen_height_mm`` unless the project declared
+        a smaller ``declared_reference_height_mm``.  A declaration larger than
+        the fab floor is ignored: it can only relax the designator floor, never
+        tighten it.  Labels and board text always keep the fab floor.
+        """
+        declared = self.declared_reference_height_mm
+        if declared is None or not is_valid_declared_reference_height(declared):
+            return self.min_silkscreen_height_mm
+        return min(declared, self.min_silkscreen_height_mm)
+
+    @property
+    def has_reference_height_deviation(self) -> bool:
+        """True when a declaration actually relaxes the designator floor."""
+        return self.min_silkscreen_reference_height_mm < self.min_silkscreen_height_mm
 
     @property
     def min_trace_width_mil(self) -> float:

@@ -38,6 +38,7 @@ is a report the gallery's validator accepts.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import logging
@@ -60,6 +61,8 @@ from kicad_tools.analysis.routing_quality import (
     RULE_OFF_AXIS_LENGTH_WARNING,
     off_axis_layer_warning_count,
 )
+from kicad_tools.exceptions import FileFormatError
+from kicad_tools.sexp import ParseError
 
 from .board_readiness import read_readiness, readiness_input_hash
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
@@ -283,6 +286,36 @@ def _declared_copper_weights(pcb_path: Path) -> dict[str, float | None]:
     except Exception:  # noqa: BLE001 - receipt metadata must not fail readiness
         return {"outer_oz": None, "inner_oz": None}
     return {"outer_oz": outer, "inner_oz": inner}
+
+
+def _declared_reference_height_deviation(options: ReadinessOptions) -> dict[str, Any] | None:
+    """The project's declared designator-height deviation, or ``None`` (Issue #9448).
+
+    Present only when ``project.kct`` declares a reference-designator height
+    below the target fab's silkscreen text-height floor -- the one case where
+    ``silkscreen_text_height`` is relaxed for designators.  Reported in the
+    manifest and README so a sign-off never carries the relaxation silently.
+    """
+    from kicad_tools.sync.discover import resolve_declared_reference_height_for_pcb
+
+    declared = resolve_declared_reference_height_for_pcb(options.pcb)
+    if declared is None:
+        return None
+    try:
+        from kicad_tools.manufacturers import get_profile
+
+        fab_floor = get_profile(options.manufacturer).get_design_rules(2).min_silkscreen_height_mm
+    except Exception:  # noqa: BLE001 - receipt metadata must not fail readiness
+        return None
+    if declared >= fab_floor:
+        return None
+    return {
+        "rule": "silkscreen_text_height",
+        "scope": "reference designators",
+        "declared_min_height_mm": declared,
+        "fab_min_height_mm": fab_floor,
+        "source": "project.kct requirements.manufacturing.silkscreen_min_reference_height_mm",
+    }
 
 
 def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
@@ -936,6 +969,11 @@ class ReadinessOptions:
     # The ORIGINAL board directory the spec lookup started from (#8764); the
     # staged candidate's ``board_dir`` is a temp dir deleted when the run ends.
     bom_spec_searched: Path | None = None
+    # Issue #9799 (#9795 phase 3): run the shared silk legalisation pass on
+    # the staged candidate during ``generate``, after the pour refill and
+    # before Gate 1 judges silk; the repaired bytes are what the checks,
+    # plots and hashes then consume.  ``--no-silk-fix`` sets this False.
+    silk_fix: bool = True
 
     @property
     def root(self) -> Path:
@@ -1165,6 +1203,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
             skip_fiducials=bool(getattr(args, "skip_fiducials", False)),
             skip_board_info=bool(getattr(args, "skip_board_info", False)),
+            silk_fix=not bool(getattr(args, "no_silk_fix", False)),
             ack_trace_quality=ack_trace,
             merge_lcsc_from=merge_lcsc_from,
             quantity=quantity,
@@ -1588,22 +1627,119 @@ def _blocking_unknown_coverage(report: dict) -> list[str]:
     ]
 
 
-def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
+def _gate_kct_check(
+    options: ReadinessOptions,
+    engines: Engines,
+    pre_cleanup: Path | None = None,
+    post_cleanup: Path | None = None,
+) -> tuple[CheckOutcome, dict]:
     """Gate 1 — ``kct check`` at the resolved fab tier.
 
     Issue #8826: a non-passing outcome names the exact ``kct check`` invocation
     used, so a mismatch with a hand-run ``kct check`` (e.g. ``--copper``) is
     diagnosable.
+
+    Issue #9747: with the boards from either side of the cleanup steps
+    (``pre_cleanup``/``post_cleanup``, staged by the candidate run), a
+    non-passing outcome also says when a blocking finding was introduced by
+    ``copper_cleanup`` itself -- absent from the committed board, present
+    right after the cleanup and still blocking here -- and points at
+    ``--skip-cleanup``.  No new gate: only the blocker message changes.
     """
     invocation = " ".join(
         ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *options.check_args]
     )
     outcome, report = _gate_kct_check_run(options, engines)
+    if outcome.status == FAILED and pre_cleanup is not None and post_cleanup is not None:
+        introduced = _cleanup_introduced_errors(options, engines, pre_cleanup, post_cleanup, report)
+        if introduced:
+            shown = ", ".join(introduced[:3]) + (", ..." if len(introduced) > 3 else "")
+            note = (
+                " [introduced by the copper_cleanup step (dedupe/prune/"
+                f"optimize-traces), absent from the committed board: {shown}; "
+                "re-run with --skip-cleanup to keep the committed copper]"
+            )
+            outcome.detail += note
+            outcome.blockers = [b + note for b in outcome.blockers]
     if outcome.status != PASSED:
         note = f" [invocation: {invocation}]"
         outcome.detail += note
         outcome.blockers = [b + note for b in outcome.blockers]
     return outcome, report
+
+
+def _error_keys(report: dict) -> set[tuple[Any, ...]] | None:
+    """Error-violation identities of a ``kct check`` report.
+
+    ``None`` when any error lacks a usable identity: the caller then skips
+    finding-level comparison rather than comparing a partial set.
+    """
+    keys: set[tuple[Any, ...]] = set()
+    for violation in report.get("violations", []):
+        if not isinstance(violation, dict) or violation.get("severity") != "error":
+            continue
+        key = _violation_error_key(violation)
+        if key is None:
+            return None
+        keys.add(key)
+    return keys
+
+
+def _cleanup_introduced_errors(
+    options: ReadinessOptions,
+    engines: Engines,
+    pre_cleanup: Path,
+    post_cleanup: Path,
+    gate_report: dict,
+) -> list[str] | None:
+    """Error findings Gate 1 blocks on that the cleanup steps introduced (#9747).
+
+    A finding counts only when the comparison isolates it: absent from the
+    board as staged (``pre_cleanup``), present right after the cleanup steps
+    (``post_cleanup``, before assembly prep and refill) and still present in
+    the gate's own report -- so pre-existing findings and findings from
+    assembly prep or refill are never blamed on the cleanup.  The snapshot
+    checks run with the same current-paths resolution Gate 1 used.  ``None``
+    means the comparison could not run (a snapshot check failed or a report
+    had unidentifiable errors); attribution is then skipped, never guessed.
+    """
+    extra = list(options.check_args)
+    has_current_paths_flag = any(
+        token == "--current-paths"
+        or token.startswith("--current-paths=")
+        or token == "--no-current-paths"
+        for token in options.check_args
+    )
+    if not has_current_paths_flag:
+        resolved = _cleanup_current_paths_sidecar(options)
+        extra += (
+            ["--current-paths", str(resolved)] if resolved is not None else ["--no-current-paths"]
+        )
+    keys: dict[str, set[tuple[Any, ...]] | None] = {}
+    with tempfile.TemporaryDirectory(prefix="kct-cleanup-attribution-") as tmp:
+        for label, board in (("pre", pre_cleanup), ("post", post_cleanup)):
+            report_path = Path(tmp) / f"kct-check-{label}.json"
+            run = engines.kct_check(board, options.manufacturer, report_path, extra)
+            if not run.ok or not report_path.is_file():
+                logger.warning(
+                    "copper_cleanup attribution skipped: %s-cleanup check failed: %s",
+                    label,
+                    run.detail,
+                )
+                return None
+            keys[label] = _error_keys(_read_json(report_path))
+            if keys[label] is None:
+                return None
+    gate_keys = _error_keys(gate_report)
+    if gate_keys is None:
+        return None
+    assert keys["pre"] is not None and keys["post"] is not None
+    introduced = keys["post"] - keys["pre"]
+    return [
+        _describe_error_key(key)
+        for key in sorted(introduced, key=lambda k: (len(k), *map(str, k)))
+        if key in gate_keys
+    ]
 
 
 def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
@@ -2367,9 +2503,15 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
             "acknowledged_warning_rules": sorted(options.ack_warnings),
             "acknowledged_trace_quality": dict(sorted(options.ack_trace_quality.items())),
             "copper_cleanup": options.cleanup_record,
+            "assembly_prep": options.assembly_prep_record,
             "copper_weights": _declared_copper_weights(options.pcb),
         }
     )
+    deviation = _declared_reference_height_deviation(options)
+    if deviation is not None:
+        manifest["declared_deviations"] = [deviation]
+    else:
+        manifest.pop("declared_deviations", None)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest_path
 
@@ -2624,11 +2766,68 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     return problems
 
 
+def _cleanup_current_paths_sidecar(options: ReadinessOptions) -> Path | None:
+    """The current-paths sidecar the check gate would load, for prune (#9747).
+
+    Honours an explicit ``--current-paths``/``--no-current-paths`` in
+    ``options.check_args`` exactly as Gate 1's ``kct check`` would (explicit
+    wins, resolved against the cwd like the check parser does); otherwise
+    auto-discovers the sidecar next to the staged board the same way.  The
+    cleanup's prune step then applies the declared-current width test with
+    the same declarations the very next gate audits.
+    """
+    explicit: str | None = None
+    suppressed = False
+    tokens = list(options.check_args)
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--current-paths" and i + 1 < len(tokens):
+            explicit = tokens[i + 1]
+            i += 2
+            continue
+        if token.startswith("--current-paths="):
+            explicit = token.split("=", 1)[1]
+        elif token == "--no-current-paths":
+            suppressed = True
+        i += 1
+    if explicit is not None:
+        return Path(explicit).resolve()
+    if suppressed:
+        return None
+    from kicad_tools.router.current_paths import discover_current_paths_sidecar
+
+    return discover_current_paths_sidecar(options.pcb)
+
+
 def _cleanup_prune_step(options: ReadinessOptions) -> dict[str, Any]:
     """``kct pcb prune`` step: DRC-verified, applied only when verified."""
-    from kicad_tools.pcb_prune import prune_board
+    from kicad_tools.pcb_prune import DEFAULT_WIDE_MM, current_path_declarations, prune_board
 
-    pruned, result = prune_board(options.pcb, project=options.project)
+    # Issue #9747: prune with the declarations Gate 1's `kct check` loads.
+    # A malformed sidecar raises and is recorded as a failed prune step by
+    # the caller (`kct check` itself only warns on an auto-discovered one,
+    # but here the very next gate audits against those declarations).
+    sidecar = _cleanup_current_paths_sidecar(options)
+    declared_nets: set[str] | None = None
+    required_widths: dict[str, dict[str, float]] = {}
+    specs: list = []
+    if sidecar is not None:
+        try:
+            specs, declared_nets, required_widths = current_path_declarations(options.pcb, sidecar)
+        except Exception as exc:
+            raise RuntimeError(f"current-paths sidecar {sidecar}: {exc}") from exc
+    pruned, result = prune_board(
+        options.pcb,
+        project=options.project,
+        declared_nets=declared_nets,
+        required_widths=required_widths,
+        current_paths=specs,
+        # Net-relative mode when declarations apply, matching a plain
+        # `kct pcb prune --current-paths ...` (whose --wide defaults to
+        # net-relative); without declarations the historical absolute 0.5 mm.
+        wide=None if declared_nets else DEFAULT_WIDE_MM,
+    )
     if result.accepted and not result.drc_verified:
         return {"status": "not-applied", "detail": result.drc_note, "segments_removed": 0}
     if result.accepted:
@@ -2871,12 +3070,20 @@ def _write_readme(
         lines.extend(["", "Assembly prep", "-------------"])
         for key in ("fiducials", "board_info"):
             lines.append(f"  {key}: {prep[key]}")
+    deviation = _declared_reference_height_deviation(options)
     lines.extend(["", "Accepted-risk waivers", "---------------------"])
     if acked:
         lines.append(f"  see the {len(acked)} line(s) above")
+    if deviation is not None:
+        lines.append(
+            f"  DECLARED DEVIATION: reference designators may be as small as "
+            f"{deviation['declared_min_height_mm']:g} mm (fab floor "
+            f"{deviation['fab_min_height_mm']:g} mm) per project.kct "
+            "silkscreen_min_reference_height_mm; labels keep the fab floor."
+        )
     for entry in options.known_issues:
         lines.append(f"  #{entry['issue']} [{entry['kind']}] {entry['summary']}")
-    if not acked and not options.known_issues:
+    if not acked and not options.known_issues and deviation is None:
         lines.append("  no accepted-risk waivers")
     lines.append("")
 
@@ -2908,6 +3115,7 @@ def _verify_finished_artifacts(options: ReadinessOptions) -> CheckOutcome:
     if "README.txt" not in actual:
         problems.append("finished package has no assembly/fabrication instructions")
     problems.extend(_verify_project_provenance(options))
+    problems.extend(_verify_cpl_rotations(options))
     for name, info in files.items():
         if (
             not isinstance(info, dict)
@@ -3564,6 +3772,16 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
             ):
                 paths.add(path.resolve())
 
+    # Issue #9006: the waivers sidecar `kct check` auto-loads for this PCB
+    # changes the verdict (errors -> waived), so it is evidence input like
+    # the rule files.  Same lookup order as the check loader; one outside
+    # the board directory is dropped by the filter below.
+    from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
+
+    sidecar = discover_waivers_sidecar(options.pcb)
+    if sidecar is not None:
+        paths.add(sidecar.resolve())
+
     for directory in (options.output_dir, options.evidence_dir):
         if directory.is_dir():
             paths.update(p.resolve() for p in directory.rglob("*") if p.is_file())
@@ -3576,6 +3794,15 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     if spec.is_file():
         paths.add(spec.resolve())
 
+    # Issue #9322: the CPL rotation sidecar changes the shipped CPL, so it is
+    # provenance like the waivers sidecar; one outside the board directory is
+    # dropped by the filter below.
+    from kicad_tools.export.rotation_overrides import discover_rotation_overrides
+
+    rotations = discover_rotation_overrides(options.pcb)
+    if rotations is not None:
+        paths.add(rotations.resolve())
+
     return sorted(
         p
         for p in paths
@@ -3584,6 +3811,169 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         and not _is_transient_local(p.relative_to(root))
         and not _is_render_artifact(p.relative_to(root))
     )
+
+
+# Inputs whose failure to read or parse means the CPL rotation re-derivation
+# cannot run (issue #9346): the retained CSVs and the board PCB.  ``ParseError``
+# is the s-expression parser's (a ``ValueError``), raised by ``PCB.load`` on a
+# malformed board; ``FileFormatError`` for a file that is not a PCB.  The
+# sidecar has its own error type and message; anything else reaching this
+# point used to hit a blanket ``except Exception`` that silently skipped the
+# check, and must be reported instead.
+_CPL_REDERIVATION_INPUT_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    csv.Error,
+    UnicodeDecodeError,
+    ParseError,
+    FileFormatError,
+)
+
+
+def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
+    """Re-derive the shipped CPL's rotation provenance (issue #9322).
+
+    Returns ``(RotationReview | None, problem)``.  Reads the shipped BOM/CPL for
+    the LCSC numbers and footprint names the export actually used, so the
+    recorded corrections are the ones keyed against the shipped files.  ``(None,
+    None)`` means there is nothing to report (no CPL, or a board the export step
+    could not have parsed); a non-``None`` problem string means the
+    re-derivation could not be trusted -- an invalid sidecar, or an input or
+    unexpected failure, which callers must report rather than skip silently
+    (issue #9346: a check that cannot run must never look like one that passed).
+    """
+    if not options.assembly or not options.pcb.is_file():
+        return None, None
+    cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
+    if cpl is None:
+        return None, None
+    from kicad_tools.export.assembly import resolve_pnp_config, review_cpl_rotations
+    from kicad_tools.export.pnp import PnPExportConfig
+    from kicad_tools.export.rotation_overrides import RotationOverridesError
+    from kicad_tools.manufacturers import get_fab_family
+
+    # Mirror the export's effective PnP config: --include-tht exported with an
+    # explicit exclude_tht=False (cli.export_cmd._build_configs), so the
+    # re-derived placement set must resolve the same way instead of assuming
+    # the fab default (#9346).
+    pnp_config = resolve_pnp_config(
+        get_fab_family(options.manufacturer),
+        PnPExportConfig(exclude_tht=False) if options.include_tht else None,
+    )
+    try:
+        names: dict[str, str] = {}
+        header, rows = _read_csv_rows(cpl)
+        lowered = [column.strip().lower() for column in header]
+        ref_col = next(
+            (lowered.index(n) for n in ("designator", "reference", "ref") if n in lowered), 0
+        )
+        pkg_col = next((lowered.index(n) for n in ("package", "footprint") if n in lowered), None)
+        if pkg_col is not None:
+            for row in rows:
+                if max(ref_col, pkg_col) < len(row) and row[ref_col].strip():
+                    names[row[ref_col].strip()] = row[pkg_col].strip()
+        lcsc: dict[str, str] = {}
+        for bom in sorted(options.output_dir.glob("bom*.csv")):
+            bom_header, bom_rows = _read_csv_rows(bom)
+            bom_lowered = [column.strip().lower() for column in bom_header]
+            d_col = next((i for i, n in enumerate(bom_lowered) if n.startswith("designator")), None)
+            l_col = next((i for i, n in enumerate(bom_lowered) if n.startswith("lcsc")), None)
+            if d_col is None or l_col is None:
+                continue
+            for row in bom_rows:
+                if max(d_col, l_col) < len(row) and row[l_col].strip():
+                    for ref in re.split(r"[,;\s]+", row[d_col].strip()):
+                        if ref:
+                            lcsc[ref] = row[l_col].strip()
+        review = review_cpl_rotations(
+            options.pcb,
+            options.manufacturer,
+            lcsc_by_reference=lcsc,
+            footprint_names=names,
+            pnp_config=pnp_config,
+        )
+    except RotationOverridesError as exc:
+        return None, f"CPL rotation sidecar is invalid: {exc}"
+    except _CPL_REDERIVATION_INPUT_ERRORS as exc:
+        logger.warning("CPL rotation re-derivation skipped: %s: %s", type(exc).__name__, exc)
+        return None, f"CPL rotation re-derivation skipped ({type(exc).__name__}: {exc})"
+    except Exception as exc:
+        logger.warning(
+            "CPL rotation re-derivation failed unexpectedly: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None, f"CPL rotation re-derivation failed ({type(exc).__name__}: {exc})"
+    return review, None
+
+
+def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
+    """Problems between the retained CPL and the project's rotation sidecar (#9322).
+
+    Re-derives each sidecar-corrected placement's rotation from the PCB and the
+    sidecar *as they are now* and compares it with the retained CPL row, so an
+    edited sidecar (or one removed since generation) fails verification instead
+    of being waved through on a stale bundle.  Boards without a sidecar are not
+    touched.
+    """
+    from kicad_tools.export.rotation_overrides import SOURCE_GLOB
+
+    if not options.assembly:
+        return []
+    review, problem = _cpl_rotation_state(options)
+    if problem:
+        # An invalid sidecar, or a re-derivation that could not run (issue
+        # #9346): report it instead of letting the check pass by omission.
+        return [problem]
+    if review is None or review.sidecar is None:
+        return []
+    cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
+    if cpl is None:
+        return []
+    header, rows = _read_csv_rows(cpl)
+    lowered = [column.strip().lower() for column in header]
+    ref_col = next(
+        (lowered.index(n) for n in ("designator", "reference", "ref") if n in lowered), 0
+    )
+    rot_col = next((lowered.index(n) for n in ("rotation", "rot") if n in lowered), None)
+    if rot_col is None:
+        return []
+    retained = {
+        row[ref_col].strip(): row[rot_col].strip()
+        for row in rows
+        if max(ref_col, rot_col) < len(row)
+    }
+    problems: list[str] = []
+    for entry in review.applied:
+        if entry["source"] == SOURCE_GLOB:
+            continue
+        ref = entry["reference"]
+        expected = f"{review.rotations[ref]:.1f}"
+        if ref in retained and retained[ref] != expected:
+            problems.append(
+                f"CPL rotation for {ref} is {retained[ref]} but the current "
+                f"{Path(review.sidecar).name} gives {expected}; regenerate the bundle"
+            )
+    return problems
+
+
+def _cpl_rotation_report_entry(options: ReadinessOptions) -> dict[str, Any] | None:
+    """The ``cpl_rotations`` evidence block for ``readiness.json``, if any.
+
+    ``None`` when there is genuinely nothing to report (no CPL, or a board the
+    export step could not have parsed).  A re-derivation that could not be
+    trusted (invalid sidecar, unreadable input, unexpected failure) is recorded
+    as a skip so the evidence never shows a silently-skipped check as a pass
+    (issue #9346).
+    """
+    review, problem = _cpl_rotation_state(options)
+    if review is not None:
+        block: dict[str, Any] = review.to_report(
+            _rel(options, Path(review.sidecar)) if review.sidecar else None
+        )
+        return block
+    if problem is not None:
+        return {"rederivation_skipped": problem}
+    return None
 
 
 def build_report(
@@ -3678,6 +4068,9 @@ def build_report(
         }
         if produced:
             report["report_sources"] = produced
+    cpl_block = _cpl_rotation_report_entry(options)
+    if cpl_block is not None:
+        report["cpl_rotations"] = cpl_block
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).
@@ -4004,9 +4397,22 @@ def _run_readiness_candidate(
     checks: list[CheckOutcome] = []
     metrics: dict[str, Any] = {}
 
+    # Issue #9747: keep the staged board from either side of the cleanup
+    # steps so Gate 1 can attribute candidate-only findings to copper_cleanup
+    # instead of pointing at the committed board.  Outside ``board_dir`` (and
+    # ``output/``), so they are never published or bundled; the candidate
+    # temp tree is deleted with them.
+    pre_cleanup = post_cleanup = None
+    if options.operation == "generate" and not options.skip_cleanup:
+        pre_cleanup = options.board_dir.parent / f".kct-pre-cleanup-{options.pcb.name}"
+        post_cleanup = options.board_dir.parent / f".kct-post-cleanup-{options.pcb.name}"
+        pre_cleanup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(options.pcb, pre_cleanup)
     cleanup = _copper_cleanup(options)
     options = replace(options, cleanup_record=cleanup)
     metrics["copper_cleanup"] = cleanup
+    if post_cleanup is not None:
+        shutil.copy2(options.pcb, post_cleanup)
 
     prep = _assembly_prep(options)
     options = replace(options, assembly_prep_record=prep)
@@ -4028,6 +4434,20 @@ def _run_readiness_candidate(
     fill = _gate_refill(options, engines)
     checks.append(fill)
 
+    # Issue #9799 (#9795 phase 3): the default silk legalisation pass runs on
+    # the staged candidate after the pour refill and BEFORE Gate 1 -- the
+    # first check that judges silk -- so the checks, plots and hashed bundle
+    # below all consume these same repaired bytes.  A repair first attempted
+    # after a failed pre-gate would be too late for the tapeout flow that
+    # delegates here.  Verify never mutates the board.
+    metrics["silk_fix"] = None
+    if options.operation == "generate" and options.silk_fix:
+        from .silk_default_pass import run_default_silk_pass
+
+        metrics["silk_fix"] = run_default_silk_pass(
+            options.pcb, mfr=options.manufacturer, quiet=True
+        )
+
     checked_sources = {
         path: _sha256_file(path)
         for path in [
@@ -4035,7 +4455,9 @@ def _run_readiness_candidate(
             *_project_dependencies(options.pcb, options.root, options.project_root is not None),
         ]
     }
-    kct_check, check_report = _gate_kct_check(options, engines)
+    kct_check, check_report = _gate_kct_check(
+        options, engines, pre_cleanup=pre_cleanup, post_cleanup=post_cleanup
+    )
     checks.append(kct_check)
 
     native, native_report = _gate_native_drc(options, engines)
@@ -4494,6 +4916,16 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Skip adding the board-ID silkscreen text (pcb add-board-info) during "
             "--generate; the skip is recorded in the report and README.txt"
+        ),
+    )
+    parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "--generate otherwise runs on the staged board before the checks, "
+            "plots and hashes consume it (Issue #9799). Verify never mutates."
         ),
     )
     parser.add_argument(

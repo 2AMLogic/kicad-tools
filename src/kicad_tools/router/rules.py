@@ -159,6 +159,30 @@ class DesignRules:
     # layer-agnostic ``MfrLimits.min_clearance`` of :attr:`manufacturer`.
     mfr_clearance_floor: float | None = None
 
+    # The fab-view same-net pad slit-band edge for the board's actual
+    # stackup (Issue #8974): the ``GapBand.detection_edge_mm`` of the
+    # resolved ``pad_spacing`` dfm entry (#9016) -- the same edge
+    # ``cli.stitch_cmd._resolve_mfr_pad_gap_edge`` reads and ``kct check
+    # --mfr`` grades same-net pad copper gaps with.  Like
+    # :attr:`mfr_clearance_floor` this is CALLER-RESOLVED (the caller knows
+    # the board's layer count and copper weight; ``DesignRules`` has no
+    # stackup fields, so an ``__post_init__`` resolution would be
+    # stackup-blind: it could not pick the entry for the board's actual
+    # layer count and copper weight).  Consumers: the escape router's ``_can_place_via`` band
+    # check and the oracle weld's ``same_net_pad_gap_mm``.  ``None``
+    # (default): the stackup is unknown, so the band guard stays off rather
+    # than guessing an edge.
+    same_net_pad_gap_band_edge_mm: float | None = None
+
+    # The fab-view same-net via-annulus-vs-own-TRACE slit-band edge for the
+    # board's actual stackup (Issue #9208): the ``GapBand.detection_edge_mm``
+    # of the resolved ``trace_spacing`` dfm entry (``cli.stitch_cmd.
+    # _resolve_mfr_trace_gap_edge``; 0.1016 mm on jlcpcb ``4layer_1oz``) --
+    # the population ``kct check --mfr`` reports as ``fab_band: trace``.
+    # Caller-resolved like :attr:`same_net_pad_gap_band_edge_mm`; consumed by
+    # the C++ pathfinders' via checks.  ``None`` (default) keeps it OFF.
+    same_net_trace_gap_band_edge_mm: float | None = None
+
     # Fab minimum trace width for the effective layers/copper key (Issue #4700)
     # The SAME ``get_design_rules(layers, copper_oz).min_trace_width_mm`` that
     # ``kct check --mfr`` enforces -- NOT the layer/copper-agnostic
@@ -332,6 +356,14 @@ class DesignRules:
     congestion_threshold: float = 0.3  # Density above which region is congested
     congestion_grid_size: int = 10  # Cells per congestion region
 
+    # Under-body surcharge (Issue #9622, audit row 9): per-cell cost
+    # multiplier on ``cost_straight`` charged to a net with NO pad on a
+    # fine-pitch component for each A* step inside that component's body
+    # bbox on an outer layer (see ``router.body_surcharge``).  Soft and
+    # additive -- it steers non-local trunks around the body while a board
+    # whose only path runs under the body still routes.  0.0 disables.
+    cost_under_body: float = 2.0
+
     # Layer utilization balancing (Issue #2275)
     # Penalizes routing on heavily-utilized layers to encourage spreading traces
     # across all available layers.  The cost added per same-layer move or via
@@ -433,6 +465,14 @@ class DesignRules:
     # Zone routing costs
     cost_zone_same_net: float = 0.1  # Low cost - encourage using zone copper
     cost_zone_clearance: float = 2.0  # Cost near zone boundaries
+    # Issue #9597: per-cell added cost for entering a foreign net's zone on a
+    # plane layer the routing net may use (a class's ``allow_plane_layers``
+    # opt-in, or ``--no-reserve-plane-layers``).  A soft cost, never a block:
+    # KiCad pours flow around a legal trace, but a route that slices a plane
+    # into pieces is almost never what the designer wants, so A* pays this per
+    # grid cell inside the zone and prefers an around-path at equal length.
+    # Both backends charge it (the C++ A* reads the same zone-cell marks).
+    cost_zone_foreign_plane: float = 10.0
 
     # Hard layer constraints (Issue #715)
     # When set, only these layers are allowed for routing (blocks all others)

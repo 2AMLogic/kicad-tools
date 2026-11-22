@@ -78,8 +78,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
-from kicad_tools.core.geometry import rotate_pad_offset
+from kicad_tools.core.geometry import point_in_polygon, rotate_pad_offset
 from kicad_tools.core.types import CopperLayer
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.physics.wire_gauge import (
@@ -106,7 +107,7 @@ from kicad_tools.router.via_clearance import (
     drill_hole_to_hole_clear,
     point_clear_of_copper,
 )
-from kicad_tools.schema.pcb import PCB, Pad, Segment
+from kicad_tools.schema.pcb import PCB, GraphicArc, GraphicLine, Pad, Segment
 
 # Default spacing between mid-run anchors (mm). Matches the architect's
 # ``ReinforcementSpec.anchor_spacing_mm`` default.
@@ -169,6 +170,13 @@ STITCH_PITCH_MM = 5.0
 
 #: Copper layer -> the outer layer that takes its parallel copy (#8916).
 OPPOSITE_OUTER_LAYER = {"F.Cu": "B.Cu", "B.Cu": "F.Cu"}
+
+#: ``end_tie`` states (#8970); each pairs with an arc length measured along
+#: the leg from the end ``end_tie`` was called for.
+END_TIED_BY_HOLE = "through"  # a plated barrel already joins the layers
+END_TIE_PLANNED = "tie"  # plant a tie via at the arc
+END_TIE_ADOPTED = "adopted"  # an earlier pass's tie stands there: plant
+# nothing, credit one ``existing_vias``
 
 #: ``LegSummary.copy_status`` values (#8916).
 COPY_PLACED = "placed"
@@ -265,6 +273,10 @@ RULE_HOLE_CLEARANCE = "hole_clearance"
 #: A parallel copy has no room: too short between its end ties, or its leg is
 #: on an inner layer (no opposite outer layer to copy onto) (#8916).
 RULE_COPY_GEOMETRY = "copy_geometry"
+#: ``ends`` mode: the end hole (anchor pad + fillet clearance) would sit in a
+#: footprint courtyard on either side -- the ``wire_run_courtyard_overlap``
+#: end-hole test, shared with that check (Issue #9815).
+RULE_ANCHOR_COURTYARD = "anchor_courtyard"
 
 #: Copper layer -> the solder-mask layer on the same side (#8743).
 MASK_LAYER_FOR_COPPER = {"F.Cu": "F.Mask", "B.Cu": "B.Mask"}
@@ -297,6 +309,10 @@ class RefusedAnchor:
     actual_mm: float = 0.0
     #: Name of the obstacle net (empty for hole-to-hole against same-net holes).
     obstacle_net: str = ""
+    #: ``anchor_courtyard`` (Issue #9815): reference of the footprint whose
+    #: courtyard the end hole would sit in, and its side (``F`` / ``B``).
+    obstacle_footprint: str = ""
+    obstacle_side: str = ""
 
 
 @dataclass
@@ -445,6 +461,16 @@ class RefusedOpening:
     required_mm: float
     actual_mm: float
     obstacle_net: str = ""
+    #: Blocking feature (#9649): its copper layer, or ``"through"`` for a
+    #: plated feature on every layer (via, PTH pad).
+    obstacle_layer: str = ""
+    #: ``track`` / ``via`` / ``pad`` / ``zone`` (#9649).
+    obstacle_kind: str = ""
+    #: Board-relative point on the blocking obstacle -- same feature the
+    #: measured gap comes from, never a nearer neighbour that clears --
+    #: also where the leg would have to be split to open around it
+    #: (#9649, #9657).
+    obstacle_at: tuple[float, float] | None = None
 
 
 @dataclass
@@ -1174,6 +1200,18 @@ class _Violation:
     required_mm: float
     actual_mm: float
     obstacle_net: str = ""
+    #: Obstacle attribution (#9649, mask-opening test only): copper layer
+    #: the blocking feature sits on, or ``"through"`` for a plated feature
+    #: that spans every layer (via, PTH pad). Empty when unattributed.
+    obstacle_layer: str = ""
+    #: ``track`` / ``via`` / ``pad`` / ``zone`` (#9649). Empty when unattributed.
+    obstacle_kind: str = ""
+    #: Board-relative point on the blocking obstacle itself -- same feature
+    #: the measured gap comes from (#9649, #9657).
+    obstacle_at: tuple[float, float] | None = None
+    #: ``anchor_courtyard`` (Issue #9815): blocking footprint and its side.
+    obstacle_footprint: str = ""
+    obstacle_side: str = ""
 
 
 @dataclass
@@ -1318,6 +1356,26 @@ class _OtherNetCopper:
     net_names: dict[int, str] = field(default_factory=dict)
     #: ``(x, y, drill_mm)`` of every via and PTH pad, same-net included.
     all_drills: list[tuple[float, float, float]] = field(default_factory=list)
+    #: Copper grouped by its own layer, then net (#9649): tracks, zone
+    #: fills and SMD pads. Read by the layer-aware mask-opening test; the
+    #: layer-agnostic anchor test keeps using ``by_net``.
+    by_layer: dict[str, dict[int, _NetCopper]] = field(default_factory=dict)
+    #: Plated features spanning every copper layer, by net (#9649): vias
+    #: and PTH pads. On the opening's creepage path whatever face it is on.
+    through: dict[int, _NetCopper] = field(default_factory=dict)
+    #: Non-plated openings that carry the creepage path to the far face
+    #: (#9657): circles ``(cx, cy, r)`` -- NPTH bores (any net; a same-net
+    #: mounting hole is still a hole) and ``gr_circle`` Edge.Cuts cutouts.
+    opening_circles: list[tuple[float, float, float]] = field(default_factory=list)
+    #: Straight ``Edge.Cuts`` geometry (board outline, slots, rect/poly
+    #: cutouts) as segment pairs (#9657).
+    opening_segments: list[tuple[tuple[float, float], tuple[float, float]]] = field(
+        default_factory=list
+    )
+    #: Curved ``Edge.Cuts`` geometry as ``(start, mid, end)`` arcs (#9657).
+    opening_arcs: list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]] = (
+        field(default_factory=list)
+    )
 
 
 @dataclass
@@ -1335,6 +1393,10 @@ def _collect_other_net_copper(
 ) -> _OtherNetCopper:
     """Build the obstacle set: other-net copper by net, all drills (any net).
 
+    Also collects the board's non-plated openings (#9657): NPTH bores and
+    ``Edge.Cuts`` geometry, along which the opening test re-admits far-face
+    copper.
+
     A same-net via that already has this pass's anchor geometry is a previous
     anchor, not an obstacle: skipping it keeps a re-run idempotent (the same
     candidates are chosen and ``add_via(dedupe=True)`` drops the duplicates).
@@ -1345,11 +1407,20 @@ def _collect_other_net_copper(
     def group(net_number: int) -> _NetCopper:
         return other.by_net.setdefault(net_number, _NetCopper())
 
+    def layer_group(layer: str, net_number: int) -> _NetCopper:
+        return other.by_layer.setdefault(layer, {}).setdefault(net_number, _NetCopper())
+
+    def through_group(net_number: int) -> _NetCopper:
+        return other.through.setdefault(net_number, _NetCopper())
+
     for seg in pcb.segments:
         if seg.net_number == target_net:
             continue
         (sx, sy), (ex, ey) = seg.start, seg.end
         group(seg.net_number).tracks.append(_TrackObstacle(sx, sy, ex, ey, seg.width))
+        layer_group(seg.layer, seg.net_number).tracks.append(
+            _TrackObstacle(sx, sy, ex, ey, seg.width)
+        )
 
     for via in pcb.vias:
         vx, vy = via.position
@@ -1363,6 +1434,9 @@ def _collect_other_net_copper(
         if via.net_number == target_net:
             continue
         group(via.net_number).vias.append((vx, vy, via.size, via.net_number))
+        # Every via is plated through whatever its span says (#9649): on the
+        # opening's creepage path on both faces (tenting is not tracked).
+        through_group(via.net_number).vias.append((vx, vy, via.size, via.net_number))
 
     for fp in pcb.footprints:
         for pad in fp.pads:
@@ -1372,18 +1446,82 @@ def _collect_other_net_copper(
             px, py = pos
             if pad.drill > 0:
                 other.all_drills.append((px, py, pad.drill))
+                if pad.type == "np_thru_hole":
+                    # Unplated bore (#9657): the bare hole wall is an
+                    # insulating surface to the far face.
+                    other.opening_circles.append((px, py, pad.drill / 2.0))
             if pad.net_number == target_net:
                 continue
             # Effective bounding radius of the pad (disc model).
             radius = max(pad.size) / 2.0 if pad.size else 0.0
             group(pad.net_number).pads.append((px, py, radius, pad.net_number))
+            if pad.drill > 0 or pad.type == "thru_hole" or "*.Cu" in pad.layers:
+                # Plated through (or wildcard copper): on every layer (#9649).
+                through_group(pad.net_number).pads.append((px, py, radius, pad.net_number))
+            else:
+                for pad_layer in pad.layers:
+                    if pad_layer == "F&B.Cu":
+                        # KiCad's both-outer-faces selector: the opening test
+                        # looks each face up by its own key, so a literal
+                        # ``"F&B.Cu"`` entry would be missed (#9657).
+                        layer_group("F.Cu", pad.net_number).pads.append(
+                            (px, py, radius, pad.net_number)
+                        )
+                        layer_group("B.Cu", pad.net_number).pads.append(
+                            (px, py, radius, pad.net_number)
+                        )
+                    elif pad_layer.endswith(".Cu"):
+                        layer_group(pad_layer, pad.net_number).pads.append(
+                            (px, py, radius, pad.net_number)
+                        )
 
     for zone in pcb.zones:
         if zone.net_number == target_net:
             continue
-        for poly in zone.filled_polygons:
+        for i, poly in enumerate(zone.filled_polygons):
             if len(poly) >= 3:
-                group(zone.net_number).filled_polygons.append(_FilledPolyObstacle(list(poly)))
+                obstacle = _FilledPolyObstacle(list(poly))
+                group(zone.net_number).filled_polygons.append(obstacle)
+                layer_group(zone.filled_polygon_layer(i), zone.net_number).filled_polygons.append(
+                    obstacle
+                )
+
+    # Edge.Cuts is an unplated opening too (#9657): the creepage path can
+    # run around the board edge or through a slot/cutout, so the opening
+    # test re-admits far-face copper near it.
+    # ``PCB._detect_board_origin`` shifts footprints, segments, vias and zones
+    # to board-relative but leaves graphic items sheet-absolute, so convert
+    # every outline coordinate here to match the samples (#9657).
+    ox, oy = pcb.board_origin
+
+    def _rel(pt: tuple[float, float]) -> tuple[float, float]:
+        return (float(pt[0]) - ox, float(pt[1]) - oy)
+
+    for item in pcb.graphic_items:
+        if item.layer != "Edge.Cuts":
+            continue
+        if isinstance(item, GraphicArc):
+            other.opening_arcs.append((_rel(item.start), _rel(item.mid), _rel(item.end)))
+        elif isinstance(item, GraphicLine):
+            other.opening_segments.append((_rel(item.start), _rel(item.end)))
+        elif item.graphic_type == "rect":
+            (sx, sy), (ex, ey) = _rel(item.start), _rel(item.end)
+            other.opening_segments.extend(
+                (
+                    ((sx, sy), (ex, sy)),
+                    ((ex, sy), (ex, ey)),
+                    ((ex, ey), (sx, ey)),
+                    ((sx, ey), (sx, sy)),
+                )
+            )
+        elif item.graphic_type == "circle" and item.center is not None:
+            radius = math.dist(item.center, item.start)
+            if radius > 0.0:
+                cx, cy = _rel(item.center)
+                other.opening_circles.append((cx, cy, radius))
+        elif item.graphic_type == "poly" and len(item.points) >= 2:
+            pts = [_rel(pt) for pt in item.points]
+            other.opening_segments.extend(zip(pts, pts[1:] + pts[:1], strict=False))
 
     return other
 
@@ -2306,19 +2444,181 @@ def _sub_polyline(
     return out
 
 
+#: Opening-test obstacle kinds in check order, mapped to the
+#: :class:`_NetCopper` list that holds them (#9649).
+_OPENING_OBSTACLE_KINDS: tuple[tuple[str, str], ...] = (
+    ("track", "tracks"),
+    ("via", "vias"),
+    ("pad", "pads"),
+    ("zone", "filled_polygons"),
+)
+
+
+def _nearest_point_on_segment(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> tuple[float, float]:
+    """The point of segment ``a``-``b`` nearest ``p``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    seg2 = dx * dx + dy * dy
+    if seg2 <= 1e-18:
+        return a
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / seg2))
+    return (a[0] + t * dx, a[1] + t * dy)
+
+
+def _obstacle_point(kind: str, item: Any, x: float, y: float) -> tuple[float, float] | None:
+    """A locating point on one obstacle of ``kind`` (#9649, #9657).
+
+    Track centerline, via centre or pad centre; for a zone fill the
+    nearest boundary point, or the sample itself when it lies inside
+    the fill -- interior copper, not the edge, is what blocks (#9657).
+    """
+    p = (x, y)
+    if kind == "track":
+        return _nearest_point_on_segment(p, (item.start_x, item.start_y), (item.end_x, item.end_y))
+    if kind == "via":
+        return (item[0], item[1])
+    if kind == "pad":
+        return (item[0], item[1])
+    pts = [(float(px), float(py)) for px, py in item.points]
+    if point_in_polygon(x, y, pts, boundary_inside=True):
+        return p
+    best: tuple[float, float] | None = None
+    best_d = math.inf
+    for a, b in zip(pts, pts[1:] + pts[:1], strict=False):
+        q = _nearest_point_on_segment(p, a, b)
+        d = math.dist(p, q)
+        if d < best_d:
+            best, best_d = q, d
+    return best
+
+
+def _opening_blocker(
+    kind: str,
+    field_name: str,
+    items: list[Any],
+    x: float,
+    y: float,
+    exposed_width: float,
+    required: float,
+) -> tuple[float, tuple[float, float] | None, Any] | None:
+    """The worst single blocking obstacle of ``kind`` at sample ``(x, y)``.
+
+    Returns that obstacle's measured gap, a point on that **same**
+    obstacle (#9657) and the obstacle itself (#9731, so the caller can
+    re-measure the gap to that one feature over the whole run): the gap
+    and the reported coordinates must identify the same copper, never a
+    nearer neighbour that clears the opening. Among several blockers the
+    one with the smallest gap wins.
+    """
+    worst: tuple[float, tuple[float, float] | None, Any] | None = None
+    for item in items:
+        single = _NetCopper(**{field_name: [item]})
+        if _group_clear(x, y, exposed_width, required, single):
+            continue
+        gap = _actual_gap(x, y, exposed_width, required, single)
+        if worst is None or gap < worst[0]:
+            worst = (gap, _obstacle_point(kind, item, x, y), item)
+    return worst
+
+
+def _arc_centre_radius(
+    start: tuple[float, float], mid: tuple[float, float], end: tuple[float, float]
+) -> tuple[tuple[float, float], float] | None:
+    """Circumcentre and radius of the circle through three arc points, or
+    ``None`` when the points are collinear (a degenerate arc)."""
+    ax, ay = start
+    bx, by = mid
+    cx, cy = end
+    d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        return None
+    a2, b2, c2 = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
+    ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
+    uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
+    return (ux, uy), math.hypot(ax - ux, ay - uy)
+
+
+def _point_to_arc_distance(
+    p: tuple[float, float],
+    start: tuple[float, float],
+    mid: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    """Planar distance from ``p`` to the arc through ``start``-``mid``-``end`` (#9657)."""
+    centre_radius = _arc_centre_radius(start, mid, end)
+    if centre_radius is None:
+        return min(
+            math.dist(p, _nearest_point_on_segment(p, start, mid)),
+            math.dist(p, _nearest_point_on_segment(p, mid, end)),
+        )
+    (cx, cy), r = centre_radius
+    a_start = math.atan2(start[1] - cy, start[0] - cx)
+    a_mid = math.atan2(mid[1] - cy, mid[0] - cx)
+    a_end = math.atan2(end[1] - cy, end[0] - cx)
+    a_p = math.atan2(p[1] - cy, p[0] - cx)
+
+    def ccw(angle: float) -> float:
+        return angle % (2.0 * math.pi)
+
+    if ccw(a_mid - a_start) <= ccw(a_end - a_start):
+        on_arc = ccw(a_p - a_start) <= ccw(a_end - a_start)
+    else:
+        on_arc = ccw(a_start - a_p) <= ccw(a_start - a_end)
+    if on_arc:
+        return abs(math.hypot(p[0] - cx, p[1] - cy) - r)
+    return min(math.dist(p, start), math.dist(p, end))
+
+
+def _near_unplated_opening(
+    x: float, y: float, exposed_width: float, required: float, other: _OtherNetCopper
+) -> bool:
+    """True when a non-plated opening is near enough to matter (#9657).
+
+    The through-opening surface path is ``d(strip, opening) + board
+    thickness + d(opening, far-face copper)``, every term of which only
+    lengthens it beyond the planar distance used here -- so gating on the
+    strip being within ``required`` of the opening never misses a path
+    that would come up short.
+    """
+    p = (x, y)
+    reach = required + exposed_width / 2.0
+    for cx, cy, r in other.opening_circles:
+        if math.hypot(x - cx, y - cy) - r < reach:
+            return True
+    for a, b in other.opening_segments:
+        if math.dist(p, _nearest_point_on_segment(p, a, b)) < reach:
+            return True
+    for start, mid, end in other.opening_arcs:
+        if _point_to_arc_distance(p, start, mid, end) < reach:
+            return True
+    return False
+
+
 def _opening_violation(
     run: list[tuple[float, float]],
     exposed_width: float,
     other: _OtherNetCopper,
     policy: _ClearancePolicy,
+    layer: str,
 ) -> _Violation | None:
     """Creepage test of an exposed run, modelled as a chain of discs.
 
     The exposed copper has half-width ``exposed_width / 2``; each obstacle
     net must keep ``policy.required(net)`` (``max(class floor, creepage @
-    |dV|)`` with a voltage map) from it. Layer-agnostic like the anchor test:
-    other-net copper on the far side is treated as an obstacle too
-    (conservative).
+    |dV|)`` with a voltage map) from it. Layer-aware (#9649): only copper
+    on the opening's own face (``layer``) and through-plated features
+    (vias, PTH pads) are on the strip's creepage path -- far-side copper
+    sits under laminate, not on it. The anchor-hole test stays
+    layer-agnostic: a barrel and its fillet are on both faces.
+
+    Far-face exception (#9657): creepage is measured along every
+    insulating surface, and a non-plated opening -- an NPTH bore, an
+    ``Edge.Cuts`` slot/cutout or the board outline -- is one of them (the
+    path runs down the bare bore or around the board edge). For samples
+    within ``required`` of such an opening the far face's copper is kept
+    in the test, measured by its planar distance: a lower bound on the
+    through-opening surface path, so it never misses a short one.
     """
     step = max(0.05, min(_MASK_SAMPLE_STEP_MM, exposed_width / 2.0))
     samples: list[tuple[float, float]] = []
@@ -2326,18 +2626,56 @@ def _opening_violation(
         n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / step))
         samples.extend((x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(n))
     samples.append(run[-1])
-    for net_number, group in other.by_net.items():
+    same_face = other.by_layer.get(layer, {})
+    far_face = "B.Cu" if layer == "F.Cu" else "F.Cu"
+    has_openings = bool(other.opening_circles or other.opening_segments or other.opening_arcs)
+    for net_number in other.by_net:
         net = other.net_names.get(net_number, "")
         required, rule = policy.required(net)
-        for x, y in samples:
-            if not _group_clear(x, y, exposed_width, required, group):
-                tag = (
-                    RULE_MASK_OPENING_PAIRWISE
-                    if rule == RULE_VOLTAGE_MAP_PAIRWISE
-                    else RULE_MASK_OPENING_CLEARANCE
-                )
-                gap = _actual_gap(x, y, exposed_width, required, group)
-                return _Violation(tag, required, gap, net)
+        sources: list[tuple[str, _NetCopper | None, list[tuple[float, float]]]] = [
+            (layer, same_face.get(net_number), samples),
+            ("through", other.through.get(net_number), samples),
+        ]
+        if has_openings:
+            far_group = other.by_layer.get(far_face, {}).get(net_number)
+            if far_group is not None:
+                # Only samples a non-plated opening shortens the path for
+                # (#9657); elsewhere the far face stays under laminate.
+                far_samples = [
+                    (x, y)
+                    for x, y in samples
+                    if _near_unplated_opening(x, y, exposed_width, required, other)
+                ]
+                if far_samples:
+                    sources.append((far_face, far_group, far_samples))
+        for source, group, source_samples in sources:
+            if group is None:
+                continue
+            for kind, field_name in _OPENING_OBSTACLE_KINDS:
+                items = getattr(group, field_name)
+                if not items:
+                    continue
+                for x, y in source_samples:
+                    blocker = _opening_blocker(
+                        kind, field_name, items, x, y, exposed_width, required
+                    )
+                    if blocker is not None:
+                        # The first failing sample is rarely where the run
+                        # passes closest (#9731): report the minimum gap to
+                        # the chosen blocker over the run's samples, so a
+                        # crossing obstacle reads as the 0.000 mm it is
+                        # instead of a "nearly passing" near-miss.
+                        chosen = _NetCopper(**{field_name: [blocker[2]]})
+                        actual = min(
+                            _actual_gap(sx, sy, exposed_width, required, chosen)
+                            for sx, sy in source_samples
+                        )
+                        tag = (
+                            RULE_MASK_OPENING_PAIRWISE
+                            if rule == RULE_VOLTAGE_MAP_PAIRWISE
+                            else RULE_MASK_OPENING_CLEARANCE
+                        )
+                        return _Violation(tag, required, actual, net, source, kind, blocker[1])
     return None
 
 
@@ -2364,12 +2702,24 @@ def _plan_mask_opening(
     # half-width max(opening, wire diameter) / 2.
     if policy.pairwise is not None:
         exposed = max(width, bare_copper_diameter_mm(result.wire_gauge_awg))
-        v = _opening_violation(run, exposed, other, policy)
+        v = _opening_violation(run, exposed, other, policy, leg.layer)
         if v is not None:
+            obstacle = ""
+            if v.obstacle_kind:
+                obstacle = f"{v.obstacle_kind} on {v.obstacle_layer}"
+                if v.obstacle_at is not None:
+                    # Sheet coordinates: both user-facing reports (CLI text
+                    # line and JSON) quote this prose verbatim, while the
+                    # structured fields are origin-shifted by the reporter
+                    # -- all four must agree (#9657).
+                    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+                    obstacle += (
+                        f" at ({v.obstacle_at[0] + ox:.3f}, {v.obstacle_at[1] + oy:.3f}) mm -- "
+                    )
             leg.mask_status = MASK_REFUSED
             leg.mask_reason = (
                 f"exposed run would be {v.actual_mm:.3f} mm from net {v.obstacle_net!r} "
-                f"(need {v.required_mm:.3f} mm, {v.rule}); no opening written"
+                f"({obstacle}need {v.required_mm:.3f} mm, {v.rule}); no opening written"
             )
             result.refused_openings.append(
                 RefusedOpening(
@@ -2380,6 +2730,9 @@ def _plan_mask_opening(
                     required_mm=v.required_mm,
                     actual_mm=v.actual_mm,
                     obstacle_net=v.obstacle_net,
+                    obstacle_layer=v.obstacle_layer,
+                    obstacle_kind=v.obstacle_kind,
+                    obstacle_at=v.obstacle_at,
                 )
             )
             return
@@ -2417,6 +2770,70 @@ def _courtyard_overlaps(
         (fp.reference, length)
         for fp, length in run_courtyard_overlaps(points, side, pcb.footprints, inflate)
     ]
+
+
+def _courtyard_body_cache():
+    """A cached ``body(fp, side)`` courtyard lookup for one reinforce pass."""
+    from shapely.geometry import Polygon, box  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.rules.reinforcement_courtyard import _body_polygon
+
+    cache: dict[tuple[int, str], Any] = {}
+
+    def body(fp: Any, side: str) -> Any | None:
+        key = (id(fp), side)
+        if key not in cache:
+            cache[key] = _body_polygon(fp, side, Polygon, box)
+        return cache[key]
+
+    return body
+
+
+def _anchor_courtyard_violation(
+    pcb: PCB,
+    p: tuple[float, float],
+    anchor_pad: float,
+    net_number: int,
+    body: Any,
+) -> _Violation | None:
+    """``anchor_courtyard`` when an end hole at ``p`` sits in a courtyard (#9815).
+
+    Reuses the ``wire_run_courtyard_overlap`` end-hole test (no second
+    implementation), so reinforce never anchors a wire where the check then
+    reports ``[end hole]``. ``required_mm`` is the hole envelope radius (pad
+    annulus + fillet clearance), ``actual_mm`` the hole centre's distance to
+    the courtyard (``0`` inside it).
+    """
+    from shapely.geometry import Point
+
+    from kicad_tools.validate.rules.reinforcement_courtyard import (
+        HOLE_FILLET_MM,
+        hole_courtyard_overlaps,
+    )
+
+    radius = anchor_pad / 2.0
+    hits = hole_courtyard_overlaps(p, radius, pcb.footprints, net_number, body)
+    if not hits:
+        return None
+    fp, side = hits[0]
+    poly = body(fp, side)
+    gap = float(poly.distance(Point(p))) if poly is not None else 0.0
+    return _Violation(
+        RULE_ANCHOR_COURTYARD,
+        radius + HOLE_FILLET_MM,
+        gap,
+        obstacle_footprint=str(fp.reference),
+        obstacle_side=side,
+    )
+
+
+def _courtyard_refusal_text(violation: _Violation) -> str:
+    """Refusal reason for an ``anchor_courtyard`` violation, naming the part."""
+    where = "front" if violation.obstacle_side == "F" else "back"
+    return (
+        f"end hole (pad annulus + fillet clearance) would sit in the {where}-side "
+        f"courtyard of {violation.obstacle_footprint} (wire_run_courtyard_overlap)"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -2677,6 +3094,9 @@ def _reinforce_ends(
     candidates: list[_LegCandidate] = []
     excluded_runs: list[list[Segment]] = []
     path_names: dict[int, list[str]] = {}
+    # Declared design current per path name (#8950): an SMD end's tie row is
+    # sized from the largest current declared over the leg.
+    declared_current_a: dict[str, float] = {}
     target_layer: str | None = layer
 
     if gated:
@@ -2685,6 +3105,7 @@ def _reinforce_ends(
                 covering = path_names.setdefault(id(seg), [])
                 if res.spec.name not in covering:
                     covering.append(res.spec.name)
+            declared_current_a[res.spec.name] = res.spec.thermal_design_current().current_a
         for lay in sorted(by_layer):
             segs = by_layer[lay]
             eligible = [s for s in segs if id(s) in path_names]
@@ -2816,6 +3237,7 @@ def _reinforce_ends(
     dedup_floor = max(anchor_pad, anchor_drill + rules.min_hole_to_hole_mm)
     placed_positions: list[tuple[float, float]] = []
     arc_of: dict[tuple[float, float], float] = {}
+    courtyard_body = _courtyard_body_cache()
 
     def violation_at(p: tuple[float, float]) -> _Violation | None:
         """Rule check of one anchor candidate; ``None`` when it may be placed.
@@ -2837,7 +3259,10 @@ def _reinforce_ends(
             gap = math.hypot(p[0] - hx, p[1] - hy) - anchor_drill / 2.0 - hd / 2.0
             if gap < rules.min_hole_to_hole_mm - 1e-9:
                 return _Violation(RULE_HOLE_TO_HOLE, rules.min_hole_to_hole_mm, max(0.0, gap))
-        return _position_violation(p[0], p[1], anchor_pad, anchor_drill, rules, other, policy)
+        found = _position_violation(p[0], p[1], anchor_pad, anchor_drill, rules, other, policy)
+        if found is not None:
+            return found
+        return _anchor_courtyard_violation(pcb, p, anchor_pad, target_net_number, courtyard_body)
 
     # ---- parallel copies (Issue #8916) ----------------------------------
     via_size, via_drill = stitch_via_geometry(rules)
@@ -2888,15 +3313,48 @@ def _reinforce_ends(
         view = _OtherNetCopper(by_net=other.by_net, net_names=other.net_names, all_drills=drills)
         return _position_violation(p[0], p[1], via_size, via_drill, rules, view, policy)
 
+    def adoptable_stitch(via, points, cum, t_lo: float, t_hi: float) -> float | None:
+        """Arc of ``via`` when it may stand in for a stitch of ``points``/``cum``.
+
+        An unowned same-net through via of the stitching geometry lying on
+        the leg within the arc window ``[t_lo, t_hi]`` is an earlier
+        record-less pass's stitching via (issues #8951, #8970): adopting it
+        in place keeps the re-run from planting a duplicate beside it. Any
+        other via -- wrong net, size or drill, off the leg, recorded as this
+        tool's own (the sidecar re-plans those) -- is not adopted and stays
+        an obstacle.
+        """
+        if id(via) in owned_vias or via.drill <= 0:
+            return None
+        if via.net_number != target_net_number or via.via_type not in (None, "through"):
+            return None
+        if (
+            abs(via.size - via_size) > _ANCHOR_SIZE_TOL_MM
+            or abs(via.drill - via_drill) > _ANCHOR_SIZE_TOL_MM
+        ):
+            return None
+        t = _arc_of_point(points, cum, via.position)
+        if not t_lo - 1e-9 <= t <= t_hi + 1e-9:
+            return None
+        if math.dist(_point_at_arc(points, cum, t), via.position) > _SIDECAR_ANCHOR_TOL_MM:
+            return None
+        return t
+
     def end_tie(points, cum, layer: str, cap: float):
         """How the copy is tied at the leg end ``points[0]``.
 
-        ``(False, 0.0)``: the end lands on a plated through-hole pad or a
-        through via that predates this tool (any via no sidecar record names,
-        whatever its size), whose barrel already joins the layers -- the copy
-        runs to the vertex and nothing is placed or recorded there. ``(True, arc)``: a stitching via ties it at ``arc`` -- the
-        vertex itself for a free track end or a junction, or the first point
-        whose via clears the SMD pad the leg ends on (no via in an SMD pad).
+        ``(END_TIED_BY_HOLE, 0.0)``: the end lands on a plated through-hole
+        pad or a through via that predates this tool (any via no sidecar
+        record names, whatever its size), whose barrel already joins the
+        layers -- the copy runs to the vertex and nothing is placed or
+        recorded there. ``(END_TIE_PLANNED, arc)``: a stitching via ties it
+        at ``arc`` -- the vertex itself for a free track end or a junction,
+        or the first point whose via clears the SMD pad the leg ends on (no
+        via in an SMD pad). ``(END_TIE_ADOPTED, arc)``: an unowned via of
+        the stitching geometry already stands at that arc -- an earlier
+        record-less pass's tie, which a vertex-anchored test cannot see
+        because ``_clear_arc`` pushes the tie inward past the pad extent
+        (issue #8970): plant nothing, but credit one ``existing_vias``.
         ``None``: a pad covers the whole leg.
         """
         copper = _end_copper(points, layer, features, [], cap)
@@ -2905,17 +3363,17 @@ def _reinforce_ends(
         start = points[0]
         for feat in copper:
             if feat.pad is not None and feat.pad.type == "thru_hole":
-                return False, 0.0
+                return END_TIED_BY_HOLE, 0.0
         for via in pcb.vias:
             if via.net_number != target_net_number or via.via_type not in (None, "through"):
                 continue
             if id(via) in owned_vias:
                 continue  # an earlier pass's recorded tie via: re-planned, not relied on
             if math.dist(via.position, start) <= via.size / 2.0 + cap + 1e-6:
-                return False, 0.0
+                return END_TIED_BY_HOLE, 0.0
         smd = [f for f in copper if f.pad is not None]
         if not smd:
-            return True, 0.0
+            return END_TIE_PLANNED, 0.0
         extent = _end_extent(points, smd)
 
         def clear(p, _smd=smd):
@@ -2924,7 +3382,27 @@ def _reinforce_ends(
             )
 
         t = _clear_arc(points, cum, extent, cum[-1], clear)
-        return (True, t) if t is not None else None
+        if t is None:
+            return None
+        # The pad-clear walk is deterministic, so a record-less re-run
+        # re-derives the arc its predecessor's tie was placed at (a rules
+        # refusal may have slid that placement inward, within the end-tie
+        # nudge reach). Adopting it keeps the re-run from planting a fresh
+        # tie beside it; requiring ``clear`` at the via's own position keeps
+        # adoption from crediting -- and pulling the copy span out to --
+        # copper this tool would never have placed there (#8970).
+        candidates = [
+            tv
+            for via in pcb.vias
+            if (
+                (tv := adoptable_stitch(via, points, cum, t - 1e-9, t + STITCH_PITCH_MM / 2.0))
+                is not None
+                and clear(via.position)
+            )
+        ]
+        if candidates:
+            return END_TIE_ADOPTED, min(candidates, key=lambda tv: abs(tv - t))
+        return END_TIE_PLANNED, t
 
     def refuse_copy(leg: LegSummary, copy_layer: str, pos, violation: _Violation, why: str) -> None:
         leg.status = LEG_UNANCHORED
@@ -2964,20 +3442,48 @@ def _reinforce_ends(
         if not copy_layer:
             refuse_copy(leg, "", points[0], no_room, f"{cand.layer} is an inner layer")
             return
+        # #8950: at an SMD end a single default via is far below a
+        # high-current leg's ampacity, so the tie is a packed row sized from
+        # the declared current covering this leg -- one via per
+        # ceil(I / barrel capacity), placed whole or not at all. Without a
+        # declared current there is nothing to size a row from: one via, as
+        # before.
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+        names: list[str] = []
+        for s in cand.run:
+            for name in path_names.get(original_ids.get(id(s), id(s)), ()):
+                if name not in names:
+                    names.append(name)
+        row_current_a = max(
+            (declared_current_a[name] for name in names if name in declared_current_a),
+            default=0.0,
+        )
+        row_need = 1
+        if row_current_a > 0.0:
+            row_need = max(1, math.ceil(row_current_a / via_barrel_current_capacity(via_drill)))
         ties = [
             end_tie(points, cum, cand.layer, cand.run[0].width / 2.0),
-            end_tie(points[::-1], cum, cand.layer, cand.run[-1].width / 2.0),
+            end_tie(
+                points[::-1], _cumulative_arc(points[::-1]), cand.layer, cand.run[-1].width / 2.0
+            ),
         ]
         if ties[0] is None or ties[1] is None:
             refuse_copy(leg, copy_layer, points[0], no_room, "same-net pad copper covers the leg")
             return
+        #: End ties adopted in place this pass (#8970): credited like
+        #: ``adopted`` but never in ``planned`` -- no record names them, so
+        #: ``--clear`` still cannot remove them (#8945's contract).
+        end_adoptions = sum(1 for tie in ties if tie[0] == END_TIE_ADOPTED)
         planned: list[tuple[float, float]] = []
         span = [ties[0][1], total - ties[1][1]]
+        #: Arc of each end's innermost placed tie via (#8950): interior
+        #: stitches only run between the two tie rows.
+        inner = [None, None]
         reach = STITCH_PITCH_MM / 2.0
         steps = max(1, round(reach / (END_NUDGE_MAX_MM / END_NUDGE_STEPS)))
         for end, sign in ((0, 1.0), (1, -1.0)):
-            needs_via, _ = ties[end]
-            if not needs_via:
+            if ties[end][0] != END_TIE_PLANNED:
                 continue
             base = span[end]
             first: tuple[tuple[float, float], _Violation] | None = None
@@ -3000,6 +3506,32 @@ def _reinforce_ends(
                 return
             span[end] = chosen[0]
             planned.append(chosen[1])
+            inner[end] = chosen[0]
+            if row_need > 1:
+                # Step the rest of the row inward at the same-net minimum
+                # centre spacing, reusing the ordinary rule checks per
+                # candidate; the far end's clear arc is left to the far end.
+                far_bound = (
+                    total - ties[1][1] - stitch_floor if end == 0 else ties[0][1] + stitch_floor
+                )
+                for k in range(1, row_need):
+                    t = chosen[0] + sign * stitch_floor * k
+                    p = _point_at_arc(points, cum, t)
+                    v = stitch_violation(p, planned)
+                    within = t <= far_bound + 1e-9 if end == 0 else t >= far_bound - 1e-9
+                    if v is None and within and not _too_close(p, planned, stitch_floor):
+                        planned.append(p)
+                        inner[end] = t
+                        continue
+                    why = (
+                        f"no room for the end tie row of {row_need} via(s) "
+                        f"({row_current_a:g} A), only {k} fit"
+                    )
+                    if v is None:
+                        v = no_room
+                        why += f" in {abs(far_bound - chosen[0]):.3f} mm of clear leg"
+                    refuse_copy(leg, copy_layer, p, v, why)
+                    return
         lo, hi = span
         if hi - lo < stitch_floor - 1e-9:
             refuse_copy(
@@ -3010,46 +3542,29 @@ def _reinforce_ends(
                 f"{max(0.0, hi - lo):.3f} mm between its end ties, need {stitch_floor:.3f} mm",
             )
             return
-        n = max(0, math.ceil((hi - lo) / STITCH_PITCH_MM - 1e-9) - 1)
-        while n > 0 and (hi - lo) / (n + 1) < stitch_floor - 1e-9:
+        # Interior stitches only run between the innermost tie vias, so a
+        # tie row (#8950) is never asked to share its span with them.
+        ilo, ihi = lo, hi
+        if inner[0] is not None:
+            ilo = max(ilo, inner[0])
+        if inner[1] is not None:
+            ihi = min(ihi, inner[1])
+        n = max(0, math.ceil((ihi - ilo) / STITCH_PITCH_MM - 1e-9) - 1)
+        while n > 0 and (ihi - ilo) / (n + 1) < stitch_floor - 1e-9:
             n -= 1
-        pitch = (hi - lo) / (n + 1)
-
-        def adoptable_arc(via) -> float | None:
-            """Arc of ``via`` when it may stand in for an interior stitch.
-
-            An unowned same-net through via of the stitching geometry lying
-            on the leg inside the span is an earlier pass's stitch (a
-            record-less re-run, issue #8951): adopting it keeps the re-run
-            idempotent the way ``end_tie`` already keeps the ends so. Any
-            other via -- wrong net, size or drill, off the leg, recorded as
-            someone else's -- is not adopted and stays an obstacle.
-            """
-            if id(via) in owned_vias or via.drill <= 0:
-                return None
-            if via.net_number != target_net_number or via.via_type not in (None, "through"):
-                return None
-            if (
-                abs(via.size - via_size) > _ANCHOR_SIZE_TOL_MM
-                or abs(via.drill - via_drill) > _ANCHOR_SIZE_TOL_MM
-            ):
-                return None
-            t = _arc_of_point(points, cum, via.position)
-            if not lo - 1e-9 <= t <= hi + 1e-9:
-                return None
-            if math.dist(_point_at_arc(points, cum, t), via.position) > _SIDECAR_ANCHOR_TOL_MM:
-                return None
-            return t
+        pitch = (ihi - ilo) / (n + 1) if n else 0.0
 
         adoptable = sorted(
-            (t, via.position) for via in pcb.vias if (t := adoptable_arc(via)) is not None
+            (t, via.position)
+            for via in pcb.vias
+            if (t := adoptable_stitch(via, points, cum, lo, hi)) is not None
         )
         #: Stitching positions this pass adopted, not placed: kept out of
         #: ``planned`` (which becomes the record's ``stitch_vias``), so
         #: ``--clear`` still cannot remove them (#8945's contract).
         adopted: list[tuple[float, float]] = []
         for k in range(1, n + 1):
-            target = lo + k * pitch
+            target = ilo + k * pitch
             take = next(
                 (i for i, (tv, _) in enumerate(adoptable) if abs(tv - target) <= pitch / 2.0),
                 None,
@@ -3060,7 +3575,7 @@ def _reinforce_ends(
             first = None
             chosen_p = None
             for t in _nudge_arc_candidates(target, total, pitch):
-                if not lo + stitch_floor - 1e-9 <= t <= hi - stitch_floor + 1e-9:
+                if not ilo + stitch_floor - 1e-9 <= t <= ihi - stitch_floor + 1e-9:
                     continue
                 p = _point_at_arc(points, cum, t)
                 if _too_close(p, planned + adopted, stitch_floor):
@@ -3115,7 +3630,7 @@ def _reinforce_ends(
             via_size_mm=via_size,
             via_drill_mm=via_drill,
             existing_segments=len(foreign),
-            existing_vias=len(adopted),
+            existing_vias=len(adopted) + end_adoptions,
         )
         for a, b, width in copy.segments:
             if dry_run:
@@ -3143,13 +3658,19 @@ def _reinforce_ends(
         leg.copy_status = COPY_PLACED
         leg.copy = copy
         result.copies.append(copy)
-        ends = " / ".join("its through hole" if not tie[0] else "a tie via" for tie in ties)
+        ends = " / ".join(
+            "its through hole" if tie[0] == END_TIED_BY_HOLE else "a tie via" for tie in ties
+        )
         # Same text on a re-run (copper already present is counted on the
         # copy, not here), so the wire-list record stays byte-identical.
         leg.reason = (
             f"parallel copy on {copy_layer} (ends tied by {ends}), "
             f"{len(planned)} stitching via(s) of {via_size:.2f} mm pad / {via_drill:.2f} mm drill"
         )
+
+    #: Courtyard violations of the first end positions the last clean pair
+    #: slid past, by end (``start`` / ``far``; Issue #9815).
+    slid_past: dict[str, _Violation] = {}
 
     def plan_pair(points, cum, t0: float, t1: float, clear):
         """Decide BOTH end anchors before either is written (PR #8751 review).
@@ -3210,6 +3731,14 @@ def _reinforce_ends(
 
         for i, j in pairs:
             if v("s", i) is None and v("e", j) is None:
+                # Issue #9815: name the courtyard an anchor slid past, so the
+                # report says why it moved (other rules keep the plain note).
+                slid_past.clear()
+                for which, key, k in (("start", "s", i), ("far", "e", j)):
+                    if k > 0:
+                        first = v(key, 0)
+                        if first is not None and first.rule == RULE_ANCHOR_COURTYARD:
+                            slid_past[which] = first
                 return (starts[i][1], ends[j][1]), []
         # No clean pair. One anchor stands only when every counterpart that
         # could pair with it is refused by a rule.
@@ -3225,19 +3754,23 @@ def _reinforce_ends(
         return (None, None), [(starts[i][1], v("s", i)), (ends[j][1], v("e", j))]
 
     def refuse(pos: tuple[float, float], violation: _Violation) -> None:
+        if violation.rule == RULE_ANCHOR_SPACING:
+            reason = "anchor pad overlaps another leg's anchor"
+        elif violation.rule == RULE_ANCHOR_COURTYARD:
+            reason = _courtyard_refusal_text(violation)
+        else:
+            reason = "other-net clearance/hole-to-hole violation"
         result.refused.append(
             RefusedAnchor(
                 x=pos[0],
                 y=pos[1],
-                reason=(
-                    "anchor pad overlaps another leg's anchor"
-                    if violation.rule == RULE_ANCHOR_SPACING
-                    else "other-net clearance/hole-to-hole violation"
-                ),
+                reason=reason,
                 rule=violation.rule,
                 required_mm=violation.required_mm,
                 actual_mm=violation.actual_mm,
                 obstacle_net=violation.obstacle_net,
+                obstacle_footprint=violation.obstacle_footprint,
+                obstacle_side=violation.obstacle_side,
             )
         )
 
@@ -3413,6 +3946,11 @@ def _reinforce_ends(
                                 "; ".join(
                                     f"{name} anchor slid {d:.2f} mm inward past a refused "
                                     "end position"
+                                    + (
+                                        f" -- {_courtyard_refusal_text(slid_past[name])}"
+                                        if name in slid_past
+                                        else ""
+                                    )
                                     for name, d in slid
                                 )
                             )
@@ -3429,7 +3967,8 @@ def _reinforce_ends(
                         leg.status = LEG_PARTIAL
                         bound = end_shift_bound(total, result.max_end_shift_mm)
                         leg.reason = (
-                            "1 of 2 end anchors refused by a clearance/hole-to-hole rule "
+                            "1 of 2 end anchors refused by a clearance/hole-to-hole/"
+                            "courtyard rule "
                             f"at every position within {bound:.1f} mm of the end "
                             "(see refused; raise --max-end-shift to search further)"
                         )

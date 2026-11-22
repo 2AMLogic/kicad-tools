@@ -356,7 +356,59 @@ namespace router {
 // pads drains as FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH
 // (``Grid3D::segment_pads_pairwise_blocker`` is new).  A v64 .so cannot emit
 // that attribution, so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 65;
+// v66 (Issue #8994): ``DesignRules::same_net_pad_gap_band_edge_mm`` + the
+// same-net pad slit-band refusal in both A* via checks.  A v65 .so seats
+// via annuli in the (0, edge) slit band beside their own SMD pads.
+// v67 (Issue #8999): ``GridCell::airwire_cost`` + ``Grid3D::clear_airwire_costs``
+// / ``set_airwire_cells`` -- the prospective airwire-separation term summed
+// inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated cells
+// without the term (and lacks the two verbs), so Python/C++ cost parity
+// breaks silently; it must be rejected.
+// v68 (Issue #9124): ``same_net_pad_gap_in_band`` rejects the tangent
+// ``gap == 0`` seat (centre exactly one radius from a pad face/corner) it used
+// to accept as a union.  (Number reserved while #9124 / PR #9209 was open.)
+// v69 (Issue #9208): ``DesignRules::same_net_trace_gap_band_edge_mm`` + the
+// same-net via-annulus-vs-own-trace slit-band refusal in both A* via checks
+// (``same_net_segment_gap_in_band``).  A v67 .so seats via annuli in the
+// ``(0, edge)`` slit band beside their own net's stored trace copper.
+// v70 (Issues #9124 + #9208, merged): the first build carrying BOTH fixes --
+// a v69 .so still seats the tangent wedge (no #9124 fix) and a v68 .so lacks
+// the trace-slit refusal, so both older builds must be rejected.
+// v71 (Issue #9019): ``Pathfinder::set_search_own_net_band`` /
+// ``own_net_band_step_ok`` are new -- the A* refuses a planar step whose swept
+// copper parks in the fab ``pad_spacing`` slit band beside an own-net SMD pad.
+// A v70 .so has no such gate, so Python and native searches would route
+// divergent bytes on a board that resolves a band edge.
+// v72 (Issue #9019 review): the band gate exempts the search's own start/end
+// pads (the leg is unioned with them through the path) and counts refusals
+// (``own_net_band_rejects``) so the caller retries only gate-caused failures.
+// A v71 .so refused every planar pad exit and pushed routes through pad-edge
+// via pairs.
+// v73 (Issue #9597, rebased over v71/v72 of #9019): ``DesignRules::cost_zone_foreign_plane`` plus
+// ``Grid3D::mark_zone_cells`` / ``clear_zone_cells`` -- the soft foreign
+// plane-zone crossing cost both A* step-cost loops now charge.  A v70 .so
+// has neither the rules field nor the verbs, so the Python grid's zone
+// marks would be invisible to the native search (cost parity breaks
+// silently); it must be rejected.
+// v74 (Issue #9826): ``Grid3D::set_plane_layers`` (per-layer PLANE mask) so the
+// A* charges ``cost_zone_foreign_plane`` only on plane layers and blocks a
+// foreign zone elsewhere (Python parity), and a layer-scoped
+// ``clear_zone_cells(layer)`` that resets ``net`` on former zone cells.  A v73
+// .so charges every foreign zone and its clear leaves stale zone nets.
+// v75 (Issue #9461): ``own_net_band_step_ok`` builds each own-net pad box
+// from the rotation-aware AABB (twin of Python ``pad_half_extents``); a v74
+// .so under-sizes a non-cardinally rotated pad and accepts a leg in the band.
+// v76 (Issue #9424): ``same_net_pad_gap_in_band`` accepts a via annulus as a
+// union with its own SMD pad only when it overlaps the AABB's inscribed
+// stadium at least the union depth deep.  A v75 .so accepts any overlap of
+// the box, seating vias in a rounded pad's corner air or a shallow wedge the
+// fab-view checker grades as ``physical_copper_gap``.  The pad copper's
+// corner radius rides on ``PadInfo::copper_corner_radius`` (``add_pad``'s
+// ``copper_corner_radius``; a ``rect`` pad's square corner is real copper).
+// v77 (Issue #9273): single-ended trace searches check their closest approach
+// to an already stored same-net via against the trace-population slit band.
+// v78 (Issue #9273): grade each facing leg, including shallow joins to stored vias.
+constexpr int ROUTER_CPP_BUILD_VERSION = 78;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -379,6 +431,11 @@ struct GridCell {
     int16_t usage_count = 0;
     float history_cost = 0.0f;
     float avoidance_cost = 0.0f;
+    // Issue #8999: prospective airwire-separation cost (already weighted by
+    // the flag-supplied scalar on the Python side; 0.0 when the flag is
+    // off, so the negotiated cost is unchanged).  Mirrors the Python
+    // ``RoutingGrid._airwire_cost`` crossing-count plane.
+    float airwire_cost = 0.0f;
     bool is_obstacle = false;
     bool is_zone = false;
     bool pad_blocked = false;
@@ -762,12 +819,35 @@ struct DesignRules {
     // via that does not overlap the pad (Python
     // ``DesignRules.min_via_pad_edge_gap``).  0 disables.
     float min_via_pad_edge_gap = 0.0f;
+    // Issue #8994: the fab-view same-net pad slit band's detection edge in
+    // mm (Python ``DesignRules.same_net_pad_gap_band_edge_mm``, the
+    // caller-resolved ``pad_spacing`` dfm entry's
+    // ``GapBand.detection_edge_mm``).  A via ANNULUS whose copper gap to a
+    // same-net SMD pad lands strictly inside ``(0, edge)`` is refused --
+    // the two acceptable regions (unioned copper at ``gap <= 0``, or clear
+    // at ``gap >= edge``) mirror Python
+    // ``via_clearance.same_net_pad_gap_acceptable``.  0 (Python ``None``)
+    // disables: never guess a literal edge (#8974 AC-3).
+    float same_net_pad_gap_band_edge_mm = 0.0f;
+    // Issue #9208: the same-net via-annulus-vs-own-TRACE slit band's detection
+    // edge in mm (Python ``DesignRules.same_net_trace_gap_band_edge_mm``, the
+    // caller-resolved ``trace_spacing`` dfm entry's
+    // ``GapBand.detection_edge_mm``; 0.1016 on jlcpcb 4layer_1oz).  Same two
+    // acceptable regions as the pad edge, measured against stored own-net
+    // segments.  0 (Python ``None``) disables: never a literal.
+    float same_net_trace_gap_band_edge_mm = 0.0f;
     // Issue #4071: soft corridor-attractor bonus (mirrors Python
     // ``DesignRules.cost_corridor_attractor``, default 3.0).  Subtracted
     // from a cell's positive step cost when the cell is reserved for the
     // querying net, clamped at 0 so g_scores stay non-negative (A*
     // admissibility preserved).  ``0.0`` disables the attractor.
     float cost_corridor_attractor = 3.0f;
+    // Issue #9597: per-cell added cost for entering a foreign net's zone on
+    // a plane layer the routing net may use (Python
+    // ``DesignRules.cost_zone_foreign_plane``).  Soft cost, never a block --
+    // both backends charge it from the same zone-cell marks
+    // (``Grid3D::mark_zone_cells`` mirrors ``RoutingGrid.add_zone_cells``).
+    float cost_zone_foreign_plane = 10.0f;
 };
 
 // Issue #6272: the trace-vs-via copper floor, ``max(trace, via)``.  Native
@@ -827,7 +907,119 @@ struct PadInfo {
     // the exact pad test (``pad_geometry_clear``) holds a step to this value
     // instead of the board-wide largest class.
     float class_clearance = 0.0f;
+    // Issue #9424: the pad copper's corner radius for the same-net via union
+    // test (``same_net_pad_gap_in_band``), from Python
+    // ``via_clearance.pad_union_corner_radius``: 0 for a ``rect`` pad, half
+    // the short side for circle/oval, ``rratio * min(w, h)`` for a known
+    // roundrect.  Negative = unknown: the inscribed stadium (conservative).
+    float copper_corner_radius = -1.0f;
 };
+
+// Issue #8994: half extents of the AABB the Python pad model gives a pad --
+// ``cli.stitch_cmd.find_all_pad_bboxes`` / ``_rotated_rect_half_extents``:
+// cardinal rotations swap or keep the dimensions exactly, any other angle
+// takes the conservative AABB of the rotated rect, and a ``circle`` pad uses
+// its exact bounding square (rotation-invariant, no inflation).  This is the
+// model ``via_clearance.same_net_pad_gap_acceptable`` measures against, NOT
+// the exact rotated rect of the #7296 blocks above -- the exact-rect model is
+// less conservative, so using it here would let the A* accept a seat the
+// fab-view checker rejects on a non-cardinally-rotated pad.
+inline void same_net_pad_aabb_half_extents(const PadInfo& pad, float& half_w,
+                                           float& half_h) {
+    if (pad.is_circular) {
+        const float half = std::max(pad.width, pad.height) / 2.0f;
+        half_w = half;
+        half_h = half;
+        return;
+    }
+    const float rot = std::fmod(std::fabs(pad.rotation), 360.0f);
+    if (std::fabs(rot - 90.0f) < 0.001f || std::fabs(rot - 270.0f) < 0.001f) {
+        half_w = pad.height / 2.0f;
+        half_h = pad.width / 2.0f;
+        return;
+    }
+    if (rot < 0.001f || std::fabs(rot - 180.0f) < 0.001f) {
+        half_w = pad.width / 2.0f;
+        half_h = pad.height / 2.0f;
+        return;
+    }
+    const float rad = pad.rotation * 3.14159265358979323846f / 180.0f;
+    const float abs_cos = std::fabs(std::cos(rad));
+    const float abs_sin = std::fabs(std::sin(rad));
+    half_w = (pad.width * abs_cos + pad.height * abs_sin) / 2.0f;
+    half_h = (pad.width * abs_sin + pad.height * abs_cos) / 2.0f;
+}
+
+// Overlap with a straight copper face needed to keep its facing via arc
+// within the fab checker's shoulder exemption (see same_net_pad_union_depth_mm).
+inline double annulus_facing_overlap_depth(double radius, double edge_mm) {
+    constexpr double kSin60 = 0.86602540378443864676;  // sqrt(1 - FACING_COS_SECOND^2)
+    const double lens = std::max(0.0, radius * kSin60 - std::max(edge_mm, 0.0));
+    return radius - std::sqrt(std::max(0.0, radius * radius - lens * lens));
+}
+
+// Issue #8994: the same-net pad slit-band verdict, the faithful C++ mirror of
+// Python ``via_clearance.same_net_pad_gap_acceptable`` for a via ANNULUS of
+// radius ``annulus_half_mm`` at world ``(wx, wy)`` against one same-net SMD
+// pad.  Two acceptable regions, not a floor: a union (the annulus overlaps
+// its own pad's copper at least the union depth deep -- one copper body, no
+// slit; #9424) and ``gap >= edge_mm`` are both ACCEPTED; everything in
+// between is rejected, tangent and shallow overlaps included (#9124, #9424).
+// The 1e-9 slack on both band edges mirrors the Python predicate's
+// float-noise tolerance for a gap computed as exactly 0 or exactly the edge.
+// Computed in double: Python measures in float64, and a float32 gap could
+// flip the 1e-9-band-edge verdicts the slack exists to keep stable.
+inline bool same_net_pad_gap_in_band(double wx, double wy, double annulus_half_mm,
+                                     const PadInfo& pad, double edge_mm) {
+    float half_w = 0.0f, half_h = 0.0f;
+    same_net_pad_aabb_half_extents(pad, half_w, half_h);
+    const double dx = std::max(
+        {static_cast<double>(pad.x - half_w) - wx,
+         wx - static_cast<double>(pad.x + half_w), 0.0});
+    const double dy = std::max(
+        {static_cast<double>(pad.y - half_h) - wy,
+         wy - static_cast<double>(pad.y + half_h), 0.0});
+    const double gap = std::hypot(dx, dy) - annulus_half_mm;
+    if (!(gap < edge_mm - 1e-9)) return false;  // clear of the detection edge
+    // Issue #9424 (supersedes the #9124 tangent epsilon): inside the edge the
+    // seat is a union only when the annulus overlaps REAL copper by at least
+    // the union depth at every point where the two outlines cross.  Mirror
+    // of Python ``via_clearance._pad_union_ok`` /
+    // ``same_net_pad_union_depth_mm`` (keep the two in step):
+    //   d = r - sqrt(r^2 - c^2), c = max(0, r * sin(60 deg) - edge), + slack,
+    // where 60 deg is the checker's ``FACING_COS_SECOND`` (cosine 0.5).
+    // The slack (1e-3 mm) also absorbs the float32 pad edges (ulp ~1.5e-5 mm).
+    // The pad is its AABB with corner radius ``pad.copper_corner_radius``
+    // (negative = unknown: the inscribed stadium, radius min(half_w, half_h),
+    // which every rect/roundrect/oval/circle pad of that box contains -- so a
+    // seat overlapping only a rounded pad's square box corner, air beside the
+    // copper, is refused).  Rounded: the signed gap to the rounded box must be
+    // at most -depth.  Sharp (a ``rect`` pad, radius 0): the annulus must
+    // overlap the box, and the centre may sit at most ``r - depth`` beyond
+    // either face line -- an annulus that swallows a square corner crosses
+    // the two faces, whose depth is what the derivation measures.
+    const double r = std::max(annulus_half_mm, 0.0);
+    constexpr double kUnionDepthSlackMm = 1e-3;
+    const double depth = annulus_facing_overlap_depth(r, edge_mm) + kUnionDepthSlackMm;
+    const double full = std::max(
+        0.0, std::min(static_cast<double>(half_w), static_cast<double>(half_h)));
+    const double corner = pad.copper_corner_radius < 0.0f
+        ? full
+        : std::min(static_cast<double>(pad.copper_corner_radius), full);
+    const double core_hw = static_cast<double>(half_w) - corner;
+    const double core_hh = static_cast<double>(half_h) - corner;
+    const double cdx = std::max({static_cast<double>(pad.x) - core_hw - wx,
+                                 wx - (static_cast<double>(pad.x) + core_hw), 0.0});
+    const double cdy = std::max({static_cast<double>(pad.y) - core_hh - wy,
+                                 wy - (static_cast<double>(pad.y) + core_hh), 0.0});
+    if (corner > 1e-9) {
+        return std::hypot(cdx, cdy) - corner - r > -depth;
+    }
+    const double reach = r - depth;
+    const bool union_ok = std::hypot(cdx, cdy) - r <= -kUnionDepthSlackMm &&
+                          cdx <= reach && cdy <= reach;
+    return !union_ok;
+}
 
 // Stored segment for validation (Issue #2439)
 // Segments from completed routes, used for clearance checking.
@@ -840,6 +1032,36 @@ struct StoredSegment {
     // neutralised (0.0 = defer to the grid's per-net floors).
     float authored_floor = 0.0f;
 };
+
+template <typename TraceSegment>
+inline double annulus_segment_gap(double wx, double wy, double annulus_half_mm,
+                                  const TraceSegment& seg) {
+    const double ax = seg.x1, ay = seg.y1;
+    const double dx = static_cast<double>(seg.x2) - ax;
+    const double dy = static_cast<double>(seg.y2) - ay;
+    const double len_sq = dx * dx + dy * dy;
+    double t = 0.0;
+    if (len_sq > 0.0) t = std::clamp(((wx - ax) * dx + (wy - ay) * dy) / len_sq, 0.0, 1.0);
+    return std::hypot(wx - (ax + t * dx), wy - (ay + t * dy))
+        - annulus_half_mm - static_cast<double>(seg.width) / 2.0;
+}
+
+// Issue #9208: the trace-population sibling of ``same_net_pad_gap_in_band`` --
+// true when a via ANNULUS (radius ``annulus_half_mm`` at world ``(wx, wy)``)
+// leaves a copper gap to the OWN-net stored segment ``seg`` strictly inside
+// the open slit band ``(0, edge_mm)``.  Mirrors Python
+// ``via_clearance.same_net_segment_pad_gap_acceptable``'s regions for the
+// round-vs-swept-segment case: ``gap <= 0`` (the annulus touches or overlaps
+// the trace, so they are one copper union -- a centerline that reaches the
+// annulus is the ``gap == 0`` case) and ``gap >= edge`` are both ACCEPTED, with
+// the same 1e-9 float-noise slack.  The caller owns the own-net / layer
+// filter.  A zero-length segment degenerates to point-vs-point distance.
+template <typename TraceSegment>
+inline bool same_net_segment_gap_in_band(double wx, double wy, double annulus_half_mm,
+                                         const TraceSegment& seg, double edge_mm) {
+    const double gap = annulus_segment_gap(wx, wy, annulus_half_mm, seg);
+    return 1e-9 < gap && gap < edge_mm - 1e-9;
+}
 
 // Stored via for validation (Issue #2439)
 // Vias from completed routes, used for clearance checking.

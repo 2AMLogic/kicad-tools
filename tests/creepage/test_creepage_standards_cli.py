@@ -17,7 +17,7 @@ from kicad_tools._shapely import has_shapely
 from kicad_tools.cli.commands.creepage import run_creepage_command
 from kicad_tools.cli.parser import create_parser
 
-from .fixtures import board_source, board_two_pad_gap_source
+from .fixtures import board_cross_face_edge_wrap_source, board_source, board_two_pad_gap_source
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
 
@@ -69,6 +69,43 @@ def test_standard_derives_requirement_without_min(tmp_path, capsys):
     assert "Derived required creepage" in out
     # The 170 V RMS step-up lands on the 200 V row -> 2.0 mm (in EE envelope).
     assert "2.000 mm" in out
+
+
+@pytest.mark.parametrize("voltage_flag", ["--working-voltage", "--voltage-map"])
+def test_ordered_thickness_keeps_opposite_face_clearance(tmp_path, capsys, voltage_flag):
+    pcb = _write(tmp_path, board_cross_face_edge_wrap_source())
+    voltage = "50"
+    if voltage_flag == "--voltage-map":
+        voltage_file = tmp_path / "voltage.json"
+        voltage_file.write_text(json.dumps({"L_MAINS": 50}))
+        voltage = str(voltage_file)
+    argv = [
+        "creepage",
+        str(pcb),
+        "--net-class-map",
+        str(_hv_map_file(tmp_path)),
+        "--standard",
+        "iec60664",
+        "--pollution-degree",
+        "2",
+        "--insulation",
+        "basic",
+        "--format",
+        "json",
+        voltage_flag,
+        voltage,
+    ]
+    assert _run(argv) == 0
+    assert json.loads(capsys.readouterr().out)["gate_passed"]
+
+    code = _run([*argv, "--order-thickness-mm", "1.60"])
+    report = json.loads(capsys.readouterr().out)
+    pair = next(row for row in report["pairs"] if row["kind"] == "conductor")
+    assert pair["creepage_mm"] == pytest.approx(4.6)
+    assert pair["clearance_mm"] == pytest.approx(1.6)
+    assert pair["required_clearance_mm"] == pytest.approx(0.2)
+    assert pair["clearance_pass"] and report["gate_passed"]
+    assert code == 0
 
 
 def test_standard_json_carries_provenance(tmp_path, capsys):

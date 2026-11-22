@@ -12,6 +12,22 @@ Finally, :meth:`SilkscreenRepairer.repair_pad_clearance` clips footprint
 ``fp_line`` silk strokes back from same-side pad apertures, using the same
 geometry as the ``silk_pad_clearance`` check so the fix and the check agree.
 
+:meth:`SilkscreenRepairer.repair_hole_clearance` clips footprint silk
+``fp_line`` / ``fp_poly`` / ``fp_rect`` graphics off drilled holes (vias of any
+tenting, PTH and NPTH), using the ``silk_hole_overlap`` check's own hole set
+and threshold (Issue #9054).  It is an explicit post-routing recipe step: the
+router never calls it, so routing never changes footprint silk (#5744).
+
+:meth:`SilkscreenRepairer.repair_text_stroke_widths` raises the printed stroke
+thickness of silkscreen text below the manufacturer's minimum width -- the
+legal-height thin-stroke case the height repair misses (Issue #9797).
+
+:func:`legalize_silk` is the one shared silk-legalisation entry point
+(#9795 phase 1, Issue #9797): it composes every repair above (vias excluded,
+per the #9795 operator ruling) with the reference placement of
+``kicad_tools.silkscreen.place_refs.SilkRefPlacer`` against the repaired
+geometry, and reports what it could not make legal without ever waiving it.
+
 This operates on the raw SExp tree (not the read-only schema dataclasses) so
 that modifications can be written back to disk, following the same pattern as
 ``repair_clearance.py`` and ``fix_vias_cmd.py``.
@@ -24,10 +40,15 @@ import math
 import uuid as _uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.core.sexp_file import save_pcb
 from kicad_tools.schema.pcb import _find_all_footprints
 from kicad_tools.sexp.parser import SExp, parse_file
+
+if TYPE_CHECKING:
+    from kicad_tools.manufacturers.base import DesignRules
+    from kicad_tools.silkscreen.place_refs import PlaceSilkRefsResult
 
 # Silkscreen layer names recognised by KiCad (pre-8.0 and 8.0+).
 SILKSCREEN_LAYERS = frozenset(("F.SilkS", "B.SilkS", "F.Silkscreen", "B.Silkscreen"))
@@ -97,6 +118,35 @@ class TextHeightRepairResult:
 
 
 @dataclass
+class TextStrokeFix:
+    """Record of a single text element whose stroke was (or would be) thickened."""
+
+    element_type: str  # e.g. "fp_text", "property", "gr_text"
+    layer: str
+    old_thickness: float  # effective thickness (0.15 default when no node)
+    new_thickness: float
+    footprint_ref: str  # empty string for board-level text
+
+
+@dataclass
+class TextStrokeRepairResult:
+    """Aggregate result of a text stroke-thickness repair pass (Issue #9797)."""
+
+    min_width_mm: float = 0.0
+    fixes: list[TextStrokeFix] = field(default_factory=list)
+
+    @property
+    def total_fixed(self) -> int:
+        return len(self.fixes)
+
+
+#: Font thickness the schema substitutes when a text element carries no
+#: explicit ``(thickness ...)`` node (``schema.pcb`` parses it to 0.15), so
+#: the raw-tree repair measures the same value the checks read.
+_DEFAULT_FONT_THICKNESS_MM = 0.15
+
+
+@dataclass
 class PadClearanceFix:
     """Record of one ``fp_line`` that was (or would be) trimmed or removed."""
 
@@ -131,6 +181,54 @@ class PadClearanceRepairResult:
     def total_fixed(self) -> int:
         return len(self.fixes)
 
+
+@dataclass
+class HoleClearanceFix:
+    """Record of one footprint silk graphic clipped (or removed) off a drill."""
+
+    footprint_ref: str
+    element_type: str  # "fp_line" | "fp_poly" | "fp_rect"
+    layer: str
+    action: str  # "trimmed" or "removed"
+    holes: list[str] = field(default_factory=list)  # drill labels it crossed
+    #: Printed ink area (mm^2) before and after the clip, from the same
+    #: geometry ``silk_hole_overlap`` measures -- how much silk was removed.
+    old_area: float = 0.0
+    new_area: float = 0.0
+    pieces: int = 0  # graphics left in the file in its place
+
+
+@dataclass
+class HoleClearanceRepairResult:
+    """Aggregate result of a silk-to-drill clip pass (Issue #9054)."""
+
+    min_clearance_mm: float = 0.0
+    fixes: list[HoleClearanceFix] = field(default_factory=list)
+    skipped: list[PadClearanceSkip] = field(default_factory=list)
+    #: ``silk_hole_overlap`` findings on *graphics* still present after the
+    #: pass, re-measured with the real rule (empty on a dry run).
+    residual: list[str] = field(default_factory=list)
+    #: ``silk_hole_overlap`` findings on *text* -- never clipped; move the
+    #: text with ``kct place-silk-refs`` instead.
+    text_residual: list[str] = field(default_factory=list)
+    #: Refs the ``pin1_marker`` check accepted before the clip and rejects
+    #: after (empty on a dry run): the clip removed the last ink it
+    #: recognised.  A warning, not an error -- a fab cannot print ink over a
+    #: hole -- but the marker is gone and must be re-added by hand.
+    marker_lost: list[str] = field(default_factory=list)
+
+    @property
+    def total_fixed(self) -> int:
+        return len(self.fixes)
+
+
+# Polygon remnants smaller than this (mm^2) are dropped: with the outline
+# stroke they print as a dot, not a shape.
+_MIN_POLY_AREA_MM2 = 1e-3
+
+# Deterministic UUIDs for graphics the hole clip has to split, so the same
+# input always yields byte-identical output (uuid4 would not).
+_HOLE_CLIP_NAMESPACE = _uuid.UUID("9054c1ea-0000-4000-8000-000000009054")
 
 # Extra margin (mm) added to the keep-out so clipped endpoints land strictly
 # on the clear side of the check's tolerance despite polygonal buffers.
@@ -254,6 +352,57 @@ class SilkscreenRepairer:
 
         return result
 
+    def repair_text_stroke_widths(
+        self,
+        min_width_mm: float,
+        dry_run: bool = False,
+    ) -> TextStrokeRepairResult:
+        """Thicken silkscreen text strokes below *min_width_mm* to that minimum.
+
+        The height repair scales thickness only when it scales the whole
+        font; a legal-height text drawn with a thin stroke stays thin.  This
+        pass floors the printed stroke independently, mirroring
+        ``check_silkscreen_text_thickness``: an element with no explicit
+        ``(thickness ...)`` node is measured at the schema's 0.15 mm default
+        and only rewritten when that default is itself below the minimum.
+
+        Args:
+            min_width_mm: The minimum acceptable stroke width in mm.
+            dry_run: If ``True``, collect fixes but do not mutate the tree.
+
+        Returns:
+            A :class:`TextStrokeRepairResult` with every fix recorded.
+        """
+        result = TextStrokeRepairResult(min_width_mm=min_width_mm)
+
+        # --- Footprint-level text ---
+        for fp_node in _find_all_footprints(self.doc):
+            fp_ref = self._footprint_reference(fp_node)
+            for ttype in FP_TEXT_TYPES:
+                for text_node in fp_node.find_all(ttype):
+                    self._maybe_fix_text_thickness(
+                        text_node,
+                        element_type=ttype,
+                        footprint_ref=fp_ref,
+                        min_width_mm=min_width_mm,
+                        dry_run=dry_run,
+                        result=result,
+                    )
+
+        # --- Board-level text ---
+        for ttype in GR_TEXT_TYPES:
+            for text_node in self.doc.find_all(ttype):
+                self._maybe_fix_text_thickness(
+                    text_node,
+                    element_type=ttype,
+                    footprint_ref="",
+                    min_width_mm=min_width_mm,
+                    dry_run=dry_run,
+                    result=result,
+                )
+
+        return result
+
     def repair_pad_clearance(
         self,
         min_clearance_mm: float,
@@ -363,7 +512,11 @@ class SilkscreenRepairer:
                 keepout = unary_union([per_side[gside][int(i)] for i in near]).buffer(
                     reach + _CLIP_EPSILON_MM, quad_segs=16
                 )
-                if not line.intersects(keepout):
+                crossed = line.intersection(keepout)
+                if crossed.is_empty or crossed.length <= 1e-9:
+                    # Not inside the keep-out: at most touches its boundary
+                    # (a piece this very clip cut on a previous pass), which
+                    # is already clear -- re-running must be a no-op (#9797).
                     continue
 
                 if markers is None:
@@ -401,6 +554,333 @@ class SilkscreenRepairer:
                     continue
                 self._rewrite_line(fp_node, node, [[inverse(c) for c in g.coords] for g in parts])
         return result
+
+    def repair_hole_clearance(
+        self,
+        min_clearance_mm: float | None = None,
+        dry_run: bool = False,
+        *,
+        include_vias: bool = True,
+    ) -> HoleClearanceRepairResult:
+        """Clip footprint silk graphics off drilled holes (Issue #9054).
+
+        The holes are :func:`~kicad_tools.validate.rules.silkscreen.iter_drill_holes`
+        -- every via drill whatever its tenting, fill or capping, plus PTH
+        and NPTH pad holes -- and the default clearance is
+        :data:`~kicad_tools.silkscreen._silk_defaults.SILK_HOLE_CLEARANCE_MM`,
+        the very set and threshold ``silk_hole_overlap`` uses, so a clipped
+        board passes that check.  Each hole clips only the silk side(s) it
+        actually pierces: a blind/micro via reaches one outer side, a
+        buried via neither (Issue #9076).
+
+        Only the silk that has to go is removed: each graphic's printed ink
+        must stay ``min_clearance_mm`` (plus a 1 um safety margin) from the
+        drill, so
+
+        * an ``fp_line`` keeps the part(s) of its centreline outside the
+          drill buffered by ``min_clearance_mm + width / 2`` (a line crossed
+          in the middle becomes two lines; remnants shorter than the stroke
+          width are dropped);
+        * a filled ``fp_poly`` / ``fp_rect`` becomes the polygon minus that
+          buffered drill, written as ``fp_poly`` (several when the cut splits
+          it; a drill wholly inside the shape is cut out through a
+          zero-width keyhole bridge, since ``fp_poly`` has no holes);
+        * an unfilled ``fp_poly`` / ``fp_rect`` outline is no longer closed
+          once cut, so its surviving runs are written as ``fp_line`` graphics.
+
+        Graphics that do not reach a hole are left byte-identical.  Arcs and
+        circles are not clipped and are reported in ``result.skipped``.  Text
+        is never touched: text over a hole lands in
+        ``result.text_residual`` for ``kct place-silk-refs``.  Pin-1 markers
+        are clipped like any other silk -- a fab cannot print ink over a
+        hole -- and a footprint whose marker the clip erased outright is
+        reported in ``result.marker_lost``; re-add that marker by hand,
+        clear of the hole.
+
+        This is an explicit recipe step, run after routing so it sees the
+        routed vias.  The router never calls it (#5744).
+
+        Args:
+            min_clearance_mm: Required silk-to-hole clearance in mm; defaults
+                to ``SILK_HOLE_CLEARANCE_MM``.
+            dry_run: If ``True``, collect fixes but do not mutate the tree.
+            include_vias: If ``False``, via drills are neither clipped
+                against nor reported (PTH/NPTH pad holes only) -- the
+                ``legalize_silk`` shared pass excludes vias per the #9795
+                operator ruling while this method's standalone behaviour
+                (``True``) keeps the full #9054 hole set.
+        """
+        from kicad_tools._shapely import require_shapely
+
+        require_shapely("silk hole clearance repair")
+        from shapely.geometry import LineString, Polygon
+        from shapely.ops import linemerge, unary_union
+        from shapely.strtree import STRtree
+
+        from kicad_tools.schema.pcb import Footprint, FootprintGraphic, Via
+        from kicad_tools.silkscreen._silk_defaults import SILK_HOLE_CLEARANCE_MM
+        from kicad_tools.validate.rules.silkscreen import (
+            _fp_transform,
+            _silk_side,
+            _stroke_geometry,
+            iter_drill_holes,
+            silk_hits_hole,
+        )
+
+        clearance = SILK_HOLE_CLEARANCE_MM if min_clearance_mm is None else min_clearance_mm
+        if not math.isfinite(clearance) or clearance < 0:
+            raise ValueError("min_clearance_mm must be finite and nonnegative")
+        result = HoleClearanceRepairResult(min_clearance_mm=clearance)
+
+        # Everything in the file's own frame: footprints and vias parsed
+        # straight from the tree (no board-origin shift), as the pad clip does.
+        footprints = [(node, Footprint.from_sexp(node)) for node in _find_all_footprints(self.doc)]
+        vias = [Via.from_sexp(node) for node in self.doc.find_all("via")] if include_vias else []
+        holes = list(iter_drill_holes(vias, [fp for _n, fp in footprints]))
+        # Before any node is edited: refs the pin-1 rule still recognises a
+        # marker for, so only the clip's own losses get reported (a dry run
+        # edits nothing and never needs the before-state).
+        markers_before: set[str] = set()
+        if not dry_run and holes:
+            markers_before = self._pin1_marker_refs()
+        if holes:
+            tree = STRtree([g for g, _label, _sides in holes])
+
+            for fp_node, fp in footprints:
+                fp_ref = self._footprint_reference(fp_node)
+                fwd = _fp_transform(fp)
+                theta = math.radians(fp.rotation)
+                cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+                def inverse(pt, fp=fp, cos_t=cos_t, sin_t=sin_t):
+                    dx, dy = pt[0] - fp.position[0], pt[1] - fp.position[1]
+                    return (dx * cos_t - dy * sin_t, dx * sin_t + dy * cos_t)
+
+                for node in [
+                    n
+                    for n in fp_node.children
+                    if not n.is_atom and n.name in _FP_GRAPHIC_KINDS and self._is_silkscreen(n)
+                ]:
+                    kind = _FP_GRAPHIC_KINDS[str(node.name)]
+                    graphic = FootprintGraphic.from_sexp(node, kind)
+                    silk_side = _silk_side(graphic.layer)
+                    if silk_side is None:
+                        continue
+                    ink = _stroke_geometry(graphic, fwd)
+                    if ink is None or ink.is_empty:
+                        continue
+                    query = ink.buffer(clearance) if clearance > 0 else ink
+                    hit = [
+                        holes[int(i)]
+                        for i in tree.query(query)
+                        if silk_side in holes[int(i)][2]
+                        and silk_hits_hole(ink, holes[int(i)][0], clearance)
+                    ]
+                    if not hit:
+                        continue
+                    labels = sorted(label for _g, label, _sides in hit)
+                    if kind not in ("line", "poly", "rect"):
+                        result.skipped.append(
+                            PadClearanceSkip(
+                                footprint_ref=fp_ref,
+                                element_type=str(node.name),
+                                layer=graphic.layer,
+                                reason=f"fp_{kind} is not clipped (over {', '.join(labels)})",
+                            )
+                        )
+                        continue
+
+                    width = max(graphic.stroke_width, 0.0)
+                    keepout = unary_union([g for g, _label, _sides in hit]).buffer(
+                        clearance + width / 2.0 + _CLIP_EPSILON_MM, quad_segs=16
+                    )
+                    if kind == "line":
+                        outline = [fwd(graphic.start), fwd(graphic.end)]
+                        filled = False
+                    elif kind == "rect":
+                        (sx, sy), (ex, ey) = graphic.start, graphic.end
+                        outline = [fwd(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey))]
+                        filled = graphic.is_filled
+                    else:
+                        outline = [fwd(p) for p in graphic.points]
+                        filled = graphic.is_filled
+
+                    new_lines: list[list[tuple[float, float]]] = []
+                    new_polys: list[list[tuple[float, float]]] = []
+                    if filled:
+                        shape = Polygon(outline)
+                        if not shape.is_valid:
+                            shape = shape.buffer(0)
+                        kept = shape.difference(keepout)
+                        rings = [
+                            _keyhole_ring(part)
+                            for part in getattr(kept, "geoms", [kept])
+                            if part.geom_type == "Polygon" and part.area >= _MIN_POLY_AREA_MM2
+                        ]
+                        if any(r is None for r in rings):
+                            result.skipped.append(
+                                PadClearanceSkip(
+                                    footprint_ref=fp_ref,
+                                    element_type=str(node.name),
+                                    layer=graphic.layer,
+                                    reason="clipped shape has a hole no bridge can reach",
+                                )
+                            )
+                            continue
+                        new_polys = [r for r in rings if r is not None]
+                    else:
+                        closed = kind != "line"
+                        path = LineString(outline + [outline[0]] if closed else outline)
+                        kept = path.difference(keepout)
+                        if closed and kept.geom_type == "MultiLineString":
+                            kept = linemerge(kept)
+                        for part in getattr(kept, "geoms", [kept]):
+                            if part.geom_type != "LineString" or part.is_empty:
+                                continue
+                            if part.length < max(width, 1e-6):
+                                continue
+                            new_lines.append(list(part.coords))
+
+                    new_ink = unary_union(
+                        [LineString(c).buffer(width / 2.0) for c in new_lines]
+                        + [Polygon(c).buffer(0).buffer(width / 2.0) for c in new_polys]
+                    )
+                    pieces = (
+                        sum(len(c) - 1 for c in new_lines) if kind != "line" else len(new_lines)
+                    ) + len(new_polys)
+                    result.fixes.append(
+                        HoleClearanceFix(
+                            footprint_ref=fp_ref,
+                            element_type=str(node.name),
+                            layer=graphic.layer,
+                            action="trimmed" if pieces else "removed",
+                            holes=labels,
+                            old_area=float(ink.area),
+                            new_area=float(new_ink.area) if not new_ink.is_empty else 0.0,
+                            pieces=pieces,
+                        )
+                    )
+                    if dry_run:
+                        continue
+                    replacements = self._hole_clip_nodes(
+                        node,
+                        fp_ref,
+                        kind,
+                        [[inverse(p) for p in c] for c in new_lines],
+                        [[inverse(p) for p in c] for c in new_polys],
+                    )
+                    index = fp_node.children.index(node)
+                    fp_node.children[index : index + 1] = replacements
+
+        if not dry_run:
+            self._measure_hole_residual(result, include_vias=include_vias)
+            if holes:
+                result.marker_lost = sorted(self._pin1_marker_refs() - markers_before)
+        return result
+
+    def _pin1_marker_refs(self) -> set[str]:
+        """Refs the ``pin1_marker`` rule flags on the current tree."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp.parser import parse_string, serialize_sexp
+        from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
+
+        pcb = PCB(parse_string(serialize_sexp(self.doc)))
+        return {
+            violation.items[0]
+            for violation in Pin1MarkerRule().check(pcb).violations
+            if violation.rule_id.startswith("pin1_marker") and violation.items
+        }
+
+    def _measure_hole_residual(
+        self, result: HoleClearanceRepairResult, *, include_vias: bool = True
+    ) -> None:
+        """Re-measure ``silk_hole_overlap`` with the real rule on the edited tree.
+
+        With *include_vias* ``False``, findings whose hole is a via drill are
+        dropped, mirroring the clip's own hole set (#9795 via exception).
+        """
+        import re
+
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp.parser import parse_string, serialize_sexp
+        from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
+
+        pcb = PCB(parse_string(serialize_sexp(self.doc)))
+        graphic = re.compile(r"(\((fp|gr)_[a-z]+\)$)|(^gr_(line|rect|circle|arc|poly|curve)$)")
+        for violation in check_silk_hole_overlap(pcb).violations:
+            if (
+                not include_vias
+                and len(violation.items) >= 2
+                and str(violation.items[1]).startswith("via at")
+            ):
+                continue
+            text = " / ".join(violation.items)
+            if graphic.search(violation.items[0]):
+                result.residual.append(text)
+            else:
+                result.text_residual.append(text)
+
+    @staticmethod
+    def _hole_clip_nodes(
+        node: SExp,
+        fp_ref: str,
+        kind: str,
+        lines: list[list[tuple[float, float]]],
+        polys: list[list[tuple[float, float]]],
+    ) -> list[SExp]:
+        """Build the graphics that replace ``node`` (footprint-local coords).
+
+        A clipped ``fp_line`` keeps its own node (and UUID) for its first
+        piece; everything else is new, with a UUID derived from the source
+        UUID and the piece geometry so the output is reproducible.
+        """
+        from kicad_tools.sexp.parser import parse_string, serialize_sexp
+
+        source_uuid = ""
+        if (uid := node.find("uuid")) is not None:
+            source_uuid = str(uid.get_first_atom() or "")
+        layer = str(node.find("layer").get_first_atom())  # type: ignore[union-attr]
+        stroke = node.find("stroke")
+        stroke_text = (
+            serialize_sexp(stroke) if stroke is not None else "(stroke (width 0) (type solid))"
+        )
+
+        def fmt(value: float) -> str:
+            return f"{round(value, 6):g}" if abs(value) >= 1e-6 else "0"
+
+        def new_uuid(tag: str, coords: list[tuple[float, float]]) -> str:
+            key = f"{fp_ref}:{source_uuid}:{tag}:{[(fmt(x), fmt(y)) for x, y in coords]}"
+            return str(_uuid.uuid5(_HOLE_CLIP_NAMESPACE, key))
+
+        out: list[SExp] = []
+        for index, coords in enumerate(lines):
+            segments = list(zip(coords, coords[1:], strict=False))
+            for seg_index, (start, end) in enumerate(segments):
+                if kind == "line" and index == 0 and seg_index == 0:
+                    clone = node
+                    for tag, (x, y) in (("start", start), ("end", end)):
+                        child = clone.find(tag)
+                        assert child is not None
+                        child.set_atom(0, round(x, 6))
+                        child.set_atom(1, round(y, 6))
+                    out.append(clone)
+                    continue
+                out.append(
+                    parse_string(
+                        f"(fp_line (start {fmt(start[0])} {fmt(start[1])}) "
+                        f"(end {fmt(end[0])} {fmt(end[1])}) {stroke_text} "
+                        f'(layer "{layer}") (uuid "{new_uuid("line", [start, end])}"))'
+                    )
+                )
+        for coords in polys:
+            xys = " ".join(f"(xy {fmt(x)} {fmt(y)})" for x, y in coords)
+            out.append(
+                parse_string(
+                    f"(fp_poly (pts {xys}) {stroke_text} (fill yes) "
+                    f'(layer "{layer}") (uuid "{new_uuid("poly", coords)}"))'
+                )
+            )
+        return out
 
     @staticmethod
     def _rewrite_line(parent: SExp, node: SExp, pieces: list[list[tuple[float, float]]]) -> None:
@@ -652,3 +1132,343 @@ class SilkscreenRepairer:
                 thickness_node = font.find("thickness")
                 assert thickness_node is not None
                 thickness_node.set_atom(0, new_thickness)
+
+    def _maybe_fix_text_thickness(
+        self,
+        text_node: SExp,
+        *,
+        element_type: str,
+        footprint_ref: str,
+        min_width_mm: float,
+        dry_run: bool,
+        result: TextStrokeRepairResult,
+    ) -> None:
+        """Check one text node and floor its stroke thickness at the minimum."""
+        if not self._is_silkscreen(text_node):
+            return
+
+        if self._is_hidden(text_node):
+            return
+
+        font = None
+        effects = text_node.find("effects")
+        if effects is not None:
+            font = effects.find("font")
+        if font is None:
+            # No font node to write a thickness into; the height repair has
+            # the same limit (an element with no explicit thickness prints
+            # at the 0.15 mm schema default).
+            return
+
+        old_thickness = self._get_font_thickness(text_node)
+        effective = old_thickness if old_thickness else _DEFAULT_FONT_THICKNESS_MM
+        if effective >= min_width_mm:
+            return
+
+        result.fixes.append(
+            TextStrokeFix(
+                element_type=element_type,
+                layer=str(text_node.find("layer").get_first_atom()),  # type: ignore[union-attr]
+                old_thickness=effective,
+                new_thickness=min_width_mm,
+                footprint_ref=footprint_ref,
+            )
+        )
+
+        if dry_run:
+            return
+        thickness_node = font.find("thickness")
+        if thickness_node is not None:
+            thickness_node.set_atom(0, min_width_mm)
+        else:
+            font.add(SExp(name="thickness", children=[SExp(value=min_width_mm)]))
+
+
+def _keyhole_ring(polygon) -> list[tuple[float, float]] | None:
+    """One vertex ring for *polygon*, bridging any interior holes.
+
+    ``fp_poly`` stores a single outline, so a polygon with an interior ring
+    (a drill cut out of the middle of a filled shape) is written the way
+    KiCad's own fractured polygons are: the exterior walks to the nearest
+    hole vertex along a zero-width bridge, round the hole, and back.  The
+    bridge is chosen between the closest vertex pair whose segment stays
+    inside the shape.  Returns ``None`` if no such bridge exists.
+    """
+    from shapely.geometry import LineString, Polygon
+    from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
+
+    polygon = orient(polygon, 1.0)  # exterior CCW, interiors CW
+    ring = list(polygon.exterior.coords)[:-1]
+    if not polygon.interiors:
+        return ring
+    inside = polygon.buffer(1e-7)
+    for interior in polygon.interiors:
+        hole = list(interior.coords)[:-1]
+        pairs = sorted(
+            ((math.dist(a, b), i, j) for i, a in enumerate(ring) for j, b in enumerate(hole)),
+        )
+        for _d, i, j in pairs:
+            if inside.contains(LineString([ring[i], hole[j]])):
+                ring = ring[: i + 1] + hole[j:] + hole[: j + 1] + ring[i:]
+                break
+        else:
+            return None
+    if Polygon(ring).buffer(0).symmetric_difference(polygon).area > 1e-6:
+        return None
+    return ring
+
+
+@dataclass
+class SilkLegalizeUnresolved:
+    """One item the pass could not make legal, named for the report.
+
+    Nothing here is waived, allowed or tolerance-ed: the item stays exactly
+    as illegal in ``kct check`` as it was before the pass (#9795).
+    """
+
+    kind: str  # "silk_over_hole" | "text_over_hole" | "pad_clearance" | "reference" | ...
+    item: str  # the finding / designator, in the checker's own vocabulary
+    detail: str = ""  # why it could not be fixed
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "item": self.item, "detail": self.detail}
+
+
+@dataclass
+class SilkLegalizeReport:
+    """Combined outcome of one :func:`legalize_silk` pass (#9795 phase 1)."""
+
+    min_width_mm: float = 0.0
+    min_height_mm: float = 0.0
+    min_pad_clearance_mm: float | None = None  # None: the profile defines none
+    min_hole_clearance_mm: float = 0.0
+    width: SilkscreenRepairResult = field(default_factory=SilkscreenRepairResult)
+    heights: TextHeightRepairResult = field(default_factory=TextHeightRepairResult)
+    strokes: TextStrokeRepairResult = field(default_factory=TextStrokeRepairResult)
+    pads: PadClearanceRepairResult = field(default_factory=PadClearanceRepairResult)
+    holes: HoleClearanceRepairResult = field(default_factory=HoleClearanceRepairResult)
+    refs: PlaceSilkRefsResult | None = None
+    #: ``silk_hole_overlap`` findings (vias excluded) still present on the
+    # finished tree, graphics and text respectively.
+    hole_residual: list[str] = field(default_factory=list)
+    text_over_hole: list[str] = field(default_factory=list)
+    #: Residual items from the attempted repairs. Run the silkscreen checker
+    #: for findings outside the repair pass.
+    unresolved: list[SilkLegalizeUnresolved] = field(default_factory=list)
+    dry_run: bool = False
+    output_path: str = ""
+    #: Checker rule IDs addressed by the active repair stages. Hole repairs
+    #: consider drilled pads only, and each stage targets supported primitives.
+    rules_covered: list[str] = field(default_factory=list)
+
+    @property
+    def total_fixed(self) -> int:
+        moved = self.refs.total_moved if self.refs is not None else 0
+        return (
+            self.width.total_fixed
+            + self.heights.total_fixed
+            + self.strokes.total_fixed
+            + self.pads.total_fixed
+            + self.holes.total_fixed
+            + moved
+        )
+
+    @property
+    def total_moved(self) -> int:
+        return self.refs.total_moved if self.refs is not None else 0
+
+
+def legalize_silk(
+    pcb: str | Path,
+    mfr_profile: DesignRules,
+    *,
+    output: str | Path | None = None,
+    dry_run: bool = False,
+) -> SilkLegalizeReport:
+    """Make a board's silkscreen legal for *mfr_profile* in one pass.
+
+    The single shared entry point of the silk-legalisation pipeline
+    (#9795 phase 1, Issue #9797), composing the existing repairs instead of
+    reimplementing them:
+
+    1. widen sub-minimum silk strokes (:meth:`SilkscreenRepairer.repair_line_widths`);
+    2. scale up under-height text (:meth:`SilkscreenRepairer.repair_text_heights`);
+    3. floor thin-but-legal-height text strokes
+       (:meth:`SilkscreenRepairer.repair_text_stroke_widths`);
+    4. clip silk lines back from pad apertures
+       (:meth:`SilkscreenRepairer.repair_pad_clearance`) when the profile
+       defines a silk-to-pad clearance;
+    5. clip silk graphics off PTH/NPTH drill holes **only** -- vias are
+       excluded, per the #9795 operator ruling
+       (:meth:`SilkscreenRepairer.repair_hole_clearance`);
+    6. move obscured references against the repaired geometry
+       (:class:`~kicad_tools.silkscreen.place_refs.SilkRefPlacer`), via
+       obstacles likewise excluded.
+
+    Steps 1-5 run on one staged tree; the placement is planned against that
+    edited geometry, so references move clear of the geometry that survives
+    the clips.  A dry run stages exactly the same result in memory and
+    reports it; it simply never writes.
+
+    ``report.rules_covered`` lists the rules targeted by the active stages.
+    ``report.unresolved`` names residual repair items such as an unclippable
+    graphic over a hole, an unplaceable reference or a lost pin-1 marker.
+    Run ``kct check --only silkscreen`` on the resulting board for a full
+    silkscreen check.
+
+    Args:
+        pcb: Path to the ``.kicad_pcb`` file.
+        mfr_profile: The resolved manufacturer ruleset; silk-to-pad /
+            silk-to-hole / minimum width and height values are read from it.
+        output: Where to write the result (default: overwrite *pcb*).
+        dry_run: Report the staged result without writing any file.
+
+    Returns:
+        A :class:`SilkLegalizeReport` with the repair scope, edits and
+        unresolved repair items.
+
+    Raises:
+        ImportError: shapely (or pyyaml) is not installed.
+        ValueError: The placer rejects the board (e.g. duplicate references).
+    """
+    import re
+    import tempfile
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp.parser import parse_string, serialize_sexp
+    from kicad_tools.silkscreen._silk_defaults import (
+        DEFAULT_CLEARANCE_MM,
+        SILK_EDGE_CLEARANCE_MM,
+    )
+    from kicad_tools.silkscreen.place_refs import SilkRefPlacer
+    from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
+
+    pcb_path = Path(pcb)
+    repairer = SilkscreenRepairer(pcb_path)
+    min_width = mfr_profile.min_silkscreen_width_mm
+    min_height = mfr_profile.min_silkscreen_height_mm
+
+    width_result = repairer.repair_line_widths(min_width)
+    height_result = repairer.repair_text_heights(min_height)
+    stroke_result = repairer.repair_text_stroke_widths(min_width)
+    rules_covered = [
+        "silkscreen_line_width",
+        "silkscreen_text_height",
+        "silkscreen_text_thickness",
+        "silk_hole_overlap",
+        "silk_ref_obscured",
+    ]
+
+    pad_result = PadClearanceRepairResult(min_clearance_mm=0.0)
+    pad_clearance = mfr_profile.min_silk_to_pad_clearance_mm
+    if pad_clearance is not None:
+        # Clip to the threshold ``silk_pad_clearance`` actually enforces:
+        # with two-tier bands (Issue #8844) that is the warning band, so a
+        # clipped board clears the check instead of sinking to a warning.
+        danger = mfr_profile.silk_to_pad_danger_mm
+        warning = mfr_profile.silk_to_pad_warning_mm
+        if danger is not None or warning is not None:
+            if danger is None:
+                danger = pad_clearance
+            if warning is None or warning < danger:
+                warning = danger
+            pad_clearance = warning
+        pad_result = repairer.repair_pad_clearance(pad_clearance)
+        rules_covered.append("silk_pad_clearance")
+
+    # None keeps the silk_hole_overlap rule's own threshold.
+    hole_result = repairer.repair_hole_clearance(
+        mfr_profile.min_silk_to_hole_clearance_mm, include_vias=False
+    )
+
+    with tempfile.TemporaryDirectory(prefix="kct-legalize-silk-") as tmp:
+        staged = Path(tmp) / "staged.kicad_pcb"
+        save_pcb(repairer.doc, staged)
+        placer = SilkRefPlacer(staged)
+        ref_result = placer.plan(
+            clearance_mm=DEFAULT_CLEARANCE_MM,
+            edge_clearance_mm=SILK_EDGE_CLEARANCE_MM,
+            mask_clearance_mm=mfr_profile.min_solder_mask_clearance_mm,
+            include_via_obstacles=False,
+        )
+        # Apply in memory even on a dry run: the report then describes the
+        # same staged result either way, and a dry run only skips the write.
+        placer.apply(ref_result)
+
+        # Re-measure the finished geometry (fresh parse: text positions are
+        # snapshotted at parse time), vias excluded like the clip's hole set.
+        final_pcb = PCB(parse_string(serialize_sexp(placer.doc)))
+        graphic = re.compile(r"(\((fp|gr)_[a-z]+\)$)|(^gr_(line|rect|circle|arc|poly|curve)$)")
+        hole_residual: list[str] = []
+        text_over_hole: list[str] = []
+        for violation in check_silk_hole_overlap(final_pcb).violations:
+            if len(violation.items) >= 2 and str(violation.items[1]).startswith("via at"):
+                continue
+            (hole_residual if graphic.search(violation.items[0]) else text_over_hole).append(
+                " / ".join(violation.items)
+            )
+        hole_result.residual = hole_residual
+        hole_result.text_residual = text_over_hole
+
+        unresolved = [
+            SilkLegalizeUnresolved("silk_over_hole", i, "graphic still overlaps a drilled hole")
+            for i in hole_residual
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved(
+                "text_over_hole", i, "text over a drilled hole could not be moved clear"
+            )
+            for i in text_over_hole
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved(
+                "pad_clearance", f"{s.footprint_ref} {s.element_type} on {s.layer}", s.reason
+            )
+            for s in pad_result.skipped
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved("reference", f"{p.footprint_ref} (reference)", p.reason)
+            for p in ref_result.unplaceable + ref_result.under_component_fallback
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved(
+                "marker_lost",
+                f"{ref} (pin-1 marker)",
+                "the clip removed its ink; re-add it clear of the hole",
+            )
+            for ref in hole_result.marker_lost
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved(
+                "text_over_opening",
+                f'"{c.text}" on {c.layer}',
+                f"board-level text over {c.opening} is never moved",
+            )
+            for c in ref_result.fixed_text_conflicts
+        ]
+
+        report = SilkLegalizeReport(
+            min_width_mm=min_width,
+            min_height_mm=min_height,
+            min_pad_clearance_mm=pad_clearance,
+            min_hole_clearance_mm=hole_result.min_clearance_mm,
+            width=width_result,
+            heights=height_result,
+            strokes=stroke_result,
+            pads=pad_result,
+            holes=hole_result,
+            refs=ref_result,
+            hole_residual=hole_residual,
+            text_over_hole=text_over_hole,
+            unresolved=unresolved,
+            dry_run=dry_run,
+            rules_covered=rules_covered,
+        )
+
+        changed = report.total_fixed > 0
+        if not dry_run and (changed or output is not None):
+            destination = Path(output) if output else pcb_path
+            placer.save(destination)
+            report.output_path = str(destination)
+
+    return report

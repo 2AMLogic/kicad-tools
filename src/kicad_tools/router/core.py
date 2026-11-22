@@ -13,12 +13,13 @@ import time
 import warnings
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
+    from kicad_tools.analysis.detour_ratio import DetourConnectionRecord
     from kicad_tools.explain.decisions import DecisionStore
     from kicad_tools.pcb.blocks.base import PCBBlock
     from kicad_tools.physics import Stackup, TransmissionLine
@@ -126,6 +127,7 @@ from .failure_analysis import (
 )
 from .grid import RoutingGrid, routed_halo_radius_cells
 from .kelvin import detect_kelvin_topology
+from .layer_advisories import PlaneZoneOutline
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
 from .match_group_length import MatchGroup, MatchGroupTracker
@@ -1749,6 +1751,12 @@ class Autorouter:
         # preferences); aliasing the module-level singleton leaked those
         # writes into every later Autorouter in the same process.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
+        # Issue #9600 (row 3 review): per-net track widths authored in the
+        # board's ``.kicad_pro`` netclasses (``{net_name: width_mm}``), set by
+        # the PCB loader for the neck census -- an authored assignment wins
+        # over the name-classification map.  Empty when no project sidecar
+        # resolves (diagnostic data; never a routing failure).
+        self.authored_net_widths: dict[str, float] = {}
 
         # Issue #6366: per-net A* heuristic-weight overrides (net id ->
         # weight).  Empty = every net searches at the default weight 1.0.
@@ -1777,6 +1785,13 @@ class Autorouter:
         # unavailable means the audit cannot vouch for pad copper at all, and
         # the gate must not treat the two alike (see ``_pairwise_pad_geometry``).
         self._pairwise_pad_geometry_cache: tuple[Any, ...] | str | None = None
+        # Issue #9685: memoised sheet-absolute Edge.Cuts linework for the
+        # #4588 post-route audit's copper-vs-board-edge column (resolved +
+        # cached by the CLI's ``_pairwise_board_edge_geometry`` helper, which
+        # applies the same board-origin shift as the pads/zones helpers).
+        # ``None`` = not yet resolved, or resolved to "no Edge.Cuts linework"
+        # (a board the census also scores no edge pairs on).
+        self._pairwise_board_edge_geometry_cache: Any = None
         # Issue #4699: the preserved routes the CLI's ``_finalize_routes``
         # actually re-emitted into the output board.  ``None`` = finalize has
         # not run yet; the #4588 post-route pairwise gate audits this copper
@@ -1992,6 +2007,12 @@ class Autorouter:
         self._lattice_net_routes: dict[int, list[Route]] | None = None
         self._lattice_served: set[int] = set()
         self._lattice_negotiation_stats: Any = None
+        # Issue #9581: keys whose search started in ANY pass of the final
+        # lattice negotiation -- the honest per-link ``attempted`` signal
+        # for the --complete report (a "deadline-exceeded" reason is
+        # per-pass and can land on a link an earlier pass declined on its
+        # own merits).
+        self._lattice_attempted_keys: frozenset[object] = frozenset()
         # Issue #4270: per-diff-pair coupled-routing outcomes for the lattice
         # engine ("coupled" or a decline reason), keyed by pair base name.
         self._lattice_pair_outcomes: dict[str, str] = {}
@@ -2019,6 +2040,9 @@ class Autorouter:
         # as ``(key, route, ("REF.PIN", "REF.PIN"))``.  Fixed copper during the
         # negotiation and merged into its output.
         self._lattice_pair_ties: list[tuple[object, Route, tuple[str, str]]] = []
+        # Issue #9636: per-pad start points on each listed net's kept copper
+        # (``--complete``), handed to the lattice pathfinder.
+        self._lattice_kept_anchors: dict[tuple[str, str], list[Any]] = {}
         # Issue #4472 (epic #4465, Phase 2): localized per-link lattice build.
         # When set to a WORLD-coordinate ``(x1, y1, x2, y2)`` box,
         # :meth:`_ensure_lattice_pathfinder` builds the octilinear lattice +
@@ -2062,6 +2086,9 @@ class Autorouter:
         # Issue #8396: ``--complete`` links rolled back for adding pairwise HV
         # creepage shortfalls (set by ``_rollback_complete_creepage`` in route_cmd).
         self._complete_creepage_refusals: list[dict] = []
+        # Issue #9685: what the same gate verified -- ``None`` until the
+        # rollback helper runs (read by ``_build_complete_link_report``).
+        self._complete_creepage_gate: dict | None = None
 
         # Issue #5517 (Epic #5508 Phase 1b): ordered commit journal.  A pure
         # observer on the routing grid -- see
@@ -2135,6 +2162,15 @@ class Autorouter:
         self._stub_region_world: tuple[float, float, float, float] | None = None
         self.net_names: dict[int, str] = {}
         self.routes: list[Route] = []
+        # Issue #8999: airwire-separation state (owned by
+        # :mod:`kicad_tools.router.airwire_cost`; weight 0.0 = flag off =
+        # byte-identical cost model).
+        self._airwire_separation_weight = 0.0
+        self._airwire_skeleton_cache: dict[
+            int, list[tuple[tuple[float, float], tuple[float, float]]]
+        ] = {}
+        self._airwire_log_printed = False
+        self._airwire_cost_pushed = False
         # Issue #3002 (PR #3006 perf): single-slot cache for the
         # ``vias_by_net`` index used by
         # :meth:`_update_router_segment_foreign_context`.  Stores
@@ -2154,6 +2190,17 @@ class Autorouter:
         self.placement_preserved_copper: str = ""
         self.placement_preserved_zones: tuple[str, ...] = ()
         self.placement_preserved_arcs: tuple[str, ...] = ()
+        # Issue #9597: pour zones on declared PLANE layers, parsed by the
+        # loader (sheet-absolute outlines).  Drives the route-time foreign
+        # zone cost (marked on the grid there), the post-route crossing
+        # report and the --protect-plane-zones hard refusal below.
+        self.plane_zones: tuple[PlaneZoneOutline, ...] = ()
+        self._plane_zone_source_pcb: str | None = None
+        # Set by load_pcb_for_routing when plane-zone parsing raised; the hard
+        # --protect-plane-zones veto refuses instead of running unprotected.
+        self._plane_zone_load_error: str | None = None
+        self.protect_plane_zones: bool = False
+        self.plane_zone_refusals: list[str] = []
         # Issue #5863: nets the loader dropped from routing because a pad on
         # them carries geometry this router cannot represent, and the pads
         # (id, net, disposition) responsible. Empty on every board whose pads
@@ -2249,6 +2296,35 @@ class Autorouter:
         # honours it by construction, instead of repeating the
         # ``--order-method`` silent-no-op mistake from #5787 step 2 (#5908).
         self._ripup_strategy: str = "negotiated"
+
+        # Issue #9003: ``--report-detour-ratio`` attribute-on-router pattern
+        # (mirrors ``_forced_net_order`` / ``_ripup_strategy`` above).  When
+        # True, ``route_all`` / ``route_all_negotiated`` run the read-only
+        # alone-on-empty probe pre-pass before any copper is committed and
+        # stash per-connection rows in ``detour_probe_records``; the CLI
+        # finalises (pairs drawn routes) and prints/writes the report after
+        # settle.  Default off: without the flag no probe runs and no
+        # sidecar is written.
+        self.report_detour_ratio: bool = False
+        self.detour_probe_records: list[DetourConnectionRecord] | None = None
+        self._detour_unattributed_drawn_mm: float = 0.0
+        # Issue #9244: wall-clock seconds the probe pre-pass consumed (0.0
+        # when it never ran on this Autorouter).  Drivers that hold a stage
+        # clock across the probe re-base it by this amount, and the CLI's
+        # ``on_probe_elapsed`` hook shifts its ``args`` deadlines forward by
+        # it, so the flag cannot change which real searches a binding
+        # ``--timeout`` cuts short.
+        self.detour_probe_elapsed_s: float = 0.0
+        self.on_probe_elapsed: Callable[[float], None] | None = None
+
+        # Issue #9013: ``--detour-repair`` attribute-on-router pattern (same
+        # shape as ``report_detour_ratio`` above).  When True the alone-on-empty
+        # probe pre-pass runs too (it is the offender list) and
+        # ``route_all_negotiated`` invokes the targeted post-settle repair pass
+        # once the loop settles.  Default off: with the flag absent, routed
+        # output is byte-identical (pinned by the #9003 report test).
+        self.detour_repair: bool = False
+        self.detour_repair_outcomes: list[Any] = []
 
         # Fine zones for multi-resolution escape routing (Issue #1828)
         # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
@@ -3116,6 +3192,248 @@ class Autorouter:
             parts.append(f"{unaccounted} no reason recorded")
         return " [unresolved: " + "; ".join(parts) + "]"
 
+    def _plane_zone_split_veto(self, route: Route, *, exclude_self: bool = False) -> str | None:
+        """Refuse copper that would split a foreign plane zone (#9597).
+
+        With ``--protect-plane-zones`` set on the router by the CLI, this is
+        consulted by :meth:`_mark_route` before any grid marking.  For each
+        plane-zone outline the candidate route crosses (foreign net, its own
+        layer), the #9591 piece counter -- :func:`plane_split.zone_pieces`,
+        the single shared implementation -- runs twice over the board's
+        copper (source PCB plus already-committed routes near the zone),
+        without and with the candidate's segments.  More pad-bearing pieces
+        with the candidate than without means the route would cut the pour
+        in two, and the commit is refused with a reason naming the zone.
+
+        ``exclude_self`` drops ``route`` itself from the committed-copper
+        side, for the post-optimization re-check (the optimized route is
+        already in ``self.routes`` there).
+
+        Returns the refusal reason, or ``None`` when the commit is clean.
+        Purely pad-local copper (intra-IC ties, kelvin bridges, escape
+        stubs) never reaches this gate through its own commit paths.
+        """
+        # Fail closed (#9597): a hard option never silently turns itself off.
+        if self._plane_zone_load_error is not None:
+            return (
+                "plane-zone protection unavailable: could not parse the board's "
+                f"zones ({self._plane_zone_load_error}); refusing the commit "
+                "(--protect-plane-zones)"
+            )
+        outlines = self.plane_zones
+        if not outlines or not route.segments:
+            return None
+        route_layers = {seg.layer.kicad_name for seg in route.segments}
+        candidates = [
+            o for o in outlines if o.layer_name in route_layers and o.net_number != route.net
+        ]
+        if not candidates:
+            return None
+        try:
+            from shapely.affinity import translate  # type: ignore[import-untyped]
+            from shapely.geometry import (  # type: ignore[import-untyped]
+                LineString,
+                Polygon,
+            )
+        except ImportError:
+            return (
+                "plane-zone protection unavailable: shapely is not installed; "
+                "refusing the commit (--protect-plane-zones)"
+            )
+
+        ox, oy = (
+            float(getattr(self.grid, "origin_x", 0.0)),
+            float(getattr(self.grid, "origin_y", 0.0)),
+        )
+
+        # Candidate track items in the schema PCB's board-relative frame.
+        def seg_item(seg: Any) -> Any:
+            from kicad_tools.validate.rules.plane_split import _Item
+
+            return _Item(
+                "track",
+                LineString([(seg.x1 - ox, seg.y1 - oy), (seg.x2 - ox, seg.y2 - oy)]).buffer(
+                    max(seg.width, 0.01) / 2.0
+                ),
+                route.net,
+                route.net_name,
+                f"route:{route.net_name or route.net}",
+            )
+
+        candidate_items = [seg_item(seg) for seg in route.segments]
+
+        zone_meta = self._plane_zone_board_state()
+        if zone_meta is None:
+            return (
+                "plane-zone protection unavailable: the source board could not be "
+                "loaded for the split check; refusing the commit (--protect-plane-zones)"
+            )
+        pcb, pcb_items, resolve = zone_meta
+
+        from shapely.validation import make_valid  # type: ignore[import-untyped]
+
+        from kicad_tools.validate.rules.plane_split import (
+            _keepout_covers,
+            keepout_geometry,
+            zone_pieces,
+        )
+
+        keepouts = [z for z in pcb.zones if getattr(z, "keepout", None) is not None]
+        net_name = route.net_name or f"net {route.net}"
+        for outline in candidates:
+            full_poly = translate(Polygon(outline.polygon), -ox, -oy)
+            if not full_poly.is_valid:
+                full_poly = make_valid(full_poly)
+            if full_poly.is_empty:
+                continue
+            # A zone whose outline repairs to a MultiPolygon / collection is
+            # still protected: every polygonal part is checked.
+            if full_poly.geom_type == "Polygon":
+                parts = [full_poly]
+            else:
+                parts = [
+                    g
+                    for g in getattr(full_poly, "geoms", [])
+                    if g.geom_type == "Polygon" and not g.is_empty
+                ]
+            for board_poly in parts:
+                # Cheap pre-filter: only zones the candidate actually touches.
+                if not any(it.geom.intersects(board_poly) for it in candidate_items):
+                    continue
+                layer_items = self._plane_zone_route_items(
+                    pcb_items.get(outline.layer_name, []),
+                    outline,
+                    board_poly,
+                    ox,
+                    oy,
+                    exclude=route if exclude_self else None,
+                )
+                obstacles = [
+                    g
+                    for g in (
+                        keepout_geometry(k)
+                        for k in keepouts
+                        if _keepout_covers(k, outline.layer_name)
+                    )
+                    if g is not None
+                ]
+                before = zone_pieces(
+                    board_poly, outline.net_number, layer_items, obstacles, outline.clearance
+                )
+                after = zone_pieces(
+                    board_poly,
+                    outline.net_number,
+                    [*layer_items, *candidate_items],
+                    obstacles,
+                    outline.clearance,
+                )
+                if len(after) > len(before):
+                    return (
+                        f"net {net_name}: committing this route would split zone "
+                        f"[{outline.net_name}] on {outline.layer_name} into "
+                        f"{len(after)} pad-bearing pieces (was {len(before)}); "
+                        "refusing the commit (--protect-plane-zones)"
+                    )
+        return None
+
+    def _plane_zone_board_state(self) -> tuple[Any, dict[str, list[Any]], Any] | None:
+        """Lazily load the source PCB and its per-layer copper items (#9597).
+
+        The board document is immutable for the router's lifetime, so both
+        are cached on the instance after the first call.  Items stay in the
+        schema PCB's board-relative frame, exactly as
+        :func:`plane_split.collect_copper_items` produces them.
+        """
+        cached = self.__dict__.get("_plane_zone_board_cache")
+        if cached is not None:
+            return cast(tuple[Any, dict[str, list[Any]], Any], cached)
+        path = self._plane_zone_source_pcb
+        if not path:
+            return None
+        try:
+            from kicad_tools.schema.pcb import PCB
+            from kicad_tools.validate.rules.plane_split import collect_copper_items
+        except ImportError:
+            return None
+        try:
+            pcb = PCB.load(path)
+        except Exception:
+            return None
+        name_to_number = {n.name: n.number for n in pcb.nets.values() if n.name}
+
+        def resolve(number: int, name: str) -> int:
+            if number == 0 and name:
+                return name_to_number.get(name, 0)
+            return number
+
+        copper_layers = [layer.name for layer in pcb.copper_layers] or ["F.Cu", "B.Cu"]
+        cached = (pcb, collect_copper_items(pcb, copper_layers, resolve), resolve)
+        self.__dict__["_plane_zone_board_cache"] = cached
+        return cached
+
+    def _plane_zone_route_items(
+        self,
+        pcb_layer_items: list[Any],
+        outline: Any,
+        board_poly: Any,
+        ox: float,
+        oy: float,
+        exclude: Any | None = None,
+    ) -> list[Any]:
+        """Committed-route copper near ``outline``, in the board frame (#9597).
+
+        Joins the cached PCB items for the zone's layer (already near-free)
+        with this router's committed segments / vias whose extent touches
+        the zone, translated from sheet to board coordinates.  Only
+        near-zone copper is materialised so a large board pays shapely work
+        proportional to the zone, not to the route count.
+        """
+        from shapely.geometry import LineString, Point
+
+        from kicad_tools.validate.rules.plane_split import _Item
+
+        minx, miny, maxx, maxy = board_poly.bounds
+        pad = outline.clearance + 1.0
+        items = list(pcb_layer_items)
+        for other in self.routes:
+            if exclude is not None and other is exclude:
+                continue
+            for seg in other.segments:
+                if seg.layer.kicad_name != outline.layer_name:
+                    continue
+                if (
+                    max(seg.x1 - ox, seg.x2 - ox) < minx - pad
+                    or min(seg.x1 - ox, seg.x2 - ox) > maxx + pad
+                    or max(seg.y1 - oy, seg.y2 - oy) < miny - pad
+                    or min(seg.y1 - oy, seg.y2 - oy) > maxy + pad
+                ):
+                    continue
+                items.append(
+                    _Item(
+                        "track",
+                        LineString([(seg.x1 - ox, seg.y1 - oy), (seg.x2 - ox, seg.y2 - oy)]).buffer(
+                            max(seg.width, 0.01) / 2.0
+                        ),
+                        other.net,
+                        other.net_name,
+                        f"route:{other.net_name or other.net}",
+                    )
+                )
+            for via in other.vias:
+                vx, vy = via.x - ox, via.y - oy
+                if not (minx - pad <= vx <= maxx + pad and miny - pad <= vy <= maxy + pad):
+                    continue
+                items.append(
+                    _Item(
+                        "via",
+                        Point(vx, vy).buffer(max(via.diameter, 0.01) / 2.0),
+                        other.net,
+                        other.net_name,
+                        f"via@({vx:.2f}, {vy:.2f})",
+                    )
+                )
+        return items
+
     def _mark_route(self, route: Route, *, enforce_pad_access: bool = False) -> bool:
         """Mark a route on both Python and C++ grids.
 
@@ -3133,6 +3451,11 @@ class Autorouter:
         invariant is consulted FIRST.  If committing ``route`` would reduce
         another unrouted pad's access set to empty, nothing is marked and this
         returns ``False`` -- the caller must treat the commit as refused.
+
+        Issue #9597: when ``protect_plane_zones`` is set, a route that would
+        split a foreign plane zone into more pad-bearing pieces is refused the
+        same way (nothing marked, ``False`` returned, the refusal recorded on
+        ``plane_zone_refusals`` naming the zone).
 
         Args:
             route: The copper to commit.
@@ -3158,6 +3481,18 @@ class Autorouter:
                     gate.record(veto)
                     return False
 
+        # Issue #9597: --protect-plane-zones hard refusal.  Checked on every
+        # commit path that runs through this method, BEFORE any marking, so a
+        # refused route leaves both grids untouched; the negotiated / MST
+        # drivers treat the ``False`` return as a failed connection (the
+        # #5891 refusal protocol) and the refusal itself is recorded on
+        # ``plane_zone_refusals`` naming the zone.
+        if self.protect_plane_zones:
+            refusal = self._plane_zone_split_veto(route)
+            if refusal is not None:
+                self.plane_zone_refusals.append(refusal)
+                return False
+
         self.grid.mark_route(route)
         self._mark_route_on_cpp_grid(route)
 
@@ -3169,6 +3504,79 @@ class Autorouter:
         if hasattr(self.router, "update_layer_fill_ratios"):
             self.router.update_layer_fill_ratios()
         return True
+
+    def _barrier_closure_commit(self, route: Route) -> None:
+        """Report-only barrier-closure hook for a negotiated commit (Issue #9000).
+
+        Off unless ``KCT_BARRIER_CLOSURE`` is truthy, in which case the only
+        cost is the environment read.  When on it feeds the committed route to
+        :class:`~kicad_tools.router.barrier_closure.BarrierClosureTracker`,
+        which logs a closed barrier loop and the unrouted nets it severs.  It
+        reads the grid's committed routes and writes nothing the router
+        consults, and every failure is swallowed: routing is byte-identical
+        with the hook on or off.
+
+        The tracker is seeded from the routes already on the grid at
+        construction, so copper that lands outside this hook (input board,
+        escape-phase results, same-net pre-search ties) welds from the first
+        report instead of appearing only after a rip-up rebuild.
+        """
+        from .barrier_closure import ENV_FLAG
+
+        if os.environ.get(ENV_FLAG, "").strip().lower() not in ("1", "true", "yes", "on"):
+            return
+        try:
+            tracker = getattr(self, "_barrier_closure_tracker", None)
+            grid = self.grid
+            if tracker is None or tracker.owner is not grid:
+                from . import barrier_closure
+                from .barrier_closure import BarrierClosureTracker
+                from .region_graph import RegionGraph
+
+                tile_mm = barrier_closure.DEFAULT_TILE_MM
+                graph = RegionGraph(
+                    board_width=grid.width,
+                    board_height=grid.height,
+                    origin_x=grid.origin_x,
+                    origin_y=grid.origin_y,
+                    num_cols=max(1, min(60, int(grid.width / tile_mm))),
+                    num_rows=max(1, min(60, int(grid.height / tile_mm))),
+                )
+
+                def region_of(x: float, y: float) -> int | None:
+                    region = graph.get_region_at(x, y)
+                    return None if region is None else region.id
+
+                def layer_of(layer: object) -> int | None:
+                    try:
+                        return grid.layer_to_index(layer.value)  # type: ignore[attr-defined]
+                    except Exception:
+                        return None
+
+                routable = [i for i in grid.get_routable_indices() if not grid.is_plane_layer(i)]
+                net_pads = {
+                    net: [(self.pads[k].x, self.pads[k].y) for k in keys if k in self.pads]
+                    for net, keys in self.nets.items()
+                }
+                journal = self._commit_journal
+                tracker = BarrierClosureTracker(
+                    region_of,
+                    layer_of,
+                    routable or grid.get_routable_indices(),
+                    net_pads,
+                    stage=lambda: f"{journal.pass_name}[{journal.iteration}]",
+                )
+                tracker.owner = grid
+                # Issue #9000 review: the hook runs after mark_route, so
+                # ``route`` is already on the grid -- exclude it here and let
+                # on_commit weld and report it; everything already committed
+                # (input board, escapes, pre-search ties) welds unreported,
+                # matching what a first rebuild would produce.
+                tracker.rebuild([r for r in grid.routes if r is not route])
+                self._barrier_closure_tracker = tracker
+            tracker.on_commit(route, list(grid.routes))
+        except Exception:  # diagnostic only: never alter routing
+            logger.debug("barrier closure hook failed", exc_info=True)
 
     def restore_route_snapshot(
         self, routes: list[Route], *, replaced_routes: list[Route] | None = None
@@ -5563,6 +5971,8 @@ class Autorouter:
                     frozenset(pc.key for pc in pairs if len(pc.key) == 3 and pc.pair_name in taps)
                     - gateway_offer
                 )
+            if hasattr(pf, "kept_anchors"):
+                pf.kept_anchors = dict(self._lattice_kept_anchors)
             routes, stats_ = pf.route_netset(
                 conns,
                 coupled=pairs,
@@ -5612,6 +6022,11 @@ class Autorouter:
                 pf, _negotiate, ran[id(coupled)], coupled, offer, (routes_by_key, stats)
             )
         self._lattice_negotiation_stats = stats
+        # Issue #9581: keep the attempted-keys signal beside the stats --
+        # ``getattr`` because duck-typed pathfinder stand-ins in tests
+        # predate the field (the report falls back to the reason-derived
+        # flag when it is absent).
+        self._lattice_attempted_keys = frozenset(getattr(stats, "attempted_keys", ()) or ())
         self._warn_lattice_pair_nets_routed_twice()
         # Issue #4477 (epic #4465, Phase 4): copy the per-connection decline
         # diagnosis onto the ROUTER (not just the pathfinder) because
@@ -5893,6 +6308,7 @@ class Autorouter:
         self._lattice_exempt_pair_reservations(coupled)
 
         connections: list[tuple[object, Pad, Pad, object]] = []
+        self._lattice_kept_anchors = {}
         # Issue #6698: generated same-part equivalent-pin ties (rebuilt on
         # every call -- the #6535 tap-chain retry calls this again).
         tied = self._lattice_plan_pair_ties(reserved)
@@ -5950,8 +6366,26 @@ class Autorouter:
                     [seg for r in kept for seg in r.segments],
                     [via for r in kept for via in r.vias],
                 )
-                for seq, (a, b) in enumerate(island_bridges(pads, labels)):
+                bridges = island_bridges(pads, labels)
+                for seq, (a, b) in enumerate(bridges):
                     connections.append(((net, seq), a, b, net_class))
+                if not bridges:
+                    # Issue #9636 (review): a fully-joined net has no link a
+                    # kept-copper start could serve -- skip the anchor build.
+                    continue
+                # Issue #9636: a link may start from the kept copper already
+                # on its pad instead of re-escaping the pad at class width.
+                from .lattice.own_copper import kept_copper_anchors
+
+                layer_stack = self.layer_stack or LayerStack.two_layer()
+
+                def _layer_index(layer: Any, _ls: Any = layer_stack) -> int | None:
+                    try:
+                        return int(_ls.layer_enum_to_index(layer))
+                    except Exception:
+                        return None
+
+                self._lattice_kept_anchors.update(kept_copper_anchors(pads, kept, _layer_index))
                 continue
             anchor, terminals = _star_topology_pads(pads)
             for seq, other in enumerate(terminals):
@@ -6745,9 +7179,13 @@ class Autorouter:
 
         mst_router = MSTRouter(self.grid, self.router, self.rules, self.net_class_map)
 
-        def mark_route(route: Route):
-            self._mark_route(route)
+        def mark_route(route: Route) -> bool:
+            # Issue #9597: a False return (plane-zone refusal) must keep the
+            # route out of self.routes too -- mst.py honours it (#5891 style).
+            if not self._mark_route(route):
+                return False
             self.routes.append(route)
+            return True
 
         def record_failure(source_pad: Pad, target_pad: Pad):
             """Record a routing failure with detailed diagnostics."""
@@ -9070,6 +9508,24 @@ class Autorouter:
             num_copper_layers=None,
         )
 
+    def _refresh_skew_trackers_after_detour_repair(self, outcomes: list) -> None:
+        """Re-run :meth:`_finalize_routing` when a detour repair mutated routes (#9197).
+
+        The opt-in ``--detour-repair`` pass (#9013) runs AFTER the
+        ``_finalize_routing`` at the tail of each ``route_all_*`` entry point,
+        and a ``kept`` attempt lifts, re-routes and re-lands nets in
+        ``self.routes``.  Without a refresh the diff-pair / match-group
+        trackers would keep lengths for copper that no longer exists, breaking
+        the "``self.routes`` is final when ``_finalize_routing`` runs" contract.
+
+        Gated on a ``kept`` verdict so the flag-off path and a no-keep pass
+        (every attempt rolled back or skipped restores the exact prior board)
+        make no extra call and stay byte-identical.  ``_finalize_routing`` is
+        safe to repeat: ``record_routes`` overwrites per net id.
+        """
+        if any(getattr(o, "verdict", None) == "kept" for o in outcomes):
+            self._finalize_routing()
+
     def _pair_via_parity_copper(self) -> list[Route]:
         """The copper ``kct check`` sees on the written board, for the parity audit.
 
@@ -11386,6 +11842,17 @@ class Autorouter:
                 max_workers=max_workers,
             )
 
+        # Issue #9003: ``--report-detour-ratio`` probe pre-pass, while the
+        # grid is still the empty board (see the negotiated driver's hook
+        # for the guard enumeration).  Reuses the net order computed above
+        # so report rows follow the run's own ordering.
+        _probe_elapsed_before = self.detour_probe_elapsed_s
+        self._probe_alone_on_empty_lengths(net_order)
+        # Issue #9244: the probe's wall-clock cost must not consume this
+        # driver's outer budget -- re-base the stage clock stamped above by
+        # the DELTA (a re-entered call whose probe was skipped adds 0.0).
+        _route_all_start += self.detour_probe_elapsed_s - _probe_elapsed_before
+
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
 
@@ -11694,8 +12161,10 @@ class Autorouter:
         # for ``failed_net`` afterwards.
         pre_routes = {id(r) for r in self.routes}
 
-        def mark_route(route: Route) -> None:
-            self._mark_route(route)
+        def mark_route(route: Route) -> bool:
+            # Issue #9597: propagate a plane-zone refusal (False) so the
+            # negotiated driver below treats it as a failed connection.
+            return self._mark_route(route)
 
         # Bump the budget counters for every net we're about to displace
         # (and for the failed net) before invoking targeted_ripup, so even
@@ -12149,9 +12618,12 @@ class Autorouter:
             # Intra-IC reduced the pad list, rebuild MST for reduced set
             mst_router = MSTRouter(self.grid, self.router, self.rules, self.net_class_map)
 
-            def mark_route(route: Route):
-                self._mark_route(route)
+            def mark_route(route: Route) -> bool:
+                # Issue #9597: keep refused copper out of self.routes.
+                if not self._mark_route(route):
+                    return False
                 self.routes.append(route)
+                return True
 
             def record_failure(source_pad: Pad, target_pad: Pad):
                 self._record_routing_failure(net, source_pad, target_pad)
@@ -12631,6 +13103,316 @@ class Autorouter:
         self.plan_region_graph = result.region_graph
         return result.plan
 
+    def _probe_alone_on_empty_lengths(self, net_order: list[int] | None = None) -> None:
+        """Pre-pass probe: every connection's alone-on-empty length (#9003).
+
+        ``--report-detour-ratio``, or ``--detour-repair`` (Issue #9013: the
+        repair pass consumes these records as its offender list).  Runs
+        BEFORE any copper is committed
+        -- the grid at this point already is the empty board (pads, keepouts
+        and fixed copper only), which is exactly the substrate the metric's
+        denominator is defined on.  For each net the probe runs the SAME
+        per-net search the real route runs (:meth:`route_net` -> the
+        pathfinder A*) against that pristine grid, measures each produced
+        Route with the shared :class:`KicadLengthModel`
+        (``copper_order`` wired from :attr:`route_copper_order`), then
+        unmarks it.  Rows land in :attr:`detour_probe_records`;
+        :meth:`finalize_detour_probe_records` pairs the settled routes in
+        after the route.
+
+        The probe must leave NO trace on the live run, or the flag would
+        silently change routed copper and the report would be worthless.
+        ``route_net`` has many side effects (failure records, the
+        failure-analysis cache and budget, the Python-fallback memo and
+        stage budget, lazily built grid snapshots, the R-tree, the halo
+        registry, ...), and a hand-maintained save list missed
+        ``routing_failures`` (PR #9014 review).  So the guard is
+        structural: :class:`~kicad_tools.router.probe_state.AttributeStateSnapshot`
+        records EVERY attribute of the Autorouter, the pathfinder, the grid
+        and the helper objects the search writes to, and restores all of
+        them -- attributes created by the probe are deleted, rebound ones are
+        put back, container content is restored in place, RNGs are rewound.
+        On top of that:
+
+        - ``commit_journal`` -- probe commits/rips are truncated away via
+          :meth:`CommitJournal.mark` / :meth:`CommitJournal.truncate_to`
+          (the #6320 discard-a-trial mechanism), keeping the
+          ``.access_witness.json`` replay contract clean;
+        - every probe route is unmarked from the grid (so the C++ mirror,
+          the R-tree and the halo registry see the matching removal), and
+          the occupancy and cost planes are additionally restored from a
+          copy, with the #4794 occupancy-generation bump (the generation
+          counter itself is never rewound: caches keyed on it must miss).
+          The C++ grid wrapper is deliberately NOT snapshotted: its
+          Python-side sync keys mirror native state the snapshot cannot
+          rewind, and the per-route unmark already invalidates its stored
+          routes for a rebuild;
+        - the sub-problem cache -- disabled for the probe: a probe solution
+          stored under its signature would be served to the REAL run later,
+          whose board is no longer empty -- a silent copper change;
+        - decision recording -- disabled so probe rows never enter the
+          decisions sidecar;
+        - the via-conflict resolver -- skipped while probing
+          (``_detour_probe_active``).  It moves or rips OTHER nets' copper;
+          on the alone-on-empty board the only such copper is fixed copper,
+          which a read-only probe must never edit.
+
+        Wall-clock time IS covered (issue #9244): the probe measures itself
+        into :attr:`detour_probe_elapsed_s`, drivers re-base the stage
+        clocks they hold across the probe by that amount, and the CLI
+        shifts its ``args`` deadline stamps forward through
+        :attr:`on_probe_elapsed`, so a binding ``--timeout`` cannot change
+        which real searches time out and therefore the copper.  Probe
+        searches also run under :func:`~kicad_tools.router.wall_deadline.suspended`
+        so an installed excursion deadline cannot clamp them (a clamped
+        probe would change the report, not the copper).  Residual: the hard
+        supervisor kill (``KCT_ROUTE_INVOCATION_DEADLINE``,
+        :mod:`kicad_tools.cli.route_deadline`) still bounds the invocation
+        as a whole -- under a binding hard cap the flag can still change
+        the output exactly as a slower machine would.  Per-net timeouts are
+        per call and unaffected.
+
+        A failed connection is reported, never dropped: every edge whose
+        probe search failed (one ``RoutingFailure`` per failed edge, read
+        before the restore discards them) becomes a ``probe_no_path`` row,
+        including the partly failed edges of a multi-terminal net.
+
+        A failure here is never fatal: the report is advisory, so an
+        unexpected error degrades to empty records plus one warning line.
+        """
+        if not getattr(self, "report_detour_ratio", False) and not getattr(
+            self, "detour_repair", False
+        ):
+            return
+        if getattr(self, "detour_probe_records", None) is not None:
+            # Already probed on this Autorouter (a re-entered driver); the
+            # first pre-pass saw the pristine grid and that is the metric.
+            return
+
+        import numpy as np
+
+        from kicad_tools.analysis.detour_ratio import (
+            DetourConnectionRecord,
+            route_path_ends,
+        )
+        from kicad_tools.router.probe_state import (
+            AttributeStateSnapshot,
+            GlobalRngSnapshot,
+        )
+
+        grid = self.grid
+        pathfinder = self.router
+        records: list[DetourConnectionRecord] = []
+        # Issue #9244: measure the probe's own wall-clock cost (snapshot
+        # setup, searches, restore -- everything from here to the records
+        # assignment) so the budgets it must not consume can be re-based.
+        _probe_started = time.monotonic()
+
+        journal_mark = self._commit_journal.mark()
+        snapshots = [
+            AttributeStateSnapshot(self),
+            AttributeStateSnapshot(pathfinder),
+            # Issue #4794: the occupancy generation only moves forward.
+            AttributeStateSnapshot(grid, skip=("_occupancy_generation",)),
+        ]
+        for helper in (
+            getattr(grid, "_route_halo", None),
+            getattr(pathfinder, "_py_router", None),
+            getattr(self, "_subgrid_router", None),
+            getattr(self, "_via_manager", None),
+            getattr(self, "_congestion_estimator", None),
+        ):
+            if helper is not None:
+                snapshots.append(AttributeStateSnapshot(helper, copy_arrays=True))
+        rng_snapshot = GlobalRngSnapshot()
+        planes: dict[str, np.ndarray] = {}
+        for name in (
+            "_blocked",
+            "_net",
+            "_congestion",
+            "_congestion_counted",
+            "_history_cost",
+            "_present_cost_ema",
+        ):
+            arr = getattr(grid, name, None)
+            if isinstance(arr, np.ndarray):
+                planes[name] = arr.copy()
+        self._sub_problem_cache = None
+        self.record_decisions = False
+        self._detour_probe_active = True
+
+        # Issue #9244: run under ``suspended()`` -- an installed excursion
+        # deadline clamps every A* search, and a clamped probe search would
+        # change the report (a slower machine would measure different
+        # alone-on-empty lengths).  Inside the block the probe is unbudgeted
+        # exactly like the ``stuck_classifier``'s routability probe (#7832).
+        with _wall_deadline.suspended():
+            try:
+                # Inside the snapshot: the priority sort fills lazy caches
+                # (component pitches, congestion estimator) that are restored.
+                if net_order is None:
+                    net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
+                probe_nets = self._filter_pour_nets(list(net_order))
+                model = self._kicad_length_model(grid.num_layers)
+                for net in probe_nets:
+                    start = len(self.routes)
+                    failures_before = sum(1 for f in self.routing_failures if f.net == net)
+                    try:
+                        self.route_net(net)
+                    except Exception as exc:  # noqa: BLE001 - a probe never fails a route
+                        flush_print(
+                            f"  Warning: detour probe failed for net "
+                            f"{self.net_names.get(net, net)} ({type(exc).__name__}: {exc})"
+                        )
+                    probed = self.routes[start:]
+                    failed_edges = [f for f in self.routing_failures if f.net == net][
+                        failures_before:
+                    ]
+                    net_name = self.net_names.get(net, f"Net_{net}")
+                    # Escape stubs (sub-grid retry) are pre-pass copper, not
+                    # connections -- the drawn side excludes them too.
+                    connections = [
+                        r for r in probed if r.segments and not getattr(r, "is_escape", False)
+                    ]
+                    net_rows_start = len(records)
+                    for route in connections:
+                        records.append(
+                            DetourConnectionRecord(
+                                net_name=net_name,
+                                connection_index=len(records) - net_rows_start,
+                                alone_mm=model.route_length(route),
+                                endpoints=route_path_ends(route),
+                            )
+                        )
+                    # Every edge the alone-board search failed is reported as
+                    # probe-no-path rather than dropped -- including the failed
+                    # edges of a multi-terminal net whose other edges routed
+                    # (issue #9003).  A routable net that connected nothing and
+                    # recorded no failure (an exception above) still gets one row.
+                    no_path = len(failed_edges)
+                    if not connections and not no_path and len(self.nets.get(net, [])) >= 2:
+                        no_path = 1
+                    for _ in range(no_path):
+                        records.append(
+                            DetourConnectionRecord(
+                                net_name=net_name,
+                                connection_index=len(records) - net_rows_start,
+                                alone_mm=None,
+                                probe_no_path=True,
+                            )
+                        )
+                    # Unmark every probe route, on both grids and both lists,
+                    # mirroring NegotiatedRouter.rip_up_nets.
+                    for route in probed:
+                        grid.unmark_route_usage(route)
+                        grid.unmark_route(route)
+                    del self.routes[start:]
+            except Exception as exc:  # noqa: BLE001 - a probe never fails a route
+                flush_print(
+                    f"  Warning: detour-ratio probe skipped "
+                    f"({type(exc).__name__}: {exc}); no report will be printed"
+                )
+                records = []
+            finally:
+                # Restore every attribute the probe could have touched (see the
+                # docstring), then the planes, then invalidate occupancy caches.
+                for snapshot in snapshots:
+                    snapshot.restore()
+                rng_snapshot.restore()
+                for name, saved in planes.items():
+                    getattr(grid, name)[...] = saved
+                grid.bump_occupancy_generation()  # Issue #4794
+                self._commit_journal.truncate_to(*journal_mark)
+        self.detour_probe_records = records
+        # Issue #9244: the probe's wall-clock cost leaves the budgets it must
+        # not consume.  ``detour_probe_elapsed_s`` re-bases every driver
+        # stage clock held across the probe; the ``_lattice_deadline`` is an
+        # absolute stamp taken before the probe that the (post-probe) real
+        # lattice negotiation would otherwise see reduced by it; and the
+        # CLI-installed ``on_probe_elapsed`` hook shifts its ``args``
+        # deadline stamps the same way.  Assigned only when the probe ran --
+        # the early returns above leave 0.0 so re-entered drivers never
+        # double-shift.
+        probe_elapsed = time.monotonic() - _probe_started
+        self.detour_probe_elapsed_s = probe_elapsed
+        if self._lattice_deadline is not None:
+            self._lattice_deadline += probe_elapsed
+        _probe_hook = self.on_probe_elapsed
+        if _probe_hook is not None:
+            _probe_hook(probe_elapsed)
+
+    def finalize_detour_probe_records(self) -> None:
+        """Pair the settled routes into the probe records (#9003).
+
+        Called by the CLI after the route settled, before printing/writing
+        the report.  Escape stubs are pre-pass copper, not connections, and
+        are excluded from the drawn side -- but the real route ALSO emits
+        untagged infrastructure fragments beside the full connections
+        (escape-stub hop routes into dense-package escape endpoints,
+        intra-IC ties), so drawn routes are paired to probe connections by
+        their **path ends** (greedy nearest under
+        ``DETOUR_ENDPOINT_MATCH_TOLERANCE_MM``), never by list position: a
+        position-based pairing on an escape-routed board matches a 0.8mm
+        hop against a 25mm connection and reports a 0.03x ratio -- worse
+        than no measurement.
+
+        Drawn copper no probe connection claims is summed per net into
+        ``summary.unattributed_drawn_mm`` (reported, not silently dropped).
+        A probe connection the settled route did not reproduce (partial
+        route, or a pristine-vs-congested topology difference) is marked
+        ``unmatched`` and excluded from the distribution.
+        """
+        records = getattr(self, "detour_probe_records", None)
+        if not records:
+            return
+        from kicad_tools.analysis.detour_ratio import (
+            DETOUR_ENDPOINT_MATCH_TOLERANCE_MM,
+            endpoint_pair_distance,
+            route_path_ends,
+        )
+
+        by_net: dict[str, list[DetourConnectionRecord]] = {}
+        for rec in records:
+            if not rec.probe_no_path:
+                by_net.setdefault(rec.net_name, []).append(rec)
+        drawn_by_net: dict[str, list[Any]] = {}
+        for route in self.routes:
+            if getattr(route, "is_escape", False) or not route.segments:
+                continue
+            drawn_by_net.setdefault(route.net_name, []).append(route)
+        model = self._kicad_length_model(self.grid.num_layers)
+        leftover_mm = 0.0
+        for net_name, recs in by_net.items():
+            drawn = drawn_by_net.get(net_name, [])
+            # Greedy nearest-endpoint matching, smallest cost first.
+            candidates: list[tuple[float, int, int]] = []
+            for pi, rec in enumerate(recs):
+                if rec.endpoints is None:
+                    continue
+                for di, route in enumerate(drawn):
+                    ends = route_path_ends(route)
+                    if ends is None:
+                        continue
+                    cost = endpoint_pair_distance(rec.endpoints, ends)
+                    if cost <= DETOUR_ENDPOINT_MATCH_TOLERANCE_MM:
+                        candidates.append((cost, pi, di))
+            candidates.sort()
+            taken_p: set[int] = set()
+            taken_d: set[int] = set()
+            for _cost, pi, di in candidates:
+                if pi in taken_p or di in taken_d:
+                    continue
+                taken_p.add(pi)
+                taken_d.add(di)
+                recs[pi].drawn_mm = model.route_length(drawn[di])
+            for pi, rec in enumerate(recs):
+                if pi not in taken_p:
+                    rec.unmatched = True
+            for di, route in enumerate(drawn):
+                if di not in taken_d:
+                    leftover_mm += model.route_length(route)
+        self._detour_unattributed_drawn_mm = leftover_mm
+
     def _run_routing_plan_stage(self) -> None:
         """Build the routing plan ahead of a negotiated route (Issue #5520).
 
@@ -12701,6 +13483,7 @@ class Autorouter:
         best_stall_min_iterations: int = 2,
         early_bail_terminal_stall: bool = True,
         deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
+        airwire_weight: float | None = None,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -12868,6 +13651,19 @@ class Autorouter:
                 measured a board-07 regression on this entry point with
                 it on, so it stays opt-in.  See that constant and
                 :meth:`_relief_subsearch_budget`.
+            airwire_weight: Issue #8999 -- weight of the prospective
+                airwire-separation cost term.  ``None`` (the default) keeps
+                any instance-level weight (``kct route
+                --airwire-separation-weight`` sets it on the router before
+                dispatch, so paths that reach this method bare -- the
+                adaptive multi-resolution and sub-grid drivers -- inherit
+                it too); ``0.0`` never builds the crossing-count plane and
+                is byte-identical to the historical cost model; ``> 0``
+                prices each cell by how many *still-unrouted* nets'
+                straight-line desire lines cover it (the current net's own
+                desire lines excluded), so candidate paths that slip around
+                other nets' pending flight lines are preferred to ones that
+                cut across them.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -12876,6 +13672,17 @@ class Autorouter:
         import time
 
         start_time = time.time()
+
+        # Issue #8999: publish the airwire-separation weight on the instance
+        # BEFORE any per-net search runs -- every path that reaches the
+        # negotiated per-net funnel (``_route_net_negotiated`` and the
+        # two-phase ``_route_net_with_corridor``, including the relief probe
+        # and the rip-up re-land) reads it there to refresh the
+        # crossing-count plane from the current committed set.  ``None``
+        # (a bare call from an internal driver) leaves the CLI-set instance
+        # weight in place.
+        if airwire_weight is not None:
+            self._airwire_separation_weight = float(airwire_weight)
 
         # Issue #4463: the corridor-yield recovery re-runs the caller's
         # strategy a SECOND time after ripping the coupled bodies that sealed
@@ -13009,6 +13816,19 @@ class Autorouter:
         # ``_run_routing_plan_stage``.
         self._run_routing_plan_stage()
 
+        # Issue #9003: ``--report-detour-ratio`` probe pre-pass.  Also
+        # report-only and grid-untouching (every accumulator restored --
+        # see ``_probe_alone_on_empty_lengths``); the grid here is still
+        # the empty board, which is the metric's denominator substrate.
+        _probe_elapsed_before = self.detour_probe_elapsed_s
+        self._probe_alone_on_empty_lengths()
+        # Issue #9244: the probe's wall-clock cost must not consume this
+        # stage's budget -- ``start_time`` was stamped before the probe, so
+        # re-base it by the DELTA (every deadline below -- ``relief_deadline``,
+        # ``secs_left``, the grace-pass checks -- derives from it; a
+        # re-entered call whose probe was skipped adds 0.0).
+        start_time += self.detour_probe_elapsed_s - _probe_elapsed_before
+
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         self._run_subgrid_prepass()
 
@@ -13020,6 +13840,15 @@ class Autorouter:
         # callers of ``route_all_negotiated`` picks it up uniformly.  Default
         # ``"negotiated"`` falls through to the unmodified loop below.
         if getattr(self, "_ripup_strategy", "negotiated") == "sequential-n1":
+            # Issue #9013: the detour repair pass settles after the negotiated
+            # loop this prototype replaces, so the flag combination would be a
+            # silent no-op here (the #5908 lesson).  Warn and skip.
+            if getattr(self, "detour_repair", False):
+                flush_print(
+                    "  --detour-repair: not available under --ripup-strategy "
+                    "sequential-n1 (that strategy replaces the negotiated loop "
+                    "the repair pass settles after); skipping the pass"
+                )
             from .sequential_ripup import route_all_sequential_ripup
 
             return route_all_sequential_ripup(
@@ -13698,6 +14527,22 @@ class Autorouter:
             # Issue #2657 / Epic #2556 Phase 3H-cont: post-route
             # diff-pair skew bookkeeping (see _finalize_routing docstring).
             self._finalize_routing()
+            # Issue #9013: the same opt-in post-settle repair pass as the
+            # main tail below -- a zero-overflow initial pass is still a
+            # settled board whose nets may detour around each other's
+            # copper (order-of-routing detours produce no overflow).
+            if getattr(self, "detour_repair", False):
+                from .detour_repair import run_detour_repair_pass
+
+                self._refresh_skew_trackers_after_detour_repair(
+                    run_detour_repair_pass(
+                        self,
+                        net_routes=net_routes,
+                        pads_by_net=pads_by_net,
+                        neg_router=neg_router,
+                        per_net_timeout=per_net_timeout,
+                    )
+                )
             return list(self.routes)
         elif initial_partial:
             partial_names = sorted(self.net_names.get(n, f"Net_{n}") for n in initial_partial)
@@ -15207,8 +16052,8 @@ class Autorouter:
 
                             if blocking_nets:
                                 # Use targeted rip-up to displace only blocking nets
-                                def mark_route(route: Route) -> None:
-                                    self._mark_route(route)
+                                def mark_route(route: Route) -> bool:
+                                    return self._mark_route(route)
 
                                 success = self._guarded_targeted_ripup(
                                     neg_router,
@@ -15500,8 +16345,8 @@ class Autorouter:
                                 f"    Attempting escape strategies starting from {escape_strategy_index + 1}..."
                             )
 
-                            def mark_route_targeted(route: Route) -> None:
-                                self._mark_route(route)
+                            def mark_route_targeted(route: Route) -> bool:
+                                return self._mark_route(route)
 
                             # Issue #2415: Compute escape budget from remaining time
                             escape_budget = self._escape_budget(
@@ -16171,8 +17016,8 @@ class Autorouter:
                             f"    Attempting escape strategies starting from {escape_strategy_index + 1}..."
                         )
 
-                        def mark_route(route: Route) -> None:
-                            self._mark_route(route)
+                        def mark_route(route: Route) -> bool:
+                            return self._mark_route(route)
 
                         # Issue #2415: Compute escape budget from remaining time
                         escape_budget = self._escape_budget(
@@ -16694,6 +17539,29 @@ class Autorouter:
                 f"{_tail_end - _tail_t_final:.1f}s; excursion deadline "
                 f"{'left ' + format(_left, '.1f') + 's' if _left is not None and _left > 0 else 'spent'} "
                 "(issue #5923)"
+            )
+
+        # Issue #9013: opt-in targeted post-settle detour repair pass.  Read
+        # once here, at the SAME relative point as the rescue sweep above --
+        # after the loop, the demote safety nets and _finalize_routing have
+        # settled the board -- so every internal caller of
+        # ``route_all_negotiated`` picks it up uniformly.  The pass is
+        # transactional per offender (whole-board ``RouteScore`` accept
+        # gate, exact rollback) and bounded (one attempt per offender
+        # net), so it can only shorten copper, never regress the routed
+        # count.  Default off: with ``detour_repair`` False this is a
+        # no-op and routed output is byte-identical (#9003 pin).
+        if getattr(self, "detour_repair", False):
+            from .detour_repair import run_detour_repair_pass
+
+            self._refresh_skew_trackers_after_detour_repair(
+                run_detour_repair_pass(
+                    self,
+                    net_routes=net_routes,
+                    pads_by_net=pads_by_net,
+                    neg_router=neg_router,
+                    per_net_timeout=per_net_timeout,
+                )
             )
 
         return list(self.routes)
@@ -18406,6 +19274,21 @@ class Autorouter:
         if net not in self.nets and not stub_targets:
             return []
 
+        # Issue #8999: refresh the airwire-separation plane before the
+        # search.  This is the single negotiated per-net funnel (the initial
+        # pass, every rip-up iteration, the relief probe and the re-land
+        # paths all reach the search through it), so one hook covers every
+        # negotiated search with a plane recomputed from the CURRENT
+        # committed set -- the net being routed is excluded (its own desire
+        # lines must not price its own straight path).  A no-op returning 0
+        # when the flag is off (weight 0.0), keeping that path
+        # byte-identical.
+        from .airwire_cost import refresh_airwire_cost
+
+        refresh_airwire_cost(
+            self, weight=getattr(self, "_airwire_separation_weight", 0.0), current_net=net
+        )
+
         pads = self._region_filtered_pad_keys(net, self.nets.get(net, []))
         if len(pads) + len(stub_targets) < 2:
             return []
@@ -18427,7 +19310,11 @@ class Autorouter:
             # Issue #6799: neighbouring duplicate pins are one Kelvin terminal.
             tie_routes, tied = self._create_kelvin_terminal_ties(net, pads)
             for route in tie_routes:
-                self._mark_route(route)
+                if self._mark_route(route):
+                    # Issue #9000 review: pre-search copper is grid-committed
+                    # copper -- feed the diagnostic before it can close a loop
+                    # unseen (construction seeding only covers older copper).
+                    self._barrier_closure_commit(route)
                 routes.append(route)
             pads_for_routing = reduce_pads_after_intra_ic(pads, tied, pad_lookup=self.pads)
             if tied:
@@ -18437,13 +19324,15 @@ class Autorouter:
         else:
             intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
             for route in intra_routes:
-                self._mark_route(route)
+                if self._mark_route(route):
+                    self._barrier_closure_commit(route)
                 routes.append(route)
 
             # Handle block-internal connections (Issue #1587)
             block_routes, block_connected = self._create_block_internal_routes(net, pads)
             for route in block_routes:
-                self._mark_route(route)
+                if self._mark_route(route):
+                    self._barrier_closure_commit(route)
                 routes.append(route)
             connected_indices |= block_connected
 
@@ -18488,7 +19377,11 @@ class Autorouter:
             # connection and fires its ``failure_callback``, so a refusal feeds
             # the existing targeted rip-up machinery rather than silently
             # dropping copper.
-            return self._mark_route(route, enforce_pad_access=True)
+            committed = self._mark_route(route, enforce_pad_access=True)
+            if committed:
+                # Issue #9000: report-only barrier-closure diagnostic (env-gated).
+                self._barrier_closure_commit(route)
+            return committed
 
         # Issue #6353 (experiment, default OFF): validity-aware nogood cache.
         # Everything below is skipped when the cache is disabled, so the
@@ -19870,6 +20763,13 @@ class Autorouter:
         # threading before two-phase routing begins.
         self._prepare_routing()
 
+        # Issue #9003: ``--report-detour-ratio`` probe pre-pass, before
+        # Phase A commits block copper or the global pass assigns corridor
+        # preferences -- the detailed grid here still carries only pads,
+        # keepouts and fixed copper.  A no-op when the caller already
+        # probed (``route_with_escape`` probes before its escape stubs).
+        self._probe_alone_on_empty_lengths()
+
         # Issue #5894: ``--ripup-strategy sequential-n1`` must reach THIS path
         # too, not only ``route_all_negotiated``.  ``kct route`` sends every
         # escape-routed board here (``route_with_escape`` ->
@@ -19978,6 +20878,20 @@ class Autorouter:
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).
         self._finalize_routing()
+        # Issue #9013: opt-in targeted post-settle detour repair pass on the
+        # two-phase settle path.  ``kct route`` sends every escape-routed
+        # board HERE (``route_with_escape`` -> ``route_all_two_phase`` ->
+        # ``TwoPhaseRouter``), which never reaches ``route_all_negotiated`` --
+        # dispatching only there would make the flag a silent no-op on
+        # exactly the boards the #9003 measurement flagged (03/05; the
+        # #5908 shape).  Same transactional, bounded pass as the negotiated
+        # tail; default off keeps this a no-op.
+        if getattr(self, "detour_repair", False):
+            from .detour_repair import run_detour_repair_pass_from_autorouter
+
+            self._refresh_skew_trackers_after_detour_repair(
+                run_detour_repair_pass_from_autorouter(self, per_net_timeout=per_net_timeout)
+            )
         _emit_route_checkpoint(
             getattr(checkpoint_callback, "checkpoint_completed", None),
             self.routes,
@@ -20008,6 +20922,18 @@ class Autorouter:
         pads = self.nets[net]
         if len(pads) < 2:
             return []
+
+        # Issue #8999: same airwire-separation refresh as the plain
+        # negotiated funnel -- the two-phase detailed loop (and the escape
+        # pre-phase's Phase 2) routes every net through HERE, so without
+        # this hook the crossing-count plane stays all-zero on every board
+        # dispatched to two-phase (board 03's escape+two-phase path is the
+        # measured example) and the term silently no-ops.
+        from .airwire_cost import refresh_airwire_cost
+
+        refresh_airwire_cost(
+            self, weight=getattr(self, "_airwire_separation_weight", 0.0), current_net=net
+        )
 
         _dbg = bool(os.environ.get("KCT_DEBUG_PNT"))
         _t0 = time.monotonic() if _dbg else 0.0
@@ -20065,8 +20991,8 @@ class Autorouter:
             congestion_estimator=self._ensure_congestion_estimator(),
         )
 
-        def mark_route(route: Route):
-            self._mark_route(route)
+        def mark_route(route: Route) -> bool:
+            return self._mark_route(route)
 
         def record_failure(source_pad: Pad, target_pad: Pad):
             self._record_routing_failure(net, source_pad, target_pad)
@@ -20224,6 +21150,13 @@ class Autorouter:
         # Issue #6008: the fresh grid has no keepout rule areas yet -- replay
         # them, after the pads so pad metal keeps its own-net ownership.
         self._install_grid_rule_area_keepouts()
+        # Issue #9826: the load path marked plane zones on the grid discarded
+        # above; re-mark them (after pads/keepouts, as on load) so the next
+        # trial still pays ``cost_zone_foreign_plane`` on both backends.
+        # ``add_zone_cells`` mirrors the marks onto the paired CppGrid.
+        from .layer_advisories import remark_plane_zones
+
+        remark_plane_zones(self, self.grid)
         self.routes = []
 
     def _shuffle_within_tiers(self, net_order: list[int], promotion_rate: float = 0.0) -> list[int]:
@@ -21502,6 +22435,13 @@ class Autorouter:
             discs=discs,
             path_is_clear=path_is_clear,
             is_mutable=lambda s: id(s) in owner_of,
+            # The checker above is a pre-repair snapshot; this makes later
+            # repairs clear the chords earlier ones added (issue #8930).
+            clearance=float(self.grid.rules.trace_clearance),
+            # ...and this stops them being vetoed by legs earlier repairs
+            # removed (issue #9355).  Only the vector checker can; the raster
+            # fallback has no such method and keeps its snapshot.
+            path_is_clear_ignoring=getattr(checker, "ignoring", None),
         )
         if not result.repairs:
             if result.skipped:
@@ -25494,6 +26434,11 @@ class Autorouter:
         self._install_grid_rule_area_keepouts()
         print("\n=== Routing with Escape Pattern Generation + Differential Pairs ===")
 
+        # Issue #9003: probe pre-pass while the grid is still pristine
+        # (mirrors ``route_with_escape``'s hook; the later two-phase hook
+        # becomes a no-op through the records guard).
+        self._probe_alone_on_empty_lengths()
+
         # Reset the one-shot escape guard for this run so a reused Autorouter
         # (e.g. across escalation attempts) starts clean.
         self._escapes_generated_this_run = False
@@ -25629,6 +26574,13 @@ class Autorouter:
         # its preamble, so install board keepout rule areas up front.
         self._install_grid_rule_area_keepouts()
         print("\n=== Routing with Escape Pattern Generation ===")
+
+        # Issue #9003: ``--report-detour-ratio`` probe pre-pass, before the
+        # escape pre-phase commits its stubs -- this is the last point at
+        # which the grid carries only pads, keepouts and fixed copper.  The
+        # ``detour_probe_records is not None`` guard makes the later
+        # ``route_all_two_phase`` hook a no-op on this flow.
+        self._probe_alone_on_empty_lengths()
 
         # Issue #3952: the escape pre-phase (sub-grid pre-pass, dense
         # detection, escape generation, pad-channel budgets) is extracted
@@ -26011,6 +26963,10 @@ class Autorouter:
             path inside the recursive ``route_net`` call.
         """
         if net not in self.nets:
+            return []
+        # Issue #9003: the read-only detour probe never edits other nets'
+        # copper (on its empty board that could only be fixed copper).
+        if getattr(self, "_detour_probe_active", False):
             return []
 
         # Issue #8414: ``per_net_timeout`` is what is LEFT of the caller's
@@ -26548,6 +27504,7 @@ class Autorouter:
 
         # --- Pass 1: Route on the current (coarse) grid ---
         flush_print("\n--- Pass 1: Coarse grid routing ---")
+        _probe_elapsed_before = self.detour_probe_elapsed_s
         if use_negotiated:
             self.route_all_negotiated(
                 max_iterations=max_iterations,
@@ -26564,6 +27521,13 @@ class Autorouter:
                 timeout=timeout,
                 suppress_no_timeout_warning=True,
             )
+        # Issue #9244: the Pass-1 callee re-bases ITS stage clock for the
+        # detour probe, but this driver's own ``start_time`` below (the
+        # fine-grid pass decision) still saw the probe's cost -- re-base it
+        # by the delta too, or a binding ``timeout`` could skip the
+        # fine-grid pass with ``--report-detour-ratio`` on and run it
+        # without the flag.
+        start_time += self.detour_probe_elapsed_s - _probe_elapsed_before
 
         coarse_stats = self.get_statistics()
         coarse_routed = coarse_stats["nets_routed"]
@@ -26694,6 +27658,11 @@ class Autorouter:
         # Issue #6008: keepout rule areas on the fine grid too (after the pads,
         # so pad metal keeps its own-net ownership).
         self._install_grid_rule_area_keepouts(fine_grid)
+        # Issue #9826: plane zones too -- marked before the router below is
+        # built, so ``CppGrid.from_routing_grid`` copies them to C++.
+        from .layer_advisories import remark_plane_zones
+
+        remark_plane_zones(self, fine_grid)
 
         # Create a fine-grid router
         fine_router = create_hybrid_router(
@@ -26899,6 +27868,7 @@ class Autorouter:
 
         # Pass 1: Route with standard clearance
         print(f"\n--- Pass 1: Standard clearance ({original_clearance:.3f}mm) ---")
+        _probe_elapsed_before = self.detour_probe_elapsed_s
         self.route_all_negotiated(
             max_iterations=max_iterations,
             timeout=timeout,
@@ -26906,6 +27876,11 @@ class Autorouter:
             use_targeted_ripup=True,
             adaptive=True,
         )
+        # Issue #9244: re-base this driver's own ``start_time`` (the
+        # relaxation-pass timeout checks below) past any detour probe the
+        # Pass-1 callee ran -- same rationale as
+        # ``route_all_multi_resolution``.
+        start_time += self.detour_probe_elapsed_s - _probe_elapsed_before
 
         # Get initial statistics
         initial_stats = self.get_statistics()
@@ -26982,8 +27957,8 @@ class Autorouter:
                     congestion_estimator=self._ensure_congestion_estimator(),
                 )
 
-                def mark_route(route: Route) -> None:
-                    self._mark_route(route)
+                def mark_route(route: Route) -> bool:
+                    return self._mark_route(route)
 
                 # Try to route the net
                 new_routes = neg_router.route_net_negotiated(

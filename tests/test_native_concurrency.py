@@ -159,6 +159,45 @@ def test_gate_bounds_native_launches_across_processes(fake_native, tmp_path, lim
     assert _overlap(log) <= limit
 
 
+def test_queued_launch_emits_waiting_heartbeats(fake_native, tmp_path):
+    """Issue #9803: an in-flight queue wait must be visible in the permit log.
+
+    ``acquire`` records only exist once a permit is granted, so a watcher
+    reading the log while a launch is still queued (the stdout-contract
+    helper, whose subprocess deadline charges that queue) would see nothing.
+    The gate now appends periodic ``waiting`` heartbeats whose ``waited_s``
+    grows up to the eventual ``acquire.waited_s``.
+    """
+    permit_log = tmp_path / "permits"
+    # One process, two concurrent launches, one slot: the second queues for
+    # ~the first's hold, which must exceed the heartbeat interval.
+    _run_workload(
+        fake_native,
+        tmp_path,
+        processes=1,
+        per_process=2,
+        limit=1,
+        hold="1.5",
+        **{native_concurrency.ENV_LOG: str(permit_log)},
+    )
+    records = [
+        json.loads(line)
+        for path in permit_log.glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    waiting = [r for r in records if r["event"] == "waiting"]
+    acquires = [r for r in records if r["event"] == "acquire"]
+    queued = [r for r in acquires if r["waited_s"] >= 1.0]
+    assert queued, f"expected one launch to queue past the heartbeat interval: {records}"
+    assert waiting, "a queued launch must emit waiting heartbeats"
+    assert all(r["waited_s"] > 0 for r in waiting)
+    # The heartbeat never claims more wait than the acquire that ended it.
+    assert all(r["waited_s"] <= queued[0]["waited_s"] + 0.05 for r in waiting)
+    # Every heartbeat precedes its acquire.
+    last_waiting_ns = max(r["time_ns"] for r in waiting)
+    assert last_waiting_ns < queued[0]["time_ns"]
+
+
 def test_control_workload_really_overlaps_without_the_gate(fake_native, tmp_path):
     """Negative control: the same workload exceeds the bound when ungated."""
     log = _run_workload(fake_native, tmp_path, processes=3, per_process=2, limit=None)
@@ -501,6 +540,46 @@ def test_permit_records_are_written_and_redacted(fake_native, tmp_path, monkeypa
     assert [record["event"] for record in records] == ["acquire", "release"]
     assert all("secret-token" not in json.dumps(record) for record in records)
     assert records[0]["owner"].startswith("tests/t.py::test_x[redacted-")
+
+
+def test_release_is_stamped_before_the_flock_drops(tmp_path, monkeypatch):
+    """Issue #9120: a handoff must never look like two holders at once.
+
+    Closing the fd drops the flock, after which another process can acquire and
+    log its ``acquire``. The release record therefore has to carry a timestamp
+    taken *before* the close; stamping it afterwards (the old behaviour, which
+    left the stamp to ``_record`` and so to after the close) let the successor's
+    acquire precede the predecessor's release in the log.
+    """
+    monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(tmp_path / "slots"))
+    monkeypatch.delenv(native_concurrency.ENV_LOG, raising=False)
+    monkeypatch.delenv(native_concurrency.ENV_OBSERVER_OUTPUT, raising=False)
+    monkeypatch.delenv(native_concurrency.ENV_HELD, raising=False)
+    permit = native_concurrency._acquire(1, os.environ)
+    assert permit.bounded
+    held_fd = permit._fd
+    real_close = os.close
+    closed_at: list[int] = []
+
+    def spy_close(fd):
+        if fd == held_fd:
+            closed_at.append(time.time_ns())
+        real_close(fd)
+
+    recorded: list[tuple[dict, int | None]] = []
+    monkeypatch.setattr(native_concurrency.os, "close", spy_close)
+    monkeypatch.setattr(
+        native_concurrency,
+        "_record",
+        lambda event, time_ns=None: recorded.append((event, time_ns)),
+    )
+    permit.release()
+    assert len(closed_at) == 1
+    ((event, stamped),) = recorded
+    assert event["event"] == "release"
+    assert stamped is not None, "release must carry its own pre-close timestamp"
+    assert stamped <= closed_at[0]
 
 
 def test_native_slot_context_manager_is_reentrant_and_inert(tmp_path, monkeypatch):
@@ -975,3 +1054,70 @@ def test_analyzer_requires_observations(tmp_path, capsys):
     empty.mkdir()
     assert analyzer.main([str(empty)]) == 2
     assert "no observer output" in capsys.readouterr().err
+
+
+def _group(name: str, seconds_by_concurrency: dict[str, float]) -> dict:
+    return {
+        "group": name,
+        "memory": {},
+        "gate": {},
+        "native_concurrency": {
+            "max_observed": max(int(level) for level in seconds_by_concurrency),
+            "seconds_by_concurrency": seconds_by_concurrency,
+        },
+    }
+
+
+def test_analyzer_overshoot_is_strict_by_default_and_toleranced_only_when_stated():
+    """Issue #9120: the 0.272 s overshoot measured on run 44026950753."""
+    analyzer = _load_analyzer_module()
+    bulk = _group("bulk", {"0": 745.312, "1": 1001.276, "2": 294.723, "3": 0.272})
+    strict = analyzer.verdict([bulk], 2)
+    assert len(strict) == 1 and "exceeds the configured bound 2 for 0.272s" in strict[0]
+    assert analyzer.verdict([bulk], 2, tolerance_seconds=1.0) == []
+    # The tolerance is a cap on time above the bound, not a pass for any overshoot.
+    long_overshoot = _group("bulk", {"1": 10.0, "2": 10.0, "3": 1.5, "4": 0.5})
+    assert len(analyzer.verdict([long_overshoot], 2, tolerance_seconds=1.0)) == 1
+    # It never excuses an OOM kill or an unbounded launch.
+    bad = _group("bulk", {"3": 0.1})
+    bad["memory"] = {"oom_kill_events": 1}
+    bad["gate"] = {"unbounded_launches": 2, "unbounded_reasons": {"x": 2}}
+    assert len(analyzer.verdict([bad], 2, tolerance_seconds=5.0)) == 2
+    assert analyzer.excess_seconds(bulk, 2) == pytest.approx(0.272)
+
+
+def _subms_overshoot_group() -> dict:
+    """Two long overlapping processes plus a third that overlaps for 200 ns."""
+    intervals = [(0, 10_000_000), (0, 10_000_000), (5_000_000, 5_000_200)]
+    return {
+        "group": "sub-ms",
+        "memory": {},
+        "gate": {},
+        "native_concurrency": _load_analyzer_module().concurrency_profile(intervals),
+    }
+
+
+def test_analyzer_strict_mode_fails_a_sub_millisecond_overshoot():
+    """Issue #9152: an excursion the 3-decimal display histogram rounds to 0.000."""
+    analyzer = _load_analyzer_module()
+    group = _subms_overshoot_group()
+    profile = group["native_concurrency"]
+    assert profile["max_observed"] == 3
+    # The display figure collapsed it to zero -- the old strict test passed here.
+    assert profile["seconds_by_concurrency"]["3"] == 0.0
+    assert analyzer.excess_seconds(group, 2) == pytest.approx(200e-9)
+
+    strict = analyzer.verdict([group], 2)
+    assert len(strict) == 1 and "exceeds the configured bound 2" in strict[0]
+    assert len(analyzer.verdict([group], 2, tolerance_seconds=0.0)) == 1
+    # A tolerance larger than the true duration (still < 0.5 ms) is honoured ...
+    assert analyzer.verdict([group], 2, tolerance_seconds=1e-6) == []
+    # ... and one smaller than it is not.
+    assert len(analyzer.verdict([group], 2, tolerance_seconds=1e-7)) == 1
+
+
+def test_analyzer_tolerance_equal_to_the_true_excess_passes():
+    analyzer = _load_analyzer_module()
+    group = _subms_overshoot_group()
+    excess = analyzer.excess_seconds(group, 2)
+    assert analyzer.verdict([group], 2, tolerance_seconds=excess) == []
