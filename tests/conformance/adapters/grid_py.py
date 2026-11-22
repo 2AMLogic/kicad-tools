@@ -1,46 +1,24 @@
-"""Group 12 -- the original Python trace-resolver retry checks (#9924).
+"""Group 12 covers Python trace-retry commit clearance.
 
-This row measures the three ``RoutingGrid`` copper validators used by
-``_TraceResolverTransaction.validate_committed_geometry`::
-
-    validate_segment_clearance(seg, exclude_net)      -> (ok, min_actual, loc)
-    validate_via_clearance(via, exclude_net)          -> (ok, min_actual, loc)
-    validate_via_to_via_clearance(via, exclude_net)   -> (ok, min_actual, loc)
-
-This adapter registers the pair's *counterpart* as existing copper -- pads via
-``add_pad``, segments and vias via ``mark_route`` -- and then asks the gate
-about the candidate, exactly as ``Autorouter`` does after a path is found.
-Nothing is patched, relaxed or re-implemented.
-
-Two properties of this consumer are visible in its row and are worth naming,
-because they are findings rather than adapter artefacts:
-
-**It applies two different requirements depending on which object is the
-candidate.**  A segment candidate is compared against ``rules.trace_clearance``;
-a via candidate against ``rules.via_clearance``.  On a board where those differ
-(0.15 vs 0.20 by default -- see ``fixtures.py``) the same pair of objects gets
-two different answers depending on insertion order.  That is #5398, and it is
-why :func:`tests.conformance.adapters._support.pair_contexts` pins one order
-(via-first) and says so.  (Issue #6272 removed the asymmetry for trace/via
-pairs: both validators now resolve ``max(trace_clearance, via_clearance)``
-through ``clearance_resolver.trace_via_clearance_mm``, so the pinned order no
-longer changes this row's verdict.)
-
-**Foreign pads.** For a candidate via these checks visit committed segments
-and vias. The original retry transaction omitted the foreign-pad check that
-the ordinary Python pathfinder performs with ``RoutingGrid.worst_via_pad_deficit``
-(#6117). The C++ commit validator also checks foreign pads (violation type 8).
-Group 12 includes pad/via pairs to measure the retry omission owned by #9924.
+The pad/via reading submits the candidate through the production trace
+transaction, including the component clearance policy and the drilled span.
+Other routing pairs drive the grid validators used by that transaction.
+The published reading uses the router's configured floors. The matched-rule
+reading runs the same consumer at the project's clearance.
 """
 
 from __future__ import annotations
 
 import math
 
+from kicad_tools.router.clearance_resolver import trace_via_clearance_mm
+from kicad_tools.router.core import Autorouter, _TraceResolverTransaction
+from kicad_tools.router.rules import DesignRules
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import (
     ALL_PAIR_KINDS,
     PairContext,
+    layer_stack_for,
     net_ids,
     project_rules,
     router_grid,
@@ -56,7 +34,7 @@ __all__ = ["GridPyAdapter"]
 
 
 class GridPyAdapter:
-    """Drives ``RoutingGrid``'s commit-time clearance validators."""
+    """Exercise the trace retry transaction and its commit-time grid validators."""
 
     name = "grid_py"
     group = 12
@@ -69,16 +47,9 @@ class GridPyAdapter:
         return self._verdicts(case, router_rules(case))
 
     def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
-        """The same three validators on a grid armed at kicad-cli's clearance.
-
-        Issue #9922: the same-rule reading.  ``router_grid(case, rules)`` is
-        what keeps the grid the validators read their requirement from and the
-        project value from disagreeing, exactly as every migrated adapter's
-        gated reading does it.
-        """
         return self._verdicts(case, project_rules(case))
 
-    def _verdicts(self, case: CopperCase, rules) -> set[Verdict]:
+    def _verdicts(self, case: CopperCase, rules: DesignRules) -> set[Verdict]:
         nets = net_ids(case)
         found: set[Verdict] = set()
         for context in _contexts(case):
@@ -101,30 +72,61 @@ class GridPyAdapter:
         case: CopperCase,
         context: PairContext,
         nets: dict[str, int],
-        rules,
+        rules: DesignRules | None = None,
     ) -> tuple[bool, float | None, float]:
         """``(rejected, measured_gap_mm, required_mm)`` for one pair."""
+        rules = router_rules(case) if rules is None else rules
+        existing, candidate = context.existing, context.candidate
+        if isinstance(existing, PadSpec) and isinstance(candidate, ViaSpec):
+            router = Autorouter(
+                case.width,
+                case.height,
+                rules=rules,
+                layer_stack=layer_stack_for(case),
+                force_python=True,
+                adaptive_grid=False,
+            )
+            pad = router_pad(existing, nets)
+            router.pads[pad.key] = pad
+            router.nets.setdefault(pad.net, []).append(pad.key)
+            router.grid.add_pad(pad)
+            transaction = _TraceResolverTransaction(router)
+            transaction.begin()
+            route = single_object_route(candidate, nets)
+            router.routes.append(route)
+            router._mark_route(route)
+            if transaction.validate_committed_geometry():
+                return False, None, rules.trace_clearance
+            # This two-object coupon has a single foreign SMD pad and no
+            # component overrides, so the deficit measures its copper gap.
+            deficit, _ = router.grid.worst_via_pad_deficit(route.vias[0], route.net)
+            return True, rules.trace_clearance - deficit, rules.trace_clearance
+
         grid = router_grid(case, rules)
-        existing = context.existing
         if isinstance(existing, PadSpec):
             grid.add_pad(router_pad(existing, nets))
         else:
             grid.mark_route(single_object_route(existing, nets))
 
-        candidate = context.candidate
         exclude_net = nets[candidate.net]
 
         if isinstance(candidate, SegmentSpec):
             ok, actual, _ = grid.validate_segment_clearance(
                 router_segment(candidate, nets), exclude_net
             )
-            return (not ok, _finite(actual), grid.rules.trace_clearance)
+            required = rules.trace_clearance
+            if isinstance(existing, ViaSpec):
+                required = trace_via_clearance_mm(rules.trace_clearance, rules.via_clearance)
+            return not ok, _finite(actual), required
 
         via = router_via(candidate, nets)
         ok_seg, actual_seg, _ = grid.validate_via_clearance(via, exclude_net)
         ok_via, actual_via, _ = grid.validate_via_to_via_clearance(via, exclude_net)
         actual = min(actual_seg, actual_via)
-        return (not (ok_seg and ok_via), _finite(actual), grid.rules.via_clearance)
+        required = rules.via_clearance
+        if isinstance(existing, SegmentSpec):
+            required = trace_via_clearance_mm(rules.trace_clearance, rules.via_clearance)
+        return not (ok_seg and ok_via), _finite(actual), required
 
 
 def pathfinder_via_pad_control(case: CopperCase, pad: PadSpec, via: ViaSpec) -> tuple[float, bool]:

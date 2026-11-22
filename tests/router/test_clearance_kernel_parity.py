@@ -878,6 +878,10 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # shared ``CLEARANCE_EPSILON_MM`` constant so it agrees with the C++
         # gate.  Constant only -- no kernel geometry is called (like grid.py).
         "router/pathfinder.py",
+        # Issue #9924: the trace-resolver commit check uses the shared
+        # CLEARANCE_EPSILON_MM for via-to-foreign-pad clearance. The grid's
+        # worst_via_pad_deficit supplies the geometry.
+        "router/core.py",
         # Epic #5509 Phase 3b (#5661), consumer group 4: the Python search-time
         # route-halo refinement.  ``RouteHaloGeometry.clear`` builds a
         # ``KSegment``/``KVia`` for the candidate and for each surviving

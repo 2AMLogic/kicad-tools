@@ -391,7 +391,7 @@ def _read_local_courtyards(pcb_path: str) -> dict[str, tuple[float, float, float
                 if g.layer not in layers:
                     continue
                 hw = (g.stroke_width or 0.0) / 2
-                for x, y in list(g.points) if g.graphic_type == "poly" else [g.start, g.end]:
+                for x, y in g.boundary_points if g.graphic_type == "poly" else [g.start, g.end]:
                     pts.extend([(x - hw, y - hw), (x + hw, y + hw)])
             return pts
 

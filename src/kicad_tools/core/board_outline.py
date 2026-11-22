@@ -708,7 +708,7 @@ def _fp_rect_corner_arcs(
     ``(radius r)`` is clamped to half the shorter side; each corner becomes a
     quarter-circle ``(start, mid, end)`` arc, the four walked clockwise on
     screen so consecutive arcs are joined by the straight sides.  Shared by
-    the filled-region reader (:func:`_fp_rect_ring`) and the stroke reader
+    the filled-region reader (:func:`outline_rect_points`) and the stroke reader
     (Issue #9759) so both honour the same radius.
     """
     (x1, y1), (x2, y2) = p1, p2
@@ -738,8 +738,8 @@ def _fp_rect_corner_arcs(
     ]
 
 
-def _fp_rect_ring(node: SExp, p1: Point, p2: Point) -> list[Point]:
-    """Four corners of an ``fp_rect``, or its rounded outline when ``(radius r)``.
+def outline_rect_points(node: SExp, p1: Point, p2: Point) -> list[Point]:
+    """Four corners of a graphic rectangle, or its rounded boundary with ``(radius r)``.
 
     The removed corner material of a rounded rect is not part of the filled
     region.
@@ -801,7 +801,7 @@ def footprint_outline_closed_shapes(root: SExp) -> Iterator[FootprintClosedShape
                 )
             elif tag == "fp_rect":
                 (x1, y1), (x2, y2) = _point(node, "start"), _point(node, "end")
-                corners = _fp_rect_ring(node, (x1, y1), (x2, y2))
+                corners = outline_rect_points(node, (x1, y1), (x2, y2))
                 yield FootprintClosedShape(
                     shape_type="rect",
                     ring=tuple(_to_board_frame(corner, anchor, angle) for corner in corners),

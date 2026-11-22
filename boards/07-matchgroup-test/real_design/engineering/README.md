@@ -88,3 +88,58 @@ pads. The full validator returned 2 for the remaining design check, including
 nine mask errors and 193 warnings. The design check still reports 16 fragment,
 22 covered-track, 20 staircase and 11 detour warnings. See
 `evidence/validation.json` and `evidence/check.json` for the current result.
+
+## Reproduce the warning-free six-layer design
+
+Run the complete Board 07 repair from a Git checkout with a fresh output
+directory. It retrieves the original design inputs from commit
+`47b710fac93bc6c1f93df52a930ec6dc336f7601`, repeats the optimizer and
+retuning, then applies the measured copper in `cleanup-8603.json`.
+
+```sh
+KCT_KICAD_DOCKER=1 uv run python boards/07-matchgroup-test/real_design/engineering/cleanup_8603.py /tmp/board07-clean
+```
+
+Sixteen runs of sub-0.1 mm tracks are simplified between their original
+terminals, including the fragmented UART and clock escapes. The remaining
+edits remove 22 covered tracks, straighten redundant bends and fix mask-side
+pad entries. Seven SDRAM nets now use 21 additional plated through-vias to
+move between their assigned pair of signal layers. Every new via joins
+same-net track endpoints on both layers. The shorter paths and redistributed
+series tuning meet the physical pad-to-pad timing requirements. The two
+assembly sides each carry three stock fiducials. They have unnumbered,
+unconnected pads and are excluded from both the BOM and placement output.
+
+| Pinned KiCad 10.0.6 measurement | Retuned input | Cleaned design |
+| --- | ---: | ---: |
+| Design errors / warnings | 9 / 193 | 0 / 0 |
+| Redundant fragments / covered / staircases / detours | 16 / 22 / 20 / 11 | 0 / 0 / 0 / 0 |
+| Byte 0 / byte 1 spreads (mm) | 0.050 / 4.388 | 1.952 / 4.605 |
+| Address / command spreads (mm) | 4.237 / 3.770 | 3.648 / 4.027 |
+| Maximum clock-relative difference (mm) | 9.370 | 9.881 |
+| Minimum non-pad clock edge gap (mm) | 0.567 | 0.560 |
+| Copper LVS bound pads | 216 | 216 |
+
+`cleaned/candidate.kicad_pcb` and `cleaned/source/sdram_demo.kicad_pcb`
+are the repaired physical pair. Their SHA-256 digests are
+`45943c244519945ee5d51c4b58a28a901cf67b092129c64dcd2ea90a11d2bc84` and
+`ebff1f52709d4cb1a56d6b1558ca1051c223b746c37825ecd93c38ea81bc7575`.
+The unchanged validator writes the measurements to `evidence/`. Its native
+DRC checks before and after saving the refill, native ERC, and both LVS
+checks passed with zero violations, shorts or opens. All 1,738 routed
+segments and 340 authored segments pass the release angle census.
+
+After validation passes, `proposed-design/` holds the two candidate manifests
+and their bound files. The staging step applies
+[`assembly-fiducials.patch`](assembly-fiducials.patch) to its copies of
+`build.py` and `build_source.py` if those copies do not already contain it.
+This lets the release builder verify the six
+board-only marks while it independently regenerates the 43 electrical
+components and 216 bound pads. It runs the ordinary validator on the complete
+pair and writes the result to `release/`.
+
+The published recipes still match the versions in
+`output/manufacturing/design-source.zip`. Issue #8603 remains open until
+the production checkout adopts both physical boards, their bound manifests
+and the matching build recipes together. Issue #8604 then independently
+rechecks the routing and refreshes the manufacturing evidence.

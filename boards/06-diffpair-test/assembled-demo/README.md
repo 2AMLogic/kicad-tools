@@ -53,11 +53,22 @@ The headers are assembled by JLCPCB (through-hole assembly) and are in `bom_jlcp
 
 ## Reproduce
 
+With the C++ router built and the pinned KiCad toolchain active, run the complete
+assembly recipe in an empty directory. It checks the finished board at JLCPCB
+Tier 1. The registered release producer verifies the manufacturing manifest.
+
+```sh
+uv run python boards/06-diffpair-test/assembled-demo/build.py /tmp/lvds-demo --step all
+```
+
+To reproduce the routing step on its own, use the board's conventional through-via
+process for the eight LVTTL nets.
+
 ```sh
 uv run python boards/06-diffpair-test/assembled-demo/generate.py /tmp/lvds-demo
 uv run python -m kicad_tools.cli.route_cmd /tmp/lvds-demo/diffpair_test.kicad_pcb \
   --output /tmp/lvds-demo/diffpair_test_routed.kicad_pcb \
-  --nets IN1,IN2,IN3,IN4,OUT1,OUT2,OUT3,OUT4 --preserve-existing \
+  --manufacturer jlcpcb --nets IN1,IN2,IN3,IN4,OUT1,OUT2,OUT3,OUT4 --preserve-existing \
   --layers 4 --no-auto-layers --no-auto-pour --strict-layers --no-cache \
   --net-class-map /tmp/lvds-demo/net_class_map.json \
   --strategy negotiated --seed 42 --iterations 20 --timeout 120 --grid 0.075

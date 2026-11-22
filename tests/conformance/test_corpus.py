@@ -713,8 +713,6 @@ SAME_RULE_OVER_LEDGER: dict[tuple[int, int], tuple[str, ...]] = {
 
 SAME_RULE_UNDER_LEDGER: dict[tuple[int, int], tuple[str, ...]] = {
     (11, 1): ("pad-via ['N6', 'N7'] gap=0.1933",),
-    (12, 0): ("pad-via ['N5', 'N6'] gap=0.1782",),
-    (12, 1): ("pad-via ['N6', 'N7'] gap=0.1933",),
     (14, 0): ("seg-via ['N1', 'N2'] gap=0.1905", "pad-via ['N5', 'N6'] gap=0.1782"),
     (14, 1): ("seg-via ['N1', 'N2'] gap=0.1972", "pad-via ['N6', 'N7'] gap=0.1933"),
     (14, 2): ("seg-seg ['N3', 'N4'] gap=0.1752",),
@@ -723,6 +721,8 @@ SAME_RULE_UNDER_LEDGER: dict[tuple[int, int], tuple[str, ...]] = {
 RULE_VALUE_LEDGER: dict[tuple[int, int], tuple[str, ...]] = {
     (11, 0): ("seg-via ['N1', 'N2'] gap=0.1905",),
     (11, 1): ("seg-via ['N1', 'N2'] gap=0.1972",),
+    (12, 0): ("pad-via ['N5', 'N6'] gap=0.1782",),
+    (12, 1): ("pad-via ['N6', 'N7'] gap=0.1933",),
     (12, 2): ("seg-seg ['N3', 'N4'] gap=0.1752",),
     (13, 0): ("pad-via ['N5', 'N6'] gap=0.1782",),
     (13, 1): ("pad-via ['N6', 'N7'] gap=0.1933",),
@@ -1130,27 +1130,22 @@ def test_search_refinement_retires_the_group_three_over_rejection(seed: int) -> 
 def test_other_gates_reject_the_trace_retry_pad_via_residuals(
     seed: int, corpus_oracle: CorpusOracle
 ) -> None:
-    """Check the ordinary Python pathfinder, occupancy halo and C++ validator
-    against the foreign-pad pairs the original trace retry accepted (#9924).
-    """
+    """The repaired retry and the three independent gates reject the historical gaps (#9924)."""
     case = generate_case(seed)
     result = corpus_oracle(seed, refill=False)
     truth = {v.nets for v in result.without_zones()}
     commit = _ADAPTERS_BY_GROUP[12]
-    pairs = _pairs_tagged(commit, case, SAME_RULE_UNDER_LEDGER[(12, seed)])
-    assert all(pair.kind == PairKind.PAD_VIA for pair in pairs), (
-        "the trace retry's retained gap is a missing via-vs-pad predicate; "
-        "any other pair kind here is a different finding"
-    )
+    pairs = _pairs_tagged(commit, case, RULE_VALUE_LEDGER[(12, seed)])
+    assert pairs and all(pair.kind == PairKind.PAD_VIA for pair in pairs)
     contexts = {context.pair: context for context in pair_contexts(case)}
     for pair in pairs:
-        assert pair.nets in truth, f"{_pair_tag(pair)} is retained but kicad-cli is clean"
+        assert pair.nets in truth, f"kicad-cli no longer flags {_pair_tag(pair)}"
         context = contexts[pair]
         assert isinstance(context.existing, PadSpec) and isinstance(context.candidate, ViaSpec)
         deficit, accepted = pathfinder_via_pad_control(case, context.existing, context.candidate)
         assert deficit > 0, _pair_tag(pair)
         assert not accepted, _pair_tag(pair)
-    for group in (1, 13):
+    for group in (1, 12, 13):
         adapter = _ADAPTERS_BY_GROUP[group]
         flagged = {v.nets for v in adapter.verdicts_at_project_rules(case)}
         for pair in pairs:

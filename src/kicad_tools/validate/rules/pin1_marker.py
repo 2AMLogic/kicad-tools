@@ -186,7 +186,7 @@ def _graphic_geometry(
     elif kind == "arc" and graphic.mid is not None:
         geom = LineString([xf(p) for p in _arc_points(graphic.start, graphic.mid, graphic.end)])
     elif kind == "poly":
-        points = getattr(graphic, "points", None) or []
+        points = graphic.boundary_points
         if len(points) >= 3:
             polygon = Polygon([xf(p) for p in points])
             if not polygon.is_valid:

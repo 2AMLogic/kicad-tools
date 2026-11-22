@@ -930,32 +930,27 @@ CLASSIFICATIONS: dict[int, Classification] = {
     12: Classification(
         group=12,
         caller=(
-            "`_TraceResolverTransaction.validate_committed_geometry` in `router/core.py`, "
-            "represented by `RoutingGrid.validate_segment_clearance`, "
-            "`validate_via_clearance` and `validate_via_to_via_clearance`"
+            "`_TraceResolverTransaction.validate_committed_geometry` in `router/core.py` "
+            "for pad/via pairs, and its `RoutingGrid` validators for the other pairs"
         ),
         rule=(
             "`trace_clearance` 0.15 mm for `seg-seg` and pad pairs, "
             "`max(trace_clearance, via_clearance)` 0.20 mm for `seg-via` "
             "(#6272), against the project minimum 0.20 mm"
         ),
-        dispositions=frozenset({RULE_VALUE, RETAINED_GAP}),
+        dispositions=frozenset({RULE_VALUE}),
         retained=(
-            "At the matched rule the `seg-seg` and `pad-seg` under-rejections "
-            "disappear. The original trace-resolver retry transaction and this "
-            "adapter checked candidate vias against segments and other vias, "
-            "but omitted clearance to foreign pads. Across seeds 0-199 this "
-            "accounts for all 26 residual `pad-via` pairs, or 52 comparisons "
-            "across the two fill states. On seeds 0 and 1, KiCad measures "
-            "0.1782 and 0.1933 mm against the 0.20 mm project minimum. The "
-            "ordinary Python pathfinder already rejects both through "
-            "`Router._validate_route_clearance`, which calls "
-            "`RoutingGrid.worst_via_pad_deficit` (#6117). The occupancy halo "
-            "(group 1) and C++ commit validator (group 13) also flag both. "
-            "#9924 owns the retry transaction's missing check. Its fix in #9928 "
-            "calls the same foreign-pad predicate. At `824cae89e` the retry "
-            "agrees with KiCad on all 1,294 comparisons. This row retains the "
-            "original measurement."
+            "The retry agrees with KiCad on all 1,294 comparisons at the 0.20 mm "
+            "project minimum. At the router's own rule values it accepts 346 "
+            "comparisons that KiCad flags. All 346 change to rejections at the "
+            "project minimum. The original measurement on `8df85294d` (#9927) "
+            "had 26 foreign-pad/via pairs that the retry accepted even at the "
+            "project minimum, or 52 comparisons across both fill states. The "
+            "repair (#9924, #9928) applies the ordinary Python pathfinder's "
+            "`RoutingGrid.worst_via_pad_deficit` check to committed vias. On "
+            "seeds 0 and 1, the retry, ordinary Python pathfinder, occupancy "
+            "halo and C++ commit validator all reject the pairs whose KiCad gaps "
+            "are 0.1782 and 0.1933 mm."
         ),
     ),
     13: Classification(
