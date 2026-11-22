@@ -11,9 +11,15 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 20 vias / 315.15mm total
+- **Deterministic output**: 22 routes / 20 vias / 318.78mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  (315.21mm before the Issue #8901 re-baseline:
+  has fully converged.  (315.15mm before the Issue #9909 re-baseline:
+  the #9734 lattice snap (PR #9785) stopped float32 read-back noise
+  from steering board 02's optimizer/negotiated-loop decisions, so the
+  four NODE nets re-route +3.63 mm longer on lattice-exact input, on
+  Linux-x86_64 AND macOS-arm64 identically -- see the #9909 note in
+  ``test_routing_output_deterministic_across_seeds``.)  (315.21mm
+  before the Issue #8901 re-baseline:
   #8831 lets ``compress_staircase`` absorb a staircase's trailing
   monotone legs, so the replacement swallows three more segments -- see
   the #8901 note in
@@ -992,7 +998,41 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # touches that file): the old 315.21 pin then passes again, and restoring
     # it reproduces 315.15.  Which net moved was NOT diffed per net.
     # Prior pin (22, 80, 20, 315.21) (#8505).
-    EXPECTED_LENGTH = 315.15
+    #
+    # Re-baselined 2026-11-22 for Issue #9909 (the #9734 lattice snap,
+    # PR #9785, commit 41641aa39 -- the first divergent commit by
+    # bisect between 00a097996 and main).  ``cpp_backend`` now snaps
+    # every C++-emitted segment endpoint and via coordinate back onto
+    # the 0.1 um lattice at the backend boundary, so the optimizer and
+    # the negotiated loop compute their decisions from lattice-exact
+    # float64 geometry instead of float32 round-trip noise (~1.5e-5 mm
+    # ulp at board scale).  The old 315.15 pin encoded decisions that
+    # depended on which side of an exact-clearance boundary that noise
+    # happened to land (#9734 removed it because on board 05 the SAME
+    # noise demoted VCP to unrouted); it is not reproducible from
+    # lattice-exact input on any platform.  Measured 2026-11-22 on
+    # Linux-x86_64 (native ext 1.0.0, Python 3.12): seeds 42/43/44 all
+    # yield (22, 89, 20, 318.78), byte-identical routed PCBs (equal
+    # md5) -- and macOS-arm64 reports the identical tuple (issue
+    # #9909), so this is NOT a platform divergence: the report's
+    # 318.78 mm and Linux agree exactly.  Per-net diff vs the 315.15
+    # reference (seed 42): LINE_A-D identical; NODE_A 87.539 ->
+    # 89.311 mm (+1.772, 16 -> 26 segments, 4 -> 8 vias), NODE_B
+    # 57.194 -> 58.973 (+1.779, 4 -> 2 vias), NODE_C 53.094 -> 52.553
+    # (-0.541), NODE_D 50.532 -> 51.155 (+0.623, 4 -> 2 vias); 5 of 20
+    # via positions shared, 15 redistributed across the NODE nets, 20
+    # total UNCHANGED.  Physical acceptance on the saved seed-42/43/44
+    # boards: native kicad-cli pcb drc --refill-zones on the pinned
+    # KiCad 10.0.6 image reports 0 errors and 0 unconnected items on
+    # all three seeds (the 315.15 reference board is clean too); net
+    # island analysis 10/10 complete, 0 stranded, 0 open connections;
+    # no duplicated identical segments; 8/8 nets routed/connected and
+    # ``test_drc_clean_at_jlcpcb_tier1`` still passes on this output.
+    # The new copper is an acceptable re-route, not a regression: the
+    # removed noise is the same defect whose board-05 face (#9734)
+    # demoted a net, and every gate the old pin's geometry passed is
+    # still clean.
+    EXPECTED_LENGTH = 318.78
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
@@ -1073,6 +1113,9 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # #8253 (atomic chamfer, #8361): the LOWER bound is widened 150 -> 60.
     # NODE_D no longer falls back to the raw staircase (169 -> 83 observed).
     # #8387 (chains cut at interior vias, #8502): 83 -> 80 observed, band unchanged.
+    # #9909 (the #9734 lattice snap, PR #9785): 77 -> 89 observed on BOTH
+    # Linux-x86_64 and macOS-arm64 (the four NODE nets genuinely re-route
+    # on lattice-exact input; 15 of 20 via positions move), band unchanged.
     EXPECTED_SEGMENTS_RANGE = (60, 240)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)
