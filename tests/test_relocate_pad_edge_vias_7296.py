@@ -353,6 +353,22 @@ def test_ring_move_respects_the_via_lock(tmp_path, lock, locked):
         assert pcb._sexp.to_string() == original
 
 
+@pytest.mark.parametrize(("member", "moves"), [("v1", False), ("s1", True)])
+def test_ring_move_respects_nested_group_membership(tmp_path, member, moves):
+    groups = (
+        f'(group "fixture" (uuid inner) (members "{member}"))'
+        '(group "assembly" (uuid outer) (locked yes) (members inner))'
+    )
+    via = _EDGE_VIA.replace("100.65", "100.8").replace("(via (at", "(via (locked no) (at")
+    pcb = _load(tmp_path, groups + via)
+    original = pcb._sexp.to_string()
+    result = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)
+    assert bool(result.moved) == moves
+    if not moves:
+        assert result.skipped[0].reason == "via is locked"
+        assert pcb._sexp.to_string() == original
+
+
 def test_ring_dam_mode_leaves_a_ring_legal_via_alone(tmp_path):
     pcb = _load(tmp_path, _EDGE_VIA.replace("100.65", "100.95"))
     ring = relocate_pad_edge_vias(pcb, _RULES, ring_dam_mm=0.09)

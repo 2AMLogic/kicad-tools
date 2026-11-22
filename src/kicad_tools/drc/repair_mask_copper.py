@@ -38,9 +38,9 @@ from shapely.geometry import LineString, Point, box  # type: ignore[import-untyp
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 from shapely.ops import unary_union  # type: ignore[import-untyped]
 
+from ..core.pcb_item_locks import BoardItemLocks
 from ..sexp import SExp, parse_file
 from .net_compat import resolve_net_atom
-from .repair_clearance import _is_locked
 from .violation import DRCViolation, ViolationType
 
 #: Message marker the mask rule writes for a same-net segment that enters its
@@ -180,6 +180,7 @@ class MaskCopperRepairer:
     def __init__(self, pcb_path: str | Path):
         self.path = Path(pcb_path)
         self.doc = parse_file(self.path)
+        self._locks = BoardItemLocks(self.doc)
         self.modified = False
 
         self.nets: dict[int, str] = {}
@@ -340,7 +341,7 @@ class MaskCopperRepairer:
                 xy = self._xy(node.find(tag))
                 if xy is None or math.dist(xy, point) >= _TOLERANCE_MM:
                     continue
-                if self._net_name(node) != net_name or _is_locked(node):
+                if self._net_name(node) != net_name or self._locks.is_locked(node):
                     return members, True
                 members.append((uuid, node, tag))
         for via in self.doc.find_all("via"):
@@ -459,7 +460,7 @@ class MaskCopperRepairer:
         net_name = self._net_name(seg)
         if not net_name or net_name != pad_net:
             return "not_same_net"
-        if _is_locked(seg):
+        if self._locks.is_locked(seg):
             return "locked_segment"
 
         layer_node = seg.find("layer")
@@ -580,7 +581,7 @@ class MaskCopperRepairer:
         net_name = self._net_name(seg)
         if not net_name or net_name != pad_net:
             return "not_same_net"
-        if _is_locked(seg):
+        if self._locks.is_locked(seg):
             return "locked_segment"
 
         layer_node = seg.find("layer")

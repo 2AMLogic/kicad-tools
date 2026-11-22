@@ -1695,8 +1695,8 @@ def relocate_pad_edge_vias(
     ``stitch_cmd._resolve_mfr_pad_gap_edge``; ``None`` or ``<= 0`` keeps the
     guard off (the pre-#8979 behaviour, bit-for-bit).
     """
+    from kicad_tools.core.pcb_item_locks import BoardItemLocks
     from kicad_tools.core.project_clearance import ProjectClearanceError
-    from kicad_tools.drc.repair_clearance import _is_locked
     from kicad_tools.validate.rules.clearance import _pad_polygon
     from kicad_tools.validate.rules.netclass_clearance_copper import netclass_pair_requirement
 
@@ -1718,6 +1718,7 @@ def relocate_pad_edge_vias(
         pair_requirement = None
         unsupported = f"netclass clearances cannot be modelled ({exc}); not moved"
 
+    locks = BoardItemLocks(pcb._sexp)
     pads_by_net = _collect_smd_pads_by_net(pcb)
     tht_pads = _collect_tht_pads(pcb)
     pair_legs = _diff_pair_net_names(pcb)
@@ -1780,7 +1781,7 @@ def relocate_pad_edge_vias(
         if nets is not None and net_name not in nets:
             continue
         node = pcb.via_source_node(via)
-        if node is not None and _is_locked(node):
+        if node is not None and locks.is_locked(node):
             result.skipped.append(
                 ViaRelocationSkip(
                     x=vx,

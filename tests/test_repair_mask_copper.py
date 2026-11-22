@@ -550,6 +550,28 @@ def test_pull_in_respects_segment_locks(tmp_path, locked_item, lock, locked):
         assert repairer.doc.to_string() == original
 
 
+@pytest.mark.parametrize(
+    "endpoint", [(100.55, 100.55), (100.3, 100.3)], ids=["pull-in", "recentre"]
+)
+@pytest.mark.parametrize("member", ["primary", "joined", "unrelated"])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_mask_repair_respects_group_locks(tmp_path, endpoint, member, dry_run):
+    primary = _seg("primary", (100.3, 102), endpoint)
+    joined = _seg("joined", endpoint, (101.5, 101.5))
+    unrelated = _seg("unrelated", (90, 90), (90, 91))
+    groups = (
+        f'(group "fixture" (uuid inner) (locked no) (members "{member}"))'
+        '(group "assembly" (uuid outer) (locked yes) (members inner))'
+    )
+    board = _board(tmp_path, primary + joined + unrelated + groups)
+    repairer = MaskCopperRepairer(board)
+    original = repairer.doc.to_string()
+    result = repairer.repair([_finding("primary")], max_displacement=1, dry_run=dry_run)
+    assert result.repaired == int(member == "unrelated")
+    if dry_run or member != "unrelated":
+        assert repairer.doc.to_string() == original
+
+
 def test_pull_in_declined_when_entry_crosses_too_shallow(tmp_path):
     """A pull-in whose entry would cross the pad edge at over 45 degrees cannot
     clear the finding, so it is declined (``entry_too_shallow``)."""
