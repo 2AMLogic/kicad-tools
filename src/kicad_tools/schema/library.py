@@ -345,7 +345,7 @@ class LibraryPin:
     position: tuple[float, float]  # Position relative to symbol origin
     rotation: float  # Degrees: 0=right, 90=up, 180=left, 270=down
     length: float
-    unit: int = 1  # Unit number for multi-unit symbols (1-indexed)
+    unit: int = 1  # Placed unit number, or 0 for a pin shared by all units
     shape: str = "line"  # Pin shape: line, inverted, clock, etc.
 
     @property
@@ -363,6 +363,36 @@ class LibraryPin:
         _ = math.radians(self.rotation)  # noqa: F841
         return (0, 0)
 
+    def schematic_position(
+        self,
+        instance_pos: tuple[float, float],
+        instance_rot: float,
+        mirror: str,
+        snap_to_grid: bool,
+    ) -> tuple[float, float]:
+        """Transform this library pin to its position on the placed instance."""
+        # Pin's local position is in library coordinates (Y-up).  KiCad
+        # rotates, then mirrors (``(mirror x)`` negates the rotated Y,
+        # ``(mirror y)`` the rotated X), then Y is negated to convert to
+        # schematic coordinates (Y-down) -- issue #6005.  The previous
+        # mirror-first / swapped-axis transform was wrong for every mirrored
+        # symbol at 0 and 180 degrees.
+        x, y = symbol_to_sheet_offset(*self.position, instance_rot, mirror)
+
+        # Snap rotated offset to nearest 1.27mm grid point when close.
+        # Pin offsets in library coordinates are exact multiples of 1.27mm.
+        # Axis-aligned rotations (0/90/180/270) should preserve this, but
+        # floating-point trig introduces drift (e.g. cos(90deg) ~ 6e-17
+        # instead of 0).  Snap each offset coordinate to the nearest
+        # multiple of 1.27mm if within 0.2mm -- this eliminates trig drift
+        # without affecting genuinely non-grid positions.
+        if snap_to_grid:
+            x = _snap_to_kicad_grid(x)
+            y = _snap_to_kicad_grid(y)
+
+        # Apply translation
+        return (instance_pos[0] + x, instance_pos[1] + y)
+
     @classmethod
     def from_sexp(cls, sexp: SExp, unit: int = 1) -> LibraryPin:
         """Parse from S-expression.
@@ -370,7 +400,7 @@ class LibraryPin:
         Args:
             sexp: The ``(pin ...)`` S-expression node.
             unit: The unit number of the enclosing ``_N_1`` sub-symbol
-                (1-indexed). Defaults to ``1`` for top-level pins.
+                (0 for a shared pin). Defaults to ``1`` for top-level pins.
         """
         pin_type = sexp.get_string(0) or "passive"
         pin_shape = sexp.get_string(1) or "line"
@@ -461,8 +491,8 @@ def _parse_unit_index(unit_name: str, parent_name: str) -> int | None:
     """Parse the unit index from a KiCad unit sub-symbol name.
 
     Unit sub-symbols are named ``{short_name}_{unit}_{variant}`` (e.g.
-    ``MyPart_2_1``). The ``_0_*`` sub-symbol holds graphical decoration and is
-    reported as unit ``0``. ``_N_*`` (N>=1) sub-symbols hold pins for unit N.
+    ``MyPart_2_1``). The ``_0_*`` sub-symbol holds shared pins and graphics.
+    ``_N_*`` (N>=1) sub-symbols hold pins for unit N.
 
     Symbol names may themselves contain underscores, so the trailing
     ``_<int>_<int>`` suffix is split from the right.
@@ -473,7 +503,7 @@ def _parse_unit_index(unit_name: str, parent_name: str) -> int | None:
             sanity-check the prefix.
 
     Returns:
-        The parsed unit index (0 for the graphics sub-symbol, >=1 for pin
+        The parsed unit index (0 for shared content, >=1 for placed
         units), or ``None`` if *unit_name* does not match the expected
         ``<prefix>_<int>_<int>`` shape.
     """
@@ -549,27 +579,7 @@ class LibrarySymbol:
         if not pin:
             return None
 
-        # Pin's local position is in library coordinates (Y-up).  KiCad
-        # rotates, then mirrors (``(mirror x)`` negates the rotated Y,
-        # ``(mirror y)`` the rotated X), then Y is negated to convert to
-        # schematic coordinates (Y-down) -- issue #6005.  The previous
-        # mirror-first / swapped-axis transform was wrong for every mirrored
-        # symbol at 0 and 180 degrees.
-        x, y = symbol_to_sheet_offset(*pin.position, instance_rot, mirror)
-
-        # Snap rotated offset to nearest 1.27mm grid point when close.
-        # Pin offsets in library coordinates are exact multiples of 1.27mm.
-        # Axis-aligned rotations (0/90/180/270) should preserve this, but
-        # floating-point trig introduces drift (e.g. cos(90deg) ~ 6e-17
-        # instead of 0).  Snap each offset coordinate to the nearest
-        # multiple of 1.27mm if within 0.2mm -- this eliminates trig drift
-        # without affecting genuinely non-grid positions.
-        if snap_to_grid:
-            x = _snap_to_kicad_grid(x)
-            y = _snap_to_kicad_grid(y)
-
-        # Apply translation
-        return (instance_pos[0] + x, instance_pos[1] + y)
+        return pin.schematic_position(instance_pos, instance_rot, mirror, snap_to_grid)
 
     def get_all_pin_positions(
         self,
@@ -577,24 +587,21 @@ class LibrarySymbol:
         instance_rot: float = 0,
         mirror: str = "",
         snap_to_grid: bool = True,
+        *,
+        unit: int | None = None,
     ) -> dict[str, tuple[float, float]]:
-        """
-        Get all pin positions for a symbol instance.
+        """Return pin numbers and sheet positions, optionally for one placed unit.
 
-        Returns:
-            Dict mapping pin number to (x, y) position
+        Unit zero pins belong to every placed unit. With no unit specified,
+        look up every pin and keep the first occurrence of each pin number.
         """
-        positions = {}
-        for pin in self.pins:
-            pos = self.get_pin_position(
-                pin.number,
-                instance_pos,
-                instance_rot,
-                mirror,
-                snap_to_grid=snap_to_grid,
-            )
-            if pos:
-                positions[pin.number] = pos
+        pins = self.pins if unit is None else self.get_pins_for_unit(unit)
+        positions: dict[str, tuple[float, float]] = {}
+        for pin in pins:
+            if pin.number not in positions:
+                positions[pin.number] = pin.schematic_position(
+                    instance_pos, instance_rot, mirror, snap_to_grid
+                )
         return positions
 
     @classmethod
@@ -619,7 +626,7 @@ class LibrarySymbol:
         # Parse pins and graphics from unit sub-symbols.
         #
         # Unit sub-symbols are named "{short_name}_{unit}_{variant}" (e.g.
-        # "TPA3116D2_1_1"). The "_0_1" sub-symbol holds graphical decoration;
+        # "TPA3116D2_1_1"). The "_0_1" sub-symbol holds shared graphics and pins;
         # "_N_1" (N>=1) sub-symbols hold the pins for unit N. We parse the unit
         # index from each sub-symbol name so that:
         #   - every pin records its enclosing unit (LibraryPin.unit), and
@@ -634,10 +641,8 @@ class LibrarySymbol:
         for unit_sym in sexp.find_children("symbol"):
             unit_name = unit_sym.get_string(0) or ""
             parsed_unit = _parse_unit_index(unit_name, short_name)
-            # Pins inherit the enclosing sub-symbol's unit index. The "_0_1"
-            # graphics sub-symbol (parsed_unit == 0) has no pins; treat
-            # unparsable names as unit 1.
-            pin_unit = parsed_unit if (parsed_unit and parsed_unit >= 1) else 1
+            # Preserve unit zero for pins shared by every placed unit.
+            pin_unit = parsed_unit if parsed_unit is not None else 1
 
             for pin_sexp in unit_sym.find_all("pin"):
                 pins.append(LibraryPin.from_sexp(pin_sexp, unit=pin_unit))
@@ -897,9 +902,9 @@ class LibrarySymbol:
             unit: Unit number (1-indexed)
 
         Returns:
-            List of pins for that unit
+            List of pins for that unit, including shared unit zero pins
         """
-        return [p for p in self.pins if p.unit == unit]
+        return [p for p in self.pins if p.unit in (0, unit)]
 
     def to_sexp_node(self) -> SExp:
         """Generate S-expression for this symbol.
@@ -932,7 +937,7 @@ class LibrarySymbol:
         Derived symbols inherit pins and graphics from their base and
         must NOT contain unit sub-symbols.
 
-        The ``_0_1`` sub-symbol holds graphical decoration (body shapes).
+        The ``_0_1`` sub-symbol holds shared pins and graphical decoration.
         The ``_N_1`` sub-symbols hold pins for each unit.
         """
         children: list[SExp] = [SExp(value=self.name)]
@@ -968,12 +973,14 @@ class LibrarySymbol:
         # Derived symbols inherit graphics and pins from the base --
         # they must NOT emit unit sub-symbols.
         if not self.extends:
-            # Add _0_1 sub-symbol for graphical shapes (body decoration)
-            if self.graphics:
+            # Shared pins and body decoration belong in the unit zero block.
+            common_pins = self.get_pins_for_unit(0)
+            if self.graphics or common_pins:
                 gfx_name = f"{short_name}_0_1"
                 gfx_children: list[SExp] = [SExp(value=gfx_name)]
                 for graphic in self.graphics:
                     gfx_children.append(graphic.to_sexp_node())
+                gfx_children.extend(pin.to_sexp_node() for pin in common_pins)
                 children.append(SExp(name="symbol", children=gfx_children))
 
             # Add unit symbols with their pins
