@@ -43,6 +43,7 @@ def run_creepage_command(args) -> int:
     from kicad_tools._shapely import has_shapely
     from kicad_tools.creepage.engine import (
         SELV_WORKING_VOLTAGE_V,
+        BoardThicknessError,
         apply_census_waivers,
         compute_creepage_census,
         mains_suspect_nets,
@@ -240,6 +241,7 @@ def run_creepage_command(args) -> int:
             min_mm,
             net_class=net_class,
             board=str(pcb_path),
+            order_thickness_mm=getattr(args, "order_thickness_mm", None),
             # In map mode the requirement varies per pair, so the report-level
             # scalar requirement / working voltage are null (per-pair).
             required_creepage_mm=required_creepage_mm,
@@ -259,6 +261,16 @@ def run_creepage_command(args) -> int:
             attach_zones=attach_zones,
             pair_bounds=pair_bounds or None,
         )
+    except BoardThicknessError as e:
+        if fmt == "json":
+            error = {"error": str(e), "passed": False, "gate_passed": False}
+            if e.declarations_mm:
+                error["board_thickness_source"] = "unresolved"
+                error["board_thickness_declarations_mm"] = e.declarations_mm
+            print(json.dumps(error, indent=2))
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+        return 1
     except StandardLookupError as e:
         # A per-pair |ΔV| out of the table's range (map mode): fail LOUD, never
         # silently pass a safety-critical audit.
@@ -309,6 +321,14 @@ def run_creepage_command(args) -> int:
         _render_table_standard(report, guard_triggered=guard_triggered, show_witness=show_witness)
     else:
         _render_table(report, guard_triggered=guard_triggered, show_witness=show_witness)
+
+    if fmt != "json" and report.board_thickness_mm is not None:
+        print(
+            f"Cross-face board thickness: {report.board_thickness_mm:g} mm ({report.board_thickness_source})"
+        )
+        if report.board_thickness_declarations_mm:
+            cad = report.board_thickness_declarations_mm
+            print(f"PCB declarations: header {cad['general']:g} mm, stackup {cad['stackup']:g} mm.")
 
     if guard_triggered:
         _warn_hv_unclassified(report, mains_suspects, working_voltage)

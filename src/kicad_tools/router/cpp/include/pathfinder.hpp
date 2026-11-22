@@ -469,6 +469,11 @@ private:
     // if open set exhausted / iteration limit hit.
     RouteResult run_astar_loop();
 
+    bool trace_step_vias_clear(const AStarNode& current, const Segment& step,
+                               float start_x, float start_y) const;
+    bool goal_stub_vias_clear(const AStarNode& node, float end_x, float end_y,
+                              int net, float emit_trace_width) const;
+
     // Reconstruct path from A* result.
     //
     // Issue #3130: ``emit_trace_width`` / ``emit_via_diameter`` /

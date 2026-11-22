@@ -180,6 +180,47 @@ def test_nonzero_origin_avoids_track(tmp_path):
         assert (dx**2 + (y - 3) ** 2) ** 0.5 >= 2.0
 
 
+@pytest.mark.parametrize("owner", ["board", "footprint"])
+@pytest.mark.parametrize(
+    "layers,restrictions,blocked_layers",
+    [
+        ('(layers "F.Cu" "B.Cu")', "(pads not_allowed)", {"F.Cu", "B.Cu"}),
+        ('(layers "F&B.Cu")', "(footprints not_allowed)", {"F.Cu", "B.Cu"}),
+        ('(layer "F.Cu")', "(pads not_allowed) (footprints not_allowed)", {"F.Cu"}),
+        ('(layer "B.Cu")', "(pads not_allowed)", {"B.Cu"}),
+        ('(layers "F.Cu" "B.Cu")', "(vias not_allowed)", set()),
+    ],
+    ids=["pads-both", "footprints-both", "pads-and-footprints-front", "pads-back", "vias-only"],
+)
+def test_rule_area_limits_fiducials_on_its_copper_layers(
+    tmp_path, owner, layers, restrictions, blocked_layers
+):
+    from shapely.geometry import Point, box
+
+    from kicad_tools.cli import main
+    from kicad_tools.cli.pcb_add_fiducials import DEFAULT_KEEPOUT_MM
+
+    # KiCad stores rule-area vertices in board-file coordinates for either owner.
+    zone = f"""(zone (net 0) (net_name "") {layers} (keepout {restrictions})
+        (polygon (pts (xy 100 100) (xy 111 100) (xy 111 111) (xy 100 111))))"""
+    if owner == "footprint":
+        zone = f"""(footprint "RF:Antenna" (layer "F.Cu") (at 105 105)
+            (property "Reference" "AE1" (at 0 0) (layer "F.SilkS")) {zone})"""
+    path = _write(tmp_path, _board(origin=(100, 100), extra=zone))
+    assert main(["pcb", "add-fiducials", str(path), "--sides", "front,back"]) == 0
+
+    fids = _fids(path)
+    region = box(0, 0, 11, 11)  # PCB.load returns board-relative positions.
+    for layer in ("F.Cu", "B.Cu"):
+        sites = [fp.position for fp in fids if fp.layer == layer]
+        assert len(sites) == 3
+        assert not _collinear(sites)
+        if layer in blocked_layers:
+            assert all(region.distance(Point(site)) > DEFAULT_KEEPOUT_MM for site in sites)
+        else:
+            assert (3.5, 3.5) in sites
+
+
 class _FP:
     def __init__(self, name="", reference="", tags=""):
         self.name, self.reference, self.tags = name, reference, tags
