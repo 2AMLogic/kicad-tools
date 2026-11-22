@@ -82,7 +82,7 @@ def _rules() -> DesignRules:
     )
 
 
-def _add_pad(router, ref, pin, x, y, net, net_name):
+def _add_pad(router, ref, pin, x, y, net, net_name, *, layer=Layer.F_CU):
     router.add_component(
         ref,
         [
@@ -94,7 +94,7 @@ def _add_pad(router, ref, pin, x, y, net, net_name):
                 "height": 0.4,
                 "net": net,
                 "net_name": net_name,
-                "layer": Layer.F_CU,
+                "layer": layer,
             }
         ],
     )
@@ -123,7 +123,10 @@ def _wall(router, *, gap: bool) -> None:
 
 
 def _classes(router: Autorouter) -> None:
-    router.router.net_class_map = {"VICTIM": USB3_CLASS, "BLOCKER": USB2_CLASS}
+    router.router.net_class_map = {
+        router.net_names[VICTIM]: USB3_CLASS,
+        router.net_names[BLOCKER]: USB2_CLASS,
+    }
 
 
 def _crossing_board() -> Autorouter:
@@ -143,16 +146,13 @@ def _crossing_board() -> Autorouter:
 
 
 def _local_board() -> Autorouter:
-    """VICTIM stays west of the wall; BLOCKER straddles it.
-
-    The RX1- reduction -- once BLOCKER is ripped the victim lands cheaply,
-    and the re-land that fails is BLOCKER's own basin sweep.
-    """
+    """Scale the RX1− transaction to a local victim and a three-pad USB2_D−."""
     router = Autorouter(20.0, 6.0, rules=_rules(), force_python=True, physics_enabled=False)
-    _add_pad(router, "JX", "1", 1.5, 3.0, VICTIM, "VICTIM")
-    _add_pad(router, "JX", "2", 4.0, 3.0, VICTIM, "VICTIM")
-    _add_pad(router, "BX", "1", 6.0, 3.0, BLOCKER, "BLOCKER")
-    _add_pad(router, "BX", "2", 16.0, 3.0, BLOCKER, "BLOCKER")
+    _add_pad(router, "J1", "B10", 1.5, 3.0, VICTIM, "USB3_RX1-")
+    _add_pad(router, "U2", "B6", 4.0, 3.0, VICTIM, "USB3_RX1-")
+    _add_pad(router, "J1", "A7", 16.0, 3.0, BLOCKER, "USB2_D-")
+    _add_pad(router, "J1", "B7", 17.0, 3.0, BLOCKER, "USB2_D-")
+    _add_pad(router, "U1", "11", 6.0, 3.0, BLOCKER, "USB2_D-")
     _wall(router, gap=True)
     _classes(router)
     return router
@@ -170,7 +170,7 @@ def _sealed_board(*, force_python: bool = True) -> Autorouter:
     return router
 
 
-def _blocker_route(*, crossing: bool) -> Route:
+def _blocker_route(*, crossing: bool, net_name: str = "BLOCKER") -> Route:
     """Authored BLOCKER copper, pre-committed like the #6342 seal ring.
 
     ``crossing`` routes it through the gap (the re-land must re-find that
@@ -184,7 +184,7 @@ def _blocker_route(*, crossing: bool) -> Route:
         ]
     else:
         segs = [Segment(x1=6.0, y1=3.0, x2=8.0, y2=3.0, width=0.25, layer=Layer.F_CU, net=BLOCKER)]
-    return Route(net=BLOCKER, net_name="BLOCKER", segments=segs)
+    return Route(net=BLOCKER, net_name=net_name, segments=segs)
 
 
 def _pads_by_net(router: Autorouter) -> dict[int, list]:
@@ -355,23 +355,50 @@ def test_native_drain_and_python_fallback_must_both_prove_no_path(
     assert routes[BLOCKER][0] is blocker
 
 
+@pytest.mark.parametrize("silent_rescue", [False, True])
 @pytest.mark.parametrize("protect", [True, False])
-def test_plane_commit_veto_has_its_own_outcome(tmp_path, protect):
+def test_plane_commit_veto_has_its_own_outcome(tmp_path, protect, silent_rescue):
+    from kicad_tools.router.access_ripup import RipupCycleGuard
     from tests.test_route_plane_zone_9597 import _board_text, _load, _sig_id
 
     source = tmp_path / "plane.kicad_pcb"
     source.write_text(_board_text())
-    board = _load(source)
+    board = _load(source, force_python=silent_rescue)
     board.protect_plane_zones = protect
     board.router.net_class_map = board.net_class_map
     spare = 77
-    for ref, x in [("B1", 5.0), ("B2", 6.0)]:
-        _add_pad(board, ref, "1", x, 3.0, spare, "SPARE")
-    blocker = Route(spare, "SPARE", segments=[Segment(5, 3, 6, 3, 0.20, Layer.F_CU, spare)])
+    for ref, y in [("B1", 8.0), ("B2", 12.0)]:
+        _add_pad(board, ref, "1", 12.0, y, spare, "SPARE", layer=Layer.IN2_CU)
+    blocker = Route(spare, "SPARE", segments=[Segment(12, 8, 12, 12, 0.20, Layer.IN2_CU, spare)])
     assert board._mark_route(blocker)
+    board.grid.mark_route_usage(blocker)
     board.routes.append(blocker)
     routes = {spare: [blocker]}
-    ok, outcome = _run_ripup(board, routes, victim=_sig_id(board), blocker=spare, timeout=30)
+    sig = _sig_id(board)
+    if silent_rescue:
+        worker = _neg(board)
+        pads = _pads_by_net(board)
+        assert worker.find_blocking_nets_for_connection(*pads[sig]) == {spare}
+        ok = board._silent_rescue_one(
+            sig,
+            worker,
+            routes,
+            pads,
+            0.5,
+            30,
+            lambda _line: None,
+            lambda: "test",
+            ripup_guard=RipupCycleGuard(),
+            ripup_history={},
+            max_ripups_per_net=3,
+            relief_probe_attempts={},
+            max_relief_probes_per_net=0,
+            relief_deadline=None,
+            deterministic_rescue=True,
+        )
+        outcome = worker.last_ripup_outcome
+    else:
+        ok, outcome = _run_ripup(board, routes, victim=sig, blocker=spare, timeout=30)
     if protect:
         assert not ok and outcome.reason == RIPUP_VICTIM_REFUSED
         assert "split zone [+3V3]" in board.plane_zone_refusals[0]
@@ -385,32 +412,50 @@ def test_plane_commit_veto_has_its_own_outcome(tmp_path, protect):
 # ---------------------------------------------------------------------------
 
 
-def test_sibling_reland_failure_rolls_back_with_reason_sibling_failed():
-    """Victim lands, blocker cannot re-land under the same budget.
+def test_sibling_reland_failure_restores_both_three_pad_usb2_routes(monkeypatch):
+    """A short re-land succeeds before the crossing exhausts its budget."""
+    board = _local_board()
+    local = Route(BLOCKER, "USB2_D-", segments=[Segment(16, 3, 17, 3, 0.25, Layer.F_CU, BLOCKER)])
+    crossing = _blocker_route(crossing=True, net_name="USB2_D-")
+    original = [local, crossing]
+    for route in original:
+        assert board._mark_route(route)
+        board.grid.mark_route_usage(route)
+        board.routes.append(route)
+    routes = {BLOCKER: original.copy()}
+    usage = board.grid._usage_count.copy()
+    search = board.router.route
+    attempts = []
 
-    The archived USB3_RX1- transaction: the victim routed with the blockers
-    ripped, then USB2_D- could not re-land and the whole transaction rolled
-    back.  Here the victim's two pads are local (cheap route once the
-    blocker is ripped) while the blocker's re-land must sweep the gap basin
-    the cap cuts -- with the rollback preserving the blocker verbatim.
-    """
-    router = _local_board()
-    blocker = _blocker_route(crossing=True)
-    assert router._mark_route(blocker)
-    net_routes: dict[int, list[Route]] = {BLOCKER: [blocker]}
-    router.router._max_iterations_override = CUT_CAP
-    ok, outcome = _run_ripup(router, net_routes)
-    assert ok is False
-    assert outcome.reason == RIPUP_SIBLING_FAILED
-    assert outcome.failed_sibling == BLOCKER
-    # The #3470 rollback: the victim's fresh copper is gone, the blocker's
-    # exact original object is restored.
-    assert net_routes[BLOCKER] == [blocker]
-    assert net_routes.get(VICTIM, []) == []
-    probe = router.grid.world_to_grid(11.0, 4.45)
-    assert router.grid.is_blocked_for_net(
-        probe[0], probe[1], router.grid.layer_to_index(Layer.F_CU.value), VICTIM
+    def observe(start, end, **options):
+        candidate = search(start, end, **options)
+        attempts.append(
+            (start.net_name, candidate is not None, board.router.last_route_iteration_limited)
+        )
+        return candidate
+
+    monkeypatch.setattr(board.router, "route", observe)
+    board.router._max_iterations_override = CUT_CAP
+    ok, outcome = _run_ripup(board, routes)
+    assert not ok and outcome.reason == RIPUP_SIBLING_FAILED
+    assert board.net_names[outcome.failed_sibling] == "USB2_D-"
+    assert attempts == [
+        ("USB3_RX1-", True, False),
+        ("USB2_D-", True, False),
+        ("USB2_D-", False, True),
+    ]
+    assert routes[BLOCKER][0] is local and routes[BLOCKER][1] is crossing
+    assert board.routes[0] is local and board.routes[1] is crossing
+    assert len(board.routes) == 2 and not routes.get(VICTIM)
+    assert (board.grid._usage_count == usage).all()
+    probe = board.grid.world_to_grid(11.0, 4.45)
+    assert board.grid.is_blocked_for_net(
+        *probe, board.grid.layer_to_index(Layer.F_CU.value), VICTIM
     )
+
+    board.router._max_iterations_override = FULL_CAP
+    assert _run_ripup(board, routes)[0]
+    assert len(routes[VICTIM]) == 1 and len(routes[BLOCKER]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -468,9 +513,7 @@ def test_committed_board_connects_all_four_usb3_polarities_and_displaced_nets():
 def test_cpp_backend_routes_the_corridor_the_python_cap_cut():
     """Backend cross-check: C++ lands the corridor the cut search rejected.
 
-    The full-scale divergence (C++ ~96k expansions vs Python >3M on
-    USB3_RX1+ on the identical grid state) at fixture scale: same board,
-    same classes, default C++ backend -- it connects immediately.
+    The two backends use the same reduced board and net classes.
     """
     router = Autorouter(20.0, 6.0, rules=_rules(), physics_enabled=False)
     _add_pad(router, "JX", "1", 1.5, 3.0, VICTIM, "VICTIM")
