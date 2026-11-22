@@ -45,8 +45,10 @@ from tests.conformance.adapters._support import (
     ALL_PAIR_KINDS,
     PairContext,
     net_ids,
+    project_rules,
     router_grid,
     router_pad,
+    router_rules,
     router_segment,
     router_via,
     single_object_route,
@@ -67,10 +69,23 @@ class GridPyAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same three validators on a grid armed at kicad-cli's clearance.
+
+        Issue #9922: the same-rule reading.  ``router_grid(case, rules)`` is
+        what keeps the grid the validators read their requirement from and the
+        project value from disagreeing, exactly as every migrated adapter's
+        gated reading does it.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules) -> set[Verdict]:
         nets = net_ids(case)
         found: set[Verdict] = set()
         for context in _contexts(case):
-            rejected, actual, required = self._judge(case, context, nets)
+            rejected, actual, required = self._judge(case, context, nets, rules)
             if rejected:
                 net_a, net_b = context.nets
                 found.add(
@@ -89,9 +104,10 @@ class GridPyAdapter:
         case: CopperCase,
         context: PairContext,
         nets: dict[str, int],
+        rules,
     ) -> tuple[bool, float | None, float]:
         """``(rejected, measured_gap_mm, required_mm)`` for one pair."""
-        grid = router_grid(case)
+        grid = router_grid(case, rules)
         existing = context.existing
         if isinstance(existing, PadSpec):
             grid.add_pad(router_pad(existing, nets))
