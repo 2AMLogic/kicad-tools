@@ -253,6 +253,47 @@ def test_already_legal_board_is_noop(tmp_path: Path):
     assert _silk_findings(path) == []
 
 
+def test_report_distinguishes_repair_scope_from_a_clean_silk_check(tmp_path: Path, capsys):
+    from kicad_tools.cli import main as kct_main
+
+    line_across_edge = (
+        "  (gr_line (start 99 125) (end 101 125) (stroke (width 0.15) (type solid))"
+        ' (layer "F.SilkS") (uuid "edge-line"))'
+    )
+    path = _write(tmp_path, line_across_edge)
+    report = legalize_silk(path, _jlcpcb_rules())
+    assert report.unresolved == []
+    assert set(report.rules_covered) == {
+        "silkscreen_line_width",
+        "silkscreen_text_height",
+        "silkscreen_text_thickness",
+        "silk_pad_clearance",
+        "silk_hole_overlap",
+        "silk_ref_obscured",
+    }
+    assert _silk_findings(path) == [("silk_edge_clearance", "warning")]
+
+    args = ["fix-silkscreen", str(path), "--all", "--mfr", "jlcpcb"]
+    assert kct_main([*args, "--dry-run", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["rules_covered"] == report.rules_covered
+    assert data["unresolved"] == []
+
+    assert kct_main(args) == 0
+    output = capsys.readouterr().out
+    assert "No unresolved items from this repair pass." in output
+    assert "kct check <board> --only silkscreen --mfr jlcpcb" in output
+
+
+def test_report_omits_pad_clearance_when_profile_skips_clipping(tmp_path: Path):
+    from dataclasses import replace
+
+    path = _write(tmp_path, MAIN_BODY)
+    rules = replace(_jlcpcb_rules(), min_silk_to_pad_clearance_mm=None)
+    report = legalize_silk(path, rules, dry_run=True)
+    assert "silk_pad_clearance" not in report.rules_covered
+
+
 # ---------------------------------------------------------------------------
 # The #9795 via exception: silk over a via is never clipped, moved or reported
 # ---------------------------------------------------------------------------

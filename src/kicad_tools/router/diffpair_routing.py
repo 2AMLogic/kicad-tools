@@ -444,6 +444,10 @@ _GUIDE_SELF_APPROACH_DETOUR_RATIO: float = float(
 # fixed cost over the boosted neighbourhood; one pass is too weak to divert the
 # A* out of a dense escape fan, so accumulate several.
 _GUIDE_BIAS_BOOST_REPEATS: int = int(os.environ.get("KCT_GUIDE_BIAS_BOOST_REPEATS", "6"))
+# On board 06's captured USB3_RX1+ request, Python's weight-1 search took
+# about 77 s against a 15 s probe budget. Weight 2 found an eight-segment
+# guide in about 1 s (Issue #9852). The native probe uses weight 1.
+_GUIDE_PROBE_PYTHON_ASTAR_WEIGHT: float = 2.0
 # Issue #4460: opt-in verbose provenance for shadow self-check declines.  When
 # set, every ``self-check overlap`` decline prints WHICH part of the assembled
 # shadow (start tail / body / end tail) produced the offending segment and where
@@ -12048,7 +12052,20 @@ class DiffPairRouter:
                 for loc in avoid_locations:
                     for _ in range(_GUIDE_BIAS_BOOST_REPEATS):
                         router._boost_avoidance_at(loc, avoid_radius_cells)
-            return router.route(start_pad, end_pad, per_net_timeout=per_net_timeout)
+            # Weight scales the heuristic in the search priority. The path
+            # cost also includes turn and via penalties. The corridor uses
+            # the resulting clearance-checked guide to seed its dilation.
+            from .pathfinder import Router as _PythonRouter
+
+            guide_weight = (
+                _GUIDE_PROBE_PYTHON_ASTAR_WEIGHT if isinstance(router, _PythonRouter) else 1.0
+            )
+            return router.route(
+                start_pad,
+                end_pad,
+                per_net_timeout=per_net_timeout,
+                weight=guide_weight,
+            )
         except Exception as exc:  # pragma: no cover — defensive
             logger.debug(
                 "corridor guide route raised for %r -> %r: %s",
