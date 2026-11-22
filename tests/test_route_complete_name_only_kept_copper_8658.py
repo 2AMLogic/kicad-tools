@@ -207,14 +207,22 @@ def _blocks_xy(sexp: str) -> set[tuple[float, float, float, float]]:
     return _kept_xy(f"(kicad_pcb\n{sexp}\n)")
 
 
-def test_plain_preserve_existing_name_only_drops_only_the_rerouted_nets_copper(tmp_path, capsys):
-    """The disclosed behaviour change: stale kept copper of a re-routed net goes."""
-    rc, text, out = _route(_kept_board(tmp_path), capsys, "--preserve-existing")
+def test_name_only_explicit_net_selection_replaces_only_the_selected_copper(tmp_path, capsys):
+    rc, text, out = _route(_kept_board(tmp_path), capsys, "--nets", "/A")
     assert rc == 0, text
     written = out.read_text()
     # /A is re-routed, so its stale kept trace is replaced by the routed copy.
     assert _kept_xy(written) == {PADLESS_C_XY, ANONYMOUS_XY}
     assert parse_segments(written)["/A"], "the re-routed net must still have copper"
+    assert re.search(r"\(net\s+\d", written) is None
+
+
+@pytest.mark.parametrize("flags", [(), ("--preserve-existing",)])
+def test_whole_board_incremental_route_keeps_partly_routed_name_only_net(tmp_path, capsys, flags):
+    rc, text, out = _route(_kept_board(tmp_path), capsys, *flags)
+    assert rc == 0, text
+    written = out.read_text()
+    assert _kept_xy(written) == {KEPT_A_XY, PADLESS_C_XY, ANONYMOUS_XY}
     assert re.search(r"\(net\s+\d", written) is None
 
 

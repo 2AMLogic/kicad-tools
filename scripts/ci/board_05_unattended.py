@@ -169,6 +169,15 @@ def gate_failures(row: dict) -> list[str]:
     count("kicad_drc_warnings", "kicad-cli DRC warnings")
     count("kct_check_warnings", f"kct check --mfr {MANUFACTURER} warnings")
 
+    # Issue #9424: a ``kct check`` whose mask pass ran but degraded (the
+    # ``mask_to_copper_incomplete`` info marker of #8914) measured nothing;
+    # like every other gate that did not run, it fails the row.
+    if row.get("kct_check_mask_incomplete"):
+        failures.append(
+            "kct check mask_to_copper coverage incomplete "
+            "(unqualified kicad-cli? run under KCT_KICAD_DOCKER=1)"
+        )
+
     for key, label in (("lvs_copper_clean", "copper LVS"), ("lvs_label_clean", "label LVS")):
         value = row.get(key)
         if value is None:
@@ -334,12 +343,20 @@ def run_kct_check(routed: Path, evidence: Path) -> dict:
         if v.get("severity") == "error":
             rule = v.get("rule_id") or v.get("rule") or "?"
             by_rule[rule] = by_rule.get(rule, 0) + 1
-    return {
+    row = {
         "kct_check_errors": summary.get("errors"),
         "kct_check_warnings": summary.get("warnings"),
         "kct_check_by_rule": dict(sorted(by_rule.items())),
         "kct_check_report": str(report_path),
     }
+    # Issue #9424 (the #8914 trap): when the mask pass runs but cannot
+    # complete -- an unqualified host kicad-cli cannot attribute native mask
+    # regions -- it degrades to zero findings plus one info
+    # ``mask_to_copper_incomplete`` marker, which reads as a clean board to
+    # the error/warning counters.  "Not checked" is not "clean" here either.
+    if any(v.get("rule_id") == "mask_to_copper_incomplete" for v in report.get("violations", [])):
+        row["kct_check_mask_incomplete"] = True
+    return row
 
 
 def run_lvs(sch: Path, routed: Path, evidence: Path) -> dict:
