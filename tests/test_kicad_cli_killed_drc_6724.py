@@ -1103,6 +1103,23 @@ class TestRunnerOtherSites:
 
         assert res.success is False
 
+    def test_explicit_saved_refill_never_degrades_to_read_only_drc(self, monkeypatch, tmp_path):
+        from kicad_tools.cli import runner
+
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240108) (generator pcbnew))")
+        monkeypatch.setattr(runner, "_kicad_drc_supports_refill", lambda _cli: False)
+
+        def reject_flags(cmd, **kwargs):
+            assert "--refill-zones" in cmd and "--save-board" in cmd
+            Path(cmd[cmd.index("--output") + 1]).write_text('{"violations":[]}')
+            return subprocess.CompletedProcess(cmd, 1, "", "Unknown argument: --save-board")
+
+        monkeypatch.setattr(runner.subprocess, "run", reject_flags)
+        result = runner.run_refill_zones(pcb, kicad_cli=Path("kicad-cli"), require_save=True)
+        assert not result.success
+        assert "Unknown argument" in result.stderr
+
     def test_run_refill_zones_killed_fails(self, monkeypatch, tmp_path):
         from kicad_tools.cli import runner
 
