@@ -16,6 +16,38 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-22
 
+- **PR #9903**: docs: report Board 05 unattended routing on Linux and macOS
+- **PR #9898**: ci(board-05): fail a kct check whose mask coverage silently degraded
+- **PR #9897**: docs: show the JLCPCB assembly workflow on the homepage and in the README
+- **PR #9894**: fix(router): choose a via-balanced pair and preserve the connector escape
+- **PR #9890**: fix(router): reserve exhausted plane-pad escapes before retrying
+- **PR #9889**: test(route): pin the grid for sealed and partial copper audits
+- **PR #9885**: fix(readiness): record assembly prep in the manufacturing manifest
+- **PR #9882**: fix(pcb): respect antenna and pad keepouts when placing fiducials
+- **PR #9881**: feat(route): preserve existing tracks and vias by default
+- **PR #9877**: fix: use the ordered board thickness for cross-face creepage
+- **PR #9873**: fix(router): check trace gaps beside stored same-net vias
+- **PR #9865**: feat: legalise silk by default in route, route-auto, placement, export and readiness
+- **PR #9864**: fix(validate): gate staircase shortcuts on the physical-gap slit floor
+- **PR #9857**: fix: stitcher keeps emitted stub tracks out of the same-net pad slit band
+- **PR #9646**: fix: gate pcb prune and optimize-traces on per-pair creepage shortfall
+- **Issue #9893** (closed): docs: surface JLCPCB assembly and submission automation on kicad-tools.org and in the README
+- **Issue #9884** (closed): Select a via-balanced differential pair with a short, clear connector escape
+- **Issue #9883** (closed): Reserve a legal power-plane escape for stranded mixed-net two-pad footprints
+- **Issue #9879** (closed): Record fiducial and board-identification prep in the manufacturing manifest
+- **Issue #9878** (closed): Respect footprint-owned antenna and pad keepouts when placing fiducials
+- **Issue #9876** (closed): test flake: test_fully_sealed_net_reports_unrouted_and_leaves_no_copper times out in Test
+- **Issue #9862** (closed): redundant_copper_staircase: shortcut legs can create same-net copper slits physical_copper_gap flags (zones/same-net branches unmodeled)
+- **Issue #9846** (closed): Pad-aware stitcher adds GND tracks inside the own-net pad slit band (board 06 U2.B4, U3.48)
+- **Issue #9825** (closed): creepage: stackup-vs-(general (thickness)) precedence disagrees with KiCad when both are present
+- **Issue #9799** (closed): Run the silk legalisation pass by default in route, optimize-placement and export, with --no-silk-fix (#9795 phase 3)
+- **Issue #9640** (closed): pcb prune and optimize-traces still straighten deliberate near-pad geometry into creepage failures (prune has no voltage map; optimize gate active but passes them)
+- **Issue #9627** (closed): kct route: lock existing copper by default on boards that already carry routing copper
+- **Issue #9273** (closed): Same-net trace slit band sees only committed segments: measure whether any producer routes a via before the trace that skirts it
+- **Issue #9235** (closed): Slow-suite test test_armc_route_gives_usb_d_equal_vias_with_every_gate fails on main (USB_D+ 2 vias, USB_D- 3)
+- **Issue #8530** (closed): Fiducials + board-identification silkscreen should be automatic: add-fiducials / add-board-info commands, a check rule, and a default tapeout step
+- **Issue #8425** (closed): Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B
+- **Issue #8214** (closed): optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback
 - **PR #9806**: fix: stop optimize-traces --drc-aware --mfr breaking mask-clean pad escapes
 - **Issue #8585** (closed): repair-creepage follow-ups: live kicad-cli DRC run, vanished-target, DRC identity, via_floating reason
 - **Issue #8563** (closed): route: withdrawn pour-oracle closures leave legacy (net <n>) stubs on name-only KiCad 10 boards
