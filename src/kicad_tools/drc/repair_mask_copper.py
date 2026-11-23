@@ -58,7 +58,6 @@ from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyp
 
 from ..schema.pcb import Arc
 from ..sexp import SExp
-from .net_compat import resolve_net_atom
 from .repair_copper_gap import CopperGapRepairer
 from .violation import DRCViolation, ViolationType
 
@@ -108,9 +107,6 @@ _MIN_TAIL_MM = 0.005
 # The four connection line directions through the new via centre (each used
 # in both orientations): 0, 45, 90 and 135 degrees.
 _ALIGNED_TAIL_DIRS = ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0))
-# How far beyond the search disc project-rule obstacles are still collected
-# (mm): covers the largest clearance requirement plus a track width.
-_PROJECT_OBSTACLE_SLACK_MM = 1.0
 
 
 @dataclass
@@ -344,8 +340,10 @@ class MaskCopperRepairer(CopperGapRepairer):
     def _net_name(self, node: SExp) -> str:
         net_node = node.find("net")
         atom = net_node.get_first_atom() if net_node else None
-        _, name = resolve_net_atom(None if atom is None else str(atom), self.nets, self.net_names)
-        return name or ""
+        # The parser preserves quoted names as strings, including names such as "123".
+        if isinstance(atom, str):
+            return atom
+        return self.nets.get(atom, "") if isinstance(atom, int) else ""
 
     @staticmethod
     def _xy(node: SExp | None) -> tuple[float, float] | None:
@@ -1475,7 +1473,14 @@ class MaskCopperRepairer(CopperGapRepairer):
         # floor can still violate the project's net classes, and the saved
         # board would then fail its native re-check.
         project = self._via_project_obstacles(
-            via_node, net_name, at, size, self._via_span_layer_set(via_node), joined, pads
+            via_node,
+            net_name,
+            at,
+            size,
+            self._via_span_layer_set(via_node),
+            joined,
+            pads,
+            max_displacement,
         )
 
         push = self._push_clear_of_openings(
@@ -1620,7 +1625,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             project_detail = self._via_project_refusal(
                 project,
                 Point(new_at).buffer(size / 2, quad_segs=32),
-                [(old, new, layer) for old, new, layer in moves],
+                moves[len(span_layers) :],  # the via disc is checked separately
                 new_at,
             )
             if project_detail is not None:
@@ -1739,10 +1744,12 @@ class MaskCopperRepairer(CopperGapRepairer):
             width_node = join_node.find("width")
             other = self._xy(join_node.find("end" if join_tag == "start" else "start"))
             net_node = join_node.find("net")
+            net_value = net_node.get_first_atom() if net_node is not None else None
             if not layer or join_tag is None or width_node is None or other is None:
                 return None
+            if not isinstance(net_value, (int, str)):
+                return None
             width = _num(width_node)
-            net_value: int | str = int(_num(net_node)) if net_node is not None else 0
             # The approach line through ``other`` and the anchored end; the
             # connection point stays on it, so the segment never changes angle.
             line_dx, line_dy = end[0] - other[0], end[1] - other[1]
@@ -1915,6 +1922,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         span_layers: frozenset[str],
         joined: list[tuple[str, SExp, str, tuple[float, float]]],
         pads: dict,
+        max_displacement: float,
     ) -> tuple | None:
         """Foreign copper and holes near the search window with the project's
         own per-pair requirements; ``None`` when the authored rules cannot
@@ -1952,17 +1960,29 @@ class MaskCopperRepairer(CopperGapRepairer):
                     _bare(layer_node.get_first_atom()),
                 )
             )
-        reach = size + _PROJECT_OBSTACLE_SLACK_MM
-        window = box(at[0] - reach, at[1] - reach, at[0] + reach, at[1] + reach)
         copper: list[tuple[BaseGeometry, float, frozenset[str], str, list[float]]] = []
         holes: list[tuple[tuple[float, float], float, float, float, str]] = []
 
-        def old_gaps(geom: BaseGeometry, layers: frozenset[str]) -> list[float]:
+        def add_copper(
+            geom: BaseGeometry, required: float, layers: frozenset[str], description: str
+        ) -> None:
+            if required <= 0:
+                return
+            # A moved endpoint can close the old gap by at most the caller's
+            # displacement bound. Check the whole approach on its copper layer.
             gaps = [old_disc.distance(geom)]
             gaps.extend(
                 line.distance(geom) if layer in layers else math.inf for line, layer in old_lines
             )
-            return gaps
+            if min(gaps) <= required + max_displacement + _TOLERANCE_MM:
+                copper.append((geom, required, layers, description, gaps))
+
+        def add_hole(
+            centre: tuple[float, float], radii: float, required: float, description: str
+        ) -> None:
+            gap = math.dist(at, centre) - radii
+            if required > 0 and gap <= required + max_displacement + _TOLERANCE_MM:
+                holes.append((centre, radii, required, gap, description))
 
         joined_uuids = {uuid for uuid, _node, _tag, _end in joined}
         for uuid, node in self._segment_nodes().items():
@@ -1977,8 +1997,6 @@ class MaskCopperRepairer(CopperGapRepairer):
             if seg_start is None or seg_end is None or width_node is None:
                 continue
             geom = LineString([seg_start, seg_end]).buffer(_num(width_node) / 2, quad_segs=16)
-            if not window.intersects(geom):
-                continue
             other_net = self._net_name(node)
             required = rules.clearance(
                 via_props,
@@ -1987,16 +2005,8 @@ class MaskCopperRepairer(CopperGapRepairer):
                 ),
                 layer,
             )
-            if required <= 0:
-                continue
-            copper.append(
-                (
-                    geom,
-                    required,
-                    frozenset({layer}),
-                    f"track on net {other_net or 'unassigned'}",
-                    old_gaps(geom, frozenset({layer})),
-                )
+            add_copper(
+                geom, required, frozenset({layer}), f"track on net {other_net or 'unassigned'}"
             )
 
         for other_via in self.doc.find_all("via"):
@@ -2011,33 +2021,18 @@ class MaskCopperRepairer(CopperGapRepairer):
             if not (layers & span_layers):
                 continue
             geom = Point(other_at).buffer(_num(other_size) / 2, quad_segs=32)
-            if not window.intersects(geom):
-                continue
             other_props = item_props_for_type("via", other_net, True)
             required = rules.clearance(via_props, other_props)
-            if required > 0:
-                copper.append(
-                    (
-                        geom,
-                        required,
-                        layers,
-                        f"via at ({other_at[0]:.2f}, {other_at[1]:.2f})",
-                        old_gaps(geom, layers),
-                    )
-                )
+            description = f"via at ({other_at[0]:.2f}, {other_at[1]:.2f})"
+            add_copper(geom, required, layers, description)
             other_drill = other_via.find("drill")
             if other_drill is not None and drill > 0:
-                hole_required = rules.hole_to_hole(via_props, other_props)
-                if hole_required > 0:
-                    holes.append(
-                        (
-                            other_at,
-                            drill / 2 + _num(other_drill) / 2,
-                            hole_required,
-                            math.dist(at, other_at) - drill / 2 - _num(other_drill) / 2,
-                            f"via at ({other_at[0]:.2f}, {other_at[1]:.2f})",
-                        )
-                    )
+                add_hole(
+                    other_at,
+                    (drill + _num(other_drill)) / 2,
+                    rules.hole_to_hole(via_props, other_props),
+                    description,
+                )
 
         from kicad_tools.schema.pcb import PCB
 
@@ -2079,21 +2074,14 @@ class MaskCopperRepairer(CopperGapRepairer):
                     else max(local, rules.min_clearance or 0.0)
                 )
                 required = max(rules.physical_clearance(via_props, pad_props), electrical)
-                if required > 0 and window.intersects(poly):
-                    copper.append((poly, required, layers, f"pad {ref}", old_gaps(poly, layers)))
+                add_copper(poly, required, layers, f"pad {ref}")
                 if pad.drill > 0 and drill > 0:
-                    hole_required = rules.hole_clearance(via_props, pad_props)
-                    if hole_required > 0:
-                        radii = drill / 2 + pad.drill / 2
-                        holes.append(
-                            (
-                                centre,
-                                radii,
-                                hole_required,
-                                math.dist(at, centre) - radii,
-                                f"pad {ref} hole",
-                            )
-                        )
+                    add_hole(
+                        centre,
+                        (drill + pad.drill) / 2,
+                        rules.hole_clearance(via_props, pad_props),
+                        f"pad {ref} hole",
+                    )
         return copper, holes
 
     def _via_project_refusal(
@@ -2193,7 +2181,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         seg.append(SExp.list("width", round(width, 4)))
         seg.append(SExp.list("layer", layer))
         seg.append(SExp.list("uuid", uuid))
-        seg.append(SExp.list("net", net))
+        seg.append(SExp.list("net", SExp.quoted_atom(net) if isinstance(net, str) else net))
         return seg
 
     def _insert_segment_after_last(self, node: SExp) -> None:

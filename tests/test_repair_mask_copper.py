@@ -1475,7 +1475,8 @@ def test_via_alternate_move_keeps_approach_lines_and_adds_aligned_tails(tmp_path
             _end(board, tail[0])
 
 
-def test_via_tail_plan_builds_aligned_in_land_connections(tmp_path):
+@pytest.mark.parametrize("net_atom", [1, "N1", "123"], ids=["number", "name", "numeric-name"])
+def test_via_tail_plan_builds_aligned_in_land_connections(tmp_path, net_atom):
     """Issue #9939: the kept-line contact plan, exercised directly.
 
     A diagonal and a vertical approach both end at the via; after a move to
@@ -1496,8 +1497,17 @@ def test_via_tail_plan_builds_aligned_in_land_connections(tmp_path):
         + _seg("trk-b", (101.35, 98.2), (101.35, 99.6), layer="B.Cu")
     )
     board = _board(tmp_path, copper)
+    net_name = "N1" if isinstance(net_atom, int) else net_atom
+    if isinstance(net_atom, str):
+        text = "\n".join(
+            line for line in board.read_text().splitlines() if not line.startswith("  (net ")
+        )
+        text = text.replace('(net 1 "N1")', f'(net "{net_name}")').replace(
+            "(net 1)", f'(net "{net_name}")'
+        )
+        board.write_text(text + "\n")
     repairer = MaskCopperRepairer(board)
-    joined = repairer._anchored_ends(101.35, 99.6, "N1")
+    joined = repairer._anchored_ends(101.35, 99.6, net_name)
     assert [tag for _u, _n, tag, _e in joined] == ["end", "end"]
     plan = repairer._via_tail_plan(joined, (101.45, 99.48), 0.6, 1.0)
     assert plan is not None
@@ -1540,7 +1550,7 @@ def test_via_tail_plan_builds_aligned_in_land_connections(tmp_path):
         kind="via",
         pad_uuid="pad-r1-1",
         pad_ref="R1/1",
-        net_name="N1",
+        net_name=net_name,
         layer="F.Cu-B.Cu",
         old_x=101.35,
         old_y=99.6,
@@ -1562,16 +1572,19 @@ def test_via_tail_plan_builds_aligned_in_land_connections(tmp_path):
     assert _saved_copper(board, "via-p")[1] == (101.45, 99.48)
     assert _end(board, "trk-f")[1] == by_uuid["trk-f"][4:]
     assert _end(board, "trk-b")[1] == (101.35, 99.48)
+    reloaded = MaskCopperRepairer(board)
     for tail in added:
+        segment = reloaded._segment_by_uuid(tail[0])
+        assert segment.find("net").get_first_atom() == net_atom
+        assert reloaded._net_name(segment) == net_name
         assert set(_end(board, tail[0])) == {
             (round(tail[1], 6), round(tail[2], 6)),
             (round(tail[3], 6), round(tail[4], 6)),
         }
         assert _saved_copper(board, tail[0])[0].length > 0  # a real segment, not noise
 
-    undo = MaskCopperRepairer(board)
-    assert undo.undo_action(action)
-    undo.save(board)
+    assert reloaded.undo_action(action)
+    reloaded.save(board)
     assert _saved_copper(board, "via-p")[1] == (101.35, 99.6)
     assert _end(board, "trk-f")[1] == (101.35, 99.6)
     assert _end(board, "trk-b")[1] == (101.35, 99.6)
@@ -1609,14 +1622,16 @@ def test_via_alternate_blocked_in_every_direction_stays_in_place(tmp_path):
     assert board.read_bytes() == original
 
 
-def test_via_alternate_respects_authored_net_class_over_manufacturer_floor(tmp_path):
+@pytest.mark.parametrize(("wall_x", "required"), [(102.09, 0.3), (103.26, 1.5)])
+def test_via_alternate_respects_authored_net_class_over_manufacturer_floor(
+    tmp_path, wall_x, required
+):
     """Issue #9939: a destination that only passes the manufacturer floor is
     refused when the project's authored net class demands more clearance.
 
-    The Board 03 control: a floor-legal move created five native 0.150 mm
-    violations.  Here the foreign net carries a 0.3 mm class while the
-    manufacturer floor stays at 0.127 mm, so the primary destination is
-    refused by the project gate and an alternate beyond 0.3 mm is taken.
+    The farther wall exercises a class whose clearance exceeds the old
+    fixed search box. Both boards have a legal alternate and a constrained
+    control in which the via has to stay put.
     """
     from kicad_tools.manufacturers.base import DesignRules
 
@@ -1637,11 +1652,7 @@ def test_via_alternate_respects_authored_net_class_over_manufacturer_floor(tmp_p
         min_via_diameter_mm=0.6,
         min_annular_ring_mm=0.15,
     )
-    # A net-2 wall beside the primary destination: its copper sits 0.256 mm
-    # from the moved disc (above the 0.127 mm manufacturer floor, below the
-    # authored 0.3 mm class, closer than the pre-move 0.34 mm) while staying
-    # clear of the vertical approach itself.
-    blocker = _seg("trk-x", (102.09, 99.3), (102.09, 100.0), net=2)
+    blocker = _seg("trk-x", (wall_x, 99.3), (wall_x, 100.0), net=2)
     board = _board(tmp_path, copper + "\n" + blocker)
     board.with_suffix(".kicad_pro").write_text(
         json.dumps(
@@ -1649,7 +1660,7 @@ def test_via_alternate_respects_authored_net_class_over_manufacturer_floor(tmp_p
                 "net_settings": {
                     "classes": [
                         {"name": "Default", "clearance": 0.2},
-                        {"name": "Wide", "clearance": 0.3},
+                        {"name": "Wide", "clearance": required},
                     ],
                     "netclass_assignments": {"N2": "Wide"},
                 }
@@ -1667,7 +1678,7 @@ def test_via_alternate_respects_authored_net_class_over_manufacturer_floor(tmp_p
     moved = (round(action.new_x, 4), round(action.new_y, 4))
     assert moved != dest
     blocker_geom, _ends = _saved_copper(board, "trk-x")
-    assert Point(moved).buffer(0.3).distance(blocker_geom) >= 0.3 - 1e-6
+    assert Point(moved).buffer(0.3).distance(blocker_geom) >= required - 1e-6
     assert _pad_poly(board, "R1/1").distance(Point(moved).buffer(0.3)) >= 0.11 - 1e-6
 
     # With no room to go around, the same board refuses: every candidate
