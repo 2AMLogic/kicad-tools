@@ -2871,6 +2871,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         + ("PASS" if native_stable else "FAIL (see above)")
     )
 
+    # The lattice can turn alongside its own DDR pad opening (#9960). Clear
+    # these escapes on the routed copper before measuring the final bus skew.
+    from ddr_pad_escapes import clear_ddr_pad_escapes
+
+    changed_escapes = clear_ddr_pad_escapes(output_path, generate_pcb.DDR_DATA_BYTE_0_SINGLES)
+    if changed_escapes:
+        print(f"   Cleared {changed_escapes} DDR pad escapes before skew tuning")
+
     # Issue #7612: lengthen the shorter half of the four pairs the router
     # leaves skewed.  Last on purpose: ``retune_pcb`` splices copper into the
     # finished board (it was written for one, and it measures the shipped
@@ -2878,7 +2886,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # repair or translation legs above.  The bumps are F.Cu copper beside pour
     # zones, so the recipe's fill and the pour audit run again afterwards.
     print("\n11. Tuning diff-pair skew (Issue #7612)...")
-    if retune_pair_skew(output_path, sidecar_path):
+    if retune_pair_skew(output_path, sidecar_path) or changed_escapes:
         refill = subprocess.run(fill_argv, capture_output=True, text=True)
         if refill.returncode != 0:
             print(f"   WARNING: re-fill after skew tuning failed (rc={refill.returncode})")

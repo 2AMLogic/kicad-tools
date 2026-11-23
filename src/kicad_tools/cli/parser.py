@@ -2886,7 +2886,12 @@ def _add_pcb_parser(subparsers) -> None:
         type=float,
         default=30.0,
         metavar="VOLTS",
-        help="Minimum net-pair |dV| that triggers a creepage widening (default: 30.0)",
+        help=(
+            "Accepted for compatibility (default: 30.0). Does not exempt pairs "
+            "involving the reinforced net: reinforce applies the standard-derived "
+            "clearance to every mapped pair with a non-zero |dV|, matching "
+            "'kct creepage' (#10015)."
+        ),
     )
     pcb_reinforce.add_argument(
         "-o",

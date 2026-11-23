@@ -37,8 +37,9 @@ replace all four policy values with the requirement for your actual process.
 do not fail the verdict. Mask expansion is the board's native effective
 expansion. An explicit `--mask-copper-config` overrides the default policy,
 `--skip mask_to_copper` disables it, and runs without `--mfr` (or with a
-manufacturer that has no cited policy) stay opt-in. Without native KiCad 10.0.5
-the result is `incomplete` with the reason shown, never a silent pass.
+manufacturer that has no cited policy) stay opt-in. An unqualified KiCad build
+leaves the check incomplete and blocks sign-off. The coverage note names the
+available qualified releases.
 `MaskCopperPolicy.warning_clearance_mm` enables the warning tier in custom
 requests too.
 
@@ -64,10 +65,11 @@ Save this request as `mask-request.json`:
 }
 ```
 
-Choose the Python interpreter that can import KiCad's `pcbnew` module. The CLI
-and Python must both use KiCad 10.0.5. The object-attribution profile reproduces
-that version's plotting branches; other versions require separate verification
-and currently produce incomplete coverage. `native_command` and
+Choose the Python interpreter that can import KiCad's `pcbnew` module. Use the
+same qualified release for both `kicad-cli` and `pcbnew`. KiCad 10.0.5, 10.0.6
+and 10.0.8 have each passed the native plot comparison. With Docker available,
+`KCT_KICAD_DOCKER=1` runs both passes in the pinned KiCad image when using the
+default commands. `native_command` and
 `native_python_command` are argument lists, so container launchers can be used
 without shell interpolation. Both processes must see the temporary source files
 at the same absolute paths; set `native.scratch_dir` to a shared mounted directory

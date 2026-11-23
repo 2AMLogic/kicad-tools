@@ -26,7 +26,7 @@ from .mask_geometry import _validate_structure
 #: apart. Do not add a version here without repeating that comparison; an
 #: unqualified build must keep failing loudly rather than silently attributing
 #: mask geometry from an unverified plot profile.
-QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6")
+QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6", "10.0.8")
 
 #: Custom-rule constraint names this checker may reason about during native
 #: object attribution. Module-level so the non-native suite can pin membership
@@ -202,16 +202,12 @@ def _resolve_native_python_command(
 
 
 def unqualified_native_version_reason(native_version: str) -> str:
-    """Refusal for a KiCad build outside ``QUALIFIED_NATIVE_VERSIONS``, with a way forward.
-
-    The refusal itself is unchanged -- an unqualified plot profile must keep
-    failing loudly -- but, like the no-interpreter reason (#8946), it names
-    what to do instead of only what went wrong (#9009).
-    """
+    """Describe the effect on sign-off and how to run a qualified plot profile."""
     return (
         "Native object attribution requires a qualified KiCad plot profile "
-        f"({', '.join(QUALIFIED_NATIVE_VERSIONS)}); got "
-        f"{native_version or 'no version'}. Set KCT_KICAD_DOCKER=1 to run both "
+        f"({', '.join(QUALIFIED_NATIVE_VERSIONS)}). The version probe got "
+        f"{native_version or 'no version'}, leaving mask_to_copper unevaluated "
+        "and blocking sign-off. Set KCT_KICAD_DOCKER=1 to run both "
         "native passes in the pinned kicad/kicad image (docker required), or "
         "install a qualified KiCad release."
     )
