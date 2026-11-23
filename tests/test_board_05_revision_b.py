@@ -100,7 +100,11 @@ def test_reference_copper_rejects_a_changed_real_net(tmp_path, hardware):
     assert PCB.load(path).segments
     from kicad_tools.router.quantize import segment_angle_census
 
-    off_angle = [seg for seg in segment_angle_census(path)[1] if str(seg.get("uuid")) not in BOARD05_DOCUMENTED_OFF_ANGLE]
+    off_angle = [
+        seg
+        for seg in segment_angle_census(path)[1]
+        if str(seg.get("uuid")) not in BOARD05_DOCUMENTED_OFF_ANGLE
+    ]
     assert not off_angle, (
         "Reviewed copper must preserve the fleet 45-degree policy outside the"
         " pinned #9921 de-slant escapes: " + repr(off_angle)
@@ -109,8 +113,8 @@ def test_reference_copper_rejects_a_changed_real_net(tmp_path, hardware):
     # recipe, so a future re-route that retires one fails here instead of
     # silently masking it.
     present = {str(seg.get("uuid")) for seg in segment_angle_census(path)[1]}
-    assert BOARD05_DOCUMENTED_OFF_ANGLE <= present, (
-        "Stale #9921 de-slant pins: " + repr(sorted(BOARD05_DOCUMENTED_OFF_ANGLE - present))
+    assert present >= BOARD05_DOCUMENTED_OFF_ANGLE, "Stale #9921 de-slant pins: " + repr(
+        sorted(BOARD05_DOCUMENTED_OFF_ANGLE - present)
     )
     hardware.build_pcb().save(path)
     changed = PCB.load(path)
