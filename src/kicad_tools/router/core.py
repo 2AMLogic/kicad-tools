@@ -18646,31 +18646,28 @@ class Autorouter:
                 self.SEARCH_SCOPE_CELL_MAX_MM,
             )
             grid = self.grid
-            width = float(getattr(grid, "width", 0.0) or 0.0)
-            height = float(getattr(grid, "height", 0.0) or 0.0)
-            origin_x = float(getattr(grid, "origin_x", 0.0) or 0.0)
-            origin_y = float(getattr(grid, "origin_y", 0.0) or 0.0)
-            m = self.FAILURE_NEIGHBOURHOOD_MARGIN_MM
-            xs = [p.x for p in pads]
-            ys = [p.y for p in pads]
-            span_x = max(xs) - min(xs) + 2 * m
-            span_y = max(ys) - min(ys) + 2 * m
-            if width < span_x or height < span_y:
-                # A grid narrower than the terminals plus margin cannot bound
-                # the fill; use the terminals' own extent instead.
-                origin_x = min(xs) - m
-                origin_y = min(ys) - m
-                width = span_x
-                height = span_y
+            width, height = grid.width, grid.height
+            origin_x, origin_y = grid.origin_x, grid.origin_y
+            # A detour can use the full routing grid even when the terminal
+            # margin crosses a board edge. An incomplete grid cannot bound it.
+            if (
+                width <= 0
+                or height <= 0
+                or not all(
+                    origin_x <= p.x <= origin_x + width and origin_y <= p.y <= origin_y + height
+                    for p in pads
+                )
+            ):
+                return None
             cols = max(int(width / cell) + 1, 1)
             rows = max(int(height / cell) + 1, 1)
             if cols * rows > self.SEARCH_SCOPE_MAX_CELLS:
                 cell = (width * height / self.SEARCH_SCOPE_MAX_CELLS) ** 0.5
                 cols = max(int(width / cell) + 1, 1)
                 rows = max(int(height / cell) + 1, 1)
-            num_layers = int(getattr(grid, "num_layers", 0) or 0)
+            num_layers = grid.num_layers
             if num_layers <= 0:
-                num_layers = 2
+                return None
 
             def layer_index(layer: Any) -> int | None:
                 try:

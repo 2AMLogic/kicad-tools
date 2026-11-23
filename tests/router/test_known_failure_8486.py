@@ -497,6 +497,7 @@ def test_seal_copper_regime_change_resets_the_streak():
 def _wall_board(
     gap: bool = False,
     *,
+    terminal_x=(6.0, 24.0),
     terminal_y=(6.0, 14.0),
     gap_y=(9.4, 10.6),
     rules=None,
@@ -519,7 +520,13 @@ def _wall_board(
 
     router = Autorouter(width=width, height=20.0, rules=rules)
     # The victim: net 1, one pad each side of the wall.
-    router.add_component("U1", [pad(1, 6.0, terminal_y[0], 1), pad(2, 24.0, terminal_y[1], 1)])
+    router.add_component(
+        "U1",
+        [
+            pad(1, terminal_x[0], terminal_y[0], 1),
+            pad(2, terminal_x[1], terminal_y[1], 1),
+        ],
+    )
     # A full-height wall of overlapping through-hole pads at x=15 (each its
     # own single-pad net: fixed obstacles no rip-up can move).  ``gap`` opens
     # a corridor -- the negative control's real reachability change.
@@ -615,6 +622,7 @@ def test_reopening_a_live_corridor_restores_the_first_search_budget():
 
 @pytest.mark.requires_router_cpp
 @pytest.mark.parametrize("same_iteration", [False, True])
+@pytest.mark.parametrize("terminal_x", [(6.0, 24.0), (2.0, 28.0)], ids=["interior", "edge"])
 @pytest.mark.parametrize(
     "terminal_y, gap_y, wall_extent, via_y",
     [
@@ -623,12 +631,12 @@ def test_reopening_a_live_corridor_restores_the_first_search_budget():
     ],
 )
 def test_removing_a_replacement_wall_restores_the_first_open_search(
-    same_iteration, terminal_y, gap_y, wall_extent, via_y
+    same_iteration, terminal_x, terminal_y, gap_y, wall_extent, via_y
 ):
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment, Via
 
-    router = _wall_board(gap=True, terminal_y=terminal_y, gap_y=gap_y)
+    router = _wall_board(gap=True, terminal_x=terminal_x, terminal_y=terminal_y, gap_y=gap_y)
     guard = RipupCycleGuard()
     layers = (Layer.F_CU, Layer.B_CU)
     remote = Route(
@@ -663,9 +671,10 @@ def test_removing_a_replacement_wall_restores_the_first_open_search(
             guard.begin_iteration(it, {1: None})
         routes = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
         assert run.call_args.kwargs["per_net_timeout"] == 30.0
-        assert routes and 1 not in guard.capped_streak
+        assert _net_pad_pairs(router, 1, routes) == {frozenset({0, 1})}
+        assert 1 not in guard.capped_streak
 
-    fresh = _wall_board(gap=True, terminal_y=terminal_y, gap_y=gap_y)
+    fresh = _wall_board(gap=True, terminal_x=terminal_x, terminal_y=terminal_y, gap_y=gap_y)
     fresh.routes.append(remote)
     fresh.grid.mark_route(remote)
     expected = fresh._route_net_negotiated(1, 1.0, per_net_timeout=30.0)
@@ -1173,6 +1182,23 @@ def test_search_witness_ignores_copper_sealed_behind_a_full_wall():
     # Removing the bounding wall opens the compartment: the track enters the
     # reachable space and the wall's shapes leave the board.
     assert snapshot(10.0, with_wall=False) != base
+
+
+@pytest.mark.parametrize(("attribute", "value"), [("height", 0), ("origin_x", 10)])
+def test_unknown_or_partial_board_extent_keeps_the_board_wide_witness(
+    monkeypatch, attribute, value
+):
+    router = _three_pad_board(gap=False, width=36.0)
+    wall = _side_wall(120, 30.0)
+
+    def snapshot(y):
+        return router._failure_neighbourhood_print(
+            1, {120: [wall], 121: [_compartment_track(y)]}, search_geometry=True
+        )
+
+    assert snapshot(10.0) == snapshot(10.4)
+    monkeypatch.setattr(router.grid, attribute, value)
+    assert snapshot(10.0) != snapshot(10.4)
 
 
 @pytest.mark.requires_router_cpp
