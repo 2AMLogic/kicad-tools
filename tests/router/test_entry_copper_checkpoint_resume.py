@@ -81,10 +81,9 @@ NET_B = "B"
 def _write_coupon(directory: Path) -> Path:
     """Write the public two-net checkpoint regression coupon into *directory*.
 
-    Verbatim board generator from the PR #9937 auditor comment: six pads on
-    nets A (3 pads) and B (2 pads) plus a wide keepout frame W, one routing
-    layer.  Both nets are intentionally left with open connections so a full
-    route rips and re-searches them.
+    The coupon from the PR #9937 audit has three pads on A, two on B and one
+    wide pad on W. All six pads are on F.Cu. The router can use F.Cu and
+    B.Cu. A and B start open so a full route rips and re-searches them.
     """
     parts = {
         NET_A: [(4, 0.65, 0.6, 1.2), (4, 15.35, 0.6, 1.2), (18, 0.65, 0.6, 0.6)],
