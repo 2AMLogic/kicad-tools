@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1092,6 +1093,77 @@ def run_fill_zones(
                 )
             fill_kwargs["timeout"] = budget
 
+    def fill(target: Path | None) -> KiCadCLIResult:
+        return _fill_and_remediate_zones(
+            pcb_path, target, kicad_cli, native_clearance, time_left, fill_kwargs
+        )
+
+    if output_path is not None:
+        return _fill_separate_output(pcb_path, output_path, fill)
+    return fill(None)
+
+
+def _fill_separate_output(
+    pcb_path: Path,
+    output_path: Path,
+    fill: Callable[[Path], KiCadCLIResult],
+) -> KiCadCLIResult:
+    """Publish a separate PCB only after its writable candidate completes the fill."""
+    from kicad_tools.sidecars import copy_project_sidecars
+
+    # Preserve symbolic links by publishing to their referent. Never use a
+    # directory rename to bypass permissions on an existing destination.
+    destination = output_path.resolve()
+    try:
+        with destination.open("r+b") as existing:
+            previous = os.fstat(existing.fileno())
+            if not stat.S_ISREG(previous.st_mode):
+                return KiCadCLIResult(
+                    success=False, stderr=f"Zone fill output must be a file: {output_path}"
+                )
+            if os.path.samestat(previous, pcb_path.stat()):
+                return KiCadCLIResult(success=False, stderr="Zone fill output is the input board")
+            output_mode = stat.S_IMODE(previous.st_mode)
+    except FileNotFoundError:
+        output_mode = stat.S_IMODE(pcb_path.stat().st_mode)
+    except OSError as exc:
+        return KiCadCLIResult(
+            success=False,
+            stderr=f"Zone fill refused — cannot access existing output {output_path}: {exc}",
+        )
+
+    with tempfile.TemporaryDirectory(prefix=".kct-zone-fill-", dir=destination.parent) as tmp:
+        candidate = Path(tmp) / output_path.name
+        # KiCad resolves project settings and custom rules by the board stem.
+        # Use the same sidecars as a run at the requested output location.
+        copy_project_sidecars(output_path, candidate)
+        # Copy just the bytes. A read-only source must still yield a writable
+        # working board for the native save and any thermal remediation.
+        shutil.copyfile(pcb_path, candidate)
+        candidate.chmod(0o600)
+        result = fill(candidate)
+        if result.success:
+            candidate.chmod(output_mode)
+            candidate.replace(destination)
+            result.output_path = output_path
+        return result
+
+
+def _fill_and_remediate_zones(
+    pcb_path: Path,
+    output_path: Path | None,
+    kicad_cli: Path,
+    native_clearance: bool,
+    time_left: Callable[[], float | None] | None,
+    fill_kwargs: dict[str, float],
+) -> KiCadCLIResult:
+    native_fill = _kicad_cli_has_fill_zones(kicad_cli)
+    if output_path is not None and not native_fill:
+        # The DRC backend saves in place. Its private working board already
+        # contains the source and can be normalized directly.
+        pcb_path = output_path
+        output_path = None
+
     # Pre-fill normalization (Issues #3727 / #3729): legacy zones use thermal
     # relief for *all* pads, which starves pads that cannot form the 2 spokes
     # KiCad's geometric DRC requires (``starved_thermal``).  The selective
@@ -1118,7 +1190,7 @@ def run_fill_zones(
 
     fill_started = _monotonic()
     try:
-        if _kicad_cli_has_fill_zones(kicad_cli):
+        if native_fill:
             result = _run_fill_zones_native(fill_input, output_path, kicad_cli, **fill_kwargs)
         else:
             result = _run_fill_zones_via_drc(fill_input, output_path, kicad_cli, **fill_kwargs)
@@ -2773,52 +2845,22 @@ def _run_fill_zones_via_drc(
     than KiCad itself), the original net declarations are restored so
     that segments and vias retain their net assignments.
     """
-    import os
+    if output_path is not None:
+        return _fill_separate_output(
+            pcb_path,
+            output_path,
+            lambda candidate: _run_fill_zones_via_drc(candidate, None, kicad_cli, timeout),
+        )
+    target_pcb = pcb_path
+    input_net_nodes = _snapshot_net_declarations(target_pcb)
+    input_element_nets = _snapshot_element_nets(target_pcb)
 
-    # Snapshot input net declarations and per-element net assignments
-    # *before* DRC runs — the DRC may modify the file in-place when
-    # no output_path is given.
-    input_net_nodes = _snapshot_net_declarations(pcb_path)
-    input_element_nets = _snapshot_element_nets(pcb_path)
-
-    # DRC modifies the input file in-place.  If the caller requested a
-    # separate output file, copy the source first and run DRC on the copy.
-    # Issue #9938: remember a pre-existing destination's bytes -- a fill that
-    # does not verifiably complete must leave the caller's file as it was,
-    # never silently replaced with unfilled source bytes.
-    prior_output_bytes: bytes | None = None
-    # Issue #9938: allocate the throwaway DRC report BEFORE the destination is
-    # touched, so a failure here (unwritable temp dir) cannot leave the
-    # caller's previous output replaced by unfilled source bytes.
+    refills = (_kicad_drc_supports_refill(kicad_cli) is True) or _refill_probe_inconclusive(
+        kicad_cli
+    )
     fd, drc_report_path = tempfile.mkstemp(suffix=".json", prefix="drc_fill_")
     os.close(fd)
     drc_report = Path(drc_report_path)
-    if output_path is not None:
-        if output_path.exists():
-            try:
-                prior_output_bytes = output_path.read_bytes()
-            except OSError as e:
-                # Cannot snapshot the destination, so cannot guarantee a
-                # rollback: refuse rather than overwrite it blindly.
-                drc_report.unlink(missing_ok=True)
-                return KiCadCLIResult(
-                    success=False,
-                    stderr=(
-                        f"Zone fill via DRC refused — cannot read existing output "
-                        f"{output_path} to preserve it: {e}"
-                    ),
-                )
-        try:
-            shutil.copy2(pcb_path, output_path)
-        except BaseException:
-            drc_report.unlink(missing_ok=True)
-            if prior_output_bytes is not None:
-                with contextlib.suppress(OSError):
-                    output_path.write_bytes(prior_output_bytes)
-            raise
-        target_pcb = output_path
-    else:
-        target_pcb = pcb_path
 
     cmd = [
         str(kicad_cli),
@@ -2838,18 +2880,6 @@ def _run_fill_zones_via_drc(
     # request the explicit refill and save and let kicad-cli's own parser
     # decide, mirroring ``run_kicad_drc_command``; a genuine rejection is
     # retried once without the flags further below.
-    try:
-        refills = (_kicad_drc_supports_refill(kicad_cli) is True) or _refill_probe_inconclusive(
-            kicad_cli
-        )
-    except BaseException:
-        # Issue #9938: a setup failure before the guarded run must still
-        # leave a pre-existing separate destination as the caller had it.
-        drc_report.unlink(missing_ok=True)
-        if prior_output_bytes is not None:
-            with contextlib.suppress(OSError):
-                target_pcb.write_bytes(prior_output_bytes)
-        raise
     if refills:
         cmd.extend(["--refill-zones", "--save-board"])
 
@@ -2979,22 +3009,13 @@ def _run_fill_zones_via_drc(
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
     finally:
         if not filled:
-            if prior_output_bytes is not None:
-                # Issue #9938: the separate-output transaction failed; put
-                # the caller's pre-existing destination back untouched.
-                if not _board_unchanged(target_pcb, prior_output_bytes):
+            if unfilled_backup is None and pre_run_bytes is not None:
+                # Issue #6724: a killed or timed-out save can truncate a board
+                # even when it had no stale fills to restore.
+                if not _board_unchanged(target_pcb, pre_run_bytes):
                     with contextlib.suppress(OSError):
-                        target_pcb.write_bytes(prior_output_bytes)
-            else:
-                if unfilled_backup is None and pre_run_bytes is not None:
-                    # Issue #6724: no stale fills to restore below, but a kicad-cli
-                    # killed (signal) or timed out mid ``--save-board`` may have
-                    # left the board half-written: put back the pre-run bytes.
-                    # A run that did not refill or save leaves them unchanged.
-                    if not _board_unchanged(target_pcb, pre_run_bytes):
-                        with contextlib.suppress(OSError):
-                            target_pcb.write_bytes(pre_run_bytes)
-                _restore_stale_zone_fills(target_pcb, unfilled_backup)
+                        target_pcb.write_bytes(pre_run_bytes)
+            _restore_stale_zone_fills(target_pcb, unfilled_backup)
         # Clean up the temporary DRC report.
         drc_report.unlink(missing_ok=True)
 

@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 from unittest import mock
@@ -283,6 +285,47 @@ def test_lost_probe_failure_preserves_preexisting_destination(monkeypatch, tmp_p
     assert src.read_text() == UNFILLED_BOARD
 
 
+@pytest.mark.parametrize("preexisting", [False, True])
+@pytest.mark.parametrize("verification", ["regression", "failed"])
+def test_failed_final_check_never_publishes_partial_output(
+    monkeypatch, tmp_path, preexisting, verification
+):
+    """The final saved-copper check sees the output's project and only the candidate changes."""
+    from kicad_tools.cli import main
+    from kicad_tools.drc import geometric
+
+    src = tmp_path / "source.kicad_pcb"
+    src.write_text(UNFILLED_BOARD)
+    dest = tmp_path / "output.kicad_pcb"
+    if preexisting:
+        dest.write_bytes(b"private prior output")
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        dest.with_suffix(suffix).write_text("destination " + suffix)
+        src.with_suffix(suffix).write_text("source " + suffix)
+    _FakeCli(monkeypatch)
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: CLI)
+
+    def check_candidate(board, **kwargs):
+        assert board.name == dest.name and board != dest
+        assert board.read_text() == FILLED_BOARD
+        assert dest.exists() == preexisting
+        if preexisting:
+            assert dest.read_bytes() == b"private prior output"
+        for suffix in (".kicad_pro", ".kicad_dru"):
+            assert board.with_suffix(suffix).read_text() == "destination " + suffix
+        if verification == "failed":
+            return geometric.SavedFillCheck(ran=False, failed=True, note="native DRC failed")
+        return geometric.SavedFillCheck(ran=True, regressions=["disconnected saved copper"])
+
+    monkeypatch.setattr(geometric, "check_saved_fill", check_candidate)
+    assert main(["zones", "fill", str(src), "--output", str(dest)]) == 1
+    assert src.read_text() == UNFILLED_BOARD
+    assert dest.exists() == preexisting
+    if preexisting:
+        assert dest.read_bytes() == b"private prior output"
+    assert not list(tmp_path.glob(".kct-zone-fill-*"))
+
+
 def test_report_allocation_failure_preserves_preexisting_destination(monkeypatch, tmp_path):
     """Setup failing before the native run (unwritable report dir) never touches the destination."""
     src = tmp_path / "in.kicad_pcb"
@@ -304,21 +347,21 @@ def test_report_allocation_failure_preserves_preexisting_destination(monkeypatch
 
 
 def test_unreadable_preexisting_destination_is_refused_not_overwritten(monkeypatch, tmp_path):
-    """A destination whose bytes cannot be snapshotted is left as it is."""
+    """A destination the user cannot open for reading is left as it is."""
     src = tmp_path / "in.kicad_pcb"
     src.write_text(UNFILLED_BOARD)
     dest = tmp_path / "out.kicad_pcb"
     dest.write_bytes(FILLED_BOARD.encode())
     _FakeCli(monkeypatch)
 
-    real_read_bytes = Path.read_bytes
+    real_open = Path.open
 
-    def _read_bytes(self):
-        if self == dest:
+    def deny_access(self, mode="r", *args, **kwargs):
+        if self == dest and "r" in mode:
             raise PermissionError(13, "Permission denied")
-        return real_read_bytes(self)
+        return real_open(self, mode, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+    monkeypatch.setattr(Path, "open", deny_access)
 
     result = runner.run_fill_zones(src, output_path=dest, kicad_cli=CLI)
 
@@ -732,6 +775,42 @@ class TestPinnedKicad:
         assert (status, requested) == (0, True)
         assert _saved_polygons(dest) == polygons
         assert _sha(source) == source_sha
+
+    @pytest.mark.skipif(os.name == "nt", reason="uses POSIX file modes")
+    @pytest.mark.parametrize("malformed", [False, True], ids=["valid", "parse-error"])
+    def test_readonly_source_with_private_output(self, pinned_cli, malformed, capsys):
+        """A separate fill can read a 0444 source and only publish verified copper."""
+        root = pinned_cli[1] / ("readonly-invalid" if malformed else "readonly-valid")
+        root.mkdir()
+        src = root / "source.kicad_pcb"
+        dest = root / "private.kicad_pcb"
+        board = _board_text()
+        # Seed an actual, distinguishable filled destination.
+        dest.write_text(_board_text(tracks=False))
+        assert _kct_zones_fill(str(dest)) == (0, True)
+        old_copper = dest.read_bytes()
+        assert _saved_polygons(dest)
+        if malformed:
+            board = board[:-1] + "(unrecognized_test_record 1))"
+        src.write_text(board)
+        src.chmod(0o444)
+        dest.chmod(0o600)
+        capsys.readouterr()
+
+        status, requested = _kct_zones_fill(str(src), "--output", str(dest))
+
+        assert requested
+        assert src.read_text() == board
+        assert stat.S_IMODE(src.stat().st_mode) == 0o444
+        if malformed:
+            assert status != 0
+            assert "unrecognized_test_record" in capsys.readouterr().err
+            assert dest.read_bytes() == old_copper
+        else:
+            assert status == 0
+            assert _saved_polygons(dest)
+            assert dest.read_bytes() != old_copper
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 
     def test_zoneless_board_still_fills(self, pinned_cli):
         """No pour to save: the completed write alone is the success criterion.
