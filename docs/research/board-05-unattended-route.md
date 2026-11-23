@@ -338,3 +338,48 @@ they follow the revision window above or the host load (12 to 14 here, 17.8 to
 was done. The 49 structural
 `pour_slot` warnings are the larger remainder under the operator ruling of
 2026-11-23 (keep the strict bar, stay red until source repair lands).
+
+## Recipe copper cleanup does not clear the gate (2026-11-23, issue #9424)
+
+Seed 42 only, pinned kicad-cli via `KCT_KICAD_DOCKER=1`, Linux x86_64, router
+build 79, worktree on `b0222a8d5` (loadavg 6.5 to 8.6 at start and end of the
+route).
+
+**Rerun reproduces.** A second seed-42 run of `board_05_unattended.py` gave
+the same 5 `physical_copper_gap` errors and 65 warnings as the run above
+(route exit 0, 37/37 nets, 128 vias, DRC 0/0/0, ERC 0, LVS clean; route wall
+433.5 s against 545.7 s). The error and warning counts did not move between
+the two runs, and the board sha1 was not compared.
+
+**Experiment: add the recipe's cleanup to the gate.** `redesign/build.py`
+runs `cleanup_copper` (`kct pcb dedupe` plus the DRC-verified `kct pcb prune`,
+issue #8278) after the copper is placed; the unattended gate does not. The
+hypothesis was that the six `redundant_copper_covered` warnings are a missing
+gate step, not a router defect. The same loop was applied to the saved seed-42
+board and the board was regraded with `--grade-only`. It was a throwaway
+experiment; the gate script is unchanged.
+
+| `kct check --skip mask_to_copper` | Before cleanup | After cleanup |
+|---|---:|---:|
+| `physical_copper_gap` errors | 5 | 5 |
+| `pour_slot` | 49 | 50 |
+| `redundant_copper_covered` | 6 | 2 |
+| `redundant_copper_detour` | 4 | 6 |
+| `redundant_copper_staircase` | 0 | 1 |
+| `silk_hole_overlap` | 6 | 6 |
+| total warnings | 65 | 65 |
+
+- The cleanup does **not** reach a fixed point: it raised "did not converge in
+  10 passes" with 12 segments removed and 12 ends snapped in total. After the
+  first passes only net VM is still planned. Each pass adds the stub
+  `(21.0, 8.0) -> (21.755, 7.245)` and the next pass removes the segment it
+  added as a "redundant branch", so the loop churns on a net it has already
+  cleaned. Whether that is a defect in `pcb_prune` or a property of this
+  route was not isolated.
+- Pruning moved warnings between classes (covered down by 4, detour up by 2,
+  staircase up by 1, `pour_slot` up by 1) and left the 5 same-net gaps
+  untouched, so it is not a repair path for the gate.
+
+Not done this pass: seeds 7 and 1337, the full-mask `mask_to_copper` run, and
+any source repair of the five gaps or the pour-slot warnings. The skip and the
+0-error, 0-warning bar stay as they are, per the 2026-11-23 operator ruling.
