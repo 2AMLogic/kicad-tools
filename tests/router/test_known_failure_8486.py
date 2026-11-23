@@ -1280,3 +1280,151 @@ def test_a_near_foreign_shape_shifting_still_resets_the_streak():
             assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
             assert run.call_args.kwargs["per_net_timeout"] == 30.0
     assert not [entry for entry in guard.backoffs if entry[1] == 1]
+
+
+# --- issue #9963: progress over the routing-terminal pads, and the
+# legality-rejected ratchet -------------------------------------------------
+
+
+def _escape_endpoint_override(router, x=8.0, y=6.0):
+    """Install a routing-terminal override for net 1's ``U1.1`` pad.
+
+    Mirrors what ``generate_escape_routes`` leaves in
+    ``_escape_pad_overrides``: the pad's terminal moves to its escape
+    endpoint while ``self.pads`` keeps the original geometry.
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad
+
+    original = router.pads[("U1", "1")]
+    router._escape_pad_overrides[("U1", "1")] = Pad(
+        x=x,
+        y=y,
+        width=0.2,
+        height=0.2,
+        net=original.net,
+        net_name=original.net_name,
+        layer=Layer.F_CU,
+        ref=original.ref,
+        pin=original.pin,
+    )
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize("stub_in_routes", [False, True], ids=["stub-absent", "stub-present"])
+def test_connected_pad_pairs_measures_the_routing_terminal_view(stub_in_routes):
+    """Issue #9963 measurement: ``_connected_pad_pairs`` must see the pads the
+    negotiated loop routes against -- the ``pads_by_net`` substitution -- not
+    the raw ``self.pads`` geometry.
+
+    A net's ``net_routes`` entry holds only search results; the escape stub
+    copper that ties the original pad to its escape endpoint never enters it.
+    So with the stub absent (the loop's actual shape) the raw view cannot see
+    a terminal the router connected at the endpoint, while the routing-
+    terminal view can.  With the stub present the two views agree."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+    from kicad_tools.router.terminal_connectivity import physical_pad_components
+
+    router = _three_pad_board(gap=False)
+    _escape_endpoint_override(router)
+    # Search-shaped copper: endpoint -> AUX.1, clearing U1.1's original
+    # outline (which pad view sees the terminal is the variable measured).
+    routes = [Route(1, "N1", segments=[Segment(8.0, 6.0, 5.2, 13.4, 0.2, Layer.F_CU, 1)], vias=[])]
+    if stub_in_routes:
+        routes.append(
+            Route(1, "N1", segments=[Segment(6.0, 6.0, 8.0, 6.0, 0.2, Layer.F_CU, 1)], vias=[])
+        )
+
+    keys = [k for k in router.nets.get(1, []) if k in router.pads]
+    routing_pads = [router._escape_pad_overrides.get(k, router.pads[k]) for k in keys]
+    comps = physical_pad_components(routing_pads, routes)
+    expected = {
+        frozenset((i, j))
+        for i in range(len(routing_pads))
+        for j in range(i + 1, len(routing_pads))
+        if comps[i] == comps[j]
+    }
+    # The routing-terminal view connects U1.1 (at its endpoint) to AUX.1 in
+    # both cases; U1.2 stays behind the wall.
+    assert expected == {frozenset({0, 2})}
+    assert router._connected_pad_pairs(1, list(routes)) == frozenset(expected)
+
+
+@pytest.mark.requires_router_cpp
+def test_progress_through_an_escape_endpoint_counts_as_progress():
+    """Issue #9963: a partial net whose search connects a terminal at its
+    escape endpoint has gained a pad pair -- progress -- even though the
+    landed copper never touches the original pad outline (the escape stub
+    stays out of ``net_routes``)."""
+
+    router = _three_pad_board(gap=False)
+    _escape_endpoint_override(router)
+    guard = RipupCycleGuard()
+    guard.begin_iteration(1, {1: None})
+    router._known_failure_entry = {1: (frozenset(), [])}
+    out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 1)
+    assert out, "the search must land copper at the escape endpoint"
+    # Measurement: the landed copper reaches the endpoint terminal and AUX.1
+    # without touching U1.1's original outline -- the raw pad view that
+    # ``_net_pad_pairs`` still uses reads no pair at all.
+    assert _net_pad_pairs(router, 1, out) == set()
+    # The routing-terminal view sees the gained pair: progress, so the entry
+    # ratchets and no failure streak starts.
+    assert router._known_failure_entry[1][0] == {frozenset({0, 2})}
+    assert 1 not in guard.capped_streak
+
+
+@pytest.mark.requires_router_cpp
+def test_legality_rejected_worse_result_ratchets_the_entry():
+    """Issue #9963 second note: when the re-land is refused, the kept
+    re-search result becomes the entry state.
+
+    A second search of the same net later in the iteration (a site that did
+    not rip the first result, and after legality changed back) must compare
+    against -- and fall back to -- the copper the net actually kept, never
+    re-landing the superseded entry copper beside it."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _three_pad_board(gap=False)
+    guard = RipupCycleGuard()
+    entry, _pairs = _seed_partial_entry(router, guard)
+    stub1 = Route(
+        1, "stub1", segments=[Segment(24.0, 14.0, 24.0, 16.0, 0.2, Layer.F_CU, 1)], vias=[]
+    )
+    stub2 = Route(1, "stub2", segments=[Segment(5.0, 13.5, 5.0, 15.5, 0.2, Layer.F_CU, 1)], vias=[])
+    searches = iter([(stub1,), (stub2,)])
+
+    def fake_search(net, pf, per_net_timeout=None):
+        found = list(next(searches))
+        for route in found:
+            router._mark_route(route)  # the search commits what it returns
+        return found
+
+    guard.begin_iteration(1, {1: None})
+    _rip_copper(router, entry)
+    with (
+        patch.object(router, "_route_net_negotiated", side_effect=fake_search),
+        patch.object(router, "_entry_copper_still_legal", return_value=False),
+    ):
+        out1 = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 1)
+    assert [id(r) for r in out1] == [id(stub1)]  # worse result kept
+    _commit_copper(router, out1)
+    # The entry now describes the copper the net actually kept.
+    assert router._known_failure_entry[1][0] == frozenset()
+    assert [id(r) for r in router._known_failure_entry[1][1]] == [id(stub1)]
+
+    # Second search of the same net in the same iteration; its site did not
+    # rip the first result, and the foreign blocker has since been removed.
+    with (
+        patch.object(router, "_route_net_negotiated", side_effect=fake_search),
+        patch.object(router, "_entry_copper_still_legal", return_value=True),
+    ):
+        out2 = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 1)
+    assert [id(r) for r in out2] == [id(stub2)]  # fresh result kept
+    _commit_copper(router, out2)
+    assert not any(r in router.routes for r in entry), "superseded entry copper re-landed"
+    net1 = [r for r in router.routes if r.net == 1]
+    assert all(r is stub1 or r is stub2 for r in net1)
+    assert 1 in guard.capped_streak  # both no-progress searches still count
