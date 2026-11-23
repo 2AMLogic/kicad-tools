@@ -448,9 +448,18 @@ class TestCli:
     def _route(self, tmp_path: Path, *, overlap: bool) -> int:
         src = tmp_path / "in.kicad_pcb"
         src.write_text(_board(overlap=overlap))
+        output = tmp_path / "out.kicad_pcb"
         rc = route_main(
-            [str(src), "-o", str(tmp_path / "out.kicad_pcb"), "--no-optimize", "--skip-drc"]
+            [
+                str(src),
+                "-o",
+                str(output),
+                "--no-optimize",
+                "--skip-drc",
+                "--no-chain-complete",
+            ]
         )
+        assert output.is_file()
         return rc
 
     def test_overlapping_input_pads_are_named_before_routing(
