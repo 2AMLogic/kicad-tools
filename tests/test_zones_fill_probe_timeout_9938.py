@@ -666,13 +666,16 @@ def _front_copper_mm2(cli: Path, board: Path, out: Path) -> float:
 
 
 def _unconnected_items(cli: Path, board: Path, report: Path, *, refill=False) -> int:
-    """Opens a native DRC reports; ``refill`` refills in memory before checking."""
+    """Opens in a native DRC report; ``refill`` refills in memory before checking.
+
+    KiCad 10 records unconnected-item findings in the report's top-level
+    ``unconnected_items`` array, never among ``violations`` (Issue #9985).
+    """
     argv = [str(cli), "pcb", "drc", "--format", "json", "--output", str(report)]
     if refill:
         argv.append("--refill-zones")
     subprocess.run([*argv, str(board)], check=True, capture_output=True, text=True)
-    violations = json.loads(report.read_text()).get("violations", [])
-    return sum(v.get("type") == "unconnected_items" for v in violations)
+    return len(json.loads(report.read_text()).get("unconnected_items", []))
 
 
 class TestPinnedKicad:
@@ -682,43 +685,86 @@ class TestPinnedKicad:
         "pour_only": (1.571, 254.624),
     }
 
-    @pytest.mark.parametrize("board_kind", ["wired", "pour_only"])
-    def test_public_fill_matches_the_answered_control(self, pinned_cli, board_kind):
-        """Lost probe == answered probe: same pour, same plotted copper, no opens."""
-        cli, root = pinned_cli
-        bare_mm2, filled_mm2 = self.CONTROLS[board_kind]
-        text = _board_text(tracks=board_kind == "wired")
-        measured: dict[str, tuple] = {}
+    #: Opens in the *unfilled* board's on-disk report (Issue #9985): the
+    #: wired pads are joined by tracks, the pour-only pads only by the pour,
+    #: so a saved board without its fill reports exactly one open -- the
+    #: positive control that the counted field is the real one.
+    UNFILLED_OPENS = {
+        "wired": 0,
+        "pour_only": 1,
+    }
 
-        unfilled = root / f"{board_kind}-unfilled.kicad_pcb"
-        unfilled.write_text(text)
-        assert _front_copper_mm2(cli, unfilled, root / f"{board_kind}-unfilled-plot") == (
-            pytest.approx(bare_mm2, abs=0.001)
-        ), "the fixture no longer reproduces the issue's control board"
+    #: Boards filled by the public command, memoised per (kind, probe) so a
+    #: test comparing the two probes' geometry never re-runs the pair: each
+    #: single test must fit the suite's shared 60-second budget (Issue #9985).
+    _fills: dict[tuple[str, str], Path] = {}
 
-        for probe in ("answered", "lost"):
+    @classmethod
+    def _filled_board(cls, cli, root, board_kind, probe) -> Path:
+        """The control board filled by public ``kct zones fill`` under *probe*."""
+        key = (board_kind, probe)
+        if key not in cls._fills:
             board = root / f"{board_kind}-{probe}.kicad_pcb"
-            board.write_text(text)
+            board.write_text(_board_text(tracks=board_kind == "wired"))
             status, requested = _kct_zones_fill(str(board), lose_first_probe=probe == "lost")
             assert (status, requested) == (0, True), f"{board_kind}/{probe}"
-            measured[probe] = (
-                _saved_polygons(board),
-                _front_copper_mm2(cli, board, root / f"{board_kind}-{probe}-plot"),
-                (
-                    _unconnected_items(cli, board, root / f"{board_kind}-{probe}-saved.json"),
-                    _unconnected_items(
-                        cli, board, root / f"{board_kind}-{probe}-refilled.json", refill=True
-                    ),
-                ),
-            )
+            cls._fills[key] = board
+        return cls._fills[key]
 
-        answered, lost = measured["answered"], measured["lost"]
-        # The pour is on disk -- not merely "not an open", which is all a
-        # wired board can show once its plane is gone.
-        assert answered[1] == pytest.approx(filled_mm2, abs=0.001)
-        assert lost[0] == answered[0], "the lost-probe fill saved different geometry"
-        assert lost[1] == pytest.approx(answered[1], abs=0.001)
-        assert lost[2] == answered[2] == (0, 0)
+    @pytest.mark.parametrize("board_kind", ["wired", "pour_only"])
+    def test_unfilled_control_reports_its_saved_opens(self, pinned_cli, board_kind):
+        """The empty-control geometry: bare copper, and the saved pour-only open."""
+        cli, root = pinned_cli
+        unfilled = root / f"{board_kind}-unfilled.kicad_pcb"
+        unfilled.write_text(_board_text(tracks=board_kind == "wired"))
+        assert _front_copper_mm2(cli, unfilled, root / f"{board_kind}-unfilled-plot") == (
+            pytest.approx(self.CONTROLS[board_kind][0], abs=0.001)
+        ), "the fixture no longer reproduces the issue's control board"
+        assert (
+            _unconnected_items(cli, unfilled, root / f"{board_kind}-unfilled-saved.json")
+            == self.UNFILLED_OPENS[board_kind]
+        )
+        assert (
+            _unconnected_items(
+                cli, unfilled, root / f"{board_kind}-unfilled-refilled.json", refill=True
+            )
+            == 0
+        )
+
+    @pytest.mark.parametrize("board_kind", ["wired", "pour_only"])
+    def test_answered_probe_fill_matches_the_control(self, pinned_cli, board_kind):
+        """An answered probe saves the pour: geometry on disk, control copper, no opens."""
+        cli, root = pinned_cli
+        board = self._filled_board(cli, root, board_kind, "answered")
+        assert _saved_polygons(board), "the fill saved no geometry"
+        assert _front_copper_mm2(cli, board, root / f"{board_kind}-answered-plot") == (
+            pytest.approx(self.CONTROLS[board_kind][1], abs=0.001)
+        )
+        assert _unconnected_items(cli, board, root / f"{board_kind}-answered-saved.json") == 0
+        assert (
+            _unconnected_items(
+                cli, board, root / f"{board_kind}-answered-refilled.json", refill=True
+            )
+            == 0
+        )
+
+    @pytest.mark.parametrize("board_kind", ["wired", "pour_only"])
+    def test_lost_probe_fill_matches_the_answered_control(self, pinned_cli, board_kind):
+        """A lost probe fills exactly as an answered one: same geometry, no opens."""
+        cli, root = pinned_cli
+        answered = self._filled_board(cli, root, board_kind, "answered")
+        lost = self._filled_board(cli, root, board_kind, "lost")
+        assert _saved_polygons(lost) == _saved_polygons(answered), (
+            "the lost-probe fill saved different geometry"
+        )
+        assert _front_copper_mm2(cli, lost, root / f"{board_kind}-lost-plot") == (
+            pytest.approx(self.CONTROLS[board_kind][1], abs=0.001)
+        )
+        assert _unconnected_items(cli, lost, root / f"{board_kind}-lost-saved.json") == 0
+        assert (
+            _unconnected_items(cli, lost, root / f"{board_kind}-lost-refilled.json", refill=True)
+            == 0
+        )
 
     def test_report_without_a_save_fails_and_preserves_prior_copper(self, pinned_cli):
         """Real kicad-cli, report written, board untouched: nonzero exit, bytes kept."""
