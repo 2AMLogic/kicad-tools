@@ -1,5 +1,7 @@
 """Tests for the zones CLI command, focusing on the fill subcommand."""
 
+import json
+import shlex
 import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1962,17 +1964,49 @@ class TestRelieveAndAsymmetryWarning:
         relieve.assert_called_once()
         assert "thermal_asymmetry: 5 -> 2" in capsys.readouterr().out
 
-    def test_fill_warns_when_asymmetry_rises(self, tmp_pcb, capsys):
+    @pytest.mark.parametrize("separate_output", [False, True], ids=["in-place", "separate-output"])
+    def test_fill_warns_when_asymmetry_rises(self, tmp_pcb, capsys, separate_output):
+        target = tmp_pcb.with_name("filled board.kicad_pcb") if separate_output else tmp_pcb
+        output_args = ["--output", str(target)] if separate_output else []
         result = MagicMock(success=True, stderr="", fill_notes=[], fill_conflicts=[])
         check = SavedFillCheck(ran=True, regressions=[], note="")
         with (
             patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
-            patch(_RUN_FILL, return_value=result),
+            patch(_RUN_FILL, return_value=result) as fill,
             patch(_CHECK_SAVED_FILL, return_value=check),
+            patch(
+                "kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[1, 4]
+            ) as counts,
+        ):
+            assert main(["fill", str(tmp_pcb), *output_args, "--format", "json"]) == 0
+        output = capsys.readouterr()
+        assert json.loads(output.out)["thermal_asymmetry"] == {"before": 1, "after": 4}
+        assert "thermal_asymmetry findings rose 1 -> 4" in output.err
+        assert f"`{shlex.join(['kct', 'zones', 'relieve', str(target)])}`" in output.err
+        measured = fill.call_args.args[0]
+        assert [call.args[0] for call in counts.call_args_list] == [tmp_pcb, measured]
+        assert target.is_file()
+        if separate_output:
+            assert measured != target and not measured.exists()
+
+    def test_rejected_separate_fill_does_not_recommend_relief_on_the_old_output(
+        self, tmp_pcb, capsys
+    ):
+        target = tmp_pcb.with_name("previous.kicad_pcb")
+        target.write_bytes(b"previous output")
+        with (
+            patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
+            patch(
+                _RUN_FILL, return_value=MagicMock(success=True, fill_notes=[], fill_conflicts=[])
+            ),
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True, regressions=["split"])),
             patch("kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[1, 4]),
         ):
-            main(["fill", str(tmp_pcb)])
-        assert "thermal_asymmetry findings rose 1 -> 4" in capsys.readouterr().err
+            assert main(["fill", str(tmp_pcb), "--output", str(target), "--format", "json"]) != 0
+        output = capsys.readouterr()
+        assert json.loads(output.out)["thermal_asymmetry"] == {"before": 1, "after": 4}
+        assert "kct zones relieve" not in output.err
+        assert target.read_bytes() == b"previous output"
 
     def test_fill_silent_when_asymmetry_flat(self, tmp_pcb, capsys):
         result = MagicMock(success=True, stderr="", fill_notes=[], fill_conflicts=[])
