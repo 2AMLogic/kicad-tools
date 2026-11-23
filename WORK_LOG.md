@@ -16,12 +16,48 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-22
 
+- **PR #9942**: fix(boards): adopt the warning-free six-layer Board 07 SDRAM pair
+- **PR #9935**: chore(loom): ignore the dispatcher’s Codex ranking file
+- **PR #9934**: fix(board06): reproduce the four-channel LVDS assembly release
+- **PR #9932**: chore(board-09): reissue development evidence and bind current manufacturer report
+- **PR #9930**: fix: score Pathfinder via-placement foreign pads with the clearance kernel
+- **PR #9928**: fix(router): check foreign-pad clearance for vias committed by the trace resolver
+- **PR #9927**: docs(conformance): classify the six advisory clearance rows at a matched rule
+- **PR #9926**: fix(board05): reroute revision-B copper around mask openings
+- **PR #9925**: fix(boards): reproduce the six-layer Board 07 SDRAM repair in scratch builds
+- **PR #9920**: chore(board-07): reproduce six-layer SDRAM timing and clock repairs
+- **PR #9919**: test(route): isolate default silk checks from power pours
+- **PR #9915**: fix(router): recover clearance-safe USB3 relief escapes in Python
+- **PR #9912**: fix: record budget-stopped rip-up victims as victim_budget, not victim_geometric
+- **PR #9907**: fix(vias): model slot and offset drills in the shared hole-floor checks
+- **PR #9905**: fix: nudge same-net mask pass-through copper clear of its own pad opening
+- **PR #9904**: perf(router): cap the twice-per-iteration searches of stalled unsealed nets
+- **PR #9887**: fix(boards): clear Board 02 copper on fresh seed-42 builds
+- **PR #9823**: feat: flag and clip silk keepouts, grade jlcpcb silk errors
+- **PR #9749**: fix: resolve tripled layer changes and anchor loop-free lanes (#9725)
+- **PR #9053**: fix(boards): regenerate board 02 so its routed release clears the strict DRC gate
 - **PR #9914**: test(router): exercise seed handling with a writable lock directory
 - **PR #9911**: test: re-pin board 02 route length to 318.78mm after the #9734 lattice snap
 - **PR #9908**: fix(router): refresh clearance context during targeted rip-up
 - **PR #9906**: fix: forward pour-slot cleanup through the public trace optimizer
 - **PR #9895**: fix(drc): make the copper-gap facing test independent of edge order
 - **PR #9861**: fix: route conversions taper the same path into identical segments (per-run taper in the native adapter)
+- **Issue #9933** (closed): check-main-clean.sh reports the dispatcher's own .loom/account-ranking.codex as builder contamination
+- **Issue #9931** (closed): Repair the four-channel Board 06 LVDS assembly recipe and its release replot
+- **Issue #9929** (closed): Reissue Board 09 development evidence and bind the current manufacturer report
+- **Issue #9924** (closed): Trace resolver’s Python commit check misses foreign-pad clearance for vias
+- **Issue #9923** (closed): Pathfinder via placement scores a rotated foreign pad against its pre-rotation box (#9236 sibling, Epic #5509 group 11)
+- **Issue #9922** (closed): Classify the six clearance checks outside the merge gate and document their measured differences
+- **Issue #9918** (closed): test flake: test_route_runs_pass_and_names_unresolved times out in post-route checks
+- **Issue #9902** (closed): relocate_in_pad_vias: unmodeled-drill fail-closed blocks every via move board-wide, regardless of distance
+- **Issue #9901** (closed): Trace the missing relief corridors for Board 06 USB3 RX2/TX2 on Python
+- **Issue #9900** (closed): Trace Board 06 USB3 RX1/TX1 victim and sibling failures during Python rerouting
+- **Issue #9896** (closed): fix-drc: repair same-net pass-through copper beside a pad mask opening
+- **Issue #9880** (closed): Board 02 clean seed-42 regeneration opens a NODE_D via slit and C1 mask exposure on router build 76
+- **Issue #9798** (closed): Silk-in-keepout check rule and clip, plus silk error grading per #9112/#9033 (#9795 phase 2)
+- **Issue #9725** (closed): current paths / pcb reinforce: a tripled layer change (three vias in a row with a short bar on both layers) makes the whole path 'ambiguous'
+- **Issue #9467** (closed): Board 02: clear mask_to_copper + silk_hole_overlap through the recipe, then re-issue the release (unblocks #9053)
+- **Issue #8603** (closed): Board 07: classify and eliminate remaining redundant_copper warnings at source (part of #8399)
 - **Issue #9913** (closed): test(router): seed fixture exits on its unwritable output-lock path on macOS
 - **Issue #9909** (closed): Historical Board 02 route measures 318.78 mm against its 315.15 mm pin on macOS arm64
 - **Issue #9899** (closed): Trace the failed Board 06 MIPI_RST escape at J4.RST on the Python router

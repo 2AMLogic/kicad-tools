@@ -179,6 +179,23 @@ class CopperContactGraph:
             groups.setdefault(root, []).append(index)
         return list(groups.values())
 
+    def preserves_connections(self, previous: CopperContactGraph) -> bool:
+        """Whether every previous group still connects after a geometry-only edit.
+
+        Existing items keep their source keys. Additional tracks and joins
+        between previously separate groups are allowed.
+        """
+        membership = {
+            (item.kind, item.key): group
+            for item, group in zip(self.items, self.component, strict=True)
+        }
+        destinations: dict[int, int] = {}
+        for item, old_group in zip(previous.items, previous.component, strict=True):
+            new_group = membership.get((item.kind, item.key))
+            if new_group is None or destinations.setdefault(old_group, new_group) != new_group:
+                return False
+        return True
+
     def _kinds(self, members: list[int]) -> set[str]:
         return {self.items[i].kind for i in members}
 
