@@ -4104,7 +4104,7 @@ def _release_changes(
 ) -> list[str]:
     """Name changed inputs relative to the original board directory."""
     after = _snapshot_inventory(board_dir)
-    changes = []
+    changes: list[str] = []
     if after != before:
         changes.extend(f"added {name}" for name in sorted(after.keys() - before.keys()))
         changes.extend(f"removed {name}" for name in sorted(before.keys() - after.keys()))
