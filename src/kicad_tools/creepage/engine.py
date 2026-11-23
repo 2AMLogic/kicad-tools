@@ -1755,6 +1755,43 @@ class BoardThicknessError(ValueError):
         self.declarations_mm = declarations_mm
 
 
+def _project_order_thickness(pcb_path: Path) -> float | None:
+    """Read the nominal order thickness for the board under consideration."""
+    from kicad_tools.spec import ManufacturingRequirements, ProjectArtifacts
+    from kicad_tools.spec.parser import load_spec_data
+    from kicad_tools.sync.discover import pcb_matches_artifacts
+    from kicad_tools.validate.spec_conformance import find_project_kct
+
+    pcb_path = pcb_path.resolve()
+    spec_path = find_project_kct(pcb_path)
+    if spec_path is None:
+        return None
+    try:
+        data = load_spec_data(spec_path)
+        # A partial or older project can omit this key. Validate only the
+        # purchasing fields, and only for the board to which they apply.
+        requirements = data.get("requirements")
+        manufacturing = (
+            requirements.get("manufacturing") if isinstance(requirements, dict) else None
+        )
+        if not isinstance(manufacturing, dict) or manufacturing.get("order_thickness_mm") is None:
+            return None
+        project = data.get("project")
+        paths = project.get("artifacts") if isinstance(project, dict) else None
+        if paths is not None:
+            artifacts = ProjectArtifacts.model_validate(paths)
+            if not pcb_matches_artifacts(pcb_path, spec_path, artifacts):
+                return None
+        purchase = ManufacturingRequirements.model_validate(
+            {"order_thickness_mm": manufacturing["order_thickness_mm"]}
+        )
+        return purchase.order_thickness_mm
+    except (OSError, ValueError) as exc:
+        raise BoardThicknessError(
+            f"Cannot read requirements.manufacturing.order_thickness_mm from {spec_path}: {exc}"
+        ) from exc
+
+
 def _board_thickness_mm(
     pcb: PCB, order_thickness_mm: float | None
 ) -> tuple[float | None, str, dict[str, float]]:
@@ -2240,6 +2277,7 @@ def compute_creepage_census(
     board: str = "",
     *,
     order_thickness_mm: float | None = None,
+    project_board: Path | None = None,
     required_creepage_mm: float | None = None,
     required_clearance_mm: float | None = None,
     standard: str | None = None,
@@ -2260,6 +2298,8 @@ def compute_creepage_census(
     """Build the full HV creepage/clearance census for a board.
 
     ``order_thickness_mm`` is the nominal finished thickness selected for purchase.
+    Without an explicit value, ``project_board`` identifies the original PCB whose
+    project may declare its order thickness, including when measuring staged copper.
     It resolves conflicting CAD thickness declarations and reports the shortest
     cross-face conductor path even when that path passes.
 
@@ -2574,6 +2614,7 @@ def compute_creepage_census(
     # key -> (creepage, rim label, face of net A, face of net B, geom A, geom B)
     cross_best: dict[tuple[int, int], tuple[float, str, str, str, Any, Any]] = {}
     thickness_mm, thickness_source, declarations = _board_thickness_mm(pcb, order_thickness_mm)
+    order_lookup = project_board if order_thickness_mm is None else None
     _copper = pcb.copper_layers
     _faces = [_copper[0].name, _copper[-1].name] if _copper else []
     thickness_evaluated = False
@@ -2601,6 +2642,12 @@ def compute_creepage_census(
                     if other_num in hv_nets:
                         if not map_mode or other_num < hv_num:
                             continue
+                    # Read the project once, on the first actual opposing-face pair.
+                    if order_lookup is not None:
+                        order_thickness_mm = _project_order_thickness(order_lookup)
+                        order_lookup = None
+                        if order_thickness_mm is not None:
+                            thickness_mm, thickness_source = order_thickness_mm, "project.kct"
                     key = (hv_num, other_num)
                     prev = best.get(key)
                     if prev is not None:
@@ -2650,7 +2697,9 @@ def compute_creepage_census(
                             raise BoardThicknessError(
                                 f"Board header thickness {declarations['general']:g} mm and stackup "
                                 f"thickness {declarations['stackup']:g} mm disagree. Supply "
-                                "--order-thickness-mm with the nominal finished thickness selected for purchase.",
+                                "the nominal finished thickness selected for purchase with "
+                                "--order-thickness-mm or requirements.manufacturing.order_thickness_mm "
+                                "in the board's project.kct.",
                                 declarations,
                             )
                         thickness_evaluated = True

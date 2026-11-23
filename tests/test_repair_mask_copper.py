@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import pytest
+from shapely.geometry import Point  # type: ignore[import-untyped]
 
 from kicad_tools.cli import fix_drc_cmd
 from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer
@@ -1378,9 +1380,322 @@ def test_pass_through_via_refused_by_drill_clearance_at_the_destination(tmp_path
         max_displacement=1.0,
         design_rules=rules,
     )
+    # The drill-violating destination is not taken: the via either stays or
+    # lands somewhere that keeps the manufacturer's hole spacing (issue
+    # #9939's bounded search around a vetoed first choice).
+    assert result.repaired in (0, 1)
+    if result.repaired == 0:
+        assert result.skipped("would_violate_clearance") == 1
+        assert "hole-to-hole" in result.unrepaired[0].detail
+        return
+    action = result.actions[0]
+    moved = (action.new_x, action.new_y)
+    assert moved != dest
+    assert math.dist(moved, (dest[0] + 0.7, dest[1])) - 0.3 >= rules.min_hole_to_hole_mm - 1e-6
+    assert _pad_poly(board, "R1/1").distance(Point(moved).buffer(0.3)) >= 0.11 - 1e-6
+
+
+def test_via_alternate_move_keeps_approach_lines_and_adds_aligned_tails(tmp_path):
+    """Issue #9939: a vetoed first choice is worked around, not forced.
+
+    The primary destination is blocked by a foreign track, so the search
+    relocates the via instead.  Whatever it accepts keeps every approach on
+    its own line (no off-angle drag) and any added connection lies wholly
+    inside the via land on the 0/45/90/135 set.  Undo restores the board
+    exactly, including removing the added copper.
+    """
+    from kicad_tools.router.quantize import _is_quantum_aligned
+
+    copper = (
+        PASS_VIA
+        + "\n"
+        + _seg("trk-f", (101.35, 98.2), (101.35, 99.6))
+        + "\n"
+        + _seg("trk-b", (101.35, 98.2), (101.35, 99.6), layer="B.Cu")
+    )
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    probe = MaskCopperRepairer(_board(plain_dir, copper))
+    probe_result = probe.repair(
+        [_pt_finding("via-p", measured=0.05, location=(101.05, 99.6))], max_displacement=1.0
+    )
+    assert probe_result.repaired == 1
+    dest = (probe_result.actions[0].new_x, probe_result.actions[0].new_y)
+
+    # A foreign wall sits where the primary push lands, closer than the
+    # project's own clearance: the drag is vetoed, the search must go around.
+    blocker = _seg("trk-x", (101.95, 99.2), (101.95, 100.0), net=2)
+    board = _board(tmp_path, copper + "\n" + blocker)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(
+        [_pt_finding("via-p", measured=0.05, location=(101.05, 99.6))], max_displacement=1.0
+    )
+    assert result.repaired == 1 and not result.unrepaired
+    action = result.actions[0]
+    assert action.action == "relocate_clear"
+    repairer.save(board)
+
+    centre = (round(action.new_x, 4), round(action.new_y, 4))
+    assert centre != dest
+    assert _pad_poly(board, "R1/1").distance(Point(centre).buffer(0.3)) >= 0.11 - 1e-6
+    blocker_geom, _ends = _saved_copper(board, "trk-x")
+    assert Point(centre).buffer(0.3).distance(blocker_geom) >= 0.2 - 1e-6
+
+    # Each slid end stays on its own approach line, inside the new land.
+    assert action.end_moves
+    for uuid, tag, _ox, _oy, new_x, new_y in action.end_moves:
+        ends = dict(zip(["start", "end"], _end(board, uuid), strict=True))
+        moved, fixed = ends[tag], ends["end" if tag == "start" else "start"]
+        original = (101.35, 99.6)
+        cross = (moved[0] - fixed[0]) * (original[1] - fixed[1]) - (moved[1] - fixed[1]) * (
+            original[0] - fixed[0]
+        )
+        assert abs(cross) < 1e-3  # collinear: the approach kept its angle
+        assert math.dist(moved, centre) + 0.1 <= 0.3 + 1e-6  # inside the land, width included
+
+    # Any added connection is 45-legal as serialized and inside the land.
+    for tail in action.added_segments:
+        _uuid, sx, sy, ex, ey, width, layer, net = tail
+        assert _is_quantum_aligned(ex - sx, ey - sy)
+        for point in ((sx, sy), (ex, ey)):
+            assert math.dist(point, centre) + width / 2 <= 0.3 + 1e-6
+        assert set(_end(board, tail[0])) == {
+            (round(sx, 6), round(sy, 6)),
+            (round(ex, 6), round(ey, 6)),
+        }
+
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(action)
+    undo.save(board)
+    assert _saved_copper(board, "via-p")[1] == (101.35, 99.6)
+    for uuid, _tag, *_rest in action.end_moves:
+        assert _end(board, uuid)[1] == (101.35, 99.6)
+    for tail in action.added_segments:
+        with pytest.raises(AssertionError):
+            _end(board, tail[0])
+
+
+@pytest.mark.parametrize("net_atom", [1, "N1", "123"], ids=["number", "name", "numeric-name"])
+def test_via_tail_plan_builds_aligned_in_land_connections(tmp_path, net_atom):
+    """Issue #9939: the kept-line contact plan, exercised directly.
+
+    A diagonal and a vertical approach both end at the via; after a move to
+    (101.45, 99.48) each end slides along its own line and a 0/45/90/135
+    connection runs to the new centre wholly inside the land, at the file's
+    own coordinate precision.  Applying and undoing the action round-trips
+    the board, added copper included.
+    """
+    from kicad_tools.drc.repair_mask_copper import MaskRepairResult, MaskViaRelocateAction
+    from kicad_tools.router.primitives import _make_uuid
+    from kicad_tools.router.quantize import _is_quantum_aligned, off_angle_degrees
+
+    copper = (
+        PASS_VIA
+        + "\n"
+        + _seg("trk-f", (102.75, 98.85), (101.35, 99.6))
+        + "\n"
+        + _seg("trk-b", (101.35, 98.2), (101.35, 99.6), layer="B.Cu")
+    )
+    board = _board(tmp_path, copper)
+    net_name = "N1" if isinstance(net_atom, int) else net_atom
+    if isinstance(net_atom, str):
+        text = "\n".join(
+            line for line in board.read_text().splitlines() if not line.startswith("  (net ")
+        )
+        text = text.replace('(net 1 "N1")', f'(net "{net_name}")').replace(
+            "(net 1)", f'(net "{net_name}")'
+        )
+        board.write_text(text + "\n")
+    repairer = MaskCopperRepairer(board)
+    joined = repairer._anchored_ends(101.35, 99.6, net_name)
+    assert [tag for _u, _n, tag, _e in joined] == ["end", "end"]
+    plan = repairer._via_tail_plan(joined, (101.45, 99.48), 0.6, 1.0)
+    assert plan is not None
+    end_moves, tails, _final_lines = plan
+    assert len(end_moves) == 2 and len(tails) == 2
+
+    # The vertical approach keeps its line and connects horizontally; the
+    # diagonal approach keeps its line and connects at exactly 45 degrees.
+    by_uuid = {move[0]: move for move in end_moves}
+    assert by_uuid["trk-b"][4:] == (101.35, 99.48)
+    assert by_uuid["trk-f"][4:] == (101.493256, 99.523256)
+    for start_x, start_y, end_x, end_y, width, layer, net in tails:
+        assert _is_quantum_aligned(end_x - start_x, end_y - start_y)
+        # exactly on the 0/45/90/135 set, not merely within a rounding quantum
+        assert off_angle_degrees(end_x - start_x, end_y - start_y) <= 0.01
+        # wholly inside the new land, track width included
+        for point in ((start_x, start_y), (end_x, end_y)):
+            assert math.dist(point, (101.45, 99.48)) + width / 2 <= 0.3 - 0.001 + 1e-9
+
+    # The slid ends stay collinear with their original lines.
+    for move, (fixed_x, fixed_y) in zip(
+        sorted(end_moves), [(101.35, 98.2), (102.75, 98.85)], strict=True
+    ):
+        _uuid, _tag, _ox, _oy, new_x, new_y = move
+        cross = (new_x - fixed_x) * (99.6 - fixed_y) - (new_y - fixed_y) * (101.35 - fixed_x)
+        assert abs(cross) < 2e-4  # on the line to within serialization rounding
+
+    # Apply records the action, moves the via and ends, and inserts the
+    # connections as ordinary segments beside the existing ones; undo
+    # removes them again and restores every original coordinate.
+    added = [(_make_uuid(), *tail) for tail in tails]
+    points = [("via", "via-p", None, 101.35, 99.6)]
+    points.extend(
+        ("segment", uuid, tag, old_x, old_y) for uuid, tag, old_x, old_y, _nx, _ny in end_moves
+    )
+    points.extend(("segment", tail[0], None, tail[1], tail[2]) for tail in added)
+    action = MaskViaRelocateAction(
+        action="relocate_clear",
+        uuid="via-p",
+        kind="via",
+        pad_uuid="pad-r1-1",
+        pad_ref="R1/1",
+        net_name=net_name,
+        layer="F.Cu-B.Cu",
+        old_x=101.35,
+        old_y=99.6,
+        new_x=101.45,
+        new_y=99.48,
+        dx=0.1,
+        dy=-0.12,
+        displacement_mm=math.hypot(0.1, 0.12),
+        detail="unit plan",
+        openings=["pad-r1-1"],
+        points=points,
+        end_moves=end_moves,
+        added_segments=added,
+    )
+    result = MaskRepairResult()
+    assert repairer._apply_via_relocate(action, result, False) is None
+    assert result.repaired == 1 and repairer.modified
+    repairer.save(board)
+    assert _saved_copper(board, "via-p")[1] == (101.45, 99.48)
+    assert _end(board, "trk-f")[1] == by_uuid["trk-f"][4:]
+    assert _end(board, "trk-b")[1] == (101.35, 99.48)
+    reloaded = MaskCopperRepairer(board)
+    for tail in added:
+        segment = reloaded._segment_by_uuid(tail[0])
+        assert segment.find("net").get_first_atom() == net_atom
+        assert reloaded._net_name(segment) == net_name
+        assert set(_end(board, tail[0])) == {
+            (round(tail[1], 6), round(tail[2], 6)),
+            (round(tail[3], 6), round(tail[4], 6)),
+        }
+        assert _saved_copper(board, tail[0])[0].length > 0  # a real segment, not noise
+
+    assert reloaded.undo_action(action)
+    reloaded.save(board)
+    assert _saved_copper(board, "via-p")[1] == (101.35, 99.6)
+    assert _end(board, "trk-f")[1] == (101.35, 99.6)
+    assert _end(board, "trk-b")[1] == (101.35, 99.6)
+    for tail in added:
+        with pytest.raises(AssertionError):
+            _end(board, tail[0])
+
+
+def test_via_alternate_blocked_in_every_direction_stays_in_place(tmp_path):
+    """Issue #9939: a via with no legal candidate is left alone, with a reason.
+
+    Foreign copper fences every direction that would clear the pad opening,
+    so the bounded search finds nothing and the board is untouched.
+    """
+    fence = "\n".join(
+        [
+            # Left wall past the pad, right wall, floor below, roof above:
+            # every opening-clearing destination crowds one of them below
+            # the project's own clearance (0.2 mm without a project).
+            _seg("wall-l", (101.85, 98.4), (101.85, 100.8), net=2),
+            _seg("wall-r", (102.85, 98.4), (102.85, 100.8), net=2),
+            _seg("wall-b", (101.85, 98.4), (102.85, 98.4), net=2),
+            _seg("wall-t", (101.85, 100.8), (102.85, 100.8), net=2),
+        ]
+    )
+    copper = PASS_VIA + "\n" + _seg("trk-f", (101.35, 99.6), (103, 99.6)) + "\n" + fence
+    board = _board(tmp_path, copper)
+    original = board.read_bytes()
+    result = MaskCopperRepairer(board).repair(
+        [_pt_finding("via-p", measured=0.05, location=(101.05, 99.6))], max_displacement=0.6
+    )
     assert result.repaired == 0
     assert result.skipped("would_violate_clearance") == 1
-    assert "hole-to-hole" in result.unrepaired[0].detail
+    assert "project rules" in result.unrepaired[0].detail
+    assert board.read_bytes() == original
+
+
+@pytest.mark.parametrize(("wall_x", "required"), [(102.09, 0.3), (103.26, 1.5)])
+def test_via_alternate_respects_authored_net_class_over_manufacturer_floor(
+    tmp_path, wall_x, required
+):
+    """Issue #9939: a destination that only passes the manufacturer floor is
+    refused when the project's authored net class demands more clearance.
+
+    The farther wall exercises a class whose clearance exceeds the old
+    fixed search box. Both boards have a legal alternate and a constrained
+    control in which the via has to stay put.
+    """
+    from kicad_tools.manufacturers.base import DesignRules
+
+    copper = PASS_VIA + "\n" + _seg("trk-f", (101.35, 98.2), (101.35, 99.6))
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    probe = MaskCopperRepairer(_board(plain_dir, copper))
+    probe_result = probe.repair(
+        [_pt_finding("via-p", measured=0.05, location=(101.05, 99.6))], max_displacement=1.0
+    )
+    assert probe_result.repaired == 1
+    dest = (probe_result.actions[0].new_x, probe_result.actions[0].new_y)
+
+    rules = DesignRules(
+        min_clearance_mm=0.127,
+        min_trace_width_mm=0.127,
+        min_via_drill_mm=0.3,
+        min_via_diameter_mm=0.6,
+        min_annular_ring_mm=0.15,
+    )
+    blocker = _seg("trk-x", (wall_x, 99.3), (wall_x, 100.0), net=2)
+    board = _board(tmp_path, copper + "\n" + blocker)
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "net_settings": {
+                    "classes": [
+                        {"name": "Default", "clearance": 0.2},
+                        {"name": "Wide", "clearance": required},
+                    ],
+                    "netclass_assignments": {"N2": "Wide"},
+                }
+            }
+        )
+    )
+    result = MaskCopperRepairer(board).repair(
+        [_pt_finding("via-p", measured=0.05, location=(101.05, 99.6))],
+        max_displacement=1.0,
+        clearance_mm=rules.min_clearance_mm,
+        design_rules=rules,
+    )
+    assert result.repaired == 1 and not result.unrepaired
+    action = result.actions[0]
+    moved = (round(action.new_x, 4), round(action.new_y, 4))
+    assert moved != dest
+    blocker_geom, _ends = _saved_copper(board, "trk-x")
+    assert Point(moved).buffer(0.3).distance(blocker_geom) >= required - 1e-6
+    assert _pad_poly(board, "R1/1").distance(Point(moved).buffer(0.3)) >= 0.11 - 1e-6
+
+    # With no room to go around, the same board refuses: every candidate
+    # that clears the opening stays inside the authored class's reach.
+    tight_dir = tmp_path / "tight"
+    tight_dir.mkdir()
+    tight = _board(tight_dir, copper + "\n" + blocker)
+    tight.with_suffix(".kicad_pro").write_text(board.with_suffix(".kicad_pro").read_text())
+    tight_result = MaskCopperRepairer(tight).repair(
+        [_pt_finding("via-p", measured=0.05, location=(101.05, 99.6))],
+        max_displacement=0.1,
+        clearance_mm=rules.min_clearance_mm,
+        design_rules=rules,
+    )
+    assert tight_result.repaired == 0
+    assert tight_result.skipped("would_violate_clearance") == 1
+    assert "project rules" in tight_result.unrepaired[0].detail
 
 
 def test_pass_through_overlap_relation_and_model_mismatch_are_refused(tmp_path):
@@ -1641,3 +1956,165 @@ def test_moves_with_new_errors_attributes_a_via_centre_location(tmp_path, monkey
     # The nudged copper sits 0.40 mm from the via centre -- outside the old
     # 0.35 mm reach, inside reach + the measured 0.109 mm gap.
     assert flagged == {"trk-p"}
+
+
+# ---------------------------------------------------------------------------
+# Issue #9958: two pass-through nudges that drag a shared track endpoint
+# ---------------------------------------------------------------------------
+
+# trk-a runs right as a pass-through 0.02 mm above the opening; trk-b shares
+# its left endpoint and runs down past the opening's left edge, also 0.02 mm
+# clear.  trk-a's upward nudge drags trk-b's top end along trk-b's own line,
+# which leaves trk-b's body 0.02 mm from the opening on the dragged geometry,
+# so trk-b stays a live candidate after the first move -- the stacked second
+# edit the issue reports.
+OVERLAP_PAIR = (
+    _seg("trk-a", (104, 100.62), (98.88, 100.62))
+    + "\n"
+    + _seg("trk-b", (98.88, 100.62), (98.88, 98.5))
+)
+
+
+def _overlap_applied(board: Path) -> list:
+    """Apply the overlapping pair through the production solver and save."""
+    repairer = MaskCopperRepairer(board)
+    first = repairer.repair([_pt_finding("trk-a")], max_displacement=1.0)
+    assert first.repaired == 1
+    repairer.save(board)
+    # A fresh repair call has no memory of the first action, so trk-b's
+    # finding names the dragged geometry and is nudged on top of it.
+    second_repairer = MaskCopperRepairer(board)
+    second = second_repairer.repair([_pt_finding("trk-b")], max_displacement=1.0)
+    assert second.repaired == 1
+    second_repairer.save(board)
+    return [*first.actions, *second.actions]
+
+
+def test_overlapping_pass_through_pair_defers_the_second_nudge(tmp_path):
+    """A pass-through conductor an earlier action dragged must be deferred
+    (``segment_end_already_moved``), not nudged again on the dragged
+    geometry: the stacked edit cannot be undone in application order, which
+    aborts the whole batch (issue #9958)."""
+    board = _board(tmp_path, OVERLAP_PAIR + "\n" + _seg("trk-c", (100, 99.38), (102.5, 99.38)))
+    findings = [_pt_finding("trk-a"), _pt_finding("trk-b"), _pt_finding("trk-c")]
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(findings, max_displacement=1.0)
+    assert result.repaired == 2  # the independent move stays eligible
+    assert [a.uuid for a in result.actions] == ["trk-a", "trk-c"]
+    assert result.skipped("segment_end_already_moved") == 1
+    repairer.save(board)
+    undo = MaskCopperRepairer(board)
+    for action in result.actions:
+        assert undo.undo_action(action)
+    undo.save(board)
+    assert _end(board, "trk-a") == [(104.0, 100.62), (98.88, 100.62)]
+    assert _end(board, "trk-b") == [(98.88, 100.62), (98.88, 98.5)]
+    assert _end(board, "trk-c") == [(100.0, 99.38), (102.5, 99.38)]
+
+
+def test_undo_still_fails_on_a_genuine_endpoint_mismatch(tmp_path):
+    """Deferral must not loosen the undo guard: a point that no longer sits
+    at the action's recorded post-move position still fails the undo, and
+    the caller falls back to the snapshot (issue #9958 premise)."""
+    board = _board(tmp_path, OVERLAP_PAIR)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_pt_finding("trk-a")], max_displacement=1.0)
+    assert result.repaired == 1
+    repairer.save(board)
+    # Shift trk-b's dragged endpoint 0.05 mm past its recorded post-move
+    # position, as a later edit the undo guard cannot account for would.
+    corrupt = MaskCopperRepairer(board)
+    start = corrupt._segment_by_uuid("trk-b").find("start")
+    start.set_value(0, round(float(start.get_atoms()[0]) + 0.05, 4))
+    start.set_value(1, round(float(start.get_atoms()[1]) + 0.05, 4))
+    corrupt.save(board)
+    assert not MaskCopperRepairer(board).undo_action(result.actions[0])
+
+
+def test_verify_undoes_overlapping_moves_in_reverse_order(tmp_path, monkeypatch):
+    """When an overlapping pair does reach the verifier, it rolls back only
+    if the undos run last-applied-first: undoing in application order hits
+    the shared endpoint at the second action's position and fails (issue
+    #9958)."""
+    from kicad_tools.drc.repair_mask_copper import MaskRepairResult
+
+    board = _board(tmp_path, OVERLAP_PAIR)
+    actions = _overlap_applied(board)
+    result = MaskRepairResult(actions=actions, repaired=2)
+    before = _report(_pt_finding("trk-a"), _pt_finding("trk-b"))
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", lambda *a, **k: None)
+    fix_drc_cmd._verify_mask_actions(
+        result,
+        before,
+        argparse.Namespace(mfr="jlcpcb", layers=None),
+        board,
+        board,
+        {},
+    )
+    assert result.actions == [] and result.repaired == 0
+    assert {(u.uuid, u.reason) for u in result.unrepaired} == {
+        ("trk-a", "recheck_unavailable"),
+        ("trk-b", "recheck_unavailable"),
+    }
+    assert _end(board, "trk-a") == [(104.0, 100.62), (98.88, 100.62)]
+    assert _end(board, "trk-b") == [(98.88, 100.62), (98.88, 98.5)]
+
+
+def test_baseline_reconstruction_undoes_overlapping_moves_in_reverse(tmp_path, monkeypatch):
+    """The pre-existing-error baseline is only trustworthy when the
+    reconstruction undo succeeds; with the overlapping pair applied, that
+    requires reverse application order (issue #9958)."""
+    board = _board(tmp_path, OVERLAP_PAIR)
+    actions = _overlap_applied(board)
+    # A pre-existing clearance error beside the shared endpoint: it matches
+    # its baseline counterpart, so no move is flagged -- but only if the
+    # baseline run happens, which needs both undos to succeed.
+    error = _clearance_error(x=98.9, y=100.6)
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", lambda *a, **k: _report(error))
+    flagged = fix_drc_cmd._moves_with_new_errors(
+        after=_report(error),
+        actions=actions,
+        output_path=board,
+        pcb_path=board,
+        args=argparse.Namespace(mfr="jlcpcb", layers=None),
+    )
+    assert flagged == set()
+
+
+def _own_finding(conductor: str, pad_uuid: str, pad_ref: str) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.MASK_TO_COPPER,
+        type_str="mask_to_copper",
+        severity=Severity.ERROR,
+        message=f"Mask-to-copper overlap: error; opening {pad_ref}; {OWN_ENTRY}",
+        locations=[Location(x_mm=100.0, y_mm=100.3, layer="F.Cu")],
+        items=[pad_uuid, conductor],
+    )
+
+
+def test_failed_mask_batch_reports_each_action_once(tmp_path, monkeypatch, capsys):
+    """When the selective rollback fails partway, the fail-closed fallback
+    must not re-report actions the rollback already disposed of: each action
+    uuid appears under exactly one reason in the JSON (issue #9958)."""
+    # Both findings persist. Undo trk-2 first so it has a specific
+    # disposition when undoing trk-a fails and the batch is discarded.
+    board = _board2(tmp_path, ENTRY + "\n" + _seg("trk-2", (106, 100.3), (103.7, 100.3)), "103 100")
+    original = board.read_bytes()
+    f1 = _own_finding("trk-a", PAD, "R1/1")
+    f2 = _own_finding("trk-2", "pad-r2-1", "R2/1")
+    still = _report(f1, f2)
+    real_undo = MaskCopperRepairer.undo_action
+
+    def selective_undo(self, action):
+        return False if action.uuid == "trk-a" else real_undo(self, action)
+
+    monkeypatch.setattr(MaskCopperRepairer, "undo_action", selective_undo)
+    code = _run(monkeypatch, board, [still, still, still], extra=("--format", "json"))
+    assert code != 0
+    payload = json.loads(capsys.readouterr().out)
+    records = payload["mask_copper"]["unrepaired"]
+    assert sorted((record["uuid"], record["reason"]) for record in records) == [
+        ("trk-2", "finding_not_cleared"),
+        ("trk-a", "recheck_unavailable"),
+    ]
+    assert board.read_bytes() == original

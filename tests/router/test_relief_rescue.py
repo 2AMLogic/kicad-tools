@@ -1997,3 +1997,84 @@ class TestReliefVictimGoalBias:
         ok, seen = self._run(router, failed_net=2, coupled_partner=True)
         assert ok is False
         assert seen[1].get(1) == 2.5, "the gene's weight is not overwritten by the bias"
+
+
+def test_protecting_partner_drills_overrides_cached_via_and_restores_search_state():
+    router = _make_diff_pair_router(force_python=True)
+    pathfinder = router.router
+    x, y = router.grid.world_to_grid(15.0, 10.0)
+    center = router.grid.grid_to_world(x, y)
+    drills = [(*center, 0.25)]
+    pathfinder._max_iterations_override = 2000
+    assert pathfinder._check_via_placement_cached(x, y, 2)
+    cache_state = router._nogood_extra_state()
+    with pytest.raises(RuntimeError, match="stop trial"), pathfinder.trial_partner_drills(drills):
+        assert pathfinder._max_iterations_override == 2000
+        assert router._nogood_extra_state() != cache_state
+        assert not pathfinder._check_via_placement_cached(x, y, 2)
+        assert not pathfinder._check_via_placement_cached(x, y, 2, allow_sharing=True)
+        raise RuntimeError("stop trial")
+    assert pathfinder._max_iterations_override == 2000
+    assert router._nogood_extra_state() == cache_state
+    assert pathfinder._check_via_placement_cached(x, y, 2)
+
+
+@pytest.mark.parametrize("can_reland", [True, False])
+def test_partner_drill_candidate_commits_both_or_restores_tracks_vias_and_pads(can_reland):
+    from copy import deepcopy
+
+    from kicad_tools.router.primitives import Via
+
+    router = _make_diff_pair_router(force_python=True)
+    worker = NegotiatedRouter(router.grid, router.router, router.rules, router.net_class_map)
+    pads = {net: [router.pads[k] for k in keys] for net, keys in router.nets.items()}
+    partner = _seg_route(1, "TMDS_D0_P", 4.0)
+    layers = (Layer.F_CU, Layer.B_CU)
+    partner.vias.append(Via(15.0, 4.0, 0.35, 0.65, layers, net=1))
+    router._mark_route(partner)
+    router.grid.mark_route_usage(partner)
+    router.routes.append(partner)
+    routes = {1: [partner], 2: []}
+    original = deepcopy(partner)
+    before = router._relief_victim_connected_pads(1, [partner], pads)
+    assert before == (True, 2)
+    probe = _seg_route(2, "TMDS_D0_N", 8.0)
+    probe.vias.append(Via(15.0, 4.3, 0.35, 0.65, layers, net=2))
+    calls = []
+    normal = router._route_net_negotiated
+
+    def offer_probe(net, *_args, **_kwargs):
+        if net != 2:
+            return [], set()
+        router._mark_route(probe)
+        return [probe], set()
+
+    def search(net, *args, **kwargs):
+        reserved = tuple(router.router.relief_partner_drills)
+        calls.append((net, reserved))
+        if reserved:
+            assert kwargs["reverse_search"]
+            assert router.router._max_iterations_override == 4096
+        if not can_reland and (reserved or net == 1):
+            return []
+        return normal(net, *args, **kwargs)
+
+    with (
+        patch.object(router, "_relief_probe", side_effect=offer_probe),
+        patch.object(router, "_route_net_negotiated", side_effect=search),
+    ):
+        accepted = router._relief_rescue(2, worker, routes, pads, 1.0, 2.0, lambda *_: None, str)
+
+    assert accepted is can_reland
+    assert calls[0] == (2, ((15.0, 4.0, 0.35),))
+    assert not router.router.relief_partner_drills
+    assert router._relief_victim_connected_pads(1, routes[1], pads) == before
+    if can_reland:
+        assert (2, ()) not in calls
+        assert (1, ()) in calls
+        assert router._relief_victim_connected_pads(2, routes[2], pads) == (True, 2)
+    else:
+        assert (2, ()) in calls
+        assert routes == {1: [original], 2: []}
+        assert router.routes == [original]
+        assert router.routes[0] is partner

@@ -350,6 +350,126 @@ def test_order_keeps_independent_edge_failure(tmp_path, capsys):
     assert not pairs["edge"]["pass"] and pairs["edge"]["creepage_mm"] == pytest.approx(1.0)
 
 
+def _write_purchase_spec(directory, value, artifact="board.kicad_pcb"):
+    (directory / "project.kct").write_text(
+        f"project:\n  name: Test board\n  artifacts:\n    pcb: {artifact}\n"
+        f"requirements:\n  manufacturing:\n    order_thickness_mm: {value}\n"
+    )
+
+
+def _near_nominal_bore():
+    # Move the left edge clear so it cannot hide the conductor gate transition.
+    return (
+        _with_stackup(board_cross_face_bore_source(), 1.525)
+        .replace("100 100)", "95 100)")
+        .replace("100 120)", "95 120)")
+    )
+
+
+@pytest.mark.parametrize(("order", "code", "distance"), [(0.8, 1, 2.95), (1.6, 0, 3.75)])
+def test_project_purchase_applies_to_creepage_and_audit(tmp_path, capsys, order, code, distance):
+    from kicad_tools.audit.auditor import check_isolation
+    from kicad_tools.schema.pcb import PCB
+
+    output = tmp_path / "output"
+    output.mkdir()
+    _write_purchase_spec(tmp_path, order, "output/board.kicad_pcb")
+    rc, report = _run_thickness_cli(output, capsys, _near_nominal_bore())
+    assert rc == code and "error" not in report
+    assert report["board_thickness_source"] == "project.kct"
+    assert report["board_thickness_mm"] == order
+    assert report["board_thickness_declarations_mm"] == {"general": 1.6, "stackup": 1.595}
+    row = next(p for p in report["pairs"] if p["net_b"] == "GND")
+    assert row["creepage_mm"] == pytest.approx(distance, abs=0.01)
+    pcb = output / "board.kicad_pcb"
+    audit = check_isolation(
+        PCB.load(pcb), pcb, hv_min_mm=3.3, net_class_map_path=output / "net-class-map.json"
+    )
+    assert audit.checked and audit.passed is (code == 0)
+    assert audit.report["board_thickness_source"] == "project.kct"
+    assert audit.report["board_thickness_mm"] == order
+
+
+def test_purchase_for_one_revision_does_not_govern_another(tmp_path, capsys):
+    for revision in ("rev-c", "rev-d"):
+        (tmp_path / revision).mkdir()
+    _write_purchase_spec(tmp_path, 1.6, "rev-d/board.kicad_pcb")
+    rc, report = _run_thickness_cli(tmp_path / "rev-c", capsys, _near_nominal_bore())
+    assert rc == 1 and report["board_thickness_source"] == "unresolved"
+    assert "requirements.manufacturing.order_thickness_mm" in report["error"]
+    rc, report = _run_thickness_cli(tmp_path / "rev-d", capsys, _near_nominal_bore())
+    assert rc == 0 and report["board_thickness_source"] == "project.kct"
+    rc, report = _run_thickness_cli(tmp_path, capsys, _near_nominal_bore())
+    assert rc == 1 and report["board_thickness_source"] == "unresolved"
+
+
+def test_repair_and_route_link_use_original_purchase_for_staged_copper(tmp_path):
+    from kicad_tools.cli.parser import create_parser
+    from kicad_tools.cli.repair_creepage_cmd import build_census_fn
+    from kicad_tools.cli.route_link_cmd import _census_failures
+    from kicad_tools.schema.pcb import PCB
+
+    original = tmp_path / "original"
+    original.mkdir()
+    source = original / "board.kicad_pcb"
+    source.write_text(_near_nominal_bore())
+    _write_purchase_spec(original, 0.8)
+    staged = tmp_path / "release"
+    staged.mkdir()
+    candidate = staged / "rerouted.kicad_pcb"
+    candidate.write_bytes(source.read_bytes())
+    _write_purchase_spec(staged, 1.6, candidate.name)
+    net_map = original / "net-class-map.json"
+    net_map.write_text(json.dumps({"L_MAINS": {"name": "HV"}}))
+
+    flags = [str(source), "--min", "3.3", "--net-class-map", str(net_map)]
+    parser = create_parser()
+    repair = build_census_fn(parser.parse_args(["repair-creepage", *flags]))(PCB.load(candidate))
+    assert repair.board_thickness_source == "project.kct"
+    assert repair.board_thickness_mm == 0.8 and not repair.gate_passed
+
+    link_args = parser.parse_args(["route-link", *flags, "--link", "L_MAINS U1.1 U2.1"])
+    failures = _census_failures(candidate, link_args)
+    assert failures
+    assert min(failures.values()) == pytest.approx(2.95, abs=0.01)
+
+
+def test_command_line_purchase_overrides_project(tmp_path, capsys):
+    _write_purchase_spec(tmp_path, 1.6)
+    rc, report = _run_thickness_cli(
+        tmp_path, capsys, _near_nominal_bore(), "--order-thickness-mm", "0.8"
+    )
+    assert rc == 1 and report["board_thickness_source"] == "order"
+    assert report["board_thickness_mm"] == 0.8
+
+
+@pytest.mark.parametrize("invalid", ["0", "-1", ".nan", ".inf", "true"])
+def test_invalid_project_purchase_gives_a_diagnostic(tmp_path, capsys, invalid):
+    _write_purchase_spec(tmp_path, invalid)
+    rc, report = _run_thickness_cli(tmp_path, capsys, _near_nominal_bore())
+    assert rc != 0 and report["gate_passed"] is False
+    assert "order_thickness_mm" in report["error"]
+
+
+def test_previous_project_without_order_key_keeps_its_cad_result(tmp_path, capsys):
+    # Some workflows use a minimal requirements file with no project metadata.
+    (tmp_path / "project.kct").write_text(
+        "requirements:\n  manufacturing:\n    target_fab: jlcpcb\n"
+    )
+    rc, report = _run_thickness_cli(tmp_path, capsys, _near_nominal_bore().replace("1.525", "1.53"))
+    assert "error" not in report
+    assert rc == 0
+
+
+def test_invalid_order_for_another_revision_is_ignored(tmp_path, capsys):
+    rev_c = tmp_path / "rev-c"
+    rev_c.mkdir()
+    _write_purchase_spec(tmp_path, -1, "rev-d/board.kicad_pcb")
+    rc, report = _run_thickness_cli(rev_c, capsys, _near_nominal_bore())
+    assert rc == 1 and report["board_thickness_source"] == "unresolved"
+    assert "1.595 mm disagree" in report["error"]
+
+
 @pytest.mark.parametrize(("header", "core"), [(0.8, 1.5), (1.6, 0.73)])
 def test_unresolved_cross_face_conflict_requests_order(tmp_path, capsys, header, core):
     source = _with_stackup(

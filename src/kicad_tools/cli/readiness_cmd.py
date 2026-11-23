@@ -4135,6 +4135,32 @@ def _snapshot_inventory(root: Path) -> dict[str, str]:
     }
 
 
+def _release_changes(
+    board_dir: Path, before: dict[str, str], external_before: dict[Path, str]
+) -> list[str]:
+    """Name changed inputs relative to the original board directory."""
+    after = _snapshot_inventory(board_dir)
+    changes: list[str] = []
+    if after != before:
+        changes.extend(f"added {name}" for name in sorted(after.keys() - before.keys()))
+        changes.extend(f"removed {name}" for name in sorted(before.keys() - after.keys()))
+        changes.extend(
+            f"modified {name}"
+            for name in sorted(before.keys() & after.keys())
+            if after[name] != before[name]
+        )
+    for path, digest in sorted(external_before.items()):
+        if not path.is_file():
+            kind = "removed"
+        elif _sha256_file(path) != digest:
+            kind = "modified"
+        else:
+            continue
+        relative = Path(os.path.relpath(path, board_dir)).as_posix()
+        changes.append(f"{kind} external input {relative}")
+    return changes
+
+
 def _publication_identity(path: Path) -> tuple[Any, ...] | None:
     """Identify the actual file, including same-content inode replacements."""
     try:
@@ -4367,11 +4393,11 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                     )
                 shutil.rmtree(staged.output_dir)
             result = _run_readiness_candidate(staged, engines)
-            if _snapshot_inventory(original) != before or any(
-                not p.is_file() or _sha256_file(p) != digest
-                for p, digest in external_before.items()
-            ):
-                raise RuntimeError("Release changed while checks were running")
+            changes = _release_changes(original, before, external_before)
+            if changes:
+                raise RuntimeError(
+                    "Release changed while checks were running: " + ", ".join(changes)
+                )
             if options.operation == "generate" and result.exit_code == 0:
                 _publish_candidate(candidate, original, before)
                 return replace(
