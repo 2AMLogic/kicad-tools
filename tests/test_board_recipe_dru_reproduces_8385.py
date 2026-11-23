@@ -28,8 +28,9 @@ from the committed one.  None of them needs kicad-cli: these boards have no
 rule areas, so the keepout step writes nothing.
 
 Board 07 replays the six-layer rule writer from its production validator
-with the reviewed net-class map. Board 02's exporter-only replay still
-differs from the full recipe's ampacity, drill and silk rules (#8759).
+with the reviewed net-class map.  Each replay stages the board's
+``net_class_map.json`` next to the routed board, as the recipe leaves it,
+so the writer's ampacity rules match the committed file (board 02, #8759).
 
 Boards not covered, and why (traced in #8385): board 00's recipe routes
 in-process and its routed ``.kicad_pro`` declares no router class, so it never
@@ -106,24 +107,6 @@ PARAMS = [
 ]
 
 
-# Board 02's committed DRU was re-pinned from a full recipe run (#8759) and carries
-# rules (ampacity, max hole size, B.Silkscreen floors) that this exporter-only
-# replay does not emit, so the byte-for-byte replay is still pending there.
-BYTE_FOR_BYTE_PARAMS = [
-    pytest.param(
-        p.values[0],
-        id=p.id,
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="committed DRU re-pinned from a full recipe run; export-only replay differs (#8759)",
-        ),
-    )
-    if p.id == "board02"
-    else p
-    for p in PARAMS
-]
-
-
 def _committed_dru(board: str) -> str:
     stem = CASES[board][0]
     return (BOARDS / board / "output" / f"{stem}.kicad_dru").read_text(encoding="utf-8")
@@ -134,6 +117,9 @@ def _recipe_dru(board: str, tmp_path: Path) -> str:
     output = BOARDS / board / "output"
     for suffix in (".kicad_pcb", ".kicad_pro"):
         shutil.copy2(output / f"{stem}{suffix}", tmp_path / f"{stem}{suffix}")
+    net_class_map = output / "net_class_map.json"
+    if net_class_map.exists():
+        shutil.copy2(net_class_map, tmp_path / "net_class_map.json")
     routed = tmp_path / f"{stem}.kicad_pcb"
     assert not routed.with_suffix(".kicad_dru").exists()
     last_writer(routed)
@@ -145,16 +131,10 @@ def test_committed_dru_carries_the_attach_zone_block(board):
     assert has_attach_zone_block(_committed_dru(board))
 
 
-@pytest.mark.parametrize("board", BYTE_FOR_BYTE_PARAMS)
+@pytest.mark.parametrize("board", PARAMS)
 def test_recipe_emits_the_committed_dru_byte_for_byte(board, tmp_path):
     assert _recipe_dru(board, tmp_path) == _committed_dru(board), (
         f"board {board}'s recipe no longer emits the committed .kicad_dru; commit "
         "what it emits, refill the zones and re-pin the evidence on the pinned "
         "toolchain (scripts/boards/refresh_readiness.py)"
     )
-
-
-@pytest.mark.parametrize("board", ["02-charlieplex-led", "04-stm32-devboard"])
-def test_pending_boards_recipe_does_emit_the_block(board, tmp_path):
-    """The xfails above are pending the re-pin, not a recipe that stopped emitting."""
-    assert has_attach_zone_block(_recipe_dru(board, tmp_path))

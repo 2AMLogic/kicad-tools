@@ -1,12 +1,14 @@
 {
-  "status": "validated routing",
-  "parts": 43,
   "bound_pads": 216,
-  "pcb": "sdram_demo_routed.kicad_pcb",
-  "evidence": "validation/validation.json",
-  "routing_method": "reviewed artifact; independently regenerated circuit and fresh gates",
+  "evidence": "readiness/validation.json",
   "hardware_tested": false,
+  "manufacturing_complete": true,
+  "manufacturing_export_required": false,
+  "manufacturing_package": "manufacturing.zip",
+  "parts": 43,
+  "pcb": "matchgroup_test_routed.kicad_pcb",
+  "readiness": "readiness.json",
   "routed": true,
-  "manufacturing_complete": false,
-  "manufacturing_export_required": true
+  "routing_method": "reviewed artifact; independently regenerated circuit and fresh gates",
+  "status": "released"
 }
