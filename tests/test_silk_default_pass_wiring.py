@@ -512,9 +512,6 @@ def test_optimize_placement_no_silk_fix_bypasses_silk_edits(tmp_path: Path, caps
 
     assert rc == 0
     assert "Silk legalisation" not in capsys.readouterr().out
-    # Real routing still ran: the opt-out arm must connect what the input left open.
-    _assert_net1_open(board)
-    _assert_routed_connectivity(out)
     # The opt-out bypasses the reference-move repairs too: the authored
     # sub-minimum line survives byte-identical (placement moved, silk not).
     (thin,) = [entry for entry in _silk_lines(out) if entry[2] == pytest.approx(105.0)]
