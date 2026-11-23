@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import shutil
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -56,7 +58,7 @@ def _defect_board(
     return pcb
 
 
-def _silk_lines(path: Path) -> list[tuple[str, float, float, float, float]]:
+def _silk_lines(path: Path) -> list[tuple[str, float, float, float, float, float]]:
     """``(uuid, width, x1, y1, x2, y2)`` of every board-level F.SilkS line."""
     board = PCB.load(str(path))
     out = []
@@ -125,33 +127,40 @@ def _export_json(board: Path, out_dir: Path, capsys, *extra: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_route_runs_pass_and_names_unresolved(tmp_path: Path, capsys):
+@pytest.fixture(scope="module")
+def routed_silk_witness(tmp_path_factory):
+    directory = tmp_path_factory.mktemp("routed-silk")
     # Connect the silk-crossing via to D1.2 so this board needs no GND pour.
     board = _defect_board(
-        tmp_path / "run",
+        directory,
         extra_copper='(segment (start 141 50) (end 148 57) (width 0.25) (layer "F.Cu") '
         '(net 2) (uuid "silk-via-gnd-feed"))\n',
     )
-    out = tmp_path / "run" / "routed.kicad_pcb"
-    signal = NetStatusAnalyzer(board, strict=True).analyze().get_net("NET1")
-    assert signal is not None and signal.open_connections == 1
-
-    rc = kct_main(
-        [
-            "route",
-            str(board),
-            "-o",
-            str(out),
-            "--seed",
-            "7",
-            "--skip-drc",
-            "--no-auto-pour",
-            "--no-chain-complete",
-        ]
-    )
+    out = directory / "routed.kicad_pcb"
+    output = StringIO()
+    with redirect_stdout(output):
+        rc = kct_main(
+            [
+                "route",
+                str(board),
+                "-o",
+                str(out),
+                "--seed",
+                "7",
+                "--skip-drc",
+                "--no-auto-pour",
+                "--no-chain-complete",
+            ]
+        )
 
     assert rc == 0
-    text = capsys.readouterr().out
+    return board, out, output.getvalue()
+
+
+def test_route_runs_pass_and_names_unresolved(routed_silk_witness):
+    board, out, text = routed_silk_witness
+    signal = NetStatusAnalyzer(board, strict=True).analyze().get_net("NET1")
+    assert signal is not None and signal.open_connections == 1
     assert "--- Silk legalisation (default pass, jlcpcb) ---" in text
     assert "unresolved [silk_over_hole]" in text
     assert "U9 (fp_arc)" in text  # the unfixable item is named
@@ -252,25 +261,20 @@ def test_output_silk_uses_source_fabricator(
     assert next(line[1] for line in _silk_lines(out) if line[2] == 105.0) == pytest.approx(width)
 
 
-def test_route_reports_no_unresolved_for_via_only_crossing(tmp_path: Path, capsys):
-    board = _defect_board(tmp_path / "run")
-    out = tmp_path / "run" / "routed.kicad_pcb"
-
-    rc = kct_main(["route", str(board), "-o", str(out), "--seed", "7", "--skip-drc"])
-
-    assert rc == 0
-    text = capsys.readouterr().out
+def test_route_reports_no_unresolved_for_via_only_crossing(routed_silk_witness):
+    _, out, text = routed_silk_witness
     unresolved = [line for line in text.splitlines() if "unresolved [" in line]
-    # Only the PTH arc is unresolved: the via under silk is never reported.
-    assert len(unresolved) == 1
-    assert "via" not in unresolved[0]
-    # ...and the silk line over the via kept its authored geometry (untouched).
-    (over_via,) = [
-        entry
-        for entry in _silk_lines(out)
-        if entry[2] == pytest.approx(146.0) and entry[3] == pytest.approx(57.0)
-    ]
-    assert over_via[1] == pytest.approx(0.15)
+    (pth_arc,) = unresolved
+    assert "unresolved [silk_over_hole]" in pth_arc and "U9 (fp_arc)" in pth_arc
+    assert "via" not in pth_arc
+    # Check both physical witnesses on the board the route command wrote.
+    routed = PCB.load(out)
+    origin_x, origin_y = routed.board_origin
+    center = (148.0 - origin_x, 57.0 - origin_y)
+    (via,) = [v for v in routed.vias if v.net_name == "GND" and v.position == pytest.approx(center)]
+    assert (via.size, via.drill) == pytest.approx((0.6, 0.3))
+    (line,) = [entry for entry in _silk_lines(out) if entry[2:4] == pytest.approx((146.0, 57.0))]
+    assert line[1:] == pytest.approx((0.15, 146.0, 57.0, 150.0, 57.0))
 
 
 def test_route_no_silk_fix_leaves_authored_silk(tmp_path: Path, capsys):

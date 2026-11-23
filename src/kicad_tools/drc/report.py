@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -563,6 +564,61 @@ def _optional_str(value: object) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _check_native_position(position: object, section: str) -> None:
+    if not isinstance(position, dict):
+        raise ValueError(f"expected an x/y position in {section}")
+    for axis in ("x", "y"):
+        value = position.get(axis)
+        if type(value) not in (int, float) or (
+            isinstance(value, float) and not math.isfinite(value)
+        ):
+            raise ValueError(f"expected a numeric {axis} coordinate in {section}")
+
+
+def load_native_connectivity_report(path: Path) -> DRCReport:
+    """Read KiCad's connectivity result. Only an explicit empty array means zero opens."""
+    from .geometric import read_kicad_cli_json_report
+
+    data = read_kicad_cli_json_report(path)
+    for section in ("violations", "unconnected_items", "schematic_parity"):
+        if section == "schematic_parity" and section not in data:
+            continue
+        entries = data.get(section)
+        if not isinstance(entries, list):
+            raise ValueError(f"expected a {section} list in the KiCad report")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"expected a finding object in {section}")
+            for member in ("type", "description", "severity"):
+                if _optional_str(entry.get(member)) is None:
+                    raise ValueError(f"expected a finding {member} in {section}")
+            if "pos" in entry:
+                _check_native_position(entry["pos"], section)
+            endpoints = entry.get("items")
+            if not isinstance(endpoints, list):
+                raise ValueError(f"expected an items list in {section}")
+            is_relationship = section == "unconnected_items" or entry["type"] == "unconnected_items"
+            if is_relationship and not endpoints:
+                raise ValueError(
+                    f"expected affected items for a connectivity relationship in {section}"
+                )
+            for endpoint in endpoints:
+                if not isinstance(endpoint, dict):
+                    raise ValueError(f"expected an item object in {section}")
+                for member in ("uuid", "description"):
+                    if _optional_str(endpoint.get(member)) is None:
+                        raise ValueError(f"expected an item {member} in {section}")
+                _check_native_position(endpoint.get("pos"), section)
+                net = endpoint.get("net")
+                if net is not None and not isinstance(net, str):
+                    raise ValueError(f"expected a net name in {section}")
+
+    try:
+        return _parse_kicad_cli_json(data, str(path))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid KiCad DRC finding: {exc}") from exc
 
 
 def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:

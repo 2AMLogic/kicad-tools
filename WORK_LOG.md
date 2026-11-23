@@ -16,6 +16,38 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-23
 
+- **PR #10006**: test: bound the input pad-overlap CLI regression
+- **Issue #10005** (closed): test flake: input pad-overlap CLI test times out in the post-route connectivity check
+- **PR #9976**: fix: clear the DRC report path before every kicad-cli launch
+- **Issue #9959** (closed): _run_drc_once: the flag-less DRC retry can inherit the first attempt's report
+- **Issue #9951** (closed): Judge docs-only fast path fails closed on this worker: gh build has no `baseRepository` field for `gh pr view`
+- **PR #9999**: chore(deps-dev): bump vitest from 5.0.5 to 5.1.0 in /site in the npm-minor-patch group across 1 directory
+- **PR #9979**: chore(board02): remove the redundant silk-width pass
+- **PR #9965**: fix(router): measure relief re-land search exits and bias displaced pair victims
+- **Issue #9936** (closed): Re-land displaced nets after Board 06 Python routing reaches the four USB3 negative legs
+- **PR #9949**: fix(drc): move a mask-crowded track junction around its fixed via
+- **PR #9984**: fix(board07): clear solder-mask overlap at DDR data pad exits
+- **PR #9980**: fix: measure known-failure progress over routing-terminal pads
+- **PR #9975**: feat: surface settle-capped silk references as reference_unsettled in fix-silkscreen
+- **PR #9947**: fix: request and verify the refill save on a lost zones fill probe
+- **PR #8990**: fix(schematic): name nets driven by hidden power-input pins
+- **PR #8983**: fix(sync): match mounting holes that have a schematic symbol
+- **PR #8982**: fix(pcb): place footprint zones at the footprint on add
+- **PR #9969**: test: stage net_class_map.json sidecar in board DRU replay, drop board02 xfail
+- **PR #9974**: fix: derive Board 07's public release summaries from the gated release
+- **PR #9967**: test: gate the partial-net entry-copper re-land on persisted checkpoints and --resume
+- **PR #9968**: fix(silk): bound the reference settle loop and report unsettled refs
+- **Issue #9960** (closed): Clear the four-layer Board 07 DDR data pad escapes at U1 and U2
+- **Issue #9091** (closed): Board 07: scripted repair of 29 same-net physical_copper_gap errors on the hand-reviewed release copper (ruling on #8979)
+- **Issue #9963** (closed): Router: _connected_pad_pairs measures progress over self.nets pads, not the routing-target pads_by_net set
+- **Issue #9971** (closed): legalize_silk does not surface PlaceSilkRefsResult.unsettled_refs in its unresolved report
+- **Issue #9938** (closed): kct zones fill can report success with an empty copper pour after a KiCad capability probe times out
+- **Issue #8981** (closed): sync --analyze reports mounting holes that have a schematic symbol as missing from the PCB
+- **Issue #8958** (closed): create-pcb leaves footprint-embedded zones in library coordinates
+- **Issue #8385** (closed): Boards 00/01/02/04/06/07: committed .kicad_dru lacks the #8048 attach-zone block the sidecar writer emits (follow-up to #8357)
+- **Issue #9955** (closed): Board 07 publisher leaves staging paths and an outstanding export in the public release summaries
+- **Issue #9962** (closed): Add an end-to-end persisted-checkpoint / --resume regression for the partial-net entry-copper re-land
+- **Issue #9957** (closed): SilkRefPlacer settle loop has no iteration cap
 - **PR #9952**: fix(board07): reissue the verified six-layer SDRAM manufacturing package
 - **PR #9956**: fix: clear the Board 06 J4 reset mask escape
 - **PR #9964**: docs(changelog): restore Board 03 route_demo DRC-gate fragment lost in #9940
@@ -3960,36 +3992,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #5702** (closed): test_mfr: ampacity DRU fallback pins a stale rule-name set, fails whenever kicad-cli is off PATH
 - **PR #5698**: perf(router): read collision-grid planes directly in the optimizer's obstacle scan
 - **Issue #5696** (closed): router: memoise the coupled diff-pair halo refinement on the pure-Python fallback
-
-### 2026-09-23
-
-- **PR #5710**: feat(drc): emit SMD pad clearance floor natively, scoped by reference
-- **PR #5709**: ci: pin KiCad CI containers by digest via workflow-level KICAD_IMAGE
-- **PR #5706**: fix(ci): exclude the vendored .agents/ surface from ruff, unblocking main
-- **PR #5705**: test(mfr): measure effective native silk-clearance, not emitted values
-- **PR #5699**: fix(router): apply the fab hole-to-hole floor to same-net via drops
-- **Issue #5697** (closed): main branch: Lint & Format CI failing again — .agents/ Loom mirror not in ruff extend-exclude
-- **PR #5695**: fix(router): refine coupled diff-pair halo rejection with physical clearance
-- **PR #5692**: fix(merge-pr): warn when a partial-increment trailer is backticked
-- **PR #5691**: perf(router): memoise the per-cell via-site predicates + drop cell_known's _CellView (phase 4 of the diff-pair re-route step)
-- **Issue #5690** (closed): Partial-increment reset (#3667) silently skipped when "Part of #N" trailer is backticked
-- **PR #5689**: docs: fix inline code spans with embedded line breaks
-- **PR #5688**: perf(sexp): walk SExp trees with an explicit stack instead of nested generators
-- **Issue #5687** (closed): README.md: three inline code spans broken by mid-span line wraps
-- **PR #5686**: perf(validate): memoise each copper element's shapely geometry in the clearance rule
-- **PR #5684**: refactor(router/mesh): take ObstacleModel.is_clear's verdicts from the clearance kernel
-- **PR #5683**: ci: qualify KiCad 10.0.6 for the native mask-to-copper gate
-- **Issue #5682** (closed): ci: pin the kicad/kicad container by digest so a Docker Hub tag move can't silently change measured native behaviour
-- **PR #5681**: docs: correct autorouter example and relocated board links
-- **PR #5680**: docs: refresh README What's New for 0.21.x and bring scripts/README current
-- **Issue #5678** (closed): ci: Test job's native mask gate hard-pins KiCad 10.0.5, fails on runners with 10.0.6
-- **PR #5677**: perf(router): fast-path copper_gap dispatch for the lattice engine's pair kinds
-- **PR #5676**: fix(router): route the coupled diff-pair search through the clearance kernel (Epic #5509 Phase 3c)
-- **Issue #5672** (closed): perf(router): kernel-backed lattice clearance predicates cost ~1.7x the pre-kernel arithmetic (Epic #5509 Phase 3d follow-up)
-- **Issue #5664** (closed): [Epic #5509] Phase 3e: switch mesh engine predicate (mesh/obstacles.py) to the clearance kernel
-- **Issue #5662** (closed): [Epic #5509] Phase 3c: switch coupled diff-pair search (coupled_pathfinder.cpp + diffpair_routing.py) to the clearance kernel
-- **Issue #5059** (closed): Manufacturing profiles: verify effective silk/pad DRC coverage and preserve custom rules
-- **Issue #4507** (closed): router Phase 2 (#4431): search-time pairwise HV avoidance + C++ validate_route domain-matrix extension — make HV boards actually converge
 
 ### 2026-07-20 (evening)
 
