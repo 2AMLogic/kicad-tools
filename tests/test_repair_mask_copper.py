@@ -635,7 +635,15 @@ def test_pass_through_moves_shared_junction_and_keeps_its_via_fixed(tmp_path, re
 
 @pytest.mark.parametrize(
     "block",
-    ["locked_neighbor", "fixed_end_too_close", "two_vias", "unbroken_track", "arc_midpoint"],
+    [
+        "locked_neighbor",
+        "fixed_end_too_close",
+        "two_vias",
+        "unbroken_track",
+        "arc_midpoint",
+        "locked_tap_on_target",
+        "tap_on_joined_leg",
+    ],
 )
 def test_pass_through_preserves_an_immovable_junction(tmp_path, block):
     anchor = (99.5, 100.62) if block == "fixed_end_too_close" else (95, 100.62)
@@ -653,6 +661,11 @@ def test_pass_through_preserves_an_immovable_junction(tmp_path, block):
             "(arc (start 104 101.62) (mid 105 100.62) (end 106 101.62) "
             '(width 0.2) (layer "F.Cu") (net 1) (uuid "arc"))'
         )
+    if block == "locked_tap_on_target":
+        tap = _seg("tap", (100, 100.62), (100, 98))
+        copper.append(tap.replace('(uuid "tap")', '(locked yes) (uuid "tap")'))
+    if block == "tap_on_joined_leg":
+        copper.append(_seg("tap", (106.5, 101.81), (110, 99)))
     board = _board(tmp_path, "\n".join(copper))
     repairer = MaskCopperRepairer(board)
     result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)

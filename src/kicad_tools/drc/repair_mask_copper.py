@@ -782,6 +782,15 @@ class MaskCopperRepairer(CopperGapRepairer):
             reference = end if fixed == start else start
             if self._has_fixed_junction_contact(reference, layer, net_name):
                 return "junction_at_moved_end", ""
+            legs = [(fixed, reference, {seg_uuid})]
+            for join_uuid, join_node, join_tag in joined:
+                join_a = self._xy(join_node.find("end" if join_tag == "start" else "start"))
+                join_b = self._xy(join_node.find(join_tag))
+                if join_a is not None and join_b is not None:
+                    legs.append((join_a, join_b, {join_uuid}))
+            moving = {seg_uuid, *(member[0] for member in joined)}
+            if any(self._has_interior_contact(a, b, layer, net_name, moving) for a, b, _ in legs):
+                return "junction_at_moved_end", ""
             push = self._shift_junction_clear(
                 fixed, reference, [entry[0] for entry in entries], required + margin_mm + width / 2
             )
@@ -893,6 +902,59 @@ class MaskCopperRepairer(CopperGapRepairer):
                 if LineString(path).distance(Point(point)) <= _TOLERANCE_MM + 0.00001:
                     return True
             elif not at_end and LineString([start, end]).distance(Point(point)) < _TOLERANCE_MM:
+                return True
+        return False
+
+    def _has_interior_contact(
+        self,
+        a: tuple[float, float],
+        b: tuple[float, float],
+        layer: str,
+        net_name: str,
+        moving: set[str],
+    ) -> bool:
+        """Whether same-net copper touches a reshaped leg away from its two ends.
+
+        A branch ending on (or crossing) the middle of a leg that is rotated
+        about its fixed end would lose that contact, so the edit is declined.
+        """
+        leg = LineString([a, b])
+        guard = _TOLERANCE_MM * 2
+        interior = leg.difference(Point(a).buffer(guard)).difference(Point(b).buffer(guard))
+        if interior.is_empty:
+            return False
+        for uuid, node in self._segment_nodes().items():
+            if uuid in moving or self._net_name(node) != net_name:
+                continue
+            layer_node = node.find("layer")
+            if layer_node is None or _bare(layer_node.get_first_atom()) != layer:
+                continue
+            start, end = self._xy(node.find("start")), self._xy(node.find("end"))
+            if start is not None and end is not None:
+                if LineString([start, end]).distance(interior) < _TOLERANCE_MM:
+                    return True
+        for node in self.doc.find_all("arc"):
+            layer_node = node.find("layer")
+            if (
+                layer_node is None
+                or _bare(layer_node.get_first_atom()) != layer
+                or self._net_name(node) != net_name
+            ):
+                continue
+            try:
+                path = Arc.from_sexp(node).centerline_points()
+            except ValueError:
+                return True
+            if LineString(path).distance(interior) < _TOLERANCE_MM:
+                return True
+        for via in self.doc.find_all("via"):
+            at = self._xy(via.find("at"))
+            if (
+                at is not None
+                and self._net_name(via) == net_name
+                and layer in self._via_span_layer_set(via)
+                and Point(at).distance(interior) < _TOLERANCE_MM
+            ):
                 return True
         return False
 
