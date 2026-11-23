@@ -607,6 +607,7 @@ def run_drc(
     all_track_errors: bool = False,
     refill_zones: bool = False,
     schematic: Path | None = None,
+    all_severities: bool = False,
 ) -> KiCadCLIResult:
     """Run KiCad DRC on a PCB.
 
@@ -628,6 +629,7 @@ def run_drc(
             board file is not saved).  Only when this kicad-cli supports it
             (KiCad 10+); KiCad 8/9 reject the option, so it is dropped there
             (Issue #6724).
+        all_severities: Include DRC exclusions as well as errors and warnings.
         schematic: Explicit schematic for parity (``kct drc --schematic``);
             ignored when ``schematic_parity`` is false.
 
@@ -668,6 +670,7 @@ def run_drc(
             # silent kicad-cli would otherwise read as parity PASSED.
             schematic_parity=schematic_parity and not staging_failed and parity_sch is not None,
             kicad_cli=kicad_cli,
+            all_severities=all_severities,
             all_track_errors=all_track_errors,
             refill_zones=refill_zones,
         )
@@ -695,6 +698,7 @@ def _run_drc_once(
     format: str,
     schematic_parity: bool,
     kicad_cli: Path | None,
+    all_severities: bool,
     all_track_errors: bool,
     refill_zones: bool,
 ) -> KiCadCLIResult:
@@ -735,6 +739,8 @@ def _run_drc_once(
 
     if schematic_parity:
         cmd.append("--schematic-parity")
+    if all_severities:
+        cmd.append("--severity-all")
     if all_track_errors:
         cmd.append("--all-track-errors")
 
