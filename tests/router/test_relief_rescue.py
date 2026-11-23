@@ -471,7 +471,7 @@ class TestCppReliefBindings:
         assert cell.usage_count == 0
 
 
-def _make_diff_pair_router() -> Autorouter:
+def _make_diff_pair_router(*, force_python: bool = False) -> Autorouter:
     """Autorouter with one suffix-inferred diff pair on a small board.
 
     Net 1 = ``TMDS_D0_P`` (the leg that routes cleanly in normal mode),
@@ -479,7 +479,7 @@ def _make_diff_pair_router() -> Autorouter:
     Suffix-based detection resolves them as partners so
     ``_diff_pair_partner_net(2) == 1`` without any explicit declaration.
     """
-    router = Autorouter(width=40.0, height=20.0)
+    router = Autorouter(width=40.0, height=20.0, force_python=force_python)
     for name, net_id, y in (("TMDS_D0_P", 1, 4.0), ("TMDS_D0_N", 2, 8.0)):
         pads = [
             {
@@ -1571,3 +1571,257 @@ class TestReliefProbeFallbackIsValidated:
         assert ok is True, msgs
         assert net_routes[1] == [probe]
         assert probe in router.routes
+
+
+class TestReliefVictimSearchExits:
+    """Issue #9936: failed victim re-lands report their MEASURED search exit.
+
+    The rollback line's count ("only X/Y displaced victim(s) re-landed")
+    never said WHICH victim failed or WHY its search stopped -- yet a
+    wall-deadline stop (search cut short; a better-guided search can still
+    land) and a drained frontier (a proof no path exists at this occupancy)
+    demand different follow-ups.  On the Board 06 TX2 replay the first
+    ordinary re-landing search (USB3_TX2+ J1.B2->U2.F2) was cut short by
+    the 120 s backstop at 277,504 of a 1,000,000-expansion cap; these tests
+    pin the log line that carries that measurement, attributed to the net
+    actually searched -- never to the transaction's enclosing name.
+    """
+
+    def _fixture(self):
+        router = _make_simple_router(num_nets=2)
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        route2 = _seg_route(2, "N2", 8.0)
+        router._mark_route(route2)
+        router.grid.mark_route_usage(route2)
+        router.routes.append(route2)
+        net_routes: dict[int, list[Route]] = {1: [], 2: [route2]}
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+        return router, neg_router, net_routes, pads_by_net, route2
+
+    def _probes(self):
+        probe_conflicted = _seg_route(1, "N1", 4.0)
+        probe_free = _seg_route(1, "N1", 4.0)
+        calls: list[int] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None, **_kw):
+            if net_id != 1:
+                return [], set()  # a nested rescue for the victim finds no relief path
+            calls.append(net_id)
+            return ([probe_conflicted], {2}) if len(calls) == 1 else ([probe_free], set())
+
+        return probe_side_effect
+
+    def _rescue(self, router, neg_router, net_routes, pads_by_net):
+        msgs: list[str] = []
+        ok = router._relief_rescue(
+            failed_net=1,
+            neg_router=neg_router,
+            net_routes=net_routes,
+            pads_by_net=pads_by_net,
+            present_factor=1.0,
+            per_net_timeout=30.0,
+            flush_print_fn=msgs.append,
+            elapsed_fn=lambda: "0s",
+        )
+        return ok, msgs
+
+    def _failing_victim_reland(self, *, deadline: bool, exhausted: bool, fire_callback: bool):
+        router, neg_router, net_routes, pads_by_net, route2 = self._fixture()
+        pads = router.nets[2]
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+            if net_id == 1:
+                return [_seg_route(1, "N1", 4.0)]
+            pathfinder = router.router
+            pathfinder.last_route_deadline_hit = deadline
+            pathfinder.last_route_deadline_iterations = 277_504 if deadline else 0
+            pathfinder.last_route_exhausted = exhausted and not deadline
+            pathfinder.last_route_iteration_limited = False
+            if fire_callback:
+                kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+            return []
+
+        with (
+            patch.object(Autorouter, "_relief_probe", side_effect=self._probes()),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok, msgs = self._rescue(router, neg_router, net_routes, pads_by_net)
+        return ok, msgs, net_routes, route2
+
+    def test_deadline_cut_exit_is_measured_and_attributed(self):
+        ok, msgs, net_routes, route2 = self._failing_victim_reland(
+            deadline=True, exhausted=False, fire_callback=True
+        )
+        assert ok is False
+        exits = [m for m in msgs if "re-land failure exits (issue #9936)" in m]
+        assert len(exits) == 1, msgs
+        line = exits[0]
+        assert "N2" in line, "the exit names the victim net actually searched"
+        assert "U2.1->U2.2" in line, "the exit names the failed pin pair"
+        assert "wall deadline hit at 277504 expansions (search cut short)" in line
+        assert "nested rescue rolled back" not in line, "a measured exit outranks the marker"
+        # The measured exit never weakens the rollback: verbatim restore.
+        assert len(net_routes[2]) == 1 and net_routes[2][0] is route2
+
+    def test_frontier_exhausted_exit_reports_the_proof(self):
+        ok, msgs, _net_routes, _route2 = self._failing_victim_reland(
+            deadline=False, exhausted=True, fire_callback=True
+        )
+        assert ok is False
+        line = next(m for m in msgs if "re-land failure exits (issue #9936)" in m)
+        assert "frontier exhausted (no legal path at this occupancy)" in line
+
+    def test_unrecorded_stop_says_so(self):
+        ok, msgs, _net_routes, _route2 = self._failing_victim_reland(
+            deadline=False, exhausted=False, fire_callback=True
+        )
+        assert ok is False
+        line = next(m for m in msgs if "re-land failure exits (issue #9936)" in m)
+        assert "no search stop recorded (edge refused or short-circuited)" in line
+
+    def test_cpp_structured_failure_info_names_closing_copper(self):
+        """The C++ backend's structured diagnostics carry the exit reason.
+
+        On the C++ replay of the same Board 06 transaction the failing
+        re-land stopped at its iteration cap with the closing copper named
+        (a ``USB3_RX2+`` via) -- the exit line must surface both.
+        """
+        require_router_cpp()
+        router, neg_router, net_routes, pads_by_net, route2 = self._fixture()
+        pads = router.nets[2]
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+            if net_id == 1:
+                return [_seg_route(1, "N1", 4.0)]
+            router.router.get_last_failure_info = lambda: {
+                "failure_reason": 2,  # FAILURE_ITERATION_LIMIT
+                "blocking_via_net": 14,
+                "blocking_net_name": "USB3_RX2+",
+                "failure_x": 118.0,
+                "failure_y": 55.5,
+                "iterations": 1_000_000,
+            }
+            kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+            return []
+
+        with (
+            patch.object(Autorouter, "_relief_probe", side_effect=self._probes()),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok, msgs = self._rescue(router, neg_router, net_routes, pads_by_net)
+
+        assert ok is False
+        line = next(m for m in msgs if "re-land failure exits (issue #9936)" in m)
+        assert "iteration cap reached at 1,000,000 expansions (search cut short)" in line
+        assert "last blocker USB3_RX2+ at (118.0, 55.5)" in line
+        assert net_routes[2][0] is route2
+
+    def test_victim_without_measured_exit_keeps_a_nested_marker(self):
+        ok, msgs, _net_routes, _route2 = self._failing_victim_reland(
+            deadline=False, exhausted=False, fire_callback=False
+        )
+        assert ok is False
+        line = next(m for m in msgs if "re-land failure exits (issue #9936)" in m)
+        assert "nested rescue rolled back (see its own lines)" in line
+        assert "->" not in line, "no pin pair is invented without a recorded edge"
+
+
+class TestReliefVictimGoalBias:
+    """Issue #9936: displaced two-terminal diff-pair victims re-land biased.
+
+    #9901 gave the transaction's own failed net a modest goal bias (the BGA
+    escape lands well inside the budget biased); the displaced victims
+    re-landed inside the same transaction are the same two-terminal escape
+    shape, so they run under the same weight.  Every other victim keeps its
+    search policy.
+    """
+
+    def _run(self, router, failed_net: int, *, coupled_partner: bool):
+        from kicad_tools.router.access_ripup import RipupCycleGuard
+
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        # Every net except the failed one holds committed copper, so the
+        # diff-pair fold-in (coupled) or the probe's first conflicted round
+        # (single-ended) has a victim to displace and re-land.
+        net_routes: dict[int, list[Route]] = {net_id: [] for net_id in router.nets}
+        for net_id in router.nets:
+            if net_id == failed_net:
+                continue
+            route = _seg_route(net_id, router.net_names[net_id], 4.0 + 4.0 * (net_id - 1))
+            router._mark_route(route)
+            router.grid.mark_route_usage(route)
+            router.routes.append(route)
+            net_routes[net_id] = [route]
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+        seen: dict[int, dict[int, float]] = {}
+        probe_calls: list[int] = []
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+            seen[net_id] = dict(router.router.net_astar_weights)
+            return []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None, **_kw):
+            if net_id != failed_net:
+                return [], set()  # a nested rescue for the victim finds no relief path
+            probe_calls.append(net_id)
+            route = _seg_route(failed_net, router.net_names[failed_net], 6.0)
+            if not coupled_partner and len(probe_calls) == 1:
+                victim = next(n for n in router.nets if n != failed_net)
+                return ([route], {victim})  # conflicted first round rips the blocker
+            return ([route], set())
+
+        msgs: list[str] = []
+        with (
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=failed_net,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                guard=RipupCycleGuard(),
+            )
+        return ok, seen
+
+    def test_diffpair_victim_relands_under_the_goal_bias(self):
+        router = _make_diff_pair_router(force_python=True)
+        ok, seen = self._run(router, failed_net=2, coupled_partner=True)
+        assert ok is False, "the victim's re-land fails (patched) -> rollback"
+        assert 1 in seen, "the displaced partner must be re-landed inside the transaction"
+        # The victim's own #9936 bias...
+        assert seen[1].get(1) == 1.5
+        # ...alongside the entry-point bias #9901 installed for the failed net.
+        assert seen[1].get(2) == 1.5
+
+    def test_single_ended_victim_keeps_its_search_policy(self):
+        router = _make_simple_router(num_nets=2)
+        ok, seen = self._run(router, failed_net=1, coupled_partner=False)
+        assert ok is False
+        assert 2 in seen, "the ripped blocker must be re-landed"
+        assert 2 not in seen[2], "a victim without a diff-pair partner is never biased"
+
+    def test_victim_with_an_existing_gene_keeps_its_own_weight(self):
+        router = _make_diff_pair_router(force_python=True)
+        router._net_astar_weights[1] = 2.5  # an evolutionary gene already owns this net
+        ok, seen = self._run(router, failed_net=2, coupled_partner=True)
+        assert ok is False
+        assert seen[1].get(1) == 2.5, "the gene's weight is not overwritten by the bias"
