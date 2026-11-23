@@ -10,6 +10,7 @@ filling zones using kicad-cli:
 """
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -35,14 +36,15 @@ def _thermal_asymmetry_count(pcb_path: Path) -> int | None:
         return None
 
 
-def _warn_if_asymmetry_rose(before: int | None, pcb_path: Path, payload: dict) -> None:
-    """Print one warning line when ``thermal_asymmetry`` rose (Issue #8659)."""
-    after = _thermal_asymmetry_count(pcb_path)
+def _report_thermal_asymmetry(
+    before: int | None, after: int | None, published_board: Path | None, payload: dict
+) -> None:
+    """Record the measured counts and name the published board if it needs relief."""
     payload["thermal_asymmetry"] = {"before": before, "after": after}
-    if before is not None and after is not None and after > before:
+    if published_board is not None and before is not None and after is not None and after > before:
         print(
             f"Warning: thermal_asymmetry findings rose {before} -> {after} "
-            f"(tombstoning risk); try `kct zones relieve {pcb_path}`",
+            f"(tombstoning risk); try `kct zones relieve {shlex.quote(str(published_board))}`",
             file=sys.stderr,
         )
 
@@ -509,7 +511,9 @@ def _run_add(args) -> int:
         gen.save(output_path)
     except Exception as e:
         return _fail(args, f"Error: Write verification failed: {e}")
-    _warn_if_asymmetry_rose(asym_before, output_path, payload)
+    _report_thermal_asymmetry(
+        asym_before, _thermal_asymmetry_count(output_path), output_path, payload
+    )
 
     if json_mode:
         payload["saved"] = True
@@ -1072,13 +1076,14 @@ def _run_fill(args) -> int:
         print(f"Filling zones in: {pcb_path}")
 
     asym_before = _thermal_asymmetry_count(pcb_path)
+    asym_after = None
     check: SavedFillCheck | None = None
 
     def fill_and_check(board: Path) -> KiCadCLIResult:
-        nonlocal check
+        nonlocal asym_after, check
         result = run_fill_zones(board, None, kicad_cli=kicad_cli)
         if result.success:
-            _warn_if_asymmetry_rose(asym_before, board, payload)
+            asym_after = _thermal_asymmetry_count(board)
             check = check_saved_fill(board, kicad_cli=kicad_cli)
             if output_path is not None:
                 if check.failed:
@@ -1098,6 +1103,7 @@ def _run_fill(args) -> int:
         return _fail(args, f"Error: {result.stderr}")
 
     target = output_path if output_path else pcb_path
+    _report_thermal_asymmetry(asym_before, asym_after, target if result.success else None, payload)
     payload["saved_fill_regressions"] = list(check.regressions)
     # Issue #8053: what the self-verifying foreign-pad carve did.
     fill_notes = list(getattr(result, "fill_notes", None) or [])
@@ -1164,7 +1170,7 @@ def _run_relieve(args) -> int:
         return _fail(args, f"Error: {e}")
 
     payload: dict[str, Any] = {"pcb": str(pcb_path), "output": str(target)}
-    _warn_if_asymmetry_rose(asym_before, target, payload)
+    _report_thermal_asymmetry(asym_before, _thermal_asymmetry_count(target), target, payload)
     if json_mode:
         emit_json(payload)
     elif not quiet:
