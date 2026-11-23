@@ -558,29 +558,15 @@ def run_drc(pcb_path: Path) -> bool:
 
 
 def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
-    """Export the manufacturing bundle (gerbers, BOM, CPL, report, manifest).
+    """Stage Gerbers, drills, BOM, CPL, reports and a manifest for inspection.
 
-    Issue #3147: ``kct fleet status`` flags a board ``ship_ready=false``
-    with the ``"artifacts stale"`` blocker whenever the routed PCB is
-    newer than ``output/manufacturing/manifest.json``.  Re-running this
-    recipe always rewrites the routed PCB, so the recipe must also
-    regenerate the manufacturing bundle to keep the manifest current.
-
-    ``kct export`` runs the standard JLCPCB recipe (gerbers + drill + BOM
-    + CPL + report.{md,pdf} + manifest.json).  ``--skip-preflight`` skips
-    the strict pre-flight DRC/ERC gate so the bundle is produced even for
-    boards that ship with allowlisted tolerances (mirrors boards
-    03/04/05); for clean boards it is harmless.
+    The registered package_release.py workflow publishes the release after
+    checking warning review, artifacts and the other readiness requirements.
     """
     print("\n" + "=" * 60)
     print("Exporting manufacturing bundle...")
     print("=" * 60)
 
-    # Stage into a sibling candidate directory (#9800): a run that the final
-    # gate refuses must leave an existing ready release's manifest, Gerbers and
-    # archive byte-identical.  ``promote_candidate_bundle`` publishes the
-    # candidate only after the gate passes; a refused candidate stays here for
-    # inspection.
     mfg_dir = output_dir / CANDIDATE_DIRNAME
     if mfg_dir.exists():
         shutil.rmtree(mfg_dir)
@@ -613,21 +599,6 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         return True
     print("\n   WARNING: manifest.json not produced")
     return False
-
-
-def promote_candidate_bundle(output_dir: Path) -> None:
-    """Publish the staged candidate bundle over ``output/manufacturing``.
-
-    Called only after the pipeline gate passes.  Files are overlaid (the
-    package producer owns other files in the release directory), then the
-    candidate directory is removed.
-    """
-    candidate = output_dir / CANDIDATE_DIRNAME
-    release = output_dir / "manufacturing"
-    if not candidate.is_dir():
-        return
-    shutil.copytree(candidate, release, dirs_exist_ok=True)
-    shutil.rmtree(candidate)
 
 
 # =============================================================================
@@ -739,9 +710,7 @@ def main() -> int:
         )
         lvs_success = copper_clean and label_clean
 
-        # Step 7: Export manufacturing bundle (#3147) so ``kct fleet
-        # status`` reports ``ship_ready=true`` (the bundle's manifest
-        # mtime must be newer than the freshly routed PCB).
+        # Stage a candidate for manufacturing review.
         mfg_success = export_manufacturing_bundle(routed_path, output_dir)
 
         # Issue #3912: derive BOTH the SUMMARY and the exit code from ONE
@@ -791,12 +760,9 @@ def main() -> int:
         # independent gating leg.  (``write_lvs_report`` already raises on a
         # dirty LVS so a False ``lvs_ok`` here would mean LVS short-circuited.)
         if erc_success and gate.passed:
-            promote_candidate_bundle(output_dir)
+            print(f"\nCandidate bundle is in {output_dir / CANDIDATE_DIRNAME}")
+            print("Publish the reviewed board through package_release.py.")
             return 0
-        print(
-            f"\nRefused: candidate bundle left in {output_dir / CANDIDATE_DIRNAME}; "
-            "the existing manufacturing release is untouched."
-        )
         return 1
 
     except Exception as e:

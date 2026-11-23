@@ -18,6 +18,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.drc.geometric import GeometricDRCResult
 from kicad_tools.recipes import gate as pipeline_gate
 
@@ -61,6 +63,19 @@ def test_fresh_release_uses_the_authored_net_classes(tmp_path: Path) -> None:
     sidecar.write_text(json.dumps(authored))
     module.declare_ampacity_targets(tmp_path)
     assert json.loads(sidecar.read_text()) == authored
+
+
+def _stub_bundle_export(module, monkeypatch):
+    from types import SimpleNamespace
+
+    def run(cmd, **kwargs):
+        output = Path(cmd[cmd.index("--output") + 1])
+        (output / "gerbers").mkdir(parents=True)
+        (output / "manifest.json").write_text("candidate-manifest")
+        (output / "gerbers" / "gerbers.zip").write_text("candidate-zip")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(module, "subprocess", SimpleNamespace(run=run))
 
 
 class TestBoard02PartialRouteFastFail:
@@ -113,7 +128,14 @@ class TestBoard02PartialRouteFastFail:
             "a partial route must NOT surface as an LVS BoardNetlistMismatch"
         )
 
-    def test_full_route_still_reaches_lvs_gate(self, monkeypatch, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ("existing_release", "drc_ok"),
+        [(False, True), (True, True), (True, False)],
+        ids=["fresh", "released", "refused"],
+    )
+    def test_full_route_stages_candidate_after_lvs(
+        self, monkeypatch, tmp_path: Path, existing_release: bool, drc_ok: bool
+    ) -> None:
         # Issue #6724: route_pcb is stubbed, so the routed board is never
         # written and a real kicad-cli cannot load it.  That load failure
         # used to read as a clean native DRC; stub the leg as clean instead.
@@ -129,7 +151,7 @@ class TestBoard02PartialRouteFastFail:
         module = _load_board02_module()
         self._stub_pipeline_prefix(module, monkeypatch, tmp_path)
         monkeypatch.setattr(module, "route_pcb", lambda *a, **k: True)
-        monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
+        monkeypatch.setattr(module, "run_drc", lambda *a, **k: drc_ok)
         monkeypatch.setattr(
             pipeline_gate,
             "run_geometric_drc",
@@ -159,8 +181,16 @@ class TestBoard02PartialRouteFastFail:
             lambda *a, **k: {"applied": True, "unresolved": []},
         )
         monkeypatch.setattr(module, "write_lvs_report", _fake_lvs)
-        monkeypatch.setattr(module, "export_manufacturing_bundle", lambda *a, **k: True)
-        monkeypatch.setattr(module.sys, "argv", ["generate_design.py", str(tmp_path / "out")])
+        _stub_bundle_export(module, monkeypatch)
+        output = tmp_path / "out"
+        release = output / "manufacturing"
+        if existing_release:
+            (release / "gerbers").mkdir(parents=True)
+            (release / "manifest.json").write_text("released-manifest")
+            archive = release / "gerbers" / "gerbers.zip"
+            archive.write_text("released-zip")
+            archive.chmod(0o444)
+        monkeypatch.setattr(module.sys, "argv", ["generate_design.py", str(output)])
 
         rc = module.main()
 
@@ -168,7 +198,15 @@ class TestBoard02PartialRouteFastFail:
             "a full (N==M) route must still reach write_lvs_report -- the "
             "#4066 fast-fail gate must not fire on a complete route"
         )
-        assert rc == 0
+        assert rc == (0 if drc_ok else 1)
+        candidate = output / module.CANDIDATE_DIRNAME
+        assert (candidate / "manifest.json").read_text() == "candidate-manifest"
+        assert (candidate / "gerbers" / "gerbers.zip").read_text() == "candidate-zip"
+        if existing_release:
+            assert (release / "manifest.json").read_text() == "released-manifest"
+            assert (release / "gerbers" / "gerbers.zip").read_text() == "released-zip"
+        else:
+            assert not release.exists()
 
 
 class TestBoard02RouteExitGate:
@@ -232,52 +270,3 @@ class TestBoard02RouteExitGate:
         assert rc != 0
         assert finalize_calls == []
         assert "routing/finalization failed" in capsys.readouterr().err.lower()
-
-
-class TestBoard02CandidateStaging:
-    """Issue #9800: a refused run must not touch an existing ready release."""
-
-    def _fake_export(self, module, monkeypatch):
-        import types
-
-        def _run(cmd, *a, **k):
-            out = Path(cmd[cmd.index("--output") + 1])
-            (out / "gerbers").mkdir(parents=True, exist_ok=True)
-            (out / "manifest.json").write_text("candidate-manifest")
-            (out / "gerbers" / "gerbers.zip").write_text("candidate-zip")
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        monkeypatch.setattr(module, "subprocess", types.SimpleNamespace(run=_run))
-
-    def _release(self, tmp_path: Path) -> Path:
-        release = tmp_path / "manufacturing"
-        (release / "gerbers").mkdir(parents=True)
-        (release / "manifest.json").write_text("release-manifest")
-        (release / "gerbers" / "gerbers.zip").write_text("release-zip")
-        (release / "report.pdf").write_text("release-report")
-        return release
-
-    def test_export_leaves_existing_release_untouched(self, monkeypatch, tmp_path: Path) -> None:
-        module = _load_board02_module()
-        release = self._release(tmp_path)
-        self._fake_export(module, monkeypatch)
-
-        assert module.export_manufacturing_bundle(tmp_path / "r.kicad_pcb", tmp_path) is True
-
-        assert (release / "manifest.json").read_text() == "release-manifest"
-        assert (release / "gerbers" / "gerbers.zip").read_text() == "release-zip"
-        candidate = tmp_path / module.CANDIDATE_DIRNAME
-        assert (candidate / "manifest.json").read_text() == "candidate-manifest"
-
-    def test_promote_publishes_candidate_over_release(self, monkeypatch, tmp_path: Path) -> None:
-        module = _load_board02_module()
-        release = self._release(tmp_path)
-        self._fake_export(module, monkeypatch)
-        module.export_manufacturing_bundle(tmp_path / "r.kicad_pcb", tmp_path)
-
-        module.promote_candidate_bundle(tmp_path)
-
-        assert (release / "manifest.json").read_text() == "candidate-manifest"
-        assert (release / "gerbers" / "gerbers.zip").read_text() == "candidate-zip"
-        assert (release / "report.pdf").read_text() == "release-report"
-        assert not (tmp_path / module.CANDIDATE_DIRNAME).exists()
