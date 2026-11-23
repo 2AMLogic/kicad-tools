@@ -64,8 +64,12 @@ def load_spec(path: Path | str) -> ProjectSpec:
         ValueError: If the file format is invalid
         ValidationError: If the content doesn't match the schema
     """
-    path = Path(path)
+    return ProjectSpec.model_validate(load_spec_data(path))
 
+
+def load_spec_data(path: Path | str) -> dict[str, Any]:
+    """Read a spec's YAML mapping for consumers that validate selected fields."""
+    path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Spec file not found: {path}")
 
@@ -82,7 +86,7 @@ def load_spec(path: Path | str) -> ProjectSpec:
     if not isinstance(data, dict):
         raise ValueError(f"Spec file must contain a YAML mapping: {path}")
 
-    return ProjectSpec.model_validate(data)
+    return data
 
 
 def _dump_yaml(data: Any) -> str:

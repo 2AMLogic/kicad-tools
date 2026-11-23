@@ -34,6 +34,7 @@ from ..core.board_outline import (
     outline_polygon_points,
     outline_rect_points,
 )
+from ..core.layers import is_declared_copper_layer
 from ..core.outline_tessellation import DegenerateArcError, tessellate_arc, tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
@@ -469,8 +470,11 @@ def _transform_zone_sexp(
     zone_node: SExp,
     mapper,
     flip_layers: bool,
+    copper_layers: int,
 ) -> None:
     """Re-place one footprint ``(zone ...)`` node in the S-expression tree."""
+    if flip_layers:
+        _flip_layer_children(zone_node, copper_layers)
     for child in zone_node.iter_children():
         if child.tag in _ZONE_PTS_PARENTS:
             pts = child.find_child("pts")
@@ -493,16 +497,7 @@ def _transform_zone_sexp(
                         node.children[0] = _mm_atom(nx)
                         node.children[1] = _mm_atom(ny)
             if flip_layers and child.tag == "filled_polygon":
-                _flip_layer_node(child.find_child("layer"))
-        elif flip_layers and child.tag == "layer":
-            _flip_layer_node(child)
-        elif flip_layers and child.tag == "layers":
-            child.children = [
-                SExp.quoted_atom(_flip_side_layer(atom.value))
-                if atom.is_atom and isinstance(atom.value, str)
-                else atom
-                for atom in child.children
-            ]
+                _flip_layer_node(child.find_child("layer"), copper_layers)
 
 
 def _flip_layer_node(node: SExp | None, copper_layers: int = 2) -> None:
@@ -795,6 +790,7 @@ def transform_footprint_zone_nodes(
     footprint_node: SExp,
     old_frame: _FootprintFrame,
     new_frame: _FootprintFrame,
+    copper_layers: int = 2,
 ) -> int:
     """Re-place the ``(zone ...)`` children of a raw ``(footprint ...)`` node.
 
@@ -803,7 +799,8 @@ def transform_footprint_zone_nodes(
     ``position``/``rotation``/``layer`` setters already do this).  Both
     frames are **sheet-absolute** ``(x, y, rotation_deg, is_back)`` -- the
     values in the footprint's ``(at ...)``/``(layer ...)`` before and after
-    the edit.  Returns the number of zones rewritten (Issue #6119).
+    the edit. Pass the board's copper layer count when changing sides so
+    inner copper mirrors through the stack. Returns the number of zones rewritten.
     """
     if new_frame == old_frame:
         return 0
@@ -813,7 +810,7 @@ def transform_footprint_zone_nodes(
     mapper = _footprint_frame_mapper(old_frame, new_frame)
     flip_layers = old_frame[3] != new_frame[3]
     for zone_node in zone_nodes:
-        _transform_zone_sexp(zone_node, mapper, flip_layers)
+        _transform_zone_sexp(zone_node, mapper, flip_layers, copper_layers)
     return len(zone_nodes)
 
 
@@ -1000,15 +997,17 @@ def keep_footprint_texts_upright(footprint_node: SExp) -> int:
     )
 
 
-def _transform_zone_object(zone: Zone, mapper, flip_layers: bool) -> None:
+def _transform_zone_object(zone: Zone, mapper, flip_layers: bool, copper_layers: int) -> None:
     """Re-place one parsed footprint :class:`Zone` (board-relative coords)."""
     zone.polygon = [mapper(x, y) for x, y in zone.polygon]
     zone.rule_area_contours = [[mapper(x, y) for x, y in ring] for ring in zone.rule_area_contours]
     zone.filled_polygons = [[mapper(x, y) for x, y in poly] for poly in zone.filled_polygons]
     if flip_layers:
-        zone.layer = _flip_side_layer(zone.layer)
-        zone.layers = [_flip_side_layer(name) for name in zone.layers]
-        zone.filled_polygon_layers = [_flip_side_layer(name) for name in zone.filled_polygon_layers]
+        zone.layer = _flip_side_layer(zone.layer, copper_layers)
+        zone.layers = [_flip_side_layer(name, copper_layers) for name in zone.layers]
+        zone.filled_polygon_layers = [
+            _flip_side_layer(name, copper_layers) for name in zone.filled_polygon_layers
+        ]
 
 
 # Pad fields whose assignment is mirrored into the backing ``(pad ...)`` node
@@ -1925,6 +1924,7 @@ class Footprint:
         repr=False,
         compare=False,
     )
+    _copper_layer_count: int = field(default=2, init=False, repr=False, compare=False)
 
     # Set of attr-block tokens the parser models explicitly. Anything
     # else that appears as an atom child of ``(attr ...)`` is captured
@@ -2044,7 +2044,7 @@ class Footprint:
             board_map = _footprint_frame_mapper(old_frame, new_frame)
             flip_layers = old_frame[3] != new_frame[3]
             for zone in zones:
-                _transform_zone_object(zone, board_map, flip_layers)
+                _transform_zone_object(zone, board_map, flip_layers, self._copper_layer_count)
 
         # The tree is sheet-absolute: shift both frames by the board origin.
         ox, oy = self.__dict__.get("_board_origin", (0.0, 0.0))
@@ -2052,6 +2052,7 @@ class Footprint:
             sexp_node,
             (old_frame[0] + ox, old_frame[1] + oy, old_frame[2], old_frame[3]),
             (new_frame[0] + ox, new_frame[1] + oy, new_frame[2], new_frame[3]),
+            self._copper_layer_count,
         )
 
     def _turn_texts(self, sexp_node: SExp, old_frame: _FootprintFrame) -> None:
@@ -2952,10 +2953,12 @@ class Zone:
                 zone.net_name = net.get_string(0) or ""
         if net_name := index.get("net_name"):
             zone.net_name = net_name.get_string(0) or ""
-        if layer := index.get("layer"):
+        # A filled polygon has its own layer, which may differ from the
+        # first declared zone layer on a multilayer pour.
+        if layer := sexp.find_child("layer"):
             zone.layer = layer.get_string(0) or ""
         # Multi-layer form (rule areas): (layers "F.Cu" "B.Cu") / (layers "*.Cu")
-        if layers := index.get("layers"):
+        if layers := sexp.find_child("layers"):
             zone.layers = [
                 layer_name
                 for i in range(len(layers.values))
@@ -3040,6 +3043,19 @@ class Zone:
                 zone.filled_polygon_layers.append(fp_layer or zone.layer)
 
         return zone
+
+    def _subtract_board_origin(self, ox: float, oy: float) -> None:
+        """Convert sheet coordinates to the board-relative coordinates exposed by PCB."""
+        if self.polygon:
+            self.polygon = [(x - ox, y - oy) for x, y in self.polygon]
+        if self.rule_area_contours:
+            self.rule_area_contours = [
+                [(x - ox, y - oy) for x, y in ring] for ring in self.rule_area_contours
+            ]
+        if self.filled_polygons:
+            self.filled_polygons = [
+                [(x - ox, y - oy) for x, y in poly] for poly in self.filled_polygons
+            ]
 
     def filled_polygon_layer(self, index: int) -> str:
         """Return the copper layer of ``filled_polygons[index]``.
@@ -3774,19 +3790,7 @@ class PCB:
                 # same parser handles both (issue #4873).
                 fp = Footprint.from_sexp(child)
                 self._footprints.append(fp)
-                for fp_child in child.iter_children():
-                    if fp_child.tag != "zone":
-                        continue
-                    # Footprint zones are stored sheet-absolute in a board
-                    # file, exactly like top-level zones (Issue #6087).
-                    fp_zone = Zone.from_sexp(fp_child)
-                    fp_zone.file_version = self._file_version()
-                    fp_zone.parent_reference = fp.reference
-                    fp_zone.parent_uuid = fp.uuid
-                    self._footprint_zones.append(fp_zone)
-                    # Back-reference so moving the footprint moves the zone
-                    # with it (Issue #6119).
-                    fp._zones.append(fp_zone)
+                self._parse_footprint_zones(fp, child)
             elif tag == "segment":
                 seg = Segment.from_sexp(child)
                 self._segments.append(seg)
@@ -3928,6 +3932,24 @@ class PCB:
             return int(raw)
         except ValueError:
             return 0
+
+    def _parse_footprint_zones(
+        self, fp: Footprint, node: SExp, board_origin: tuple[float, float] = (0.0, 0.0)
+    ) -> None:
+        """Share embedded zones between the footprint and the board's rule-area index.
+
+        Loading normalizes the whole board after parsing. Insertion already
+        knows the origin and can normalize these zones immediately.
+        """
+        for zone_node in node.find_children("zone"):
+            zone = Zone.from_sexp(zone_node)
+            zone.file_version = self._file_version()
+            zone.parent_reference = fp.reference
+            zone.parent_uuid = fp.uuid
+            if board_origin != (0.0, 0.0):
+                zone._subtract_board_origin(*board_origin)
+            self._footprint_zones.append(zone)
+            fp._zones.append(zone)
 
     def _parse_layers(self, sexp: SExp):
         """Parse layer definitions."""
@@ -4357,16 +4379,7 @@ class PCB:
 
             # Zones: convert authored vertices, rule-area contours and copper fills.
             for zone in (*self._zones, *self._footprint_zones):
-                if zone.polygon:
-                    zone.polygon = [(x - ox, y - oy) for x, y in zone.polygon]
-                if zone.rule_area_contours:
-                    zone.rule_area_contours = [
-                        [(x - ox, y - oy) for x, y in ring] for ring in zone.rule_area_contours
-                    ]
-                if zone.filled_polygons:
-                    zone.filled_polygons = [
-                        [(x - ox, y - oy) for x, y in poly] for poly in zone.filled_polygons
-                    ]
+                zone._subtract_board_origin(ox, oy)
 
     def _link_footprint_sexp_nodes(self) -> None:
         """Attach S-expression back-references to parsed Footprint objects.
@@ -4381,7 +4394,9 @@ class PCB:
         * ``_board_origin`` -- the board origin offset so that the setter
           can convert board-relative positions back to sheet-absolute
           when writing to the S-expression.
+        * ``_copper_layer_count`` -- the board stack size for embedded zone flips.
         """
+        copper_layers = self._footprint_copper_layer_count()
         # Build a UUID -> index lookup for fast matching.
         fp_by_uuid: dict[str, int] = {}
         for idx, fp in enumerate(self._footprints):
@@ -4413,6 +4428,7 @@ class PCB:
                 # Use object.__setattr__ to avoid triggering sync before
                 # both _sexp_node and _board_origin are in place.
                 object.__setattr__(fp, "_board_origin", self._board_origin)
+                object.__setattr__(fp, "_copper_layer_count", copper_layers)
                 object.__setattr__(fp, "_sexp_node", child)
 
                 # Issue #4518: link each Pad to its own ``(pad ...)`` node so
@@ -4777,6 +4793,12 @@ class PCB:
     def layers(self) -> dict[int, Layer]:
         """Layer definitions."""
         return self._layers
+
+    def _footprint_copper_layer_count(self) -> int:
+        """Physical stack size for mirroring, including mixed and jumper copper."""
+        return sum(
+            is_declared_copper_layer(layer.name, layer.type) for layer in self.layers.values()
+        )
 
     @property
     def copper_layers(self) -> list[Layer]:
@@ -7349,8 +7371,9 @@ class PCB:
         # back (layers, mirrored local geometry/text), not just its (layer)
         # node (Issue #8581). Front placements are untouched.
         is_back = _is_back_layer(layer)
+        copper_layers = self._footprint_copper_layer_count()
         if is_back:
-            flip_footprint_children_to_back(fp_sexp, rotation, len(self.copper_layers))
+            flip_footprint_children_to_back(fp_sexp, rotation, copper_layers)
 
         # Footprint zones are stored board-absolute, unlike pads and graphics,
         # so carry the library outline to the placement frame (Issue #8958).
@@ -7457,7 +7480,9 @@ class PCB:
         # Link the S-expression node so that future mutations to position,
         # rotation, or layer are automatically persisted.
         object.__setattr__(footprint, "_board_origin", self._board_origin)
+        object.__setattr__(footprint, "_copper_layer_count", copper_layers)
         object.__setattr__(footprint, "_sexp_node", fp_sexp)
+        self._parse_footprint_zones(footprint, fp_sexp, self._board_origin)
         # New footprints need the same pad write-through links as loaded
         # footprints (#5049). Use parser order, not pad numbers: shield and
         # NPTH pads may share a number or have no number at all.

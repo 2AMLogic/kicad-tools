@@ -715,7 +715,8 @@ def _add_creepage_parser(subparsers) -> None:
         type=float,
         metavar="MM",
         help="Nominal finished board thickness selected for purchase, in mm. "
-        "Required for cross-face measurements when the PCB header and stackup disagree.",
+        "Overrides requirements.manufacturing.order_thickness_mm in project.kct. "
+        "A purchase value resolves conflicting PCB and stackup thicknesses for cross-face paths.",
     )
     creepage_parser.add_argument(
         "--min",
@@ -2886,7 +2887,12 @@ def _add_pcb_parser(subparsers) -> None:
         type=float,
         default=30.0,
         metavar="VOLTS",
-        help="Minimum net-pair |dV| that triggers a creepage widening (default: 30.0)",
+        help=(
+            "Accepted for compatibility (default: 30.0). Does not exempt pairs "
+            "involving the reinforced net: reinforce applies the standard-derived "
+            "clearance to every mapped pair with a non-zero |dV|, matching "
+            "'kct creepage' (#10015)."
+        ),
     )
     pcb_reinforce.add_argument(
         "-o",
