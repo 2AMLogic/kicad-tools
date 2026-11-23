@@ -682,6 +682,62 @@ def test_removing_a_replacement_wall_restores_the_first_open_search(
 
 
 @pytest.mark.requires_router_cpp
+@pytest.mark.parametrize(("width", "height", "angle"), [(5, 0.5, 75), (0.5, 5, -15)])
+def test_rotated_pads_leave_the_first_open_detour_at_full_budget(tmp_path, width, height, angle):
+    from kicad_tools.router.io import load_pcb_for_routing
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    def fixed_pad(pin, x, y, w, h, rotation=0):
+        return (
+            f'(pad "{pin}" thru_hole rect (at {x} {y} {rotation}) (size {w} {h}) '
+            '(drill 0.4) (layers "*.Cu" "*.Mask") (net 2 "FIXED"))'
+        )
+
+    # The vertical pad wall has a gap above the terminals. Six angled pads
+    # below the gap leave the same passage under either KiCad encoding.
+    fixed = []
+    for index in range(24):
+        y = 0.35 + 0.85 * index
+        if y < 19.8 and not 15.15 < y < 17.5:
+            fixed.append(fixed_pad(f"W{index}", 15, y, 1, 1))
+    for index in range(6):
+        fixed.append(fixed_pad(f"F{index}", 2.5 + 5 * index, 14.1, width, height, angle))
+    board = tmp_path / "detour.kicad_pcb"
+    board.write_text(
+        "(kicad_pcb (version 20240108) (generator test)\n"
+        '(net 0 "") (net 1 "SIG") (net 2 "FIXED")\n'
+        '(gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts") (width 0.1))\n'
+        '(footprint "Test" (layer "F.Cu") (at 0 0)\n'
+        '(property "Reference" "J1" (at 0 0) (layer "F.SilkS"))\n'
+        '(pad "1" smd rect (at 2 9) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG"))\n'
+        '(pad "2" smd rect (at 28 11) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG"))\n'
+        + "\n".join(fixed)
+        + "))\n"
+    )
+    router, names = load_pcb_for_routing(str(board), use_pcb_rules=False, validate_drc=False)
+    net = names["SIG"]
+    gate = _corridor_wall(99, (15.45, 17.5), (15.65, 16.55, 17.3))
+    anchor = Route(98, "anchor", segments=[Segment(8, 12, 8.5, 12, 0.2, Layer.F_CU, 98)])
+    for route in (gate, anchor):
+        router.routes.append(route)
+        router.grid.mark_route(route)
+    guard = RipupCycleGuard()
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for iteration in (1, 2, 3):
+            guard.begin_iteration(iteration, {net: None})
+            assert not router._route_net_known_failure_aware(net, 1.0, 30.0, guard, iteration)
+        assert run.call_args.kwargs["per_net_timeout"] == 5.0
+
+        router.grid.unmark_route(gate)
+        router.routes.remove(gate)
+        guard.begin_iteration(4, {net: None})
+        routes = router._route_net_known_failure_aware(net, 1.0, 30.0, guard, 4)
+        assert _net_pad_pairs(router, net, routes) == {frozenset({0, 1})}
+        assert run.call_args.kwargs["per_net_timeout"] == 30.0
+
+
+@pytest.mark.requires_router_cpp
 @pytest.mark.parametrize(
     "handover_iteration, replacement_floor, cap, expected_budget, reachable",
     [

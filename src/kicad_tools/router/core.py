@@ -18815,14 +18815,35 @@ class Autorouter:
                 mesh_x, mesh_y = np.meshgrid(gx, gy)
                 return i0, i1, j0, j1, np.hypot(mesh_x - x, mesh_y - y) <= radius
 
-            def box_mask(x: float, y: float, half_w: float, half_h: float):
-                box = subview(x - half_w, x + half_w, y - half_h, y + half_h, 0.0)
+            def pad_mask(pad: Pad, clearance: float):
+                from shapely import contains_xy  # type: ignore[import-untyped]
+
+                from kicad_tools.geometry.copper import pad_gate_polygon
+
+                if pad.shape == "roundrect" and pad.roundrect_rratio is None:
+                    return None
+                copper = pad_gate_polygon(
+                    pad.x,
+                    pad.y,
+                    pad.width,
+                    pad.height,
+                    pad.shape,
+                    pad.rotation,
+                    pad.roundrect_rratio,
+                )
+                if copper is None:
+                    return None
+                # A search may pass through a corner of a coarse cell. Mark it
+                # blocked only when the whole cell lies inside the pad's clearance.
+                interior = copper.buffer(clearance - cell / math.sqrt(2))
+                if interior.is_empty:
+                    return None
+                x_lo, y_lo, x_hi, y_hi = interior.bounds
+                box = subview(x_lo, x_hi, y_lo, y_hi, 0.0)
                 if box is None:
                     return None
                 i0, i1, j0, j1, gx, gy = box
-                inside_x = np.abs(gx - x) <= half_w
-                inside_y = np.abs(gy - y) <= half_h
-                return i0, i1, j0, j1, inside_x[None, :] & inside_y[:, None]
+                return i0, i1, j0, j1, contains_xy(interior, gx[None, :], gy[:, None])
 
             blocked = np.zeros((num_layers, rows, cols), dtype=np.bool_)
 
@@ -18870,7 +18891,7 @@ class Autorouter:
                         layer_ids: list[int | None] = list(range(num_layers))
                     else:
                         layer_ids = [layer_index(p.layer)]
-                    raster = box_mask(p.x, p.y, p.width / 2 + required, p.height / 2 + required)
+                    raster = pad_mask(p, required)
                     for li in layer_ids:
                         paint(blocked, li, raster)
 
