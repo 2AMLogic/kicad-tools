@@ -1309,25 +1309,37 @@ def _fill_measurements(pcb: Path, engines: Engines) -> dict[str, float]:
     return areas
 
 
-def _copy_fill_context(pcb: Path, destination: Path) -> Path:
-    """Retain saved copper and its local native project/rule/library context."""
+def _copy_fill_context(
+    pcb: Path, destination: Path, project: Path | None = None
+) -> tuple[Path, dict[str, Path]]:
+    """Stage native sidecars under the PCB stem and retain their source paths."""
     from kicad_tools.sidecars import resolve_project_rules
 
-    rules = resolve_project_rules(pcb, allow_default=True)
-    # Readiness also pairs a routed output with its original project when
-    # the routed PCB has no project of its own (see _find_sibling).
-    if pcb.stem.endswith("_routed") and not pcb.with_suffix(".kicad_pro").is_file():
-        base_board = pcb.with_name(pcb.stem.removesuffix("_routed") + pcb.suffix)
-        rules.extend(resolve_project_rules(base_board, allow_default=True))
+    # Standalone board producers can also have a routed PCB and its original
+    # project's sidecars. Readiness supplies the project it already selected.
+    rule_board = pcb
+    if (
+        project is None
+        and pcb.stem.endswith("_routed")
+        and not pcb.with_suffix(".kicad_pro").is_file()
+    ):
+        rule_board = pcb.with_stem(pcb.stem.removesuffix("_routed"))
+    sidecars = {
+        pcb.with_suffix(source.suffix).name: source
+        for source in resolve_project_rules(rule_board, project, allow_default=True)
+    }
+    pcb_rule = pcb.with_suffix(".kicad_dru")
+    if pcb_rule.is_file():
+        sidecars[pcb_rule.name] = pcb_rule
     destination.mkdir(parents=True, exist_ok=True)
+    for native_name, source in sidecars.items():
+        shutil.copy2(source, destination / native_name)
     for source in pcb.parent.iterdir():
-        if source.is_file() and (
-            source == pcb or source in rules or source.name in {"fp-lib-table", "sym-lib-table"}
-        ):
+        if source.is_file() and (source == pcb or source.name in {"fp-lib-table", "sym-lib-table"}):
             shutil.copy2(source, destination / source.name)
         elif source.is_dir() and (source.name == "footprints" or source.suffix == ".pretty"):
             shutil.copytree(source, destination / source.name, dirs_exist_ok=True)
-    return destination / pcb.name
+    return destination / pcb.name, sidecars
 
 
 @dataclass(frozen=True)
@@ -1392,13 +1404,16 @@ def saved_vs_refilled(
     tolerance: float = DEFAULT_FILL_TOLERANCE_MM2,
     *,
     engines: Engines | None = None,
+    project: Path | None = None,
     snapshot_dir: Path | None = None,
     evidence: dict[str, Any] | None = None,
     label: Callable[[Path], str] = str,
 ) -> FillComparison:
     """Compare *pcb*'s saved copper with an independent native refill of a copy.
 
-    *pcb* is never modified.  With *snapshot_dir* the saved and refilled
+    *pcb* is never modified. With *project*, both copies use that project's
+    settings and its rules, with a PCB-specific rule file taking precedence.
+    With *snapshot_dir* the saved and refilled
     copies (and their native context) are kept there as ``fill-saved/`` and
     ``fill-refilled/``; otherwise a temporary directory is used.  *evidence*,
     when given, is filled in step by step (paths rendered through *label*) so a
@@ -1418,8 +1433,9 @@ def saved_vs_refilled(
         for name in ("fill-saved", "fill-refilled"):
             if (root / name).exists():
                 shutil.rmtree(root / name)
-        saved = _copy_fill_context(pcb, root / "fill-saved")
-        refilled = _copy_fill_context(saved, root / "fill-refilled")
+        saved, sources = _copy_fill_context(pcb, root / "fill-saved", project)
+        refilled = root / "fill-refilled" / pcb.name
+        shutil.copytree(saved.parent, refilled.parent)
         saved_areas = _fill_measurements(saved, engines)
         evidence.update(
             {
@@ -1427,6 +1443,7 @@ def saved_vs_refilled(
                 "saved_areas_mm2": saved_areas,
                 "saved_pcb": label(saved),
                 "refilled_pcb": label(refilled),
+                "rule_sources": {name: label(source) for name, source in sources.items()},
                 "context_sha256": {
                     path.relative_to(saved.parent).as_posix(): _sha256_file(path)
                     for path in sorted(saved.parent.rglob("*"))
@@ -1484,6 +1501,7 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
             options.pcb,
             options.fill_tolerance_mm2,
             engines=engines,
+            project=options.project,
             snapshot_dir=options.evidence_dir,
             evidence=evidence,
             label=lambda path: _rel(options, path),

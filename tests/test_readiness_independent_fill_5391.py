@@ -1,7 +1,9 @@
 """Content-derived controls for independent saved-copper verification."""
 
 import json
+import shutil
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -120,14 +122,67 @@ def test_routed_fill_snapshot_keeps_the_paired_project(tmp_path, routed_project)
     pcb = opts.pcb.with_stem("demo_routed")
     pcb.write_bytes(opts.pcb.read_bytes())
     pcb.with_suffix(".kicad_dru").write_text("(version 2)")
-    expected = {pcb.name, "demo_routed.kicad_dru"}
+    project = opts.project
     if routed_project:
-        pcb.with_suffix(".kicad_pro").write_text('{"routed": true}')
-        expected.add("demo_routed.kicad_pro")
-    else:
-        expected.update({"demo.kicad_pro", "demo.kicad_dru"})
-    snapshot = cmd._copy_fill_context(pcb, tmp_path / "snapshot").parent
-    assert {p.name for p in snapshot.iterdir()} == expected
+        project = pcb.with_suffix(".kicad_pro")
+        project.write_text('{"routed": true}')
+    saved, sources = cmd._copy_fill_context(pcb, tmp_path / "snapshot")
+    snapshot = saved.parent
+    assert sources["demo_routed.kicad_pro"] == project
+    assert {p.name for p in snapshot.iterdir()} == {
+        pcb.name,
+        "demo_routed.kicad_dru",
+        "demo_routed.kicad_pro",
+    }
+    assert (snapshot / "demo_routed.kicad_pro").read_bytes() == project.read_bytes()
+    assert (snapshot / "demo_routed.kicad_dru").read_text() == "(version 2)"
+
+
+def test_native_fill_uses_the_selected_project_with_each_supported_name(tmp_path):
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("native KiCad CLI is not installed")
+    board00 = Path(__file__).resolve().parents[1] / "boards/00-simple-led/output"
+    source = board00 / "simple_led_routed.kicad_pcb"
+    default_fill = tmp_path / "default.kicad_pcb"
+    shutil.copyfile(source, default_fill)
+    engines = cmd.Engines()
+    assert engines.refill(default_fill).ok
+    project_data = json.loads(source.with_suffix(".kicad_pro").read_bytes())
+    project_data["board"]["design_settings"]["rules"]["min_copper_edge_clearance"] = 3.0
+    rules = '(version 1)\n(rule "board edge" (constraint edge_clearance (min 3mm)))\n'
+    areas = []
+    for directory, pcb_stem, project_stem in (
+        ("exact", "board_routed", "board_routed"),
+        ("routed", "board_routed", "board"),
+        ("sole", "shipping_v3", "shared"),
+    ):
+        target = tmp_path / directory
+        target.mkdir()
+        pcb = target / f"{pcb_stem}.kicad_pcb"
+        shutil.copyfile(default_fill, pcb)
+        project = target / f"{project_stem}.kicad_pro"
+        project.write_text(json.dumps(project_data))
+        project.with_suffix(".kicad_dru").write_text(rules)
+        args = cmd.build_parser().parse_args(
+            [str(pcb), "--generate", "--mfr", "jlcpcb", "--pcb-only"]
+        )
+        opts, error = cmd.resolve_options(args)
+        assert opts is not None and opts.project == project, error
+        result = cmd._gate_refill(opts, engines)
+        evidence = json.loads((opts.evidence_dir / "fill-consistency.json").read_bytes())
+        assert evidence["refill_returncode"] == 0
+        assert result.status == cmd.FAILED, (directory, result.detail)
+        assert evidence["deltas_mm2"]["F.Cu"] > 1
+        areas.append(evidence["refilled_areas_mm2"])
+        for suffix in (".kicad_pro", ".kicad_dru"):
+            staged_name = pcb.with_suffix(suffix).name
+            source_file = project.with_suffix(suffix)
+            assert evidence["context_sha256"][staged_name] == cmd._sha256_file(source_file)
+            assert evidence["rule_sources"][staged_name] == cmd._rel(opts, source_file)
+        assert pcb.read_bytes() == default_fill.read_bytes()
+    assert areas[0] == areas[1] == areas[2]
 
 
 @pytest.mark.parametrize("bad", [{"F.Cu": float("nan")}, {"F.Cu": -1}, [], {"F.Cu": "x"}])
