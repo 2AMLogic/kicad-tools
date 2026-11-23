@@ -8,7 +8,7 @@
     "warnings": 7,
     "infos": 71,
     "waived": 0,
-    "rules_checked": 82,
+    "rules_checked": 84,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -8244,10 +8244,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "180b43925435ce07b6d7beebb06ec25654c666aa23d4f4267f1466b615f36b12",
-            "B.Mask": "41eb012a6763e82a2fbdc7aed839e0645db25462abd9b9262ff523724ec25d0a",
-            "F.Cu": "d4567e5f5ee77fdd45ecf3e53b42842cb2ea1c6db1a337921f6367eaef5090f1",
-            "B.Cu": "eb6a75acb42b6e5a060f33455dcc9932ab87c6476865a9da855700a6b284eb72"
+            "F.Mask": "8e18cc5985858dd94962d6f82def54b5bd737e2dee03fc9e62cf4b8e55b18adb",
+            "B.Mask": "4576598c9ceac0e8cb645f3d6a4e52291de74c04344b8e2b0349b27eb9bbd207",
+            "F.Cu": "ec447b235e0bc6ac9b4f0736383ec487fd32ed8e2fe9d6813d49e538801158b1",
+            "B.Cu": "5dd621c909e95a801c9a7a6289d1f3f1a27a0457c499ded4068ee03d3c5fc41a"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -12986,7 +12986,7 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "82 rules checked, 0 error(s), 7 warning(s)"
+      "detail": "84 rules checked, 0 error(s), 7 warning(s)"
     },
     "erc": {
       "status": "PASSED",
