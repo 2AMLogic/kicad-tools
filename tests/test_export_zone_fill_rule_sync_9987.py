@@ -131,13 +131,19 @@ def _config(out: Path, **overrides) -> ManufacturingConfig:
     return ManufacturingConfig(**options)
 
 
+def _is_scratch_refill(pcb_path) -> bool:
+    """The exporter's comparison refill runs on a scratch copy, never the board."""
+    return "kct-export-zone-refill-" in str(pcb_path)
+
+
 def _spy_on_refill(monkeypatch) -> list[tuple[Path, bool]]:
     """Record each native refill, passing it through to the real runner."""
     calls: list[tuple[Path, bool]] = []
     real = runner.run_refill_zones
 
     def spy(pcb_path, kicad_cli=None, *, require_save=False):
-        calls.append((Path(pcb_path), require_save))
+        if not _is_scratch_refill(pcb_path):
+            calls.append((Path(pcb_path), require_save))
         return real(pcb_path, kicad_cli, require_save=require_save)
 
     monkeypatch.setattr(runner, "run_refill_zones", spy)
@@ -147,8 +153,11 @@ def _spy_on_refill(monkeypatch) -> list[tuple[Path, bool]]:
 def _forbid_refill(monkeypatch) -> list[tuple[Path, bool]]:
     """Record a native refill and fail: these tests must not reach kicad-cli."""
     calls: list[tuple[Path, bool]] = []
+    real = runner.run_refill_zones
 
     def spy(pcb_path, kicad_cli=None, *, require_save=False):
+        if _is_scratch_refill(pcb_path):
+            return real(pcb_path, kicad_cli, require_save=require_save)
         calls.append((Path(pcb_path), require_save))
         pytest.fail("export attempted a native zone refill")
 
@@ -248,6 +257,28 @@ def test_export_persists_the_fill_its_new_zone_rules_require(tmp_path, monkeypat
 
 
 @pytest.mark.skipif(find_kicad_cli() is None, reason="Native KiCad CLI is not installed")
+def test_export_refills_a_clean_fill_left_wider_than_the_delivered_rules(tmp_path, monkeypatch):
+    """A fill made under a stricter rule passes saved DRC but is not what the rules plot."""
+    board = _fixture(tmp_path / "probe.kicad_pcb", zone_clearance=0.6)
+    _write_sidecars(board)
+    _persist_native_fill(board)
+    wide_gap = _pour_to_pad_gap(board)
+    assert wide_gap >= 0.55
+    # The pour is edited down to 0.30 mm; the saved fill and its DRU predate it.
+    text = board.read_text()
+    assert "(clearance 0.6)" in text
+    board.write_text(text.replace("(clearance 0.6)", "(clearance 0.3)"))
+    board.with_suffix(".kicad_dru").unlink()
+    assert _pour_to_pad_gap(board) == pytest.approx(wide_gap)
+    refills = _spy_on_refill(monkeypatch)
+
+    assert export_main([str(board), *_EXPORT_ARGS, "-o", str(tmp_path / "mfg")]) == 0
+
+    assert [(path.resolve(), save) for path, save in refills] == [(board.resolve(), True)]
+    assert _pour_to_pad_gap(board) == pytest.approx(0.3, abs=0.02)
+
+
+@pytest.mark.skipif(find_kicad_cli() is None, reason="Native KiCad CLI is not installed")
 def test_export_reuses_the_same_pcb_but_refills_a_restored_pcb(tmp_path, monkeypatch):
     board = _stale_fill_board(tmp_path)
     stale = board.read_bytes()
@@ -298,38 +329,6 @@ def test_current_fill_without_a_marker_preserves_board_bytes(tmp_path, monkeypat
     assert refills == []
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"unconnected_items": None},
-        {"unconnected_items": [{}]},
-        {"ignored_checks": [{"key": "clearance"}]},
-        {"included_severities": ["error", "warning"]},
-        {"violations": [{"severity": "exclusion", "type": "clearance"}]},
-        {"violations": [{"severity": "warning", "type": "clearance"}]},
-        {"violations": [{"severity": "warning", "type": "isolated_copper"}]},
-        {"violations": [None]},
-    ],
-)
-def test_incomplete_or_suppressed_saved_drc_cannot_certify_a_fill(tmp_path, monkeypatch, change):
-    def saved_drc(board, report_path, **options):
-        assert options["all_severities"] and not options.get("refill_zones")
-        report = {
-            "included_severities": ["error", "warning", "exclusion"],
-            "unconnected_items": [],
-            "ignored_checks": [],
-            "violations": [],
-            **change,
-        }
-        report_path.write_text(json.dumps(report))
-        return KiCadCLIResult(success=True)
-
-    monkeypatch.setattr(runner, "run_drc", saved_drc)
-    assert not manufacturing._saved_zone_fill_passes_drc(
-        tmp_path / "board.kicad_pcb", Path("kicad-cli")
-    )
-
-
 def _fake_refill(monkeypatch, *, fail_first: bool = False) -> list[Path]:
     """A refill that appends a newline to the board; optionally fails once."""
     calls: list[Path] = []
@@ -342,7 +341,7 @@ def _fake_refill(monkeypatch, *, fail_first: bool = False) -> list[Path]:
         Path(pcb_path).write_bytes(Path(pcb_path).read_bytes() + b"\n")
         return KiCadCLIResult(success=True, output_path=Path(pcb_path))
 
-    monkeypatch.setattr(manufacturing, "_saved_zone_fill_passes_drc", lambda *_: False)
+    monkeypatch.setattr(manufacturing, "_saved_zone_fill_matches_native_refill", lambda *_: False)
     monkeypatch.setattr(runner, "run_refill_zones", refilling)
     monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/fake/kicad-cli"))
     return calls
@@ -442,7 +441,7 @@ def test_named_stackup_refuses_a_pcb_edited_during_saved_fill_check(tmp_path, mo
         pcb_path.write_bytes(edited)
         return True
 
-    monkeypatch.setattr(manufacturing, "_saved_zone_fill_passes_drc", edit_pcb)
+    monkeypatch.setattr(manufacturing, "_saved_zone_fill_matches_native_refill", edit_pcb)
     out = tmp_path / "mfg"
     config = _config(out, stackup_id="JLC04161H-3313")
     result = ManufacturingPackage(board, manufacturer="jlcpcb", config=config).export()
@@ -462,7 +461,7 @@ def test_failed_required_fill_publishes_nothing_and_restores_the_board(tmp_path,
     board = _with_saved_fill_text(_stale_rules_board(tmp_path))
     original = board.read_bytes()
     monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/fake/kicad-cli"))
-    monkeypatch.setattr(manufacturing, "_saved_zone_fill_passes_drc", lambda *_: False)
+    monkeypatch.setattr(manufacturing, "_saved_zone_fill_matches_native_refill", lambda *_: False)
 
     def dying_refill(pcb_path, kicad_cli=None, *, require_save=False):
         # kicad-cli killed mid --save-board: a truncated board on disk.
@@ -484,7 +483,7 @@ def test_a_refill_that_saves_nothing_is_a_failed_required_fill(tmp_path, monkeyp
     board = _with_saved_fill_text(_stale_rules_board(tmp_path))
     original = board.read_bytes()
     monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/fake/kicad-cli"))
-    monkeypatch.setattr(manufacturing, "_saved_zone_fill_passes_drc", lambda *_: False)
+    monkeypatch.setattr(manufacturing, "_saved_zone_fill_matches_native_refill", lambda *_: False)
     monkeypatch.setattr(
         runner,
         "run_refill_zones",

@@ -337,60 +337,60 @@ def _zone_fill_rule_state(pcb_path: Path) -> str:
     return json.dumps({"dru": dru, "rules": rules, "net_settings": net_settings}, sort_keys=True)
 
 
-def _saved_zone_fill_passes_drc(pcb_path: Path, kicad_cli: Path) -> bool:
-    """Check the copper KiCad would plot, without refilling or saving it."""
-    from ..cli.runner import run_drc
-    from ..drc.geometric import SAVED_FILL_CONNECTIVITY_TYPES
+def _saved_zone_fills(pcb_path: Path) -> dict[str, list[tuple]]:
+    """Each zone's saved ``filled_polygon`` geometry, keyed by zone uuid.
 
-    # KiCad can downgrade or ignore clearance checks in the project. Neither
-    # a suppressed check nor an incomplete report can certify the saved pour.
-    fill_checks = {
-        "clearance",
-        "shorting_items",
-        "unconnected_items",
-        *SAVED_FILL_CONNECTIVITY_TYPES,
-    }
-    try:
-        with tempfile.TemporaryDirectory(prefix="kct-export-zone-drc-") as tmp:
-            report_path = Path(tmp) / "saved.json"
-            drc = run_drc(
-                pcb_path,
-                report_path,
-                schematic_parity=False,
-                kicad_cli=kicad_cli,
-                all_severities=True,
+    Coordinates are rounded to 1 nm so KiCad's own reserialization of an
+    identical fill compares equal.  Raises ``OSError``/``ValueError`` when the
+    board cannot be read or parsed.
+    """
+    from ..sexp import parse_string
+
+    root = parse_string(pcb_path.read_text(encoding="utf-8"))
+    fills: dict[str, list[tuple]] = {}
+    for index, zone in enumerate(root.find_all("zone")):
+        uuid_node = zone.find_child("uuid")
+        key = str(uuid_node.get_value(0)) if uuid_node is not None else f"#{index}"
+        polygons = []
+        for poly in zone.find_children("filled_polygon"):
+            layer_node = poly.find_child("layer")
+            layer = str(layer_node.get_value(0)) if layer_node is not None else ""
+            points = tuple(
+                (round(float(xy.get_float(0) or 0), 6), round(float(xy.get_float(1) or 0), 6))
+                for pts in poly.find_children("pts")
+                for xy in pts.find_children("xy")
             )
-            if not drc.success:
+            polygons.append((layer, points))
+        fills[key] = sorted(polygons)
+    return fills
+
+
+def _saved_zone_fill_matches_native_refill(pcb_path: Path, kicad_cli: Path) -> bool:
+    """Whether the saved pours equal what KiCad fills under the rules now present.
+
+    A clean saved-board DRC cannot prove this: copper left farther from foreign
+    pads than a stricter rule would fill passes every clearance check yet plots
+    differently. The only authoritative comparison is a native refill, run on a
+    scratch copy of the board and its rule sources so ``pcb_path`` is never
+    touched. Any failure reads as "does not match".
+    """
+    from ..cli.runner import run_refill_zones
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="kct-export-zone-refill-") as tmp:
+            scratch = Path(tmp) / pcb_path.name
+            shutil.copy2(pcb_path, scratch)
+            for suffix in (".kicad_dru", ".kicad_pro"):
+                sidecar = pcb_path.with_suffix(suffix)
+                if sidecar.is_file():
+                    shutil.copy2(sidecar, scratch.with_suffix(suffix))
+            refill = run_refill_zones(scratch, kicad_cli, require_save=True)
+            if not refill.success:
                 return False
-            report = json.loads(report_path.read_bytes())
+            saved = _saved_zone_fills(pcb_path)
+            return bool(saved) and saved == _saved_zone_fills(scratch)
     except (OSError, ValueError):
         return False
-    if not isinstance(report, dict) or report.get("unconnected_items") != []:
-        return False
-    severities = report.get("included_severities")
-    if not isinstance(severities, list) or not all(
-        level in severities for level in ("error", "warning", "exclusion")
-    ):
-        return False
-    ignored = report.get("ignored_checks")
-    violations = report.get("violations")
-    return (
-        isinstance(ignored, list)
-        and all(
-            isinstance(check, dict)
-            and isinstance(check.get("key"), str)
-            and check["key"] not in fill_checks
-            for check in ignored
-        )
-        and isinstance(violations, list)
-        and all(
-            isinstance(v, dict)
-            and v.get("severity") == "warning"
-            and isinstance(v.get("type"), str)
-            and v["type"] not in fill_checks
-            for v in violations
-        )
-    )
 
 
 def _restore_board(pcb_path: Path, original: bytes) -> None:
@@ -934,7 +934,7 @@ class ManufacturingPackage:
     ) -> bool | None:
         """Return whether export rewrote the PCB, or None if it must stop.
 
-        A native DRC of the saved copper can certify the existing pours
+        A native refill of a scratch copy can certify the existing pours
         under the final rules without KiCad reserializing the source file.
         Otherwise a native refill must save the board before it can ship.
         Reuse that evidence only for the exact PCB bytes and rule sources.
@@ -980,7 +980,7 @@ class ManufacturingPackage:
         if kicad_cli is None:
             cannot_refresh("kicad-cli was not found")
             return None
-        current = _saved_zone_fill_passes_drc(self.pcb_path, kicad_cli)
+        current = _saved_zone_fill_matches_native_refill(self.pcb_path, kicad_cli)
         if not _board_unchanged(self.pcb_path, original, original_mtime_ns):
             result.errors.append("PCB changed during manufacturing export")
             return None
