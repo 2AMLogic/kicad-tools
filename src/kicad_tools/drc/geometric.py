@@ -42,6 +42,7 @@ __all__ = [
     "classify_returncode",
     "describe_returncode",
     "load_kicad_cli_json_report",
+    "read_kicad_cli_json_report",
     "run_geometric_drc",
     "saved_fill_regressions",
 ]
@@ -180,23 +181,34 @@ def load_kicad_cli_json_report(report_path: Path) -> str | None:
     object -- returns a short reason string (Issue #6724).  A killed kicad-cli
     must never be read as an empty, clean report.
     """
+    try:
+        read_kicad_cli_json_report(report_path)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def read_kicad_cli_json_report(report_path: Path) -> dict:
+    """Read a native JSON report, raising ValueError with the reason it is unusable."""
     import json
 
     try:
-        if not report_path.is_file():
-            return "kicad-cli wrote no DRC report"
-        content = report_path.read_text(encoding="utf-8", errors="replace")
+        content = report_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ValueError("kicad-cli wrote no DRC report") from exc
+    except UnicodeDecodeError as exc:
+        raise ValueError("kicad-cli DRC report is not valid UTF-8") from exc
     except OSError as exc:
-        return f"kicad-cli DRC report unreadable: {exc}"
+        raise ValueError(f"kicad-cli DRC report unreadable: {exc}") from exc
     if not content.strip():
-        return "kicad-cli wrote an empty DRC report"
+        raise ValueError("kicad-cli wrote an empty DRC report")
     try:
         data = json.loads(content)
-    except ValueError:
-        return "kicad-cli DRC report is not valid JSON (truncated?)"
+    except ValueError as exc:
+        raise ValueError("kicad-cli DRC report is not valid JSON (truncated?)") from exc
     if not isinstance(data, dict) or not isinstance(data.get("violations"), list):
-        return "kicad-cli DRC report has no violations list (not a DRC report)"
-    return None
+        raise ValueError("kicad-cli DRC report has no violations list (not a DRC report)")
+    return data
 
 
 @dataclass

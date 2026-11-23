@@ -1592,7 +1592,9 @@ class SilkLegalizeUnresolved:
     as illegal in ``kct check`` as it was before the pass (#9795).
     """
 
-    kind: str  # "silk_over_hole" | "text_over_hole" | "pad_clearance" | "reference" | ...
+    # "silk_over_hole" | "text_over_hole" | "pad_clearance" | "reference"
+    # | "reference_unsettled" | ...
+    kind: str
     item: str  # the finding / designator, in the checker's own vocabulary
     detail: str = ""  # why it could not be fixed
 
@@ -1850,6 +1852,15 @@ def legalize_silk(
         unresolved += [
             SilkLegalizeUnresolved("reference", f"{p.footprint_ref} (reference)", p.reason)
             for p in ref_result.unplaceable + ref_result.under_component_fallback
+        ]
+        unresolved += [
+            SilkLegalizeUnresolved(
+                "reference_unsettled",
+                f"{ref} (reference)",
+                "the settle loop hit its round cap; the reference sits where its"
+                " last round left it",
+            )
+            for ref in ref_result.unsettled_refs
         ]
         unresolved += [
             SilkLegalizeUnresolved("silk_in_keepout", i, "graphic still lies in a silk keepout")

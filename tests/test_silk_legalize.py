@@ -10,6 +10,7 @@ mix-ups between the raw-tree tools and the board-relative checks show up.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -479,3 +480,121 @@ def test_edge_trim_preserves_a_tap_on_the_removed_length(tmp_path, tap_layer, ed
     path = _write(tmp_path, line + tap)
     report = legalize_silk(path, _jlcpcb_rules())
     assert sum(e.action == "trimmed_edge" for e in report.footprint_line_edits) == edits
+
+
+# ---------------------------------------------------------------------------
+# A capped settle loop surfaces its unsettled references (Issue #9971)
+# ---------------------------------------------------------------------------
+
+
+def _lattice_fp(ref: str, x: float, y: float, dx: float, dy: float) -> str:
+    return _fp(
+        f"{x} {y}",
+        _ref(ref, f"{dx:.4f} {dy:.4f}") + "(fp_rect (start -0.5 -0.3) (end 0.5 0.3)"
+        ' (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd")'
+        f' (uuid "{ref}-crtyd"))',
+    )
+
+
+def _settle_lattice_body(*, with_unplaceable: bool = False) -> str:
+    """A 4x4 lattice whose labels compete for the same gaps.
+
+    One pass is not enough: a reference only sees the better candidate once
+    its neighbour has moved, so capping the settle loop after the first
+    round leaves references on the retry list (Issue #9957).  With
+    *with_unplaceable*, also add a Q1/K1 pair -- a reference boxed in by a
+    giant neighbour's courtyard on every side, which no round can place.
+    """
+    footprints = []
+    for row in range(4):
+        for col in range(4):
+            angle = math.degrees(math.atan2(2 - row, 2 - col))
+            dx = 0.6 * math.cos(math.radians(angle))
+            dy = -0.6 * math.sin(math.radians(angle))
+            footprints.append(
+                _lattice_fp(f"G{row}{col}", 108.0 + col * 2.0, 108.0 + row * 2.0, dx, dy)
+            )
+    if with_unplaceable:
+        footprints.append(
+            _fp(
+                "148 148",
+                _ref("Q1", "3 3") + "(fp_rect (start -1 -1) (end 1 1)"
+                ' (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd")'
+                ' (uuid "q1-crtyd"))',
+            )
+        )
+        footprints.append(
+            _fp(
+                "150 150",
+                '(fp_text reference "K1" (at 0 0) (layer "F.SilkS") (hide yes)'
+                " (effects (font (size 1 1) (thickness 0.15))))"
+                + "(fp_rect (start -20 -25) (end 20 25)"
+                ' (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd")'
+                ' (uuid "k1-crtyd"))',
+            )
+        )
+    return "".join(footprints)
+
+
+def test_converged_settle_leaves_no_unresolved_entries(tmp_path: Path):
+    path = _write(tmp_path, _settle_lattice_body())
+    report = legalize_silk(path, _jlcpcb_rules())
+
+    assert report.refs is not None
+    assert report.refs.unsettled_refs == []
+    assert report.unresolved == []
+
+
+def test_settle_cap_lifts_unsettled_refs_into_unresolved(tmp_path: Path, monkeypatch):
+    from kicad_tools.silkscreen import place_refs
+
+    path = _write(tmp_path, _settle_lattice_body(), name="capped.kicad_pcb")
+    monkeypatch.setattr(place_refs, "_SETTLE_MAX_ROUNDS", 1)
+
+    report = legalize_silk(path, _jlcpcb_rules())
+
+    assert report.refs is not None
+    assert report.refs.unsettled_refs, "one round is not enough for the lattice"
+    entries = [u for u in report.unresolved if u.kind == "reference_unsettled"]
+    assert sorted(u.item for u in entries) == sorted(
+        f"{ref} (reference)" for ref in report.refs.unsettled_refs
+    )
+    assert len(entries) == len({u.item for u in entries})  # one entry per reference
+    assert all("round cap" in u.detail for u in entries)
+    assert {u.kind for u in report.unresolved} == {"reference_unsettled"}
+
+
+def test_unsettled_refs_coexist_with_unplaceable_entries(tmp_path: Path, monkeypatch):
+    from kicad_tools.silkscreen import place_refs
+
+    path = _write(tmp_path, _settle_lattice_body(with_unplaceable=True))
+    monkeypatch.setattr(place_refs, "_SETTLE_MAX_ROUNDS", 1)
+
+    report = legalize_silk(path, _jlcpcb_rules())
+
+    assert report.refs is not None
+    assert "Q1" in report.refs.unsettled_refs
+    kinds = {u.kind for u in report.unresolved}
+    assert "reference" in kinds  # Q1 stays unplaceable, whatever the cap
+    assert "reference_unsettled" in kinds
+    assert any(u.kind == "reference" and u.item == "Q1 (reference)" for u in report.unresolved)
+
+
+def test_settle_cap_unsettled_refs_reach_fix_silkscreen_output(tmp_path: Path, capsys, monkeypatch):
+    from kicad_tools.silkscreen import place_refs
+
+    monkeypatch.setattr(place_refs, "_SETTLE_MAX_ROUNDS", 1)
+
+    json_path = _write(tmp_path, _settle_lattice_body(), name="json.kicad_pcb")
+    assert (
+        fix_silkscreen_main([str(json_path), "--all", "--mfr", "jlcpcb", "--format", "json"]) == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    entries = [u for u in data["unresolved"] if u["kind"] == "reference_unsettled"]
+    assert entries
+    assert all(u["item"].endswith("(reference)") and u["detail"] for u in entries)
+
+    text_path = _write(tmp_path, _settle_lattice_body(), name="text.kicad_pcb")
+    assert fix_silkscreen_main([str(text_path), "--all", "--mfr", "jlcpcb"]) == 0
+    out = capsys.readouterr().out
+    assert "[reference_unsettled] " in out

@@ -135,22 +135,14 @@ BOARD07_GAP_NETS: tuple[str, ...] = ()
 # image, one on a worker through KCT_KICAD_DOCKER) reproduced all 19
 # signatures and their per-net counts exactly (54 findings: 52 violation +
 # 2 uncertain, all same-net). Issue #9436 identified all 18 +1V8 findings
-# as solid own-pour connections. A new blocking error on +1V8 trips the gate.
+# as solid own-pour connections. Issue #9960 cleared both pad exits on
+# DM0 and DQ0-DQ7. A new blocking error on any of those nets trips the gate.
 BOARD07_MASK_NETS = (
     "A0",
     "A2",
     "A3",
     "A5",
     "A7",
-    "DM0",
-    "DQ0",
-    "DQ1",
-    "DQ2",
-    "DQ3",
-    "DQ4",
-    "DQ5",
-    "DQ6",
-    "DQ7",
     "GND",
     "MIPI_CLK_P",
     "TMDS_D2_N",
@@ -213,7 +205,7 @@ def test_board07_committed_allowance():
     seed-42 regen's ``mask_to_copper`` net signatures (net-signature keyed
     -- the board is regenerated each CI run, so the mask rule's
     opening/conductor UUID items are ephemeral): board 07's allowance
-    holds exactly those 19 mask nets."""
+    holds exactly the mask nets that still have blocking findings."""
     gate = load("check_matchgroup_coverage")
     expected = fab_gap_allowance(BOARD07_GAP_NETS)
     expected.update(mask_allowance(BOARD07_MASK_NETS))
