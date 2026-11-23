@@ -42,6 +42,7 @@ from kicad_tools.router.algorithms.negotiated import (
     RIPUP_VICTIM_UNPROVEN,
     NegotiatedRouter,
     TargetedRipupOutcome,
+    report_edge_failure,
 )
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
@@ -79,11 +80,9 @@ def _run_ripup(
 
     def route_with_evidence(self_neg, pads, *args, **options):
         routes = fake_route_net(self_neg, pads, *args, **options)
-        failures = options.get("failure_callback")
-        if isinstance(failures, list) and not routes and not failures:
-            failures.append(
-                RIPUP_VICTIM_GEOMETRIC if victim_search_drained else RIPUP_VICTIM_BUDGET
-            )
+        if not routes:
+            reason = RIPUP_VICTIM_GEOMETRIC if victim_search_drained else RIPUP_VICTIM_BUDGET
+            report_edge_failure(options.get("failure_callback"), pads[0], pads[1], reason)
         return routes
 
     with patch.object(NegotiatedRouter, "route_net_negotiated", route_with_evidence):

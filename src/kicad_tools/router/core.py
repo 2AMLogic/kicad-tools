@@ -91,6 +91,13 @@ from .algorithms import (
     select_seg_seg_demotion_nets,
     should_terminate_early,
 )
+from .algorithms.negotiated import (
+    RIPUP_VICTIM_BUDGET,
+    RIPUP_VICTIM_GEOMETRIC,
+    RIPUP_VICTIM_REFUSED,
+    EdgeFailureCallback,
+    report_edge_failure,
+)
 from .bus import BusGroup, BusRoutingConfig, BusRoutingMode
 from .bus_routing import BusRouter
 from .cache import (
@@ -307,6 +314,15 @@ _ESCAPE_CORRIDOR_INNER_LAYERS_ONLY = True
 # worth reopening is board 07's INPUTS -- a rescue that cannot spend ~46% of a
 # stage budget and roll back (issue #4781) -- not another A/B of this flag.
 DETERMINISTIC_RESCUE_DEFAULT = False
+
+# Issue #9901 / #9936: the modest A* goal-bias weight a two-terminal
+# diff-pair leg's relief searches run under.  #9901 gave the transaction's
+# own failed net this bias (a BGA escape that missed the budget unbiased
+# lands well inside it biased); #9936 extends it to the displaced victims
+# the transaction re-lands, whose ordinary re-land searches are the same
+# two-terminal escape shape.  Shared by both call sites so the value can
+# only ever be changed in one place.
+RELIEF_DIFFPAIR_GOAL_BIAS_WEIGHT = 1.5
 
 # Issue #6329: the line the negotiated loop prints when its stage deadline
 # stops an iteration-budgeted (``--deterministic-budget``) run.  Must match
@@ -17911,6 +17927,80 @@ class Autorouter:
             self._active_expansion_cap(), per_net_timeout, deterministic_rescue
         )
 
+    def _relief_goal_bias_eligible(self, net: int, pads_by_net: dict[int, list[Pad]]) -> bool:
+        """Whether ``net``'s relief searches carry the two-terminal goal bias.
+
+        Issue #9901 gave the relief transaction's own failed net a modest
+        goal bias (``RELIEF_DIFFPAIR_GOAL_BIAS_WEIGHT``): on a two-terminal
+        pair leg the unbiased A* wanders the congestion field and misses the
+        sub-search budget, while the biased search finds the BGA escape well
+        inside the same budget.  Issue #9936 reuses the identical test for
+        the displaced victims the transaction re-lands: on the Board 06 TX2
+        replay the first ordinary re-landing search (``USB3_TX2+``
+        ``J1.B2->U2.F2``) was cut short by the wall backstop at ~28% of its
+        expansion cap while a jointly legal control existed on the same
+        copper, and the same net routed in ~3 s whenever it was the
+        transaction's own failed net (biased) rather than a victim
+        (unbiased).  Eligibility is unchanged from #9901: pure-Python
+        pathfinder, exactly two pads, no evolutionary gene override already
+        installed, and a resolvable diff-pair partner.
+        """
+        from .pathfinder import Router
+
+        return (
+            isinstance(self.router, Router)
+            and len(pads_by_net.get(net, ())) == 2
+            and net not in self.router.net_astar_weights
+            and self._diff_pair_partner_net(net) is not None
+        )
+
+    def _relief_search_exit_reason(self) -> str:
+        """Describe the search that just failed, including any Python fallback."""
+        from .nogood_cache import DRAINED_FAILURE_REASONS, search_failure_is_definitive
+
+        pathfinder = self.router
+        python = getattr(pathfinder, "_py_router", pathfinder)
+        drained = "frontier exhausted (no legal path at this occupancy)"
+        python_stop = ""
+        if getattr(python, "last_route_deadline_hit", False):
+            iterations = getattr(python, "last_route_deadline_iterations", 0)
+            python_stop = f"wall deadline hit at {iterations} expansions (search cut short)"
+        elif getattr(python, "last_route_iteration_limited", False):
+            python_stop = "iteration cap reached (search cut short)"
+        info = getattr(pathfinder, "get_last_failure_info", lambda: None)()
+        proven = search_failure_is_definitive(pathfinder)
+        if isinstance(info, dict) and info:
+            import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
+
+            reason = info.get("failure_reason")
+            iterations = int(info.get("iterations", 0) or 0)
+            if reason in DRAINED_FAILURE_REASONS:
+                # The native search aims at the pad. Only the fallback can
+                # also reach an intermediate tree-join goal on this request.
+                head = drained if proven else "native frontier exhausted"
+                if not proven and not python_stop:
+                    head += (
+                        "; Python fallback did not run"
+                        if python is None
+                        else "; no exhaustive Python fallback recorded"
+                    )
+            elif reason == router_cpp.FAILURE_TIMEOUT:
+                head = "wall deadline hit (search cut short)"
+            elif reason == router_cpp.FAILURE_ITERATION_LIMIT:
+                head = f"iteration cap reached at {iterations:,} expansions (search cut short)"
+            else:
+                head = f"search failed (failure_reason={reason})"
+            if python_stop:
+                head += f"; Python fallback {python_stop}"
+            blocker = info.get("blocking_net_name")
+            if blocker:
+                head += (
+                    f"; last blocker {blocker} at"
+                    f" ({info.get('failure_x', '?')}, {info.get('failure_y', '?')})"
+                )
+            return head
+        return drained if proven else python_stop or "no search stop recorded"
+
     def _relief_reland_retry_budget(
         self, per_net_timeout: float | None, subsearch_budget: float | None
     ) -> float | None:
@@ -18849,20 +18939,14 @@ class Autorouter:
         carried through unchanged.  Behaviour is otherwise identical: this
         only sets a label.
         """
-        from .pathfinder import Router
-
         # The normal search already failed. On a two-terminal pair leg a
         # modest goal bias finds the BGA escape within the same search budget
-        # (#9901). Keep it for the normal-mode validation reroute too. Other
-        # nets, including a displaced sibling, retain their search policy.
-        use_goal_bias = (
-            isinstance(self.router, Router)
-            and len(pads_by_net.get(failed_net, ())) == 2
-            and failed_net not in self.router.net_astar_weights
-            and self._diff_pair_partner_net(failed_net) is not None
-        )
+        # (#9901). Keep it for the normal-mode validation reroute too. The
+        # eligibility test lives on the shared helper so the displaced
+        # victims re-landed below (#9936) can never drift from it.
+        use_goal_bias = self._relief_goal_bias_eligible(failed_net, pads_by_net)
         weight_override = (
-            self.trial_gene_overrides({failed_net: 1.5})
+            self.trial_gene_overrides({failed_net: RELIEF_DIFFPAIR_GOAL_BIAS_WEIGHT})
             if use_goal_bias
             else contextlib.nullcontext()
         )
@@ -19318,6 +19402,11 @@ class Autorouter:
         retry_timeout = self._relief_reland_retry_budget(per_net_timeout, subsearch_budget)
         budget_bound: set[int] = set()  # victims owed one retry at retry_timeout
         escalated: set[int] = set()  # victims that already had it
+        # Issue #9936: per-victim measured search exit for the rollback
+        # diagnostics.  ``setdefault`` keeps the FIRST ordinary re-landing
+        # search's stopping reason (the one the diagnosis wants); later
+        # passes and the nested-rescue marker below only fill gaps.
+        reland_exits: dict[int, str] = {}
         # Multi-pass re-land: a victim that fails while its displaced
         # siblings are still unplaced often lands cleanly once they have
         # settled (the run-5 measurements: rescues failed at exactly
@@ -19332,6 +19421,12 @@ class Autorouter:
             progress = False
             for rn in pending:
                 if _past_deadline():
+                    # Issue #9936: no search ran, so there is no measured
+                    # exit -- say that instead of letting the victim pass
+                    # silently into the rollback count.
+                    reland_exits.setdefault(
+                        rn, "stage/transaction deadline reached before its re-land search"
+                    )
                     still_pending.append(rn)
                     continue
                 rn_timeout = restart_timeout
@@ -19359,13 +19454,44 @@ class Autorouter:
                 # "no fewer connected pads than before" instead (see
                 # ``partial_victim_baseline``).
                 edge_failures: list[tuple[Pad, Pad]] = []
+
+                def _record_reland_failure(
+                    src: Pad, dst: Pad, reason: str | None, _rn: int = rn
+                ) -> None:
+                    edge_failures.append((src, dst))
+                    src_pin = f"{src.ref}.{src.pin}" if src.ref else "pad"
+                    dst_pin = f"{dst.ref}.{dst.pin}" if dst.ref else "pad"
+                    if reason is None:
+                        outcome = self._relief_search_exit_reason()
+                    else:
+                        outcome = {
+                            RIPUP_VICTIM_BUDGET: "cumulative net budget exhausted before search",
+                            RIPUP_VICTIM_REFUSED: "commit refused after search",
+                            RIPUP_VICTIM_GEOMETRIC: "cached exhaustive failure at this occupancy",
+                        }.get(reason, "edge failed without search evidence")
+                    reland_exits.setdefault(_rn, f"{src_pin}->{dst_pin}: {outcome}")
+
                 started = _time.monotonic()
-                rn_routes = self._route_net_negotiated(
-                    rn,
-                    present_factor,
-                    per_net_timeout=rn_timeout,
-                    failure_callback=lambda src, dst: edge_failures.append((src, dst)),
+                # Issue #9936: a displaced victim that is itself a two-terminal
+                # diff-pair leg runs its re-land searches under the same modest
+                # goal bias #9901 gave the transaction's own failed net.  On
+                # the Board 06 TX2 replay the ordinary re-land searches were
+                # cut short by the wall backstop at 277,504 / 348,160 of a
+                # 1,000,000-expansion cap while a jointly legal control existed
+                # on the same copper; every other victim keeps its search
+                # policy.
+                victim_bias = (
+                    self.trial_gene_overrides({rn: RELIEF_DIFFPAIR_GOAL_BIAS_WEIGHT})
+                    if self._relief_goal_bias_eligible(rn, pads_by_net)
+                    else contextlib.nullcontext()
                 )
+                with victim_bias:
+                    rn_routes = self._route_net_negotiated(
+                        rn,
+                        present_factor,
+                        per_net_timeout=rn_timeout,
+                        failure_callback=EdgeFailureCallback(_record_reland_failure),
+                    )
                 accepted = bool(rn_routes) and not edge_failures
                 if rn_routes and edge_failures and rn in partial_victim_baseline:
                     # Issue #6151 review: a victim that was ALREADY partial
@@ -19420,6 +19546,10 @@ class Autorouter:
             still_pending = []
             for rn in pending:
                 if _past_deadline():
+                    # Issue #9936: mirror the re-land pass's deadline marker.
+                    reland_exits.setdefault(
+                        rn, "stage/transaction deadline reached before its nested rescue"
+                    )
                     still_pending.append(rn)
                     continue
                 # Issue #6363: a nested rescue is a relief attempt for ``rn``
@@ -19432,6 +19562,7 @@ class Autorouter:
                         f"{self.net_names.get(rn, f'Net_{rn}')} skipped -- per-net "
                         f"relief cap reached (issue #6363)"
                     )
+                    reland_exits.setdefault(rn, "nested rescue refused (per-net relief cap)")
                     still_pending.append(rn)
                     continue
                 if self._relief_rescue(
@@ -19455,6 +19586,11 @@ class Autorouter:
                 ):
                     relanded += 1
                 else:
+                    # Issue #9936: the nested rescue printed its own rollback
+                    # reason lines; keep only a marker here -- a measured exit
+                    # from an earlier ordinary re-land pass, when there was
+                    # one, keeps priority.
+                    reland_exits.setdefault(rn, "nested rescue rolled back (see its own lines)")
                     still_pending.append(rn)
             pending = still_pending
 
@@ -19468,6 +19604,20 @@ class Autorouter:
         # one stranded net for another (zero-sum) while burning the wall
         # budget the later iterations needed.
         if relanded < len(ripped):
+            # Issue #9936: name each un-re-landed victim and its MEASURED
+            # search exit, so the rollback line's count is never the whole
+            # story -- a deadline stop (search cut short) and a drained
+            # frontier (proved obstruction) demand different follow-ups.
+            exit_detail = "; ".join(
+                f"{self.net_names.get(v, f'Net_{v}')} -- {reland_exits[v]}"
+                for v in pending
+                if v in reland_exits
+            )
+            if exit_detail:
+                flush_print_fn(
+                    f"  Relief rescue: {failed_name} re-land failure exits "
+                    f"(issue #9936): {exit_detail}"
+                )
             flush_print_fn(
                 f"  Relief rescue: {failed_name} routed but only "
                 f"{relanded}/{len(ripped)} displaced victim(s) re-landed "
@@ -19665,24 +19815,23 @@ class Autorouter:
                     store[int(net)] = int(cached_reason)
                 if failure_callback is not None:
                     for src, tgt in cached_pairs:
-                        failure_callback(src, tgt)
+                        report_edge_failure(failure_callback, src, tgt, RIPUP_VICTIM_GEOMETRIC)
                 return routes
 
             reset_search_exhausted(search_router)
             downstream_callback = failure_callback
 
-            def record_nogood_failure(src: Pad, tgt: Pad) -> None:
+            def record_nogood_failure(src: Pad, tgt: Pad, reason: str | None) -> None:
                 failed_pairs.append((src, tgt))
-                ng_definitive.append(search_failure_is_definitive(search_router))
+                ng_definitive.append(reason is None and search_failure_is_definitive(search_router))
                 get_info = getattr(search_router, "get_last_failure_info", None)
                 info = get_info() if get_info is not None else None
                 if info and info.get("failure_reason"):
                     ng_reason[:] = [int(info["failure_reason"])]
+                report_edge_failure(downstream_callback, src, tgt, reason)
                 reset_search_exhausted(search_router)
-                if downstream_callback is not None:
-                    downstream_callback(src, tgt)
 
-            failure_callback = record_nogood_failure
+            failure_callback = EdgeFailureCallback(record_nogood_failure)
 
         ng_start = time.monotonic() if nogood is not None else 0.0
         new_routes = neg_router.route_net_negotiated(
