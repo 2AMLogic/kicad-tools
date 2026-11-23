@@ -1089,15 +1089,6 @@ class MaskCopperRepairer(CopperGapRepairer):
             reference = end if fixed == start else start
             if self._has_fixed_junction_contact(reference, layer, net_name):
                 return "junction_at_moved_end", ""
-            legs = [(fixed, reference, {seg_uuid})]
-            for join_uuid, join_node, join_tag in joined:
-                join_a = self._xy(join_node.find("end" if join_tag == "start" else "start"))
-                join_b = self._xy(join_node.find(join_tag))
-                if join_a is not None and join_b is not None:
-                    legs.append((join_a, join_b, {join_uuid}))
-            moving = {seg_uuid, *(member[0] for member in joined)}
-            if any(self._has_interior_contact(a, b, layer, net_name, moving) for a, b, _ in legs):
-                return "junction_at_moved_end", ""
             push = self._shift_junction_clear(
                 fixed, reference, [entry[0] for entry in entries], required + margin_mm + width / 2
             )
@@ -1109,6 +1100,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             return "already_cleared", ""
         if displacement > max_displacement:
             return "exceeds_max_displacement", f"needs {displacement:.4f}mm"
+        moving_uuids = {seg_uuid, *(member[0] for member in joined)}
 
         new_start = start if start == fixed else (start[0] + dx, start[1] + dy)
         new_end = end if end == fixed else (end[0] + dx, end[1] + dy)
@@ -1145,6 +1137,8 @@ class MaskCopperRepairer(CopperGapRepairer):
             )
             points.append(("segment", join_uuid, join_tag, join_end[0], join_end[1]))
 
+        if self._loses_same_net_contact(moves, layer, net_name, moving_uuids, pads):
+            return "junction_at_moved_end", ""
         refusal = self._copper_floor_reason(moves, layer, net_name, seg_uuid, pads, clearance_mm)
         if refusal is not None:
             return refusal
@@ -1212,24 +1206,30 @@ class MaskCopperRepairer(CopperGapRepairer):
                 return True
         return False
 
-    def _has_interior_contact(
+    def _loses_same_net_contact(
         self,
-        a: tuple[float, float],
-        b: tuple[float, float],
+        moves: list[tuple[BaseGeometry, BaseGeometry, str]],
         layer: str,
         net_name: str,
         moving: set[str],
+        pads: dict,
     ) -> bool:
-        """Whether same-net copper touches a reshaped leg away from its two ends.
+        """Whether a reshaped leg would stop touching same-net copper it touches now.
 
-        A branch ending on (or crossing) the middle of a leg that is rotated
-        about its fixed end would lose that contact, so the edit is declined.
+        Compares the physical copper (track and arc widths, via annuli, pad
+        faces), not centerlines: a branch that meets a leg by its width, or a
+        pad beside it, is a real contact. A contact that survives the move
+        (including a collinear overlap) is fine; one that would separate
+        declines the whole grouped edit. An arc or pad whose shape cannot be
+        modelled declines when it is anywhere near a reshaped leg.
         """
-        leg = LineString([a, b])
-        guard = _TOLERANCE_MM * 2
-        interior = leg.difference(Point(a).buffer(guard)).difference(Point(b).buffer(guard))
-        if interior.is_empty:
-            return False
+        olds = [old for old, _new, _layer in moves]
+        news = [new for _old, new, _layer in moves]
+        reach = unary_union([old.buffer(_TOLERANCE_MM) for old in olds])
+        # Contact kept only if the new copper still overlaps by more than the
+        # editor's four-decimal rounding grid.
+        shrunk = [new.buffer(-0.0002) for new in news]
+        neighbours: list[BaseGeometry] = []
         for uuid, node in self._segment_nodes().items():
             if uuid in moving or self._net_name(node) != net_name:
                 continue
@@ -1237,9 +1237,10 @@ class MaskCopperRepairer(CopperGapRepairer):
             if layer_node is None or _bare(layer_node.get_first_atom()) != layer:
                 continue
             start, end = self._xy(node.find("start")), self._xy(node.find("end"))
-            if start is not None and end is not None:
-                if LineString([start, end]).distance(interior) < _TOLERANCE_MM:
-                    return True
+            width_node = node.find("width")
+            if start is None or end is None or width_node is None:
+                return True
+            neighbours.append(LineString([start, end]).buffer(_num(width_node) / 2, quad_segs=16))
         for node in self.doc.find_all("arc"):
             layer_node = node.find("layer")
             if (
@@ -1248,21 +1249,37 @@ class MaskCopperRepairer(CopperGapRepairer):
                 or self._net_name(node) != net_name
             ):
                 continue
+            width_node = node.find("width")
             try:
-                path = Arc.from_sexp(node).centerline_points()
+                path = LineString(Arc.from_sexp(node).centerline_points())
             except ValueError:
                 return True
-            if LineString(path).distance(interior) < _TOLERANCE_MM:
+            if width_node is None:
                 return True
+            neighbours.append(path.buffer(_num(width_node) / 2, quad_segs=16))
         for via in self.doc.find_all("via"):
             at = self._xy(via.find("at"))
+            size_node = via.find("size")
             if (
-                at is not None
-                and self._net_name(via) == net_name
-                and layer in self._via_span_layer_set(via)
-                and Point(at).distance(interior) < _TOLERANCE_MM
+                at is None
+                or size_node is None
+                or self._net_name(via) != net_name
+                or layer not in self._via_span_layer_set(via)
             ):
+                continue
+            neighbours.append(Point(at).buffer(_num(size_node) / 2, quad_segs=16))
+        for poly, _centre, pad_layers, pad_net, _ref, shape in pads.values():
+            if pad_net != net_name or not (layer in pad_layers or "*.Cu" in pad_layers):
+                continue
+            if shape == "unsupported" and reach.intersects(poly.buffer(0.5)):
                 return True
+            neighbours.append(poly)
+        for neighbour in neighbours:
+            if not reach.intersects(neighbour):
+                continue
+            for old, kept in zip(olds, shrunk, strict=True):
+                if old.intersects(neighbour) and not kept.intersects(neighbour):
+                    return True
         return False
 
     @staticmethod

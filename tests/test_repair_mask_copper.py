@@ -920,6 +920,11 @@ def test_pass_through_moves_shared_junction_and_keeps_its_via_fixed(tmp_path, re
     assert {uid: _saved_copper(board, uid)[1] for uid in original} == original
 
 
+# A tap ending 0.19 mm off a centreline only just touches the 0.2 mm copper edge,
+# on the side the nudge moves the track away from.
+TAP_OFFSET = -0.19
+
+
 @pytest.mark.parametrize(
     "block",
     [
@@ -949,10 +954,10 @@ def test_pass_through_preserves_an_immovable_junction(tmp_path, block):
             '(width 0.2) (layer "F.Cu") (net 1) (uuid "arc"))'
         )
     if block == "locked_tap_on_target":
-        tap = _seg("tap", (100, 100.62), (100, 98))
+        tap = _seg("tap", (104.6, 100.62 + TAP_OFFSET), (104.6, 98))
         copper.append(tap.replace('(uuid "tap")', '(locked yes) (uuid "tap")'))
     if block == "tap_on_joined_leg":
-        copper.append(_seg("tap", (106.5, 101.81), (110, 99)))
+        copper.append(_seg("tap", (106.5, 101.81 + TAP_OFFSET), (110, 99)))
     board = _board(tmp_path, "\n".join(copper))
     repairer = MaskCopperRepairer(board)
     result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
@@ -962,6 +967,37 @@ def test_pass_through_preserves_an_immovable_junction(tmp_path, block):
         == 1
     )
     assert not repairer.modified
+
+
+def test_pass_through_declines_when_a_via_annulus_touches_the_track_shoulder(tmp_path):
+    # The via centre is 0.39 mm off the centreline -- far outside a centreline
+    # tolerance -- yet its 0.3 mm annulus meets the 0.1 mm half-width copper.
+    anchor, junction = (95, 100.62), (105, 100.62)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, (108, 103)),
+        _via("shoulder", (104.6, 100.23)),
+    ]
+    repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 0 and result.skipped("junction_at_moved_end") == 1
+    assert not repairer.modified
+
+
+def test_pass_through_keeps_a_collinear_overlap_that_survives_the_move(tmp_path):
+    # A stationary track continuing the dragged leg's far end overlaps its
+    # copper before and after, so the contact is preserved and the move stands.
+    anchor, junction, remote = (95, 100.62), (105, 100.62), (108, 103)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, remote),
+        _seg("tail", remote, (110, 104.59)),
+    ]
+    repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 1 and not result.skipped("junction_at_moved_end")
 
 
 def test_via_fixed_junction_clears_both_openings_within_displacement_limit(tmp_path):
