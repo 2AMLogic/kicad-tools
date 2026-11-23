@@ -529,7 +529,7 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
                         sheetname = sname
 
             # Extract (pin "name" direction (at x y angle) ...) children.
-            # Pin positions in sheet entries are relative to the sheet origin.
+            # A pin's (at x y) is already in absolute page coordinates, like its parent wire.
             for pin_node in child.find_all("pin"):
                 pin_name = pin_node.get_string(0)
                 if pin_name:
