@@ -26,6 +26,7 @@ Both stay on their current, already-exact shapely implementations.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
@@ -156,6 +157,33 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     return results
 
 
+def silk_pad_apertures(
+    footprints: Iterable[Footprint], default_margin: float | None
+) -> dict[str, list[tuple[Any, str]]]:
+    """Pad shapes measured by the clearance rule, in the footprints' coordinate frame."""
+    from .clearance import _pad_polygon
+
+    by_side: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+    for fp in footprints:
+        for pad in fp.pads:
+            if pad.type not in ("smd", "thru_hole", "connect"):
+                continue
+            copper = _pad_polygon(pad, fp)
+            if copper is None or copper.is_empty:
+                continue
+            margin = (
+                pad.solder_mask_margin if pad.solder_mask_margin is not None else default_margin
+            )
+            for side in ("F", "B"):
+                if "*.Cu" not in pad.layers and f"{side}.Cu" not in pad.layers:
+                    continue
+                exposed = "*.Mask" in pad.layers or f"{side}.Mask" in pad.layers
+                shape = copper.buffer(max(margin or 0, 0)) if exposed else copper
+                if not shape.is_empty:
+                    by_side[side].append((shape, f"{fp.reference}-{pad.number}"))
+    return by_side
+
+
 def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     """Exact modeled silk strokes versus pad copper/apertures on the same side.
 
@@ -181,7 +209,6 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     import shapely
     from shapely import STRtree
 
-    from .clearance import _pad_polygon
     from .silkscreen import (
         _board_frame_shift,
         _fp_transform,
@@ -202,25 +229,8 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     strokes.extend(
         (graphic, board_xf, "board", to_board(_graphic_anchor(graphic))) for graphic in pcb.graphics
     )
-    apertures = []
-    for fp in pcb.footprints:
-        for pad in fp.pads:
-            if pad.type not in ("smd", "thru_hole", "connect"):
-                continue
-            margin = pad.solder_mask_margin
-            if margin is None:
-                margin = pcb.setup.pad_to_mask_clearance if pcb.setup is not None else 0
-            copper = _pad_polygon(pad, fp)
-            for side in ("F", "B"):
-                if "*.Cu" not in pad.layers and f"{side}.Cu" not in pad.layers:
-                    continue
-                exposed = "*.Mask" in pad.layers or f"{side}.Mask" in pad.layers
-                geom = copper.buffer(max(margin or 0, 0)) if exposed else copper
-                apertures.append((side, geom, f"{fp.reference}-{pad.number}"))
-    apertures_by_side: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
-    for pad_side, aperture, pad_reference in apertures:
-        if not aperture.is_empty:
-            apertures_by_side[pad_side].append((aperture, pad_reference))
+    margin = pcb.setup.pad_to_mask_clearance if pcb.setup is not None else 0
+    apertures_by_side = silk_pad_apertures(pcb.footprints, margin)
     trees: dict[str, Any] = {
         side: STRtree([geom for geom, _ in entries])
         for side, entries in apertures_by_side.items()
