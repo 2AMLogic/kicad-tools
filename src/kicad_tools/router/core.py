@@ -17954,6 +17954,58 @@ class Autorouter:
             and self._diff_pair_partner_net(net) is not None
         )
 
+    def _relief_partner_drill_candidate(
+        self,
+        net: int,
+        probe: list[Route],
+        partner: int,
+        partner_routes: list[Route],
+        present_factor: float,
+        timeout: float | None,
+        log,
+    ) -> list[Route]:
+        """Try a normal route that leaves the partner's original drills usable (#10032)."""
+        from .pathfinder import Router
+        from .via_clearance import drill_hole_to_hole_clear
+
+        if not isinstance(self.router, Router):
+            return []
+        drills = [(v.x, v.y, v.drill) for route in partner_routes for v in route.vias]
+
+        def clears_drills(routes: list[Route]) -> bool:
+            return all(
+                drill_hole_to_hole_clear(v.x, v.y, v.drill, drills, self.rules.min_hole_to_hole)
+                for route in routes
+                for v in route.vias
+            )
+
+        if not drills or clears_drills(probe):
+            return []
+
+        # Start at the opposite terminal. Its smaller reachable component can
+        # drain even when a forward search would consume the whole budget.
+        incomplete = []
+        with self.router.trial_partner_drills(drills):
+            candidate = self._route_net_negotiated(
+                net,
+                present_factor,
+                per_net_timeout=timeout,
+                reverse_search=True,
+                failure_callback=lambda a, b: incomplete.append((a, b)),
+            )
+        if candidate and (incomplete or not clears_drills(candidate)):
+            for route in candidate:
+                self.grid.unmark_route(route)
+            candidate = []
+            outcome = "incomplete route or final via inside protected clearance"
+        else:
+            outcome = "route found" if candidate else self._relief_search_exit_reason()
+        log(
+            f"  Relief rescue: {self.net_names.get(net, net)} protecting "
+            f"{self.net_names.get(partner, partner)} drill sites: {outcome}"
+        )
+        return candidate
+
     def _relief_search_exit_reason(self) -> str:
         """Describe the search that just failed, including any Python fallback."""
         from .nogood_cache import DRAINED_FAILURE_REASONS, search_failure_is_definitive
@@ -19284,13 +19336,47 @@ class Autorouter:
                 # below -- a normal-mode re-route that dropped an edge is not
                 # better than the complete probe path it would replace.
                 normal_failures: list[tuple[Pad, Pad]] = []
-                normal_routes = self._route_net_negotiated(
-                    failed_net,
-                    present_factor,
-                    per_net_timeout=per_net_timeout,
-                    failure_callback=lambda src, dst: normal_failures.append((src, dst)),
-                    **direction,
-                )
+                normal_routes: list[Route] = []
+                if (
+                    pair_partner is not None
+                    and pair_partner not in partial_victim_baseline
+                    and depth == 0
+                    and len(pads_by_net.get(failed_net, ())) == 2
+                    and len(pads_by_net.get(pair_partner, ())) == 2
+                ):
+                    remaining = [
+                        bound - _time.time()
+                        for bound in (deadline, txn_deadline)
+                        if bound is not None
+                    ]
+                    trial_limits = [t for t in (probe_timeout, per_net_timeout) if t is not None]
+                    trial_timeout = min(trial_limits + remaining, default=None)
+                    if trial_timeout is None or trial_timeout > 0:
+                        normal_routes = self._relief_partner_drill_candidate(
+                            failed_net,
+                            probe_routes,
+                            pair_partner,
+                            original_routes[pair_partner],
+                            present_factor,
+                            trial_timeout,
+                            flush_print_fn,
+                        )
+                    if _past_deadline():
+                        for route in normal_routes:
+                            self.grid.unmark_route(route)
+                        flush_print_fn(
+                            f"  Relief rescue: {failed_name} {_deadline_reason()} -- rolling back"
+                        )
+                        _rollback()
+                        return False
+                if not normal_routes:
+                    normal_routes = self._route_net_negotiated(
+                        failed_net,
+                        present_factor,
+                        per_net_timeout=per_net_timeout,
+                        failure_callback=lambda src, dst: normal_failures.append((src, dst)),
+                        **direction,
+                    )
                 if normal_routes and normal_failures:
                     for route in normal_routes:
                         self.grid.unmark_route(route)
@@ -19869,9 +19955,13 @@ class Autorouter:
 
         The C++ wrapper's #6098 grid stamp covers corridor reservations,
         fixed fills, keepout rule areas and the router-side net maps, which
-        live outside the grid's numpy planes.  ``None`` on the pure-Python
-        router (those inputs are then grid arrays already hashed).
+        live outside the grid's numpy planes. The Python relief candidate
+        also contributes any partner drills reserved for this search.
         """
+        # A drain with reserved partner drills cannot stand in for an
+        # unrestricted search on the same copper arrays.
+        if drills := getattr(self.router, "relief_partner_drills", None):
+            return tuple(drills)
         stamp = getattr(self.router, "_py_grid_state_stamp", None)
         py_grid = getattr(self.router, "_py_grid", None)
         if stamp is None or py_grid is None:
