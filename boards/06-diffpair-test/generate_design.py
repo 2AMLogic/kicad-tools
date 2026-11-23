@@ -40,6 +40,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from kicad_tools.cli.silk_default_pass import run_default_silk_pass
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
@@ -5321,6 +5322,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
+            run_default_silk_pass(routed_path, mfr="jlcpcb")
             return 0
 
         # argparse choices already constrains this, but be explicit.
