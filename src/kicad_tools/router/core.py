@@ -91,6 +91,13 @@ from .algorithms import (
     select_seg_seg_demotion_nets,
     should_terminate_early,
 )
+from .algorithms.negotiated import (
+    RIPUP_VICTIM_BUDGET,
+    RIPUP_VICTIM_GEOMETRIC,
+    RIPUP_VICTIM_REFUSED,
+    EdgeFailureCallback,
+    report_edge_failure,
+)
 from .bus import BusGroup, BusRoutingConfig, BusRoutingMode
 from .bus_routing import BusRouter
 from .cache import (
@@ -17948,52 +17955,43 @@ class Autorouter:
         )
 
     def _relief_search_exit_reason(self) -> str:
-        """Measured stopping reason for the pathfinder's most recent search.
-
-        Issue #9936: the relief transaction's rollback lines reported HOW
-        MANY victims re-landed but never WHY the failures stopped -- yet the
-        distinction is the whole diagnosis.  A wall-deadline or iteration-cap
-        stop is a search CUT SHORT (a better-guided search can still land);
-        a drained frontier is a PROOF no path exists at this occupancy.  The
-        replay of Board 06's TX2 transaction measured both failing re-lands
-        as deadline stops at 277,504 / 348,160 expansions of a 1,000,000
-        expansion cap.  Python reads the per-call timing wrapper's flags;
-        the C++ backend exposes structured ``get_last_failure_info()``
-        instead, whose blocker fields name the specific closing copper (on
-        the C++ replay of the same transaction: an iteration-cap stop whose
-        last blocker was a ``USB3_RX2+`` via).  Flags absent or all clear
-        means the edge failed without a recorded search stop (pad-access
-        refusal or a cumulative-budget short-circuit), which is itself
-        worth saying.
-        """
+        """Describe the search that just failed, including any Python fallback."""
         from .nogood_cache import DRAINED_FAILURE_REASONS, search_failure_is_definitive
 
         pathfinder = self.router
-        # The Python flags live on the Python ``Router``; ``CppPathfinder``
-        # owns none and runs its fallback on ``_py_router`` (#8644).
-        python = getattr(pathfinder, "_py_router", None) or pathfinder
+        python = getattr(pathfinder, "_py_router", pathfinder)
         drained = "frontier exhausted (no legal path at this occupancy)"
-        if search_failure_is_definitive(pathfinder):
-            return drained
+        python_stop = ""
         if getattr(python, "last_route_deadline_hit", False):
             iterations = getattr(python, "last_route_deadline_iterations", 0)
-            return f"wall deadline hit at {iterations} expansions (search cut short)"
-        if getattr(python, "last_route_iteration_limited", False):
-            return "iteration cap reached (search cut short)"
+            python_stop = f"wall deadline hit at {iterations} expansions (search cut short)"
+        elif getattr(python, "last_route_iteration_limited", False):
+            python_stop = "iteration cap reached (search cut short)"
         info = getattr(pathfinder, "get_last_failure_info", lambda: None)()
+        proven = search_failure_is_definitive(pathfinder)
         if isinstance(info, dict) and info:
             import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
 
             reason = info.get("failure_reason")
             iterations = int(info.get("iterations", 0) or 0)
-            if reason == router_cpp.FAILURE_TIMEOUT:
+            if reason in DRAINED_FAILURE_REASONS:
+                # The native search aims at the pad. Only the fallback can
+                # also reach an intermediate tree-join goal on this request.
+                head = drained if proven else "native frontier exhausted"
+                if not proven and not python_stop:
+                    head += (
+                        "; Python fallback did not run"
+                        if python is None
+                        else "; no exhaustive Python fallback recorded"
+                    )
+            elif reason == router_cpp.FAILURE_TIMEOUT:
                 head = "wall deadline hit (search cut short)"
             elif reason == router_cpp.FAILURE_ITERATION_LIMIT:
                 head = f"iteration cap reached at {iterations:,} expansions (search cut short)"
-            elif reason in DRAINED_FAILURE_REASONS:
-                head = drained
             else:
                 head = f"search failed (failure_reason={reason})"
+            if python_stop:
+                head += f"; Python fallback {python_stop}"
             blocker = info.get("blocking_net_name")
             if blocker:
                 head += (
@@ -18001,9 +17999,7 @@ class Autorouter:
                     f" ({info.get('failure_x', '?')}, {info.get('failure_y', '?')})"
                 )
             return head
-        if getattr(python, "last_route_exhausted", False):
-            return drained
-        return "no search stop recorded (edge refused or short-circuited)"
+        return drained if proven else python_stop or "no search stop recorded"
 
     def _relief_reland_retry_budget(
         self, per_net_timeout: float | None, subsearch_budget: float | None
@@ -19459,19 +19455,21 @@ class Autorouter:
                 # ``partial_victim_baseline``).
                 edge_failures: list[tuple[Pad, Pad]] = []
 
-                def _record_reland_failure(src: Pad, dst: Pad, _rn: int = rn) -> None:
-                    # Issue #9936: capture the pin pair AND the pathfinder's
-                    # measured stopping reason at callback time -- the flags
-                    # describe the search that just failed, so the exit is
-                    # attributed to the net actually searched, never to the
-                    # transaction's enclosing name (the older replay's logs
-                    # could not tell them apart).
+                def _record_reland_failure(
+                    src: Pad, dst: Pad, reason: str | None, _rn: int = rn
+                ) -> None:
                     edge_failures.append((src, dst))
                     src_pin = f"{src.ref}.{src.pin}" if src.ref else "pad"
                     dst_pin = f"{dst.ref}.{dst.pin}" if dst.ref else "pad"
-                    reland_exits.setdefault(
-                        _rn, f"{src_pin}->{dst_pin}: {self._relief_search_exit_reason()}"
-                    )
+                    if reason is None:
+                        outcome = self._relief_search_exit_reason()
+                    else:
+                        outcome = {
+                            RIPUP_VICTIM_BUDGET: "cumulative net budget exhausted before search",
+                            RIPUP_VICTIM_REFUSED: "commit refused after search",
+                            RIPUP_VICTIM_GEOMETRIC: "cached exhaustive failure at this occupancy",
+                        }.get(reason, "edge failed without search evidence")
+                    reland_exits.setdefault(_rn, f"{src_pin}->{dst_pin}: {outcome}")
 
                 started = _time.monotonic()
                 # Issue #9936: a displaced victim that is itself a two-terminal
@@ -19492,7 +19490,7 @@ class Autorouter:
                         rn,
                         present_factor,
                         per_net_timeout=rn_timeout,
-                        failure_callback=_record_reland_failure,
+                        failure_callback=EdgeFailureCallback(_record_reland_failure),
                     )
                 accepted = bool(rn_routes) and not edge_failures
                 if rn_routes and edge_failures and rn in partial_victim_baseline:
@@ -19817,24 +19815,23 @@ class Autorouter:
                     store[int(net)] = int(cached_reason)
                 if failure_callback is not None:
                     for src, tgt in cached_pairs:
-                        failure_callback(src, tgt)
+                        report_edge_failure(failure_callback, src, tgt, RIPUP_VICTIM_GEOMETRIC)
                 return routes
 
             reset_search_exhausted(search_router)
             downstream_callback = failure_callback
 
-            def record_nogood_failure(src: Pad, tgt: Pad) -> None:
+            def record_nogood_failure(src: Pad, tgt: Pad, reason: str | None) -> None:
                 failed_pairs.append((src, tgt))
-                ng_definitive.append(search_failure_is_definitive(search_router))
+                ng_definitive.append(reason is None and search_failure_is_definitive(search_router))
                 get_info = getattr(search_router, "get_last_failure_info", None)
                 info = get_info() if get_info is not None else None
                 if info and info.get("failure_reason"):
                     ng_reason[:] = [int(info["failure_reason"])]
+                report_edge_failure(downstream_callback, src, tgt, reason)
                 reset_search_exhausted(search_router)
-                if downstream_callback is not None:
-                    downstream_callback(src, tgt)
 
-            failure_callback = record_nogood_failure
+            failure_callback = EdgeFailureCallback(record_nogood_failure)
 
         ng_start = time.monotonic() if nogood is not None else 0.0
         new_routes = neg_router.route_net_negotiated(

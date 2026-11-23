@@ -38,11 +38,12 @@ These tests verify:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+from kicad_tools.router.algorithms.negotiated import NegotiatedRouter, report_edge_failure
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pathfinder import Router
@@ -50,9 +51,9 @@ from kicad_tools.router.primitives import Route, Segment
 from tests.conftest import require_router_cpp
 
 
-def _make_simple_router(num_nets: int = 3) -> Autorouter:
+def _make_simple_router(num_nets: int = 3, *, force_python: bool = False) -> Autorouter:
     """Autorouter with ``num_nets`` two-pad nets on a small board."""
-    router = Autorouter(width=40.0, height=20.0)
+    router = Autorouter(width=40.0, height=20.0, force_python=force_python)
     for idx in range(num_nets):
         net_id = idx + 1
         pads = [
@@ -1587,8 +1588,8 @@ class TestReliefVictimSearchExits:
     actually searched -- never to the transaction's enclosing name.
     """
 
-    def _fixture(self):
-        router = _make_simple_router(num_nets=2)
+    def _fixture(self, *, force_python=False):
+        router = _make_simple_router(num_nets=2, force_python=force_python)
         neg_router = NegotiatedRouter(
             grid=router.grid,
             router=router.router,
@@ -1633,7 +1634,7 @@ class TestReliefVictimSearchExits:
         return ok, msgs
 
     def _failing_victim_reland(self, *, deadline: bool, exhausted: bool, fire_callback: bool):
-        router, neg_router, net_routes, pads_by_net, route2 = self._fixture()
+        router, neg_router, net_routes, pads_by_net, route2 = self._fixture(force_python=True)
         pads = router.nets[2]
 
         def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
@@ -1647,7 +1648,9 @@ class TestReliefVictimSearchExits:
             pathfinder.last_route_exhausted = exhausted and not deadline
             pathfinder.last_route_iteration_limited = False
             if fire_callback:
-                kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+                report_edge_failure(
+                    kw["failure_callback"], router.pads[pads[0]], router.pads[pads[1]], None
+                )
             return []
 
         with (
@@ -1686,7 +1689,7 @@ class TestReliefVictimSearchExits:
         )
         assert ok is False
         line = next(m for m in msgs if "re-land failure exits (issue #9936)" in m)
-        assert "no search stop recorded (edge refused or short-circuited)" in line
+        assert "no search stop recorded" in line
 
     def test_cpp_structured_failure_info_names_closing_copper(self):
         """The C++ backend's structured diagnostics carry the exit reason.
@@ -1712,7 +1715,9 @@ class TestReliefVictimSearchExits:
                 "failure_y": 55.5,
                 "iterations": 1_000_000,
             }
-            kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+            report_edge_failure(
+                kw["failure_callback"], router.pads[pads[0]], router.pads[pads[1]], None
+            )
             return []
 
         with (
@@ -1727,8 +1732,9 @@ class TestReliefVictimSearchExits:
         assert "last blocker USB3_RX2+ at (118.0, 55.5)" in line
         assert net_routes[2][0] is route2
 
-    def test_cpp_drained_failure_codes_report_the_proof(self):
-        """FAILURE_NO_PATH / VIA_VIA_BLOCKED / PAIRWISE_BLOCKED drained the open set."""
+    @pytest.mark.parametrize("fallback_drained", [False, True])
+    def test_cpp_drained_codes_and_named_blocker(self, fallback_drained):
+        """All three native drains need a Python drain to prove the entire request."""
         require_router_cpp()
         import kicad_tools.router.router_cpp as router_cpp
 
@@ -1750,7 +1756,10 @@ class TestReliefVictimSearchExits:
                     "failure_y": 2.0,
                     "iterations": 10,
                 }
-                kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+                router.router._py_router = SimpleNamespace(last_route_exhausted=fallback_drained)
+                report_edge_failure(
+                    kw["failure_callback"], router.pads[pads[0]], router.pads[pads[1]], None
+                )
                 return []
 
             with (
@@ -1759,7 +1768,9 @@ class TestReliefVictimSearchExits:
             ):
                 _ok, msgs = self._rescue(router, neg_router, net_routes, pads_by_net)
             line = next(m for m in msgs if "re-land failure exits (issue #9936)" in m)
-            assert "frontier exhausted (no legal path at this occupancy)" in line, code
+            assert ("no legal path at this occupancy" in line) == fallback_drained, code
+            if not fallback_drained:
+                assert "no exhaustive Python fallback recorded" in line
             assert "cut short" not in line, code
             assert "last blocker USB3_RX2+" in line
 
@@ -1772,11 +1783,13 @@ class TestReliefVictimSearchExits:
         def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
             if net_id == 1:
                 return [_seg_route(1, "N1", 4.0)]
-            py = getattr(router.router, "_py_router", None) or router.router
-            py.last_route_deadline_hit = True
-            py.last_route_deadline_iterations = 1234
+            router.router._py_router = SimpleNamespace(
+                last_route_deadline_hit=True, last_route_deadline_iterations=1234
+            )
             router.router.get_last_failure_info = lambda: {"failure_reason": 2, "iterations": 9}
-            kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+            report_edge_failure(
+                kw["failure_callback"], router.pads[pads[0]], router.pads[pads[1]], None
+            )
             return []
 
         with (
@@ -1795,6 +1808,101 @@ class TestReliefVictimSearchExits:
         line = next(m for m in msgs if "re-land failure exits (issue #9936)" in m)
         assert "nested rescue rolled back (see its own lines)" in line
         assert "->" not in line, "no pin pair is invented without a recorded edge"
+
+    @pytest.mark.parametrize("cache", ["0", "1"])
+    @pytest.mark.parametrize("outcome", ["budget", "commit_refused"])
+    def test_unsearched_or_refused_edge_reports_its_own_cause(self, monkeypatch, cache, outcome):
+        monkeypatch.setenv("KCT_NOGOOD_CACHE", cache)
+        router, negotiated, routes, _, original = self._fixture()
+        router.add_component(
+            "T",
+            [
+                {
+                    "number": "1",
+                    "x": 30,
+                    "y": 8,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 2,
+                    "net_name": "N2",
+                }
+            ],
+        )
+        pads = {net: [router.pads[i] for i in indices] for net, indices in router.nets.items()}
+        route_net = router._route_net_negotiated
+        calls = []
+
+        def reroute(net, cost, **kwargs):
+            if net == 1:
+                return [_seg_route(1, "N1", 4.0)]
+            # A prior search left a native drain. Neither a skipped edge nor
+            # a successful search whose copper is refused inherits its proof.
+            with (
+                patch.object(
+                    router.router, "get_last_failure_info", return_value={"failure_reason": 1}
+                ),
+                patch.object(
+                    router.router, "route", return_value=_seg_route(2, "N2", 8.0)
+                ) as search,
+                patch.object(router, "_mark_route", return_value=False),
+            ):
+                kwargs["per_net_timeout"] = 1e-9 if outcome == "budget" else 2.0
+                result = route_net(net, cost, **kwargs)
+                calls.append(search.call_count)
+                return result
+
+        with (
+            patch.object(router, "_relief_probe", side_effect=self._probes()),
+            patch.object(router, "_route_net_negotiated", side_effect=reroute),
+        ):
+            ok, messages = self._rescue(router, negotiated, routes, pads)
+        assert not ok and routes[2] == [original]
+        line = next(message for message in messages if "re-land failure exits" in message)
+        assert "N2" in line and "->" in line
+        if outcome == "budget":
+            assert calls and sum(calls) == 0
+            assert "cumulative net budget exhausted before search" in line
+        else:
+            assert sum(calls) > 0
+            assert "commit refused" in line
+        assert "frontier exhausted" not in line
+
+    def test_native_drain_does_not_prove_an_unsearched_tree_join(self):
+        require_router_cpp()
+        from kicad_tools.router.nogood_cache import search_failure_is_definitive
+        from kicad_tools.router.rules import DesignRules
+
+        router = Autorouter(width=12, height=8, rules=DesignRules(grid_resolution=0.25))
+        for ref, x in (("L", 2), ("R", 10)):
+            router.add_component(
+                ref,
+                [
+                    {
+                        "number": "1",
+                        "x": x,
+                        "y": 4,
+                        "width": 0.5,
+                        "height": 0.5,
+                        "net": 1,
+                        "net_name": "WALLED",
+                    }
+                ],
+            )
+        for layer in (Layer.F_CU, Layer.B_CU):
+            router.add_obstacle(6, 4, 1, 10, layer)
+        a, b = (router.pads[key] for key in router.nets[1])
+        join = {(*router.grid.world_to_grid(3, 4), 0)}
+        finder = router.router
+        assert finder.route(a, b, per_net_timeout=0.035, extra_goal_cells=join) is None
+        assert not search_failure_is_definitive(finder)
+        message = router._relief_search_exit_reason()
+        assert "native frontier exhausted" in message and "Python fallback did not run" in message
+        assert "no legal path" not in message
+        route = finder.route(a, b, per_net_timeout=2, extra_goal_cells=join)
+        assert route and route.segments[-1].end == pytest.approx((3, 4))
+        assert finder.route(a, b, per_net_timeout=2) is None
+        assert search_failure_is_definitive(finder)
+        assert "no legal path at this occupancy" in router._relief_search_exit_reason()
 
 
 class TestReliefVictimGoalBias:
