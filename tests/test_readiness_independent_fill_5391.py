@@ -153,10 +153,12 @@ def test_native_fill_uses_the_selected_project_with_each_supported_name(tmp_path
     project_data["board"]["design_settings"]["rules"]["min_copper_edge_clearance"] = 3.0
     rules = '(version 1)\n(rule "board edge" (constraint edge_clearance (min 3mm)))\n'
     areas = []
-    for directory, pcb_stem, project_stem in (
-        ("exact", "board_routed", "board_routed"),
-        ("routed", "board_routed", "board"),
-        ("sole", "shipping_v3", "shared"),
+    for directory, pcb_stem, project_stem, sibling in (
+        ("exact", "board_routed", "board_routed", None),
+        ("routed", "board_routed", "board", None),
+        ("sole", "shipping_v3", "shared", None),
+        ("sibling-first", "shipping_v3", "shared", "a_other"),
+        ("sibling-last", "shipping_v3", "shared", "z_other"),
     ):
         target = tmp_path / directory
         target.mkdir()
@@ -165,6 +167,11 @@ def test_native_fill_uses_the_selected_project_with_each_supported_name(tmp_path
         project = target / f"{project_stem}.kicad_pro"
         project.write_text(json.dumps(project_data))
         project.with_suffix(".kicad_dru").write_text(rules)
+        if sibling:
+            other = target / f"{sibling}.kicad_pcb"
+            shutil.copyfile(source, other)
+            other.with_suffix(".kicad_pro").write_text("{}")
+            other.with_suffix(".kicad_dru").write_text("(version 1)\n")
         args = cmd.build_parser().parse_args(
             [str(pcb), "--generate", "--mfr", "jlcpcb", "--pcb-only"]
         )
@@ -182,7 +189,26 @@ def test_native_fill_uses_the_selected_project_with_each_supported_name(tmp_path
             assert evidence["context_sha256"][staged_name] == cmd._sha256_file(source_file)
             assert evidence["rule_sources"][staged_name] == cmd._rel(opts, source_file)
         assert pcb.read_bytes() == default_fill.read_bytes()
-    assert areas[0] == areas[1] == areas[2]
+    assert all(area == areas[0] for area in areas)
+
+
+@pytest.mark.parametrize("unpaired", [(), ("shared",), ("shared", "alternate")])
+def test_project_fallback_requires_one_project_available_to_the_board(tmp_path, unpaired):
+    pcb = tmp_path / "shipping_v3.kicad_pcb"
+    pcb.touch()
+    # The sibling can use its original project through the supported _routed alias.
+    (tmp_path / "a_other_routed.kicad_pcb").touch()
+    (tmp_path / "a_other.kicad_pro").write_text("{}")
+    for name in unpaired:
+        (tmp_path / f"{name}.kicad_pro").write_text("{}")
+    args = cmd.build_parser().parse_args([str(pcb), "--verify", "--mfr", "jlcpcb", "--pcb-only"])
+    opts, error = cmd.resolve_options(args)
+    if len(unpaired) == 1:
+        assert error is None and opts is not None
+        assert opts.project == tmp_path / "shared.kicad_pro"
+    else:
+        assert opts is None
+        assert pcb.name in error and ".kicad_pro" in error
 
 
 @pytest.mark.parametrize("bad", [{"F.Cu": float("nan")}, {"F.Cu": -1}, [], {"F.Cu": "x"}])

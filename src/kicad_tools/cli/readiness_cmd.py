@@ -1021,7 +1021,7 @@ def _find_pcb(board_dir: Path) -> Path | None:
 
 
 def _find_sibling(pcb: Path, suffix: str) -> Path | None:
-    """Find a sibling file for *pcb*, preferring the exact stem match."""
+    """Prefer the PCB or original project stem, then an applicable sibling."""
     exact = pcb.with_suffix(suffix)
     if exact.is_file():
         return exact
@@ -1030,6 +1030,17 @@ def _find_sibling(pcb: Path, suffix: str) -> Path | None:
     if trimmed.is_file():
         return trimmed
     candidates = sorted(pcb.parent.glob(f"*{suffix}"))
+    if suffix == ".kicad_pro":
+        # A differently named project can be shared. Projects paired with
+        # other boards, including their routed copies, belong to those boards.
+        available = [
+            project
+            for project in candidates
+            if project.is_file()
+            and not project.with_suffix(".kicad_pcb").is_file()
+            and not project.with_name(f"{project.stem}_routed.kicad_pcb").is_file()
+        ]
+        return available[0] if len(available) == 1 else None
     return candidates[0] if candidates else None
 
 
@@ -1070,8 +1081,9 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
     project = _find_sibling(pcb, ".kicad_pro")
     if project is None:
         return None, (
-            f"{pcb.name} has no paired .kicad_pro; the sign-off tier is not "
-            "trustworthy without project rules (see #4097)"
+            f"{pcb.name} has no unambiguous paired .kicad_pro. "
+            f"Place its intended project beside it as {pcb.with_suffix('.kicad_pro').name} "
+            "so readiness can use its rules."
         )
 
     schematic = (
