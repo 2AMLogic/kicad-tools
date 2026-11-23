@@ -51,13 +51,28 @@ RIPUP_SIBLING_FAILED = "sibling_failed"
 RIPUP_TRADED = "traded"
 
 
-class _RipupVictimFailures(list[str]):
-    """Collect the cause of each failed edge in this targeted attempt."""
+@dataclass
+class EdgeFailureCallback:
+    """Receive a negotiated edge's cause alongside its two pads.
 
-    def __call__(self, _source: Pad, _target: Pad) -> None:
-        # A route provider using the ordinary two-pad callback supplies no
-        # search evidence, but its partial net still has to roll back.
-        self.append(RIPUP_VICTIM_UNPROVEN)
+    Only a search that just returned no route supplies ``None``: its stop
+    telemetry can still be read synchronously. A two-pad provider supplies
+    no such evidence.
+    """
+
+    record: Callable[[Pad, Pad, str | None], None]
+
+    def __call__(self, source: Pad, target: Pad) -> None:
+        self.record(source, target, RIPUP_VICTIM_UNPROVEN)
+
+
+def report_edge_failure(
+    callback: Callable[[Pad, Pad], None] | None, source: Pad, target: Pad, reason: str | None
+) -> None:
+    if isinstance(callback, EdgeFailureCallback):
+        callback.record(source, target, reason)
+    elif callback is not None:
+        callback(source, target)
 
 
 class EscapeAttempts:
@@ -1274,12 +1289,6 @@ class NegotiatedRouter:
             "ran out of net budget" from "no path / via-blocked".
         """
 
-        def record_failure(source: Pad, target: Pad, reason: str | None = None) -> None:
-            if isinstance(failure_callback, _RipupVictimFailures):
-                failure_callback.append(reason or self._failed_search_reason())
-            elif failure_callback is not None:
-                failure_callback(source, target)
-
         def commit_candidate(route: Route | None, source: Pad, target: Pad) -> Route | None:
             reason = None
             if route is not None:
@@ -1290,7 +1299,7 @@ class NegotiatedRouter:
                 else:
                     reason = RIPUP_VICTIM_UNPROVEN
             self._record_via_blocked_failure(source.net)
-            record_failure(source, target, reason)
+            report_edge_failure(failure_callback, source, target, reason)
             return None
 
         if len(pad_objs) < 2:
@@ -1408,7 +1417,9 @@ class NegotiatedRouter:
                         # every skipped edge is still surfaced to the
                         # rip-up/retry layer via ``failure_callback``.
                         self._last_timeout_failures.add(source_pad.net)
-                        record_failure(source_pad, target_pad, RIPUP_VICTIM_BUDGET)
+                        report_edge_failure(
+                            failure_callback, source_pad, target_pad, RIPUP_VICTIM_BUDGET
+                        )
                         continue
                     edge_timeout: float | None = remaining
                 else:
@@ -3078,7 +3089,10 @@ class NegotiatedRouter:
         # route is exactly the stranded-stub copper this transaction must
         # never commit.
         failed_pads = pads_by_net.get(failed_net, [])
-        edge_failures = _RipupVictimFailures()
+        edge_failures: list[str] = []
+
+        def record_victim_failure(_source: Pad, _target: Pad, reason: str | None) -> None:
+            edge_failures.append(reason or self._failed_search_reason())
 
         failed_net_success = False  # Issue #858: Track if failed net was routed
         if failed_pads and len(failed_pads) >= 2:
@@ -3088,7 +3102,7 @@ class NegotiatedRouter:
                 present_cost_factor,
                 mark_route_callback,
                 per_net_timeout=per_net_timeout,
-                failure_callback=edge_failures,
+                failure_callback=EdgeFailureCallback(record_victim_failure),
             )
             if routes:
                 net_routes[failed_net] = routes
