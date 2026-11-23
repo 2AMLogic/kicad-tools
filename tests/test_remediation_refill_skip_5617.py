@@ -81,7 +81,7 @@ def _install_fake_cli(
                 stdout="--refill-zones" if supports_refill else "Usage: kicad-cli pcb drc"
             )
         if "--output" in cmd:
-            Path(cmd[cmd.index("--output") + 1]).write_text("{}")
+            Path(cmd[cmd.index("--output") + 1]).write_text('{"violations": []}')
         if "--save-board" in cmd:
             # A completed --save-board always rewrites the board.
             Path(cmd[-1]).write_text("(kicad_pcb (version 20260206) filled)")

@@ -208,6 +208,14 @@ BUNDLES: dict[str, BundleConfig] = {
     ),
     "07-matchgroup-test": BundleConfig(
         manufacturer="jlcpcb",
+        export_members=(
+            "gerbers/gerbers.zip",
+            "bom_jlcpcb.csv",
+            "cpl_jlcpcb.csv",
+            "images/*.png",
+            "report.md",
+            "report.pdf",
+        ),
         fill_consistency=(
             "output/readiness/fill-consistency.json",
             "output/manufacturing/fill-consistency.json",
@@ -377,7 +385,11 @@ def _publish_board07_evidence(staged: Path, cfg: rr.BoardConfig, build: Path) ->
     written = [cfg.routed_pcb]
     shutil.copyfile(candidate, routed)
     for name, targets in BOARD07_EVIDENCE.items():
-        _write_targets(staged, targets, (validation / name).read_bytes())
+        data = (validation / name).read_bytes()
+        if name == "check.log":
+            # Keep the checked sidecar search paths relative to the build.
+            data = data.replace(os.fsencode(build.resolve()) + b"/", b"")
+        _write_targets(staged, targets, data)
         written.extend(targets)
     log(f"  board 07 evidence: published routed PCB and {len(written) - 1} evidence copies")
     return written
@@ -608,7 +620,9 @@ def _normalize_pdf_timestamps(pdf: Path) -> None:
         pdf.write_bytes(anchored)
 
 
-def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> list[str]:
+def stage_replot(
+    staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig, *, saved_drc: bytes | None = None
+) -> list[str]:
     """Re-plot every artifact drawn from the routed PCB's copper or the schematic."""
     from kicad_tools.cli.readiness_cmd import _export_assembly_pdf, _export_schematic_pdf
     from kicad_tools.cli.render_cmd import _render_pcb
@@ -655,20 +669,45 @@ def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> lis
         if (routed.parent.parent / "project.kct").is_file():
             shutil.copy2(routed.parent.parent / "project.kct", Path(tmp) / "project.kct")
         export = Path(tmp) / "export"
-        proc = run(
-            rr.kct(
-                "export",
-                str(project / routed.name),
-                "--mfr",
-                bundle.manufacturer,
-                "--output",
-                str(export),
-            )
+        plot_board = project / routed.name
+        command = rr.kct(
+            "export", str(plot_board), "--mfr", bundle.manufacturer, "--output", str(export)
         )
+        if bundle.evidence_pcb is not None:
+            # The artwork is already reviewed. Export must plot those bytes
+            # and preflight the reports for this board, including on the first
+            # run when the previous manufacturing receipt is stale.
+            from kicad_tools.drc.report_binding import stamp_report_hash
+
+            if saved_drc is None:
+                raise GateFailure("export of the reviewed board requires its saved-fill DRC")
+            drc, erc = project / "drc_report.json", project / "erc_report.json"
+            drc.write_bytes(saved_drc)
+            erc.write_bytes(rr.native_erc(staged, cfg.erc[0], None, None))
+            if not stamp_report_hash(drc, plot_board, "pcb_sha256") or not stamp_report_hash(
+                erc, project / Path(cfg.schematic).name, "schematic_sha256"
+            ):
+                raise GateFailure("could not bind the export reports to the reviewed design")
+            command.extend(("--no-silk-fix", "--strict-preflight", "--no-auto-lcsc"))
+        proc = run(command)
         if proc.returncode != 0:
             raise GateFailure(f"kct export failed: {proc.stdout[-2000:]}{proc.stderr[-2000:]}")
-        if (project / routed.name).read_bytes() != routed.read_bytes():
+        if plot_board.read_bytes() != routed.read_bytes():
             raise GateFailure("kct export modified the routed PCB it plotted")
+        if bundle.evidence_pcb is not None:
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                if (
+                    plot_board.with_suffix(suffix).read_bytes()
+                    != routed.with_suffix(suffix).read_bytes()
+                ):
+                    raise GateFailure(f"kct export changed the reviewed {suffix} rules")
+            # Keep the assembly sign-off mode and take the measurements and
+            # production settings from the new export. repin_staged hashes the
+            # full gallery payload after adding the board-specific evidence.
+            manifest_path = mfg / "manifest.json"
+            fresh_manifest = json.loads((export / "manifest.json").read_bytes())
+            fresh_manifest["mode"] = json.loads(manifest_path.read_bytes())["mode"]
+            manifest_path.write_text(json.dumps(fresh_manifest, indent=2) + "\n")
         if (export / "cpl_jlcpcb.csv").is_file() and (mfg / "cpl_jlcpcb.csv").is_file():
             check_fresh_cpl(
                 (mfg / "cpl_jlcpcb.csv").read_bytes(),
@@ -864,7 +903,7 @@ def refresh_bundle(
         if stale:
             if bundle.recipe_manufacturing is not None:
                 stage_recipe_manufacturing(staged, cfg, bundle)
-            stage_replot(staged, cfg, bundle)
+            stage_replot(staged, cfg, bundle, saved_drc=saved_drc)
             _write_targets(staged, bundle.saved_drc_reports, saved_drc)
             _write_targets(staged, bundle.fill_consistency, _json_bytes(refill["deltas_mm2"]))
             routed = staged / cfg.routed_pcb

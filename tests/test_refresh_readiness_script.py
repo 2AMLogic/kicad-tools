@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -500,6 +501,25 @@ def test_repin_staged_gates_and_publishes_a_staged_copy(mod, tmp_path, monkeypat
     )
     # dry_run: the committed board is untouched
     assert json.loads((board / "output" / "readiness.json").read_text())["checked_at"] != CHECKED_AT
+
+
+def test_new_buyer_file_is_published_loose_and_archived(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    source = board / "fixture.patch"
+    source.write_bytes(b"patch payload\n")
+    member = "engineering/fixture.patch"
+    loose = board / "output/manufacturing" / member
+    cfg = replace(mod.BOARDS[board.name], additional_bundle_files=((source.name, member),))
+    monkeypatch.setitem(mod.BOARDS, board.name, cfg)
+
+    assert loose.relative_to(board).as_posix() in mod.refresh(board, CHECKED_AT, dry_run=True)
+    assert not loose.exists()
+    mod.refresh(board, CHECKED_AT)
+    with zipfile.ZipFile(board / "output/manufacturing.zip") as archive:
+        assert archive.read(member) == loose.read_bytes() == source.read_bytes()
+    report = json.loads((board / "output/readiness.json").read_bytes())
+    assert report["inputs"][loose.relative_to(board).as_posix()] == mod.sha256(source)
+    assert mod.refresh(board, CHECKED_AT, dry_run=True) == []
 
 
 def test_waivers_sidecar_beside_the_routed_pcb_is_bound_into_inputs(mod, tmp_path, monkeypatch):

@@ -131,22 +131,24 @@ load estimate rather than series travel. Final group spreads are:
 
 | Group | Spread including vertical travel |
 |---|---:|
-| Lower byte and LDQM | 0.0021 mm |
-| Upper byte and UDQM | 2.7188 mm |
-| Address and bank | 2.4208 mm |
-| Command and clock | 0.9570 mm |
+| Lower byte and LDQM | 1.9521 mm |
+| Upper byte and UDQM | 4.6054 mm |
+| Address and bank | 3.6482 mm |
+| Command and clock | 4.0274 mm |
 
-All remain below 5 mm, and every bus member is within 10 mm of the 72.953 mm
-clock. The clock's estimated external load is 13.521 pF against its separate
-15 pF limit. Geometric impedance is 51.72 Ω on the outer layers and about
-48.09 Ω on the inner signal layers. These are model-based engineering checks,
-not fabrication impedance certification or measured hardware timing.
+The largest departure from the 71.329 mm clock is 9.881 mm on DQ3, within
+the 10 mm budget. The clock’s estimated external load is 11.917 pF against
+its 15 pF limit. The calculated geometric impedance is 53.64 Ω on the
+outer layers and 48.09 Ω on the inner signal layers. The closest non-pad
+clock spacing is 0.560 mm against a 0.540 mm minimum. Hardware timing and
+the fabricator’s impedance measurement require an assembled board and a
+fabrication coupon, respectively.
 
-Long data and address/control trunks occupy separate layer pairs. Short
-package escapes share the front layer; their measured deviation from AN4488's
-5 mm recommendation and the fixed TSOP pad spacing are documented in
-[the engineering review](engineering/README.md). The review states the model
-and edge-rate assumptions and does not claim blanket AN4488 compliance.
+Data and address/control trunks occupy separate layer pairs. On the shared
+front layer, 99 non-clock data/control net pairs have trace gaps under the
+5 mm application-note recommendation. The closest is 0.320 mm. The
+electrical review records the measured parallel spans, their modeled
+coupling and the outstanding bench checks. [Electrical review](engineering/README.md)
 
 ## Power and operating scope
 
