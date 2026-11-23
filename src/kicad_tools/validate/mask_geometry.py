@@ -133,16 +133,23 @@ def board_mask_margin(pcb: Any) -> tuple[float | None, bool]:
 
 
 def pad_mask_margin(
-    pad: Any, fp: Any, board_margin: float, board_declared: bool
+    pad: Any, fp: Any, board_margin: float, board_declared: bool, *, board_version: int = 0
 ) -> tuple[float | None, str]:
-    """Effective mask expansion of ``pad`` (pad, then footprint, then board) and its source."""
+    """Effective mask expansion of ``pad`` (pad, then footprint, then board) and its source.
+
+    In board formats before 20240202 a local zero inherits the parent's
+    margin. Newer formats distinguish an explicit zero from an absent value.
+    """
+    zero_inherits = 0 < board_version < 20240202
     margin = pad.solder_mask_margin
-    if margin is not None:
+    if margin is not None and not (zero_inherits and margin == 0):
         return margin, "pad"
     fp_node = getattr(fp, "_sexp_node", None)
     fp_margin_node = fp_node.find_child("solder_mask_margin") if fp_node else None
     if fp_margin_node:
-        return fp_margin_node.get_float(0), "footprint"
+        fp_margin = fp_margin_node.get_float(0)
+        if not (zero_inherits and fp_margin == 0):
+            return fp_margin, "footprint"
     return board_margin, "board" if board_declared else "native-default-zero"
 
 

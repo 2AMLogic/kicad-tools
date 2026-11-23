@@ -49,6 +49,27 @@ def _load_build():
         sys.path.remove(str(REDESIGN))
 
 
+def _assert_u3_pour_clearance(text: str) -> None:
+    # KiCad gives the last matching rule precedence. Both item orders must
+    # cover exactly the five stock pads while leaving the 42 exemptions intact.
+    marker = '(rule "Zone clearance at U3 pads - GND (F.Cu)"'
+    assert text.count(marker) == 1
+    assert text.count('(rule "kct attach zone - ') == 42
+    assert text.count('(rule "Reviewed clearance - ') == 7
+    assert text.count('(rule "Zone clearance - ') == 4
+    assert text.count('(rule "Ampacity Min Width') == 2
+    assert text.rindex('(rule "kct attach zone - ') < text.index(marker)
+    rule = text.split(marker)[1].split(DRU_ATTACH_ZONE_BLOCK_END)[0]
+    assert '(layer "F.Cu")' in rule
+    assert "(constraint clearance (min 0.2mm))" in rule
+    for zone, pad in (("A", "B"), ("B", "A")):
+        numbers = " || ".join(f"{pad}.Pad_Number == '{n}'" for n in (1, 3, 5, 7, 8))
+        assert (
+            f"({zone}.Type == 'Zone' && {zone}.NetName == 'GND' && "
+            f"{pad}.Type == 'Pad' && {pad}.Reference == 'U3' && ({numbers}))"
+        ) in rule
+
+
 def _recipe_dru(tmp_path: Path) -> bytes:
     for suffix in (".kicad_pcb", ".kicad_pro"):
         name = f"bldc_controller{suffix}"
@@ -62,6 +83,7 @@ def _recipe_dru(tmp_path: Path) -> bytes:
     # The last matching rule wins in KiCad. Check the actual refill input
     # as well as the result of export, which runs the sidecar writer again.
     before_refill = routed.with_suffix(".kicad_dru").read_text()
+    _assert_u3_pour_clearance(before_refill)
     assert before_refill.rstrip().endswith(DRU_ATTACH_ZONE_BLOCK_END)
     for ref in ("U2", "U3"):
         assert f'(rule "kct attach zone - {ref}"' in before_refill
@@ -81,11 +103,35 @@ def _recipe_dru(tmp_path: Path) -> bytes:
     result = ManufacturingResult(output_dir=tmp_path / "manufacturing")
     ManufacturingPackage(routed, manufacturer="jlcpcb")._write_drc_constraints(result)
     assert routed.with_suffix(".kicad_dru") in result.drc_constraint_paths
-    return routed.with_suffix(".kicad_dru").read_bytes()
+    exported = routed.with_suffix(".kicad_dru").read_bytes()
+    _assert_u3_pour_clearance(exported.decode())
+    return exported
 
 
 def test_committed_dru_carries_the_attach_zone_block():
     assert has_attach_zone_block((OUTPUT / f"{STEM}.kicad_dru").read_text(encoding="utf-8"))
+
+
+def test_export_replays_committed_rules_and_respects_a_designer_clearance(tmp_path):
+    board = tmp_path / f"{STEM}.kicad_pcb"
+    dru = board.with_suffix(".kicad_dru")
+    for path in (board, dru, board.with_suffix(".kicad_pro"), tmp_path / "net_class_map.json"):
+        shutil.copy2(OUTPUT / path.name, path)
+
+    def export():
+        result = ManufacturingResult(output_dir=tmp_path / "manufacturing")
+        ManufacturingPackage(board, manufacturer="jlcpcb")._write_drc_constraints(result)
+        assert dru in result.drc_constraint_paths
+        return dru.read_bytes()
+
+    assert export() == (OUTPUT / dru.name).read_bytes()
+    designer_rule = b'(rule "Designer clearance" (constraint clearance (min 0.3mm)))'
+    dru.write_bytes(dru.read_bytes() + designer_rule + b"\n")
+    after = export()
+    assert designer_rule in after
+    assert not has_attach_zone_block(after.decode())
+    assert b'(rule "Zone clearance at U3 pads' not in after
+    assert b'(rule "Ampacity Min Width' not in after
 
 
 def test_mask_standoff_preserves_fiducial_geometry(tmp_path, monkeypatch):

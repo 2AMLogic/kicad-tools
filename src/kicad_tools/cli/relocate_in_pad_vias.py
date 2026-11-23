@@ -61,8 +61,9 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field, replace
+from functools import partial
+from typing import TYPE_CHECKING
 
 from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[import-untyped]
 
@@ -74,6 +75,7 @@ from kicad_tools.validate.rules.via_pad_geometry import (
     is_smd_pad,
     pad_absolute_bbox,
     via_inside_pad,
+    via_ring_to_mask_aperture_gap,
 )
 
 if TYPE_CHECKING:
@@ -974,17 +976,6 @@ class _PadFloors:
     full_stub_land: float
 
 
-def _local_pad_clearance(fp: Footprint, pad: Pad) -> float | None:
-    """A pad overrides its footprint's electrical clearance on the board."""
-    for owner in (pad, fp):
-        node = getattr(owner, "_sexp_node", None)
-        clearance = node.find_child("clearance") if node is not None else None
-        value = clearance.get_float(0) if clearance is not None else None
-        if value is not None and value > 0:
-            return float(value)
-    return None
-
-
 def _pad_floors(
     pcb: PCB, via: Via, kind: str, layers: set[str], minimum: float
 ) -> Callable[[Footprint, Pad], _PadFloors]:
@@ -996,6 +987,7 @@ def _pad_floors(
         PHYSICAL_HOLE_CLEARANCE,
         BoardClearanceRules,
         item_props_for_type,
+        pad_clearance_override,
     )
 
     rules = BoardClearanceRules.from_board(pcb.path) if pcb.path else BoardClearanceRules()
@@ -1036,7 +1028,7 @@ def _pad_floors(
         is_slot = axes is not None and axes[0] != axes[1]
         foreign = not via.net_number or pad.net_number != via.net_number
         electrical_drill = foreign or pad.type == "np_thru_hole"
-        local = _local_pad_clearance(fp, pad) if foreign else None
+        local = pad_clearance_override(fp, pad) if foreign else None
         if local is not None:
             local = max(local, rules.min_clearance or 0.0)
         pad_net = pcb.get_net(pad.net_number)
@@ -1501,6 +1493,8 @@ def _persist_via_with_stubs(
     stub_layers: list[str],
     stub_width: float,
     net_name: str,
+    *,
+    preserve_connections: bool = False,
 ) -> bool:
     """Commit a validated move and its copper, rolling back failed writes.
 
@@ -1510,6 +1504,10 @@ def _persist_via_with_stubs(
     """
     import copy
 
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    validator = ConnectivityValidator(pcb) if preserve_connections else None
+    previous = validator._contact_graph(via.net_number) if validator is not None else None
     old_position = via.position
     old_children = list(pcb._sexp.children)
     old_segments = list(pcb._segments)
@@ -1525,6 +1523,9 @@ def _persist_via_with_stubs(
             return False
         for layer in stub_layers:
             pcb.add_trace(old_position, target, width=stub_width, layer=layer, net=net_name or None)
+        if validator is not None and previous is not None:
+            if not validator._contact_graph(via.net_number).preserves_connections(previous):
+                return False
         committed = True
         return True
     finally:
@@ -1960,22 +1961,11 @@ def _pad_edge_gap(
     x: float,
     y: float,
     candidates: list[tuple[Footprint, Pad, tuple[float, float, float, float]]],
-    pad_to_mask: float,
+    measure: Callable[[Via, Pad, Footprint], float | None],
 ) -> float | None:
-    """Smallest drill-edge-to-aperture gap of a via placed at ``(x, y)``.
-
-    Negative when the drill reaches into a same-net pad's copper (via-in-pad).
-    ``None`` when no same-net pad has a measurable aperture.
-    """
-    from types import SimpleNamespace
-
-    probe: Any = SimpleNamespace(position=(x, y), drill=via.drill)
-    gaps = [
-        gap
-        for fp, pad, _bbox in candidates
-        if (gap := drill_to_mask_aperture_gap(probe, pad, fp, pad_to_mask_clearance=pad_to_mask))
-        is not None
-    ]
+    """Smallest measurable drill or ring gap among the same-net pads at a candidate position."""
+    probe = replace(via, position=(x, y))
+    gaps = [gap for fp, pad, _bbox in candidates if (gap := measure(probe, pad, fp)) is not None]
     return min(gaps) if gaps else None
 
 
@@ -2043,6 +2033,7 @@ def relocate_pad_edge_vias(
     *,
     nets: set[str] | None = None,
     min_hole_clearance_mm: float | None = None,
+    ring_dam_mm: float | None = None,
     same_net_pad_gap_mm: float | None = None,
 ) -> RelocationResult:
     """Slide vias out of the mask-dam zone beside an SMD pad (Issue #7296).
@@ -2058,6 +2049,14 @@ def relocate_pad_edge_vias(
     layer, and the move is gated by the same clearance / hole-to-hole /
     stub-clearance checks as :func:`relocate_in_pad_vias`.  A via with no legal
     spot is reported ``unresolvable`` and left in place.
+
+    ``ring_dam_mm`` (issue #9891) tightens both the flagging and the acceptance
+    test to the mask-to-copper view: a via is flagged when its copper *ring*
+    edge sits closer than ``ring_dam_mm`` to a same-net pad's aperture, and a
+    candidate spot is accepted only when the ring clears ``ring_dam_mm`` AND
+    the drill still clears the plain dam (the move may never create a
+    ``via_at_pad_edge`` finding).  The ring gap uses
+    :func:`~kicad_tools.validate.rules.via_pad_geometry.via_ring_to_mask_aperture_gap`.
 
     Copper clearance is the effective per-pair requirement ``kct check``'s
     ``netclass_clearance_copper`` enforces (the project's netclasses,
@@ -2084,6 +2083,7 @@ def relocate_pad_edge_vias(
     ``stitch_cmd._resolve_mfr_pad_gap_edge``; ``None`` or ``<= 0`` keeps the
     guard off (the pre-#8979 behaviour, bit-for-bit).
     """
+    from kicad_tools.core.pcb_item_locks import BoardItemLocks
     from kicad_tools.core.project_clearance import ProjectClearanceError
     from kicad_tools.validate.rules.clearance import _pad_polygon
     from kicad_tools.validate.rules.netclass_clearance_copper import netclass_pair_requirement
@@ -2091,7 +2091,8 @@ def relocate_pad_edge_vias(
     result = RelocationResult()
     dam = float(getattr(design_rules, "min_solder_mask_dam_mm", 0.0) or 0.0)
     band = float(same_net_pad_gap_mm or 0.0)
-    if dam <= WRITER_CLEARANCE_MARGIN_MM and band <= 0:
+    flag_dam = float(ring_dam_mm) if ring_dam_mm is not None else dam
+    if flag_dam <= WRITER_CLEARANCE_MARGIN_MM and band <= 0:
         return result
     setup = getattr(pcb, "setup", None)
     pad_to_mask = float(getattr(setup, "pad_to_mask_clearance", 0.0) or 0.0)
@@ -2105,12 +2106,22 @@ def relocate_pad_edge_vias(
         pair_requirement = None
         unsupported = f"netclass clearances cannot be modelled ({exc}); not moved"
 
+    locks = BoardItemLocks(pcb._sexp)
     pads_by_net = _collect_smd_pads_by_net(pcb)
     tht_pads = _collect_tht_pads(pcb)
     pair_legs = _diff_pair_net_names(pcb)
     steps = [
         _PAD_EDGE_STEP_MM * i for i in range(1, int(_PAD_EDGE_MAX_SLIDE_MM / _PAD_EDGE_STEP_MM) + 1)
     ]
+
+    drill_to_mask = partial(drill_to_mask_aperture_gap, pad_to_mask_clearance=pad_to_mask)
+    measure = drill_to_mask
+    if ring_dam_mm is not None:
+        measure = partial(
+            via_ring_to_mask_aperture_gap,
+            pad_to_mask_clearance=pad_to_mask,
+            board_version=pcb._file_version(),
+        )
 
     for via in list(pcb.vias):
         if via.net_number == 0:
@@ -2137,14 +2148,9 @@ def relocate_pad_edge_vias(
                 if not via_inside_pad(via, bbox, pad, fp)
                 and (
                     (
-                        dam > WRITER_CLEARANCE_MARGIN_MM
-                        and (
-                            gap := drill_to_mask_aperture_gap(
-                                via, pad, fp, pad_to_mask_clearance=pad_to_mask
-                            )
-                        )
-                        is not None
-                        and gap < dam - WRITER_CLEARANCE_MARGIN_MM
+                        flag_dam > WRITER_CLEARANCE_MARGIN_MM
+                        and (gap := measure(via, pad, fp)) is not None
+                        and gap < flag_dam - WRITER_CLEARANCE_MARGIN_MM
                     )
                     or (
                         band > 0
@@ -2161,6 +2167,21 @@ def relocate_pad_edge_vias(
         pad_ref = f"{fp.reference}-{pad.number}"
         net_name = via.net_name or pad.net_name or ""
         if nets is not None and net_name not in nets:
+            continue
+        node = pcb.via_source_node(via)
+        if node is not None and locks.is_locked(node):
+            result.skipped.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason="via is locked",
+                    uuid=via.uuid,
+                    category="skipped",
+                )
+            )
             continue
         if net_name in pair_legs:
             result.skipped.append(
@@ -2228,14 +2249,22 @@ def relocate_pad_edge_vias(
             for step in steps:
                 # Whole micrometres: what KiCad's own serializer keeps.
                 nx, ny = round(vx + dx * step, 3), round(vy + dy * step, 3)
-                if dam > WRITER_CLEARANCE_MARGIN_MM:
-                    gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask)
-                    if gap is None or gap < dam + 1e-6:
-                        # Still in the zone, or into a pad's copper: keep sliding.
+                if flag_dam > WRITER_CLEARANCE_MARGIN_MM:
+                    gap = _pad_edge_gap(via, nx, ny, candidates, measure)
+                    if gap is None:
+                        # A slit-only move may have no exposed pad to clear.
+                        if ring_dam_mm is None:
+                            continue
+                    elif gap < flag_dam + 1e-6:
                         continue
                 if in_slit_band(nx, ny):
                     # Annulus still leaves a same-net slit (#8979): keep sliding.
                     continue
+                if ring_dam_mm is not None and dam > WRITER_CLEARANCE_MARGIN_MM:
+                    # The move may not create a plain via_at_pad_edge finding.
+                    drill_gap = _pad_edge_gap(via, nx, ny, candidates, drill_to_mask)
+                    if drill_gap is None or drill_gap < dam + 1e-6:
+                        continue
                 failure = _check_clearance(
                     pcb,
                     via,
@@ -2278,7 +2307,15 @@ def relocate_pad_edge_vias(
                 )
             )
             continue
-        if not _persist_via_with_stubs(pcb, via, target, stub_layers, stub_width, net_name):
+        if not _persist_via_with_stubs(
+            pcb,
+            via,
+            target,
+            stub_layers,
+            stub_width,
+            net_name,
+            preserve_connections=ring_dam_mm is not None,
+        ):
             result.unresolvable.append(
                 ViaRelocationSkip(
                     x=vx,
@@ -2286,7 +2323,11 @@ def relocate_pad_edge_vias(
                     net=via.net_number,
                     net_name=net_name,
                     pad_ref=pad_ref,
-                    reason="could not locate backing (via ...) node to persist move",
+                    reason=(
+                        "could not persist the via move with its existing copper connections"
+                        if ring_dam_mm is not None
+                        else "could not locate backing (via ...) node to persist move"
+                    ),
                     uuid=via.uuid,
                     category="unresolvable",
                 )
