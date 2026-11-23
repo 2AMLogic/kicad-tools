@@ -538,7 +538,12 @@ class ConnectivityValidator:
         # Issue #6724: KiCad 8/9 reject --refill-zones (exit 1, no report);
         # it is passed unless this kicad-cli definitively lacks it, and a
         # rejected run is retried without it.
-        with tempfile.NamedTemporaryFile(suffix=".json") as report_file:
+        # Issue #9959: the report lives at a fresh, never-pre-created path
+        # inside a private directory, and run_kicad_drc_command clears it
+        # before every launch -- so only a report kicad-cli itself wrote on
+        # the final launch is ever read here.
+        with tempfile.TemporaryDirectory(prefix="kct-nativeconn-") as td:
+            report_path = Path(td) / "drc.json"
             proc, _refilled = run_kicad_drc_command(
                 lambda refill: [
                     str(kicad_cli),
@@ -548,7 +553,7 @@ class ConnectivityValidator:
                     "--format",
                     "json",
                     "-o",
-                    report_file.name,
+                    str(report_path),
                     str(self.pcb_path),
                 ],
                 Path(kicad_cli),
@@ -572,7 +577,29 @@ class ConnectivityValidator:
                     stacklevel=2,
                 )
                 return None
-            report = DRCReport.load(report_file.name)
+            # Issue #9959: an accepted exit code still has to have written a
+            # complete report.  A missing, empty, malformed or incomplete one
+            # must fall back to the internal analysis (with a warning), never
+            # substitute an empty native result for the real findings.
+            from kicad_tools.drc.geometric import load_kicad_cli_json_report
+
+            problem = load_kicad_cli_json_report(report_path)
+            if problem is not None:
+                import warnings
+
+                substituted = (
+                    f"; substituting the internal analysis ({internal_issue_count} issue(s))"
+                    if internal_issue_count is not None
+                    else ""
+                )
+                warnings.warn(
+                    "kicad-cli pcb drc wrote an unusable report during "
+                    f"native connectivity reconciliation: {problem}{substituted}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return None
+            report = DRCReport.load(report_path)
 
         # Connectivity relationships live in the report's dedicated
         # ``unconnected_items`` collection, NOT in ``violations`` -- the

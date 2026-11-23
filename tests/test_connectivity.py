@@ -528,6 +528,148 @@ def test_reconcile_warns_on_unexpected_kicad_cli_exit(tmp_path, monkeypatch) -> 
     assert {issue.issue_type for issue in result.issues} == {"partial"}
 
 
+#: Usage text whose ``--help`` probe answer is a definitive "no refill flag".
+_KICAD9_USAGE = (
+    "Usage: drc [--help] [--output OUTPUT_FILE] [--format FORMAT] "
+    "[--all-track-errors] [--schematic-parity] [--units UNITS] INPUT_FILE\n"
+)
+
+_EMPTY_RELATIONSHIP_REPORT = '{"violations": [], "unconnected_items": []}'
+
+
+def _native_launch_cli(monkeypatch, tmp_path, *, report_text: str | None, exit_code: int):
+    """Fake kicad-cli driving the native path through one DRC launch.
+
+    The ``--help`` probe answers definitively "no --refill-zones", so the
+    single launch carries no refill flag.  It writes ``report_text`` to the
+    ``-o`` path (``None`` writes nothing) and exits ``exit_code``.
+    """
+    import subprocess
+
+    import kicad_tools.cli.runner as runner_mod
+
+    cli = tmp_path / "kicad-cli"
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda *a, **k: cli)
+
+    def _run(cmd, *args, **kwargs):
+        argv = [str(c) for c in cmd]
+        if "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=_KICAD9_USAGE, stderr="")
+        for flag in ("-o", "--output"):
+            if flag in argv:
+                if report_text is not None:
+                    Path(argv[argv.index(flag) + 1]).write_text(report_text)
+                break
+        return subprocess.CompletedProcess(argv, exit_code, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    return cli
+
+
+def _native_write_then_reject_cli(monkeypatch, tmp_path, *, retry_writes, retry_exit: int):
+    """Fake kicad-cli whose refill launch writes a complete report and then rejects the flag.
+
+    The probe fails (inconclusive), so the first launch carries
+    ``--refill-zones``: it writes a complete zero-relationship report and
+    exits 1 with ``Unknown argument: --refill-zones``.  The flag-less retry
+    writes ``retry_writes`` (``None`` writes nothing) and exits
+    ``retry_exit`` (Issue #9959's write-then-reject shape).
+    """
+    import subprocess
+
+    import kicad_tools.cli.runner as runner_mod
+
+    cli = tmp_path / "kicad-cli"
+    monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda *a, **k: cli)
+
+    def _run(cmd, *args, **kwargs):
+        argv = [str(c) for c in cmd]
+        if "--help" in argv:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="probe failed")
+        out = Path(argv[argv.index("-o") + 1])
+        if "--refill-zones" in argv:
+            out.write_text(_EMPTY_RELATIONSHIP_REPORT)
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="Unknown argument: --refill-zones\n", stderr=""
+            )
+        if retry_writes is not None:
+            out.write_text(retry_writes)
+        return subprocess.CompletedProcess(argv, retry_exit, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    return cli
+
+
+class TestNativeReportMustBeFreshAndComplete:
+    """Issue #9959: native reconciliation accepts only a complete report
+    written by the final launch.  Anything else warns and keeps the internal
+    findings instead of substituting an empty native result."""
+
+    @pytest.mark.parametrize("report_text", [None, "", "not json {", '{"violations": 3}'])
+    @pytest.mark.parametrize("exit_code", [0, 5])
+    def test_unusable_report_warns_and_keeps_internal_findings(
+        self, tmp_path, monkeypatch, report_text, exit_code
+    ):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        _native_launch_cli(monkeypatch, tmp_path, report_text=report_text, exit_code=exit_code)
+
+        with pytest.warns(
+            RuntimeWarning,
+            match=r"unusable report .*substituting the internal analysis \(2 issue\(s\)\)",
+        ):
+            result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+        assert len(result.issues) == 2
+        assert {issue.issue_type for issue in result.issues} == {"partial"}
+
+    def test_complete_zero_relationship_report_yields_zero_native_issues(
+        self, tmp_path, monkeypatch, recwarn
+    ):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        _native_launch_cli(
+            monkeypatch, tmp_path, report_text=_EMPTY_RELATIONSHIP_REPORT, exit_code=5
+        )
+
+        result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+        assert result.issues == []
+        assert [w for w in recwarn.list if issubclass(w.category, RuntimeWarning)] == []
+
+    @pytest.mark.parametrize("retry_exit", [0, 5])
+    @pytest.mark.parametrize("retry_writes", [None, ""], ids=["reportless", "empty-retry"])
+    def test_reportless_retry_does_not_read_the_rejected_attempts_report(
+        self, tmp_path, monkeypatch, retry_exit, retry_writes
+    ):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        _native_write_then_reject_cli(
+            monkeypatch, tmp_path, retry_writes=retry_writes, retry_exit=retry_exit
+        )
+
+        with pytest.warns(RuntimeWarning, match=r"unusable report"):
+            result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+        assert len(result.issues) == 2
+        assert {issue.issue_type for issue in result.issues} == {"partial"}
+
+    @pytest.mark.parametrize("retry_exit", [0, 5])
+    def test_fresh_zero_relationship_retry_report_is_accepted(
+        self, tmp_path, monkeypatch, recwarn, retry_exit
+    ):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        _native_write_then_reject_cli(
+            monkeypatch, tmp_path, retry_writes=_EMPTY_RELATIONSHIP_REPORT, retry_exit=retry_exit
+        )
+
+        result = ConnectivityValidator(board).validate(reconcile_native=True)
+
+        assert result.issues == []
+        assert [w for w in recwarn.list if issubclass(w.category, RuntimeWarning)] == []
+
+
 def test_reconcile_expected_degradations_stay_silent(tmp_path, monkeypatch, recwarn) -> None:
     """Issue #4551: the documented KiCad-less paths emit no warning."""
     import kicad_tools.cli.runner as runner_mod
