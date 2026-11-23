@@ -2331,6 +2331,7 @@ def _print_json(
                     "from": [a.old_x, a.old_y],
                     "to": [a.new_x, a.new_y],
                     "displacement_mm": round(a.displacement_mm, 4),
+                    "connections": len(getattr(a, "added_segments", ())),
                     "reverted": (bool(rolled_back) or (a.uuid in reverted_uuids)),
                 }
                 for a in mask_result.actions

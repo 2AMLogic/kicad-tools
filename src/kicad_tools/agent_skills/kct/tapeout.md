@@ -15,15 +15,13 @@ The contract is exactly: **`tapeout` returning 0 (with a manifest written) means
 
 ## Prerequisite
 
-The native router/DRC backend must be built in the active checkout before this skill is meaningful (Epic #4054 convention #1). Run once per checkout / worktree:
+After `uv sync`, check the native router in the project environment.
 
 ```bash
-uv run kct build-native --check   # expect: "C++ backend: available"
-# if "not installed":
-uv run kct build-native
+uv run kct build-native --check
 ```
 
-`uv sync` does **not** build the native extension. A fresh checkout or git worktree needs this step explicitly.
+`C++ backend: available` and exit code 0 satisfy this prerequisite. If the router is missing, run `uv run kct build-native` and repeat the check. Placement and DRC are optional. When either reports `not built`, continue with its Python fallback. Building those two native extensions requires a kicad-tools source checkout.
 
 If the local KiCad is not the pinned release, `kct readiness` refuses before any gate; run it with `KCT_KICAD_DOCKER=1` to use the pinned image.
 

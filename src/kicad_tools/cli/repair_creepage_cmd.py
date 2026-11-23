@@ -179,6 +179,7 @@ def build_census_fn(args) -> Callable[[Any], Any]:
                 min_mm,
                 net_class=args.net_class,
                 board=str(pcb_path),
+                project_board=pcb_path,
                 required_creepage_mm=required_creepage,
                 required_clearance_mm=required_clearance,
                 standard=standard_id,

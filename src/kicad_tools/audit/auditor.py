@@ -606,6 +606,7 @@ def check_isolation(
             hv_min_mm,
             net_class=hv_net_class,
             board=str(pcb_path) if pcb_path is not None else "",
+            project_board=pcb_path,
             required_creepage_mm=required_creepage_mm,
             required_clearance_mm=required_clearance_mm,
             standard=hv_standard,

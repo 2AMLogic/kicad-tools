@@ -752,6 +752,7 @@ def _census_failures(
         float(min_mm) if min_mm is not None else None,
         net_class=net_class,
         board=str(pcb_path),
+        project_board=Path(getattr(args, "pcb", pcb_path)),
         **extra,
     )
     failing: dict[tuple[str, str, str, str], float] = {}
