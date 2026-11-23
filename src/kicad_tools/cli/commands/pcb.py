@@ -1739,7 +1739,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 standard_id=getattr(args, "creepage_standard", "iec60664"),
                 pollution_degree=getattr(args, "pollution_degree", 2),
                 material_group=getattr(args, "material_group", "IIIa"),
-                hv_threshold=getattr(args, "hv_threshold", 30.0),
+                # Issue #10015: never floor the table by ``--hv-threshold``.
+                # ``kct creepage`` derives a requirement for every mapped pair
+                # (any non-zero |dV|), so a threshold here accepted anchors the
+                # gate then failed (a 15 V pair under the default 30 V). The
+                # table is only consulted per target<->obstacle net, so
+                # keeping every pair costs nothing. Same-potential pairs
+                # (|dV| == 0) still carry no requirement.
+                hv_threshold=0.0,
                 pair_bounds=load_pair_bounds(vm_path) or None,
                 net_intervals=load_voltage_intervals(vm_path),
             )

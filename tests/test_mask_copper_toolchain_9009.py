@@ -195,17 +195,20 @@ def test_unqualified_host_kicad_is_still_refused_with_a_remediation(monkeypatch,
         inspect_attributed_mask_geometry,
     )
 
-    assert "10.0.8" not in QUALIFIED_NATIVE_VERSIONS
+    unqualified_version = "10.0.7"
+    assert unqualified_version not in QUALIFIED_NATIVE_VERSIONS
     monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: False)
     monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda: Path("/host/kicad-cli"))
-    _fake_native(monkeypatch, version="10.0.8")
+    _fake_native(monkeypatch, version=unqualified_version)
     board = _board(tmp_path / "board.kicad_pcb", _PAD_BODY)
     result = inspect_attributed_mask_geometry(
         board, native_python_command=["/host/python3"], scratch_dir=tmp_path
     )
     refusal = [e for e in result.errors if "qualified KiCad plot profile" in e]
     assert len(refusal) == 1
-    assert "got 10.0.8" in refusal[0]
+    assert f"got {unqualified_version}" in refusal[0]
+    assert "mask_to_copper unevaluated" in refusal[0]
+    assert "blocking sign-off" in refusal[0]
     assert "KCT_KICAD_DOCKER=1" in refusal[0]
     assert "install a qualified KiCad release" in refusal[0]
     # Refused means no attribution was produced.
