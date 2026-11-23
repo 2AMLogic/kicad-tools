@@ -507,24 +507,6 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return finalize_routing(output_path, input_path.with_suffix(".kicad_sch"))
 
 
-def clear_silk_over_holes(routed_path: Path) -> None:
-    """Clip footprint silk off drilled holes and move reference text that sits on one.
-
-    ``fix-silkscreen --clip-to-holes`` handles lines/polygons; text is left for
-    ``place-silk-refs --over-holes`` (#9061).  Both are the generic commands --
-    no board-local silk edit and no acknowledgement of ``silk_hole_overlap``.
-    """
-    for command in (
-        ["fix-silkscreen", "--mfr", "jlcpcb", "--clip-to-holes", "--format", "summary"],
-        ["place-silk-refs", "--over-holes"],
-    ):
-        subprocess.run(
-            [sys.executable, "-m", "kicad_tools.cli", command[0], str(routed_path), *command[1:]],
-            check=True,
-            timeout=120,
-        )
-
-
 def run_drc(pcb_path: Path) -> bool:
     """Run DRC on the PCB.
 
@@ -692,10 +674,17 @@ def main() -> int:
         if run_add_board_info(routed_path, auto=True) != 0:
             raise RuntimeError("pcb add-board-info failed")
 
-        # Step 5.7 (#9467 / #9061): clear ``silk_hole_overlap`` through the recipe,
-        # after every copper edit (finalize, cleanup, fiducials) so the drilled
-        # holes it clips against are the shipped ones.  Never acknowledged away.
-        clear_silk_over_holes(routed_path)
+        # Step 5.7 (#9800 / #9795 phase 4): legalise the silkscreen through
+        # the shared default pass -- the same ``legalize_silk`` the route
+        # step already ran, re-applied after every copper edit (finalize,
+        # cleanup, fiducials) so the drilled holes it clips against are the
+        # shipped ones.  Retires the board-local clip/reference commands of
+        # #9467/#9061; nothing is acknowledged away.
+        from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+
+        silk_pass = run_default_silk_pass(routed_path, mfr="jlcpcb")
+        if silk_pass is None or not silk_pass["applied"] or silk_pass["unresolved"]:
+            raise RuntimeError(f"Board02 silk legalisation failed: {silk_pass}")
 
         # Step 5.8 (#9467): ship the release cleanup chain's fixed point --
         # last board-writing step, so the serializers the packaging run will
