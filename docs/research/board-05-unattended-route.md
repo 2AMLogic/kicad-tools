@@ -284,11 +284,16 @@ gap errors and 73 warnings per seed.
 ## Re-measured 2026-11-23 on `be9eb6a12`: the gap errors are back (Issue #9424)
 
 One seed (42) through the gate script on the pinned toolchain
-(`KCT_KICAD_DOCKER=1`; the gate refuses any other kicad-cli release),
-Linux x86_64, C++ backend built in the worktree, load average 12 to 14 while
-it ran. Seeds 7 and 1337 were **not** run in this pass, so the three-seed
-criterion is still open. No route log carries a `[deterministic-budget]
-per-net wall clock bound` or `stage deadline fired` line.
+(`KCT_KICAD_DOCKER=1`, pinned kicad-cli 10.0.6; the gate refuses any other
+kicad-cli release), Linux x86_64, load average 12 to 14 while it ran. The
+revision is `be9eb6a12`, which requires C++ router build 79
+(`_REQUIRED_CPP_BUILD_VERSION` in `router/cpp_backend.py`; the 2026-11-22 runs
+above used build 78). The extension was built in the worktree; the
+`kct build-native --check` output itself was not captured, so build 79 is the
+build the revision requires rather than a recorded check line. Seeds 7 and
+1337 were **not** run in this pass, so the three-seed criterion is still open.
+The seed-42 route log carries no `[deterministic-budget] per-net wall clock
+bound` or `stage deadline fired` line.
 
 | | seed 42 |
 |---|---|
@@ -300,9 +305,11 @@ per-net wall clock bound` or `stage deadline fired` line.
 | board sha1 | `59865268d8fc...` |
 
 The board is not the one the 2026-11-22 Linux runs produced (124 vias, sha1
-`64411406e173...`, 0 errors, 77 warnings). Router, DRC and stitch merges
-landed in between (#9936, #9939, #9959, #9891 and others), and the route now
-carries the same family of same-net via/trace slits the macOS replay found:
+`64411406e173...`, 0 errors, 77 warnings). The revision window is `7416c1c24`
+(router build 78) to `be9eb6a12` (build 79), including the 78 to 79 build bump.
+It was not bisected, so no individual merge is identified as the cause. The
+route now carries the same family of same-net via/trace slits the macOS
+replays found:
 
 | Net | Layer | Gap (mm) | Required (mm) | Items |
 |---|---|---:|---:|---|
@@ -312,14 +319,22 @@ carries the same family of same-net via/trace slits the macOS replay found:
 | RUN | F.Cu | 0.0858 | 0.1016 | trace `163.99,105.465 -> 164.9,106.375` beside via `164.25,105.205` |
 | RESET | F.Cu | 0.0700 | 0.1016 | traces `159.83,94.415 -> 159.83,95.568` and `160.1,90.313 -> 160.1,95.838` |
 
-SPEED, RUN and RESET (F.Cu) match three of the four witnesses recorded for
-the macOS replay; DRIVER_SLEEP and RESET (B.Cu) are new. All five are
+Against the macOS build-79 replay at `06b494587`
+([#9844 comment](https://github.com/2AMLogic/kicad-tools/issues/9844#issuecomment-7086213789),
+witnesses SPEED, RUN, VM and RESET), SPEED (0.0467 mm) and RUN (0.0858 mm)
+reproduce the same gap widths. RESET (F.Cu) is the same net, layer and region
+and the same trace-to-trace class, but a different gap: 0.0700 mm here against
+0.02981 mm at (159.943, 94.690) there. DRIVER_SLEEP is not among those
+witnesses, and VM did not recur in this run. Against the earlier build-78
+macOS replay above (SPEED and two IREF gaps) only SPEED recurs. All five are
 `same_net`, so none is a short. The 65 warnings are 49 `pour_slot`, 6
 `redundant_copper_covered`, 4 `redundant_copper_detour` and 6
 `silk_hole_overlap`. The 0-error, 0-warning bar fails, and
 `--skip mask_to_copper` is still in the gate.
 
-This pass changed no router source. The gap errors are the new work: they
-moved with the merges above rather than with load, and the 49 structural
+This pass changed no router source. The gap errors are the new work. Whether
+they follow the revision window above or the host load (12 to 14 here, 17.8 to
+40.5 on the 2026-11-22 runs) was not tested: no bisect or repeated low-load run
+was done. The 49 structural
 `pour_slot` warnings are the larger remainder under the operator ruling of
 2026-11-23 (keep the strict bar, stay red until source repair lands).
