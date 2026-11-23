@@ -128,7 +128,7 @@ def test_remediation_pass_reuses_the_fill_paths_refill_probe(monkeypatch, tmp_pa
             return _fake_completed(stdout="--refill-zones")
         drc_calls += 1
         out_idx = cmd.index("--output") + 1
-        Path(cmd[out_idx]).write_text("{}")
+        Path(cmd[out_idx]).write_text('{"violations": []}')
         return _fake_completed()
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)

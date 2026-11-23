@@ -75,7 +75,7 @@ def _install_fake_cli(
                 return _fake_completed(stdout="fill-zones" if has_fill_zones else "")
             return _fake_completed(stdout="--refill-zones" if supports_refill else "")
         if "--output" in cmd:
-            Path(cmd[cmd.index("--output") + 1]).write_text("{}")
+            Path(cmd[cmd.index("--output") + 1]).write_text('{"violations": []}')
         return _fake_completed()
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)

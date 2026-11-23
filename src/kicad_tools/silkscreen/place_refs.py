@@ -39,7 +39,7 @@ from __future__ import annotations
 import contextlib
 import math
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1044,6 +1044,7 @@ class SilkRefPlacer:
         allow_rotate: bool = False,
         only: Collection[str] | None = None,
         include_via_obstacles: bool = True,
+        settle: bool = False,
     ) -> PlaceSilkRefsResult:
         """Compute a per-reference move plan without mutating the tree.
 
@@ -1058,6 +1059,8 @@ class SilkRefPlacer:
             allow_rotate: If True, also try each candidate with the text
                 rotated 90 degrees about its anchor when the
                 original orientation does not fit.
+            settle: Retry blocked or poorly associated references after their
+                neighbours move. Report each move from its original position.
             only: If given, plan only the references of these footprints
                 (issue #6256). Every other visible reference is left out of
                 the result -- never moved -- but still blocks the planned
@@ -1178,7 +1181,7 @@ class SilkRefPlacer:
         # Deterministic processing order.
         entries.sort(key=lambda e: e["footprint"].reference)
 
-        for entry in entries:
+        def place(entry) -> RefPlacement:
             footprint = entry["footprint"]
             ref = footprint.reference
             side = entry["side"]
@@ -1186,11 +1189,6 @@ class SilkRefPlacer:
             geom0 = entry["geom0"]
             original_center = entry["original_center"]
             old_rotation = entry["old_rotation"]
-            if only is not None and ref not in only:
-                # Outside the requested set: never planned or moved, but its
-                # text stays in the pool as an obstacle for the others.
-                continue
-
             pool = dynamic[side]
             with contextlib.suppress(ValueError):
                 pool.remove((geom0, ref))
@@ -1235,6 +1233,10 @@ class SilkRefPlacer:
             chosen_margin: float | None = None
             last_reason = ""
             for point in ordered:
+                if settle and point != original_center:
+                    # Evaluate the position KiCad will read from the saved local coordinates.
+                    lx, ly = entry["inverse"](point)
+                    point = _fp_transform(footprint)((round(lx, 6), round(ly, 6)))
                 trials = [(old_rotation, 0)]
                 if allow_rotate:
                     trials.append((old_rotation + 90.0, 1))
@@ -1271,20 +1273,17 @@ class SilkRefPlacer:
                 own_poly = own_courtyard.get((id(footprint), side))
                 fallback = own_poly is not None and geom0.intersects(own_poly)
                 status = "under_component_fallback" if fallback else "unplaceable"
-                result.placements.append(
-                    RefPlacement(
-                        footprint_ref=ref,
-                        layer=ref_text.layer,
-                        old_position=original_center,
-                        new_position=original_center,
-                        old_rotation=old_rotation,
-                        new_rotation=old_rotation,
-                        status=status,
-                        reason=last_reason or "no collision-free candidate within search radius",
-                        origin=placement_origin,
-                    )
+                return RefPlacement(
+                    footprint_ref=ref,
+                    layer=ref_text.layer,
+                    old_position=original_center,
+                    new_position=original_center,
+                    old_rotation=old_rotation,
+                    new_rotation=old_rotation,
+                    status=status,
+                    reason=last_reason or "no collision-free candidate within search radius",
+                    origin=placement_origin,
                 )
-                continue
 
             dynamic[side].append((chosen_geom, ref))
             low_assoc = chosen_margin is not None and chosen_margin < ASSOCIATION_MARGIN_MM
@@ -1302,39 +1301,54 @@ class SilkRefPlacer:
             )
             if moved:
                 local = entry["inverse"](chosen_point)
-                result.placements.append(
-                    RefPlacement(
-                        footprint_ref=ref,
-                        layer=ref_text.layer,
-                        old_position=original_center,
-                        new_position=chosen_point,
-                        old_rotation=old_rotation,
-                        new_rotation=chosen_rotation,
-                        status="moved",
-                        reason=assoc_reason,
-                        new_local_position=local,
-                        association_margin_mm=chosen_margin,
-                        low_association=low_assoc,
-                        origin=placement_origin,
-                    )
+                entry.update(
+                    geom0=chosen_geom, original_center=chosen_point, old_rotation=chosen_rotation
                 )
-            else:
-                result.placements.append(
-                    RefPlacement(
-                        footprint_ref=ref,
-                        layer=ref_text.layer,
-                        old_position=original_center,
-                        new_position=original_center,
-                        old_rotation=old_rotation,
-                        new_rotation=old_rotation,
-                        status="unchanged",
-                        reason=assoc_reason,
-                        association_margin_mm=chosen_margin,
-                        low_association=low_assoc,
-                        origin=placement_origin,
-                    )
-                )
+            return RefPlacement(
+                footprint_ref=ref,
+                layer=ref_text.layer,
+                old_position=original_center,
+                new_position=chosen_point if moved else original_center,
+                old_rotation=old_rotation,
+                new_rotation=chosen_rotation,
+                status="moved" if moved else "unchanged",
+                reason=assoc_reason,
+                new_local_position=local if moved else None,
+                association_margin_mm=chosen_margin,
+                low_association=low_assoc,
+                origin=placement_origin,
+            )
 
+        pending = [e for e in entries if only is None or e["footprint"].reference in only]
+        final: dict[str, RefPlacement] = {}
+        while pending:
+            retry = []
+            moved_this_round = False
+            for entry in pending:
+                placement = place(entry)
+                ref = placement.footprint_ref
+                if placement.status == "moved":
+                    moved_this_round = True
+                    if ref in final:
+                        placement = replace(
+                            placement,
+                            old_position=final[ref].old_position,
+                            old_rotation=final[ref].old_rotation,
+                        )
+                    final[ref] = placement
+                elif ref not in final or final[ref].status != "moved":
+                    final[ref] = placement
+                if placement.low_association or placement.status in (
+                    "unplaceable",
+                    "under_component_fallback",
+                ):
+                    retry.append(entry)
+            if not settle or not moved_this_round:
+                break
+            # A clear ref can move again only to improve its courtyard margin.
+            # Each has a finite set of saved candidate positions.
+            pending = retry
+        result.placements = list(final.values())
         return result
 
     def refs_blocked_by(

@@ -1406,6 +1406,7 @@ def apply_attach_zone_dru_rules(
     rules: DesignRules,
     project_data: dict,
     board: Path,
+    zone_clearances: Sequence[tuple[str, str, float]] | None = None,
 ) -> str:
     """Merge the attach-zone managed block into ``.kicad_dru`` text (#8048).
 
@@ -1422,6 +1423,7 @@ def apply_attach_zone_dru_rules(
         eligible_net_names,
         has_designer_clearance_rule,
         merge_attach_zone_block,
+        pad_zone_clearance_rules,
     )
 
     zones: tuple = ()
@@ -1455,7 +1457,10 @@ def apply_attach_zone_dru_rules(
                 "kct check will not exempt attach-zone copper",
                 file=sys.stderr,
             )
-    merged = merge_attach_zone_block(dru_text, zones, floor)
+    if zone_clearances is None:
+        zone_clearances = zone_clearance_targets(board) if zones else ()
+    pad_rules = pad_zone_clearance_rules(zones, zone_clearances, project_data, floor)
+    merged = merge_attach_zone_block(dru_text, zones, floor, pad_zone_rules=pad_rules)
     return merged if merged is not None else dru_text
 
 
@@ -1893,7 +1898,9 @@ def write_drc_constraints(
         # Issue #8048: attach zones lift the router-class floors.  Merged after
         # the pair-gap block so a re-write that keeps both blocks (``None``)
         # reproduces the same bytes: this block always ends the file.
-        merged_dru = apply_attach_zone_dru_rules(merged_dru, rules, project_data, board)
+        merged_dru = apply_attach_zone_dru_rules(
+            merged_dru, rules, project_data, board, zone_targets
+        )
         dru_path.write_text(merged_dru, encoding="utf-8")
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have

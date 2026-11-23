@@ -270,6 +270,7 @@ def test_report_distinguishes_repair_scope_from_a_clean_silk_check(tmp_path: Pat
         "silk_pad_clearance",
         "silk_hole_overlap",
         "silk_ref_obscured",
+        "silk_edge_clearance",  # Footprint line ends; this board-level graphic remains.
     }
     assert _silk_findings(path) == [("silk_edge_clearance", "warning")]
 
@@ -459,3 +460,22 @@ def test_existing_flags_keep_behaviour(tmp_path: Path, capsys):
     assert "reference_placements" not in data  # --all not given
     # No clipping happened: the pad/hole/ref findings survive.
     assert any(rule == "silk_hole_overlap" for rule, _ in _silk_findings(path))
+
+
+@pytest.mark.parametrize(("tap_layer", "edits"), [("F.SilkS", 0), ("B.SilkS", 1)])
+@pytest.mark.parametrize("kind", ["line", "text_box"])
+def test_edge_trim_preserves_a_tap_on_the_removed_length(tmp_path, tap_layer, edits, kind):
+    # A shallow diagonal can spend millimetres in the edge band. The other
+    # stroke joins that part of the diagonal, away from its original tip.
+    line = _fp("100 125", _line(0.1, 0, 0.8, 8, uid="4a4dbf83-72c0-4ebe-b574-b828df7030b9"))
+    if kind == "line":
+        tap = "(gr_line (start 100.1875 126) (end 102 126)"
+    else:
+        tap = (
+            '(gr_text_box "T" (start 100.1875 124.3) (end 102 126) '
+            "(effects (font (size 0.5 0.5) (thickness 0.1))) (border yes)"
+        )
+    tap += f' (stroke (width 0.15) (type solid)) (layer "{tap_layer}") (uuid "73180039-92de-4283-b14f-cb7ecf362dd7"))'
+    path = _write(tmp_path, line + tap)
+    report = legalize_silk(path, _jlcpcb_rules())
+    assert sum(e.action == "trimmed_edge" for e in report.footprint_line_edits) == edits
