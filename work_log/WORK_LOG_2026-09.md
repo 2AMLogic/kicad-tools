@@ -2,6 +2,36 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-23
+
+- **PR #5710**: feat(drc): emit SMD pad clearance floor natively, scoped by reference
+- **PR #5709**: ci: pin KiCad CI containers by digest via workflow-level KICAD_IMAGE
+- **PR #5706**: fix(ci): exclude the vendored .agents/ surface from ruff, unblocking main
+- **PR #5705**: test(mfr): measure effective native silk-clearance, not emitted values
+- **PR #5699**: fix(router): apply the fab hole-to-hole floor to same-net via drops
+- **Issue #5697** (closed): main branch: Lint & Format CI failing again — .agents/ Loom mirror not in ruff extend-exclude
+- **PR #5695**: fix(router): refine coupled diff-pair halo rejection with physical clearance
+- **PR #5692**: fix(merge-pr): warn when a partial-increment trailer is backticked
+- **PR #5691**: perf(router): memoise the per-cell via-site predicates + drop cell_known's _CellView (phase 4 of the diff-pair re-route step)
+- **Issue #5690** (closed): Partial-increment reset (#3667) silently skipped when "Part of #N" trailer is backticked
+- **PR #5689**: docs: fix inline code spans with embedded line breaks
+- **PR #5688**: perf(sexp): walk SExp trees with an explicit stack instead of nested generators
+- **Issue #5687** (closed): README.md: three inline code spans broken by mid-span line wraps
+- **PR #5686**: perf(validate): memoise each copper element's shapely geometry in the clearance rule
+- **PR #5684**: refactor(router/mesh): take ObstacleModel.is_clear's verdicts from the clearance kernel
+- **PR #5683**: ci: qualify KiCad 10.0.6 for the native mask-to-copper gate
+- **Issue #5682** (closed): ci: pin the kicad/kicad container by digest so a Docker Hub tag move can't silently change measured native behaviour
+- **PR #5681**: docs: correct autorouter example and relocated board links
+- **PR #5680**: docs: refresh README What's New for 0.21.x and bring scripts/README current
+- **Issue #5678** (closed): ci: Test job's native mask gate hard-pins KiCad 10.0.5, fails on runners with 10.0.6
+- **PR #5677**: perf(router): fast-path copper_gap dispatch for the lattice engine's pair kinds
+- **PR #5676**: fix(router): route the coupled diff-pair search through the clearance kernel (Epic #5509 Phase 3c)
+- **Issue #5672** (closed): perf(router): kernel-backed lattice clearance predicates cost ~1.7x the pre-kernel arithmetic (Epic #5509 Phase 3d follow-up)
+- **Issue #5664** (closed): [Epic #5509] Phase 3e: switch mesh engine predicate (mesh/obstacles.py) to the clearance kernel
+- **Issue #5662** (closed): [Epic #5509] Phase 3c: switch coupled diff-pair search (coupled_pathfinder.cpp + diffpair_routing.py) to the clearance kernel
+- **Issue #5059** (closed): Manufacturing profiles: verify effective silk/pad DRC coverage and preserve custom rules
+- **Issue #4507** (closed): router Phase 2 (#4431): search-time pairwise HV avoidance + C++ validate_route domain-matrix extension — make HV boards actually converge
+
 ### 2026-09-22
 
 - **PR #5679**: perf(zones): skip the post-fill remediation pass's redundant first kicad-cli refill

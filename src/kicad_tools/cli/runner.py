@@ -715,10 +715,10 @@ def _run_drc_once(
         import os
 
         os.close(fd)
-    # Issue #6724: the report must be one kicad-cli wrote on THIS run.  A
-    # pre-created (mkstemp) or left-over file survived a killed kicad-cli
-    # and read as a clean report, so clear it before the run.
-    Path(output_path).unlink(missing_ok=True)
+    # Issue #6724 (superseded by the launch-side reset, Issue #9959): the
+    # report must be one kicad-cli wrote on THIS run.  The pre-created
+    # (mkstemp) or left-over file is cleared before every launch inside
+    # run_kicad_drc_command, retry included.
 
     # Build command
     cmd = [
@@ -1491,9 +1491,10 @@ def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict 
     try:
 
         def build_cmd(use_refill: bool) -> list[str]:
-            # Issue #9946: every launch starts from no report, so a retry
-            # that writes nothing can never be read as the first attempt's.
-            report_path.unlink(missing_ok=True)
+            # Issue #9946 (the unlink moved into run_kicad_drc_command,
+            # Issue #9959): every launch starts from no report, so a retry
+            # that writes nothing can never be read as the first attempt's
+            # -- and argv inspection is side-effect-free.
             cmd = [
                 str(kicad_cli),
                 "pcb",
@@ -1984,6 +1985,24 @@ def _refill_probe_inconclusive(kicad_cli: Path) -> bool:
     return bool(callable(inconclusive) and inconclusive(Path(kicad_cli)))
 
 
+def _drc_argv_output_path(argv: list[str]) -> str | None:
+    """The explicit report path named by a ``pcb drc`` argv (Issue #9959).
+
+    Handles both the separate ``--output PATH`` / ``-o PATH`` forms and the
+    joined ``--output=PATH`` / ``-o=PATH`` forms, so :func:`run_kicad_drc_command`
+    can reset the report before every launch regardless of which caller built
+    the argv.  ``None`` when the argv names no output.
+    """
+    for index, arg in enumerate(argv):
+        if arg in ("--output", "-o") and index + 1 < len(argv):
+            return argv[index + 1]
+        if arg.startswith("--output=") and len(arg) > len("--output="):
+            return arg[len("--output=") :]
+        if arg.startswith("-o=") and len(arg) > len("-o="):
+            return arg[len("-o=") :]
+    return None
+
+
 def _rejected_refill_option(result: "subprocess.CompletedProcess") -> bool:
     """Whether a kicad-cli run definitively rejected ``--refill-zones`` (Issue #9938).
 
@@ -2024,6 +2043,13 @@ def run_kicad_drc_command(
     definitive answer is memoised).  Running without a requested refill is
     logged as a WARNING, never silently.
 
+    Issue #9959: every launch -- first attempt and flag-less retry alike --
+    starts from no report.  The output path named by the argv (``--output``
+    or ``-o``, separate or joined) is unlinked immediately before each
+    ``subprocess`` launch, so a retry can never inherit and be judged by the
+    previous attempt's file.  ``build_cmd`` itself stays side-effect-free:
+    building or inspecting argv alone never deletes a report.
+
     ``timeout`` is the whole budget (probe + run + retry); a
     :class:`subprocess.TimeoutExpired` propagates to the caller.
     ``before_retry`` (Issue #9946) runs after a rejected attempt and before
@@ -2039,19 +2065,30 @@ def run_kicad_drc_command(
             return None
         return max(deadline - _monotonic(), 1.0)
 
+    def launch(refill: bool) -> "subprocess.CompletedProcess":
+        # Issue #9959: every launch starts from no report.  The reset lives
+        # here -- not in ``build_cmd`` -- so building or inspecting argv
+        # alone stays side-effect-free, and a retry that writes nothing can
+        # never be judged against (and read as) the previous attempt's file.
+        argv = build_cmd(refill)
+        report = _drc_argv_output_path(argv)
+        if report is not None:
+            Path(report).unlink(missing_ok=True)
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=text,
+            timeout=remaining(),
+            check=False,
+        )
+
     use_refill = False
     if refill_zones:
         use_refill = bool(_kicad_drc_supports_refill(Path(kicad_cli)))
         if not use_refill and _refill_probe_inconclusive(kicad_cli):
             # Unknown is not "no": let kicad-cli's own parser decide.
             use_refill = True
-    proc = subprocess.run(
-        build_cmd(use_refill),
-        capture_output=True,
-        text=text,
-        timeout=remaining(),
-        check=False,
-    )
+    proc = launch(use_refill)
     if (
         use_refill
         and getattr(proc, "returncode", 0) == KICAD_CLI_ERR_ARGS
@@ -2064,13 +2101,7 @@ def run_kicad_drc_command(
         use_refill = False
         if before_retry is not None:
             before_retry()
-        proc = subprocess.run(
-            build_cmd(False),
-            capture_output=True,
-            text=text,
-            timeout=remaining(),
-            check=False,
-        )
+        proc = launch(False)
     if refill_zones and not use_refill:
         logger.warning(
             "kicad-cli %s does not support --refill-zones; DRC ran WITHOUT "
