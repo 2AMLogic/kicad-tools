@@ -14,8 +14,28 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-23
+
+- **PR #9952**: fix(board07): reissue the verified six-layer SDRAM manufacturing package
+- **PR #9956**: fix: clear the Board 06 J4 reset mask escape
+- **PR #9964**: docs(changelog): restore Board 03 route_demo DRC-gate fragment lost in #9940
+- **PR #9948**: fix: keep DRC-report refills live through an inconclusive probe
+- **PR #9937**: fix(router): keep partially connected nets in the #8486 search back-off
+- **PR #9940**: chore(board03): stage the verified mask-copper repair as a scratch-only helper
+- **PR #9945**: fix(silk): preserve joined pin markers and free outline ends (#9800)
+- **PR #9953**: fix(board05): retain ground-pour clearance at five U3 openings
+- **Issue #8399** (closed): Boards 02/04/07: evidence refresh refused on main by unaccepted redundant_copper warnings (#8218), blocks #8385
+- **Issue #8604** (closed): Board 07: re-check length matching, re-pin routing hash, refresh evidence (part of #8399)
+- **Issue #9961** (closed): Restore the unreleased changelog entry for Board 03's route_demo mask_to_copper skip (lost in PR #9940)
+- **Issue #9954** (closed): Repair the J4.RST mask exposure along the nine-pair fixture’s pad-to-via escape
+- **Issue #9946** (closed): _kicad_drc_report drops --refill-zones --save-board while the refill probe stays inconclusive
+
 ### 2026-11-22
 
+- **PR #9916**: feat: extend the mask-copper repair with pad pull-in and ring-dam via moves
+- **PR #9941**: fix(board05): restore pour standoff at pad openings and de-slot four U1 escapes
+- **PR #9944**: test: raise mask nudge pad-island test timeout to 180 s
+- **Issue #9943** (closed): test flake: mask-copper pad-island controls time out in native DRC on CI
 - **PR #9942**: fix(boards): adopt the warning-free six-layer Board 07 SDRAM pair
 - **PR #9935**: chore(loom): ignore the dispatcher’s Codex ranking file
 - **PR #9934**: fix(board06): reproduce the four-channel LVDS assembly release

@@ -1015,7 +1015,9 @@ def _refill_after_keepout(path: Path, quiet: bool) -> int:
 
 def _run_fill(args) -> int:
     """Fill zones in a PCB using kicad-cli."""
-    from .runner import find_kicad_cli, run_fill_zones
+    from kicad_tools.drc.geometric import SavedFillCheck, check_saved_fill
+
+    from .runner import KiCadCLIResult, _fill_separate_output, find_kicad_cli, run_fill_zones
 
     json_mode = _wants_json(args)
 
@@ -1070,19 +1072,32 @@ def _run_fill(args) -> int:
         print(f"Filling zones in: {pcb_path}")
 
     asym_before = _thermal_asymmetry_count(pcb_path)
-    result = run_fill_zones(pcb_path, output_path, kicad_cli=kicad_cli)
+    check: SavedFillCheck | None = None
 
-    if not result.success:
+    def fill_and_check(board: Path) -> KiCadCLIResult:
+        nonlocal check
+        result = run_fill_zones(board, None, kicad_cli=kicad_cli)
+        if result.success:
+            _warn_if_asymmetry_rose(asym_before, board, payload)
+            check = check_saved_fill(board, kicad_cli=kicad_cli)
+            if output_path is not None:
+                if check.failed:
+                    result.success = False
+                    result.stderr = (
+                        f"Could not verify the candidate zone fill: {check.note or 'no DRC report'}"
+                    )
+                elif check.regressions or result.fill_conflicts:
+                    result.success = False
+        return result
+
+    if output_path is None:
+        result = fill_and_check(pcb_path)
+    else:
+        result = _fill_separate_output(pcb_path, output_path, fill_and_check)
+    if check is None or (check.failed and not result.success):
         return _fail(args, f"Error: {result.stderr}")
 
     target = output_path if output_path else pcb_path
-    _warn_if_asymmetry_rose(asym_before, target, payload)
-
-    # Issue #8053: export refuses a saved fill that is split where a refill
-    # is not.  Say so now, not at export time.
-    from kicad_tools.drc.geometric import check_saved_fill
-
-    check = check_saved_fill(target, kicad_cli=kicad_cli)
     payload["saved_fill_regressions"] = list(check.regressions)
     # Issue #8053: what the self-verifying foreign-pad carve did.
     fill_notes = list(getattr(result, "fill_notes", None) or [])
@@ -1091,9 +1106,9 @@ def _run_fill(args) -> int:
     payload["fill_conflicts"] = fill_conflicts
 
     if json_mode:
-        payload["filled"] = True
+        payload["filled"] = result.success
         emit_json(payload)
-    elif not quiet:
+    elif result.success and not quiet:
         print(f"Zones filled: {target}")
         for note in fill_notes:
             print(f"Note: {note}")
@@ -1109,11 +1124,14 @@ def _run_fill(args) -> int:
             )
             for line in fill_conflicts:
                 print(f"  {line}", file=sys.stderr)
-        print(
-            "`kct export` will refuse this board. Refill with KiCad's own filler: "
-            f"`kicad-cli pcb drc --refill-zones --save-board {target}`",
-            file=sys.stderr,
-        )
+        if output_path is None:
+            print(
+                "`kct export` will refuse this board. Refill with KiCad's own filler: "
+                f"`kicad-cli pcb drc --refill-zones --save-board {target}`",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Discarded the failed candidate for {output_path}.", file=sys.stderr)
         return 1
     if not check.ran and not quiet:
         print(f"Warning: saved zone fill not verified ({check.note or 'no DRC report'})")

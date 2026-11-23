@@ -20,7 +20,11 @@ gate passes.  Stages, in order:
    sidecars (byte-identical ``.kicad_pro`` / ``.kicad_dru``); otherwise the
    evidence would describe different rules.  Evidence is copied only when it
    describes a different board than the committed evidence, so a rerun keeps
-   the committed (date-stamped) reports.
+   the committed (date-stamped) reports.  The public summaries
+   (``output/build.json`` / ``output/status.json``) are always rewritten from
+   the build's routing-stage summary to describe the gated release (Issue
+   #9955): the staging references do not resolve from ``output/`` and its
+   pending-export flags describe the design stage.
 2. **Refill**: refill the routed PCB's zones under its own sidecars with
    ``declare_router_netclasses_6390.refill_zones_in_place`` (a plain native
    refill, transplanting only the ``(zone ...)`` blocks).  Refuses if anything
@@ -288,6 +292,38 @@ def _json_bytes(data: object) -> bytes:
     return (json.dumps(data, indent=2, sort_keys=True) + "\n").encode()
 
 
+#: Board-relative public release summaries (Issue #9955).  Both carry the same
+#: derived document: the staging builder writes them as identical routing-stage
+#: copies next to the artifacts it validated, and the publisher rewrites them
+#: to describe the gated release shipped in ``output/``.
+BOARD07_SUMMARY_TARGETS: tuple[str, ...] = ("output/build.json", "output/status.json")
+
+
+def _published_board07_summary(stage_summary: dict, cfg: rr.BoardConfig) -> bytes:
+    """Derive board 07's public summaries from the staging build's own (Issue #9955).
+
+    ``real_design/build.py`` records the routing stage: its ``pcb`` /
+    ``evidence`` references are relative to the staging build directory and its
+    completion flags describe that design stage, where no manufacturing
+    package exists yet.  The published ``output/`` copies keep the recorded
+    routing facts and describe the gated release instead: references resolve
+    from ``output/`` (the published routed PCB and the shipped design
+    evidence), the readiness receipt and the exported package are named, and
+    the completion flags describe the verified package.
+    """
+    summary = dict(stage_summary)
+    summary.update(
+        status="released",
+        pcb=Path(cfg.routed_pcb).name,
+        evidence="readiness/validation.json",
+        readiness="readiness.json",
+        manufacturing_package="manufacturing.zip",
+        manufacturing_complete=True,
+        manufacturing_export_required=False,
+    )
+    return _json_bytes(summary)
+
+
 # --------------------------------------------------------------------------- stage 1
 #: ``validation/`` file -> board-relative copies (board 07).
 BOARD07_EVIDENCE: dict[str, tuple[str, ...]] = {
@@ -348,6 +384,9 @@ def stage_board07_evidence(
     ``build_dir`` keeps (or replays) the build; by default it is a temporary
     directory removed afterwards.  Returns the board-relative files rewritten
     (empty when the committed evidence already describes the build's board).
+    The public release summaries are always rewritten in ``staged`` from the
+    build's summary (Issue #9955), whether or not the evidence itself is
+    current; the staging build's own files are only ever read.
     """
     if build_dir is None:
         with tempfile.TemporaryDirectory(prefix="refresh-bundles-07-build-") as tmp:
@@ -372,6 +411,14 @@ def _publish_board07_evidence(staged: Path, cfg: rr.BoardConfig, build: Path) ->
                 f"build.py checked the board under a different {suffix} than the published "
                 "routed sidecar; its evidence would describe other rules"
             )
+    # Issue #9955: the public summaries must describe the gated release, not
+    # the staging build whose ``build.json`` still carries staging-relative
+    # references and the design stage's pending-export flags.  Only ``staged``
+    # is written here: a refused publication (mismatched rules here, or any
+    # later gate in ``rr.repin_staged``) never copies to the board, and a
+    # rerun over an already-repaired bundle proposes zero changes.
+    summary = _published_board07_summary(json.loads((build / "build.json").read_text()), cfg)
+    _write_targets(staged, BOARD07_SUMMARY_TARGETS, summary)
     current = routed.read_bytes() == candidate.read_bytes() and all(
         (staged / targets[0]).read_bytes() == (validation / name).read_bytes()
         for name, targets in BOARD07_EVIDENCE.items()
@@ -391,6 +438,7 @@ def _publish_board07_evidence(staged: Path, cfg: rr.BoardConfig, build: Path) ->
             data = data.replace(os.fsencode(build.resolve()) + b"/", b"")
         _write_targets(staged, targets, data)
         written.extend(targets)
+    written.extend(BOARD07_SUMMARY_TARGETS)
     log(f"  board 07 evidence: published routed PCB and {len(written) - 1} evidence copies")
     return written
 

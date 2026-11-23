@@ -39,6 +39,7 @@ class Pin:
     # they look like "one common unit", so they continue to match SymbolInstance
     # placements regardless of the instance's ``unit`` field.
     unit: int = 0
+    hidden: bool = False
 
     def connection_point(self) -> tuple[float, float]:
         """Get the wire connection point in symbol-local (library Y-up) coords.
@@ -94,6 +95,20 @@ class Pin:
         number_node = node.get("number")
         number = str(number_node.children[0].value) if number_node else ""
 
+        # ``(hide yes)`` / ``(hide no)`` in KiCad 7+, a bare ``hide`` atom before that
+        hide_node = node.find_child("hide")
+        if hide_node is not None:
+            hidden = not hide_node.children or hide_node.get_string(0) == "yes"
+        else:
+            hidden = any(c.is_atom and c.value == "hide" for c in node.children)
+
         return cls(
-            name=name, number=number, x=x, y=y, angle=angle, length=length, pin_type=pin_type
+            name=name,
+            number=number,
+            x=x,
+            y=y,
+            angle=angle,
+            length=length,
+            pin_type=pin_type,
+            hidden=hidden,
         )

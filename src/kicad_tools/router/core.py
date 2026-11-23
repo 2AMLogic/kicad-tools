@@ -18709,6 +18709,15 @@ class Autorouter:
                     for route in old_routes:
                         self._mark_route(route)
                     routes = list(old_routes)
+                else:
+                    # The entry copper cannot legally come back, so the best
+                    # copper the net has actually kept is this re-search
+                    # result: ratchet to it, exactly as the progress and
+                    # equal-connectivity branches do.  A second search of the
+                    # net in this iteration must compare against (and fall
+                    # back to) the kept copper, never re-landing the
+                    # superseded entry beside it (issue #9963).
+                    self._known_failure_entry[net] = (new_pairs, list(routes))
             elif routes:
                 # Equal connectivity: the new copper is kept, so ratchet the
                 # entry state to it -- a second search of this net in the same
@@ -18744,11 +18753,20 @@ class Autorouter:
 
         Layer-aware contact graph over the net's own pads and routes, so pad
         overlap alone counts (the baseline an empty net enters with) and a
-        route that never touches a pad does not.
+        route that never touches a pad does not.  Issue #9963: the pads are
+        the routing terminals the negotiated loop searches against (the
+        ``pads_by_net`` substitution) -- an escaped pad counts as connected
+        at its escape endpoint, because the escape stub copper stays out of
+        ``net_routes`` and a search result that only reaches the endpoint
+        never touches the original pad outline.
         """
         from .terminal_connectivity import physical_pad_components
 
-        pads = [self.pads[k] for k in self.nets.get(int(net), []) if k in self.pads]
+        pads = [
+            self._escape_pad_overrides.get(k, self.pads[k])
+            for k in self.nets.get(int(net), [])
+            if k in self.pads
+        ]
         if len(pads) < 2:
             return frozenset()
         comps = physical_pad_components(pads, list(routes))
