@@ -115,9 +115,17 @@ def pcb_matches_spec(pcb_path: str | Path, kct_path: str | Path, spec: object) -
     nothing to contradict, so it matches (the pre-#9637 behaviour is kept), and
     so does a spec that sits in the same directory as the PCB.
     """
-    pcb_path = Path(pcb_path)
     project = getattr(spec, "project", None)
     artifacts = getattr(project, "artifacts", None)
+    # Recipe fixtures copy their spec beside the PCB (#7320), and versioned
+    # schematic aliases can share the directory of the named board (#4350).
+    if Path(kct_path).parent.resolve() == Path(pcb_path).parent.resolve():
+        return True
+    return pcb_matches_artifacts(pcb_path, kct_path, artifacts)
+
+
+def pcb_matches_artifacts(pcb_path: str | Path, kct_path: str | Path, artifacts: object) -> bool:
+    """Match any declared PCB path, including its routed or optimized stages."""
     named: list[str] = [
         n
         for n in (getattr(artifacts, "pcb", None), getattr(artifacts, "pcb_routed", None))
@@ -125,16 +133,9 @@ def pcb_matches_spec(pcb_path: str | Path, kct_path: str | Path, spec: object) -
     ]
     if not named:
         return True
-
     base = Path(kct_path).parent
-    # A spec sitting in the PCB's own directory is that board's spec (a recipe
-    # fixture copies its spec beside the PCB, issue #7320; versioned boards
-    # such as ``board_v24`` sit beside the spec of ``board``, issue #4350).
-    # Only a spec found one directory up can describe a *different* revision.
-    if base.resolve() == pcb_path.parent.resolve():
-        return True
     wanted = {_artifact_stem_key(base / n) for n in named}
-    return _artifact_stem_key(pcb_path) in wanted
+    return _artifact_stem_key(Path(pcb_path)) in wanted
 
 
 # How a schematic was found, reported by ``kct check`` (issue #9637).
