@@ -11,6 +11,7 @@ from pathlib import Path
 from hardware import ROOT, generate
 from routing import apply_routing
 
+from kicad_tools.manufacturers.attach_zone_dru import PAD_ZONE_CLEARANCES_META_KEY
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
 from kicad_tools.validate.known_warnings import unaccepted_report_warnings
 
@@ -286,7 +287,13 @@ def prepare_routed_board(output):
     """Prepare the staged board, from fingerprinted copper through the pre-refill check."""
     routed = output / "bldc_controller_routed.kicad_pcb"
     shutil.copy2(output / "bldc_controller.kicad_pcb", routed)
-    shutil.copy2(output / "bldc_controller.kicad_pro", routed.with_suffix(".kicad_pro"))
+    project = json.loads((output / "bldc_controller.kicad_pro").read_text())
+    # These five stock openings need the front pour's authored clearance even
+    # inside U3's attach zone. Pad-local clearance would also repel other pads.
+    project.setdefault("meta", {})[PAD_ZONE_CLEARANCES_META_KEY] = {
+        "F.Cu": {"GND": {"U3": ["1", "3", "5", "7", "8"]}}
+    }
+    routed.with_suffix(".kicad_pro").write_text(json.dumps(project, indent=2))
     fingerprint = apply_routing(routed)
     declare_router_netclasses(routed)
     # Issue #8532: every board carries global fiducials and a board-ID

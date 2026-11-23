@@ -69,6 +69,10 @@ DRU_ATTACH_ZONE_BLOCK_END = "# END kct attach-zone router-class exemptions"
 #: Rule-name prefix of every generated rule.
 ATTACH_ZONE_RULE_PREFIX = "kct attach zone - "
 
+#: Project meta mapping of layer -> zone net -> footprint -> pad numbers.
+#: These pads retain the zone's authored clearance inside an attach exemption.
+PAD_ZONE_CLEARANCES_META_KEY = "kct_pad_zone_clearances"
+
 #: KiCad's "this pad exists on every copper layer" wildcard.
 ALL_COPPER_LAYERS = "*.Cu"
 
@@ -251,6 +255,66 @@ def render_attach_zone_rule(zone: FloorZone, clearance: float) -> str:
     )
 
 
+def pad_zone_clearance_rules(
+    zones: Sequence[FloorZone],
+    zone_clearances: Sequence[tuple[str, str, float]],
+    project: dict,
+    floor: float,
+) -> list[str]:
+    """Restore authored pour spacing at selected pads inside an attach exemption.
+
+    Only actual board zones and eligible footprint courtyards supply rules.
+    The footprint's existing exemption condition guards both items: the new
+    rule can only tighten a pair that otherwise qualified for the lower floor.
+    """
+    meta = project.get("meta")
+    selections = meta.get(PAD_ZONE_CLEARANCES_META_KEY) if isinstance(meta, dict) else None
+    if not zones or selections is None:
+        return []
+    if not isinstance(selections, dict):
+        raise ValueError(f"Expected a layer mapping in {PAD_ZONE_CLEARANCES_META_KEY}")
+    rules = []
+    for layer, net, clearance in zone_clearances:
+        by_net = selections.get(layer, {})
+        by_ref = by_net.get(net, {}) if isinstance(by_net, dict) else None
+        if not isinstance(by_ref, dict):
+            raise ValueError(f"Expected a pad selection mapping for {layer}/{net}")
+        for zone in zones:
+            if zone.ref not in by_ref:
+                continue
+            pads = by_ref[zone.ref]
+            if (
+                not isinstance(pads, list)
+                or not pads
+                or not all(
+                    isinstance(s, str) and s and not re.search(r"[*?]", s)
+                    for s in (net, zone.ref, *pads)
+                )
+            ):
+                raise ValueError(
+                    f"Expected literal pad, footprint and net names for {zone.ref}/{net}"
+                )
+            terms = []
+            for pour, pad in (("A", "B"), ("B", "A")):
+                numbers = " || ".join(
+                    f"{pad}.Pad_Number == '{_dru_string(n)}'" for n in sorted(set(pads))
+                )
+                terms.append(
+                    f"({pour}.Type == 'Zone' && {pour}.NetName == '{_dru_string(net)}' && "
+                    f"{pad}.Type == 'Pad' && {pad}.Reference == '{_dru_string(zone.ref)}' && "
+                    f"({numbers}))"
+                )
+            condition = f"({zone.condition()}) && ({' || '.join(terms)})"
+            name = f"Zone clearance at {zone.ref} pads - {net} ({layer})"
+            rules.append(
+                f"(rule {json.dumps(name)}\n"
+                f"  (layer {json.dumps(layer)})\n"
+                f"  (condition {json.dumps(condition)})\n"
+                f"  (constraint clearance (min {max(clearance, floor)}mm)))"
+            )
+    return rules
+
+
 def has_attach_zone_block(dru_text: str | None) -> bool:
     """Whether ``.kicad_dru`` content carries the managed attach-zone block."""
     return bool(dru_text) and DRU_ATTACH_ZONE_BLOCK_BEGIN in (dru_text or "")
@@ -270,7 +334,11 @@ def strip_attach_zone_block(text: str) -> str:
 
 
 def merge_attach_zone_block(
-    existing: str | None, zones: Sequence[FloorZone], clearance: float
+    existing: str | None,
+    zones: Sequence[FloorZone],
+    clearance: float,
+    *,
+    pad_zone_rules: Sequence[str] = (),
 ) -> str | None:
     """Merge the attach-zone block into ``.kicad_dru`` content.
 
@@ -292,6 +360,7 @@ def merge_attach_zone_block(
         "# inside a footprint's courtyard, between its pad nets, the router's net-class",
         "# floor drops to the board-wide base clearance. Designer minima are untouched.",
         *(render_attach_zone_rule(zone, clearance) for zone in zones),
+        *pad_zone_rules,
     ]
     block = f"{DRU_ATTACH_ZONE_BLOCK_BEGIN}\n" + "\n".join(body) + f"\n{DRU_ATTACH_ZONE_BLOCK_END}"
     if base is None or not base.strip():
