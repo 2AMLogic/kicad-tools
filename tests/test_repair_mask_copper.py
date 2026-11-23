@@ -1956,3 +1956,165 @@ def test_moves_with_new_errors_attributes_a_via_centre_location(tmp_path, monkey
     # The nudged copper sits 0.40 mm from the via centre -- outside the old
     # 0.35 mm reach, inside reach + the measured 0.109 mm gap.
     assert flagged == {"trk-p"}
+
+
+# ---------------------------------------------------------------------------
+# Issue #9958: two pass-through nudges that drag a shared track endpoint
+# ---------------------------------------------------------------------------
+
+# trk-a runs right as a pass-through 0.02 mm above the opening; trk-b shares
+# its left endpoint and runs down past the opening's left edge, also 0.02 mm
+# clear.  trk-a's upward nudge drags trk-b's top end along trk-b's own line,
+# which leaves trk-b's body 0.02 mm from the opening on the dragged geometry,
+# so trk-b stays a live candidate after the first move -- the stacked second
+# edit the issue reports.
+OVERLAP_PAIR = (
+    _seg("trk-a", (104, 100.62), (98.88, 100.62))
+    + "\n"
+    + _seg("trk-b", (98.88, 100.62), (98.88, 98.5))
+)
+
+
+def _overlap_applied(board: Path) -> list:
+    """Apply the overlapping pair through the production solver and save."""
+    repairer = MaskCopperRepairer(board)
+    first = repairer.repair([_pt_finding("trk-a")], max_displacement=1.0)
+    assert first.repaired == 1
+    repairer.save(board)
+    # A fresh repair call has no memory of the first action, so trk-b's
+    # finding names the dragged geometry and is nudged on top of it.
+    second_repairer = MaskCopperRepairer(board)
+    second = second_repairer.repair([_pt_finding("trk-b")], max_displacement=1.0)
+    assert second.repaired == 1
+    second_repairer.save(board)
+    return [*first.actions, *second.actions]
+
+
+def test_overlapping_pass_through_pair_defers_the_second_nudge(tmp_path):
+    """A pass-through conductor an earlier action dragged must be deferred
+    (``segment_end_already_moved``), not nudged again on the dragged
+    geometry: the stacked edit cannot be undone in application order, which
+    aborts the whole batch (issue #9958)."""
+    board = _board(tmp_path, OVERLAP_PAIR + "\n" + _seg("trk-c", (100, 99.38), (102.5, 99.38)))
+    findings = [_pt_finding("trk-a"), _pt_finding("trk-b"), _pt_finding("trk-c")]
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair(findings, max_displacement=1.0)
+    assert result.repaired == 2  # the independent move stays eligible
+    assert [a.uuid for a in result.actions] == ["trk-a", "trk-c"]
+    assert result.skipped("segment_end_already_moved") == 1
+    repairer.save(board)
+    undo = MaskCopperRepairer(board)
+    for action in result.actions:
+        assert undo.undo_action(action)
+    undo.save(board)
+    assert _end(board, "trk-a") == [(104.0, 100.62), (98.88, 100.62)]
+    assert _end(board, "trk-b") == [(98.88, 100.62), (98.88, 98.5)]
+    assert _end(board, "trk-c") == [(100.0, 99.38), (102.5, 99.38)]
+
+
+def test_undo_still_fails_on_a_genuine_endpoint_mismatch(tmp_path):
+    """Deferral must not loosen the undo guard: a point that no longer sits
+    at the action's recorded post-move position still fails the undo, and
+    the caller falls back to the snapshot (issue #9958 premise)."""
+    board = _board(tmp_path, OVERLAP_PAIR)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_pt_finding("trk-a")], max_displacement=1.0)
+    assert result.repaired == 1
+    repairer.save(board)
+    # Shift trk-b's dragged endpoint 0.05 mm past its recorded post-move
+    # position, as a later edit the undo guard cannot account for would.
+    corrupt = MaskCopperRepairer(board)
+    start = corrupt._segment_by_uuid("trk-b").find("start")
+    start.set_value(0, round(float(start.get_atoms()[0]) + 0.05, 4))
+    start.set_value(1, round(float(start.get_atoms()[1]) + 0.05, 4))
+    corrupt.save(board)
+    assert not MaskCopperRepairer(board).undo_action(result.actions[0])
+
+
+def test_verify_undoes_overlapping_moves_in_reverse_order(tmp_path, monkeypatch):
+    """When an overlapping pair does reach the verifier, it rolls back only
+    if the undos run last-applied-first: undoing in application order hits
+    the shared endpoint at the second action's position and fails (issue
+    #9958)."""
+    from kicad_tools.drc.repair_mask_copper import MaskRepairResult
+
+    board = _board(tmp_path, OVERLAP_PAIR)
+    actions = _overlap_applied(board)
+    result = MaskRepairResult(actions=actions, repaired=2)
+    before = _report(_pt_finding("trk-a"), _pt_finding("trk-b"))
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", lambda *a, **k: None)
+    fix_drc_cmd._verify_mask_actions(
+        result,
+        before,
+        argparse.Namespace(mfr="jlcpcb", layers=None),
+        board,
+        board,
+        {},
+    )
+    assert result.actions == [] and result.repaired == 0
+    assert {(u.uuid, u.reason) for u in result.unrepaired} == {
+        ("trk-a", "recheck_unavailable"),
+        ("trk-b", "recheck_unavailable"),
+    }
+    assert _end(board, "trk-a") == [(104.0, 100.62), (98.88, 100.62)]
+    assert _end(board, "trk-b") == [(98.88, 100.62), (98.88, 98.5)]
+
+
+def test_baseline_reconstruction_undoes_overlapping_moves_in_reverse(tmp_path, monkeypatch):
+    """The pre-existing-error baseline is only trustworthy when the
+    reconstruction undo succeeds; with the overlapping pair applied, that
+    requires reverse application order (issue #9958)."""
+    board = _board(tmp_path, OVERLAP_PAIR)
+    actions = _overlap_applied(board)
+    # A pre-existing clearance error beside the shared endpoint: it matches
+    # its baseline counterpart, so no move is flagged -- but only if the
+    # baseline run happens, which needs both undos to succeed.
+    error = _clearance_error(x=98.9, y=100.6)
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", lambda *a, **k: _report(error))
+    flagged = fix_drc_cmd._moves_with_new_errors(
+        after=_report(error),
+        actions=actions,
+        output_path=board,
+        pcb_path=board,
+        args=argparse.Namespace(mfr="jlcpcb", layers=None),
+    )
+    assert flagged == set()
+
+
+def _own_finding(conductor: str, pad_uuid: str, pad_ref: str) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.MASK_TO_COPPER,
+        type_str="mask_to_copper",
+        severity=Severity.ERROR,
+        message=f"Mask-to-copper overlap: error; opening {pad_ref}; {OWN_ENTRY}",
+        locations=[Location(x_mm=100.0, y_mm=100.3, layer="F.Cu")],
+        items=[pad_uuid, conductor],
+    )
+
+
+def test_failed_mask_batch_reports_each_action_once(tmp_path, monkeypatch, capsys):
+    """When the selective rollback fails partway, the fail-closed fallback
+    must not re-report actions the rollback already disposed of: each action
+    uuid appears under exactly one reason in the JSON (issue #9958)."""
+    # Both findings persist. Undo trk-2 first so it has a specific
+    # disposition when undoing trk-a fails and the batch is discarded.
+    board = _board2(tmp_path, ENTRY + "\n" + _seg("trk-2", (106, 100.3), (103.7, 100.3)), "103 100")
+    original = board.read_bytes()
+    f1 = _own_finding("trk-a", PAD, "R1/1")
+    f2 = _own_finding("trk-2", "pad-r2-1", "R2/1")
+    still = _report(f1, f2)
+    real_undo = MaskCopperRepairer.undo_action
+
+    def selective_undo(self, action):
+        return False if action.uuid == "trk-a" else real_undo(self, action)
+
+    monkeypatch.setattr(MaskCopperRepairer, "undo_action", selective_undo)
+    code = _run(monkeypatch, board, [still, still, still], extra=("--format", "json"))
+    assert code != 0
+    payload = json.loads(capsys.readouterr().out)
+    records = payload["mask_copper"]["unrepaired"]
+    assert sorted((record["uuid"], record["reason"]) for record in records) == [
+        ("trk-2", "finding_not_cleared"),
+        ("trk-a", "recheck_unavailable"),
+    ]
+    assert board.read_bytes() == original

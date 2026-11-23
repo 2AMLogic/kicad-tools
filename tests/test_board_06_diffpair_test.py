@@ -29,10 +29,14 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
+
+from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+from kicad_tools.schema.pcb import PCB
 
 # =============================================================================
 # Module loading helpers
@@ -88,6 +92,36 @@ def generate_design_mod(generate_pcb_mod):
 # =============================================================================
 # AC#1 + AC#3: routed PCB exists and contains the expected diff pairs
 # =============================================================================
+
+
+def test_route_step_finishes_silk_on_the_saved_board(generate_design_mod, tmp_path, monkeypatch):
+    source = tmp_path / "diffpair_test.kicad_pcb"
+    shutil.copyfile(OUTPUT_DIR / source.name, source)
+    routed = tmp_path / "diffpair_test_routed.kicad_pcb"
+    fixture = PCB.load(OUTPUT_DIR / routed.name)
+    assert fixture.set_silkscreen_font(size=0.8, thickness=0.12, pattern="U4") > 0
+
+    def replay_route(input_path, output_path):
+        assert input_path == source
+        fixture.save(output_path)
+        return False  # A partial route still publishes a board for the CI gate.
+
+    monkeypatch.setattr(generate_design_mod, "route_pcb", replay_route)
+    monkeypatch.setattr(sys, "argv", ["generate_design.py", str(tmp_path), "--step", "route"])
+    assert generate_design_mod.main() == 0
+
+    finished = PCB.load(routed)
+    u4 = finished.get_footprint("U4")
+    assert u4 is not None
+    reference = next(text for text in u4.texts if text.text_type == "reference")
+    assert reference.font_height >= 1.0
+    assert reference.font_thickness >= 0.15
+    assert finished.segments == fixture.segments
+    assert finished.vias == fixture.vias
+    saved = routed.read_bytes()
+    repeat = run_default_silk_pass(routed, mfr="jlcpcb", quiet=True)
+    assert repeat and repeat["applied"] and repeat["total_fixed"] == repeat["total_moved"] == 0
+    assert routed.read_bytes() == saved
 
 
 class TestRoutedPcbArtifact:
