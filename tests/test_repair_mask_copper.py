@@ -1002,10 +1002,64 @@ def test_pass_through_keeps_a_collinear_overlap_that_survives_the_move(tmp_path)
     assert result.repaired == 1 and not result.skipped("junction_at_moved_end")
 
 
+@pytest.mark.parametrize(
+    "kind, layer, detail, blocked",
+    [
+        (
+            "smd custom",
+            "F.Cu",
+            "(primitives (gr_rect (start -2.75 -0.05) (end -2.68 0.05) (width 0) (fill yes)))",
+            True,
+        ),
+        (
+            "smd custom",
+            "F.Cu",
+            "(primitives (gr_rect (start -1.75 -0.05) (end -1.68 0.05) (width 0) (fill yes)))",
+            False,
+        ),
+        ("smd custom", "F.Cu", "(primitives (unknown_primitive))", True),
+        ("smd custom", "B.Cu", "(primitives (unknown_primitive))", False),
+        ("thru_hole rect", "*.Cu", "(drill 0.15 (offset -2.75 0))", True),
+        ("thru_hole rect", "*.Cu", "(drill 0.15 (offset -1.75 0))", False),
+        (
+            "thru_hole rect",
+            "*.Cu",
+            '(drill 0.15) (padstack (mode custom) (layer "F.Cu" (shape rect) (size 6 1)))',
+            True,
+        ),
+    ],
+)
+def test_fixed_via_pivot_checks_rotated_pad_copper_on_its_layer(
+    tmp_path, kind, layer, detail, blocked
+):
+    # A 90-degree pad rotates negative local X toward positive board Y.
+    # The first rectangle touches the old track by its edge. The second sits 1 mm farther away.
+    anchor, junction = (95, 100.62), (105, 100.62)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, (108, 103)),
+        f'(footprint "test:P5" (layer "F.Cu") (at 104.5 97.84) '
+        f'(property "Reference" "P5") (pad "1" {kind} (at 0 0 90) (size 0.2 0.2) '
+        f'(layers "{layer}") (net 1 "N1") (uuid "test-pad") {detail}))',
+    ]
+    repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == (0 if blocked else 1)
+    assert bool(result.skipped("would_break_same_net_contact")) == blocked
+
+
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize(
     "contact, tap_end",
-    [("track", 90.551), ("via", 90.366), ("pad", 90.316), ("retained", 90.95)],
+    [
+        ("track", 90.551),
+        ("via", 90.366),
+        ("pad", 90.316),
+        ("centered-custom", 90.316),
+        ("offset-custom", 90.316),
+        ("retained", 90.95),
+    ],
 )
 def test_verified_fixed_via_move_preserves_physical_contact(tmp_path, capsys, contact, tap_end):
     from kicad_tools.cli import main as kct
@@ -1019,22 +1073,50 @@ def test_verified_fixed_via_move_preserves_physical_contact(tmp_path, capsys, co
     doc = parse_file(fixture)
     track = "cc000000-0000-4000-8000-000000000050"
     tap = "cc000000-0000-4000-8000-000000000070"
+    pad_contact = contact in {"pad", "centered-custom", "offset-custom"}
+    shoulder = 89.25 if pad_contact else tap_end
     doc.add(
         parse_string(
-            f"(segment (start 145.5 88.45) (end 145.5 {tap_end}) (width 0.15) "
+            f"(segment (start 145.5 88.45) (end 145.5 {shoulder}) (width 0.15) "
             f'(layer "F.Cu") (net 1) (locked yes) (uuid "{tap}"))'
         )
     )
     if contact == "via":
         doc.add(parse_string(_via("cc000000-0000-4000-8000-000000000071", (145.5, tap_end))))
-    elif contact == "pad":
+    elif pad_contact:
+        # All three descriptions print the same copper. The broad feed contains
+        # the offset anchor, and its narrow continuation contains the custom neck.
+        for uid, start, end, width in [
+            ("74", shoulder, 89.75, 0.32),
+            ("75", 89.75, tap_end, 0.15),
+        ]:
+            doc.add(
+                parse_string(
+                    f"(segment (start 145.5 {start}) (end 145.5 {end}) (width {width}) "
+                    f'(layer "F.Cu") (net 1) (locked yes) '
+                    f'(uuid "cc000000-0000-4000-8000-0000000000{uid}"))'
+                )
+            )
+        anchor_y = 89.5 if contact == "offset-custom" else 90.436
+        shape, size = "rect", 0.45
+        primitives = ""
+        if contact != "pad":
+            shape, size = "custom", 0.30
+            neck = ""
+            if contact == "offset-custom":
+                neck = "(gr_rect (start -0.04 0) (end 0.04 0.936) (width 0) (fill yes))"
+            primitives = (
+                "(options (clearance outline) (anchor circle)) "
+                f"(primitives (gr_rect (start -0.225 {90.211 - anchor_y:.6f}) "
+                f"(end 0.225 {90.661 - anchor_y:.6f}) (width 0) (fill yes)) {neck})"
+            )
         doc.add(
             parse_string(
-                '(footprint "Test:Contact" (layer "F.Cu") (at 145.5 90.436) '
+                f'(footprint "Test:Contact" (layer "F.Cu") (at 145.5 {anchor_y}) '
                 '(uuid "cc000000-0000-4000-8000-000000000072") '
                 '(property "Reference" "P5" (at 0 -1) (layer "F.Fab")) '
-                '(pad "1" smd rect (at 0 0) (size 0.45 0.45) (layers "F.Cu") '
-                '(net 1 "N1") (uuid "cc000000-0000-4000-8000-000000000073")))'
+                f'(pad "1" smd {shape} (at 0 0) (size {size} {size}) (layers "F.Cu") '
+                f'(net 1 "N1") (uuid "cc000000-0000-4000-8000-000000000073") {primitives}))'
             )
         )
     board = tmp_path / fixture.name
@@ -1046,7 +1128,7 @@ def test_verified_fixed_via_move_preserves_physical_contact(tmp_path, capsys, co
         # reading in a private stage just as fix-drc does.
         with fix_drc_cmd._with_project_rules(board, board, private=True) as staged:
             groups = fix_drc_cmd._mask_native_pad_groups(staged)
-        assert len(groups) == 1 and len(groups[0]) == (5 if contact == "pad" else 4)
+        assert len(groups) == 1 and len(groups[0]) == (5 if pad_contact else 4)
         kct(
             [
                 "fix-drc",

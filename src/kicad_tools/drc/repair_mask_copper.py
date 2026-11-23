@@ -65,7 +65,7 @@ from .violation import DRCViolation, ViolationType
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.pcb import PCB, Pad
 
 #: Message marker the mask rule writes for a same-net segment that enters its
 #: own pad (``validate/mask_copper.py``).
@@ -275,6 +275,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         # same ``nets`` / ``net_names`` indexes this class historically did.
         super().__init__(pcb_path)
         self._project_pcb_path = Path(project_pcb_path) if project_pcb_path else self.path
+        self._pivot_pad_bounds: dict[str, BaseGeometry | None] = {}
 
     @cached_property
     def _board_rules(self) -> BoardClearanceRules:
@@ -331,6 +332,7 @@ class MaskCopperRepairer(CopperGapRepairer):
                 rx, ry = rotate_pad_offset(lx, ly, fp.rotation)
                 cx = fp.position[0] + rx + ox
                 cy = fp.position[1] + ry + oy
+                identity = _bare(pad.uuid) if pad.uuid else f"{fp.reference}:pad:{index}"
                 poly = self._pad_polygon(pad, cx, cy)
                 if poly is None:
                     # Keep the pad as an obstacle/owner marker with its box so a
@@ -340,7 +342,15 @@ class MaskCopperRepairer(CopperGapRepairer):
                     shape = "unsupported"
                 else:
                     shape = pad.shape
-                identity = _bare(pad.uuid) if pad.uuid else f"{fp.reference}:pad:{index}"
+                node = pad._sexp_node
+                if (
+                    shape == "unsupported"
+                    or pad.drill_offset != (0.0, 0.0)
+                    or (node is not None and (node.find("padstack") or node.find("chamfer")))
+                ):
+                    self._pivot_pad_bounds[identity] = self._pad_contact_bound(
+                        pad, fp.reference, cx, cy
+                    )
                 pads[identity] = (
                     poly,
                     (cx, cy),
@@ -350,6 +360,38 @@ class MaskCopperRepairer(CopperGapRepairer):
                     shape,
                 )
         return pads
+
+    @staticmethod
+    def _pad_contact_bound(pad: Pad, ref: str, cx: float, cy: float) -> BaseGeometry | None:
+        """Enclose the physical copper of a pad whose opening we cannot model."""
+        from kicad_tools.cli.relocate_in_pad_vias import _pad_copper_shift
+        from kicad_tools.router.fixed_copper import bounding_pad_copper
+
+        node = pad._sexp_node
+        shift = _pad_copper_shift(pad)
+        if node is None or shift is None or node.find("padstack") is not None:
+            return None
+        cx, cy = cx + shift[0], cy + shift[1]
+        if pad.shape in {"rect", "roundrect", "circle", "oval"}:
+            w, h = pad.size
+            if w <= 0 or h <= 0:
+                return None
+            rect = box(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+            return rotate(rect, -pad.rotation, origin=(cx, cy))
+        try:
+            bound = bounding_pad_copper(
+                node.to_string(),
+                reference=ref,
+                pad_number=pad.number,
+                x=cx,
+                y=cy,
+                rotation=pad.rotation,
+                source_net=pad.net_name or "",
+                source_net_id=pad.net_number,
+            )
+        except ValueError:
+            return None
+        return bound.geometry if bound is not None else None
 
     @staticmethod
     def _pad_polygon(pad, cx: float, cy: float) -> BaseGeometry | None:
@@ -1270,11 +1312,20 @@ class MaskCopperRepairer(CopperGapRepairer):
             ):
                 continue
             neighbours.append(Point(at).buffer(_num(size_node) / 2, quad_segs=16))
-        for poly, _centre, pad_layers, pad_net, _ref, shape in pads.values():
-            if pad_net != net_name or not (layer in pad_layers or "*.Cu" in pad_layers):
+        for identity, (poly, _centre, pad_layers, pad_net, _ref, _shape) in pads.items():
+            if pad_net != net_name or not (
+                layer in pad_layers
+                or "*.Cu" in pad_layers
+                or ("F&B.Cu" in pad_layers and layer in {"F.Cu", "B.Cu"})
+            ):
                 continue
-            if shape == "unsupported" and reach.intersects(poly.buffer(0.5)):
-                return True
+            if identity in self._pivot_pad_bounds:
+                # A primitive or displaced land can reach well past its anchor.
+                # An enclosing shape can only rule out contact at a distance.
+                bound = self._pivot_pad_bounds[identity]
+                if bound is None or reach.intersects(bound):
+                    return True
+                continue
             neighbours.append(poly)
         for neighbour in neighbours:
             if not reach.intersects(neighbour):
