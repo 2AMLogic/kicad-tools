@@ -22,6 +22,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import patch
 
@@ -37,6 +38,8 @@ from kicad_tools.cli.route_lint_gate import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "projects"
+# Leave time for the process snapshot and cleanup before CI's 60-second watchdog.
+_SIGNAL_CASE_TIMEOUT_S = 40
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 
@@ -95,31 +98,70 @@ def _staging_dirs(directory: Path) -> list[Path]:
     return [p for p in directory.iterdir() if ".lint-gate-" in p.name]
 
 
+def _signal_group_snapshot(pgid: int) -> str:
+    """Include descendants that inherited a pipe, even after the driver exited."""
+    try:
+        table = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,ppid=,pgid=,stat=,comm="],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"process snapshot unavailable ({exc})"
+    members = []
+    for line in table.splitlines():
+        fields = line.split(maxsplit=4)
+        if len(fields) == 5 and fields[2] == str(pgid):
+            members.append(line.strip())
+    return "\n".join(members) or "no group members visible"
+
+
 def _run_and_signal(tmp_path: Path, mode: str, argv: list[str], sig: int) -> tuple[int, str, Path]:
     driver = tmp_path / "driver.py"
     driver.write_text(_DRIVER)
     ready = tmp_path / "ready"
+    started = time.monotonic()
+    deadline = started + _SIGNAL_CASE_TIMEOUT_S
     proc = subprocess.Popen(
         [sys.executable, str(driver), mode, str(ready), *argv],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
+    ready_at = signal_at = "pending"
+    drained = False
     try:
-        deadline = time.monotonic() + 120
-        while not ready.exists():
-            if proc.poll() is not None:
-                out, err = proc.communicate()
-                pytest.fail(f"driver exited early ({proc.returncode}):\n{out}\n{err}")
-            if time.monotonic() > deadline:
-                pytest.fail("driver never reached the signal point")
+        while not ready.exists() and proc.poll() is None:
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(proc.args, _SIGNAL_CASE_TIMEOUT_S)
             time.sleep(0.05)
-        proc.send_signal(sig)
-        _out, err = proc.communicate(timeout=60)
+        if ready.exists():
+            ready_at = f"{time.monotonic() - started:.3f}s"
+            proc.send_signal(sig)
+            signal_at = f"{time.monotonic() - started:.3f}s"
+        out, err = proc.communicate(timeout=max(0, deadline - time.monotonic()))
+        drained = True
+        if ready_at == "pending":
+            pytest.fail(f"driver exited early ({proc.returncode}):\n{out}\n{err}")
+    except subprocess.TimeoutExpired:
+        elapsed = time.monotonic() - started
+        rc = proc.poll()
+        status = "still running" if rc is None else f"exited with {rc} by {elapsed:.3f}s"
+        pytest.fail(
+            f"driver deadline at {elapsed:.3f}s, ready={ready_at}, signal={signal_at}, "
+            f"driver {status}\nPID PPID PGID STAT COMMAND\n{_signal_group_snapshot(proc.pid)}"
+        )
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.communicate()
+        if not drained:
+            with suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            assert proc.stdout is not None and proc.stderr is not None
+            proc.stdout.close()
+            proc.stderr.close()
+            proc.wait(timeout=3)
     return proc.returncode, err, Path(ready.read_text())
 
 
