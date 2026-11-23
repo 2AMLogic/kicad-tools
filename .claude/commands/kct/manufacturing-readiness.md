@@ -13,15 +13,13 @@ Sign off a routed `.kicad_pcb` for fabrication. This skill codifies the **sign-o
 
 ## Prerequisite
 
-The native router/DRC backend must be built in the active checkout before this skill is meaningful (Epic #4054 convention #1). Run once per checkout / worktree:
+After `uv sync`, check the native router in the project environment.
 
 ```bash
-uv run kct build-native --check   # expect: "C++ backend: available"
-# if "not installed":
-uv run kct build-native
+uv run kct build-native --check
 ```
 
-`uv sync` does **not** build the native extension. A fresh checkout or git worktree needs this step explicitly.
+`C++ backend: available` and exit code 0 satisfy this prerequisite. If the router is missing, run `uv run kct build-native` and repeat the check. Placement and DRC are optional. When either reports `not built`, continue with its Python fallback. Building those two native extensions requires a kicad-tools source checkout.
 
 The gates also need `jq` (Gates 1, 2 and 4 judge JSON reports with it) and a KiCad install for `kicad-cli` (Gate 2 resolves it itself; see there). A missing `jq` means the gates cannot be judged — refuse sign-off rather than eyeballing the JSON.
 
