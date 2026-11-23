@@ -1886,12 +1886,15 @@ def _relocate_pad_edge_vias(pcb_path: Path) -> int:
     clean result.  Returns the number of vias moved; a via with no legal spot
     raises (the surrounding transaction restores the board).
     """
+    from reset_escape import repair_reset_escape
+
     from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.schema.pcb import PCB
 
     pcb = PCB.load(pcb_path)
-    result = relocate_pad_edge_vias(pcb, get_profile("jlcpcb").get_design_rules(layers=4))
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    result = relocate_pad_edge_vias(pcb, rules)
     if result.skipped or result.unresolvable:
         raise RuntimeError(f"Pad-edge vias left in the mask-dam zone: {result}")
     for move in result.moved:
@@ -1901,7 +1904,7 @@ def _relocate_pad_edge_vias(pcb_path: Path) -> int:
         )
     if result.changed:
         pcb.save(pcb_path)
-    return len(result.moved)
+    return len(result.moved) + repair_reset_escape(pcb_path, rules)
 
 
 def _same_net_leg_band_ok(
