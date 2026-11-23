@@ -80,11 +80,6 @@ EXPECTED_STALE: dict[str, str] = {
     # #9536 regenerated the committed copper/evidence from that recipe on the
     # pinned toolchain (readiness re-pinned ``ready``).  Removed from this
     # dict by #9536.
-    "07-matchgroup-test": (
-        "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "
-        "sources; `refresh_readiness.py` refuses to re-pin while redundant_copper_* "
-        "warnings remain (kct check allowance is 0). The last child of #8399 owns the re-pin."
-    ),
     # Board 09's entry (issue #9495 / #9519) was removed when #9519
     # regenerated board 09's output and receipt via the #9469 pinned
     # Docker toolchain workflow after #9502 moved both producers under

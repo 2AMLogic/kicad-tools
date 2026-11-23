@@ -123,12 +123,29 @@ address / command spreads are 1.952 / 4.605 / 3.648 / 4.027 mm against the
 5.0 mm limit, the largest clock-relative difference is 9.881 mm and the
 smallest non-pad clock gap is 0.560 mm against the 0.54 mm screen.
 
-The files under `evidence/` come from that passing build, except
-`refill-stability.json`, which #8604's manufacturing evidence refresh
-re-issues together with `../../output/` and the independent routing
-recheck. The redundant-copper census above is the release gate's: it runs
+The redundant-copper census above runs
 on the validated artifact with the board's generated `.kicad_pro` net
 classes beside it. Checking the raw committed file without that project
 context instead flags five candidate staircases (BOOT0, DQ1 and three
 more) whose one-bend shortcuts would violate the 0.175 mm class
 clearances, so the gate context is the authoritative one.
+
+## Manufacturing recheck (Issue #8604)
+
+The independent review on 2026-11-22 repeated the build and validator from
+the post-merge inputs. Both SHA-256 values above still match the reviewed and
+authored PCBs. The saved, filled production PCB is
+`716d270e82df33950d7bc65c27aecc02cd4932ca9c6112429361a13db21791fb`.
+Two independent builds produced this digest. At the first refill, KiCad
+adds two hidden fabrication fields to each fiducial. The validator retains
+all 2,869 reviewed identifiers and assigns reproducible identifiers to
+those 12 fields before repeating the native save.
+Pinned KiCad 10.0.6 found zero violations and opens on the saved copper and
+after a separate refill. Both LVS checks bound all 216 pads. The 38 timed
+nets passed their group, clock-relative and load limits. See the
+[group measurements](../README.md) and [clock spacing](evidence/clock-spacing.json).
+
+The order package uses the same filled PCB and the production DRU for both
+plots and checks. Its assembly CSV contains all 43 placements. The six
+board-only fiducials are present in the fabrication artwork. Hardware
+testing remains pending.

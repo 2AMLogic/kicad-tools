@@ -54,6 +54,7 @@ manufacturers:
 #   01: 2 errors / 1 signature   02: 29 / 8    03: 78 / 23
 #   (02's entry was removed when #9467 cleared its copper to 0 errors.)
 #   05: 83 / 21                  06: 48 / 14   07: 67 / 16
+#   Board 07's six-layer reissue in #8604 cleared all 16 release signatures.
 # Board 00 measures 0 mask_to_copper errors and board 04's native path
 # dispatches to the reviewed paid-drill validator whose rule selection does
 # not include mask_to_copper, so neither carries an entry.  The per-board
@@ -114,21 +115,3 @@ identity_allowances:
       V3P3: 8858
       VCP: 8858
       VM: 8858
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb:
-    mask_to_copper:
-      +3V3: 8858
-      +5V: 8858
-      BOOT0: 8858
-      DQ13: 8858
-      DQ7: 8858
-      GND: 8858
-      LDQM: 8858
-      LED_FAIL_A: 8858
-      LED_PASS_A: 8858
-      NRST: 8858
-      SWDIO: 8858
-      SWO: 8858
-      UART_RX: 8858
-      UART_TX: 8858
-      UDQM: 8858
-      VCAP1: 8858

@@ -1,464 +1,4293 @@
 {
-  "scope": "Authored front-side package escape paths only; this measures deviations, not a transient SI pass.",
-  "max_escape_length_mm": 5.11989898732233,
-  "clock_escapes": [
+  "pcb_sha256": "45943c244519945ee5d51c4b58a28a901cf67b092129c64dcd2ea90a11d2bc84",
+  "scope": "All data/control track and via pairs on F.Cu within 5 mm. Clock-to-other-copper spacing on all signal layers is checked separately by clock_spacing.py.",
+  "trace_width_mm": 0.18,
+  "via_diameter_mm": 0.5,
+  "layer": "F.Cu",
+  "pairs_within_5_mm": [
     {
-      "ref": "U2",
-      "length_mm": 4.64911688245431
+      "data": "DQ0",
+      "control": "A5",
+      "edge_gaps_mm": {
+        "track/track": 20.849159,
+        "track/via": 4.822364,
+        "via/track": 20.689159,
+        "via/via": 4.920248
+      }
     },
     {
-      "ref": "U1",
-      "length_mm": 3.3278721497261428
+      "data": "DQ0",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 1.752431,
+        "track/via": 1.592431,
+        "via/track": 1.96,
+        "via/via": 1.8
+      }
+    },
+    {
+      "data": "DQ0",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 2.283,
+        "track/via": 2.631298,
+        "via/track": 2.535,
+        "via/via": 2.634984
+      }
+    },
+    {
+      "data": "DQ0",
+      "control": "SDCLK",
+      "edge_gaps_mm": {
+        "track/track": 3.82,
+        "track/via": 3.868217,
+        "via/track": 4.076004,
+        "via/via": 4.1
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "A0",
+      "edge_gaps_mm": {
+        "track/track": 12.196071,
+        "track/via": 3.547,
+        "via/track": 12.036071,
+        "via/via": 4.543029
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "A1",
+      "edge_gaps_mm": {
+        "track/track": 11.707073,
+        "track/via": 5.104796,
+        "via/track": 11.547073,
+        "via/via": 4.944796
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "A2",
+      "edge_gaps_mm": {
+        "track/track": 12.542702,
+        "track/via": 4.098,
+        "via/track": 12.382702,
+        "via/via": 5.34454
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "A5",
+      "edge_gaps_mm": {
+        "track/track": 13.186643,
+        "track/via": 3.51,
+        "via/track": 13.026643,
+        "via/via": 4.144102
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 0.758,
+        "track/via": 0.598,
+        "via/track": 0.71,
+        "via/via": 1.631097
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 1.333,
+        "track/via": 1.173,
+        "via/track": 1.173,
+        "via/via": 1.801
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "SDCLK",
+      "edge_gaps_mm": {
+        "track/track": 2.782422,
+        "track/via": 2.898,
+        "via/track": 2.622422,
+        "via/via": 3.312189
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "SDNCAS",
+      "edge_gaps_mm": {
+        "track/track": 4.444814,
+        "track/via": 7.908851,
+        "via/track": 4.284814,
+        "via/via": 7.748851
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 9.653662,
+        "track/via": 3.832089,
+        "via/track": 9.493662,
+        "via/via": 3.672089
+      }
+    },
+    {
+      "data": "DQ1",
+      "control": "SDNWE",
+      "edge_gaps_mm": {
+        "track/track": 9.42,
+        "track/via": 4.854513,
+        "via/track": 9.426069,
+        "via/via": 4.694513
+      }
+    },
+    {
+      "data": "DQ10",
+      "control": "A10",
+      "edge_gaps_mm": {
+        "track/track": 4.782614,
+        "track/via": 4.812554,
+        "via/track": 5.41,
+        "via/via": 4.652554
+      }
+    },
+    {
+      "data": "DQ10",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 4.32,
+        "track/via": 4.263815,
+        "via/track": 4.983826,
+        "via/via": 4.823826
+      }
+    },
+    {
+      "data": "DQ10",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 11.314922,
+        "track/via": 3.791056,
+        "via/track": 15.085985,
+        "via/via": 3.631056
+      }
+    },
+    {
+      "data": "DQ11",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 4.82,
+        "track/via": 4.759479,
+        "via/track": 5.41,
+        "via/via": 5.25
+      }
+    },
+    {
+      "data": "DQ11",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 11.108677,
+        "track/via": 5.107166,
+        "via/track": 13.730101,
+        "via/via": 4.947166
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "A0",
+      "edge_gaps_mm": {
+        "track/track": 6.270612,
+        "track/via": 1.864052,
+        "via/track": 6.565941,
+        "via/via": 1.763097
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "A1",
+      "edge_gaps_mm": {
+        "track/track": 6.37229,
+        "track/via": 0.241242,
+        "via/track": 7.065783,
+        "via/via": 2.666261
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "A10",
+      "edge_gaps_mm": {
+        "track/track": 4.780454,
+        "track/via": 4.620454,
+        "via/track": 5.277047,
+        "via/via": 5.117047
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 5.32,
+        "track/via": 0.897437,
+        "via/track": 11.071332,
+        "via/via": 11.525144
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "A3",
+      "edge_gaps_mm": {
+        "track/track": 7.193719,
+        "track/via": 1.471608,
+        "via/track": 8.750678,
+        "via/via": 8.714728
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "A4",
+      "edge_gaps_mm": {
+        "track/track": 15.02,
+        "track/via": 0.69379,
+        "via/track": 16.05639,
+        "via/via": 9.475561
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "A5",
+      "edge_gaps_mm": {
+        "track/track": 14.22,
+        "track/via": 0.46,
+        "via/track": 15.257436,
+        "via/via": 2.115267
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "A9",
+      "edge_gaps_mm": {
+        "track/track": 6.283,
+        "track/via": 3.876131,
+        "via/track": 12.030416,
+        "via/via": 10.741006
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 3.405031,
+        "track/via": 3.245031,
+        "via/track": 3.536599,
+        "via/via": 3.376599
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 4.939453,
+        "track/via": 4.24361,
+        "via/track": 4.930979,
+        "via/via": 4.770979
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "SDNCAS",
+      "edge_gaps_mm": {
+        "track/track": 2.69054,
+        "track/via": 2.53054,
+        "via/track": 2.537364,
+        "via/via": 2.377364
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "SDNE1",
+      "edge_gaps_mm": {
+        "track/track": 3.639183,
+        "track/via": 3.479183,
+        "via/track": 3.48696,
+        "via/via": 3.32696
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 2.103955,
+        "track/via": 0.839454,
+        "via/track": 1.956959,
+        "via/via": 1.796959
+      }
+    },
+    {
+      "data": "DQ12",
+      "control": "SDNWE",
+      "edge_gaps_mm": {
+        "track/track": 1.329924,
+        "track/via": 0.839454,
+        "via/track": 1.174999,
+        "via/via": 1.014999
+      }
+    },
+    {
+      "data": "DQ13",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 1.208261,
+        "track/via": 4.298261,
+        "via/track": 1.274254,
+        "via/via": 4.192551
+      }
+    },
+    {
+      "data": "DQ13",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 1.208261,
+        "track/via": 5.548261,
+        "via/track": 1.578216,
+        "via/via": 5.527215
+      }
+    },
+    {
+      "data": "DQ13",
+      "control": "SDCLK",
+      "edge_gaps_mm": {
+        "track/track": 1.416183,
+        "track/via": 4.399782,
+        "via/track": 1.89661,
+        "via/via": 4.987308
+      }
+    },
+    {
+      "data": "DQ13",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 9.026666,
+        "track/via": 4.458465,
+        "via/track": 8.876704,
+        "via/via": 4.298465
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A0",
+      "edge_gaps_mm": {
+        "track/track": 1.92,
+        "track/via": 0.944813,
+        "via/track": 18.427059,
+        "via/via": 21.501782
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A1",
+      "edge_gaps_mm": {
+        "track/track": 0.67,
+        "track/via": 0.26,
+        "via/track": 18.41,
+        "via/via": 22.780947
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A10",
+      "edge_gaps_mm": {
+        "track/track": 0.67,
+        "track/via": 0.51,
+        "via/track": 18.478143,
+        "via/via": 22.758807
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 4.469989,
+        "track/via": 4.16,
+        "via/track": 4.366421,
+        "via/via": 4.206421
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A2",
+      "edge_gaps_mm": {
+        "track/track": 1.8,
+        "track/via": 1.64,
+        "via/track": 18.427059,
+        "via/via": 21.601909
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A3",
+      "edge_gaps_mm": {
+        "track/track": 0.392756,
+        "track/via": 0.232756,
+        "via/track": 18.478143,
+        "via/via": 22.947902
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A4",
+      "edge_gaps_mm": {
+        "track/track": 0.640244,
+        "track/via": 0.480244,
+        "via/track": 4.684102,
+        "via/via": 4.524102
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A5",
+      "edge_gaps_mm": {
+        "track/track": 0.406899,
+        "track/via": 0.246899,
+        "via/track": 3.132305,
+        "via/via": 2.972305
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A6",
+      "edge_gaps_mm": {
+        "track/track": 1.94132,
+        "track/via": 1.78132,
+        "via/track": 3.836123,
+        "via/via": 3.676123
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A7",
+      "edge_gaps_mm": {
+        "track/track": 1.707975,
+        "track/via": 1.547975,
+        "via/track": 2.424218,
+        "via/via": 2.264218
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A8",
+      "edge_gaps_mm": {
+        "track/track": 3.242397,
+        "track/via": 0.98,
+        "via/track": 3.710876,
+        "via/via": 3.550876
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "A9",
+      "edge_gaps_mm": {
+        "track/track": 2.918403,
+        "track/via": 0.29,
+        "via/track": 2.821661,
+        "via/via": 2.661661
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 0.67,
+        "track/via": 0.51,
+        "via/track": 18.681107,
+        "via/via": 22.881893
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 1.92,
+        "track/via": 1.76,
+        "via/track": 18.562976,
+        "via/via": 21.55524
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "SDNCAS",
+      "edge_gaps_mm": {
+        "track/track": 1.92,
+        "track/via": 1.76,
+        "via/track": 18.424927,
+        "via/via": 21.111145
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "SDNE1",
+      "edge_gaps_mm": {
+        "track/track": 1.92,
+        "track/via": 1.76,
+        "via/track": 18.83192,
+        "via/via": 21.761177
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 0.67,
+        "track/via": 0.364,
+        "via/track": 18.92973,
+        "via/via": 22.661539
+      }
+    },
+    {
+      "data": "DQ14",
+      "control": "SDNWE",
+      "edge_gaps_mm": {
+        "track/track": 0.67,
+        "track/via": 0.450545,
+        "via/track": 17.941206,
+        "via/via": 21.691082
+      }
+    },
+    {
+      "data": "DQ15",
+      "control": "A0",
+      "edge_gaps_mm": {
+        "track/track": 7.966466,
+        "track/via": 0.984006,
+        "via/track": 9.65312,
+        "via/via": 0.824006
+      }
+    },
+    {
+      "data": "DQ15",
+      "control": "A1",
+      "edge_gaps_mm": {
+        "track/track": 7.610323,
+        "track/via": 1.483266,
+        "via/track": 9.99257,
+        "via/via": 4.278188
+      }
+    },
+    {
+      "data": "DQ15",
+      "control": "A5",
+      "edge_gaps_mm": {
+        "track/track": 18.22,
+        "track/via": 2.130544,
+        "via/track": 21.233159,
+        "via/via": 4.162381
+      }
+    },
+    {
+      "data": "DQ15",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 2.742769,
+        "track/via": 2.582769,
+        "via/track": 6.632133,
+        "via/via": 6.472133
+      }
+    },
+    {
+      "data": "DQ15",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 2.408827,
+        "track/via": 2.248827,
+        "via/track": 7.843993,
+        "via/via": 7.683993
+      }
+    },
+    {
+      "data": "DQ15",
+      "control": "SDCLK",
+      "edge_gaps_mm": {
+        "track/track": 4.394512,
+        "track/via": 4.234512,
+        "via/track": 9.094738,
+        "via/via": 8.934738
+      }
+    },
+    {
+      "data": "DQ15",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 5.240549,
+        "track/via": 2.030945,
+        "via/track": 5.109014,
+        "via/via": 4.949014
+      }
+    },
+    {
+      "data": "DQ15",
+      "control": "SDNWE",
+      "edge_gaps_mm": {
+        "track/track": 4.008565,
+        "track/via": 0.521,
+        "via/track": 3.848565,
+        "via/via": 2.823882
+      }
+    },
+    {
+      "data": "DQ3",
+      "control": "A5",
+      "edge_gaps_mm": {
+        "track/track": 11.728516,
+        "track/via": 5.069482,
+        "via/track": 11.568516,
+        "via/via": 4.909482
+      }
+    },
+    {
+      "data": "DQ3",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 2.353217,
+        "track/via": 2.193217,
+        "via/track": 2.193217,
+        "via/via": 2.033217
+      }
+    },
+    {
+      "data": "DQ3",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 2.833,
+        "track/via": 2.724965,
+        "via/track": 2.673,
+        "via/via": 2.564965
+      }
+    },
+    {
+      "data": "DQ3",
+      "control": "SDCLK",
+      "edge_gaps_mm": {
+        "track/track": 4.45356,
+        "track/via": 4.447691,
+        "via/track": 4.29356,
+        "via/via": 4.287691
+      }
+    },
+    {
+      "data": "DQ3",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 8.62,
+        "track/via": 4.566111,
+        "via/track": 8.53824,
+        "via/via": 4.406111
+      }
+    },
+    {
+      "data": "DQ4",
+      "control": "A0",
+      "edge_gaps_mm": {
+        "track/track": 11.82,
+        "track/via": 2.947,
+        "via/track": 22.843098,
+        "via/via": 3.637576
+      }
+    },
+    {
+      "data": "DQ4",
+      "control": "A10",
+      "edge_gaps_mm": {
+        "track/track": 0.744885,
+        "track/via": 0.809,
+        "via/track": 0.809,
+        "via/via": 0.649
+      }
+    },
+    {
+      "data": "DQ4",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 0.32,
+        "track/via": 0.234,
+        "via/track": 1.035491,
+        "via/via": 0.875491
+      }
+    },
+    {
+      "data": "DQ4",
+      "control": "A2",
+      "edge_gaps_mm": {
+        "track/track": 13.42,
+        "track/via": 3.498,
+        "via/track": 22.01245,
+        "via/via": 4.435469
+      }
+    },
+    {
+      "data": "DQ4",
+      "control": "A6",
+      "edge_gaps_mm": {
+        "track/track": 3.82,
+        "track/via": 4.26,
+        "via/track": 3.935382,
+        "via/via": 4.1
+      }
+    },
+    {
+      "data": "DQ4",
+      "control": "A7",
+      "edge_gaps_mm": {
+        "track/track": 2.32,
+        "track/via": 2.462127,
+        "via/track": 2.740002,
+        "via/via": 2.634984
+      }
+    },
+    {
+      "data": "DQ4",
+      "control": "A8",
+      "edge_gaps_mm": {
+        "track/track": 1.82,
+        "track/via": 1.959,
+        "via/track": 1.959,
+        "via/via": 1.799
+      }
+    },
+    {
+      "data": "DQ4",
+      "control": "A9",
+      "edge_gaps_mm": {
+        "track/track": 1.283,
+        "track/via": 1.385,
+        "via/track": 1.790288,
+        "via/via": 1.630288
+      }
+    },
+    {
+      "data": "DQ4",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 4.32,
+        "track/via": 4.675166,
+        "via/track": 4.703698,
+        "via/via": 4.822854
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "A0",
+      "edge_gaps_mm": {
+        "track/track": 10.22,
+        "track/via": 2.163505,
+        "via/track": 21.50534,
+        "via/via": 2.328345
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "A10",
+      "edge_gaps_mm": {
+        "track/track": 1.32,
+        "track/via": 1.790288,
+        "via/track": 1.385,
+        "via/via": 1.630288
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 0.82,
+        "track/via": 0.81,
+        "via/track": 0.81,
+        "via/via": 0.65
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "A2",
+      "edge_gaps_mm": {
+        "track/track": 11.82,
+        "track/via": 2.698,
+        "via/track": 21.341715,
+        "via/via": 3.036772
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "A6",
+      "edge_gaps_mm": {
+        "track/track": 4.32,
+        "track/via": 4.984798,
+        "via/track": 4.498,
+        "via/via": 4.824798
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "A7",
+      "edge_gaps_mm": {
+        "track/track": 2.82,
+        "track/via": 3.054714,
+        "via/track": 2.999912,
+        "via/via": 2.951
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "A8",
+      "edge_gaps_mm": {
+        "track/track": 2.32,
+        "track/via": 2.794984,
+        "via/track": 2.535,
+        "via/via": 2.634984
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "A9",
+      "edge_gaps_mm": {
+        "track/track": 1.783,
+        "track/via": 1.961,
+        "via/track": 1.961,
+        "via/via": 1.801
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 4.82,
+        "track/via": 5.238805,
+        "via/track": 5.013876,
+        "via/via": 5.25
+      }
+    },
+    {
+      "data": "DQ5",
+      "control": "SDNWE",
+      "edge_gaps_mm": {
+        "track/track": 4.62,
+        "track/via": 5.18,
+        "via/track": 15.901755,
+        "via/via": 13.342975
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "A0",
+      "edge_gaps_mm": {
+        "track/track": 9.42,
+        "track/via": 1.091184,
+        "via/track": 20.734413,
+        "via/via": 1.693066
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "A10",
+      "edge_gaps_mm": {
+        "track/track": 1.818762,
+        "track/via": 1.959,
+        "via/track": 1.959,
+        "via/via": 1.799
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 1.32,
+        "track/via": 1.384,
+        "via/track": 1.789478,
+        "via/via": 1.629478
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "A2",
+      "edge_gaps_mm": {
+        "track/track": 11.02,
+        "track/via": 1.063607,
+        "via/track": 22.226943,
+        "via/via": 2.339657
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "A5",
+      "edge_gaps_mm": {
+        "track/track": 15.872726,
+        "track/via": 4.114773,
+        "via/track": 21.503047,
+        "via/via": 5.951744
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "A6",
+      "edge_gaps_mm": {
+        "track/track": 4.82,
+        "track/via": 5.41,
+        "via/track": 5.082544,
+        "via/via": 5.25
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "A7",
+      "edge_gaps_mm": {
+        "track/track": 3.32,
+        "track/via": 3.538021,
+        "via/track": 3.802646,
+        "via/via": 3.714632
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "A8",
+      "edge_gaps_mm": {
+        "track/track": 2.82,
+        "track/via": 3.109,
+        "via/track": 3.109,
+        "via/via": 2.949
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "A9",
+      "edge_gaps_mm": {
+        "track/track": 2.283,
+        "track/via": 2.497543,
+        "via/track": 2.794984,
+        "via/via": 2.634984
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 6.095573,
+        "track/via": 4.799269,
+        "via/track": 8.447441,
+        "via/via": 4.639269
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "SDNCAS",
+      "edge_gaps_mm": {
+        "track/track": 4.62,
+        "track/via": 4.82,
+        "via/track": 16.670294,
+        "via/via": 16.510294
+      }
+    },
+    {
+      "data": "DQ6",
+      "control": "SDNWE",
+      "edge_gaps_mm": {
+        "track/track": 3.82,
+        "track/via": 3.9,
+        "via/track": 15.12498,
+        "via/via": 12.583874
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A0",
+      "edge_gaps_mm": {
+        "track/track": 3.368577,
+        "track/via": 2.075057,
+        "via/track": 3.208577,
+        "via/via": 1.915057
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A1",
+      "edge_gaps_mm": {
+        "track/track": 3.285905,
+        "track/via": 0.515862,
+        "via/track": 3.125905,
+        "via/via": 0.355862
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A10",
+      "edge_gaps_mm": {
+        "track/track": 1.817523,
+        "track/via": 1.657523,
+        "via/track": 1.657523,
+        "via/via": 1.497523
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 2.632,
+        "track/via": 0.756016,
+        "via/track": 11.314356,
+        "via/via": 11.027931
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A2",
+      "edge_gaps_mm": {
+        "track/track": 4.71902,
+        "track/via": 4.55902,
+        "via/track": 4.55902,
+        "via/via": 4.39902
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A3",
+      "edge_gaps_mm": {
+        "track/track": 4.929984,
+        "track/via": 0.209844,
+        "via/track": 4.837461,
+        "via/via": 4.677461
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A4",
+      "edge_gaps_mm": {
+        "track/track": 14.385164,
+        "track/via": 0.261041,
+        "via/track": 14.225164,
+        "via/via": 6.235726
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A5",
+      "edge_gaps_mm": {
+        "track/track": 13.827998,
+        "track/via": 1.66,
+        "via/track": 13.667998,
+        "via/via": 1.970324
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A7",
+      "edge_gaps_mm": {
+        "track/track": 4.82,
+        "track/via": 1.724493,
+        "via/track": 12.63012,
+        "via/via": 7.943044
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A8",
+      "edge_gaps_mm": {
+        "track/track": 4.32,
+        "track/via": 4.220462,
+        "via/track": 12.155759,
+        "via/via": 11.437642
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "A9",
+      "edge_gaps_mm": {
+        "track/track": 3.783,
+        "track/via": 0.252191,
+        "via/track": 11.71587,
+        "via/via": 6.800685
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 1.474962,
+        "track/via": 1.314962,
+        "via/track": 1.314962,
+        "via/via": 1.154962
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 2.640567,
+        "track/via": 1.970457,
+        "via/track": 2.480567,
+        "via/via": 2.320567
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "SDNCAS",
+      "edge_gaps_mm": {
+        "track/track": 2.97,
+        "track/via": 4.018394,
+        "via/track": 3.049691,
+        "via/via": 3.858394
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "SDNE1",
+      "edge_gaps_mm": {
+        "track/track": 2.996476,
+        "track/via": 2.836476,
+        "via/track": 2.836476,
+        "via/via": 2.676476
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 2.69383,
+        "track/via": 1.595314,
+        "via/track": 2.53383,
+        "via/via": 1.435314
+      }
+    },
+    {
+      "data": "DQ7",
+      "control": "SDNWE",
+      "edge_gaps_mm": {
+        "track/track": 2.17,
+        "track/via": 3.460232,
+        "via/track": 2.322706,
+        "via/via": 4.033222
+      }
+    },
+    {
+      "data": "DQ8",
+      "control": "A10",
+      "edge_gaps_mm": {
+        "track/track": 3.707,
+        "track/via": 3.611852,
+        "via/track": 4.26,
+        "via/via": 4.1
+      }
+    },
+    {
+      "data": "DQ8",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 3.132,
+        "track/via": 2.972,
+        "via/track": 3.874632,
+        "via/via": 3.714632
+      }
+    },
+    {
+      "data": "DQ8",
+      "control": "A8",
+      "edge_gaps_mm": {
+        "track/track": 4.82,
+        "track/via": 4.747213,
+        "via/track": 5.41,
+        "via/via": 5.25
+      }
+    },
+    {
+      "data": "DQ8",
+      "control": "A9",
+      "edge_gaps_mm": {
+        "track/track": 4.283,
+        "track/via": 4.123,
+        "via/track": 4.984798,
+        "via/via": 4.824798
+      }
+    },
+    {
+      "data": "DQ8",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 11.779566,
+        "track/via": 3.847369,
+        "via/track": 15.429633,
+        "via/via": 3.687369
+      }
+    },
+    {
+      "data": "DQ8",
+      "control": "SDCKE1",
+      "edge_gaps_mm": {
+        "track/track": 3.82,
+        "track/via": 4.26,
+        "via/track": 4.128478,
+        "via/via": 4.266812
+      }
+    },
+    {
+      "data": "DQ8",
+      "control": "SDCLK",
+      "edge_gaps_mm": {
+        "track/track": 3.02,
+        "track/via": 3.34,
+        "via/track": 2.999461,
+        "via/via": 3.18
+      }
+    },
+    {
+      "data": "DQ9",
+      "control": "A10",
+      "edge_gaps_mm": {
+        "track/track": 4.207156,
+        "track/via": 4.496852,
+        "via/track": 4.834,
+        "via/via": 4.822854
+      }
+    },
+    {
+      "data": "DQ9",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 3.712392,
+        "track/via": 3.552392,
+        "via/track": 4.259,
+        "via/via": 4.099
+      }
+    },
+    {
+      "data": "DQ9",
+      "control": "A9",
+      "edge_gaps_mm": {
+        "track/track": 4.783,
+        "track/via": 4.685011,
+        "via/track": 5.41,
+        "via/via": 5.25
+      }
+    },
+    {
+      "data": "DQ9",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 11.538883,
+        "track/via": 5.028236,
+        "via/track": 14.060516,
+        "via/via": 4.868236
+      }
+    },
+    {
+      "data": "DQ9",
+      "control": "SDCLK",
+      "edge_gaps_mm": {
+        "track/track": 4.62,
+        "track/via": 4.832543,
+        "via/track": 4.832543,
+        "via/via": 5.02
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "A0",
+      "edge_gaps_mm": {
+        "track/track": 6.165411,
+        "track/via": 0.560854
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "A1",
+      "edge_gaps_mm": {
+        "track/track": 6.592315,
+        "track/via": 0.8
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "A2",
+      "edge_gaps_mm": {
+        "track/track": 7.028623,
+        "track/via": 0.533277
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "A5",
+      "edge_gaps_mm": {
+        "track/track": 8.379453,
+        "track/via": 3.584443
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 3.766239,
+        "track/via": 2.93
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "BA1",
+      "edge_gaps_mm": {
+        "track/track": 4.574787,
+        "track/via": 5.18
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "SDCKE1",
+      "edge_gaps_mm": {
+        "track/track": 0.8825,
+        "track/via": 3.678242
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNCAS",
+      "edge_gaps_mm": {
+        "track/track": 0.994268,
+        "track/via": 1.5
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNE1",
+      "edge_gaps_mm": {
+        "track/track": 0.8825,
+        "track/via": 3.34
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNRAS",
+      "edge_gaps_mm": {
+        "track/track": 2.149979,
+        "track/via": 2.569295
+      }
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNWE",
+      "edge_gaps_mm": {
+        "track/track": 0.5,
+        "track/via": 0.961076
+      }
+    },
+    {
+      "data": "UDQM",
+      "control": "A11",
+      "edge_gaps_mm": {
+        "track/track": 3.02,
+        "track/via": 4.752043,
+        "via/track": 13.480302,
+        "via/via": 14.430517
+      }
+    },
+    {
+      "data": "UDQM",
+      "control": "A8",
+      "edge_gaps_mm": {
+        "track/track": 4.62,
+        "track/via": 6.27363,
+        "via/track": 14.744586,
+        "via/via": 17.387908
+      }
+    },
+    {
+      "data": "UDQM",
+      "control": "A9",
+      "edge_gaps_mm": {
+        "track/track": 3.82,
+        "track/via": 6.268752,
+        "via/track": 14.104125,
+        "via/via": 16.995553
+      }
+    },
+    {
+      "data": "UDQM",
+      "control": "BA0",
+      "edge_gaps_mm": {
+        "track/track": 9.335908,
+        "track/via": 4.870941,
+        "via/track": 10.607088,
+        "via/via": 9.228312
+      }
+    },
+    {
+      "data": "UDQM",
+      "control": "SDCKE1",
+      "edge_gaps_mm": {
+        "track/track": 1.42,
+        "track/via": 2.523,
+        "via/track": 3.874632,
+        "via/via": 3.714632
+      }
+    },
+    {
+      "data": "UDQM",
+      "control": "SDCLK",
+      "edge_gaps_mm": {
+        "track/track": 0.62,
+        "track/via": 4.307107,
+        "via/track": 11.734135,
+        "via/via": 15.364386
+      }
+    },
+    {
+      "data": "UDQM",
+      "control": "SDNCAS",
+      "edge_gaps_mm": {
+        "track/track": 4.552863,
+        "track/via": 4.392863,
+        "via/track": 5.41,
+        "via/via": 5.25
+      }
+    },
+    {
+      "data": "UDQM",
+      "control": "SDNE1",
+      "edge_gaps_mm": {
+        "track/track": 2.107,
+        "track/via": 2.225271,
+        "via/track": 3.109,
+        "via/via": 2.949
+      }
     }
   ],
-  "spacing_deviations": [
+  "nonclock_parallel_track_spans": [
     {
-      "a": "U2.10:DQ5",
-      "b": "U2.16:SDNWE",
-      "edge_gap_mm": 4.62,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ0",
+      "control": "BA0",
+      "data_track": [
+        [
+          45.662,
+          42.75
+        ],
+        [
+          48.5,
+          42.75
+        ]
+      ],
+      "control_track": [
+        [
+          45.662,
+          40.75
+        ],
+        [
+          48.8,
+          40.75
+        ]
+      ],
+      "gap_mm": 1.82,
+      "parallel_mm": 2.838
     },
     {
-      "a": "U2.11:DQ6",
-      "b": "U2.16:SDNWE",
-      "edge_gap_mm": 3.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ0",
+      "control": "BA1",
+      "data_track": [
+        [
+          45.662,
+          42.75
+        ],
+        [
+          48.5,
+          42.75
+        ]
+      ],
+      "control_track": [
+        [
+          45.699,
+          40.287
+        ],
+        [
+          50.162,
+          40.287
+        ]
+      ],
+      "gap_mm": 2.283,
+      "parallel_mm": 2.801
     },
     {
-      "a": "U2.11:DQ6",
-      "b": "U2.17:SDNCAS",
-      "edge_gap_mm": 4.62,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ1",
+      "control": "BA0",
+      "data_track": [
+        [
+          45.662,
+          42.25
+        ],
+        [
+          49.824,
+          42.25
+        ]
+      ],
+      "control_track": [
+        [
+          45.662,
+          40.75
+        ],
+        [
+          48.8,
+          40.75
+        ]
+      ],
+      "gap_mm": 1.32,
+      "parallel_mm": 3.138
     },
     {
-      "a": "U2.13:DQ7",
-      "b": "U2.16:SDNWE",
-      "edge_gap_mm": 2.22,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ1",
+      "control": "BA0",
+      "data_track": [
+        [
+          46.9,
+          41.8
+        ],
+        [
+          51.4,
+          41.8
+        ]
+      ],
+      "control_track": [
+        [
+          45.662,
+          40.75
+        ],
+        [
+          48.8,
+          40.75
+        ]
+      ],
+      "gap_mm": 0.87,
+      "parallel_mm": 1.9
     },
     {
-      "a": "U2.13:DQ7",
-      "b": "U2.17:SDNCAS",
-      "edge_gap_mm": 3.02,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ1",
+      "control": "BA1",
+      "data_track": [
+        [
+          45.662,
+          42.25
+        ],
+        [
+          49.824,
+          42.25
+        ]
+      ],
+      "control_track": [
+        [
+          45.699,
+          40.287
+        ],
+        [
+          50.162,
+          40.287
+        ]
+      ],
+      "gap_mm": 1.783,
+      "parallel_mm": 4.125
     },
     {
-      "a": "U2.13:DQ7",
-      "b": "U2.18:SDNRAS",
-      "edge_gap_mm": 3.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ1",
+      "control": "BA1",
+      "data_track": [
+        [
+          46.9,
+          41.8
+        ],
+        [
+          51.4,
+          41.8
+        ]
+      ],
+      "control_track": [
+        [
+          45.699,
+          40.287
+        ],
+        [
+          50.162,
+          40.287
+        ]
+      ],
+      "gap_mm": 1.333,
+      "parallel_mm": 3.262
     },
     {
-      "a": "U2.13:DQ7",
-      "b": "U2.19:SDNE1",
-      "edge_gap_mm": 4.62,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ10",
+      "control": "A10",
+      "data_track": [
+        [
+          40.75,
+          50.662
+        ],
+        [
+          40.75,
+          52.299
+        ]
+      ],
+      "control_track": [
+        [
+          35.75,
+          50.662
+        ],
+        [
+          35.75,
+          53.049
+        ]
+      ],
+      "gap_mm": 4.82,
+      "parallel_mm": 1.637
     },
     {
-      "a": "U2.15:LDQM",
-      "b": "U2.16:SDNWE",
-      "edge_gap_mm": 0.54111,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ10",
+      "control": "A11",
+      "data_track": [
+        [
+          40.75,
+          50.662
+        ],
+        [
+          40.75,
+          52.299
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 4.32,
+      "parallel_mm": 1.637
     },
     {
-      "a": "U2.15:LDQM",
-      "b": "U2.17:SDNCAS",
-      "edge_gap_mm": 1.343155,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ11",
+      "control": "A11",
+      "data_track": [
+        [
+          41.25,
+          50.662
+        ],
+        [
+          41.25,
+          52.224
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 4.82,
+      "parallel_mm": 1.562
     },
     {
-      "a": "U2.15:LDQM",
-      "b": "U2.18:SDNRAS",
-      "edge_gap_mm": 2.149979,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ12",
+      "control": "BA0",
+      "data_track": [
+        [
+          58.9,
+          43.3
+        ],
+        [
+          60.2445,
+          41.9555
+        ]
+      ],
+      "control_track": [
+        [
+          63.75,
+          45.52
+        ],
+        [
+          64.47,
+          44.8
+        ]
+      ],
+      "gap_mm": 4.819245,
+      "parallel_mm": 0.041719
     },
     {
-      "a": "U2.15:LDQM",
-      "b": "U2.19:SDNE1",
-      "edge_gap_mm": 3.02,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A0",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          63.0,
+          48.28
+        ],
+        [
+          63.75,
+          48.28
+        ]
+      ],
+      "gap_mm": 3.64,
+      "parallel_mm": 0.75
     },
     {
-      "a": "U2.15:LDQM",
-      "b": "U2.20:BA0",
-      "edge_gap_mm": 3.766239,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A0",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          64.83,
+          47.2
+        ],
+        [
+          66.25,
+          47.2
+        ]
+      ],
+      "gap_mm": 4.72,
+      "parallel_mm": 1.42
     },
     {
-      "a": "U2.15:LDQM",
-      "b": "U2.21:BA1",
-      "edge_gap_mm": 4.574787,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A1",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          61.75,
+          49.2
+        ],
+        [
+          63.75,
+          49.2
+        ]
+      ],
+      "gap_mm": 2.72,
+      "parallel_mm": 1.75
     },
     {
-      "a": "U2.33:A8",
-      "b": "U2.39:UDQM",
-      "edge_gap_mm": 4.479957,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A1",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          64.95,
+          48.0
+        ],
+        [
+          66.25,
+          48.0
+        ]
+      ],
+      "gap_mm": 3.92,
+      "parallel_mm": 1.3
     },
     {
-      "a": "U2.34:A9",
-      "b": "U2.39:UDQM",
-      "edge_gap_mm": 3.671298,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A10",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          61.75,
+          47.36
+        ],
+        [
+          63.75,
+          47.36
+        ]
+      ],
+      "gap_mm": 4.56,
+      "parallel_mm": 1.75
     },
     {
-      "a": "U2.35:A11",
-      "b": "U2.39:UDQM",
-      "edge_gap_mm": 2.862581,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A2",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          63.0,
+          50.12
+        ],
+        [
+          63.75,
+          50.12
+        ]
+      ],
+      "gap_mm": 1.8,
+      "parallel_mm": 0.75
     },
     {
-      "a": "U2.37:SDCKE1",
-      "b": "U2.39:UDQM",
-      "edge_gap_mm": 1.364668,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A2",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          65.07,
+          48.8
+        ],
+        [
+          66.25,
+          48.8
+        ]
+      ],
+      "gap_mm": 3.12,
+      "parallel_mm": 1.18
     },
     {
-      "a": "U2.37:SDCKE1",
-      "b": "U2.42:DQ8",
-      "edge_gap_mm": 3.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A3",
+      "data_track": [
+        [
+          60.9,
+          41.8
+        ],
+        [
+          60.9,
+          51.0
+        ]
+      ],
+      "control_track": [
+        [
+          65.15,
+          49.6
+        ],
+        [
+          65.15,
+          49.64
+        ]
+      ],
+      "gap_mm": 4.07,
+      "parallel_mm": 0.04
     },
     {
-      "a": "U1.49:SDNRAS",
-      "b": "U1.58:DQ4",
-      "edge_gap_mm": 4.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A3",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          61.75,
+          51.04
+        ],
+        [
+          63.75,
+          51.04
+        ]
+      ],
+      "gap_mm": 0.88,
+      "parallel_mm": 1.75
     },
     {
-      "a": "U1.49:SDNRAS",
-      "b": "U1.59:DQ5",
-      "edge_gap_mm": 4.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A3",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          65.15,
+          49.6
+        ],
+        [
+          66.25,
+          49.6
+        ]
+      ],
+      "gap_mm": 2.32,
+      "parallel_mm": 1.1
     },
     {
-      "a": "U1.50:A6",
-      "b": "U1.58:DQ4",
-      "edge_gap_mm": 3.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A4",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          77.75,
+          49.6
+        ],
+        [
+          78.85,
+          49.6
+        ]
+      ],
+      "gap_mm": 2.32,
+      "parallel_mm": 1.1
     },
     {
-      "a": "U1.50:A6",
-      "b": "U1.59:DQ5",
-      "edge_gap_mm": 4.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A4",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          80.25,
+          51.04
+        ],
+        [
+          81.0,
+          51.04
+        ]
+      ],
+      "gap_mm": 0.88,
+      "parallel_mm": 0.75
     },
     {
-      "a": "U1.50:A6",
-      "b": "U1.60:DQ6",
-      "edge_gap_mm": 4.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A5",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          77.75,
+          48.8
+        ],
+        [
+          78.93,
+          48.8
+        ]
+      ],
+      "gap_mm": 3.12,
+      "parallel_mm": 1.18
     },
     {
-      "a": "U1.53:A7",
-      "b": "U1.58:DQ4",
-      "edge_gap_mm": 2.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A5",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          80.25,
+          50.12
+        ],
+        [
+          82.25,
+          50.12
+        ]
+      ],
+      "gap_mm": 1.8,
+      "parallel_mm": 0.85
     },
     {
-      "a": "U1.53:A7",
-      "b": "U1.59:DQ5",
-      "edge_gap_mm": 2.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A6",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          77.75,
+          48.0
+        ],
+        [
+          79.05,
+          48.0
+        ]
+      ],
+      "gap_mm": 3.92,
+      "parallel_mm": 1.3
     },
     {
-      "a": "U1.53:A7",
-      "b": "U1.60:DQ6",
-      "edge_gap_mm": 3.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A6",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          80.25,
+          49.2
+        ],
+        [
+          81.0,
+          49.2
+        ]
+      ],
+      "gap_mm": 2.72,
+      "parallel_mm": 0.75
     },
     {
-      "a": "U1.53:A7",
-      "b": "U1.63:DQ7",
-      "edge_gap_mm": 4.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A7",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          77.75,
+          47.2
+        ],
+        [
+          79.17,
+          47.2
+        ]
+      ],
+      "gap_mm": 4.72,
+      "parallel_mm": 1.42
     },
     {
-      "a": "U1.54:A8",
-      "b": "U1.58:DQ4",
-      "edge_gap_mm": 1.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A7",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          80.25,
+          48.28
+        ],
+        [
+          82.25,
+          48.28
+        ]
+      ],
+      "gap_mm": 3.64,
+      "parallel_mm": 0.85
     },
     {
-      "a": "U1.54:A8",
-      "b": "U1.59:DQ5",
-      "edge_gap_mm": 2.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ14",
+      "control": "A8",
+      "data_track": [
+        [
+          62.0,
+          52.1
+        ],
+        [
+          81.1,
+          52.1
+        ]
+      ],
+      "control_track": [
+        [
+          80.25,
+          47.36
+        ],
+        [
+          81.0,
+          47.36
+        ]
+      ],
+      "gap_mm": 4.56,
+      "parallel_mm": 0.75
     },
     {
-      "a": "U1.54:A8",
-      "b": "U1.60:DQ6",
-      "edge_gap_mm": 2.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ15",
+      "control": "BA0",
+      "data_track": [
+        [
+          45.662,
+          45.75
+        ],
+        [
+          48.05,
+          45.75
+        ]
+      ],
+      "control_track": [
+        [
+          45.662,
+          40.75
+        ],
+        [
+          48.8,
+          40.75
+        ]
+      ],
+      "gap_mm": 4.82,
+      "parallel_mm": 2.388
     },
     {
-      "a": "U1.54:A8",
-      "b": "U1.63:DQ7",
-      "edge_gap_mm": 4.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ3",
+      "control": "BA0",
+      "data_track": [
+        [
+          47.2,
+          44.5
+        ],
+        [
+          48.4,
+          44.5
+        ]
+      ],
+      "control_track": [
+        [
+          45.662,
+          40.75
+        ],
+        [
+          48.8,
+          40.75
+        ]
+      ],
+      "gap_mm": 3.57,
+      "parallel_mm": 1.2
     },
     {
-      "a": "U1.54:A8",
-      "b": "U1.64:DQ8",
-      "edge_gap_mm": 4.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ3",
+      "control": "BA1",
+      "data_track": [
+        [
+          40.9,
+          42.4
+        ],
+        [
+          43.3,
+          44.8
+        ]
+      ],
+      "control_track": [
+        [
+          45.662,
+          40.25
+        ],
+        [
+          45.699,
+          40.287
+        ]
+      ],
+      "gap_mm": 4.707522,
+      "parallel_mm": 0.052326
     },
     {
-      "a": "U1.55:A9",
-      "b": "U1.58:DQ4",
-      "edge_gap_mm": 1.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ3",
+      "control": "BA1",
+      "data_track": [
+        [
+          47.2,
+          44.5
+        ],
+        [
+          48.4,
+          44.5
+        ]
+      ],
+      "control_track": [
+        [
+          45.699,
+          40.287
+        ],
+        [
+          50.162,
+          40.287
+        ]
+      ],
+      "gap_mm": 4.033,
+      "parallel_mm": 1.2
     },
     {
-      "a": "U1.55:A9",
-      "b": "U1.59:DQ5",
-      "edge_gap_mm": 1.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A10",
+      "data_track": [
+        [
+          36.75,
+          50.662
+        ],
+        [
+          36.75,
+          52.9
+        ]
+      ],
+      "control_track": [
+        [
+          35.75,
+          50.662
+        ],
+        [
+          35.75,
+          53.049
+        ]
+      ],
+      "gap_mm": 0.82,
+      "parallel_mm": 2.238
     },
     {
-      "a": "U1.55:A9",
-      "b": "U1.60:DQ6",
-      "edge_gap_mm": 2.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A10",
+      "data_track": [
+        [
+          37.012,
+          53.162
+        ],
+        [
+          37.012,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          35.863,
+          53.162
+        ],
+        [
+          35.863,
+          55.162
+        ]
+      ],
+      "gap_mm": 0.969,
+      "parallel_mm": 2.0
     },
     {
-      "a": "U1.55:A9",
-      "b": "U1.63:DQ7",
-      "edge_gap_mm": 3.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A11",
+      "data_track": [
+        [
+          36.75,
+          50.662
+        ],
+        [
+          36.75,
+          52.9
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 0.32,
+      "parallel_mm": 2.238
     },
     {
-      "a": "U1.55:A9",
-      "b": "U1.64:DQ8",
-      "edge_gap_mm": 4.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A11",
+      "data_track": [
+        [
+          36.75,
+          52.9
+        ],
+        [
+          37.012,
+          53.162
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          53.724
+        ],
+        [
+          36.438,
+          53.912
+        ]
+      ],
+      "gap_mm": 0.756209,
+      "parallel_mm": 0.141421
     },
     {
-      "a": "U1.55:A9",
-      "b": "U1.65:DQ9",
-      "edge_gap_mm": 4.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A11",
+      "data_track": [
+        [
+          37.012,
+          53.162
+        ],
+        [
+          37.012,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 0.582,
+      "parallel_mm": 0.562
     },
     {
-      "a": "U1.56:A10",
-      "b": "U1.58:DQ4",
-      "edge_gap_mm": 0.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A6",
+      "data_track": [
+        [
+          36.75,
+          50.662
+        ],
+        [
+          36.75,
+          52.9
+        ]
+      ],
+      "control_track": [
+        [
+          32.75,
+          50.662
+        ],
+        [
+          32.75,
+          54.824
+        ]
+      ],
+      "gap_mm": 3.82,
+      "parallel_mm": 2.238
     },
     {
-      "a": "U1.56:A10",
-      "b": "U1.59:DQ5",
-      "edge_gap_mm": 1.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A6",
+      "data_track": [
+        [
+          37.012,
+          53.162
+        ],
+        [
+          37.012,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          32.75,
+          50.662
+        ],
+        [
+          32.75,
+          54.824
+        ]
+      ],
+      "gap_mm": 4.082,
+      "parallel_mm": 1.662
     },
     {
-      "a": "U1.56:A10",
-      "b": "U1.60:DQ6",
-      "edge_gap_mm": 1.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A7",
+      "data_track": [
+        [
+          36.75,
+          50.662
+        ],
+        [
+          36.75,
+          52.9
+        ]
+      ],
+      "control_track": [
+        [
+          34.25,
+          50.662
+        ],
+        [
+          34.25,
+          53.799
+        ]
+      ],
+      "gap_mm": 2.32,
+      "parallel_mm": 2.238
     },
     {
-      "a": "U1.56:A10",
-      "b": "U1.63:DQ7",
-      "edge_gap_mm": 3.26638,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A7",
+      "data_track": [
+        [
+          37.012,
+          53.162
+        ],
+        [
+          37.012,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          34.25,
+          50.662
+        ],
+        [
+          34.25,
+          53.799
+        ]
+      ],
+      "gap_mm": 2.582,
+      "parallel_mm": 0.637
     },
     {
-      "a": "U1.56:A10",
-      "b": "U1.64:DQ8",
-      "edge_gap_mm": 3.771852,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A8",
+      "data_track": [
+        [
+          36.75,
+          50.662
+        ],
+        [
+          36.75,
+          52.9
+        ]
+      ],
+      "control_track": [
+        [
+          34.713,
+          50.699
+        ],
+        [
+          34.713,
+          55.162
+        ]
+      ],
+      "gap_mm": 1.857,
+      "parallel_mm": 2.201
     },
     {
-      "a": "U1.56:A10",
-      "b": "U1.65:DQ9",
-      "edge_gap_mm": 4.277032,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A8",
+      "data_track": [
+        [
+          37.012,
+          53.162
+        ],
+        [
+          37.012,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          34.713,
+          50.699
+        ],
+        [
+          34.713,
+          55.162
+        ]
+      ],
+      "gap_mm": 2.119,
+      "parallel_mm": 2.0
     },
     {
-      "a": "U1.56:A10",
-      "b": "U1.66:DQ10",
-      "edge_gap_mm": 4.782614,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A9",
+      "data_track": [
+        [
+          36.75,
+          50.662
+        ],
+        [
+          36.75,
+          52.9
+        ]
+      ],
+      "control_track": [
+        [
+          35.287,
+          50.699
+        ],
+        [
+          35.287,
+          53.912
+        ]
+      ],
+      "gap_mm": 1.283,
+      "parallel_mm": 2.201
     },
     {
-      "a": "U1.57:A11",
-      "b": "U1.58:DQ4",
-      "edge_gap_mm": 0.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "A9",
+      "data_track": [
+        [
+          37.012,
+          53.162
+        ],
+        [
+          37.012,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          35.287,
+          50.699
+        ],
+        [
+          35.287,
+          53.912
+        ]
+      ],
+      "gap_mm": 1.545,
+      "parallel_mm": 0.75
     },
     {
-      "a": "U1.57:A11",
-      "b": "U1.59:DQ5",
-      "edge_gap_mm": 0.82,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "SDNRAS",
+      "data_track": [
+        [
+          36.75,
+          50.662
+        ],
+        [
+          36.75,
+          52.9
+        ]
+      ],
+      "control_track": [
+        [
+          32.25,
+          50.662
+        ],
+        [
+          32.25,
+          53.5
+        ]
+      ],
+      "gap_mm": 4.32,
+      "parallel_mm": 2.238
     },
     {
-      "a": "U1.57:A11",
-      "b": "U1.60:DQ6",
-      "edge_gap_mm": 1.32,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ4",
+      "control": "SDNRAS",
+      "data_track": [
+        [
+          37.012,
+          53.162
+        ],
+        [
+          37.012,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          32.25,
+          50.662
+        ],
+        [
+          32.25,
+          53.5
+        ]
+      ],
+      "gap_mm": 4.582,
+      "parallel_mm": 0.338
     },
     {
-      "a": "U1.57:A11",
-      "b": "U1.63:DQ7",
-      "edge_gap_mm": 2.703247,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A10",
+      "data_track": [
+        [
+          37.25,
+          50.662
+        ],
+        [
+          37.25,
+          52.558
+        ]
+      ],
+      "control_track": [
+        [
+          35.75,
+          50.662
+        ],
+        [
+          35.75,
+          53.049
+        ]
+      ],
+      "gap_mm": 1.32,
+      "parallel_mm": 1.896
     },
     {
-      "a": "U1.57:A11",
-      "b": "U1.64:DQ8",
-      "edge_gap_mm": 3.207877,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A10",
+      "data_track": [
+        [
+          37.588,
+          52.896
+        ],
+        [
+          37.588,
+          53.912
+        ]
+      ],
+      "control_track": [
+        [
+          35.75,
+          50.662
+        ],
+        [
+          35.75,
+          53.049
+        ]
+      ],
+      "gap_mm": 1.658,
+      "parallel_mm": 0.153
     },
     {
-      "a": "U1.57:A11",
-      "b": "U1.65:DQ9",
-      "edge_gap_mm": 3.712392,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A10",
+      "data_track": [
+        [
+          37.588,
+          52.896
+        ],
+        [
+          37.588,
+          53.912
+        ]
+      ],
+      "control_track": [
+        [
+          35.863,
+          53.162
+        ],
+        [
+          35.863,
+          55.162
+        ]
+      ],
+      "gap_mm": 1.545,
+      "parallel_mm": 0.75
     },
     {
-      "a": "U1.57:A11",
-      "b": "U1.66:DQ10",
-      "edge_gap_mm": 4.217512,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A11",
+      "data_track": [
+        [
+          37.25,
+          50.662
+        ],
+        [
+          37.25,
+          52.558
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 0.82,
+      "parallel_mm": 1.896
     },
     {
-      "a": "U1.57:A11",
-      "b": "U1.67:DQ11",
-      "edge_gap_mm": 4.72257,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A11",
+      "data_track": [
+        [
+          37.25,
+          52.558
+        ],
+        [
+          37.588,
+          52.896
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          53.724
+        ],
+        [
+          36.438,
+          53.912
+        ]
+      ],
+      "gap_mm": 1.351593,
+      "parallel_mm": 0.265872
     },
     {
-      "a": "U1.79:DQ15",
-      "b": "U1.89:BA0",
-      "edge_gap_mm": 4.783425,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A11",
+      "data_track": [
+        [
+          37.588,
+          52.896
+        ],
+        [
+          37.588,
+          53.912
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 1.158,
+      "parallel_mm": 0.828
     },
     {
-      "a": "U1.85:DQ0",
-      "b": "U1.89:BA0",
-      "edge_gap_mm": 1.752431,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A6",
+      "data_track": [
+        [
+          37.25,
+          50.662
+        ],
+        [
+          37.25,
+          52.558
+        ]
+      ],
+      "control_track": [
+        [
+          32.75,
+          50.662
+        ],
+        [
+          32.75,
+          54.824
+        ]
+      ],
+      "gap_mm": 4.32,
+      "parallel_mm": 1.896
     },
     {
-      "a": "U1.85:DQ0",
-      "b": "U1.90:BA1",
-      "edge_gap_mm": 2.317221,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A6",
+      "data_track": [
+        [
+          37.588,
+          52.896
+        ],
+        [
+          37.588,
+          53.912
+        ]
+      ],
+      "control_track": [
+        [
+          32.75,
+          50.662
+        ],
+        [
+          32.75,
+          54.824
+        ]
+      ],
+      "gap_mm": 4.658,
+      "parallel_mm": 1.016
     },
     {
-      "a": "U1.86:DQ1",
-      "b": "U1.89:BA0",
-      "edge_gap_mm": 1.248562,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A7",
+      "data_track": [
+        [
+          37.25,
+          50.662
+        ],
+        [
+          37.25,
+          52.558
+        ]
+      ],
+      "control_track": [
+        [
+          34.25,
+          50.662
+        ],
+        [
+          34.25,
+          53.799
+        ]
+      ],
+      "gap_mm": 2.82,
+      "parallel_mm": 1.896
     },
     {
-      "a": "U1.86:DQ1",
-      "b": "U1.90:BA1",
-      "edge_gap_mm": 1.811887,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A7",
+      "data_track": [
+        [
+          37.588,
+          52.896
+        ],
+        [
+          37.588,
+          53.912
+        ]
+      ],
+      "control_track": [
+        [
+          34.25,
+          50.662
+        ],
+        [
+          34.25,
+          53.799
+        ]
+      ],
+      "gap_mm": 3.158,
+      "parallel_mm": 0.903
     },
     {
-      "a": "U1.132:SDNCAS",
-      "b": "U1.141:LDQM",
-      "edge_gap_mm": 4.050306,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A8",
+      "data_track": [
+        [
+          37.25,
+          50.662
+        ],
+        [
+          37.25,
+          52.558
+        ]
+      ],
+      "control_track": [
+        [
+          34.713,
+          50.699
+        ],
+        [
+          34.713,
+          55.162
+        ]
+      ],
+      "gap_mm": 2.357,
+      "parallel_mm": 1.859
     },
     {
-      "a": "U1.132:SDNCAS",
-      "b": "U1.142:UDQM",
-      "edge_gap_mm": 4.59968,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A8",
+      "data_track": [
+        [
+          37.588,
+          52.896
+        ],
+        [
+          37.588,
+          53.912
+        ]
+      ],
+      "control_track": [
+        [
+          34.713,
+          50.699
+        ],
+        [
+          34.713,
+          55.162
+        ]
+      ],
+      "gap_mm": 2.695,
+      "parallel_mm": 1.016
     },
     {
-      "a": "U1.135:SDCKE1",
-      "b": "U1.141:LDQM",
-      "edge_gap_mm": 2.421444,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A9",
+      "data_track": [
+        [
+          37.25,
+          50.662
+        ],
+        [
+          37.25,
+          52.558
+        ]
+      ],
+      "control_track": [
+        [
+          35.287,
+          50.699
+        ],
+        [
+          35.287,
+          53.912
+        ]
+      ],
+      "gap_mm": 1.783,
+      "parallel_mm": 1.859
     },
     {
-      "a": "U1.135:SDCKE1",
-      "b": "U1.142:UDQM",
-      "edge_gap_mm": 2.981071,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "A9",
+      "data_track": [
+        [
+          37.588,
+          52.896
+        ],
+        [
+          37.588,
+          53.912
+        ]
+      ],
+      "control_track": [
+        [
+          35.287,
+          50.699
+        ],
+        [
+          35.287,
+          53.912
+        ]
+      ],
+      "gap_mm": 2.121,
+      "parallel_mm": 1.016
     },
     {
-      "a": "U1.136:SDNE1",
-      "b": "U1.141:LDQM",
-      "edge_gap_mm": 1.912155,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "SDNRAS",
+      "data_track": [
+        [
+          37.25,
+          50.662
+        ],
+        [
+          37.25,
+          52.558
+        ]
+      ],
+      "control_track": [
+        [
+          32.25,
+          50.662
+        ],
+        [
+          32.25,
+          53.5
+        ]
+      ],
+      "gap_mm": 4.82,
+      "parallel_mm": 1.896
     },
     {
-      "a": "U1.136:SDNE1",
-      "b": "U1.142:UDQM",
-      "edge_gap_mm": 2.470654,
-      "clock": false,
-      "mixed_group": true
+      "data": "DQ5",
+      "control": "SDNWE",
+      "data_track": [
+        [
+          64.92,
+          36.8
+        ],
+        [
+          66.25,
+          36.8
+        ]
+      ],
+      "control_track": [
+        [
+          61.99,
+          41.6
+        ],
+        [
+          66.25,
+          41.6
+        ]
+      ],
+      "gap_mm": 4.62,
+      "parallel_mm": 1.33
+    },
+    {
+      "data": "DQ6",
+      "control": "A10",
+      "data_track": [
+        [
+          37.75,
+          50.662
+        ],
+        [
+          37.75,
+          52.503
+        ]
+      ],
+      "control_track": [
+        [
+          35.75,
+          50.662
+        ],
+        [
+          35.75,
+          53.049
+        ]
+      ],
+      "gap_mm": 1.82,
+      "parallel_mm": 1.841
+    },
+    {
+      "data": "DQ6",
+      "control": "A10",
+      "data_track": [
+        [
+          38.162,
+          52.915
+        ],
+        [
+          38.162,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          35.75,
+          50.662
+        ],
+        [
+          35.75,
+          53.049
+        ]
+      ],
+      "gap_mm": 2.232,
+      "parallel_mm": 0.134
+    },
+    {
+      "data": "DQ6",
+      "control": "A10",
+      "data_track": [
+        [
+          38.162,
+          52.915
+        ],
+        [
+          38.162,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          35.863,
+          53.162
+        ],
+        [
+          35.863,
+          55.162
+        ]
+      ],
+      "gap_mm": 2.119,
+      "parallel_mm": 2.0
+    },
+    {
+      "data": "DQ6",
+      "control": "A11",
+      "data_track": [
+        [
+          37.75,
+          50.662
+        ],
+        [
+          37.75,
+          52.503
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 1.32,
+      "parallel_mm": 1.841
+    },
+    {
+      "data": "DQ6",
+      "control": "A11",
+      "data_track": [
+        [
+          37.75,
+          52.503
+        ],
+        [
+          38.162,
+          52.915
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          53.724
+        ],
+        [
+          36.438,
+          53.912
+        ]
+      ],
+      "gap_mm": 1.744038,
+      "parallel_mm": 0.068589
+    },
+    {
+      "data": "DQ6",
+      "control": "A11",
+      "data_track": [
+        [
+          38.162,
+          52.915
+        ],
+        [
+          38.162,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 1.732,
+      "parallel_mm": 0.809
+    },
+    {
+      "data": "DQ6",
+      "control": "A6",
+      "data_track": [
+        [
+          37.75,
+          50.662
+        ],
+        [
+          37.75,
+          52.503
+        ]
+      ],
+      "control_track": [
+        [
+          32.75,
+          50.662
+        ],
+        [
+          32.75,
+          54.824
+        ]
+      ],
+      "gap_mm": 4.82,
+      "parallel_mm": 1.841
+    },
+    {
+      "data": "DQ6",
+      "control": "A7",
+      "data_track": [
+        [
+          37.75,
+          50.662
+        ],
+        [
+          37.75,
+          52.503
+        ]
+      ],
+      "control_track": [
+        [
+          34.25,
+          50.662
+        ],
+        [
+          34.25,
+          53.799
+        ]
+      ],
+      "gap_mm": 3.32,
+      "parallel_mm": 1.841
+    },
+    {
+      "data": "DQ6",
+      "control": "A7",
+      "data_track": [
+        [
+          38.162,
+          52.915
+        ],
+        [
+          38.162,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          34.25,
+          50.662
+        ],
+        [
+          34.25,
+          53.799
+        ]
+      ],
+      "gap_mm": 3.732,
+      "parallel_mm": 0.884
+    },
+    {
+      "data": "DQ6",
+      "control": "A8",
+      "data_track": [
+        [
+          37.75,
+          50.662
+        ],
+        [
+          37.75,
+          52.503
+        ]
+      ],
+      "control_track": [
+        [
+          34.713,
+          50.699
+        ],
+        [
+          34.713,
+          55.162
+        ]
+      ],
+      "gap_mm": 2.857,
+      "parallel_mm": 1.804
+    },
+    {
+      "data": "DQ6",
+      "control": "A8",
+      "data_track": [
+        [
+          38.162,
+          52.915
+        ],
+        [
+          38.162,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          34.713,
+          50.699
+        ],
+        [
+          34.713,
+          55.162
+        ]
+      ],
+      "gap_mm": 3.269,
+      "parallel_mm": 2.247
+    },
+    {
+      "data": "DQ6",
+      "control": "A9",
+      "data_track": [
+        [
+          37.75,
+          50.662
+        ],
+        [
+          37.75,
+          52.503
+        ]
+      ],
+      "control_track": [
+        [
+          35.287,
+          50.699
+        ],
+        [
+          35.287,
+          53.912
+        ]
+      ],
+      "gap_mm": 2.283,
+      "parallel_mm": 1.804
+    },
+    {
+      "data": "DQ6",
+      "control": "A9",
+      "data_track": [
+        [
+          38.162,
+          52.915
+        ],
+        [
+          38.162,
+          55.162
+        ]
+      ],
+      "control_track": [
+        [
+          35.287,
+          50.699
+        ],
+        [
+          35.287,
+          53.912
+        ]
+      ],
+      "gap_mm": 2.695,
+      "parallel_mm": 0.997
+    },
+    {
+      "data": "DQ6",
+      "control": "SDNCAS",
+      "data_track": [
+        [
+          56.35,
+          37.6
+        ],
+        [
+          66.25,
+          37.6
+        ]
+      ],
+      "control_track": [
+        [
+          63.36,
+          42.4
+        ],
+        [
+          66.25,
+          42.4
+        ]
+      ],
+      "gap_mm": 4.62,
+      "parallel_mm": 2.89
+    },
+    {
+      "data": "DQ6",
+      "control": "SDNWE",
+      "data_track": [
+        [
+          56.35,
+          37.6
+        ],
+        [
+          66.25,
+          37.6
+        ]
+      ],
+      "control_track": [
+        [
+          61.99,
+          41.6
+        ],
+        [
+          66.25,
+          41.6
+        ]
+      ],
+      "gap_mm": 3.82,
+      "parallel_mm": 4.26
+    },
+    {
+      "data": "DQ7",
+      "control": "A10",
+      "data_track": [
+        [
+          39.25,
+          50.662
+        ],
+        [
+          39.25,
+          54.7
+        ]
+      ],
+      "control_track": [
+        [
+          35.75,
+          50.662
+        ],
+        [
+          35.75,
+          53.049
+        ]
+      ],
+      "gap_mm": 3.32,
+      "parallel_mm": 2.387
+    },
+    {
+      "data": "DQ7",
+      "control": "A10",
+      "data_track": [
+        [
+          39.25,
+          50.662
+        ],
+        [
+          39.25,
+          54.7
+        ]
+      ],
+      "control_track": [
+        [
+          35.863,
+          53.162
+        ],
+        [
+          35.863,
+          55.162
+        ]
+      ],
+      "gap_mm": 3.207,
+      "parallel_mm": 1.538
+    },
+    {
+      "data": "DQ7",
+      "control": "A11",
+      "data_track": [
+        [
+          39.25,
+          50.662
+        ],
+        [
+          39.25,
+          54.7
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 2.82,
+      "parallel_mm": 3.062
+    },
+    {
+      "data": "DQ7",
+      "control": "A7",
+      "data_track": [
+        [
+          39.25,
+          50.662
+        ],
+        [
+          39.25,
+          54.7
+        ]
+      ],
+      "control_track": [
+        [
+          34.25,
+          50.662
+        ],
+        [
+          34.25,
+          53.799
+        ]
+      ],
+      "gap_mm": 4.82,
+      "parallel_mm": 3.137
+    },
+    {
+      "data": "DQ7",
+      "control": "A8",
+      "data_track": [
+        [
+          39.25,
+          50.662
+        ],
+        [
+          39.25,
+          54.7
+        ]
+      ],
+      "control_track": [
+        [
+          34.713,
+          50.699
+        ],
+        [
+          34.713,
+          55.162
+        ]
+      ],
+      "gap_mm": 4.357,
+      "parallel_mm": 4.001
+    },
+    {
+      "data": "DQ7",
+      "control": "A9",
+      "data_track": [
+        [
+          39.25,
+          50.662
+        ],
+        [
+          39.25,
+          54.7
+        ]
+      ],
+      "control_track": [
+        [
+          35.287,
+          50.699
+        ],
+        [
+          35.287,
+          53.912
+        ]
+      ],
+      "gap_mm": 3.783,
+      "parallel_mm": 3.213
+    },
+    {
+      "data": "DQ8",
+      "control": "A10",
+      "data_track": [
+        [
+          39.75,
+          50.662
+        ],
+        [
+          39.75,
+          54.449
+        ]
+      ],
+      "control_track": [
+        [
+          35.75,
+          50.662
+        ],
+        [
+          35.75,
+          53.049
+        ]
+      ],
+      "gap_mm": 3.82,
+      "parallel_mm": 2.387
+    },
+    {
+      "data": "DQ8",
+      "control": "A10",
+      "data_track": [
+        [
+          39.75,
+          50.662
+        ],
+        [
+          39.75,
+          54.449
+        ]
+      ],
+      "control_track": [
+        [
+          35.863,
+          53.162
+        ],
+        [
+          35.863,
+          55.162
+        ]
+      ],
+      "gap_mm": 3.707,
+      "parallel_mm": 1.287
+    },
+    {
+      "data": "DQ8",
+      "control": "A11",
+      "data_track": [
+        [
+          39.75,
+          50.662
+        ],
+        [
+          39.75,
+          54.449
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 3.32,
+      "parallel_mm": 3.062
+    },
+    {
+      "data": "DQ8",
+      "control": "A8",
+      "data_track": [
+        [
+          39.75,
+          50.662
+        ],
+        [
+          39.75,
+          54.449
+        ]
+      ],
+      "control_track": [
+        [
+          34.713,
+          50.699
+        ],
+        [
+          34.713,
+          55.162
+        ]
+      ],
+      "gap_mm": 4.857,
+      "parallel_mm": 3.75
+    },
+    {
+      "data": "DQ8",
+      "control": "A9",
+      "data_track": [
+        [
+          39.75,
+          50.662
+        ],
+        [
+          39.75,
+          54.449
+        ]
+      ],
+      "control_track": [
+        [
+          35.287,
+          50.699
+        ],
+        [
+          35.287,
+          53.912
+        ]
+      ],
+      "gap_mm": 4.283,
+      "parallel_mm": 3.213
+    },
+    {
+      "data": "DQ8",
+      "control": "SDCKE1",
+      "data_track": [
+        [
+          77.87,
+          39.08
+        ],
+        [
+          82.25,
+          39.08
+        ]
+      ],
+      "control_track": [
+        [
+          77.75,
+          43.2
+        ],
+        [
+          80.52,
+          43.2
+        ]
+      ],
+      "gap_mm": 3.94,
+      "parallel_mm": 2.65
+    },
+    {
+      "data": "DQ9",
+      "control": "A10",
+      "data_track": [
+        [
+          40.25,
+          50.662
+        ],
+        [
+          40.25,
+          53.125
+        ]
+      ],
+      "control_track": [
+        [
+          35.75,
+          50.662
+        ],
+        [
+          35.75,
+          53.049
+        ]
+      ],
+      "gap_mm": 4.32,
+      "parallel_mm": 2.387
+    },
+    {
+      "data": "DQ9",
+      "control": "A11",
+      "data_track": [
+        [
+          40.25,
+          50.662
+        ],
+        [
+          40.25,
+          53.125
+        ]
+      ],
+      "control_track": [
+        [
+          36.25,
+          50.662
+        ],
+        [
+          36.25,
+          53.724
+        ]
+      ],
+      "gap_mm": 3.82,
+      "parallel_mm": 2.463
+    },
+    {
+      "data": "DQ9",
+      "control": "A9",
+      "data_track": [
+        [
+          40.25,
+          50.662
+        ],
+        [
+          40.25,
+          53.125
+        ]
+      ],
+      "control_track": [
+        [
+          35.287,
+          50.699
+        ],
+        [
+          35.287,
+          53.912
+        ]
+      ],
+      "gap_mm": 4.783,
+      "parallel_mm": 2.426
+    },
+    {
+      "data": "LDQM",
+      "control": "BA0",
+      "data_track": [
+        [
+          62.67,
+          40.92
+        ],
+        [
+          63.75,
+          40.92
+        ]
+      ],
+      "control_track": [
+        [
+          61.75,
+          45.52
+        ],
+        [
+          63.75,
+          45.52
+        ]
+      ],
+      "gap_mm": 4.42,
+      "parallel_mm": 1.08
+    },
+    {
+      "data": "LDQM",
+      "control": "BA0",
+      "data_track": [
+        [
+          63.87,
+          40.8
+        ],
+        [
+          66.25,
+          40.8
+        ]
+      ],
+      "control_track": [
+        [
+          64.47,
+          44.8
+        ],
+        [
+          66.25,
+          44.8
+        ]
+      ],
+      "gap_mm": 3.82,
+      "parallel_mm": 1.78
+    },
+    {
+      "data": "LDQM",
+      "control": "BA1",
+      "data_track": [
+        [
+          63.87,
+          40.8
+        ],
+        [
+          66.25,
+          40.8
+        ]
+      ],
+      "control_track": [
+        [
+          64.59,
+          45.6
+        ],
+        [
+          66.25,
+          45.6
+        ]
+      ],
+      "gap_mm": 4.62,
+      "parallel_mm": 1.66
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNCAS",
+      "data_track": [
+        [
+          62.67,
+          40.92
+        ],
+        [
+          63.75,
+          40.92
+        ]
+      ],
+      "control_track": [
+        [
+          63.36,
+          42.4
+        ],
+        [
+          66.25,
+          42.4
+        ]
+      ],
+      "gap_mm": 1.3,
+      "parallel_mm": 0.39
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNCAS",
+      "data_track": [
+        [
+          63.87,
+          40.8
+        ],
+        [
+          66.25,
+          40.8
+        ]
+      ],
+      "control_track": [
+        [
+          63.36,
+          42.4
+        ],
+        [
+          66.25,
+          42.4
+        ]
+      ],
+      "gap_mm": 1.42,
+      "parallel_mm": 2.38
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNE1",
+      "data_track": [
+        [
+          62.67,
+          40.92
+        ],
+        [
+          63.75,
+          40.92
+        ]
+      ],
+      "control_track": [
+        [
+          63.0,
+          44.6
+        ],
+        [
+          63.75,
+          44.6
+        ]
+      ],
+      "gap_mm": 3.5,
+      "parallel_mm": 0.75
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNE1",
+      "data_track": [
+        [
+          63.87,
+          40.8
+        ],
+        [
+          66.25,
+          40.8
+        ]
+      ],
+      "control_track": [
+        [
+          64.35,
+          44.0
+        ],
+        [
+          66.25,
+          44.0
+        ]
+      ],
+      "gap_mm": 3.02,
+      "parallel_mm": 1.9
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNRAS",
+      "data_track": [
+        [
+          62.67,
+          40.92
+        ],
+        [
+          63.75,
+          40.92
+        ]
+      ],
+      "control_track": [
+        [
+          61.75,
+          43.68
+        ],
+        [
+          63.75,
+          43.68
+        ]
+      ],
+      "gap_mm": 2.58,
+      "parallel_mm": 1.08
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNRAS",
+      "data_track": [
+        [
+          63.87,
+          40.8
+        ],
+        [
+          66.25,
+          40.8
+        ]
+      ],
+      "control_track": [
+        [
+          64.23,
+          43.2
+        ],
+        [
+          66.25,
+          43.2
+        ]
+      ],
+      "gap_mm": 2.22,
+      "parallel_mm": 2.02
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNWE",
+      "data_track": [
+        [
+          62.67,
+          40.92
+        ],
+        [
+          63.75,
+          40.92
+        ]
+      ],
+      "control_track": [
+        [
+          61.99,
+          41.6
+        ],
+        [
+          66.25,
+          41.6
+        ]
+      ],
+      "gap_mm": 0.5,
+      "parallel_mm": 1.08
+    },
+    {
+      "data": "LDQM",
+      "control": "SDNWE",
+      "data_track": [
+        [
+          63.87,
+          40.8
+        ],
+        [
+          66.25,
+          40.8
+        ]
+      ],
+      "control_track": [
+        [
+          61.99,
+          41.6
+        ],
+        [
+          66.25,
+          41.6
+        ]
+      ],
+      "gap_mm": 0.62,
+      "parallel_mm": 2.38
+    },
+    {
+      "data": "UDQM",
+      "control": "SDCKE1",
+      "data_track": [
+        [
+          27.25,
+          25.9995
+        ],
+        [
+          27.25,
+          29.3375
+        ]
+      ],
+      "control_track": [
+        [
+          30.75,
+          26.7245
+        ],
+        [
+          30.75,
+          29.3375
+        ]
+      ],
+      "gap_mm": 3.32,
+      "parallel_mm": 2.613
+    },
+    {
+      "data": "UDQM",
+      "control": "SDNCAS",
+      "data_track": [
+        [
+          27.25,
+          25.9995
+        ],
+        [
+          27.25,
+          29.3375
+        ]
+      ],
+      "control_track": [
+        [
+          32.25,
+          25.2495
+        ],
+        [
+          32.25,
+          29.3375
+        ]
+      ],
+      "gap_mm": 4.82,
+      "parallel_mm": 3.338
+    },
+    {
+      "data": "UDQM",
+      "control": "SDNE1",
+      "data_track": [
+        [
+          27.25,
+          25.9995
+        ],
+        [
+          27.25,
+          29.3375
+        ]
+      ],
+      "control_track": [
+        [
+          29.537,
+          24.8375
+        ],
+        [
+          29.537,
+          27.3525
+        ]
+      ],
+      "gap_mm": 2.107,
+      "parallel_mm": 1.353
+    },
+    {
+      "data": "UDQM",
+      "control": "SDNE1",
+      "data_track": [
+        [
+          27.25,
+          25.9995
+        ],
+        [
+          27.25,
+          29.3375
+        ]
+      ],
+      "control_track": [
+        [
+          30.25,
+          28.0655
+        ],
+        [
+          30.25,
+          29.3375
+        ]
+      ],
+      "gap_mm": 2.82,
+      "parallel_mm": 1.272
     }
   ]
 }

@@ -1,8 +1,8 @@
 ---
 title: "matchgroup_test_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.24.0"
-date: "Rev 1 | 2026-10-21 | jlcpcb"
+author: "kicad-tools 0.29.0"
+date: "Rev 1 | 2026-11-22 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,10 +18,10 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 6 copper (F.Cu, In1.Cu, In2.Cu, In3.Cu, In4.Cu, B.Cu) |
-| Footprints | 43 (40 SMD, 3 THT, 0 other) |
+| Footprints | 49 (46 SMD, 3 THT, 0 other) |
 | Nets | 55 |
-| Traces | 8771 segments |
-| Vias | 192 |
+| Traces | 1738 segments |
+| Vias | 213 |
 | Board Size | 100.0 x 80.0 mm |
 
 ## Stackup
@@ -175,6 +175,7 @@ Board 07 real SDRAM memory test
 
 
 
+
 \newpage
 
 ## Manufacturing Readiness
@@ -210,9 +211,9 @@ Board 07 real SDRAM memory test
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~5.0 USD |
-| Components (estimated) | ~1.95 USD |
-| Assembly (estimated) | ~2.43 USD |
-| **Total (estimated)** | **~9.37 USD** |
+| Components (estimated) | ~2.01 USD |
+| Assembly (estimated) | ~2.5 USD |
+| **Total (estimated)** | **~9.51 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~46.87 USD |
+| Batch Total (estimated) | ~47.54 USD |
 
