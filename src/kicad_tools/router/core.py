@@ -17966,30 +17966,32 @@ class Autorouter:
         refusal or a cumulative-budget short-circuit), which is itself
         worth saying.
         """
+        from .nogood_cache import DRAINED_FAILURE_REASONS, search_failure_is_definitive
+
         pathfinder = self.router
-        if getattr(pathfinder, "last_route_deadline_hit", False):
-            iterations = getattr(pathfinder, "last_route_deadline_iterations", 0)
+        # The Python flags live on the Python ``Router``; ``CppPathfinder``
+        # owns none and runs its fallback on ``_py_router`` (#8644).
+        python = getattr(pathfinder, "_py_router", None) or pathfinder
+        drained = "frontier exhausted (no legal path at this occupancy)"
+        if search_failure_is_definitive(pathfinder):
+            return drained
+        if getattr(python, "last_route_deadline_hit", False):
+            iterations = getattr(python, "last_route_deadline_iterations", 0)
             return f"wall deadline hit at {iterations} expansions (search cut short)"
-        if getattr(pathfinder, "last_route_iteration_limited", False):
+        if getattr(python, "last_route_iteration_limited", False):
             return "iteration cap reached (search cut short)"
-        if getattr(pathfinder, "last_route_exhausted", False):
-            return "frontier exhausted (no legal path at this occupancy)"
         info = getattr(pathfinder, "get_last_failure_info", lambda: None)()
         if isinstance(info, dict) and info:
             import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
 
-            FAILURE_ITERATION_LIMIT = router_cpp.FAILURE_ITERATION_LIMIT
-            FAILURE_NO_PATH = router_cpp.FAILURE_NO_PATH
-            FAILURE_TIMEOUT = router_cpp.FAILURE_TIMEOUT
-
             reason = info.get("failure_reason")
             iterations = int(info.get("iterations", 0) or 0)
-            if reason == FAILURE_TIMEOUT:
+            if reason == router_cpp.FAILURE_TIMEOUT:
                 head = "wall deadline hit (search cut short)"
-            elif reason == FAILURE_ITERATION_LIMIT:
+            elif reason == router_cpp.FAILURE_ITERATION_LIMIT:
                 head = f"iteration cap reached at {iterations:,} expansions (search cut short)"
-            elif reason == FAILURE_NO_PATH:
-                head = "no path reported (search cut short)"
+            elif reason in DRAINED_FAILURE_REASONS:
+                head = drained
             else:
                 head = f"search failed (failure_reason={reason})"
             blocker = info.get("blocking_net_name")
@@ -17999,6 +18001,8 @@ class Autorouter:
                     f" ({info.get('failure_x', '?')}, {info.get('failure_y', '?')})"
                 )
             return head
+        if getattr(python, "last_route_exhausted", False):
+            return drained
         return "no search stop recorded (edge refused or short-circuited)"
 
     def _relief_reland_retry_budget(

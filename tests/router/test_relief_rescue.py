@@ -1639,7 +1639,9 @@ class TestReliefVictimSearchExits:
         def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
             if net_id == 1:
                 return [_seg_route(1, "N1", 4.0)]
-            pathfinder = router.router
+            # Production flags live on the Python Router: ``CppPathfinder``
+            # owns none and runs its fallback on ``_py_router`` (#8644).
+            pathfinder = getattr(router.router, "_py_router", None) or router.router
             pathfinder.last_route_deadline_hit = deadline
             pathfinder.last_route_deadline_iterations = 277_504 if deadline else 0
             pathfinder.last_route_exhausted = exhausted and not deadline
@@ -1694,6 +1696,8 @@ class TestReliefVictimSearchExits:
         (a ``USB3_RX2+`` via) -- the exit line must surface both.
         """
         require_router_cpp()
+        import kicad_tools.router.router_cpp as router_cpp_mod
+
         router, neg_router, net_routes, pads_by_net, route2 = self._fixture()
         pads = router.nets[2]
 
@@ -1701,7 +1705,7 @@ class TestReliefVictimSearchExits:
             if net_id == 1:
                 return [_seg_route(1, "N1", 4.0)]
             router.router.get_last_failure_info = lambda: {
-                "failure_reason": 2,  # FAILURE_ITERATION_LIMIT
+                "failure_reason": router_cpp_mod.FAILURE_ITERATION_LIMIT,
                 "blocking_via_net": 14,
                 "blocking_net_name": "USB3_RX2+",
                 "failure_x": 118.0,
@@ -1722,6 +1726,66 @@ class TestReliefVictimSearchExits:
         assert "iteration cap reached at 1,000,000 expansions (search cut short)" in line
         assert "last blocker USB3_RX2+ at (118.0, 55.5)" in line
         assert net_routes[2][0] is route2
+
+    def test_cpp_drained_failure_codes_report_the_proof(self):
+        """FAILURE_NO_PATH / VIA_VIA_BLOCKED / PAIRWISE_BLOCKED drained the open set."""
+        require_router_cpp()
+        import kicad_tools.router.router_cpp as router_cpp
+
+        for code in (
+            router_cpp.FAILURE_NO_PATH,
+            router_cpp.FAILURE_VIA_VIA_BLOCKED,
+            router_cpp.FAILURE_PAIRWISE_BLOCKED,
+        ):
+            router, neg_router, net_routes, pads_by_net, _route2 = self._fixture()
+            pads = router.nets[2]
+
+            def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, _c=code, **kw):
+                if net_id == 1:
+                    return [_seg_route(1, "N1", 4.0)]
+                router.router.get_last_failure_info = lambda: {
+                    "failure_reason": _c,
+                    "blocking_net_name": "USB3_RX2+",
+                    "failure_x": 1.0,
+                    "failure_y": 2.0,
+                    "iterations": 10,
+                }
+                kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+                return []
+
+            with (
+                patch.object(Autorouter, "_relief_probe", side_effect=self._probes()),
+                patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+            ):
+                _ok, msgs = self._rescue(router, neg_router, net_routes, pads_by_net)
+            line = next(m for m in msgs if "re-land failure exits (issue #9936)" in m)
+            assert "frontier exhausted (no legal path at this occupancy)" in line, code
+            assert "cut short" not in line, code
+            assert "last blocker USB3_RX2+" in line
+
+    def test_cpp_fallback_deadline_outranks_stale_native_reason(self):
+        """A Python-fallback deadline on ``_py_router`` is read, not hidden by native info."""
+        require_router_cpp()
+        router, neg_router, net_routes, pads_by_net, _route2 = self._fixture()
+        pads = router.nets[2]
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+            if net_id == 1:
+                return [_seg_route(1, "N1", 4.0)]
+            py = getattr(router.router, "_py_router", None) or router.router
+            py.last_route_deadline_hit = True
+            py.last_route_deadline_iterations = 1234
+            router.router.get_last_failure_info = lambda: {"failure_reason": 2, "iterations": 9}
+            kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+            return []
+
+        with (
+            patch.object(Autorouter, "_relief_probe", side_effect=self._probes()),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            _ok, msgs = self._rescue(router, neg_router, net_routes, pads_by_net)
+        line = next(m for m in msgs if "re-land failure exits (issue #9936)" in m)
+        assert "wall deadline hit at 1234 expansions (search cut short)" in line
 
     def test_victim_without_measured_exit_keeps_a_nested_marker(self):
         ok, msgs, _net_routes, _route2 = self._failing_victim_reland(
