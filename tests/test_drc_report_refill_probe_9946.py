@@ -297,3 +297,33 @@ class TestRetryReportIsFresh:
         pcb = _board(tmp_path)
 
         assert runner._kicad_drc_report(pcb, cli, refill=True) == {"violations": []}
+
+    def test_inspecting_argv_after_a_successful_write_preserves_the_report(
+        self, tmp_path, monkeypatch
+    ):
+        """Issue #9959: ``build_cmd`` is side-effect-free, so the parity-style
+        argv inspection (calling ``build_cmd`` inside a spy) never deletes a
+        report a launch already wrote.  The per-launch reset lives in
+        ``run_kicad_drc_command``."""
+        cli = _script_kicad_cli(tmp_path)
+        pcb = _board(tmp_path)
+        orig = runner.run_kicad_drc_command
+        checks: dict = {}
+
+        def spy(build_cmd, kicad_cli, **kwargs):
+            proc, refilled = orig(build_cmd, kicad_cli, **kwargs)
+            argv = build_cmd(False)  # inspect argv after the launch wrote
+            out = Path(argv[argv.index("--output") + 1])
+            checks["written"] = out.read_text() == VALID_REPORT
+            build_cmd(True)
+            build_cmd(False)
+            checks["survives"] = out.read_text() == VALID_REPORT
+            return proc, refilled
+
+        monkeypatch.setattr(runner, "run_kicad_drc_command", spy)
+
+        report = runner._kicad_drc_report(pcb, cli, refill=True)
+
+        assert isinstance(report, dict) and report["violations"] == []
+        assert checks["written"] is True, "argv inspection must not delete the report"
+        assert checks["survives"] is True

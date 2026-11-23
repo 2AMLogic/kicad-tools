@@ -879,6 +879,325 @@ def test_pass_through_segment_refused_when_a_via_anchors_its_end(tmp_path):
     assert board.read_text() == before
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_pass_through_moves_shared_junction_and_keeps_its_via_fixed(tmp_path, reverse):
+    anchor, junction, remote = (95, 100.62), (105, 100.62), (108, 103)
+    track = _seg("trk-p", junction, anchor) if reverse else _seg("trk-p", anchor, junction)
+    fork, inner = (108, 100.8), (95, 105)
+    board = _board(
+        tmp_path,
+        "\n".join(
+            [
+                track,
+                _via("fixed", anchor),
+                _seg("joined", junction, remote),
+                _seg("fork", fork, junction),
+                _seg("other-layer", anchor, inner, layer="B.Cu"),
+            ]
+        ),
+    )
+    original = {
+        uid: _saved_copper(board, uid)[1]
+        for uid in ("trk-p", "fixed", "joined", "fork", "other-layer")
+    }
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0, clearance_mm=0.1)
+    assert result.repaired == 1
+    repairer.save(board)
+    copper, ends = _saved_copper(board, "trk-p")
+    moved = ends[0 if reverse else 1]
+    action = result.actions[0]
+    assert (action.old_x, action.old_y) == junction
+    assert (round(action.new_x, 4), round(action.new_y, 4)) == moved
+    assert ends[1 if reverse else 0] == _saved_copper(board, "fixed")[1] == anchor
+    assert _end(board, "joined") == [moved, remote]
+    assert _end(board, "fork") == [fork, moved]
+    assert _end(board, "other-layer") == [anchor, inner]
+    assert moved != junction and _pad_poly(board, "R1/1").distance(copper) >= 0.11 - 1e-6
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(result.actions[0])
+    undo.save(board)
+    assert {uid: _saved_copper(board, uid)[1] for uid in original} == original
+
+
+# A tap ending 0.19 mm off a centreline only just touches the 0.2 mm copper edge,
+# on the side the nudge moves the track away from.
+TAP_OFFSET = -0.19
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "locked_neighbor",
+        "fixed_end_too_close",
+        "two_vias",
+        "unbroken_track",
+        "arc_midpoint",
+        "locked_tap_on_target",
+        "tap_on_joined_leg",
+    ],
+)
+def test_pass_through_preserves_an_immovable_junction(tmp_path, block):
+    anchor = (99.5, 100.62) if block == "fixed_end_too_close" else (95, 100.62)
+    junction = (105, 100.62)
+    joined = _seg("joined", junction, (108, 103))
+    if block == "locked_neighbor":
+        joined = joined.replace('(uuid "joined")', '(locked yes) (uuid "joined")')
+    copper = [_seg("trk-p", anchor, junction), _via("fixed", anchor), joined]
+    if block == "two_vias":
+        copper.append(_via("other", junction))
+    if block == "unbroken_track":
+        copper.append(_seg("tee", (105, 99), (105, 102)))
+    if block == "arc_midpoint":
+        copper.append(
+            "(arc (start 104 101.62) (mid 105 100.62) (end 106 101.62) "
+            '(width 0.2) (layer "F.Cu") (net 1) (uuid "arc"))'
+        )
+    if block == "locked_tap_on_target":
+        tap = _seg("tap", (104.6, 100.62 + TAP_OFFSET), (104.6, 98))
+        copper.append(tap.replace('(uuid "tap")', '(locked yes) (uuid "tap")'))
+    if block == "tap_on_joined_leg":
+        copper.append(_seg("tap", (106.5, 101.81 + TAP_OFFSET), (110, 99)))
+    board = _board(tmp_path, "\n".join(copper))
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 0
+    reason = {
+        "fixed_end_too_close": "infeasible",
+        "locked_tap_on_target": "would_break_same_net_contact",
+        "tap_on_joined_leg": "would_break_same_net_contact",
+    }.get(block, "junction_at_moved_end")
+    assert result.skipped(reason) == 1
+    assert not repairer.modified
+
+
+def test_pass_through_declines_when_a_via_annulus_touches_the_track_shoulder(tmp_path):
+    # The via centre is 0.39 mm off the centreline -- far outside a centreline
+    # tolerance -- yet its 0.3 mm annulus meets the 0.1 mm half-width copper.
+    anchor, junction = (95, 100.62), (105, 100.62)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, (108, 103)),
+        _via("shoulder", (104.6, 100.23)),
+    ]
+    repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 0 and result.skipped("would_break_same_net_contact") == 1
+    assert not repairer.modified
+
+
+def test_pass_through_keeps_a_collinear_overlap_that_survives_the_move(tmp_path):
+    # A stationary track continuing the dragged leg's far end overlaps its
+    # copper before and after, so the contact is preserved and the move stands.
+    anchor, junction, remote = (95, 100.62), (105, 100.62), (108, 103)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, remote),
+        _seg("tail", remote, (110, 104.59)),
+    ]
+    repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == 1 and not result.skipped("junction_at_moved_end")
+
+
+@pytest.mark.parametrize(
+    "kind, layer, detail, blocked",
+    [
+        (
+            "smd custom",
+            "F.Cu",
+            "(primitives (gr_rect (start -2.75 -0.05) (end -2.68 0.05) (width 0) (fill yes)))",
+            True,
+        ),
+        (
+            "smd custom",
+            "F.Cu",
+            "(primitives (gr_rect (start -1.75 -0.05) (end -1.68 0.05) (width 0) (fill yes)))",
+            False,
+        ),
+        ("smd custom", "F.Cu", "(primitives (unknown_primitive))", True),
+        ("smd custom", "B.Cu", "(primitives (unknown_primitive))", False),
+        ("thru_hole rect", "*.Cu", "(drill 0.15 (offset -2.75 0))", True),
+        ("thru_hole rect", "*.Cu", "(drill 0.15 (offset -1.75 0))", False),
+        (
+            "thru_hole rect",
+            "*.Cu",
+            '(drill 0.15) (padstack (mode custom) (layer "F.Cu" (shape rect) (size 6 1)))',
+            True,
+        ),
+    ],
+)
+def test_fixed_via_pivot_checks_rotated_pad_copper_on_its_layer(
+    tmp_path, kind, layer, detail, blocked
+):
+    # A 90-degree pad rotates negative local X toward positive board Y.
+    # The first rectangle touches the old track by its edge. The second sits 1 mm farther away.
+    anchor, junction = (95, 100.62), (105, 100.62)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, (108, 103)),
+        f'(footprint "test:P5" (layer "F.Cu") (at 104.5 97.84) '
+        f'(property "Reference" "P5") (pad "1" {kind} (at 0 0 90) (size 0.2 0.2) '
+        f'(layers "{layer}") (net 1 "N1") (uuid "test-pad") {detail}))',
+    ]
+    repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
+    assert result.repaired == (0 if blocked else 1)
+    assert bool(result.skipped("would_break_same_net_contact")) == blocked
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    "contact, tap_end",
+    [
+        ("track", 90.551),
+        ("via", 90.366),
+        ("pad", 90.316),
+        ("centered-custom", 90.316),
+        ("offset-custom", 90.316),
+        ("retained", 90.95),
+    ],
+)
+def test_verified_fixed_via_move_preserves_physical_contact(tmp_path, capsys, contact, tap_end):
+    from kicad_tools.cli import main as kct
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+    from kicad_tools.core.sexp_file import save_pcb
+    from kicad_tools.sexp import parse_string
+
+    # P2 already reaches P3 along a second path. A lost branch contact can
+    # therefore leave both the native opens count and every pad group intact.
+    fixture = Path(__file__).parent / "fixtures" / "mask_fixed_via_junction.kicad_pcb"
+    doc = parse_file(fixture)
+    track = "cc000000-0000-4000-8000-000000000050"
+    tap = "cc000000-0000-4000-8000-000000000070"
+    pad_contact = contact in {"pad", "centered-custom", "offset-custom"}
+    shoulder = 89.25 if pad_contact else tap_end
+    doc.add(
+        parse_string(
+            f"(segment (start 145.5 88.45) (end 145.5 {shoulder}) (width 0.15) "
+            f'(layer "F.Cu") (net 1) (locked yes) (uuid "{tap}"))'
+        )
+    )
+    if contact == "via":
+        doc.add(parse_string(_via("cc000000-0000-4000-8000-000000000071", (145.5, tap_end))))
+    elif pad_contact:
+        # All three descriptions print the same copper. The broad feed contains
+        # the offset anchor, and its narrow continuation contains the custom neck.
+        for uid, start, end, width in [
+            ("74", shoulder, 89.75, 0.32),
+            ("75", 89.75, tap_end, 0.15),
+        ]:
+            doc.add(
+                parse_string(
+                    f"(segment (start 145.5 {start}) (end 145.5 {end}) (width {width}) "
+                    f'(layer "F.Cu") (net 1) (locked yes) '
+                    f'(uuid "cc000000-0000-4000-8000-0000000000{uid}"))'
+                )
+            )
+        anchor_y = 89.5 if contact == "offset-custom" else 90.436
+        shape, size = "rect", 0.45
+        primitives = ""
+        if contact != "pad":
+            shape, size = "custom", 0.30
+            neck = ""
+            if contact == "offset-custom":
+                neck = "(gr_rect (start -0.04 0) (end 0.04 0.936) (width 0) (fill yes))"
+            primitives = (
+                "(options (clearance outline) (anchor circle)) "
+                f"(primitives (gr_rect (start -0.225 {90.211 - anchor_y:.6f}) "
+                f"(end 0.225 {90.661 - anchor_y:.6f}) (width 0) (fill yes)) {neck})"
+            )
+        doc.add(
+            parse_string(
+                f'(footprint "Test:Contact" (layer "F.Cu") (at 145.5 {anchor_y}) '
+                '(uuid "cc000000-0000-4000-8000-000000000072") '
+                '(property "Reference" "P5" (at 0 -1) (layer "F.Fab")) '
+                f'(pad "1" smd {shape} (at 0 0) (size {size} {size}) (layers "F.Cu") '
+                f'(net 1 "N1") (uuid "cc000000-0000-4000-8000-000000000073") {primitives}))'
+            )
+        )
+    board = tmp_path / fixture.name
+    save_pcb(doc, board)
+    original = board.read_bytes()
+    old_track, _ = _saved_copper(board, track)
+    with evidence_toolchain(mounts=[tmp_path]):
+        # The pcbnew worker is written beside its input, so take the reference
+        # reading in a private stage just as fix-drc does.
+        with fix_drc_cmd._with_project_rules(board, board, private=True) as staged:
+            groups = fix_drc_cmd._mask_native_pad_groups(staged)
+        assert len(groups) == 1 and len(groups[0]) == (5 if pad_contact else 4)
+        kct(
+            [
+                "fix-drc",
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-passes",
+                "1",
+                "--max-displacement",
+                "2",
+                "--verify",
+                "--format",
+                "json",
+            ]
+        )
+        with fix_drc_cmd._with_project_rules(board, board, private=True) as staged:
+            assert fix_drc_cmd._mask_native_pad_groups(staged) == groups
+    report = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert report["violations"] == 1
+    if contact == "retained":
+        copper, _ = _saved_copper(board, track)
+        stationary, _ = _saved_copper(board, tap)
+        assert report["repaired"] == 1, report
+        assert not copper.equals(old_track)
+        assert old_track.intersection(stationary).area > 0
+        assert copper.intersection(stationary).area > 0
+    else:
+        assert report["repaired"] == 0
+        assert [item["reason"] for item in report["unrepaired"]] == ["would_break_same_net_contact"]
+        assert board.read_bytes() == original
+
+
+def test_via_fixed_junction_clears_both_openings_within_displacement_limit(tmp_path):
+    anchor, junction = (95, 100.62), (105, 100.62)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, (108, 103)),
+    ]
+    board = _board2(tmp_path, "\n".join(copper), "102.8 100.01")
+    findings = [_pt_finding("trk-p"), _pt_finding("trk-p", pad="pad-r2-1", measured=0.01)]
+    repairer = MaskCopperRepairer(board)
+    refused = repairer.repair(findings, max_displacement=0.15)
+    assert refused.skipped("exceeds_max_displacement") and not repairer.modified
+
+    result = repairer.repair(findings, max_displacement=1.0)
+    assert result.repaired == 1 and set(result.actions[0].openings) == {PAD, "pad-r2-1"}
+    repairer.save(board)
+    shape, _ = _saved_copper(board, "trk-p")
+    for ref in ("R1/1", "R2/1"):
+        assert _pad_poly(board, ref).distance(shape) >= 0.11 - 1e-6
+
+
+def test_via_fixed_junction_checks_clearance_on_other_joined_track(tmp_path):
+    anchor, junction = (95, 100.62), (105, 100.62)
+    copper = [
+        _seg("trk-p", anchor, junction),
+        _via("fixed", anchor),
+        _seg("joined", junction, (108, 103)),
+        _seg("n2", (105.68, 101.57), (105.72, 101.57), net=2),
+    ]
+    repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
+    result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0, clearance_mm=0.1)
+    assert result.repaired == 0 and result.skipped("would_violate_clearance") == 1
+    assert not repairer.modified
+
+
 def test_pass_through_segment_refused_by_other_net_copper(tmp_path):
     # The nudge moves the track up 0.09 mm; an N2 track 0.05 mm beyond the
     # destination is crowded below the 0.1 mm floor while the authored track

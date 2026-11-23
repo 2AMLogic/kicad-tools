@@ -1,0 +1,238 @@
+{
+  "meta": {
+    "filename": "diffpair_test_routed.kicad_pro",
+    "version": 1,
+    "manufacturer": "jlcpcb",
+    "layers": 4,
+    "copper_oz": 1.0,
+    "kct_router_netclasses": {
+      "classes": [
+        "MIPI",
+        "PCIe",
+        "Power",
+        "Sideband",
+        "USB2",
+        "USB3"
+      ],
+      "assignments": [
+        "+1V2",
+        "+1V8",
+        "+3V3",
+        "GND",
+        "MIPI_CLK+",
+        "MIPI_CLK-",
+        "MIPI_D0+",
+        "MIPI_D0-",
+        "MIPI_RST",
+        "PCIE_RX+",
+        "PCIE_RX-",
+        "PCIE_TX+",
+        "PCIE_TX-",
+        "USB2_D+",
+        "USB2_D-",
+        "USB3_RX1+",
+        "USB3_RX1-",
+        "USB3_RX2+",
+        "USB3_RX2-",
+        "USB3_TX1+",
+        "USB3_TX1-",
+        "USB3_TX2+",
+        "USB3_TX2-",
+        "USB_CC1",
+        "USB_CC2",
+        "VBUS_USB"
+      ]
+    },
+    "kct_sidecar_sha256": "1665c3a7708058803ff8b070be61f199080b62f4690d38e7ccd242b5795da628"
+  },
+  "board": {
+    "design_settings": {
+      "rules": {
+        "min_clearance": 0.1016,
+        "min_track_width": 0.1016,
+        "min_via_diameter": 0.45,
+        "min_via_annular_width": 0.05,
+        "min_through_hole_diameter": 0.2,
+        "min_via_hole": 0.2,
+        "min_hole_to_hole": 0.5,
+        "min_copper_edge_clearance": 0.3,
+        "min_silk_clearance": 0.05,
+        "min_text_thickness": 0.15,
+        "min_text_height": 1.0,
+        "min_microvia_diameter": 0.2,
+        "min_microvia_drill": 0.1
+      },
+      "rule_severities": {
+        "lib_footprint_mismatch": "ignore",
+        "isolated_copper": "warning"
+      },
+      "defaults": {
+        "track_min_width": 0.1016,
+        "clearance_min": 0.1016,
+        "via_min_diameter": 0.45,
+        "via_min_drill": 0.2
+      }
+    }
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "bus_width": 12,
+        "clearance": 0.1016,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1016,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Default",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1016,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "MIPI",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1016,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "PCIe",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1016,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Power",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1016,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Sideband",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1016,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "USB2",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1016,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "USB3",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2,
+        "wire_width": 6
+      }
+    ],
+    "meta": {
+      "version": 3
+    },
+    "netclass_assignments": {
+      "+1V2": "Power",
+      "+1V8": "Power",
+      "+3V3": "Power",
+      "GND": "Power",
+      "MIPI_CLK+": "MIPI",
+      "MIPI_CLK-": "MIPI",
+      "MIPI_D0+": "MIPI",
+      "MIPI_D0-": "MIPI",
+      "MIPI_RST": "Sideband",
+      "PCIE_RX+": "PCIe",
+      "PCIE_RX-": "PCIe",
+      "PCIE_TX+": "PCIe",
+      "PCIE_TX-": "PCIe",
+      "USB2_D+": "USB2",
+      "USB2_D-": "USB2",
+      "USB3_RX1+": "USB3",
+      "USB3_RX1-": "USB3",
+      "USB3_RX2+": "USB3",
+      "USB3_RX2-": "USB3",
+      "USB3_TX1+": "USB3",
+      "USB3_TX1-": "USB3",
+      "USB3_TX2+": "USB3",
+      "USB3_TX2-": "USB3",
+      "USB_CC1": "Sideband",
+      "USB_CC2": "Sideband",
+      "VBUS_USB": "Power"
+    }
+  },
+  "schematic": {
+    "meta": {
+      "version": 1
+    }
+  },
+  "sheets": [],
+  "text_variables": {}
+}
