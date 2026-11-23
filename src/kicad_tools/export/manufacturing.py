@@ -688,6 +688,18 @@ class ManufacturingPackage:
                     "Silk legalisation pass could not run: "
                     + str(result.silk_fix.get("error", "unknown reason"))
                 )
+            # Issue #9990: the pass is export's own edit of the source board.
+            # Re-bind the named-stackup provenance to the bytes the pass
+            # itself wrote (its report carries their sha256), through the
+            # same validation used at the start of export() -- so the
+            # ordering record describes the bytes that ship, while an edit
+            # other than the pass's own still fails the final change guard.
+            written = result.silk_fix.get("output_sha256") if result.silk_fix else None
+            if self.config.stackup_id and written:
+                rebound = self._stackup_hash_after_own_edit(result, written)
+                if rebound is None:
+                    return result
+                selected_stackup_source_hash = rebound
 
         # Step 0: Pre-flight validation
         preflight_cfg = self.config.preflight
@@ -790,6 +802,35 @@ class ManufacturingPackage:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _stackup_hash_after_own_edit(
+        self, result: ManufacturingResult, written_sha256: str
+    ) -> str | None:
+        """Re-bind named-stackup provenance to export's own edit (#9990).
+
+        Runs the same ``stackup_ordering_record`` validation as the start of
+        :meth:`export` on the live board and returns its sha256 only when it
+        equals *written_sha256* -- the hash of the bytes an export-internal
+        stage (the silk pass; the #9987 rule refill when it lands) recorded
+        writing.  The equality pins the rebound provenance to the exporter's
+        own transformed bytes, so an external edit during or after that stage
+        still fails the final source-change guard.  On any failure the error
+        is recorded on *result* and ``None`` is returned.
+        """
+        from .stackup import stackup_ordering_record
+
+        stackup_id = self.config.stackup_id
+        if not stackup_id:
+            return None
+        try:
+            record = stackup_ordering_record(self.pcb_path, stackup_id)
+            rebound_hash = str(record["pcb_sha256"])
+            if rebound_hash != written_sha256:
+                raise ValueError("PCB changed during manufacturing export")
+        except (OSError, ValueError, KiCadToolsError) as exc:
+            result.errors.append(f"Stackup ordering validation failed: {exc}")
+            return None
+        return rebound_hash
 
     # Substring that identifies the LCSC clause emitted by
     # ``PreflightChecker._check_bom_fields``.

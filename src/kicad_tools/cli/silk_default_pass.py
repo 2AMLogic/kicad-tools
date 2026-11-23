@@ -136,6 +136,10 @@ def silk_pass_document(report, mfr: str | None) -> dict[str, Any]:
         "total_moved": report.total_moved,
         "unresolved": [u.to_dict() for u in report.unresolved],
         "board": str(report.output_path) if report.output_path else None,
+        # sha256 of the bytes the pass wrote (None when it wrote nothing);
+        # the manufacturing export re-binds its source-change guard to it
+        # so an external edit still fails the guard (#9990).
+        "output_sha256": report.output_sha256 or None,
     }
 
 

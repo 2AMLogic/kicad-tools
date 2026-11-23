@@ -9,6 +9,7 @@ mix-ups between the raw-tree tools and the board-relative checks show up.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -177,6 +178,8 @@ def test_legalize_silk_report_names_every_edit(tmp_path: Path):
     assert moved == ["U1"]  # only the obscured reference relocates
     assert report.unresolved == []
     assert report.output_path == str(path)
+    # The report names the exact bytes it wrote (#9990).
+    assert report.output_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
 
     # Widths, heights and thicknesses now meet the profile.
     pcb = PCB.load(path)
@@ -207,6 +210,7 @@ def test_idempotent_second_run_changes_nothing(tmp_path: Path):
     assert report.total_fixed == 0
     assert report.unresolved == []
     assert path.read_bytes() == once
+    assert report.output_sha256 == ""  # wrote nothing, bound nothing (#9990)
 
 
 def test_dry_run_reports_staged_result_and_preserves_bytes(tmp_path: Path, capsys):
@@ -239,6 +243,7 @@ def test_separate_output_preserves_original(tmp_path: Path):
     assert path.read_bytes() == before
     assert _silk_findings(out) == []
     assert report.output_path == str(out)
+    assert report.output_sha256 == hashlib.sha256(out.read_bytes()).hexdigest()
 
 
 def test_already_legal_board_is_noop(tmp_path: Path):

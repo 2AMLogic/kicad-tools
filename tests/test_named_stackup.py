@@ -2,9 +2,11 @@
 
 import json
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
+from kicad_tools._shapely import has_shapely
 from kicad_tools.physics import Stackup, TransmissionLine
 
 
@@ -205,3 +207,97 @@ def test_export_cannot_rebind_metadata_after_source_changed(tmp_path, monkeypatc
     assert not result.success
     assert "changed during" in result.errors[-1]
     assert result.manifest_path is None and result.stackup_path is None
+
+
+def _silk_defect_stackup_board(tmp_path, identifier="JLC04161H-3313"):
+    """The named-construction board plus authored silk defects the pass repairs.
+
+    Same construction as :func:`authored_pcb`; the appended defects (the
+    wiring suite's ``DEFECTS``) give the default silk pass one repair to
+    apply, so Step 0c re-saves the board in place (#9990).
+    """
+    from tests.test_silk_default_pass_wiring import DEFECTS
+
+    path = authored_pcb(tmp_path, identifier)
+    text = path.read_text().rstrip()
+    path.write_text(text[:-1] + DEFECTS + ")\n")
+    return path
+
+
+def _stackup_package(path, **overrides):
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig
+
+    config = ManufacturingConfig(
+        stackup_id="JLC04161H-3313",
+        bom_source="pcb",
+        include_bom=False,
+        include_pnp=False,
+        include_gerbers=False,
+        include_report=False,
+        include_project_zip=True,
+        preflight=PreflightConfig(skip_all=True),
+        **overrides,
+    )
+    return ManufacturingPackage(path, manufacturer="jlcpcb", config=config)
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_silk_repair_rebinds_stackup_provenance_to_shipped_bytes(tmp_path):
+    import hashlib
+    import zipfile
+
+    from kicad_tools.export.manufacturing import verify_manifest
+
+    path = _silk_defect_stackup_board(tmp_path)
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert result.silk_fix is not None and result.silk_fix["applied"] is True
+    assert result.silk_fix["total_fixed"] >= 1  # the pass really re-saved the board
+    assert result.success, result.errors
+
+    shipped = hashlib.sha256(path.read_bytes()).hexdigest()
+    record = json.loads(result.stackup_path.read_text())
+    assert record["pcb_sha256"] == shipped  # ordering record names the repaired PCB
+    with zipfile.ZipFile(result.project_zip_path) as zf:
+        assert hashlib.sha256(zf.read(path.name)).hexdigest() == shipped
+    assert verify_manifest(result.manifest_path) == []
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_silk_pass_zero_edit_stackup_export_keeps_source_bytes(tmp_path):
+    import hashlib
+
+    path = authored_pcb(tmp_path, "JLC04161H-3313")
+    before = path.read_bytes()
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert result.success, result.errors
+    assert result.silk_fix is not None and result.silk_fix["total_fixed"] == 0
+    assert path.read_bytes() == before  # a zero-edit board is not re-saved
+    record = json.loads(result.stackup_path.read_text())
+    assert record["pcb_sha256"] == hashlib.sha256(before).hexdigest()
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_foreign_edit_during_silk_stage_still_fails_named_stackup(tmp_path, monkeypatch):
+    from kicad_tools.cli import silk_default_pass
+
+    path = _silk_defect_stackup_board(tmp_path)
+    real_pass = silk_default_pass.run_default_silk_pass
+
+    def pass_then_foreign_edit(board, **kwargs):
+        document = real_pass(board, **kwargs)
+        if document and document.get("applied"):
+            # An independent drawing edit landing right after the pass wrote
+            # its result must not be adopted as the exporter's own bytes.
+            Path(board).write_text(Path(board).read_text() + "\n")
+        return document
+
+    monkeypatch.setattr(silk_default_pass, "run_default_silk_pass", pass_then_foreign_edit)
+
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert not result.success
+    assert "changed during" in result.errors[-1]
+    assert result.stackup_path is None and result.manifest_path is None
