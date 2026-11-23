@@ -552,6 +552,14 @@ class MaskCopperRepairer(CopperGapRepairer):
             if conductor in moved:
                 result.skip("segment_already_moved", members[0], conductor)
                 continue
+            if conductor in touched_by_action:
+                # An earlier action this run already dragged an end of this
+                # conductor; nudging it again stacks a second edit on the
+                # same endpoint, which cannot be undone in application order
+                # and aborts the whole batch in verification (issue #9958).
+                for violation in members:
+                    result.skip("segment_end_already_moved", violation, conductor)
+                continue
             refusal = self._repair_pass_through(
                 conductor,
                 members,
