@@ -139,6 +139,7 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             "pytest",
             "tests/test_zones_cmd.py",
             "tests/test_zones_hv_keepout.py",
+            "tests/test_zones_fill_probe_timeout_9938.py",
             *common,
             "--basetemp",
             str(tmp_path / "zone-native/pytest"),
@@ -170,6 +171,7 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
                     "test_stitch_physical_completion.py",
                     "test_zones_cmd.py",
                     "test_zones_hv_keepout.py",
+                    "test_zones_fill_probe_timeout_9938.py",
                     # Epic #5509 Phase 1c (#5515): a whole directory rather
                     # than a file, and the only entry here whose ignore is
                     # load-bearing for *correctness* rather than only for
