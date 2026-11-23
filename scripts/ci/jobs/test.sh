@@ -68,9 +68,13 @@ run_stitch() {
 
 run_zones() {
   # Issue #5452: native zone refills were OOM-killed while competing with
-  # pytest workers; run these modules without that pool.
+  # pytest workers; run these modules without that pool. Issue #9985: the
+  # fill-probe controls each launch several kicad-cli processes and exceeded
+  # the pool's per-test budget even without contention -- same partition.
   step "Run native zone acceptance"
-  uv run pytest tests/test_zones_cmd.py tests/test_zones_hv_keepout.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" "$@"
+  uv run pytest tests/test_zones_cmd.py tests/test_zones_hv_keepout.py \
+    tests/test_zones_fill_probe_timeout_9938.py \
+    -o addopts= --benchmark-disable --timeout=60 -m "not slow" "$@"
 }
 
 run_bulk() {
@@ -81,6 +85,7 @@ run_bulk() {
     --ignore=tests/test_stitch_physical_completion.py
     --ignore=tests/test_zones_cmd.py
     --ignore=tests/test_zones_hv_keepout.py
+    --ignore=tests/test_zones_fill_probe_timeout_9938.py
     # Epic #5509 Phase 1c (#5515): the only ignore that is load-bearing for
     # *correctness* rather than only resource contention -- tests/conformance
     # has its own dedicated sub-command above, so without this the suite runs
