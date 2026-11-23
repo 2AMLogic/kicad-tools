@@ -58,7 +58,6 @@ from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyp
 
 from ..schema.pcb import Arc
 from ..sexp import SExp
-from .net_compat import resolve_net_atom
 from .repair_copper_gap import CopperGapRepairer
 from .violation import DRCViolation, ViolationType
 
@@ -90,6 +89,24 @@ _MODEL_AGREEMENT_MM = 0.05
 # covers the plot uncertainty above plus re-measurement room, so the saved
 # geometry lands past the rule's "uncertain" band rather than inside it.
 PASS_THROUGH_MARGIN_MM = 0.02
+# Disjoint-via relocation search (issue #9939): when the shortest push is
+# vetoed by copper, pad or drill clearance, alternative displacements are
+# tried on this many directions (15-degree steps, matching the measured
+# Board 03 trial) at ascending magnitudes on this step grid, bounded by the
+# caller's ``max_displacement``.
+_VIA_SEARCH_DIRECTIONS = 24
+_VIA_SEARCH_STEP_MM = 0.01
+# Radial copper margin a kept-line connection must retain inside the via
+# land after including track width, so rounding can never push added copper
+# past the annulus.
+_TAIL_LAND_MARGIN_MM = 0.001
+# Shortest added connection segment (mm).  A shorter contact collapses into
+# the slid endpoint (the end lands inside the land and already touches the
+# annulus) instead of serializing a near-zero-length segment.
+_MIN_TAIL_MM = 0.005
+# The four connection line directions through the new via centre (each used
+# in both orientations): 0, 45, 90 and 135 degrees.
+_ALIGNED_TAIL_DIRS = ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0))
 
 
 @dataclass
@@ -160,6 +177,30 @@ class MaskNudgeAction:
             f"nudge_clear: {self.kind} [{self.net_name}] ({self.old_x:.4f}, {self.old_y:.4f}) -> "
             f"({self.new_x:.4f}, {self.new_y:.4f}) clear of {self.pad_ref} - {self.detail}"
         )
+
+
+@dataclass
+class MaskViaRelocateAction(MaskNudgeAction):
+    """One applied (or, in a dry run, predicted) via relocation with kept
+    approach lines (issue #9939's disjoint-via increment).
+
+    The via centre translates by ``(dx, dy)`` like a nudge, but an anchored
+    track end does not have to follow it verbatim: each end may slide along
+    its own segment line to the point where a 0/45/90/135-degree connection
+    -- recorded in ``added_segments`` and lying wholly inside the new via
+    land -- runs to the new centre, so no approach changes angle.  ``points``
+    still names every moved item (the via, each slid end and every added
+    connection) for finding-attribution; undo removes the added copper.
+    """
+
+    #: ``(segment uuid, end tag, old_x, old_y, new_x, new_y)`` -- one entry
+    #: per anchored end that slid along its own line to its connection point.
+    end_moves: list[tuple[str, str, float, float, float, float]] = field(default_factory=list)
+    #: ``(uuid, start_x, start_y, end_x, end_y, width, layer, net)`` for each
+    #: short aligned connection the action adds inside the new via land.
+    added_segments: list[tuple[str, float, float, float, float, float, str, int | str]] = field(
+        default_factory=list
+    )
 
 
 @dataclass
@@ -299,8 +340,10 @@ class MaskCopperRepairer(CopperGapRepairer):
     def _net_name(self, node: SExp) -> str:
         net_node = node.find("net")
         atom = net_node.get_first_atom() if net_node else None
-        _, name = resolve_net_atom(None if atom is None else str(atom), self.nets, self.net_names)
-        return name or ""
+        # The parser preserves quoted names as strings, including names such as "123".
+        if isinstance(atom, str):
+            return atom
+        return self.nets.get(atom, "") if isinstance(atom, int) else ""
 
     @staticmethod
     def _xy(node: SExp | None) -> tuple[float, float] | None:
@@ -593,6 +636,14 @@ class MaskCopperRepairer(CopperGapRepairer):
         for conductor, members in pass_throughs.items():
             if conductor in moved:
                 result.skip("segment_already_moved", members[0], conductor)
+                continue
+            if conductor in touched_by_action:
+                # An earlier action this run already dragged an end of this
+                # conductor; nudging it again stacks a second edit on the
+                # same endpoint, which cannot be undone in application order
+                # and aborts the whole batch in verification (issue #9958).
+                for violation in members:
+                    result.skip("segment_end_already_moved", violation, conductor)
                 continue
             refusal = self._repair_pass_through(
                 conductor,
@@ -1382,7 +1433,18 @@ class MaskCopperRepairer(CopperGapRepairer):
         margin_mm: float,
         touched_by_action: set[str],
     ) -> tuple[str, str] | None:
-        """Move a pass-through via (dragging its anchored track ends) clear."""
+        """Move a pass-through via (dragging its anchored track ends) clear.
+
+        When the shortest push is declined by the clearance gates, or the
+        destination it selects needs more than ``max_displacement``,
+        alternative displacements are searched (issue #9939): bounded by the
+        caller's maximum, ordered shortest first, re-validated against the
+        project's authored net classes on every spanned layer.  A candidate
+        that survives keeps each anchored approach on its own line and adds a
+        short 0/45/90/135-degree connection wholly inside the new via land
+        instead of dragging the ends off angle.  A via with no legal
+        candidate stays where it is, reported with the primary refusal.
+        """
         entries = [pads[opening] for opening in openings]
         if any(entry[5] == "unsupported" for entry in entries):
             return "unverified_pad_shape", ""
@@ -1414,18 +1476,113 @@ class MaskCopperRepairer(CopperGapRepairer):
         if refusal is not None:
             return refusal
 
+        # Authored project rules for every candidate this via could take
+        # (issue #9939): a destination that only passes the manufacturer's
+        # floor can still violate the project's net classes, and the saved
+        # board would then fail its native re-check.
+        project = self._via_project_obstacles(
+            via_node,
+            net_name,
+            at,
+            size,
+            self._via_span_layer_set(via_node),
+            joined,
+            pads,
+            max_displacement,
+        )
+
         push = self._push_clear_of_openings(
             copper, [(pads[o][0], pads[o][1]) for o in openings], required + margin_mm
         )
-        if push is None:
-            return "infeasible", ""
-        dx, dy = push
-        displacement = math.hypot(dx, dy)
-        if displacement < _TOLERANCE_MM / 2:
-            return "already_cleared", ""
-        if displacement > max_displacement:
-            return "exceeds_max_displacement", f"needs {displacement:.4f}mm"
+        primary_reason: tuple[str, str] | None = None
+        primary_push: tuple[float, float] | None = None
+        if push is not None:
+            displacement = math.hypot(*push)
+            if displacement < _TOLERANCE_MM / 2:
+                return "already_cleared", ""
+            if displacement > max_displacement:
+                primary_reason = "exceeds_max_displacement", f"needs {displacement:.4f}mm"
+            else:
+                primary_push = push
+                primary_reason = self._via_drag_candidate(
+                    via_node,
+                    via_uuid,
+                    openings,
+                    pads,
+                    result,
+                    at,
+                    size,
+                    copper,
+                    joined,
+                    push,
+                    required,
+                    displacement,
+                    max_displacement,
+                    dry_run,
+                    clearance_mm,
+                    design_rules,
+                    touched_by_action,
+                    project,
+                )
+                if primary_reason is None:
+                    return None
+        else:
+            primary_reason = "infeasible", ""
 
+        # The shortest push did not survive its gates: search alternative
+        # displacements with the kept-line contact model (issue #9939).
+        if project is None:
+            return primary_reason
+        for candidate in self._via_alternate_candidates(
+            at, size, openings, pads, required + margin_mm, max_displacement, primary_push
+        ):
+            outcome = self._via_tails_candidate(
+                via_node,
+                via_uuid,
+                openings,
+                pads,
+                result,
+                at,
+                size,
+                copper,
+                joined,
+                candidate,
+                required,
+                math.hypot(*candidate),
+                max_displacement,
+                dry_run,
+                clearance_mm,
+                design_rules,
+                touched_by_action,
+                project,
+            )
+            if outcome is None:
+                return None
+        return primary_reason
+
+    def _via_drag_candidate(
+        self,
+        via_node: SExp,
+        via_uuid: str,
+        openings: list[str],
+        pads: dict,
+        result: MaskRepairResult,
+        at: tuple[float, float],
+        size: float,
+        copper: BaseGeometry,
+        joined: list[tuple[str, SExp, str, tuple[float, float]]],
+        push: tuple[float, float],
+        required: float,
+        displacement: float,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        design_rules: DesignRules | None,
+        touched_by_action: set[str],
+        project: tuple | None,
+    ) -> tuple[str, str] | None:
+        """Evaluate the shortest push with the historical drag contact model."""
+        dx, dy = push
         new_at = (at[0] + dx, at[1] + dy)
         span_layers = self._via_span_layer_set(via_node)
         moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
@@ -1456,6 +1613,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             )
             points.append(("segment", join_uuid, join_tag, join_x, join_y))
 
+        net_name = self._net_name(via_node)
         if design_rules is not None:
             reason = self._target_clearance_reason(at[0], at[1], new_at[0], new_at[1], design_rules)
             if reason is not None and self._fail_closed_reason_is_local(reason, new_at, size, pads):
@@ -1471,6 +1629,15 @@ class MaskCopperRepairer(CopperGapRepairer):
             )
             if refusal is not None:
                 return refusal
+        if project is not None:
+            project_detail = self._via_project_refusal(
+                project,
+                Point(new_at).buffer(size / 2, quad_segs=32),
+                moves[len(span_layers) :],  # the via disc is checked separately
+                new_at,
+            )
+            if project_detail is not None:
+                return "would_violate_clearance", project_detail
         refusal = self._other_opening_reason(
             openings,
             moves,
@@ -1507,6 +1674,576 @@ class MaskCopperRepairer(CopperGapRepairer):
             points=points,
         )
         return self._apply_nudge(action, result, dry_run)
+
+    def _via_alternate_candidates(
+        self,
+        at: tuple[float, float],
+        size: float,
+        openings: list[str],
+        pads: dict,
+        target_gap: float,
+        max_displacement: float,
+        primary: tuple[float, float] | None,
+    ) -> list[tuple[float, float]]:
+        """Alternative via displacements that clear every opening, shortest first.
+
+        The shortest push (``primary``, when it exists) comes first, then a
+        bounded polar grid: ``_VIA_SEARCH_DIRECTIONS`` directions at
+        ascending magnitudes up to the caller's maximum.  A candidate is
+        kept only when the whole translated disc clears every opening by
+        ``target_gap`` (exact: the disc-to-polygon distance equals the
+        centre distance minus the radius).  Rounded duplicates collapse.
+        """
+        seen: set[tuple[float, float]] = set()
+        out: list[tuple[float, float]] = []
+
+        def consider(dx: float, dy: float) -> None:
+            centre = (round(at[0] + dx, 4), round(at[1] + dy, 4))
+            key = (round(centre[0] - at[0], 4), round(centre[1] - at[1], 4))
+            if key in seen or math.hypot(*key) > max_displacement + 1e-9:
+                return
+            point = Point(centre)
+            for opening in openings:
+                if pads[opening][0].distance(point) - size / 2 < target_gap - 1e-9:
+                    return
+            seen.add(key)
+            out.append(key)
+
+        if primary is not None:
+            consider(*primary)
+        for step in range(1, int(max_displacement / _VIA_SEARCH_STEP_MM) + 1):
+            magnitude = round(step * _VIA_SEARCH_STEP_MM, 4)
+            for index in range(_VIA_SEARCH_DIRECTIONS):
+                angle = math.tau * index / _VIA_SEARCH_DIRECTIONS
+                consider(magnitude * math.cos(angle), magnitude * math.sin(angle))
+        out.sort(key=lambda d: (round(math.hypot(*d), 4), round(math.atan2(d[1], d[0]), 6)))
+        return out
+
+    def _via_tail_plan(
+        self,
+        joined: list[tuple[str, SExp, str, tuple[float, float]]],
+        new_at: tuple[float, float],
+        size: float,
+        max_displacement: float,
+    ) -> tuple[list, list, list] | None:
+        """Kept-line contact plan for one destination; ``None`` when infeasible.
+
+        Each anchored end slides along its own segment line to the point
+        where a 0/45/90/135-degree connection to the new via centre starts,
+        chosen shortest-connection first.  The connection, its width
+        included, must lie wholly inside the new via land with
+        ``_TAIL_LAND_MARGIN_MM`` of radial margin, and the slide stays
+        within ``max_displacement``.  Returns
+        ``(end_moves, tails, final_lines)`` with serialized 4-decimal
+        coordinates: ``end_moves`` entries carry the old and new end point,
+        ``tails`` entries the connection's ``(start, end, width, layer,
+        net)`` (uuids are minted when the plan is accepted), and
+        ``final_lines`` the ``(old, new, layer)`` buffered copper of each
+        approach for the clearance gates.
+        """
+        radius = size / 2
+        centre = (round(new_at[0], 4), round(new_at[1], 4))
+        end_moves: list[tuple[str, str, float, float, float, float]] = []
+        tails: list[tuple[float, float, float, float, float, str, int | str]] = []
+        final_lines: list[tuple[BaseGeometry, BaseGeometry, str]] = []
+        for join_uuid, join_node, join_tag, end in joined:
+            layer_node = join_node.find("layer")
+            layer = _bare(layer_node.get_first_atom()) if layer_node is not None else ""
+            width_node = join_node.find("width")
+            other = self._xy(join_node.find("end" if join_tag == "start" else "start"))
+            net_node = join_node.find("net")
+            net_value = net_node.get_first_atom() if net_node is not None else None
+            if not layer or join_tag is None or width_node is None or other is None:
+                return None
+            if not isinstance(net_value, (int, str)):
+                return None
+            width = _num(width_node)
+            # The approach line through ``other`` and the anchored end; the
+            # connection point stays on it, so the segment never changes angle.
+            line_dx, line_dy = end[0] - other[0], end[1] - other[1]
+            line_len = math.hypot(line_dx, line_dy)
+            if line_len < _TOLERANCE_MM:
+                return None
+            best: tuple[float, float, float, float] | None = None
+            for ux, uy in _ALIGNED_TAIL_DIRS:
+                for sign in (1.0, -1.0):
+                    rx, ry = sign * ux, sign * uy
+                    det = line_dx * ry - line_dy * rx
+                    if abs(det) < 1e-12:
+                        continue
+                    cx, cy = centre[0] - other[0], centre[1] - other[1]
+                    s = (cx * ry - cy * rx) / det
+                    t = (line_dx * cy - line_dy * cx) / det
+                    slide = abs(s - 1.0) * line_len
+                    tail_len = abs(t) * math.hypot(rx, ry)
+                    if slide > max_displacement + 1e-9:
+                        continue
+                    if s * line_len < _TOLERANCE_MM:
+                        continue
+                    if tail_len + width / 2 > radius - _TAIL_LAND_MARGIN_MM:
+                        continue
+                    qx, qy = other[0] + s * line_dx, other[1] + s * line_dy
+                    candidate = (tail_len, slide, qx, qy)
+                    if best is None or candidate[:2] < best[:2]:
+                        best = candidate
+            if best is None:
+                return None
+            _tail_len, _slide, qx, qy = best
+            # Serialize the slid end and its connection at the file's full
+            # coordinate precision (KiCad's 1 nm grid): rounding each axis
+            # to the editor's four decimals independently can break the
+            # exact leg equality an aligned approach or connection carries
+            # (issue #9939: one Board 03 approach measured 0.0196 deg off
+            # after a one-quantum asymmetry, and a 0.01 mm tail once
+            # collapsed to zero length).  The via centre itself keeps the
+            # editor grid like every other nudge.
+            new_end = (round(qx, 6), round(qy, 6))
+            end_moves.append((join_uuid, join_tag, end[0], end[1], new_end[0], new_end[1]))
+            if math.dist(new_end, centre) >= _MIN_TAIL_MM:
+                tails.append(
+                    (new_end[0], new_end[1], centre[0], centre[1], width, layer, net_value)
+                )
+            final_lines.append(
+                (
+                    LineString([other, end]).buffer(width / 2, quad_segs=16),
+                    LineString([other, new_end]).buffer(width / 2, quad_segs=16),
+                    layer,
+                )
+            )
+        return end_moves, tails, final_lines
+
+    def _via_tails_candidate(
+        self,
+        via_node: SExp,
+        via_uuid: str,
+        openings: list[str],
+        pads: dict,
+        result: MaskRepairResult,
+        at: tuple[float, float],
+        size: float,
+        copper: BaseGeometry,
+        joined: list[tuple[str, SExp, str, tuple[float, float]]],
+        push: tuple[float, float],
+        required: float,
+        displacement: float,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        design_rules: DesignRules | None,
+        touched_by_action: set[str],
+        project: tuple,
+    ) -> tuple[str, str] | None:
+        """Evaluate one alternative destination with the kept-line contact model."""
+        from ..router.primitives import _make_uuid
+        from ..router.quantize import _is_quantum_aligned
+
+        net_name = self._net_name(via_node)
+        span_layers = self._via_span_layer_set(via_node)
+        new_at = (round(at[0] + push[0], 4), round(at[1] + push[1], 4))
+        plan = self._via_tail_plan(joined, new_at, size, max_displacement)
+        if plan is None:
+            return "no_aligned_contact", ""
+        end_moves, tails, final_lines = plan
+        for start_x, start_y, end_x, end_y, *_rest in tails:
+            if not _is_quantum_aligned(
+                round(end_x, 6) - round(start_x, 6), round(end_y, 6) - round(start_y, 6)
+            ):
+                return "no_aligned_contact", ""
+        new_disc = Point(new_at).buffer(size / 2, quad_segs=32)
+        moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
+            (copper, new_disc, name) for name in sorted(span_layers)
+        ]
+        moves.extend(final_lines)
+
+        # Authored net classes first: cheap, and it is the gate the
+        # manufacturer floor cannot express (issue #9939).
+        refusal_detail = self._via_project_refusal(project, new_disc, final_lines, new_at)
+        if refusal_detail is not None:
+            return "would_violate_clearance", refusal_detail
+        if design_rules is not None:
+            reason = self._target_clearance_reason(at[0], at[1], new_at[0], new_at[1], design_rules)
+            if reason is not None and self._fail_closed_reason_is_local(reason, new_at, size, pads):
+                return "would_violate_clearance", reason
+        for span_layer in sorted(span_layers):
+            refusal = self._copper_floor_reason(
+                moves, span_layer, net_name, via_uuid, pads, clearance_mm
+            )
+            if refusal is not None:
+                return refusal
+        refusal = self._other_opening_reason(
+            openings,
+            moves,
+            [(at, new_at, frozenset(span_layers))],
+            pads,
+            required,
+            displacement,
+        )
+        if refusal is not None:
+            return refusal
+
+        added: list[tuple[str, float, float, float, float, float, str, int | str]] = [
+            (_make_uuid(), *tail) for tail in tails
+        ]
+        points: list[tuple[str, str, str | None, float, float]] = [
+            ("via", via_uuid, None, at[0], at[1])
+        ]
+        points.extend(
+            ("segment", uuid, tag, old_x, old_y)
+            for uuid, tag, old_x, old_y, _new_x, _new_y in end_moves
+        )
+        points.extend(("segment", tail[0], None, tail[1], tail[2]) for tail in added)
+        first = pads[openings[0]]
+        refs = ", ".join(pads[o][4] for o in openings)
+        action = MaskViaRelocateAction(
+            action="relocate_clear",
+            uuid=via_uuid,
+            kind="via",
+            pad_uuid=openings[0],
+            pad_ref=first[4],
+            net_name=net_name,
+            layer=self._via_span(via_node),
+            old_x=at[0],
+            old_y=at[1],
+            new_x=new_at[0],
+            new_y=new_at[1],
+            dx=push[0],
+            dy=push[1],
+            displacement_mm=displacement,
+            detail=(
+                f"moved via {displacement:.4f}mm clear of {refs}, "
+                f"keeping {len(joined)} approach line(s) with "
+                f"{len(added)} in-land connection(s)"
+            ),
+            openings=list(openings),
+            points=points,
+            end_moves=end_moves,
+            added_segments=added,
+        )
+        return self._apply_via_relocate(action, result, dry_run)
+
+    def _via_project_obstacles(
+        self,
+        via_node: SExp,
+        net_name: str,
+        at: tuple[float, float],
+        size: float,
+        span_layers: frozenset[str],
+        joined: list[tuple[str, SExp, str, tuple[float, float]]],
+        pads: dict,
+        max_displacement: float,
+    ) -> tuple | None:
+        """Foreign copper and holes near the search window with the project's
+        own per-pair requirements; ``None`` when the authored rules cannot
+        be read (the search then declines instead of guessing).
+
+        Every obstacle carries its requirement from
+        :class:`BoardClearanceRules` (authored net classes, board minima and
+        ``.kicad_dru`` included), the copper layers it applies to, and the
+        pre-move gaps of the via disc and each anchored approach.  Pads
+        reuse the opening model's polygons; pad holes use the pad centre
+        (``drill_offset`` is negligible on real boards and this gate is
+        second to the native re-check anyway).
+        """
+        from kicad_tools.router.board_clearance_rules import (
+            item_props_for_type,
+            pad_clearance_override,
+        )
+
+        rules = self._board_rules
+        if rules.dru_error:
+            return None
+        drill_node = via_node.find("drill")
+        drill = _num(drill_node) if drill_node is not None else 0.0
+        via_props = item_props_for_type("via", net_name, True)
+        old_disc = Point(at).buffer(size / 2, quad_segs=32)
+        old_lines: list[tuple[BaseGeometry, str]] = []
+        for _uuid, node, tag, end in joined:
+            other = self._xy(node.find("end" if tag == "start" else "start"))
+            layer_node = node.find("layer")
+            if other is None or layer_node is None:
+                continue
+            old_lines.append(
+                (
+                    LineString([other, end]).buffer(_num(node.find("width")) / 2, quad_segs=16),
+                    _bare(layer_node.get_first_atom()),
+                )
+            )
+        copper: list[tuple[BaseGeometry, float, frozenset[str], str, list[float]]] = []
+        holes: list[tuple[tuple[float, float], float, float, float, str]] = []
+
+        def add_copper(
+            geom: BaseGeometry, required: float, layers: frozenset[str], description: str
+        ) -> None:
+            if required <= 0:
+                return
+            # A moved endpoint can close the old gap by at most the caller's
+            # displacement bound. Check the whole approach on its copper layer.
+            gaps = [old_disc.distance(geom)]
+            gaps.extend(
+                line.distance(geom) if layer in layers else math.inf for line, layer in old_lines
+            )
+            if min(gaps) <= required + max_displacement + _TOLERANCE_MM:
+                copper.append((geom, required, layers, description, gaps))
+
+        def add_hole(
+            centre: tuple[float, float], radii: float, required: float, description: str
+        ) -> None:
+            gap = math.dist(at, centre) - radii
+            if required > 0 and gap <= required + max_displacement + _TOLERANCE_MM:
+                holes.append((centre, radii, required, gap, description))
+
+        joined_uuids = {uuid for uuid, _node, _tag, _end in joined}
+        for uuid, node in self._segment_nodes().items():
+            if uuid in joined_uuids or self._net_name(node) == net_name:
+                continue
+            layer_node = node.find("layer")
+            layer = _bare(layer_node.get_first_atom()) if layer_node is not None else ""
+            if not layer or layer not in span_layers:
+                continue
+            seg_start, seg_end = self._xy(node.find("start")), self._xy(node.find("end"))
+            width_node = node.find("width")
+            if seg_start is None or seg_end is None or width_node is None:
+                continue
+            geom = LineString([seg_start, seg_end]).buffer(_num(width_node) / 2, quad_segs=16)
+            other_net = self._net_name(node)
+            required = rules.clearance(
+                via_props,
+                item_props_for_type(
+                    "track", other_net, False, layer=layer, footprint_ref="", footprint_lib_id=""
+                ),
+                layer,
+            )
+            add_copper(
+                geom, required, frozenset({layer}), f"track on net {other_net or 'unassigned'}"
+            )
+
+        for other_via in self.doc.find_all("via"):
+            other_at = self._xy(other_via.find("at"))
+            other_size = other_via.find("size")
+            if other_at is None or other_size is None or math.dist(other_at, at) < _TOLERANCE_MM:
+                continue
+            other_net = self._net_name(other_via)
+            if other_net == net_name:
+                continue
+            layers = self._via_span_layer_set(other_via)
+            if not (layers & span_layers):
+                continue
+            geom = Point(other_at).buffer(_num(other_size) / 2, quad_segs=32)
+            other_props = item_props_for_type("via", other_net, True)
+            required = rules.clearance(via_props, other_props)
+            description = f"via at ({other_at[0]:.2f}, {other_at[1]:.2f})"
+            add_copper(geom, required, layers, description)
+            other_drill = other_via.find("drill")
+            if other_drill is not None and drill > 0:
+                add_hole(
+                    other_at,
+                    (drill + _num(other_drill)) / 2,
+                    rules.hole_to_hole(via_props, other_props),
+                    description,
+                )
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB(self.doc)
+        for fp in pcb.footprints:
+            for index, pad in enumerate(fp.pads):
+                identity = _bare(pad.uuid) if pad.uuid else f"{fp.reference}:pad:{index}"
+                entry = pads.get(identity)
+                if entry is None:
+                    continue
+                poly, centre, pad_layers, pad_net, ref, _shape = entry
+                if pad_net == net_name:
+                    continue
+                meets = (
+                    bool(span_layers & set(pad_layers))
+                    or "*.Cu" in pad_layers
+                    or ("F&B.Cu" in pad_layers and bool(span_layers & {"F.Cu", "B.Cu"}))
+                )
+                if not meets:
+                    continue
+                pad_props = item_props_for_type(
+                    "pad",
+                    pad_net,
+                    pad.type == "thru_hole",
+                    pad.type,
+                    fp.layer,
+                    fp.reference,
+                    fp.name,
+                )
+                layers = frozenset(
+                    name
+                    for name in span_layers
+                    if name in pad_layers or "*.Cu" in pad_layers or "F&B.Cu" in pad_layers
+                )
+                local = pad_clearance_override(fp, pad)
+                electrical = (
+                    rules.clearance(via_props, pad_props)
+                    if local is None
+                    else max(local, rules.min_clearance or 0.0)
+                )
+                required = max(rules.physical_clearance(via_props, pad_props), electrical)
+                add_copper(poly, required, layers, f"pad {ref}")
+                if pad.drill > 0 and drill > 0:
+                    add_hole(
+                        centre,
+                        (drill + pad.drill) / 2,
+                        rules.hole_clearance(via_props, pad_props),
+                        f"pad {ref} hole",
+                    )
+        return copper, holes
+
+    def _via_project_refusal(
+        self,
+        project: tuple,
+        new_disc: BaseGeometry,
+        final_lines: list[tuple[BaseGeometry, BaseGeometry, str]],
+        new_at: tuple[float, float],
+    ) -> str | None:
+        """Detail string when a destination violates an authored project rule.
+
+        A move is refused only when it would *newly* sit below a project
+        requirement (a violation the pre-move board already carried is not
+        this move's doing), mirroring the transaction's new-error
+        attribution.
+        """
+        copper, holes = project
+        for geom, required, layers, desc, old in copper:
+            new_gap = new_disc.distance(geom)
+            if new_gap < required - 1e-6 and new_gap < old[0] - 1e-6:
+                return f"project rules need {required:.3f}mm to {desc}; move leaves {new_gap:.3f}mm"
+            for index, (line, layer) in enumerate(
+                (new_line, layer) for _old, new_line, layer in final_lines
+            ):
+                if layer not in layers:
+                    continue
+                previous = old[index + 1] if index + 1 < len(old) else math.inf
+                new_gap = line.distance(geom)
+                if new_gap < required - 1e-6 and new_gap < previous - 1e-6:
+                    return (
+                        f"project rules need {required:.3f}mm to {desc}; "
+                        f"moved approach leaves {new_gap:.3f}mm on {layer}"
+                    )
+        for centre, radii, required, old_gap, desc in holes:
+            new_gap = math.dist(new_at, centre) - radii
+            if new_gap < required - 1e-6 and new_gap < old_gap - 1e-6:
+                return (
+                    f"project rules need {required:.3f}mm hole spacing to {desc}; "
+                    f"move leaves {new_gap:.3f}mm"
+                )
+        return None
+
+    def _apply_via_relocate(
+        self, action: MaskViaRelocateAction, result: MaskRepairResult, dry_run: bool
+    ) -> tuple[str, str] | None:
+        """Record one kept-line via relocation; ``None`` on success."""
+        targets: list[tuple[SExp, float, float]] = []
+        via_at: SExp | None = None
+        if not dry_run:
+            via_node = self._via_by_uuid(action.uuid)
+            at_node = None if via_node is None else via_node.find("at")
+            if at_node is None:
+                return "malformed_via", ""
+            via_at = at_node
+            targets.append((at_node, action.old_x, action.old_y))
+            for uuid, tag, old_x, old_y, _new_x, _new_y in action.end_moves:
+                node = self._segment_by_uuid(uuid)
+                end_node = node.find(tag) if node is not None and tag else None
+                if end_node is None:
+                    return "malformed_segment", ""
+                targets.append((end_node, old_x, old_y))
+            for tail in action.added_segments:
+                if self._segment_by_uuid(tail[0]) is not None:
+                    return "added_segment_already_present", ""
+            # Resolve every point first so a lookup miss can neither leave
+            # the document half-translated nor record an unapplied action.
+            for end_node, old_x, old_y in targets:
+                xy = self._xy(end_node)
+                if xy is None or math.dist(xy, (old_x, old_y)) > _TOLERANCE_MM:
+                    return "stale_geometry", ""
+        result.actions.append(action)
+        if not dry_run and via_at is not None:
+            via_at.set_value(0, round(action.new_x, 4))
+            via_at.set_value(1, round(action.new_y, 4))
+            for uuid, tag, _old_x, _old_y, new_x, new_y in action.end_moves:
+                node = self._segment_by_uuid(uuid)
+                end_node = node.find(tag) if node is not None and tag else None
+                if end_node is not None:
+                    # Full file precision: the slid end must stay exactly on
+                    # its approach line (see ``_via_tail_plan``).
+                    end_node.set_value(0, round(new_x, 6))
+                    end_node.set_value(1, round(new_y, 6))
+            for tail in action.added_segments:
+                self._insert_segment_after_last(self._tail_segment_node(tail))
+            self.modified = True
+        result.repaired += 1
+        return None
+
+    def _tail_segment_node(
+        self, tail: tuple[str, float, float, float, float, float, str, int | str]
+    ) -> SExp:
+        """Build the SExp node for one added in-land connection."""
+        uuid, start_x, start_y, end_x, end_y, width, layer, net = tail
+        seg = SExp(name="segment")
+        seg.append(SExp.list("start", round(start_x, 6), round(start_y, 6)))
+        seg.append(SExp.list("end", round(end_x, 6), round(end_y, 6)))
+        seg.append(SExp.list("width", round(width, 4)))
+        seg.append(SExp.list("layer", layer))
+        seg.append(SExp.list("uuid", uuid))
+        seg.append(SExp.list("net", SExp.quoted_atom(net) if isinstance(net, str) else net))
+        return seg
+
+    def _insert_segment_after_last(self, node: SExp) -> None:
+        """Insert a segment node after the document's last top-level segment."""
+        index = None
+        for position, child in enumerate(self.doc.children):
+            if child.name == "segment":
+                index = position
+        if index is None:
+            self.doc.children.append(node)
+        else:
+            self.doc.children.insert(index + 1, node)
+
+    def _undo_via_relocate(self, action: MaskViaRelocateAction) -> bool:
+        """Reverse one kept-line via relocation, removing its added copper.
+
+        Returns ``False`` when a node is gone or no point sits at its
+        post-move position (callers fall back to a snapshot restore).
+        """
+        via_node = self._via_by_uuid(action.uuid)
+        at_node = None if via_node is None else via_node.find("at")
+        xy = self._xy(at_node)
+        if at_node is None or xy is None:
+            return False
+        if math.dist(xy, (round(action.new_x, 4), round(action.new_y, 4))) > _TOLERANCE_MM:
+            return False
+        restore: list[tuple[SExp, float, float]] = [(at_node, action.old_x, action.old_y)]
+        for uuid, tag, old_x, old_y, new_x, new_y in action.end_moves:
+            node = self._segment_by_uuid(uuid)
+            end_node = node.find(tag) if node is not None and tag else None
+            xy = self._xy(end_node)
+            if (
+                end_node is None
+                or xy is None
+                or math.dist(xy, (round(new_x, 6), round(new_y, 6))) > _TOLERANCE_MM
+            ):
+                return False
+            restore.append((end_node, old_x, old_y))
+        added: list[SExp] = []
+        for tail in action.added_segments:
+            node = self._segment_by_uuid(tail[0])
+            if node is None:
+                return False
+            added.append(node)
+        for node in added:
+            try:
+                self.doc.children.remove(node)
+            except ValueError:
+                return False
+        for end_node, old_x, old_y in restore:
+            end_node.set_value(0, old_x)
+            end_node.set_value(1, old_y)
+        self.modified = True
+        return True
 
     def _apply_nudge(
         self, action: MaskNudgeAction, result: MaskRepairResult, dry_run: bool
@@ -1784,6 +2521,8 @@ class MaskCopperRepairer(CopperGapRepairer):
         Returns ``False`` when a node is gone or no point sits at its
         post-move position (callers fall back to a snapshot restore).
         """
+        if isinstance(action, MaskViaRelocateAction):
+            return self._undo_via_relocate(action)
         if isinstance(action, MaskNudgeAction):
             return self._undo_nudge(action)
         segments = self._segment_nodes()

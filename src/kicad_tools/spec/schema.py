@@ -604,6 +604,13 @@ class EscalationPolicy(SpecModel):
 class ManufacturingRequirements(SpecModel):
     """Manufacturing requirements and constraints."""
 
+    order_thickness_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Nominal finished PCB thickness selected for purchase, in millimetres.",
+    )
     layers: dict[str, int] | None = Field(
         default=None, description="Layer count (preferred, min, max)"
     )
