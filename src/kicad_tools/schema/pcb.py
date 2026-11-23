@@ -388,16 +388,21 @@ _FootprintFrame = tuple[float, float, float, bool]
 _ZONE_PTS_PARENTS = frozenset({"polygon", "filled_polygon", "fill_segments"})
 
 
-def _flip_side_layer(name: str) -> str:
+def _flip_side_layer(name: str, copper_layers: int = 2) -> str:
     """Swap a KiCad layer name to the other board side (``F.* <-> B.*``).
 
-    Side-neutral names (``*.Cu``, ``F&B.Cu``, ``In1.Cu``, ``Edge.Cuts``) are
-    returned unchanged -- what KiCad's footprint flip does to them as well.
+    With the board's *copper_layers* count, inner copper mirrors through the
+    stack (``In1.Cu <-> In2.Cu`` on four layers), as KiCad's footprint flip
+    does. Side-neutral names (``*.Cu``, ``F&B.Cu``, ``Edge.Cuts``) are
+    returned unchanged.
     """
     if name.startswith("F."):
         return "B." + name[2:]
     if name.startswith("B."):
         return "F." + name[2:]
+    inner = re.fullmatch(r"In(\d+)\.Cu", name)
+    if inner and 1 <= int(inner.group(1)) <= copper_layers - 2:
+        return f"In{copper_layers - 1 - int(inner.group(1))}.Cu"
     return name
 
 
@@ -500,12 +505,12 @@ def _transform_zone_sexp(
             ]
 
 
-def _flip_layer_node(node: SExp | None) -> None:
+def _flip_layer_node(node: SExp | None, copper_layers: int = 2) -> None:
     if node is None:
         return
     name = node.get_string(0)
     if name:
-        node.children[0] = SExp.quoted_atom(_flip_side_layer(name))
+        node.children[0] = SExp.quoted_atom(_flip_side_layer(name, copper_layers))
 
 
 # Nodes holding a footprint-local ``y`` that a back-side placement mirrors.
@@ -712,7 +717,9 @@ def mirror_pad_primitives(pad_node: SExp, custom_clearance: SExp | None = None) 
     _exchange_front_back_primitives(pad_node, custom_clearance)
 
 
-def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0) -> None:
+def flip_footprint_children_to_back(
+    footprint_node: SExp, rotation: float = 0.0, copper_layers: int = 2
+) -> None:
     """Re-express a front-authored raw ``(footprint ...)`` for a back placement.
 
     A library footprint is authored for the front.  KiCad stores a footprint
@@ -721,12 +728,13 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
     footprint's own *rotation* is added on top by the caller), and texts
     mirrored (``(justify mirror)``) with angle ``180 + rotation - local``.
     Verified black-box against ``pcbnew`` 10.0.6 ``Flip`` output (Issue #8581).
-    Side-neutral layers (``*.Cu``, ``In1.Cu``, ``Edge.Cuts``) are unchanged.
+    Inner copper mirrors through the board's *copper_layers* stack (Issue
+    #8958); side-neutral layers (``*.Cu``, ``Edge.Cuts``) are unchanged.
     """
     for child in footprint_node.iter_children():
         tag = child.tag
         if tag == "pad":
-            _flip_layer_children(child)
+            _flip_layer_children(child, copper_layers)
             at_node = child.find_child("at")
             if at_node is not None:
                 _negate_node_y(at_node)
@@ -736,7 +744,7 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
             # Walks nested padstack blocks and exchanges front/back (Issue #9752).
             mirror_pad_primitives(child)
         elif tag in _FP_TEXT_TAGS:
-            _flip_layer_children(child)
+            _flip_layer_children(child, copper_layers)
             at_node = child.find_child("at")
             if at_node is not None:
                 _negate_node_y(at_node)
@@ -744,26 +752,26 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
                 _set_text_at_angle(at_node, _normalize_text_angle(180.0 + rotation - local), None)
             _mirror_text_effects(child)
         elif tag is not None and tag.startswith(_FP_GRAPHIC_TAG_PREFIXES):
-            _flip_layer_children(child)
+            _flip_layer_children(child, copper_layers)
             if tag == "fp_text_box":
                 _mirror_text_effects(child)
             _mirror_local_y(child)
         elif tag == "zone":
-            _flip_layer_children(child)
+            _flip_layer_children(child, copper_layers)
             _mirror_local_y(child)
             for poly in child.iter_children():
                 if poly.tag == "filled_polygon":
-                    _flip_layer_node(poly.find_child("layer"))
+                    _flip_layer_node(poly.find_child("layer"), copper_layers)
 
 
-def _flip_layer_children(node: SExp) -> None:
+def _flip_layer_children(node: SExp, copper_layers: int = 2) -> None:
     """Swap the sides of a node's direct ``(layer ...)``/``(layers ...)`` children."""
     for child in node.iter_children():
         if child.tag == "layer":
-            _flip_layer_node(child)
+            _flip_layer_node(child, copper_layers)
         elif child.tag == "layers":
             child.children = [
-                SExp.quoted_atom(_flip_side_layer(atom.value))
+                SExp.quoted_atom(_flip_side_layer(atom.value, copper_layers))
                 if atom.is_atom and isinstance(atom.value, str)
                 else atom
                 for atom in child.children
@@ -7342,7 +7350,13 @@ class PCB:
         # node (Issue #8581). Front placements are untouched.
         is_back = _is_back_layer(layer)
         if is_back:
-            flip_footprint_children_to_back(fp_sexp, rotation)
+            flip_footprint_children_to_back(fp_sexp, rotation, len(self.copper_layers))
+
+        # Footprint zones are stored board-absolute, unlike pads and graphics,
+        # so carry the library outline to the placement frame (Issue #8958).
+        transform_footprint_zone_nodes(
+            fp_sexp, (0.0, 0.0, 0.0, is_back), (abs_x, abs_y, rotation, is_back)
+        )
 
         # Rewrite each pad's angle to ABSOLUTE (board-frame) rotation.
         #
