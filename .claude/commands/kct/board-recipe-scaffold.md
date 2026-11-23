@@ -15,12 +15,13 @@ Scaffold a new `generate_design.py`-style board recipe for a consumer PCB, follo
 
 ## Prerequisite
 
-The native router/DRC backend must be built in the active checkout before the routing step (step 5) will run at full speed (Epic #4054 convention #1):
+After `uv sync`, check the native router in the project environment.
 
 ```bash
-uv run kct build-native --check   # expect: "C++ backend: available"
-uv run kct build-native           # if "not installed" (uv sync does NOT build it)
+uv run kct build-native --check
 ```
+
+`C++ backend: available` and exit code 0 satisfy this prerequisite. If the router is missing, run `uv run kct build-native` and repeat the check. Placement and DRC are optional. When either reports `not built`, continue with its Python fallback. Building those two native extensions requires a kicad-tools source checkout.
 
 ## Model selection
 
