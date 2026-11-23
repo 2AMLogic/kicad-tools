@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-23
 
+- **PR #10006**: test: bound the input pad-overlap CLI regression
+- **Issue #10005** (closed): test flake: input pad-overlap CLI test times out in the post-route connectivity check
+- **PR #9976**: fix: clear the DRC report path before every kicad-cli launch
+- **Issue #9959** (closed): _run_drc_once: the flag-less DRC retry can inherit the first attempt's report
+- **Issue #9951** (closed): Judge docs-only fast path fails closed on this worker: gh build has no `baseRepository` field for `gh pr view`
+- **PR #9999**: chore(deps-dev): bump vitest from 5.0.5 to 5.1.0 in /site in the npm-minor-patch group across 1 directory
 - **PR #9979**: chore(board02): remove the redundant silk-width pass
 - **PR #9965**: fix(router): measure relief re-land search exits and bias displaced pair victims
 - **Issue #9936** (closed): Re-land displaced nets after Board 06 Python routing reaches the four USB3 negative legs
