@@ -1137,8 +1137,10 @@ class MaskCopperRepairer(CopperGapRepairer):
             )
             points.append(("segment", join_uuid, join_tag, join_end[0], join_end[1]))
 
-        if self._loses_same_net_contact(moves, layer, net_name, moving_uuids, pads):
-            return "junction_at_moved_end", ""
+        if fixed is not None and self._loses_same_net_contact(
+            moves, layer, net_name, moving_uuids, pads
+        ):
+            return "would_break_same_net_contact", ""
         refusal = self._copper_floor_reason(moves, layer, net_name, seg_uuid, pads, clearance_mm)
         if refusal is not None:
             return refusal

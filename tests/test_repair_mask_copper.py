@@ -962,10 +962,12 @@ def test_pass_through_preserves_an_immovable_junction(tmp_path, block):
     repairer = MaskCopperRepairer(board)
     result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
     assert result.repaired == 0
-    assert (
-        result.skipped("infeasible" if block == "fixed_end_too_close" else "junction_at_moved_end")
-        == 1
-    )
+    reason = {
+        "fixed_end_too_close": "infeasible",
+        "locked_tap_on_target": "would_break_same_net_contact",
+        "tap_on_joined_leg": "would_break_same_net_contact",
+    }.get(block, "junction_at_moved_end")
+    assert result.skipped(reason) == 1
     assert not repairer.modified
 
 
@@ -981,7 +983,7 @@ def test_pass_through_declines_when_a_via_annulus_touches_the_track_shoulder(tmp
     ]
     repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
     result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
-    assert result.repaired == 0 and result.skipped("junction_at_moved_end") == 1
+    assert result.repaired == 0 and result.skipped("would_break_same_net_contact") == 1
     assert not repairer.modified
 
 
@@ -998,6 +1000,85 @@ def test_pass_through_keeps_a_collinear_overlap_that_survives_the_move(tmp_path)
     repairer = MaskCopperRepairer(_board(tmp_path, "\n".join(copper)))
     result = repairer.repair([_pt_finding("trk-p")], max_displacement=1.0)
     assert result.repaired == 1 and not result.skipped("junction_at_moved_end")
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    "contact, tap_end",
+    [("track", 90.551), ("via", 90.366), ("pad", 90.316), ("retained", 90.95)],
+)
+def test_verified_fixed_via_move_preserves_physical_contact(tmp_path, capsys, contact, tap_end):
+    from kicad_tools.cli import main as kct
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+    from kicad_tools.core.sexp_file import save_pcb
+    from kicad_tools.sexp import parse_string
+
+    # P2 already reaches P3 along a second path. A lost branch contact can
+    # therefore leave both the native opens count and every pad group intact.
+    fixture = Path(__file__).parent / "fixtures" / "mask_fixed_via_junction.kicad_pcb"
+    doc = parse_file(fixture)
+    track = "cc000000-0000-4000-8000-000000000050"
+    tap = "cc000000-0000-4000-8000-000000000070"
+    doc.add(
+        parse_string(
+            f"(segment (start 145.5 88.45) (end 145.5 {tap_end}) (width 0.15) "
+            f'(layer "F.Cu") (net 1) (locked yes) (uuid "{tap}"))'
+        )
+    )
+    if contact == "via":
+        doc.add(parse_string(_via("cc000000-0000-4000-8000-000000000071", (145.5, tap_end))))
+    elif contact == "pad":
+        doc.add(
+            parse_string(
+                '(footprint "Test:Contact" (layer "F.Cu") (at 145.5 90.436) '
+                '(uuid "cc000000-0000-4000-8000-000000000072") '
+                '(property "Reference" "P5" (at 0 -1) (layer "F.Fab")) '
+                '(pad "1" smd rect (at 0 0) (size 0.45 0.45) (layers "F.Cu") '
+                '(net 1 "N1") (uuid "cc000000-0000-4000-8000-000000000073")))'
+            )
+        )
+    board = tmp_path / fixture.name
+    save_pcb(doc, board)
+    original = board.read_bytes()
+    old_track, _ = _saved_copper(board, track)
+    with evidence_toolchain(mounts=[tmp_path]):
+        # The pcbnew worker is written beside its input, so take the reference
+        # reading in a private stage just as fix-drc does.
+        with fix_drc_cmd._with_project_rules(board, board, private=True) as staged:
+            groups = fix_drc_cmd._mask_native_pad_groups(staged)
+        assert len(groups) == 1 and len(groups[0]) == (5 if contact == "pad" else 4)
+        kct(
+            [
+                "fix-drc",
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-passes",
+                "1",
+                "--max-displacement",
+                "2",
+                "--verify",
+                "--format",
+                "json",
+            ]
+        )
+        with fix_drc_cmd._with_project_rules(board, board, private=True) as staged:
+            assert fix_drc_cmd._mask_native_pad_groups(staged) == groups
+    report = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert report["violations"] == 1
+    if contact == "retained":
+        copper, _ = _saved_copper(board, track)
+        stationary, _ = _saved_copper(board, tap)
+        assert report["repaired"] == 1, report
+        assert not copper.equals(old_track)
+        assert old_track.intersection(stationary).area > 0
+        assert copper.intersection(stationary).area > 0
+    else:
+        assert report["repaired"] == 0
+        assert [item["reason"] for item in report["unrepaired"]] == ["would_break_same_net_contact"]
+        assert board.read_bytes() == original
 
 
 def test_via_fixed_junction_clears_both_openings_within_displacement_limit(tmp_path):
