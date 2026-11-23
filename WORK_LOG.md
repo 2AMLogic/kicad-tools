@@ -16,6 +16,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-23
 
+- **PR #9979**: chore(board02): remove the redundant silk-width pass
+- **PR #9965**: fix(router): measure relief re-land search exits and bias displaced pair victims
+- **Issue #9936** (closed): Re-land displaced nets after Board 06 Python routing reaches the four USB3 negative legs
 - **PR #9949**: fix(drc): move a mask-crowded track junction around its fixed via
 - **PR #9984**: fix(board07): clear solder-mask overlap at DDR data pad exits
 - **PR #9980**: fix: measure known-failure progress over routing-terminal pads
