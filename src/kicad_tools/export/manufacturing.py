@@ -305,6 +305,55 @@ def verify_manifest(manifest_path: str | Path) -> list[str]:
     return problems
 
 
+def _zone_fill_rule_state(pcb_path: Path) -> str:
+    """Fingerprint of the DRC rule sources KiCad's zone filler honours.
+
+    KiCad resolves every gap of a pour against the sibling ``.kicad_dru``
+    and the project's clearance-bearing settings -- ``board.design_settings.rules``
+    and ``net_settings`` -- so a change to any of them invalidates a fill that
+    was saved earlier.  The rest of ``.kicad_pro`` (``meta`` stamps, rule
+    severities, schematic settings, formatting) leaves the fill alone and is
+    left out, so re-emitting an unchanged rule set reads as unchanged.
+
+    An absent or unparsable sidecar contributes ``None``.
+    """
+    try:
+        dru: str | None = pcb_path.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    except OSError:
+        dru = None
+    rules: object = None
+    net_settings: object = None
+    try:
+        project = json.loads(pcb_path.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        project = None
+    if isinstance(project, dict):
+        board = project.get("board")
+        settings = board.get("design_settings") if isinstance(board, dict) else None
+        if isinstance(settings, dict):
+            rules = settings.get("rules")
+        net_settings = project.get("net_settings")
+    return json.dumps({"dru": dru, "rules": rules, "net_settings": net_settings}, sort_keys=True)
+
+
+def _restore_board(pcb_path: Path, original: bytes) -> None:
+    """Put ``original`` back when a failed zone refill left the board different.
+
+    Issue #6724: a kicad-cli killed mid ``--save-board`` can leave a
+    truncated board behind.  An untouched board is not rewritten, so its
+    mtime still says when it was last saved.
+    """
+    try:
+        if pcb_path.read_bytes() == original:
+            return
+    except OSError:
+        pass
+    try:
+        pcb_path.write_bytes(original)
+    except OSError as exc:
+        logger.error("Could not restore %s after a failed zone refill: %s", pcb_path, exc)
+
+
 def _project_symbol_files(project_dir: Path) -> list[Path]:
     """Collect portable symbol-table dependencies before writing an archive.
 
@@ -611,15 +660,8 @@ class ManufacturingPackage:
 
         selected_stackup_source_hash: str | None = None
         if self.config.stackup_id:
-            from .stackup import stackup_ordering_record
-
-            try:
-                if self.manufacturer not in {"jlcpcb", "jlcpcb-tier1"}:
-                    raise ValueError("JLCPCB construction requires a JLCPCB manufacturer")
-                initial_record = stackup_ordering_record(self.pcb_path, self.config.stackup_id)
-                selected_stackup_source_hash = initial_record["pcb_sha256"]
-            except (OSError, ValueError, KiCadToolsError) as exc:
-                result.errors.append(f"Stackup ordering validation failed: {exc}")
+            selected_stackup_source_hash = self._stackup_source_hash(self.config.stackup_id, result)
+            if selected_stackup_source_hash is None:
                 return result
 
         if dry_run:
@@ -661,7 +703,22 @@ class ManufacturingPackage:
         # Written before preflight so the constraints exist even when a
         # strict-preflight failure aborts the rest of the pipeline.
         if self.config.emit_drc_constraints:
+            rule_state = _zone_fill_rule_state(self.pcb_path)
             self._write_drc_constraints(result)
+            # Issue #9987: the rules are final now, so a saved pour filled
+            # under the previous ones is stale, and kicad-cli plots the
+            # saved copper.  Persist the refill before anything reads the
+            # board; it is export's own edit of the source, so the named
+            # stackup is re-bound to the bytes that will ship.
+            if _zone_fill_rule_state(self.pcb_path) != rule_state:
+                if not self._refresh_zone_fill(result):
+                    return result
+                if self.config.stackup_id:
+                    selected_stackup_source_hash = self._stackup_source_hash(
+                        self.config.stackup_id, result
+                    )
+                    if selected_stackup_source_hash is None:
+                        return result
 
         # Step 0b (issue #5009): resolve the selected manufacturer profile's
         # declared via-in-pad fabrication process (if any) for this board's
@@ -799,6 +856,91 @@ class ManufacturingPackage:
     # ``details`` that matches neither these nor the LCSC marker is an
     # informational note and is preserved verbatim.
     _BOM_FIELD_ISSUE_MARKERS = ("missing footprint", "missing value")
+
+    def _stackup_source_hash(self, stackup_id: str, result: ManufacturingResult) -> str | None:
+        """Validate the named stackup; the board's current content hash, or ``None``.
+
+        ``None`` appends the validation error to ``result``: the caller
+        stops with nothing written.
+        """
+        from .stackup import stackup_ordering_record
+
+        try:
+            if self.manufacturer not in {"jlcpcb", "jlcpcb-tier1"}:
+                raise ValueError("JLCPCB construction requires a JLCPCB manufacturer")
+            record = stackup_ordering_record(self.pcb_path, stackup_id)
+            return str(record["pcb_sha256"])
+        except (OSError, ValueError, KiCadToolsError) as exc:
+            result.errors.append(f"Stackup ordering validation failed: {exc}")
+            return None
+
+    def _refresh_zone_fill(self, result: ManufacturingResult) -> bool:
+        """Bring the saved zone fill in line with the rules export has just written.
+
+        KiCad's zone filler resolves every gap of a pour against the sibling
+        ``.kicad_dru`` and the project's clearance settings, so once
+        :meth:`_write_drc_constraints` changes them, the ``filled_polygon``
+        copper stored in the board -- what ``kicad-cli`` plots and the
+        project ZIP archives -- no longer obeys the rules shipped beside it
+        (Issue #9987).  Board 06's export added five 0.30 mm zone rules to
+        pours last filled at the fab floor: 499 native clearance errors on
+        the saved board, none after a refill, and three Gerber layers that
+        differed from a refill under the delivered rules.  The saved-fill
+        guard in ``export/gerber.py`` cannot see that, because a stale pour
+        is still connected.
+
+        So persist a native refill (``kicad-cli pcb drc --refill-zones
+        --save-board``) here, before any check, plot, archive or manifest
+        hash reads the board, and fail the export -- with nothing published
+        and the source restored -- when the required fill cannot be produced,
+        rather than ship copper that contradicts its own rules.  Only the
+        fill changes: tracks, vias and net assignments are KiCad's own
+        re-save of itself.
+
+        Returns ``False`` when the export must stop.  A bundle that ships
+        neither the saved copper nor a plot of it needs no fill.
+        """
+        from ..cli.runner import _board_unchanged, find_kicad_cli, run_refill_zones
+        from .gerber import _pcb_has_filled_zones
+
+        if not (self.config.include_gerbers or self.config.include_project_zip):
+            return True
+        if not _pcb_has_filled_zones(self.pcb_path):
+            return True
+
+        try:
+            original = self.pcb_path.read_bytes()
+            original_mtime_ns = self.pcb_path.stat().st_mtime_ns
+        except OSError as exc:
+            msg = f"Could not read {self.pcb_path.name} before its zone refill: {exc}"
+            result.errors.append(msg)
+            return False
+        kicad_cli = find_kicad_cli()
+        dru_name = self.pcb_path.with_suffix(".kicad_dru").name
+        if kicad_cli is None:
+            why = "kicad-cli was not found"
+        else:
+            refill = run_refill_zones(self.pcb_path, kicad_cli, require_save=True)
+            if refill.success and not _board_unchanged(self.pcb_path, original, original_mtime_ns):
+                note = (
+                    f"Export refilled the zone fills in {self.pcb_path.name} to match the "
+                    "generated DRC rules."
+                )
+                logger.info(note)
+                result.warnings.append(note)
+                return True
+            _restore_board(self.pcb_path, original)
+            why = (
+                refill.stderr or ""
+            ).strip() or "kicad-cli wrote a DRC report but did not save the board"
+        msg = (
+            f"Export rewrote the DRC rules in {dru_name}, and the saved zone fill in "
+            f"{self.pcb_path.name} could not be refreshed to match them ({why}). "
+            "Nothing was exported. Refill the zones in KiCad and export again."
+        )
+        result.errors.append(msg)
+        logger.error(msg)
+        return False
 
     def _reconcile_preflight_lcsc(self, result: ManufacturingResult) -> None:
         """Update the recorded ``bom_fields`` result with post-enrichment LCSC state.
