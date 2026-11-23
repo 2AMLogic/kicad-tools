@@ -212,10 +212,13 @@ def test_diagonal_departure_rejoins_the_kept_trunk(tmp_path, departures):
     assert board.read_bytes() == saved
 
 
-def test_relocated_departure_keeps_the_inner_extension(tmp_path, departures):
-    from kicad_tools.validate.connectivity import ConnectivityValidator
-
-    board = tmp_path / "slid.kicad_pcb"
+def _write_via_departure(board, *, extra_segments=(), inner_segments=None):
+    if inner_segments is None:
+        inner_segments = [
+            ("In2.Cu", (10.2, 12.6), (10.2, 10.4), 0.4),
+            ("In2.Cu", (10.2, 10.4), (10, 10.6), 0.4),
+            ("In2.Cu", (10.2, 12.6), (10, 12.6), 0.4),
+        ]
     _write_board(
         board,
         pad_number="12",
@@ -225,13 +228,72 @@ def test_relocated_departure_keeps_the_inner_extension(tmp_path, departures):
                 ("F.Cu", (10, 10 + y + 0.05), (10, 10 + y), round(0.1016 + y * 0.5, 4))
                 for y in [i * 0.05 for i in range(12)]
             ),
-            ("In2.Cu", (10.2, 12.6), (10.2, 10.4), 0.4),
-            ("In2.Cu", (10.2, 10.4), (10, 10.6), 0.4),
-            ("In2.Cu", (10.2, 12.6), (10, 12.6), 0.4),
+            *inner_segments,
+            *extra_segments,
         ],
         vias=[(10, 10.6)],
         far_at=(10, 12.6),
     )
+
+
+@pytest.mark.parametrize(("layer", "x"), [("F.Cu", 9.76), ("In2.Cu", 9.72)])
+def test_via_slide_preserves_the_contact_at_a_returning_branch(tmp_path, departures, layer, x):
+    board = tmp_path / "returning-branch.kicad_pcb"
+    _write_via_departure(
+        board,
+        extra_segments=[
+            (layer, (x, 10.45), (9, 10.45), 0.20),
+            (layer, (9, 10.45), (9, 12.6), 0.20),
+            (layer, (9, 12.6), (10, 12.6), 0.20),
+        ],
+    )
+    original = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == original
+
+
+def test_via_slide_keeps_the_inner_taper_connected_to_its_new_stub(tmp_path, departures):
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "inner-taper.kicad_pcb"
+    # The old annulus also touched two earlier pieces of this continuous taper.
+    points = [
+        (10, 12.6),
+        (11.3, 12.6),
+        (11.3, 10.1),
+        (10.2, 10.1),
+        (10.2, 10.25),
+        (10.2, 10.30),
+        (10.2, 10.35),
+        (10.2, 10.40),
+        (10.15, 10.45),
+        (10.10, 10.50),
+        (10.05, 10.55),
+        (10, 10.60),
+    ]
+    widths = [0.35, 0.35, 0.35, 0.18, 0.19, 0.2, 0.21, 0.23, 0.25, 0.27, 0.29]
+    inner = [
+        ("In2.Cu", start, end, width)
+        for start, end, width in zip(points[:-1], points[1:], widths, strict=True)
+    ]
+    _write_via_departure(board, inner_segments=inner)
+    old_seat = _round(PCB.load(board).vias[0].position)
+    assert departures.clear_pad_departures(board, _rules()) == 1
+    pcb = PCB.load(board)
+    via = next(v for v in pcb.vias if v.net_name == "USB_CC2")
+    assert _round(via.position) != old_seat
+    assert any(
+        {_round(s.start), _round(s.end)} == {old_seat, _round(via.position)}
+        for s in pcb.segments
+        if s.layer == "In2.Cu"
+    )
+
+
+def test_relocated_departure_keeps_the_inner_extension(tmp_path, departures):
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    board = tmp_path / "slid.kicad_pcb"
+    _write_via_departure(board)
     assert departures.clear_pad_departures(board, _rules()) == 1
     pcb, neck, piece = _neck_and_piece(board)
     center = pcb.get_pad_position("U1", "12")

@@ -17,6 +17,7 @@ not reconnectable as one physical component is left untouched, file intact.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from math import dist
 from pathlib import Path
 
@@ -96,6 +97,33 @@ def _external_contacts(
         elif second in local and first not in local:
             contacts.add(first)
     return contacts
+
+
+def _keeps_via_approach(prior, current, retained: list[Segment], stub_layers: set[str]) -> bool:
+    """A stub can contact a continuous taper at fewer pieces than the old barrel.
+
+    Follow only former contacts from a piece still bonded to the repair.
+    Every skipped piece must join unchanged copper exactly at both ends,
+    with no fork. This cannot excuse a free end on a returning branch.
+    """
+    missing = prior - current
+    tracks = {("segment", id(s)): s for s in retained if s.layer in stub_layers}
+    if not missing <= tracks.keys():
+        return False
+    joints = defaultdict(set)
+    ends = {}
+    for key, segment in tracks.items():
+        ends[key] = [(segment.layer, _xy(point)) for point in (segment.start, segment.end)]
+        for end in ends[key]:
+            joints[end].add(key)
+    connected = list(prior & current & tracks.keys())
+    while connected:
+        for end in ends[connected.pop()]:
+            for key in joints[end] & missing:
+                if all(len(joints[point]) == 2 for point in ends[key]):
+                    missing.remove(key)
+                    connected.append(key)
+    return not missing
 
 
 def _walk_chain(
@@ -317,20 +345,22 @@ def _repair_pad(
     contacts = _external_contacts(previous, original_segments, removed, via_index)
     if pcb.remove_segments(removed) != len(removed):
         return 0
-    added: list[Segment] = []
     for a, b, width in legs:
-        added += pcb.add_trace(a, b, width=width, layer="F.Cu", net=net)
+        pcb.add_trace(a, b, width=width, layer="F.Cu", net=net)
     after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
     if len(after.components()) != 1:
         return 0
-    if via_index is None and not contacts <= _external_contacts(after, pcb.segments, added, None):
-        # A neck-only rebuild must keep every direct contact (the trunk
-        # keeper, the pad, any tap).  The via-move repair drops this
-        # stronger reading by design: the inner approach reaches the old
-        # seat from the side and keeps its connection through the
-        # relocation stub, so its former annulus bonds are carried by the
-        # one-component graph, not re-established seat-locally.
-        return 0
+    # Include every surviving relocation stub as well as the new neck. An
+    # inner approach can meet the stub at the old seat, while a returning
+    # branch must still touch this repaired copper at its original end.
+    original_ids = {id(s) for s in original_segments}
+    added = [s for s in pcb.segments if id(s) not in original_ids]
+    current = _external_contacts(after, pcb.segments, added, via_index)
+    if not contacts <= current:
+        retained = [s for s in pcb.segments if id(s) in original_ids and s.net_name == net]
+        stub_layers = {s.layer for s in added if s.layer != "F.Cu"}
+        if via_index is None or not _keeps_via_approach(contacts, current, retained, stub_layers):
+            return 0
     pcb.save(path)
     print(
         f"   pad departure {ref}/{number}: rebuilt as a straight {NECK_WIDTH_MM} mm neck{via_note}"

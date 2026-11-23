@@ -3464,14 +3464,14 @@ def _finalize_signal_copper(
         n_split = _split_offangle_chords(pcb_path, before)
         n_vias = _legalize_signal_vias(pcb_path)
         n_edge = _relocate_pad_edge_vias(pcb_path)
-        if not (n_split or n_vias or n_edge):
-            print("   No repairable via/chord residuals detected")
-            return
-        print(
-            f"   {n_vias} via defect(s) repaired, {n_edge} pad-edge via(s) moved, "
-            f"{n_split} chord(s) split"
-        )
-        pours_ok = _refill_zones_and_audit(pcb_path, fill_argv, audit_pours, "legal")
+        legalized = bool(n_split or n_vias or n_edge)
+        pours_ok = True
+        if legalized:
+            print(
+                f"   {n_vias} via defect(s) repaired, {n_edge} pad-edge via(s) moved, "
+                f"{n_split} chord(s) split"
+            )
+            pours_ok = _refill_zones_and_audit(pcb_path, fill_argv, audit_pours, "legal")
         # The pad-departure repair (#9989) runs on the refilled board and is
         # followed by its own refill: its rebuilt escapes and the U1.12
         # barrel's new seat must both be graded against a fresh pour, inside
@@ -3480,6 +3480,9 @@ def _finalize_signal_copper(
         if n_dep:
             print(f"   {n_dep} pad departure(s) cleared")
             pours_ok = _refill_zones_and_audit(pcb_path, fill_argv, audit_pours, "depart")
+        elif not legalized:
+            print("   No repairable via, chord or pad-departure residuals detected")
+            return
         new_clearances = _clearance_signature(pcb_path) - before
         if not pours_ok or new_clearances:
             raise RuntimeError(

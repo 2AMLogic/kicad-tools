@@ -704,7 +704,10 @@ def test_finalization_restores_copper_and_fills_on_every_failure(
         assert "pour" not in calls  # stale/failed fills cannot pass the physical gate
 
 
-def test_finalization_commits_only_after_successful_physical_gates(tmp_path, recipe, monkeypatch):
+@pytest.mark.parametrize("repair_stage", ["_legalize_signal_vias", "_clear_pad_departures"])
+def test_finalization_commits_only_after_successful_physical_gates(
+    tmp_path, recipe, monkeypatch, repair_stage
+):
     path = tmp_path / "candidate.kicad_pcb"
     path.write_bytes(b"original")
     calls = []
@@ -730,7 +733,8 @@ def test_finalization_commits_only_after_successful_physical_gates(tmp_path, rec
         calls.append("audit")
         return True
 
-    monkeypatch.setattr(recipe, "_legalize_signal_vias", legalize)
+    monkeypatch.setattr(recipe, "_legalize_signal_vias", lambda p: 0)
+    monkeypatch.setattr(recipe, repair_stage, legalize)
     monkeypatch.setattr(recipe.subprocess, "run", refill)
     recipe._finalize_signal_copper(path, ["fill", str(path)], audit)
     assert path.read_bytes() == b"new copper and matching fills"
