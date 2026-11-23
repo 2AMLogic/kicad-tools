@@ -98,8 +98,27 @@ def _staging_dirs(directory: Path) -> list[Path]:
     return [p for p in directory.iterdir() if ".lint-gate-" in p.name]
 
 
-def _signal_group_snapshot(pgid: int) -> str:
-    """Include descendants that inherited a pipe, even after the driver exited."""
+def _captured_pipe_fds(pid: str, pipes: dict[str, str]) -> str:
+    if not pipes:
+        return "unavailable (procfs pipe identities unavailable)"
+    matches = []
+    try:
+        for fd in (Path("/proc") / pid / "fd").iterdir():
+            try:
+                pipe = pipes.get(os.readlink(fd))
+            except FileNotFoundError:
+                continue  # the process closed this descriptor during the snapshot
+            if pipe is not None:
+                matches.append(f"{pipe} fd={fd.name}")
+    except OSError as exc:
+        matches.append(f"unavailable ({exc.strerror})")
+    if len(pipes) < 2:
+        matches.append("unavailable (one captured pipe identity missing)")
+    return ", ".join(sorted(matches)) or "none"
+
+
+def _signal_group_snapshot(pgid: int, pipes: dict[str, str]) -> str:
+    """Find survivors by process group even after the driver has been reaped."""
     try:
         table = subprocess.run(
             ["ps", "-ax", "-o", "pid=,ppid=,pgid=,stat=,comm="],
@@ -114,7 +133,7 @@ def _signal_group_snapshot(pgid: int) -> str:
     for line in table.splitlines():
         fields = line.split(maxsplit=4)
         if len(fields) == 5 and fields[2] == str(pgid):
-            members.append(line.strip())
+            members.append(f"{line.strip()} | {_captured_pipe_fds(fields[0], pipes)}")
     return "\n".join(members) or "no group members visible"
 
 
@@ -131,6 +150,15 @@ def _run_and_signal(tmp_path: Path, mode: str, argv: list[str], sig: int) -> tup
         text=True,
         start_new_session=True,
     )
+    assert proc.stdout is not None and proc.stderr is not None
+    # Keep both identities before communicate() can close a stream at EOF.
+    # Match every descriptor held by a survivor, including a renamed/dup'd fd.
+    pipes: dict[str, str] = {}
+    for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+        with suppress(OSError):
+            pipes[os.readlink(f"/proc/self/fd/{stream.fileno()}")] = name
+
+    exited_at: float | None = None
     ready_at = signal_at = "pending"
     drained = False
     try:
@@ -142,23 +170,39 @@ def _run_and_signal(tmp_path: Path, mode: str, argv: list[str], sig: int) -> tup
             ready_at = f"{time.monotonic() - started:.3f}s"
             proc.send_signal(sig)
             signal_at = f"{time.monotonic() - started:.3f}s"
-        out, err = proc.communicate(timeout=max(0, deadline - time.monotonic()))
+        # communicate() retains bytes across timeouts. Drain both pipes in
+        # short intervals until the driver's own exit is observed, then drain
+        # any inherited writers against the same original deadline.
+        while True:
+            if exited_at is None and proc.poll() is not None:
+                exited_at = time.monotonic() - started
+            remaining = max(0.0, deadline - time.monotonic())
+            interval = min(0.025, remaining) if exited_at is None else remaining
+            try:
+                out, err = proc.communicate(timeout=interval)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    raise
         drained = True
         if ready_at == "pending":
             pytest.fail(f"driver exited early ({proc.returncode}):\n{out}\n{err}")
     except subprocess.TimeoutExpired:
         elapsed = time.monotonic() - started
         rc = proc.poll()
-        status = "still running" if rc is None else f"exited with {rc} by {elapsed:.3f}s"
+        status = "still running"
+        if rc is not None:
+            observed = elapsed if exited_at is None else exited_at
+            status = f"exited with {rc} at {observed:.3f}s (observed)"
         pytest.fail(
             f"driver deadline at {elapsed:.3f}s, ready={ready_at}, signal={signal_at}, "
-            f"driver {status}\nPID PPID PGID STAT COMMAND\n{_signal_group_snapshot(proc.pid)}"
+            f"driver {status}\nPID PPID PGID STAT COMMAND | CAPTURED PIPE FDS\n"
+            f"{_signal_group_snapshot(proc.pid, pipes)}"
         )
     finally:
         if not drained:
             with suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            assert proc.stdout is not None and proc.stderr is not None
             proc.stdout.close()
             proc.stderr.close()
             proc.wait(timeout=3)
