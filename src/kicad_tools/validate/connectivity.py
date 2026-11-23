@@ -497,16 +497,13 @@ class ConnectivityValidator:
                 inherits the internal type for its net; zone-only
                 relationships (and nets the internal analysis did not flag)
                 keep ``zone_island``.
-            internal_issue_count: Number of internal issues that will be
-                silently substituted if this method returns ``None``.  Only
-                used to make the unexpected-exit-code warning actionable.
+            internal_issue_count: Number of internal findings retained if
+                the native run fails or writes an unusable report.
 
         Returns ``None`` on the two *expected* degradations (PCB passed as an
-        object, kicad-cli not installed) without emitting anything; an
-        *unexpected* kicad-cli exit code also returns ``None`` but emits a
-        ``RuntimeWarning`` naming the exit code and the substituted internal
-        count (issue #4551 — the silent fallback made a kicad-cli crash
-        indistinguishable from the documented KiCad-less path).
+        object, kicad-cli not installed) without emitting anything. An
+        unexpected exit code or unusable report emits a ``RuntimeWarning``
+        with the reason and the internal count before falling back.
         """
         if self.pcb_path is None:
             return None
@@ -514,7 +511,7 @@ class ConnectivityValidator:
         import tempfile
 
         from kicad_tools.cli.runner import find_kicad_cli
-        from kicad_tools.drc import DRCReport
+        from kicad_tools.drc.report import load_native_connectivity_report
 
         kicad_cli = find_kicad_cli()
         if kicad_cli is None:
@@ -538,7 +535,12 @@ class ConnectivityValidator:
         # Issue #6724: KiCad 8/9 reject --refill-zones (exit 1, no report);
         # it is passed unless this kicad-cli definitively lacks it, and a
         # rejected run is retried without it.
-        with tempfile.NamedTemporaryFile(suffix=".json") as report_file:
+        # Issue #9959: the report lives at a fresh, never-pre-created path
+        # inside a private directory, and run_kicad_drc_command clears it
+        # before every launch -- so only a report kicad-cli itself wrote on
+        # the final launch is ever read here.
+        with tempfile.TemporaryDirectory(prefix="kct-nativeconn-") as td:
+            report_path = Path(td) / "drc.json"
             proc, _refilled = run_kicad_drc_command(
                 lambda refill: [
                     str(kicad_cli),
@@ -548,7 +550,7 @@ class ConnectivityValidator:
                     "--format",
                     "json",
                     "-o",
-                    report_file.name,
+                    str(report_path),
                     str(self.pcb_path),
                 ],
                 Path(kicad_cli),
@@ -572,7 +574,27 @@ class ConnectivityValidator:
                     stacklevel=2,
                 )
                 return None
-            report = DRCReport.load(report_file.name)
+            # Issue #9959: an accepted exit code still has to have written a
+            # complete report.  A missing, empty, malformed or incomplete one
+            # must fall back to the internal analysis (with a warning), never
+            # substitute an empty native result for the real findings.
+            try:
+                report = load_native_connectivity_report(report_path)
+            except ValueError as exc:
+                import warnings
+
+                substituted = (
+                    f"; substituting the internal analysis ({internal_issue_count} issue(s))"
+                    if internal_issue_count is not None
+                    else ""
+                )
+                warnings.warn(
+                    "kicad-cli pcb drc wrote an unusable report during "
+                    f"native connectivity reconciliation: {exc}{substituted}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return None
 
         # Connectivity relationships live in the report's dedicated
         # ``unconnected_items`` collection, NOT in ``violations`` -- the
