@@ -1403,6 +1403,9 @@ def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict 
     try:
 
         def build_cmd(use_refill: bool) -> list[str]:
+            # Issue #9946: every launch starts from no report, so a retry
+            # that writes nothing can never be read as the first attempt's.
+            report_path.unlink(missing_ok=True)
             cmd = [
                 str(kicad_cli),
                 "pcb",
@@ -1423,19 +1426,25 @@ def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict 
         # without them when kicad-cli rejects the option -- is exactly
         # run_kicad_drc_command's policy (Issue #6775), so reuse it.
         proc, _refilled = run_kicad_drc_command(
-            build_cmd, kicad_cli, refill_zones=refill, text=True
+            build_cmd,
+            kicad_cli,
+            refill_zones=refill,
+            text=True,
+            before_retry=lambda: _restore_net_declarations(
+                pcb_path, input_net_nodes, input_element_nets
+            ),
         )
         _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
         # Issue #6724: a killed kicad-cli (negative status) or a missing,
         # empty or truncated report is "no report", never an empty one.
         if proc.returncode < 0:
             return None
-        if not report_path.exists() or report_path.stat().st_size == 0:
+        # Accept only a complete final report (a ``violations`` list).
+        from kicad_tools.drc.geometric import load_kicad_cli_json_report
+
+        if load_kicad_cli_json_report(report_path) is not None:
             return None
-        try:
-            parsed = json.loads(report_path.read_text())
-        except ValueError:
-            return None
+        parsed = json.loads(report_path.read_text())
         return parsed if isinstance(parsed, dict) else None
     finally:
         report_path.unlink(missing_ok=True)
@@ -1894,6 +1903,7 @@ def run_kicad_drc_command(
     refill_zones: bool,
     timeout: float | None = None,
     text: bool = False,
+    before_retry: Callable[[], None] | None = None,
 ) -> tuple["subprocess.CompletedProcess", bool]:
     """Run a ``kicad-cli pcb drc`` command, with ``--refill-zones`` when possible.
 
@@ -1910,6 +1920,9 @@ def run_kicad_drc_command(
 
     ``timeout`` is the whole budget (probe + run + retry); a
     :class:`subprocess.TimeoutExpired` propagates to the caller.
+    ``before_retry`` (Issue #9946) runs after a rejected attempt and before
+    the flag-less retry, so the caller can undo whatever the failed launch
+    left behind (e.g. restore a stripped net table) before the retry reads it.
     """
     from kicad_tools.drc.geometric import KICAD_CLI_ERR_ARGS, unknown_argument
 
@@ -1943,6 +1956,8 @@ def run_kicad_drc_command(
         if callable(record):
             record(Path(kicad_cli), False)
         use_refill = False
+        if before_retry is not None:
+            before_retry()
         proc = subprocess.run(
             build_cmd(False),
             capture_output=True,
