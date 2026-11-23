@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.schema.pcb import PCB
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "06-diffpair-test"
 
@@ -166,3 +168,37 @@ def test_the_repaired_board_needs_no_second_repair_round(generate_design_mod, bo
     assert "UNREPAIRED" not in capsys.readouterr().out
     assert board.read_text() == text
     assert generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
+
+
+@pytest.mark.parametrize("dialect", ["mixed", "partial-table", "name-only"])
+def test_pour_repair_and_audit_resolve_named_copper(generate_design_mod, board, dialect):
+    # Stitching can add named copper to a numbered board. A native save can
+    # also replace every reference and remove the numbered declarations.
+    text = board.read_text().replace("(net 1) (uuid", '(net "+1V2") (uuid')
+    if dialect != "mixed":
+        text = text.replace('  (net 1 "+1V2")\n', "")
+        text = text.replace('(net 1 "+1V2")', '(net "+1V2")')
+        text = text.replace('(net 1) (net_name "+1V2")', '(net "+1V2")')
+    if dialect == "name-only":
+        for declaration in ('(net 0 "")', '(net 2 "SIG")'):
+            text = text.replace(f"  {declaration}\n", "")
+        text = text.replace("(net 2)", '(net "SIG")')
+        # The last zone and board can close on the same line.
+        text = text.rstrip().removesuffix(")").rstrip() + ")\n"
+    board.write_text(text)
+
+    before = PCB.load(board)
+    if dialect == "partial-table":
+        assert before.get_net_by_name("+1V2") is None
+    old_ids = {item.uuid for item in [*before.segments, *before.vias]}
+    audit = generate_design_mod._audit_pour_nets
+    assert audit(board, ["+1V2"])["+1V2"]["stranded_pads"] == [("U4.C2", False)]
+    assert generate_design_mod._repair_pour_connectivity(board, ["+1V2"]) == (1, 1)
+
+    repaired = PCB.load(board)
+    (bridge,) = [seg for seg in repaired.segments if seg.uuid not in old_ids]
+    (via,) = [via for via in repaired.vias if via.uuid not in old_ids]
+    assert bridge.net_name == via.net_name == "+1V2"
+    assert bridge.net_name_only and via.net_name_only
+    assert audit(board, ["+1V2"])["+1V2"]["stranded_pads"] == []
+    assert generate_design_mod._repair_pour_connectivity(board, ["+1V2"]) == (0, 0)
