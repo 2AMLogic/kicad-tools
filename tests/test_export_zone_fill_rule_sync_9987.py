@@ -268,25 +268,121 @@ def test_second_export_with_unchanged_rules_leaves_the_board_alone(tmp_path, mon
 
 
 @pytest.mark.skipif(find_kicad_cli() is None, reason="Native KiCad CLI is not installed")
-def test_board_whose_fill_already_matches_its_rules_is_not_refilled(tmp_path, monkeypatch):
-    """Rules written after the zone, pour filled under them: already in sync."""
+def test_fill_with_no_recorded_rule_state_is_refilled_once(tmp_path, monkeypatch):
+    """Rules already match, but nothing proves the pour was filled under them."""
     board = _zoned_board(tmp_path)
     _write_sidecars(board)
-    assert "Zone clearance - GND (F.Cu)" in board.with_suffix(".kicad_dru").read_text()
     _persist_native_fill(board)
-    assert _pour_to_pad_gap(board) >= 0.3 - 0.005
-    filled = board.read_bytes()
-    filled_mtime_ns = board.stat().st_mtime_ns
     dru = board.with_suffix(".kicad_dru").read_bytes()
     refills = _spy_on_refill(monkeypatch)
 
     assert export_main([str(board), *_EXPORT_ARGS, "-o", str(tmp_path / "mfg")]) == 0
-
-    # The premise: export wrote no rule this board did not already carry.
     assert board.with_suffix(".kicad_dru").read_bytes() == dru
-    assert refills == []
-    assert board.read_bytes() == filled
-    assert board.stat().st_mtime_ns == filled_mtime_ns
+    assert len(refills) == 1
+    # The export recorded the state, so the next one leaves the board alone.
+    assert export_main([str(board), *_EXPORT_ARGS, "-o", str(tmp_path / "again")]) == 0
+    assert len(refills) == 1
+
+
+def _fake_refill(monkeypatch, *, fail_first: bool = False) -> list[Path]:
+    """A refill that appends a newline to the board; optionally fails once."""
+    calls: list[Path] = []
+
+    def refilling(pcb_path, kicad_cli=None, *, require_save=False):
+        calls.append(Path(pcb_path))
+        if fail_first and len(calls) == 1:
+            return KiCadCLIResult(success=False, stderr="boom")
+        Path(pcb_path).write_bytes(Path(pcb_path).read_bytes() + b"\n")
+        return KiCadCLIResult(success=True, output_path=Path(pcb_path))
+
+    monkeypatch.setattr(runner, "run_refill_zones", refilling)
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/fake/kicad-cli"))
+    return calls
+
+
+def test_failed_refill_then_repeat_export_still_refills(tmp_path, monkeypatch):
+    board = _with_saved_fill_text(_stale_rules_board(tmp_path))
+    calls = _fake_refill(monkeypatch, fail_first=True)
+
+    first = ManufacturingPackage(
+        board, manufacturer="jlcpcb", config=_config(tmp_path / "one")
+    ).export()
+    assert not first.success
+    # The rules are now on disk beside the old copper.
+    assert "Zone clearance - GND (F.Cu)" in board.with_suffix(".kicad_dru").read_text()
+
+    second = ManufacturingPackage(
+        board, manufacturer="jlcpcb", config=_config(tmp_path / "two")
+    ).export()
+    assert second.success, second.errors
+    assert len(calls) == 2
+    with zipfile.ZipFile(tmp_path / "two" / "kicad_project.zip") as zf:
+        assert zf.read(board.name) == board.read_bytes()
+
+    # A previously successful, unchanged export does not refill again.
+    third = ManufacturingPackage(
+        board, manufacturer="jlcpcb", config=_config(tmp_path / "three")
+    ).export()
+    assert third.success, third.errors
+    assert len(calls) == 2
+
+
+def test_parts_only_export_then_full_export_refills(tmp_path, monkeypatch):
+    board = _with_saved_fill_text(_stale_rules_board(tmp_path))
+    calls = _fake_refill(monkeypatch)
+
+    parts = ManufacturingPackage(
+        board,
+        manufacturer="jlcpcb",
+        config=_config(tmp_path / "parts", include_project_zip=False, include_gerbers=False),
+    ).export()
+    assert parts.success, parts.errors
+    assert calls == []
+
+    full = ManufacturingPackage(
+        board, manufacturer="jlcpcb", config=_config(tmp_path / "full")
+    ).export()
+    assert full.success, full.errors
+    assert len(calls) == 1
+
+
+def test_named_stackup_without_a_refill_keeps_its_original_binding(tmp_path, monkeypatch):
+    """A board edit during rule emission must not be certified (no refill ran)."""
+    board = authored_pcb(tmp_path, "JLC04161H-3313")
+    original_hash = hashlib.sha256(board.read_bytes()).hexdigest()
+    calls = _fake_refill(monkeypatch)
+    real_write = ManufacturingPackage._write_drc_constraints
+
+    def racing(self, result, **kwargs):
+        real_write(self, result, **kwargs)
+        board.write_bytes(board.read_bytes() + b"\n")
+
+    monkeypatch.setattr(ManufacturingPackage, "_write_drc_constraints", racing)
+    config = _config(tmp_path / "mfg", stackup_id="JLC04161H-3313")
+    result = ManufacturingPackage(board, manufacturer="jlcpcb", config=config).export()
+
+    assert calls == []
+    if result.stackup_path is not None and result.stackup_path.exists():
+        record = json.loads(result.stackup_path.read_text())
+        assert record["pcb_sha256"] == original_hash
+
+
+def test_named_stackup_refill_refuses_a_board_that_changed_before_it(tmp_path, monkeypatch):
+    board = _with_saved_fill_text(authored_pcb(tmp_path, "JLC04161H-3313"))
+    calls = _fake_refill(monkeypatch)
+    real_write = ManufacturingPackage._write_drc_constraints
+
+    def racing(self, result, **kwargs):
+        real_write(self, result, **kwargs)
+        board.write_bytes(board.read_bytes() + b"\n")
+
+    monkeypatch.setattr(ManufacturingPackage, "_write_drc_constraints", racing)
+    config = _config(tmp_path / "mfg", stackup_id="JLC04161H-3313")
+    result = ManufacturingPackage(board, manufacturer="jlcpcb", config=config).export()
+
+    assert not result.success
+    assert any("PCB changed during manufacturing export" in e for e in result.errors)
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

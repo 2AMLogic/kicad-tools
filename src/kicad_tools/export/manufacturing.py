@@ -336,6 +336,20 @@ def _zone_fill_rule_state(pcb_path: Path) -> str:
     return json.dumps({"dru": dru, "rules": rules, "net_settings": net_settings}, sort_keys=True)
 
 
+def _zone_fill_marker(pcb_path: Path) -> Path:
+    """Hidden sidecar recording the rule state the saved fill was last refilled under."""
+    return pcb_path.with_name(f".{pcb_path.name}.zonefill")
+
+
+def _zone_fill_marker_matches(pcb_path: Path, rule_state: str) -> bool:
+    """True when a successful export refill recorded exactly ``rule_state``."""
+    try:
+        recorded = _zone_fill_marker(pcb_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return recorded == hashlib.sha256(rule_state.encode("utf-8")).hexdigest()
+
+
 def _restore_board(pcb_path: Path, original: bytes) -> None:
     """Put ``original`` back when a failed zone refill left the board different.
 
@@ -708,12 +722,22 @@ class ManufacturingPackage:
             # Issue #9987: the rules are final now, so a saved pour filled
             # under the previous ones is stale, and kicad-cli plots the
             # saved copper.  Persist the refill before anything reads the
-            # board; it is export's own edit of the source, so the named
-            # stackup is re-bound to the bytes that will ship.
-            if _zone_fill_rule_state(self.pcb_path) != rule_state:
-                if not self._refresh_zone_fill(result):
+            # board.  The need survives a failed or fill-less earlier export
+            # (the rules on disk then match, the copper does not): a refill
+            # is skipped only when an earlier export recorded this exact
+            # rule state as the one the saved fill was made under.
+            final_state = _zone_fill_rule_state(self.pcb_path)
+            if final_state != rule_state or not _zone_fill_marker_matches(
+                self.pcb_path, final_state
+            ):
+                refilled = self._refresh_zone_fill(
+                    result, final_state, selected_stackup_source_hash
+                )
+                if refilled is None:
                     return result
-                if self.config.stackup_id:
+                # Only bytes export itself wrote are re-bound to the named
+                # stackup; ``_refresh_zone_fill`` verified their preimage.
+                if refilled and self.config.stackup_id:
                     selected_stackup_source_hash = self._stackup_source_hash(
                         self.config.stackup_id, result
                     )
@@ -874,7 +898,12 @@ class ManufacturingPackage:
             result.errors.append(f"Stackup ordering validation failed: {exc}")
             return None
 
-    def _refresh_zone_fill(self, result: ManufacturingResult) -> bool:
+    def _refresh_zone_fill(
+        self,
+        result: ManufacturingResult,
+        rule_state: str,
+        expected_sha256: str | None = None,
+    ) -> bool | None:
         """Bring the saved zone fill in line with the rules export has just written.
 
         KiCad's zone filler resolves every gap of a pour against the sibling
@@ -897,16 +926,21 @@ class ManufacturingPackage:
         fill changes: tracks, vias and net assignments are KiCad's own
         re-save of itself.
 
-        Returns ``False`` when the export must stop.  A bundle that ships
-        neither the saved copper nor a plot of it needs no fill.
+        ``rule_state`` is recorded beside the board after a successful refill
+        so a later export can tell the saved copper already obeys the rules.
+
+        Returns ``None`` when the export must stop, ``True`` when this call
+        rewrote the board, ``False`` when no refill was needed or made.  A
+        bundle that ships neither the saved copper nor a plot of it needs no
+        fill.
         """
         from ..cli.runner import _board_unchanged, find_kicad_cli, run_refill_zones
         from .gerber import _pcb_has_filled_zones
 
         if not (self.config.include_gerbers or self.config.include_project_zip):
-            return True
+            return False
         if not _pcb_has_filled_zones(self.pcb_path):
-            return True
+            return False
 
         try:
             original = self.pcb_path.read_bytes()
@@ -914,7 +948,12 @@ class ManufacturingPackage:
         except OSError as exc:
             msg = f"Could not read {self.pcb_path.name} before its zone refill: {exc}"
             result.errors.append(msg)
-            return False
+            return None
+        if expected_sha256 is not None and hashlib.sha256(original).hexdigest() != expected_sha256:
+            msg = "PCB changed during manufacturing export"
+            result.errors.append(msg)
+            logger.error(msg)
+            return None
         kicad_cli = find_kicad_cli()
         dru_name = self.pcb_path.with_suffix(".kicad_dru").name
         if kicad_cli is None:
@@ -928,6 +967,13 @@ class ManufacturingPackage:
                 )
                 logger.info(note)
                 result.warnings.append(note)
+                try:
+                    _zone_fill_marker(self.pcb_path).write_text(
+                        hashlib.sha256(rule_state.encode("utf-8")).hexdigest() + "\n",
+                        encoding="utf-8",
+                    )
+                except OSError as exc:
+                    logger.warning("Could not record the zone-fill rule state: %s", exc)
                 return True
             _restore_board(self.pcb_path, original)
             why = (
@@ -940,7 +986,7 @@ class ManufacturingPackage:
         )
         result.errors.append(msg)
         logger.error(msg)
-        return False
+        return None
 
     def _reconcile_preflight_lcsc(self, result: ManufacturingResult) -> None:
         """Update the recorded ``bom_fields`` result with post-enrichment LCSC state.
