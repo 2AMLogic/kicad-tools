@@ -125,14 +125,15 @@ def _export_json(board: Path, out_dir: Path, capsys, *extra: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_route_runs_pass_and_names_unresolved(tmp_path: Path, capsys):
+def _route_silk_fixture(directory: Path, *flags: str) -> tuple[Path, Path]:
+    """Route the fixture's open signal and return the source and published boards."""
     # Connect the silk-crossing via to D1.2 so this board needs no GND pour.
     board = _defect_board(
-        tmp_path / "run",
+        directory,
         extra_copper='(segment (start 141 50) (end 148 57) (width 0.25) (layer "F.Cu") '
         '(net 2) (uuid "silk-via-gnd-feed"))\n',
     )
-    out = tmp_path / "run" / "routed.kicad_pcb"
+    out = directory / "routed.kicad_pcb"
     signal = NetStatusAnalyzer(board, strict=True).analyze().get_net("NET1")
     assert signal is not None and signal.open_connections == 1
 
@@ -147,20 +148,25 @@ def test_route_runs_pass_and_names_unresolved(tmp_path: Path, capsys):
             "--skip-drc",
             "--no-auto-pour",
             "--no-chain-complete",
+            *flags,
         ]
     )
 
     assert rc == 0
-    text = capsys.readouterr().out
-    assert "--- Silk legalisation (default pass, jlcpcb) ---" in text
-    assert "unresolved [silk_over_hole]" in text
-    assert "U9 (fp_arc)" in text  # the unfixable item is named
-
     routed = NetStatusAnalyzer(out, strict=True).analyze()
     routed_signal = routed.get_net("NET1")
     assert routed_signal is not None and routed_signal.connected_count == 3
     assert routed.complete_count == routed.total_nets == 3
     assert not routed.stranded
+    return board, out
+
+
+def test_route_runs_pass_and_names_unresolved(tmp_path: Path, capsys):
+    _, out = _route_silk_fixture(tmp_path / "run")
+    text = capsys.readouterr().out
+    assert "--- Silk legalisation (default pass, jlcpcb) ---" in text
+    assert "unresolved [silk_over_hole]" in text
+    assert "U9 (fp_arc)" in text  # the unfixable item is named
     widths = _silk_widths(out)
     assert widths  # the authored lines survived the write
     assert all(w >= 0.15 for w in widths)  # ...and meet the jlcpcb floor
@@ -274,20 +280,12 @@ def test_route_reports_no_unresolved_for_via_only_crossing(tmp_path: Path, capsy
 
 
 def test_route_no_silk_fix_leaves_authored_silk(tmp_path: Path, capsys):
-    board = _defect_board(tmp_path / "run")
-    out = tmp_path / "run" / "routed.kicad_pcb"
-
-    rc = kct_main(
-        ["route", str(board), "-o", str(out), "--seed", "7", "--skip-drc", "--no-silk-fix"]
-    )
-
-    assert rc == 0
+    board, out = _route_silk_fixture(tmp_path / "run", "--no-silk-fix")
+    # KiCad can assign UUIDs to the fixture's named lines during the route.
+    authored = sorted(line[1:] for line in _silk_lines(board))
+    assert (0.08, 105.0, 55.0, 115.0, 55.0) in authored
+    assert sorted(line[1:] for line in _silk_lines(out)) == authored
     assert "Silk legalisation" not in capsys.readouterr().out
-    # Authored silk records byte-identical: the sub-minimum line survives with
-    # its authored geometry (only the requested copper was added).
-    (thin,) = [entry for entry in _silk_lines(out) if entry[2] == pytest.approx(105.0)]
-    assert thin[1] == pytest.approx(0.08)
-    assert (thin[4], thin[5]) == (115.0, 55.0)
 
 
 # ---------------------------------------------------------------------------
