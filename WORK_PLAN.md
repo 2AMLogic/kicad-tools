@@ -24,57 +24,56 @@ _None._
 `loom:important`; taken before unlabelled work.
 
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
-- **#9467**: Board 02: clear mask_to_copper + silk_hole_overlap through the recipe, then re-issue the release (unblocks #9053)
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors)
-- **#9058**: Board 01: re-pin readiness evidence after PR #8848 on a host where mask_to_copper completes
-- **#9876**: test flake: test_fully_sealed_net_reports_unrouted_and_leaves_no_copper times out in Test
+- **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#8979**: CI red on main: Routed PCB DRC Check fails on boards 01/02 physical_copper_gap (2 + 14 blocking errors)
+- **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board
 - **#9033**: Silkscreen-to-hole: kct reports far fewer findings than the fab DFM, and only as warnings
-- **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI
-- **#9273**: Same-net trace slit band sees only committed segments: measure whether any producer routes a via before the trace that skirts it
-- **#9467**: Board 02: clear mask_to_copper + silk_hole_overlap through the recipe, then re-issue the release (unblocks #9053)
-- **#9627**: kct route: lock existing copper by default on boards that already carry routing copper
-- **#9640**: pcb prune and optimize-traces still straighten deliberate near-pad geometry into creepage failures (prune has no voltage map; optimize gate active but passes them)
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
-- **#9725**: current paths / pcb reinforce: a tripled layer change (three vias in a row with a short bar on both layers) makes the whole path 'ambiguous'
-- **#9798**: Silk-in-keepout check rule and clip, plus silk error grading per #9112/#9033 (#9795 phase 2)
-- **#9799**: Run the silk legalisation pass by default in route, optimize-placement and export, with --no-silk-fix (#9795 phase 3)
-- **#9825**: creepage: stackup-vs-(general (thickness)) precedence disagrees with KiCad when both are present
-- **#9846**: Pad-aware stitcher adds GND tracks inside the own-net pad slit band (board 06 U2.B4, U3.48)
-- **#9851**: Route conversion: Python and C++ backends taper the same path into different segments (per-run vs per-cell taper_points)
-- **#9862**: redundant_copper_staircase: shortcut legs can create same-net copper slits physical_copper_gap flags (zones/same-net branches unmodeled)
-- **#9878**: Respect footprint-owned antenna and pad keepouts when placing fiducials
-- **#9879**: Record fiducial and board-identification prep in the manufacturing manifest
-- **#9880**: Board 02 clean seed-42 regeneration opens a NODE_D via slit and C1 mask exposure on router build 76
-- **#9883**: Reserve a legal power-plane escape for stranded mixed-net two-pad footprints
-- **#9884**: Select a via-balanced differential pair with a short, clear connector escape
+- **#9800**: Boards 02/03/05: drop per-board silk wiring and retire silk tolerances (#9795 phase 4)
+- **#9892**: Board 07: reconcile the seed-42 recipe and reviewed release under the manufacturing gate
+- **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package
+- **#9936**: Re-land displaced nets after Board 06 Python routing reaches the four USB3 negative legs
+- **#9939**: fix-drc mask-copper: 41 board-03 findings declined for structural reasons (junction/clearance/no-end classes)
+- **#9958**: fix-drc aborts the mask repair batch while undoing two nudges that share a track endpoint
+- **#9959**: _run_drc_once: the flag-less DRC retry can inherit the first attempt's report
+- **#9966**: Add a negative control for the segment arm of reset_escape's direct-contact guard
+- **#9972**: kct zones fill --output: thermal_asymmetry warning names the discarded temp candidate, not the output board
+- **#9973**: Harden the entry-copper checkpoint/resume regression's vacuity guards
+- **#9985**: Make the native zone-fill probe controls reliable in CI and count saved opens from KiCad’s report
+- **#9987**: Keep the Board 06 JLCPCB Gerbers and project ZIP in sync with the zone clearances added during export
+- **#9989**: Clear Board 06 U4 reset and USB-C configuration-channel pad departures in the nine-pair recipe
+- **#9990**: fix: a named-stackup export fails with 'PCB changed during manufacturing export' when the silk pass edits the board
+- **#9995**: test flake: route silk opt-out regression times out in the native post-route connectivity check
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#9646**: fix: gate pcb prune and optimize-traces on per-pair creepage shortfall
-- **#9749**: fix: resolve tripled layer changes and anchor loop-free lanes (#9725)
-- **#9823**: feat: flag and clip silk keepouts, grade jlcpcb silk errors
-- **#9857**: fix: stitcher keeps emitted stub tracks out of the same-net pad slit band
-- **#9861**: fix: route conversions taper the same path into identical segments (per-run taper in the native adapter)
-- **#9864**: fix(validate): gate staircase shortcuts on the physical-gap slit floor
-- **#9865**: feat: legalise silk by default in route, route-auto, placement, export and readiness
-- **#9873**: fix(router): check trace gaps beside stored same-net vias
-- **#9882**: fix(pcb): respect antenna and pad keepouts when placing fiducials
-- **#9885**: fix(readiness): record assembly prep in the manufacturing manifest
-- **#9887**: fix(boards): clear Board 02 copper on fresh seed-42 builds
+- **#9965**: fix(router): measure relief re-land search exits and bias displaced pair victims
+- **#9976**: fix: clear the DRC report path before every kicad-cli launch
+- **#9977**: perf(router): scope the known-failure search witness to reachable copper
+- **#9978**: test: pin net B's blocker and seed tracks in the entry-copper checkpoint regression
+- **#9979**: chore(board02): remove the redundant silk-width pass
+- **#9981**: test(board06): cover a track-only contact on the reset escape
+- **#9982**: fix(zones): name the published board in the thermal relief hint
+- **#9983**: fix: defer pass-through nudges on already-dragged conductors and undo mask moves in reverse order
+- **#9986**: test: count KiCad 10 unconnected_items and fit the zone-fill probe controls into the zones budget
+- **#9988**: fix(board05): de-slot the front pour between U2/U3 lead escapes
+- **#9991**: fix: refill saved zone fills when export changes the rules they were filled under
+- **#9992**: fix: re-bind stackup provenance to the silk pass's written bytes
+- **#9993**: fix(board07): clear fixture pad exits and verify the finished manufacturing bundle
+- **#9994**: fix(board06): rebuild the sideband pad departures as straight mask-clean necks
+- **#9996**: test: bound the silk opt-out routing regression
 
 ## Approved (Awaiting Merge)
 
@@ -89,11 +88,7 @@ Issues carrying `loom:curated`.
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7856**: [Epic #6441] Phase 5 measurement: coupled-trunk retention >= 95% on boards 03, 06b, 06rf, 07 *(curated)*
-- **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback *(curated)*
-- **#8425**: Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B *(curated)*
-- **#8486**: route perf: nets proven sealed are re-searched at full budget and re-rescued every iteration (43% of search time, rescue 0/15 for ~1,475 s each pass) *(curated)*
-- **#8530**: Fiducials + board-identification silkscreen should be automatic: add-fiducials / add-board-info commands, a check rule, and a default tapeout step *(curated)*
-- **#8603**: Board 07: classify and eliminate remaining redundant_copper warnings at source (part of #8399) *(curated)*
+- **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board *(curated)*
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
 - **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors) *(curated)*
@@ -105,36 +100,32 @@ Issues carrying `loom:curated`.
 - **#9058**: Board 01: re-pin readiness evidence after PR #8848 on a host where mask_to_copper completes *(curated)*
 - **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI *(curated)*
 - **#9068**: Board 05: clear the strict-gate flood (29 physical_copper_gap errors, 13 silk_hole_overlap, 348 provisional mask_to_copper) and re-pin readiness *(curated)*
-- **#9091**: Board 07: scripted repair of 29 same-net physical_copper_gap errors on the hand-reviewed release copper (ruling on #8979) *(curated)*
 - **#9093**: submit-jlcpcb: attended, exact-total-approved JLC parts purchase leg *(curated)*
-- **#9235**: Slow-suite test test_armc_route_gives_usb_d_equal_vias_with_every_gate fails on main (USB_D+ 2 vias, USB_D- 3) *(curated)*
-- **#9273**: Same-net trace slit band sees only committed segments: measure whether any producer routes a via before the trace that skirts it *(curated)*
 - **#9298**: Repository moved to the 2AMLogic organization: update hard-coded owner slug and the PyPI trusted publisher *(curated)*
 - **#9381**: Committed demo-board BOMs still carry the pre-#9323 duplicate-LCSC lines *(curated)*
 - **#9406**: Converge boards 06/07 DRC re-check into the single-sourced job scripts (latent local-gate --full failure) *(curated)*
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper *(curated)*
 - **#9454**: No migration path for evidence-bound waivers across the ev3 -> ev4 bump: every consumer waiver goes stale *(curated)*
 - **#9464**: Boards 03, 07 and 09 have parts off the 0.1 mm grid that pad_grid now reports (surfaced by #9434) *(curated)*
-- **#9467**: Board 02: clear mask_to_copper + silk_hole_overlap through the recipe, then re-issue the release (unblocks #9053) *(curated)*
-- **#9627**: kct route: lock existing copper by default on boards that already carry routing copper *(curated)*
-- **#9640**: pcb prune and optimize-traces still straighten deliberate near-pad geometry into creepage failures (prune has no voltage map; optimize gate active but passes them) *(curated)*
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410) *(curated)*
-- **#9725**: current paths / pcb reinforce: a tripled layer change (three vias in a row with a short bar on both layers) makes the whole path 'ambiguous' *(curated)*
 - **#9748**: optimize-traces --drc-aware --mfr jlcpcb introduces mask_to_copper errors at pad entries that the un-optimised board does not have *(curated)*
-- **#9798**: Silk-in-keepout check rule and clip, plus silk error grading per #9112/#9033 (#9795 phase 2) *(curated)*
-- **#9799**: Run the silk legalisation pass by default in route, optimize-placement and export, with --no-silk-fix (#9795 phase 3) *(curated)*
-- **#9825**: creepage: stackup-vs-(general (thickness)) precedence disagrees with KiCad when both are present *(curated)*
+- **#9800**: Boards 02/03/05: drop per-board silk wiring and retire silk tolerances (#9795 phase 4) *(curated)*
 - **#9844**: Router: route turns back past its own via inside the slit band (board 05 RESET V-turn) *(curated)*
-- **#9846**: Pad-aware stitcher adds GND tracks inside the own-net pad slit band (board 06 U2.B4, U3.48) *(curated)*
-- **#9850**: Board 06 seed 42: pure-Python backend routes 12/21 vs C++ 21/21 (no Python centerline-trunk pose, USB3 guide routes fail) *(curated)*
-- **#9851**: Route conversion: Python and C++ backends taper the same path into different segments (per-run vs per-cell taper_points) *(curated)*
-- **#9862**: redundant_copper_staircase: shortcut legs can create same-net copper slits physical_copper_gap flags (zones/same-net branches unmodeled) *(curated)*
-- **#9876**: test flake: test_fully_sealed_net_reports_unrouted_and_leaves_no_copper times out in Test *(curated)*
-- **#9878**: Respect footprint-owned antenna and pad keepouts when placing fiducials *(curated)*
-- **#9879**: Record fiducial and board-identification prep in the manufacturing manifest *(curated)*
-- **#9880**: Board 02 clean seed-42 regeneration opens a NODE_D via slit and C1 mask exposure on router build 76 *(curated)*
-- **#9883**: Reserve a legal power-plane escape for stranded mixed-net two-pad footprints *(curated)*
-- **#9884**: Select a via-balanced differential pair with a short, clear connector escape *(curated)*
+- **#9850**: Board 06 seed 42: trace the nine remaining pure-Python routing failures *(curated)*
+- **#9891**: Board 06: repair the seed-42 recipe to reproduce its strict release DRC result *(curated)*
+- **#9892**: Board 07: reconcile the seed-42 recipe and reviewed release under the manufacturing gate *(curated)*
+- **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package *(curated)*
+- **#9936**: Re-land displaced nets after Board 06 Python routing reaches the four USB3 negative legs *(curated)*
+- **#9939**: fix-drc mask-copper: 41 board-03 findings declined for structural reasons (junction/clearance/no-end classes) *(curated)*
+- **#9958**: fix-drc aborts the mask repair batch while undoing two nudges that share a track endpoint *(curated)*
+- **#9959**: _run_drc_once: the flag-less DRC retry can inherit the first attempt's report *(curated)*
+- **#9966**: Add a negative control for the segment arm of reset_escape's direct-contact guard *(curated)*
+- **#9972**: kct zones fill --output: thermal_asymmetry warning names the discarded temp candidate, not the output board *(curated)*
+- **#9973**: Harden the entry-copper checkpoint/resume regression's vacuity guards *(curated)*
+- **#9987**: Keep the Board 06 JLCPCB Gerbers and project ZIP in sync with the zone clearances added during export *(curated)*
+- **#9989**: Clear Board 06 U4 reset and USB-C configuration-channel pad departures in the nine-pair recipe *(curated)*
+- **#9990**: fix: a named-stackup export fails with 'PCB changed during manufacturing export' when the silk pass edits the board *(curated)*
+- **#9995**: test flake: route silk opt-out regression times out in the native post-route connectivity check *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -153,12 +144,12 @@ _None._
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 1 |
-| Important | 2 |
-| Ready (`loom:issue`) | 3 |
-| In Progress (`loom:building`) | 20 |
-| PRs awaiting review | 12 |
+| Important | 1 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 18 |
+| PRs awaiting review | 16 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 49 |
+| Curated | 41 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->

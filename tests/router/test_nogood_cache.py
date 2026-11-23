@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from kicad_tools.router.algorithms.negotiated import RIPUP_VICTIM_GEOMETRIC, EdgeFailureCallback
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.nogood_cache import (
@@ -148,6 +149,20 @@ def test_env_default_off_and_on():
 
 
 # -- safety oracle: cached failures must not suppress newly feasible routes ----
+
+
+def test_failure_observer_sees_fresh_proof_then_cache_replay(monkeypatch):
+    monkeypatch.setenv("KCT_NOGOOD_CACHE", "1")
+    router = _walled_router()
+    seen = []
+
+    def record(source, target, cause):
+        seen.append((source.pin, target.pin, cause, router.router.last_route_exhausted))
+
+    observer = EdgeFailureCallback(record)
+    for _ in range(2):
+        assert not router._route_net_negotiated(1, 0.5, failure_callback=observer)
+    assert seen == [("1", "2", None, True), ("1", "2", RIPUP_VICTIM_GEOMETRIC, False)]
 
 
 @pytest.mark.parametrize("margin", [None, 8])
