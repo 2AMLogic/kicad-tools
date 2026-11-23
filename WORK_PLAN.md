@@ -41,7 +41,6 @@ Issues currently being built (`loom:building`).
 - **#9800**: Boards 02/03/05: drop per-board silk wiring and retire silk tolerances (#9795 phase 4)
 - **#9892**: Board 07: reconcile the seed-42 recipe and reviewed release under the manufacturing gate
 - **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package
-- **#9936**: Re-land displaced nets after Board 06 Python routing reaches the four USB3 negative legs
 - **#9939**: fix-drc mask-copper: 41 board-03 findings declined for structural reasons (junction/clearance/no-end classes)
 - **#9958**: fix-drc aborts the mask repair batch while undoing two nudges that share a track endpoint
 - **#9959**: _run_drc_once: the flag-less DRC retry can inherit the first attempt's report
@@ -53,33 +52,35 @@ Issues currently being built (`loom:building`).
 - **#9989**: Clear Board 06 U4 reset and USB-C configuration-channel pad departures in the nine-pair recipe
 - **#9990**: fix: a named-stackup export fails with 'PCB changed during manufacturing export' when the silk pass edits the board
 - **#9995**: test flake: route silk opt-out regression times out in the native post-route connectivity check
+- **#10003**: Board 06 route-only CI leaves 12 silkscreen findings on the nine-pair fixture
+- **#10005**: test flake: input pad-overlap CLI test times out in the post-route connectivity check
+- **#10007**: Board 06 skips its first pour repair when stitching writes named segment and via nets
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#9965**: fix(router): measure relief re-land search exits and bias displaced pair victims
-- **#9976**: fix: clear the DRC report path before every kicad-cli launch
 - **#9977**: perf(router): scope the known-failure search witness to reachable copper
-- **#9978**: test: pin net B's blocker and seed tracks in the entry-copper checkpoint regression
-- **#9979**: chore(board02): remove the redundant silk-width pass
 - **#9981**: test(board06): cover a track-only contact on the reset escape
 - **#9982**: fix(zones): name the published board in the thermal relief hint
-- **#9983**: fix: defer pass-through nudges on already-dragged conductors and undo mask moves in reverse order
 - **#9986**: test: count KiCad 10 unconnected_items and fit the zone-fill probe controls into the zones budget
-- **#9988**: fix(board05): de-slot the front pour between U2/U3 lead escapes
 - **#9991**: fix: refill saved zone fills when export changes the rules they were filled under
 - **#9992**: fix: re-bind stackup provenance to the silk pass's written bytes
 - **#9993**: fix(board07): clear fixture pad exits and verify the finished manufacturing bundle
-- **#9994**: fix(board06): rebuild the sideband pad departures as straight mask-clean necks
 - **#9996**: test: bound the silk opt-out routing regression
+- **#9998**: fix: search alternate via displacements in the verified mask-copper repair
+- **#10000**: chore(deps): bump the uv-minor-patch group across 1 directory with 4 updates
+- **#10001**: chore(board02): legalize silk through the shared default pass
+- **#10004**: fix(board06): finish route-only silkscreen before the regression gate
+- **#10006**: test: bound the input pad-overlap CLI regression
+- **#10008**: fix(board06): resolve stitched net references in pour repair
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#9976**: fix: clear the DRC report path before every kicad-cli launch
 
 ## Proposed
 
@@ -115,7 +116,6 @@ Issues carrying `loom:curated`.
 - **#9891**: Board 06: repair the seed-42 recipe to reproduce its strict release DRC result *(curated)*
 - **#9892**: Board 07: reconcile the seed-42 recipe and reviewed release under the manufacturing gate *(curated)*
 - **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package *(curated)*
-- **#9936**: Re-land displaced nets after Board 06 Python routing reaches the four USB3 negative legs *(curated)*
 - **#9939**: fix-drc mask-copper: 41 board-03 findings declined for structural reasons (junction/clearance/no-end classes) *(curated)*
 - **#9958**: fix-drc aborts the mask repair batch while undoing two nudges that share a track endpoint *(curated)*
 - **#9959**: _run_drc_once: the flag-less DRC retry can inherit the first attempt's report *(curated)*
@@ -126,6 +126,9 @@ Issues carrying `loom:curated`.
 - **#9989**: Clear Board 06 U4 reset and USB-C configuration-channel pad departures in the nine-pair recipe *(curated)*
 - **#9990**: fix: a named-stackup export fails with 'PCB changed during manufacturing export' when the silk pass edits the board *(curated)*
 - **#9995**: test flake: route silk opt-out regression times out in the native post-route connectivity check *(curated)*
+- **#10003**: Board 06 route-only CI leaves 12 silkscreen findings on the nine-pair fixture *(curated)*
+- **#10005**: test flake: input pad-overlap CLI test times out in the post-route connectivity check *(curated)*
+- **#10007**: Board 06 skips its first pour repair when stitching writes named segment and via nets *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -146,10 +149,10 @@ _None._
 | Very important | 1 |
 | Important | 1 |
 | Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 18 |
-| PRs awaiting review | 16 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 41 |
+| In Progress (`loom:building`) | 20 |
+| PRs awaiting review | 15 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 43 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
