@@ -14,7 +14,7 @@ five:
 * ``boards/01-voltage-divider``
 * ``boards/02-charlieplex-led``
 * ``boards/03-usb-joystick``
-* ``boards/07-matchgroup-test`` (PARTIAL by design -- #3438 known opens)
+* ``boards/07-matchgroup-test``
 
 Two layers of guard:
 
@@ -26,13 +26,14 @@ Two layers of guard:
    "board DRC-clean".
 2. **Behavioral** -- exercise :func:`evaluate_pipeline_gate` on the two
    representative recipe verdicts (a manufacturable-clean board like 00, and
-   the PARTIAL-plus-residual-DRC board 07) and assert the SUMMARY's
+   a partial Board 07 run with residual DRC findings) and assert the SUMMARY's
    ``Overall:`` line agrees with :meth:`~PipelineGateResult.exit_code` -- the
    invariant that makes divergence impossible.
 """
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -95,10 +96,27 @@ def board_source(request: pytest.FixtureRequest) -> str:
 # --------------------------------------------------------------------------
 class TestGateWiring:
     def test_imports_and_calls_shared_gate(self, board_source: str) -> None:
-        assert "from kicad_tools.recipes.gate import evaluate_pipeline_gate" in board_source
+        tree = ast.parse(board_source)
+        gate_names = {
+            name.asname or name.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and node.module == "kicad_tools.recipes.gate"
+            for name in node.names
+            if name.name == "evaluate_pipeline_gate"
+        }
+        assert gate_names, "recipe must import evaluate_pipeline_gate from the shared gate"
         # Exactly one gate evaluation per recipe -- a second would reintroduce
         # the multi-verdict drift this issue removes.
-        assert board_source.count("evaluate_pipeline_gate(") == 1
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in gate_names
+        ]
+        assert len(calls) == 1
 
     def test_summary_derived_from_gate(self, board_source: str) -> None:
         assert "for line in gate.summary_lines():" in board_source
@@ -169,7 +187,7 @@ class TestSummaryExitAgreement:
         assert self._overall_from_summary(res) == "PASS"
 
     def test_partial_board_like_07_fails_honestly(self) -> None:
-        """Board 07 is PARTIAL by design + carries kct-check DRC residuals.
+        """A partial Board 07 run with the historical #3438 opens must fail.
 
         The honest verdict is FAIL/exit 1: ``route_ok`` False (the ``Routing:``
         line must read PARTIAL, not a falsely-inflated SUCCESS), ``lvs_ok`` None
