@@ -1534,6 +1534,61 @@ class TestReinforceCLIBoardRules:
         assert data["refused"][0]["rule"] == "voltage_map_pairwise"
         assert data["refused"][0]["required_mm"] > 0.44
 
+    @pytest.mark.parametrize("extra", [{}, {"hv_threshold": 30.0}, {"hv_threshold": 100.0}])
+    def test_cli_subthreshold_pair_still_widens_clearance(self, tmp_path, capsys, extra):
+        """A 15 V pair below the default 30 V --hv-threshold still gates anchors (#10015).
+
+        ``kct creepage`` derives a requirement for every mapped pair, so reinforce
+        must too: a 0.3 mm gap to a 15 V track is accepted by the scalar floors
+        but is below the ~0.45 mm the standard gives at 15 V.
+        """
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+
+        required = build_pairwise_clearance_table(
+            {"FUSED_LINE": 0.0, "OTHER": 15.0}, dru=0.0, hv_threshold=0.0
+        ).required_clearance("FUSED_LINE", "OTHER")
+        assert 0.3 < required < 0.6
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _blocked_by_foreign_track(0.3).save(pcb_path)
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"FUSED_LINE": 0.0, "OTHER": 15.0}))
+
+        rc = run_pcb_command(
+            _reinforce_args(
+                pcb_path,
+                format="json",
+                dry_run=True,
+                voltage_map=str(vm),
+                anchor_mode="spaced",
+                **extra,
+            )
+        )
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["refused"]
+        assert data["refused"][0]["rule"] == "voltage_map_pairwise"
+        assert data["refused"][0]["required_mm"] == pytest.approx(required)
+
+    def test_cli_same_potential_pair_adds_no_widening(self, tmp_path, capsys):
+        """Equal potentials (|dV| == 0) carry no requirement, threshold or not (#10015)."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _blocked_by_foreign_track(0.3).save(pcb_path)
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"FUSED_LINE": 5.0, "OTHER": 5.0}))
+
+        rc = run_pcb_command(
+            _reinforce_args(
+                pcb_path, format="json", dry_run=True, voltage_map=str(vm), anchor_mode="spaced"
+            )
+        )
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert not data["refused"]
+
     def test_cli_refusal_coordinates_are_sheet_absolute(self, tmp_path, capsys):
         """Refusal x/y (JSON and text) are sheet-absolute on a shifted board (#8511).
 
