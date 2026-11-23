@@ -132,6 +132,55 @@ def _load_record(name, root=ROOT07):
     return module
 
 
+def test_front_layer_spacing_and_coupling_follow_the_reviewed_route():
+    import json
+
+    engineering = ROOT07 / "engineering"
+    census = _load_record("measure_escapes", engineering)
+    spacing, coupling = census.measure(
+        ROOT07 / "reviewed-routing/sdram_demo.kicad_pcb",
+        ROOT07 / "authored-source/net_class_map.json",
+    )
+    assert spacing == json.loads((engineering / "package-escape-spacing.json").read_bytes())
+    assert coupling == json.loads((engineering / "escape-coupling-scenarios.json").read_bytes())
+
+
+def test_collinear_fragments_count_as_a_single_coupled_run():
+    from shapely.geometry import LineString, MultiLineString
+
+    census = _load_record("measure_escapes", ROOT07 / "engineering")
+    parts = MultiLineString([[(0, 0), (2, 0)], [(4, 0), (2, 0)], [(4, 0), (4, 1)]])
+    victim = LineString([(3, 1), (1, 1)])
+    assert sorted(census.parallel_overlap(run, victim) for run in census.straight_runs(parts)) == [
+        0.0,
+        2.0,
+    ]
+
+
+def test_native_refill_keeps_reviewed_ids_and_stabilizes_added_fiducial_fields(tmp_path):
+    from uuid import UUID, uuid4
+
+    from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
+
+    reviewed = uuids_in_file(ROOT07 / "reviewed-routing/sdram_demo.kicad_pcb")
+    released = ROOT07.parent / "output/matchgroup_test_routed.kicad_pcb"
+    published = uuids_in_file(released)
+    assert reviewed <= published
+    added = published - reviewed
+    assert len(added) == 12
+    assert all(UUID(value).version == 5 for value in added)
+
+    # Simulate another first KiCad save of the two new properties on each FID.
+    # KiCad and the canonicalizer order copper differently. Compare identities.
+    text = released.read_text()
+    for value in added:
+        text = text.replace(value, str(uuid4()))
+    native_save = tmp_path / "refilled.kicad_pcb"
+    native_save.write_text(text)
+    canonicalize_pcb_file_uuids(native_save, keep=reviewed)
+    assert uuids_in_file(native_save) == published
+
+
 def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land(tmp_path):
     import shutil
     import subprocess
@@ -150,10 +199,7 @@ def test_declared_fiducials_require_an_unconnected_unnumbered_board_only_land(tm
     shutil.copyfile(ROOT07 / candidate_patch, proposed / candidate_patch)
     adopted = tmp_path / "adopted"
     fixture.stage_design(proposed, adopted)
-    # Production carries the adopted fiducial support (#8603), so re-staging
-    # it is idempotent and matches the rehearsal output byte for byte. The
-    # published design-source archive still ships the pre-adoption recipes
-    # until #8604's manufacturing evidence refresh re-issues it.
+    # Re-staging the adopted fiducial support must reproduce the production recipes.
     for name in ("build.py", "build_source.py"):
         assert (adopted / name).read_bytes() == (proposed / name).read_bytes()
         assert (ROOT07 / name).read_bytes() == (adopted / name).read_bytes()

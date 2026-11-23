@@ -1,4 +1,4 @@
-"""Boards 01, 02, 04 and 06 commit the ``.kicad_dru`` their recipes emit (Issue #8385).
+"""Compare the production DRUs of boards 01, 02, 04, 06 and 07 (Issue #8385).
 
 The follow-up to #8357 (board 05, ``test_board05_recipe_dru_reproduces_8357.py``):
 under the same operator ruling (commit what the recipe emits, consistent with
@@ -27,17 +27,15 @@ Each replay was checked against a full recipe run on the pinned toolchain
 from the committed one.  None of them needs kicad-cli: these boards have no
 rule areas, so the keepout step writes nothing.
 
-Board 04 is strict ``xfail``: its recipe emits the block, but its
-evidence cannot be re-pinned on main yet (``refresh_readiness.py`` refuses on
-unaccepted ``redundant_copper_*`` warnings, independent of the DRU; #8399).
-When that lands and the DRU is committed, the strict xfail turns into a
-failure that says to drop the marker.
+Board 07 replays the six-layer rule writer from its production validator
+with the reviewed net-class map.  Each replay stages the board's
+``net_class_map.json`` next to the routed board, as the recipe leaves it,
+so the writer's ampacity rules match the committed file (board 02, #8759).
 
 Boards not covered, and why (traced in #8385): board 00's recipe routes
 in-process and its routed ``.kicad_pro`` declares no router class, so it never
 emits the block; board 03 is suppressed by its own designer clearance rule;
-board 05 has its own test; board 07's ``real_design/build.py`` emits the block inside a kicad-cli
-validation run and is blocked on the same #8399 refusal.
+board 05 has its own test.
 """
 
 from __future__ import annotations
@@ -82,11 +80,18 @@ def _board04_native_floors(routed: Path) -> None:
     process["apply_native_floors"](routed)
 
 
+def _board07_reviewed_rules(routed: Path) -> None:
+    source = BOARDS / "07-matchgroup-test" / "real_design"
+    validator = runpy.run_path(str(source / "validate.py"))
+    validator["write_reviewed_rules"](routed, source / "authored-source" / "net_class_map.json")
+
+
 CASES: dict[str, tuple[str, Callable[[Path], None]]] = {
     "01-voltage-divider": ("voltage_divider_routed", _export_writer),
     "02-charlieplex-led": ("charlieplex_3x3_routed", _export_writer),
     "04-stm32-devboard": ("stm32_devboard_routed", _board04_native_floors),
     "06-diffpair-test": ("diffpair_test_routed", _board06_pair_rules_then_export),
+    "07-matchgroup-test": ("matchgroup_test_routed", _board07_reviewed_rules),
 }
 
 PARAMS = [
@@ -98,24 +103,7 @@ PARAMS = [
     # warnings -- so the #8399 redundant_copper_* refusal premise is gone).
     pytest.param("04-stm32-devboard", id="board04"),
     pytest.param("06-diffpair-test", id="board06"),
-]
-
-
-# Board 02's committed DRU was re-pinned from a full recipe run (#8759) and carries
-# rules (ampacity, max hole size, B.Silkscreen floors) that this exporter-only
-# replay does not emit, so the byte-for-byte replay is still pending there.
-BYTE_FOR_BYTE_PARAMS = [
-    pytest.param(
-        p.values[0],
-        id=p.id,
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="committed DRU re-pinned from a full recipe run; export-only replay differs (#8759)",
-        ),
-    )
-    if p.id == "board02"
-    else p
-    for p in PARAMS
+    pytest.param("07-matchgroup-test", id="board07"),
 ]
 
 
@@ -129,6 +117,9 @@ def _recipe_dru(board: str, tmp_path: Path) -> str:
     output = BOARDS / board / "output"
     for suffix in (".kicad_pcb", ".kicad_pro"):
         shutil.copy2(output / f"{stem}{suffix}", tmp_path / f"{stem}{suffix}")
+    net_class_map = output / "net_class_map.json"
+    if net_class_map.exists():
+        shutil.copy2(net_class_map, tmp_path / "net_class_map.json")
     routed = tmp_path / f"{stem}.kicad_pcb"
     assert not routed.with_suffix(".kicad_dru").exists()
     last_writer(routed)
@@ -140,16 +131,10 @@ def test_committed_dru_carries_the_attach_zone_block(board):
     assert has_attach_zone_block(_committed_dru(board))
 
 
-@pytest.mark.parametrize("board", BYTE_FOR_BYTE_PARAMS)
+@pytest.mark.parametrize("board", PARAMS)
 def test_recipe_emits_the_committed_dru_byte_for_byte(board, tmp_path):
     assert _recipe_dru(board, tmp_path) == _committed_dru(board), (
         f"board {board}'s recipe no longer emits the committed .kicad_dru; commit "
         "what it emits, refill the zones and re-pin the evidence on the pinned "
         "toolchain (scripts/boards/refresh_readiness.py)"
     )
-
-
-@pytest.mark.parametrize("board", ["02-charlieplex-led", "04-stm32-devboard"])
-def test_pending_boards_recipe_does_emit_the_block(board, tmp_path):
-    """The xfails above are pending the re-pin, not a recipe that stopped emitting."""
-    assert has_attach_zone_block(_recipe_dru(board, tmp_path))

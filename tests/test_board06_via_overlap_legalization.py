@@ -76,6 +76,107 @@ def test_legalizer_repairs_partial_drill_overlaps_without_changing_fixture(tmp_p
     ]
 
 
+def _write_reset_escape(path, *, ring_stub=False, branch=False, tap=False):
+    """The J4.RST approach, with the rest of the signal represented by U1.1."""
+    tracks = [
+        ("F.Cu", (10, 10), (10.1, 10.1), 0.1016),
+        ("F.Cu", (10.1, 10.1), (10.25, 10.1), 0.15),
+        ("F.Cu", (10.25, 10.1), (10.4, 10.1), 0.2),
+        ("F.Cu", (10.4, 10.1), (10.5, 10.1), 0.4),
+        ("In1.Cu", (10.5, 10.1), (10.6, 10.1), 0.25),
+        ("In1.Cu", (10.6, 10.1), (10.8, 10.1), 0.30),
+        ("In1.Cu", (10.8, 10.1), (15, 10.1), 0.4),
+    ]
+    via_x = 10.5
+    if ring_stub:
+        via_x = 10.675
+        for layer in ("F.Cu", "In1.Cu"):
+            tracks.append((layer, (10.5, 10.1), (via_x, 10.1), 0.4))
+    if branch:
+        tracks.append(("F.Cu", (10.4, 10.1), (10.4, 11.5), 0.2))
+    if tap:
+        # The first end touches the original barrel. Its other end also
+        # reaches U1, so pad-to-pad connectivity alone misses a detached tap.
+        tracks.extend(
+            [
+                ("F.Cu", (10.43, 10.39), (10.43, 12), 0.12),
+                ("F.Cu", (10.43, 12), (15, 12), 0.12),
+                ("F.Cu", (15, 12), (15, 10.1), 0.12),
+            ]
+        )
+    items = [
+        "(kicad_pcb (version 20240108) (generator pcbnew)",
+        '(general (thickness 1.6)) (layers (0 "F.Cu" signal) (2 "In1.Cu" power)'
+        ' (4 "In2.Cu" power) (31 "B.Cu" signal) (39 "F.Mask" user) (44 "Edge.Cuts" user))',
+        '(setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "MIPI_RST")',
+        "(gr_rect (start 5 5) (end 20 20) (stroke (width 0.05) (type default))"
+        ' (fill none) (layer "Edge.Cuts"))',
+        '(footprint "FFC" (layer "F.Cu") (at 10 10) (property "Reference" "J4")'
+        ' (pad "RST" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Mask")'
+        ' (net 1 "MIPI_RST")))',
+        '(footprint "Header" (layer "F.Cu") (at 15 10.1) (property "Reference" "U1")'
+        ' (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4)'
+        ' (layers "*.Cu" "*.Mask") (net 1 "MIPI_RST")))',
+        f'(via (at {via_x} 10.1) (size 0.6) (drill 0.25) (layers "F.Cu" "B.Cu")'
+        ' (net 1) (uuid "00000000-0000-4000-8000-000000000001"))',
+    ]
+    for i, (layer, start, end, width) in enumerate(tracks, 2):
+        items.append(
+            f"(segment (start {start[0]} {start[1]}) (end {end[0]} {end[1]})"
+            f' (width {width}) (layer "{layer}") (net 1)'
+            f' (uuid "00000000-0000-4000-8000-{i:012d}"))'
+        )
+    path.write_text("\n".join([*items, ")"]))
+
+
+@pytest.mark.parametrize("ring_stub", [False, True])
+def test_reset_escape_clears_mask_and_joins_inner_trunk_once(tmp_path, recipe, ring_stub):
+    path = tmp_path / "reset.kicad_pcb"
+    _write_reset_escape(path, ring_stub=ring_stub)
+    assert recipe._relocate_pad_edge_vias(path) == 1
+    pcb = PCB.load(path)
+    center = pcb.get_pad_position("J4", "RST")
+    via = pcb.vias[0]
+    assert via.position[0] - via.size / 2 - (center[0] + 0.25) >= 0.15
+    front = list(pcb.segments_on_layer("F.Cu"))
+    assert len(front) == 2
+    assert sum(via.position in (seg.start, seg.end) for seg in front) == 1
+    inner = list(pcb.segments_on_layer("In1.Cu"))
+    assert min(min(seg.start[0], seg.end[0]) for seg in inner) == pytest.approx(via.position[0])
+    assert not segment_angle_census(path)[1]
+    saved = path.read_bytes()
+    assert recipe._relocate_pad_edge_vias(path) == 0
+    assert path.read_bytes() == saved
+
+
+def test_reset_escape_leaves_branched_front_copper_in_place(tmp_path, recipe):
+    path = tmp_path / "branched.kicad_pcb"
+    _write_reset_escape(path, branch=True)
+    original = path.read_bytes()
+    assert recipe._relocate_pad_edge_vias(path) == 0
+    assert path.read_bytes() == original
+
+
+def test_reset_escape_respects_a_group_locked_neck(tmp_path, recipe):
+    path = tmp_path / "locked.kicad_pcb"
+    _write_reset_escape(path)
+    text = path.read_text().rstrip()[:-1]
+    path.write_text(
+        text + '(group "neck" (locked yes) (members "00000000-0000-4000-8000-000000000004")))\n'
+    )
+    original = path.read_bytes()
+    assert recipe._relocate_pad_edge_vias(path) == 0
+    assert path.read_bytes() == original
+
+
+def test_reset_escape_retains_a_via_tap_with_an_alternate_connection(tmp_path, recipe):
+    path = tmp_path / "tapped.kicad_pcb"
+    _write_reset_escape(path, tap=True)
+    original = path.read_bytes()
+    assert recipe._relocate_pad_edge_vias(path) == 0
+    assert path.read_bytes() == original
+
+
 def write_overlap_board(path, count=12, pad_size=2, via_dx=1.05):
     nodes = [
         "(kicad_pcb (version 20240108) (generator pcbnew)",
