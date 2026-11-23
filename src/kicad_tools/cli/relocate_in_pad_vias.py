@@ -2032,6 +2032,7 @@ def relocate_pad_edge_vias(
     design_rules: DesignRules,
     *,
     nets: set[str] | None = None,
+    pad_refs: set[tuple[str, str]] | None = None,
     min_hole_clearance_mm: float | None = None,
     ring_dam_mm: float | None = None,
     same_net_pad_gap_mm: float | None = None,
@@ -2057,6 +2058,9 @@ def relocate_pad_edge_vias(
     the drill still clears the plain dam (the move may never create a
     ``via_at_pad_edge`` finding).  The ring gap uses
     :func:`~kicad_tools.validate.rules.via_pad_geometry.via_ring_to_mask_aperture_gap`.
+
+    With ``pad_refs``, only repair vias flagged at the named (reference, pad)
+    openings. All other pads still constrain the candidate via and its stubs.
 
     Copper clearance is the effective per-pair requirement ``kct check``'s
     ``netclass_clearance_copper`` enforces (the project's netclasses,
@@ -2145,7 +2149,8 @@ def relocate_pad_edge_vias(
             (
                 (fp, pad)
                 for fp, pad, bbox in candidates
-                if not via_inside_pad(via, bbox, pad, fp)
+                if (pad_refs is None or (fp.reference, pad.number) in pad_refs)
+                and not via_inside_pad(via, bbox, pad, fp)
                 and (
                     (
                         flag_dam > WRITER_CLEARANCE_MARGIN_MM

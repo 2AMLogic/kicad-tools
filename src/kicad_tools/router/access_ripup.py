@@ -659,8 +659,9 @@ class RipupCycleGuard:
     """``net -> overflow-silent rescues skipped as a repeat of a futile one``."""
 
     entry_signature: dict[int, Any] = field(default_factory=dict)
-    """Nets unrouted at iteration entry, with their latest pre-search witness.
-    A rip-up between searches can change that witness within the iteration."""
+    """Nets unrouted or partially connected at iteration entry, with their
+    latest pre-search witness.  A rip-up between searches can change that
+    witness within the iteration."""
 
     capped_streak: dict[int, tuple[int, Any, int]] = field(default_factory=dict)
     """``net -> (last failed iteration, witness at first failure, streak)``.
@@ -694,10 +695,14 @@ class RipupCycleGuard:
     signature in an earlier iteration)."""
 
     def begin_iteration(self, iteration: int, failed: Mapping[int, Any]) -> None:
-        """Track the nets that enter this iteration unrouted and forget routed ones.
+        """Track the nets that enter this iteration without full pad
+        connectivity and forget fully routed ones.
 
         The negotiated loop fills in each witness when the net is searched.
         A net absent from ``failed`` was routed since its previous search.
+        Since the November 2026 #8486 scope the caller also admits partially
+        connected nets: their searches feed the same streak, judged on
+        connected-pad progress rather than on returning any copper.
         """
         self.entry_signature = {int(n): sig for n, sig in failed.items()}
         for memo in (
@@ -784,9 +789,11 @@ class RipupCycleGuard:
         setup without expanding A*; the net's next floor then rises above the
         setup time it just spent (see :data:`KNOWN_FAILURE_MIN_SEARCH_SLICE_S`).
 
-        A search that routed, or ran with no witness, resets the net's
-        streak; a no-path search extends it whether or not it reached its cap
-        (a sub-cap failure additionally bounds the next cap, :meth:`search_cap`).
+        A search that made progress, or ran with no witness, resets the net's
+        streak; a no-progress search (no path, or -- for a net that entered
+        partially connected -- a result connecting no new pad pair) extends it
+        whether or not it reached its cap (a sub-cap failure additionally
+        bounds the next cap, :meth:`search_cap`).
         A *second* failing search in the same iteration (the negotiated loop
         searches a failed net both in the zero-overflow recovery and in the
         reroute pass) counts toward known-fail seconds only while the witness

@@ -1,6 +1,6 @@
 """Board 07 ``BOOT0`` net length agrees with kicad-cli (Issue #6731).
 
-PR #6729's first length model read ``BOOT0`` on the committed board 07
+PR #6729's first length model read ``BOOT0`` on the historical board 07
 artifact as 44.9471 mm; kicad-cli 10.0.6 (Docker ``kicad/kicad:10.0``)
 reports 44.9270 mm.  The 0.0201 mm was suspected to come from the
 stair-stepped diagonal into the roundrect pad, but it comes from the other end
@@ -34,10 +34,10 @@ REPO = Path(__file__).resolve().parents[1]
 BOARD07 = REPO / "boards" / "07-matchgroup-test" / "output" / "matchgroup_test.kicad_pcb"
 
 #: kicad-cli 10.0.6 (Docker ``kicad/kicad:10.0``) ``length`` rule actual for
-#: ``BOOT0`` on the committed board 07 artifact.
-BOOT0_KICAD_CLI = 44.9270
+#: ``BOOT0`` on the adopted six-layer Board 07 source PCB (#8604).
+BOOT0_KICAD_CLI = 38.7502
 
-# Via and In2.Cu run end of BOOT0, copied from the artifact.
+# Via and In2.Cu run end retained from the original #6731 artifact.
 _VX, _VY, _VD = 28.388, 24.8375, 0.5
 _END = (28.3875, 24.8375)
 
@@ -80,6 +80,5 @@ def test_board07_boot0_matches_kicad_cli_within_one_micron():
     pcb = PCB.load(str(BOARD07))
     net = next(n for n in pcb.nets.values() if n.name == "BOOT0")
     got = DiffPairLengthTracker.measure_net_from_pcb(pcb, net.number)
-    # The acceptance bar is 1 micron.  Main reads 44.927009, which is within
-    # kicad-cli's 4-decimal rounding.
+    # The native BOOT0 length rule reports its actual value to four decimals.
     assert got == pytest.approx(BOOT0_KICAD_CLI, abs=1e-3)

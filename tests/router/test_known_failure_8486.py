@@ -798,3 +798,303 @@ def test_open_corridor_control_routes_the_victim_and_engages_no_backoff():
     assert 1 in routed_nets and len(routed_nets) == 9
     assert not [b for b in g.backoffs if b[1] == 1]
     assert 1 not in g.capped_streak
+
+
+# --- partial nets keep their failure record (November 2026 scope) -------------
+
+
+def _three_pad_board(gap: bool = False):
+    """``_wall_board`` plus a third pad on net 1 left of the wall.
+
+    The reported residual: a partially connected narrow net.  With the wall
+    closed the search connects one of the three pad pairs; with the corridor
+    open it connects all three.
+    """
+    router = _wall_board(gap=gap)
+    router.add_component(
+        "AUX",
+        [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 13.5,
+                "width": 0.6,
+                "height": 0.6,
+                "net": 1,
+                "net_name": "N1",
+                "through_hole": False,
+                "drill": 0.0,
+            }
+        ],
+    )
+    return router
+
+
+def _net_pad_pairs(router, net: int, routes) -> set[frozenset[int]]:
+    """Connected physical pad pairs of ``net``'s copper (contact graph)."""
+    from kicad_tools.router.terminal_connectivity import physical_pad_components
+
+    pads = [router.pads[k] for k in router.nets.get(int(net), []) if k in router.pads]
+    comps = physical_pad_components(pads, list(routes))
+    return {
+        frozenset((i, j))
+        for i in range(len(pads))
+        for j in range(i + 1, len(pads))
+        if comps[i] == comps[j]
+    }
+
+
+def _commit_copper(router, routes) -> None:
+    for route in routes:
+        router._mark_route(route)
+        router.grid.mark_route_usage(route)
+        router.routes.append(route)
+
+
+def _rip_copper(router, routes) -> None:
+    for route in routes:
+        router.grid.unmark_route_usage(route)
+        router.grid.unmark_route(route)
+        if route in router.routes:
+            router.routes.remove(route)
+
+
+def _seed_partial_entry(router, guard: RipupCycleGuard):
+    """Route net 1 once against the closed wall and snapshot it as the
+    negotiated loop's iteration-entry state."""
+    entry = router._route_net_negotiated(1, 1.0, per_net_timeout=30.0)
+    assert entry, "wall board: net 1 must land partial copper"
+    pairs = _net_pad_pairs(router, 1, entry)
+    assert pairs, "wall board: net 1 must connect at least one pad pair"
+    _commit_copper(router, entry)
+    router._known_failure_entry = {1: (pairs, list(entry))}
+    return entry, pairs
+
+
+@pytest.mark.requires_router_cpp
+def test_partial_net_keeps_its_failure_record_and_backs_off():
+    """A partial reroute that connects no new pad is a failure, not a route.
+
+    Pre-fix the nonempty partial return cleared the streak every iteration, so
+    the net was re-searched at the full cap forever (the reported 120.5 s per
+    iteration for four nets).
+    """
+    router = _three_pad_board(gap=False)
+    guard = RipupCycleGuard()
+    entry, pairs = _seed_partial_entry(router, guard)
+    caps = []
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        live = list(entry)
+        for it in range(1, 5):
+            guard.begin_iteration(it, {1: None})
+            _rip_copper(router, live)
+            out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+            caps.append(run.call_args.kwargs["per_net_timeout"])
+            # No progress: the kept copper still connects the entry pads.
+            assert _net_pad_pairs(router, 1, out) >= pairs
+            _commit_copper(router, out)
+            live = list(out)
+    assert caps[:2] == [30.0, 30.0]
+    assert caps[2:] == [KNOWN_FAILURE_BACKOFF_FLOOR_S, KNOWN_FAILURE_BACKOFF_FLOOR_S]
+    assert guard.capped_streak[1][2] == 4
+    assert [it for it, net, _cap in guard.backoffs if net == 1] == [3, 4]
+
+
+@pytest.mark.requires_router_cpp
+def test_opening_the_wall_gives_the_partial_net_a_full_budget_and_progress_resets():
+    """Meaningful change control: removing the copper that blocks the missing
+    connection restores the full budget immediately, the progress is kept, and
+    the failure record is cleared."""
+
+    router = _three_pad_board(gap=True)
+    wall = _corridor_wall(99)
+    router.routes.append(wall)
+    router.grid.mark_route(wall)
+    guard = RipupCycleGuard()
+    entry, pairs = _seed_partial_entry(router, guard)
+    assert len(pairs) == 1
+    caps = []
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        live = list(entry)
+        for it in (1, 2):
+            guard.begin_iteration(it, {1: None})
+            _rip_copper(router, live)
+            out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+            caps.append(run.call_args.kwargs["per_net_timeout"])
+            _commit_copper(router, out)
+            live = list(out)
+        assert caps == [30.0, 30.0]
+        assert guard.capped_streak[1][2] == 2
+        # The corridor opens: the wall's copper disappears from the board.
+        router.grid.unmark_route(wall)
+        router.routes.remove(wall)
+        guard.begin_iteration(3, {1: None})
+        _rip_copper(router, live)
+        out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 3)
+        assert run.call_args.kwargs["per_net_timeout"] == 30.0
+        assert len(_net_pad_pairs(router, 1, out)) == 3
+        assert 1 not in guard.capped_streak
+        assert router._known_failure_entry[1][0] > pairs
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize("worse", ["loses-pads", "finds-nothing"])
+def test_a_worse_or_failed_partial_reroute_keeps_the_entry_copper(worse):
+    """A no-progress re-search must not strand already-connected pads.
+
+    Pre-fix a failed (or pad-losing) reroute of a ripped partial net left it
+    empty-handed for the rest of the run; the reporter measured one net losing
+    two pad pairs this way.
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _three_pad_board(gap=False)
+    guard = RipupCycleGuard()
+    entry, pairs = _seed_partial_entry(router, guard)
+    stub = Route(1, "stub", segments=[Segment(6.0, 6.0, 6.0, 8.0, 0.2, Layer.F_CU, 1)], vias=[])
+
+    def fake_search(net, pf, per_net_timeout=None):
+        if worse == "loses-pads":
+            router._mark_route(stub)  # the search commits what it returns
+            return [stub]
+        return []
+
+    with patch.object(router, "_route_net_negotiated", side_effect=fake_search):
+        guard.begin_iteration(1, {1: None})
+        _rip_copper(router, entry)
+        out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 1)
+    assert [id(r) for r in out] == [id(r) for r in entry]
+    assert _net_pad_pairs(router, 1, out) == pairs
+    assert guard.capped_streak[1][2] == 1
+
+
+@pytest.mark.requires_router_cpp
+def test_entry_copper_is_not_relanded_over_a_net_that_took_the_space():
+    """Another net legally occupying the ripped space blocks the re-land.
+
+    Re-committing the entry copper unconditionally would overlap that net and
+    publish a short into the checkpoints (review of PR #9937).
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _three_pad_board(gap=False)
+    guard = RipupCycleGuard()
+    entry, pairs = _seed_partial_entry(router, guard)
+    seg = entry[0].segments[0]
+    mx, my = (seg.x1 + seg.x2) / 2, (seg.y1 + seg.y2) / 2
+    blocker = Route(
+        50, "n50", segments=[Segment(mx, my - 3.0, mx, my + 3.0, 0.25, seg.layer, 50)], vias=[]
+    )
+    assert isinstance(seg.layer, Layer)
+
+    guard.begin_iteration(1, {1: None})
+    _rip_copper(router, entry)
+    _commit_copper(router, [blocker])  # net 50 takes the vacated space
+    assert not router._entry_copper_still_legal(entry)
+    with patch.object(router, "_route_net_negotiated", return_value=[]):
+        out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 1)
+    assert out == []  # nothing re-landed over the foreign copper
+    assert not any(r in router.routes for r in entry)
+    assert guard.capped_streak[1][2] == 1  # still a no-progress failure
+
+
+@pytest.mark.requires_router_cpp
+def test_equal_connectivity_result_ratchets_the_entry_copper():
+    """A same-connectivity re-search is kept, and a second search in the same
+    iteration must fall back to it, not to the superseded entry copper."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _three_pad_board(gap=False)
+    guard = RipupCycleGuard()
+    entry, pairs = _seed_partial_entry(router, guard)
+    new = [
+        Route(
+            r.net,
+            r.net_name,
+            segments=[Segment(s.x1, s.y1, s.x2, s.y2, s.width, s.layer, s.net) for s in r.segments],
+            vias=list(r.vias),
+        )
+        for r in entry
+    ]
+    assert Layer is not None
+
+    def fake_search(net, pf, per_net_timeout=None):
+        for r in new:
+            router._mark_route(r)
+        return list(new)
+
+    guard.begin_iteration(1, {1: None})
+    _rip_copper(router, entry)
+    with patch.object(router, "_route_net_negotiated", side_effect=fake_search):
+        out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 1)
+    assert [id(r) for r in out] == [id(r) for r in new]
+    assert [id(r) for r in router._known_failure_entry[1][1]] == [id(r) for r in new]
+    assert router._known_failure_entry[1][0] == pairs
+
+
+@pytest.mark.requires_router_cpp
+def test_an_irrelevant_copper_accretion_keeps_the_partial_backoff():
+    """Extra foreign copper appearing in the window does not restart the
+    streak: additions cannot open a corridor."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _three_pad_board(gap=False)
+
+    def foreign(y: float) -> Route:
+        return Route(50, "n50", segments=[Segment(6.0, y, 9.0, y, 0.25, Layer.F_CU, 50)], vias=[])
+
+    f1 = foreign(8.0)
+    _commit_copper(router, [f1])
+    guard = RipupCycleGuard()
+    entry, pairs = _seed_partial_entry(router, guard)
+    caps = []
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        live = list(entry)
+        for it in (1, 2):
+            guard.begin_iteration(it, {1: None})
+            _rip_copper(router, live)
+            out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+            caps.append(run.call_args.kwargs["per_net_timeout"])
+            _commit_copper(router, out)
+            live = list(out)
+        assert caps == [30.0, 30.0]
+        _commit_copper(router, [foreign(9.0)])  # unrelated extra copper
+        guard.begin_iteration(3, {1: None})
+        _rip_copper(router, live)
+        out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 3)
+        assert run.call_args.kwargs["per_net_timeout"] == KNOWN_FAILURE_BACKOFF_FLOOR_S
+        assert _net_pad_pairs(router, 1, out) >= pairs
+
+
+@pytest.mark.requires_router_cpp
+def test_negotiated_entry_point_backs_off_the_partial_net_and_keeps_its_pads():
+    """The issue's public reproduction, end to end: the normal negotiated entry
+    point on the three-pad board assigns the partial net's ordinary reroutes a
+    backing-off budget and never drops its connected pads."""
+    router = _three_pad_board(gap=False)
+    caps = []
+    orig = router._route_net_negotiated
+
+    def record(net, pf, per_net_timeout=None, **kwargs):
+        if net == 1:
+            caps.append(per_net_timeout)
+        return orig(net, pf, per_net_timeout=per_net_timeout, **kwargs)
+
+    with patch.object(router, "_route_net_negotiated", side_effect=record):
+        routes = router.route_all_negotiated(
+            max_iterations=5,
+            timeout=900,
+            per_net_timeout=30.0,
+            use_targeted_ripup=False,
+            best_stall_patience=None,
+        )
+    reroute_caps = caps[1:]  # the initial pass is not under the loop's guard
+    assert reroute_caps and reroute_caps[0] == 30.0
+    assert any(cap < 30.0 for cap in reroute_caps[1:]), reroute_caps
+    net1 = [r for r in routes if r.net == 1]
+    assert net1, "the partial net must keep its copper"
+    assert _net_pad_pairs(router, 1, net1), "connected pads were lost"
