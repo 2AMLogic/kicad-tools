@@ -55,41 +55,6 @@ def test_all_parts_have_exact_procurement_and_physical_pins(hardware, tmp_path):
     assert pcb.get_footprint("C1").name.endswith("CP_Elec_8x10.5_PolarityMark")
 
 
-#: Issue #9921 pour-slot de-slant: the sixteen pad-escape stubs that leave
-#: their U2/U3 lead rows at a shallow angle (1.2-16.7 degrees off horizontal)
-#: so no two adjacent escapes stay parallel and the front GND pour no longer
-#: slots between them (the ``pour_slot`` advisory's 20 witnesses).  A 45-only
-#: shape is geometrically impossible here: within the pad field (pads 1.575 x
-#: 0.4 mm on a 0.65 mm pitch) every escape is forced horizontal for its first
-#: ~0.79 mm -- pads block any diagonal and the 45-degree set blocks any
-#: shallow angle -- so adjacent-row stubs always overlapped in parallel.  The
-#: sloped stubs have no exposed acute copper junctions (each lands on its own
-#: pad, a via centre, or a junction buried under via copper; the acid-trap
-#: rule passes), and the fleet census exemption mechanism this mirrors is
-#: ``DOCUMENTED_OFF_ANGLE`` in ``tests/test_fleet_45_census.py``.  Exit
-#: clause: remove an entry when its net is re-routed off this row (e.g. by
-#: the U2/U3 land-pattern decisions pending in issue #9921).
-BOARD05_DOCUMENTED_OFF_ANGLE = frozenset(
-    {
-        "cad743e3-9687-4dd7-9203-01ff7a0609d0",  # EN_A escape
-        "43a3b551-724f-4ab3-8887-9d5841cb4e4d",  # EN_B escape
-        "a9441ecb-92fa-4399-82c6-1c8978ca8305",  # EN_C escape
-        "68d05a5e-bba3-4ce9-b69c-686cbdcfd5f6",  # nFAULT escape
-        "d3667215-43af-44a0-a0fe-b5a4ce212e71",  # DRIVER_SLEEP escape
-        "c3f3a1b7-3e5f-4b5c-8897-a61280adf527",  # VCP escape
-        "90c765ee-89b3-4235-83f9-785f1f49d299",  # PHASE_A escape
-        "5428a16a-39d7-49f1-b29c-b9f884e75e59",  # GND_SENSE escape (pad 6)
-        "b10e96b9-e806-4de8-9007-793a2a340ad8",  # GND_SENSE escape (pad 7)
-        "03771fb9-4984-47e2-a4aa-1a89b02dd10d",  # PHASE_B escape
-        "3f6dc586-7165-40af-8f1b-2dc8734c8df6",  # PHASE_C escape
-        "7a0d798a-db37-4b9b-ace4-7961acce1255",  # GND_SENSE escape (pad 10)
-        "8fec79fa-8dfc-583d-bb27-49171496e95a",  # VM escape (pad 11)
-        "3daddaa4-4301-4d6b-a301-acc8f222a0ae",  # IREF escape
-        "0f51d425-761e-5514-9aef-580a524a79fc",  # SENSE_IN escape
-    }
-)
-
-
 def test_reference_copper_rejects_a_changed_real_net(tmp_path, hardware):
     routing = load("routing")
     path = tmp_path / "board.kicad_pcb"
@@ -100,21 +65,8 @@ def test_reference_copper_rejects_a_changed_real_net(tmp_path, hardware):
     assert PCB.load(path).segments
     from kicad_tools.router.quantize import segment_angle_census
 
-    off_angle = [
-        seg
-        for seg in segment_angle_census(path)[1]
-        if str(seg.get("uuid")) not in BOARD05_DOCUMENTED_OFF_ANGLE
-    ]
-    assert not off_angle, (
-        "Reviewed copper must preserve the fleet 45-degree policy outside the"
-        " pinned #9921 de-slant escapes: " + repr(off_angle)
-    )
-    # Ratchet: every pinned uuid must still be an off-angle segment in the
-    # recipe, so a future re-route that retires one fails here instead of
-    # silently masking it.
-    present = {str(seg.get("uuid")) for seg in segment_angle_census(path)[1]}
-    assert present >= BOARD05_DOCUMENTED_OFF_ANGLE, "Stale #9921 de-slant pins: " + repr(
-        sorted(BOARD05_DOCUMENTED_OFF_ANGLE - present)
+    assert not segment_angle_census(path)[1], (
+        "Reviewed copper must preserve the fleet 45-degree policy"
     )
     hardware.build_pcb().save(path)
     changed = PCB.load(path)

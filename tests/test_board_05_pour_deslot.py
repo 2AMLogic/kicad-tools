@@ -1,16 +1,22 @@
-"""Board 05's routed escapes leave no parallel pair the pour cannot fill (Issue #9921).
+"""Board 05's U2/U3 escapes: the pour-slot recipe state and its physical criterion (Issue #9921).
 
-The ``pour_slot`` advisory's 20 witnesses -- nineteen U2 lead-escape pairs and
-the U3 GND/RESET pair -- came from adjacent pad-row escapes running parallel
-with 0.49 mm (0.16 mm tracks) or 0.25 mm (0.4 mm tracks) gaps, both inside the
-``2 x clearance + min_thickness`` (0.7 mm) band where the front GND pour
-either drops a thin island or never enters.  The recipe now slopes every other
-escape off its row (see ``BOARD05_DOCUMENTED_OFF_ANGLE`` in
-``tests/test_board_05_revision_b.py`` for why a 45-only shape is impossible
-inside the 0.65 mm pad field) and drops the two GND escapes the attaching pour
-replaces.  These guards pin the de-slotted recipe: replaying the reviewed
-copper must report zero pour-slot pairs, and the two GND escapes must stay
-gone (their vias remain as pour stitches).
+The ``pour_slot`` advisory originally reported 20 witnesses -- nineteen U2
+lead-escape pairs and the U3 GND/RESET pair -- from adjacent pad-row escapes
+running parallel with 0.49 mm (0.16 mm tracks) or 0.25 mm (0.4 mm tracks)
+gaps inside the ``2 x clearance + min_thickness`` (0.7 mm) band.
+
+The recipe repairs eleven of them using horizontal, vertical and 45-degree
+copper only (no off-angle exemption: the fleet 45-degree criterion stays
+intact).  Five signal escapes are widened/repacked so their copper-to-copper
+gap drops below the 0.400 mm lower edge of the band the front GND pour cannot
+fill, and the two redundant GND escapes the attaching pour replaces are
+removed.  **Nine advisories remain by design**: seven involve the
+power/GND_SENSE bank or its IREF neighbour, and two (IREF/SENSE_IN,
+EN_A/PWM_A) lie wholly within the stock U2 lead length, where the pad edges
+set the gap and need a ground-plane or pad-edge criterion before they count as
+repaired.  These tests pin that state -- exactly those nine pairs, and the
+physical criterion on the two witness windows -- rather than a quiet
+detector, which an angle change alone could produce without any fill.
 """
 
 import importlib.util
@@ -38,15 +44,74 @@ def _replayed_board(tmp_path):
     return path
 
 
-def test_replayed_copper_reports_zero_pour_slot_pairs(tmp_path):
+#: The nine pour-slot advisories that remain open by design (module docstring):
+#: sorted (net, net) pairs.  A change here is a recipe change -- update the
+#: docstring and the #9921 evidence with it.
+BOARD05_OPEN_POUR_SLOT_PAIRS = sorted(
+    [
+        ("EN_A", "PWM_A"),
+        ("PHASE_A", "VM"),
+        ("GND_SENSE", "PHASE_A"),
+        ("GND_SENSE", "PHASE_B"),
+        ("GND_SENSE", "PHASE_C"),
+        ("PHASE_B", "PHASE_C"),
+        ("GND_SENSE", "VM"),
+        ("IREF", "SENSE_IN"),
+        ("IREF", "VM"),
+    ]
+)
+
+
+def _segment_gap(a, b):
+    """Edge-to-edge distance (mm) between two straight tracks."""
+    import math
+
+    steps = 400
+    best = float("inf")
+    (cx, cy), (ex, ey) = b.start, b.end
+    dx, dy = ex - cx, ey - cy
+    length2 = dx * dx + dy * dy
+    for i in range(steps + 1):
+        t = i / steps
+        x = a.start[0] + (a.end[0] - a.start[0]) * t
+        y = a.start[1] + (a.end[1] - a.start[1]) * t
+        u = max(0.0, min(1.0, ((x - cx) * dx + (y - cy) * dy) / length2)) if length2 else 0.0
+        best = min(best, math.hypot(x - (cx + u * dx), y - (cy + u * dy)))
+    return best - a.width / 2 - b.width / 2
+
+
+def test_replayed_copper_pins_the_open_pour_slot_pairs(tmp_path):
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.rules.pour_slot import iter_pour_slot_pairs
 
     pairs = list(iter_pour_slot_pairs(PCB.load(_replayed_board(tmp_path))))
-    assert pairs == [], (
-        "Board 05's reviewed copper must leave no parallel escape pair inside the"
-        " pour-slot band; a regeneration or recipe edit reintroduced: " + repr(pairs)
+    found = sorted(tuple(sorted((p.first.net_name, p.second.net_name))) for p in pairs)
+    assert found == BOARD05_OPEN_POUR_SLOT_PAIRS, (
+        "Board 05's pour-slot advisory set changed: expected the nine open"
+        " pairs documented for #9921, got " + repr(found)
     )
+
+
+def test_witness_channels_leave_no_pour_void_band(tmp_path):
+    """The two #9921 witness channels must not sit in the unfillable band.
+
+    The board owner's native-Gerber measurement found an empty 0.400-0.700 mm
+    section (no plotted GND fill) between PWM_C/EN_C and PWM_B/EN_B in the
+    earlier recipe, where the nominal gaps were 0.53-0.65 mm.  The repacked
+    escapes keep every track-to-track gap under the 0.400 mm band floor (native
+    measurement 0.244 / 0.264 mm; this track-only check reads about 0.23 /
+    0.26 mm), so no channel is left as a void the pour cannot reach.  This pins
+    the physical criterion, not the advisory's angle gate.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(_replayed_board(tmp_path))
+    for net_a, net_b in (("PWM_C", "EN_C"), ("PWM_B", "EN_B")):
+        a = [s for s in pcb.segments if s.net_name == net_a and s.layer == "F.Cu"]
+        b = [s for s in pcb.segments if s.net_name == net_b and s.layer == "F.Cu"]
+        assert a and b, (net_a, net_b)
+        gap = min(_segment_gap(s, t) for s in a for t in b)
+        assert gap < 0.400, f"{net_a}/{net_b} escape gap {gap:.3f} mm is in the void band"
 
 
 def test_pour_replaced_gnd_escapes_stay_gone():
