@@ -172,6 +172,17 @@ def _patch_router_available(monkeypatch, available: bool) -> None:
 
 
 class TestShortCircuitConsultsDrc:
+    def test_installed_package_skips_rebuilding_a_current_router(self, monkeypatch) -> None:
+        _patch_router_available(monkeypatch, True)
+        monkeypatch.setattr(bnc, "_get_project_root", lambda: None)
+        monkeypatch.setattr(bnc, "_is_so_stale", lambda directory: False)
+        monkeypatch.setattr(bnc, "_placement_backend_up_to_date", lambda: False)
+        monkeypatch.setattr(bnc, "_drc_backend_up_to_date", lambda: False)
+        monkeypatch.setattr(bnc, "_check_cmake", lambda: pytest.fail("unnecessary rebuild"))
+
+        result = bnc.build_native()
+        assert result.success and result.skipped
+
     def test_falls_through_to_rebuild_when_drc_stale_but_router_and_placement_ok(
         self, monkeypatch
     ) -> None:
@@ -358,11 +369,12 @@ class TestMissingDrcExtensionWarning:
             "DRC C++ extension was not built" in w and "no extension" in w for w in result.warnings
         )
 
-    def test_warns_router_only_when_no_root_cmake(
-        self, tmp_path: Path, monkeypatch, isolated_replace_flag
+    def test_installed_package_explains_optional_backends_once(
+        self, tmp_path: Path, monkeypatch, isolated_replace_flag, capsys
     ) -> None:
         package_root = _stub_build_pipeline(monkeypatch, tmp_path, include_drc_so=False)
         (package_root / "drc" / "cpp").mkdir(parents=True)
+        (package_root / "placement" / "cpp").mkdir(parents=True)
         (package_root / "router" / "cpp").mkdir(parents=True)
         (package_root / "router" / "cpp" / "CMakeLists.txt").write_text("cmake\n")
         monkeypatch.setattr(bnc, "_get_project_root", lambda: None)
@@ -370,7 +382,13 @@ class TestMissingDrcExtensionWarning:
 
         result = bnc.build_native(force=True)
 
-        assert any("only the router was built" in w for w in result.warnings)
+        assert result.success
+        assert not result.warnings
+        monkeypatch.setattr(bnc, "build_native", lambda **kwargs: result)
+        assert bnc.main([]) == 0
+        text = capsys.readouterr().out
+        assert text.count("source checkout") == 1
+        assert "Python fallbacks" in text
 
 
 class TestCheckHintAccuracy:
@@ -407,8 +425,10 @@ class TestCheckHintAccuracy:
 
         assert bnc.main(["--check"]) == 0
         out = capsys.readouterr().out
-        assert "Placement backend: not built (optional; Python fallback in use)" in out
-        assert "DRC backend: not built (optional; Python fallback in use)" in out
+        assert "C++ backend: available" in out
+        for label in ("Placement", "DRC"):
+            line = next(line for line in out.splitlines() if line.startswith(f"{label} backend:"))
+            assert "optional" in line and "Python fallback" in line and "source checkout" in line
 
 
 # ---------------------------------------------------------------------------
