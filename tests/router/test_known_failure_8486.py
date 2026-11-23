@@ -793,6 +793,52 @@ def test_detour_budget_follows_the_replacement_owners_clearance(
         assert 0 < gap < 2.0
 
 
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize("gate_x", [15.0, 15.3], ids=["between-centers", "near-center"])
+def test_thin_gate_between_coarse_cell_centers_stays_in_the_witness(gate_x):
+    """A thin blocker whose clearance envelope falls between coarse sample
+    centers (wide board default trace, narrow failed net) must stay in the
+    witness, so opening it restores the full budget on the first retry."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment, Via
+    from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+    rules = DesignRules(trace_width=1.3, trace_clearance=0.1)
+    router = _wall_board(
+        gap=True,
+        terminal_x=(2.0, 28.0),
+        terminal_y=(9.0, 11.0),
+        gap_y=(15.15, 17.5),
+        rules=rules,
+    )
+    router.net_class_map["N1"] = NetClassRouting("narrow", trace_width=0.25, clearance=0.1)
+    layers = (Layer.F_CU, Layer.B_CU)
+    gate = Route(
+        99,
+        "gate",
+        segments=[Segment(gate_x, 15.45, gate_x, 17.5, 0.20, layer, 99) for layer in layers],
+        vias=[Via(gate_x, y, 0.20, 0.45, layers, 99) for y in (15.65, 16.55, 17.30)],
+    )
+    anchor = Route(101, "anchor", segments=[Segment(8, 12, 8.5, 12, 0.20, Layer.F_CU, 101)])
+    for route in (anchor, gate):
+        router.routes.append(route)
+        router.grid.mark_route(route)
+    guard = RipupCycleGuard()
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for it in (1, 2, 3):
+            guard.begin_iteration(it, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+        assert [c.kwargs["per_net_timeout"] for c in run.call_args_list][:3] == [30.0, 30.0, 5.0]
+
+        router.grid.unmark_route(gate)
+        router.routes.remove(gate)
+        guard.begin_iteration(4, {1: None})
+        routed = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 4)
+        assert run.call_args.kwargs["per_net_timeout"] == 30.0
+        assert _net_pad_pairs(router, 1, routed) == {frozenset({0, 1})}
+        assert 1 not in guard.capped_streak
+
+
 @pytest.mark.parametrize("copper", ["segments", "vias"])
 def test_search_obstacles_compare_the_pair_rules_for_the_same_copper(copper):
     from kicad_tools.router.pairwise_clearance import AttachZone, PairwiseClearanceTable

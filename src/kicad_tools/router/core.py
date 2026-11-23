@@ -18784,13 +18784,15 @@ class Autorouter:
                     origin_y + (np.arange(i0, i1) + 0.5) * cell,
                 )
 
-            def segment_mask(seg: Any, radius: float):
+            def segment_mask(seg: Any, radius: float, reach_extra: float = 0.0):
+                # ``reach_extra`` widens the distance test (not the subview)
+                # so a cell counts when ANY point of it can meet the envelope.
                 box = subview(
                     min(seg.x1, seg.x2),
                     max(seg.x1, seg.x2),
                     min(seg.y1, seg.y2),
                     max(seg.y1, seg.y2),
-                    radius,
+                    radius + reach_extra,
                 )
                 if box is None:
                     return None
@@ -18805,15 +18807,15 @@ class Autorouter:
                         ((mesh_x - seg.x1) * dx + (mesh_y - seg.y1) * dy) / length2, 0.0, 1.0
                     )
                     dist = np.hypot(mesh_x - seg.x1 - t * dx, mesh_y - seg.y1 - t * dy)
-                return i0, i1, j0, j1, dist <= radius
+                return i0, i1, j0, j1, dist <= radius + reach_extra
 
-            def disc_mask(x: float, y: float, radius: float):
-                box = subview(x, x, y, y, radius)
+            def disc_mask(x: float, y: float, radius: float, reach_extra: float = 0.0):
+                box = subview(x, x, y, y, radius + reach_extra)
                 if box is None:
                     return None
                 i0, i1, j0, j1, gx, gy = box
                 mesh_x, mesh_y = np.meshgrid(gx, gy)
-                return i0, i1, j0, j1, np.hypot(mesh_x - x, mesh_y - y) <= radius
+                return i0, i1, j0, j1, np.hypot(mesh_x - x, mesh_y - y) <= radius + reach_extra
 
             def pad_mask(pad: Pad, clearance: float):
                 from shapely import contains_xy  # type: ignore[import-untyped]
@@ -18934,12 +18936,21 @@ class Autorouter:
             def touches(geometry: Any, clearance_mm: float) -> bool:
                 from .primitives import Via
 
+                # Conservative membership: a cell is hit when any point of it
+                # (not just its center) can lie in the envelope, so a thin
+                # segment or via between sample centers is still retained.
+                half_diag = cell / math.sqrt(2)
                 if isinstance(geometry, Via):
                     raster = disc_mask(
-                        geometry.x, geometry.y, geometry.diameter / 2 + float(clearance_mm)
+                        geometry.x,
+                        geometry.y,
+                        geometry.diameter / 2 + float(clearance_mm),
+                        half_diag,
                     )
                 else:
-                    raster = segment_mask(geometry, geometry.width / 2 + float(clearance_mm))
+                    raster = segment_mask(
+                        geometry, geometry.width / 2 + float(clearance_mm), half_diag
+                    )
                 if raster is None:
                     return False
                 i0, i1, j0, j1, cells = raster
