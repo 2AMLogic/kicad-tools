@@ -36,7 +36,6 @@ that modifications can be written back to disk, following the same pattern as
 from __future__ import annotations
 
 import copy
-import hashlib
 import math
 import uuid as _uuid
 from dataclasses import dataclass, field, replace
@@ -1935,8 +1934,11 @@ def legalize_silk(
         changed = report.total_fixed > 0
         if not dry_run and (changed or output is not None):
             destination = Path(output) if output else pcb_path
-            placer.save(destination)
+            # Hash the bytes the writer published, not a later read of the
+            # live file: a save by another process between the write and a
+            # re-read would otherwise be recorded as this pass's own output
+            # (#9990).
+            report.output_sha256 = save_pcb(placer.doc, destination)
             report.output_path = str(destination)
-            report.output_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
 
     return report

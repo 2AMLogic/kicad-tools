@@ -2,6 +2,7 @@
 File I/O utilities for KiCad S-expression files.
 """
 
+import hashlib
 from pathlib import Path
 
 from kicad_tools.core.atomic_write import atomic_write_text
@@ -165,13 +166,19 @@ def load_pcb(path: str | Path) -> SExp:
     return sexp
 
 
-def save_pcb(sexp: SExp, path: str | Path) -> None:
+def save_pcb(sexp: SExp, path: str | Path) -> str:
     """
     Save a KiCad PCB file.
 
     Args:
         sexp: The PCB SExp tree
         path: Path to save to
+
+    Returns:
+        The sha256 hex digest of the exact bytes handed to the atomic
+        write.  Computed from the in-memory serialisation, never by
+        re-reading ``path``, so an independent writer that replaces the
+        file after this call cannot be mistaken for this write (#9990).
 
     Raises:
         ValueError: If sexp is not a valid PCB
@@ -186,6 +193,7 @@ def save_pcb(sexp: SExp, path: str | Path) -> None:
     text = serialize_sexp(sexp, preserve_source=True)
     check_kicad_lock(path)
     atomic_write_text(path, text, encoding="utf-8", newline="")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 class WriteVerificationError(Exception):

@@ -301,3 +301,42 @@ def test_foreign_edit_during_silk_stage_still_fails_named_stackup(tmp_path, monk
     assert not result.success
     assert "changed during" in result.errors[-1]
     assert result.stackup_path is None and result.manifest_path is None
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_foreign_save_at_silk_write_boundary_still_fails_named_stackup(tmp_path, monkeypatch):
+    """An edit landing between the silk writer's write and any re-read (#9990).
+
+    The foreign save is injected inside the writer, right after it published
+    its bytes.  The pass must report the hash of the bytes it wrote, not of
+    whatever the file holds a moment later, so the exporter refuses to bind
+    ordering metadata to the other writer's copper.
+    """
+    from kicad_tools.core import sexp_file
+
+    path = _silk_defect_stackup_board(tmp_path)
+    real_write = sexp_file.atomic_write_text
+
+    def write_then_foreign_save(target, content, **kwargs):
+        real_write(target, content, **kwargs)
+        if Path(target) == path:
+            Path(target).write_text(Path(target).read_text() + "\n")
+
+    monkeypatch.setattr(sexp_file, "atomic_write_text", write_then_foreign_save)
+
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert not result.success
+    assert "changed during" in result.errors[-1]
+    assert result.stackup_path is None and result.manifest_path is None
+
+
+def test_save_pcb_returns_hash_of_published_bytes(tmp_path):
+    import hashlib
+
+    from kicad_tools.core.sexp_file import save_pcb
+    from kicad_tools.sexp import parse_string
+
+    target = tmp_path / "board.kicad_pcb"
+    digest = save_pcb(parse_string("(kicad_pcb (version 20240108))"), target)
+    assert digest == hashlib.sha256(target.read_bytes()).hexdigest()
