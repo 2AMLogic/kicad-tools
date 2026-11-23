@@ -1311,12 +1311,18 @@ def _fill_measurements(pcb: Path, engines: Engines) -> dict[str, float]:
 
 def _copy_fill_context(pcb: Path, destination: Path) -> Path:
     """Retain saved copper and its local native project/rule/library context."""
+    from kicad_tools.sidecars import resolve_project_rules
+
+    rules = resolve_project_rules(pcb, allow_default=True)
+    # Readiness also pairs a routed output with its original project when
+    # the routed PCB has no project of its own (see _find_sibling).
+    if pcb.stem.endswith("_routed") and not pcb.with_suffix(".kicad_pro").is_file():
+        base_board = pcb.with_name(pcb.stem.removesuffix("_routed") + pcb.suffix)
+        rules.extend(resolve_project_rules(base_board, allow_default=True))
     destination.mkdir(parents=True, exist_ok=True)
     for source in pcb.parent.iterdir():
         if source.is_file() and (
-            source == pcb
-            or source.suffix in {".kicad_pro", ".kicad_dru"}
-            or source.name in {"fp-lib-table", "sym-lib-table"}
+            source == pcb or source in rules or source.name in {"fp-lib-table", "sym-lib-table"}
         ):
             shutil.copy2(source, destination / source.name)
         elif source.is_dir() and (source.name == "footprints" or source.suffix == ".pretty"):
