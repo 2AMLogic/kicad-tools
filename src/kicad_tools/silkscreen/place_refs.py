@@ -89,6 +89,15 @@ ASSOCIATION_MARGIN_MM = 0.4
 #: The Gerber measurements in #9515 calibrate ink extents only.
 KICAD_TEXT_EXTENT_SLACK_MM = 0.225
 
+#: Rounds ``SilkRefPlacer.plan(settle=True)`` may run, the first pass included
+#: (Issue #9957).  The loop stops on its own when a round moves nothing, so
+#: this only bounds a board that never settles.  A fixed count rather than one
+#: per reference: a per-reference cap loosens exactly on the large boards
+#: where a round is the most expensive.  Measured at introduction: the boards
+#: in this repository settle within 3 rounds, and lattices of up to 169
+#: references, packed until most labels are low-association, within 8.
+_SETTLE_MAX_ROUNDS = 32
+
 
 def _iter_npth_apertures(pcb: PCB, mask_clearance_mm: float):
     """Yield ``(side, geom, label)`` for every non-plated hole pad.
@@ -786,6 +795,10 @@ class PlaceSilkRefsResult:
     #: Board-level ``gr_text`` sitting over a mask opening. Report-only: the
     #: text is never moved (Issue #8862).
     fixed_text_conflicts: list[FixedTextConflict] = field(default_factory=list)
+    #: References still waiting for a retry round when ``plan(settle=True)``
+    #: ran out of rounds (Issue #9957).  Empty unless that happened.  Each is
+    #: still placed, at the position its last round chose.
+    unsettled_refs: list[str] = field(default_factory=list)
 
     @property
     def moved(self) -> list[RefPlacement]:
@@ -1061,6 +1074,9 @@ class SilkRefPlacer:
                 original orientation does not fit.
             settle: Retry blocked or poorly associated references after their
                 neighbours move. Report each move from its original position.
+                At most ``_SETTLE_MAX_ROUNDS`` rounds, the first pass included;
+                references still waiting for a round when they run out are
+                listed in :attr:`PlaceSilkRefsResult.unsettled_refs`.
             only: If given, plan only the references of these footprints
                 (issue #6256). Every other visible reference is left out of
                 the result -- never moved -- but still blocks the planned
@@ -1321,7 +1337,16 @@ class SilkRefPlacer:
 
         pending = [e for e in entries if only is None or e["footprint"].reference in only]
         final: dict[str, RefPlacement] = {}
-        while pending:
+        # Bounded (Issue #9957).  Every candidate is tested against the other
+        # references' *current* boxes, so a move never lands on a position that
+        # already clears, and a candidate's courtyard margin is fixed for the
+        # whole call: a clear reference moves only to a strictly larger margin,
+        # at most once per candidate.  The cap covers what that leaves open.
+        # ``clears`` buffers the candidate alone, so for two labels drawn at
+        # different angles the test is not exactly symmetric within about two
+        # microns of the clearance boundary, and a reference could be
+        # displaced to a lower margin there.
+        for _round in range(_SETTLE_MAX_ROUNDS):
             retry = []
             moved_this_round = False
             for entry in pending:
@@ -1345,9 +1370,11 @@ class SilkRefPlacer:
                     retry.append(entry)
             if not settle or not moved_this_round:
                 break
-            # A clear ref can move again only to improve its courtyard margin.
-            # Each has a finite set of saved candidate positions.
             pending = retry
+        else:
+            # Ran out of rounds while references were still moving.
+            if pending:
+                result.unsettled_refs = [e["footprint"].reference for e in pending]
         result.placements = list(final.values())
         return result
 
