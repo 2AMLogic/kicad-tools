@@ -285,6 +285,16 @@ def _fake_kicad_cli_drc(payload: dict):
     return _run
 
 
+def _native_endpoint(description: str, x: float, y: float) -> dict:
+    from uuid import NAMESPACE_URL, uuid5
+
+    return {
+        "uuid": str(uuid5(NAMESPACE_URL, f"{description}/{x}/{y}")),
+        "description": description,
+        "pos": {"x": x, "y": y},
+    }
+
+
 def _unconnected_payload(count: int) -> dict:
     """A KiCad-shaped JSON report with ``count`` connectivity relationships."""
     return {
@@ -296,8 +306,8 @@ def _unconnected_payload(count: int) -> dict:
                 "severity": "error",
                 "description": "Missing connection between items",
                 "items": [
-                    {"description": "Zone [GND] on F.Cu", "pos": {"x": float(i), "y": 1.0}},
-                    {"description": f"Pad {i} [GND] of U1 on B.Cu", "pos": {"x": 2.0, "y": 2.0}},
+                    _native_endpoint("Zone [GND] on F.Cu", float(i), 1.0),
+                    _native_endpoint(f"Pad {i} [GND] of U1 on B.Cu", 2.0, 2.0),
                 ],
             }
             for i in range(count)
@@ -436,8 +446,8 @@ def _relationship_payload(item_pairs: list[tuple[str, str]]) -> dict:
                 "severity": "error",
                 "description": "Missing connection between items",
                 "items": [
-                    {"description": left, "pos": {"x": 1.0, "y": 1.0}},
-                    {"description": right, "pos": {"x": 2.0, "y": 2.0}},
+                    _native_endpoint(left, 1.0, 1.0),
+                    _native_endpoint(right, 2.0, 2.0),
                 ],
             }
             for left, right in item_pairs
@@ -642,6 +652,78 @@ class TestNativeReportMustBeFreshAndComplete:
 
         assert len(internal) == 2 and result.issues == internal
         assert {issue.issue_type for issue in result.issues} == {"partial"}
+
+    @pytest.mark.parametrize(
+        ("section", "owner", "member"),
+        [
+            ("violations", "finding", "items"),
+            ("violations", "finding", "type"),
+            ("schematic_parity", "finding", "description"),
+            ("unconnected_items", "finding", "severity"),
+            ("unconnected_items", "finding", "items"),
+            ("unconnected_items", "endpoint", "description"),
+            ("unconnected_items", "endpoint", "uuid"),
+            ("unconnected_items", "endpoint", "pos"),
+            ("unconnected_items", "position", "x"),
+            ("unconnected_items", "position", "y"),
+        ],
+    )
+    @pytest.mark.parametrize("exit_code", [0, 5])
+    def test_missing_finding_member_keeps_internal_classifications(
+        self, tmp_path, monkeypatch, section, owner, member, exit_code
+    ):
+        import json
+
+        fixture = Path(__file__).parent / "fixtures/conformance/sample-kicad-cli-drc.json"
+        finding = json.loads(fixture.read_text())["violations"][0]
+        if section == "unconnected_items":
+            finding["type"] = "unconnected_items"
+            finding["description"] = "Missing connection between items"
+        endpoint = finding["items"][0]
+        owners = {"finding": finding, "endpoint": endpoint, "position": endpoint["pos"]}
+        del owners[owner][member]
+        report = {"violations": [], "unconnected_items": [], "schematic_parity": []}
+        report[section] = [finding]
+        board = tmp_path / "board.kicad_pcb"
+        board.write_text(PARTIALLY_CONNECTED_PCB)
+        validator = ConnectivityValidator(board)
+        internal = validator.validate().issues
+        _native_launch_cli(
+            monkeypatch, tmp_path, report_text=json.dumps(report), exit_code=exit_code
+        )
+
+        with pytest.warns(RuntimeWarning, match="unusable report"):
+            result = validator.validate(reconcile_native=True)
+
+        assert result.issues == internal
+        assert {issue.net_name for issue in internal} == {"NET1", "GND"}
+
+    @pytest.mark.parametrize(
+        ("scope", "member", "value"),
+        [
+            ("finding", "items", []),
+            ("finding", "pos", {"x": True, "y": 0}),
+            ("endpoint", "net", ["NET1"]),
+            ("endpoint", "description", " "),
+            ("position", "x", "1.0"),
+            ("position", "y", float("nan")),
+        ],
+    )
+    def test_malformed_relationship_is_rejected(self, tmp_path, scope, member, value):
+        import json
+
+        from kicad_tools.drc.report import load_native_connectivity_report
+
+        report = _unconnected_payload(1)
+        finding = report["unconnected_items"][0]
+        endpoint = finding["items"][0]
+        owners = {"finding": finding, "endpoint": endpoint, "position": endpoint["pos"]}
+        owners[scope][member] = value
+        path = tmp_path / "drc.json"
+        path.write_text(json.dumps(report))
+
+        with pytest.raises(ValueError):
+            load_native_connectivity_report(path)
 
     @pytest.mark.parametrize("exit_code", [0, 5])
     def test_complete_zero_relationship_report_yields_zero_native_issues(
