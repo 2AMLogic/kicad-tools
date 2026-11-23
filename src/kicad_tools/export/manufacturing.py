@@ -370,13 +370,19 @@ def _saved_zone_fill_matches_native_refill(pcb_path: Path, kicad_cli: Path) -> b
 
     A clean saved-board DRC cannot prove this: copper left farther from foreign
     pads than a stricter rule would fill passes every clearance check yet plots
-    differently. The only authoritative comparison is a native refill, run on a
+    differently. The only authoritative comparison is a native fill, run on a
     scratch copy of the board and its rule sources so ``pcb_path`` is never
     touched. Any failure reads as "does not match".
-    """
-    from ..cli.runner import run_refill_zones
 
-    try:
+    Two native pipelines produce shipped fills: ``kct export``'s own
+    ``--refill-zones`` and the ``run_fill_zones`` pass ``kct route`` finishes
+    with, which also remediates starved thermals and so saves different copper
+    under the same rules. A saved fill equal to either is current; one equal
+    to neither was filled under other rules (or other copper) and is stale.
+    """
+    from ..cli.runner import run_fill_zones, run_refill_zones
+
+    def native(fill) -> dict[str, list[tuple]] | None:
         with tempfile.TemporaryDirectory(prefix="kct-export-zone-refill-") as tmp:
             scratch = Path(tmp) / pcb_path.name
             shutil.copy2(pcb_path, scratch)
@@ -384,11 +390,21 @@ def _saved_zone_fill_matches_native_refill(pcb_path: Path, kicad_cli: Path) -> b
                 sidecar = pcb_path.with_suffix(suffix)
                 if sidecar.is_file():
                     shutil.copy2(sidecar, scratch.with_suffix(suffix))
-            refill = run_refill_zones(scratch, kicad_cli, require_save=True)
-            if not refill.success:
-                return False
-            saved = _saved_zone_fills(pcb_path)
-            return bool(saved) and saved == _saved_zone_fills(scratch)
+            if not fill(scratch).success:
+                return None
+            return _saved_zone_fills(scratch)
+
+    try:
+        saved = _saved_zone_fills(pcb_path)
+        if not saved:
+            return False
+        refilled = native(lambda p: run_refill_zones(p, kicad_cli, require_save=True))
+        if refilled is None:
+            return False
+        if saved == refilled:
+            return True
+        filled = native(lambda p: run_fill_zones(p, kicad_cli=kicad_cli))
+        return filled is not None and saved == filled
     except (OSError, ValueError):
         return False
 
