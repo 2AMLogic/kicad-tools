@@ -605,13 +605,33 @@ class TestNativeReportMustBeFreshAndComplete:
     written by the final launch.  Anything else warns and keeps the internal
     findings instead of substituting an empty native result."""
 
-    @pytest.mark.parametrize("report_text", [None, "", "not json {", '{"violations": 3}'])
+    @pytest.mark.parametrize(
+        "report_text",
+        [
+            None,
+            "",
+            "not json {",
+            '{"violations": 3}',
+            '{"violations": []}',
+            '{"violations": [], "unconnected_items": null}',
+            '{"violations": [], "unconnected_items": {}}',
+            '{"violations": [], "unconnected_items": [{}, null]}',
+            '{"violations": [null], "unconnected_items": []}',
+            '{"violations": [], "unconnected_items": [], "schematic_parity": [null]}',
+            '{"violations": [], "unconnected_items": [], "schematic_parity": {}}',
+            '{"violations": [], "unconnected_items": [{"items": [null]}]}',
+            '{"violations": [], "unconnected_items": [{"items": {}}]}',
+            '{"violations": [], "unconnected_items": [{"items": [{"description": null}]}]}',
+            '{"violations": [], "unconnected_items": [{"items": [{"net": ["NET1"]}]}]}',
+        ],
+    )
     @pytest.mark.parametrize("exit_code", [0, 5])
     def test_unusable_report_warns_and_keeps_internal_findings(
         self, tmp_path, monkeypatch, report_text, exit_code
     ):
         board = tmp_path / "board.kicad_pcb"
         board.write_text(PARTIALLY_CONNECTED_PCB)
+        internal = ConnectivityValidator(board).validate().issues
         _native_launch_cli(monkeypatch, tmp_path, report_text=report_text, exit_code=exit_code)
 
         with pytest.warns(
@@ -620,16 +640,17 @@ class TestNativeReportMustBeFreshAndComplete:
         ):
             result = ConnectivityValidator(board).validate(reconcile_native=True)
 
-        assert len(result.issues) == 2
+        assert len(internal) == 2 and result.issues == internal
         assert {issue.issue_type for issue in result.issues} == {"partial"}
 
+    @pytest.mark.parametrize("exit_code", [0, 5])
     def test_complete_zero_relationship_report_yields_zero_native_issues(
-        self, tmp_path, monkeypatch, recwarn
+        self, tmp_path, monkeypatch, recwarn, exit_code
     ):
         board = tmp_path / "board.kicad_pcb"
         board.write_text(PARTIALLY_CONNECTED_PCB)
         _native_launch_cli(
-            monkeypatch, tmp_path, report_text=_EMPTY_RELATIONSHIP_REPORT, exit_code=5
+            monkeypatch, tmp_path, report_text=_EMPTY_RELATIONSHIP_REPORT, exit_code=exit_code
         )
 
         result = ConnectivityValidator(board).validate(reconcile_native=True)

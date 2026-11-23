@@ -565,6 +565,36 @@ def _optional_str(value: object) -> str | None:
     return None
 
 
+def load_native_connectivity_report(path: Path) -> DRCReport:
+    """Read KiCad's connectivity result. Only an explicit empty array means zero opens."""
+    from .geometric import read_kicad_cli_json_report
+
+    data = read_kicad_cli_json_report(path)
+    for section in ("violations", "unconnected_items", "schematic_parity"):
+        if section == "schematic_parity" and section not in data:
+            continue
+        entries = data.get(section)
+        if not isinstance(entries, list):
+            raise ValueError(f"expected a {section} list in the KiCad report")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"expected a finding object in {section}")
+            endpoints = entry.get("items", [])
+            if not isinstance(endpoints, list):
+                raise ValueError(f"expected an items list in {section}")
+            for endpoint in endpoints:
+                if not isinstance(endpoint, dict):
+                    raise ValueError(f"expected an item object in {section}")
+                net = endpoint.get("net")
+                if net is not None and not isinstance(net, str):
+                    raise ValueError(f"expected a net name in {section}")
+
+    try:
+        return _parse_kicad_cli_json(data, str(path))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid KiCad DRC finding: {exc}") from exc
+
+
 def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
     """Parse KiCad-cli JSON-format DRC report.
 

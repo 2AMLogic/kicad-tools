@@ -497,16 +497,13 @@ class ConnectivityValidator:
                 inherits the internal type for its net; zone-only
                 relationships (and nets the internal analysis did not flag)
                 keep ``zone_island``.
-            internal_issue_count: Number of internal issues that will be
-                silently substituted if this method returns ``None``.  Only
-                used to make the unexpected-exit-code warning actionable.
+            internal_issue_count: Number of internal findings retained if
+                the native run fails or writes an unusable report.
 
         Returns ``None`` on the two *expected* degradations (PCB passed as an
-        object, kicad-cli not installed) without emitting anything; an
-        *unexpected* kicad-cli exit code also returns ``None`` but emits a
-        ``RuntimeWarning`` naming the exit code and the substituted internal
-        count (issue #4551 — the silent fallback made a kicad-cli crash
-        indistinguishable from the documented KiCad-less path).
+        object, kicad-cli not installed) without emitting anything. An
+        unexpected exit code or unusable report emits a ``RuntimeWarning``
+        with the reason and the internal count before falling back.
         """
         if self.pcb_path is None:
             return None
@@ -514,7 +511,7 @@ class ConnectivityValidator:
         import tempfile
 
         from kicad_tools.cli.runner import find_kicad_cli
-        from kicad_tools.drc import DRCReport
+        from kicad_tools.drc.report import load_native_connectivity_report
 
         kicad_cli = find_kicad_cli()
         if kicad_cli is None:
@@ -581,10 +578,9 @@ class ConnectivityValidator:
             # complete report.  A missing, empty, malformed or incomplete one
             # must fall back to the internal analysis (with a warning), never
             # substitute an empty native result for the real findings.
-            from kicad_tools.drc.geometric import load_kicad_cli_json_report
-
-            problem = load_kicad_cli_json_report(report_path)
-            if problem is not None:
+            try:
+                report = load_native_connectivity_report(report_path)
+            except ValueError as exc:
                 import warnings
 
                 substituted = (
@@ -594,12 +590,11 @@ class ConnectivityValidator:
                 )
                 warnings.warn(
                     "kicad-cli pcb drc wrote an unusable report during "
-                    f"native connectivity reconciliation: {problem}{substituted}",
+                    f"native connectivity reconciliation: {exc}{substituted}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
                 return None
-            report = DRCReport.load(report_path)
 
         # Connectivity relationships live in the report's dedicated
         # ``unconnected_items`` collection, NOT in ``violations`` -- the
