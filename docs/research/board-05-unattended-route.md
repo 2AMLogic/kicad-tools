@@ -280,3 +280,46 @@ no-warning gate with 51 `pour_slot`, 9 `silk_hole_overlap`, 8
 and 1 `sharp_trace_corner` warning. Its two zone-fill clearance findings were
 informational under #8938. On macOS the harness recorded the three physical
 gap errors and 73 warnings per seed.
+
+## Re-measured 2026-11-23 on `be9eb6a12`: the gap errors are back (Issue #9424)
+
+One seed (42) through the gate script on the pinned toolchain
+(`KCT_KICAD_DOCKER=1`; the gate refuses any other kicad-cli release),
+Linux x86_64, C++ backend built in the worktree, load average 12 to 14 while
+it ran. Seeds 7 and 1337 were **not** run in this pass, so the three-seed
+criterion is still open. No route log carries a `[deterministic-budget]
+per-net wall clock bound` or `stage deadline fired` line.
+
+| | seed 42 |
+|---|---|
+| `kct route` exit / nets | 0 / 37 of 37 (142 of 142 connections) |
+| kicad-cli DRC err / warn / unconnected, ERC | 0 / 0 / 0, 0 |
+| copper / label LVS | clean / clean |
+| `kct check --skip mask_to_copper` | **5 err** / 65 warn |
+| vias / route wall s | 128 / 545.7 |
+| board sha1 | `59865268d8fc...` |
+
+The board is not the one the 2026-11-22 Linux runs produced (124 vias, sha1
+`64411406e173...`, 0 errors, 77 warnings). Router, DRC and stitch merges
+landed in between (#9936, #9939, #9959, #9891 and others), and the route now
+carries the same family of same-net via/trace slits the macOS replay found:
+
+| Net | Layer | Gap (mm) | Required (mm) | Items |
+|---|---|---:|---:|---|
+| DRIVER_SLEEP | B.Cu | 0.0387 | 0.1016 | trace `144.945,104.425 -> 149.625,109.105` beside via `146.83,106.895` |
+| RESET | B.Cu | 0.0772 | 0.1016 | trace `170.49,75.305 -> 174.325,79.14` beside via `170.165,75.63` |
+| SPEED | F.Cu | 0.0467 | 0.1500 | trace `169.96,126.59 -> 169.96,131` against a pad (`fab_band: pad`) |
+| RUN | F.Cu | 0.0858 | 0.1016 | trace `163.99,105.465 -> 164.9,106.375` beside via `164.25,105.205` |
+| RESET | F.Cu | 0.0700 | 0.1016 | traces `159.83,94.415 -> 159.83,95.568` and `160.1,90.313 -> 160.1,95.838` |
+
+SPEED, RUN and RESET (F.Cu) match three of the four witnesses recorded for
+the macOS replay; DRIVER_SLEEP and RESET (B.Cu) are new. All five are
+`same_net`, so none is a short. The 65 warnings are 49 `pour_slot`, 6
+`redundant_copper_covered`, 4 `redundant_copper_detour` and 6
+`silk_hole_overlap`. The 0-error, 0-warning bar fails, and
+`--skip mask_to_copper` is still in the gate.
+
+This pass changed no router source. The gap errors are the new work: they
+moved with the merges above rather than with load, and the 49 structural
+`pour_slot` warnings are the larger remainder under the operator ruling of
+2026-11-23 (keep the strict bar, stay red until source repair lands).
