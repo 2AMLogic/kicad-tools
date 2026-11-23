@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeGuard
 
 from kicad_tools.schema.pcb import _find_all_footprints
+from kicad_tools.schematic.models.netlist_mixin import _component_root
 from kicad_tools.sexp import SExp, parse_file
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard, types only
@@ -242,9 +243,8 @@ class _SheetVisit:
         schematic: The loaded :class:`~kicad_tools.schematic.models.schematic.Schematic`.
         parent: The visit of the sheet whose ``(sheet ...)`` symbol
             instantiated this one; ``None`` for the root sheet.
-        parent_pin_names: Names of the ``(pin ...)`` children of that
-            ``(sheet ...)`` symbol — the sheet pins this sheet's
-            hierarchical labels mate with.  Empty for the root sheet.
+        parent_pins: Names and parent-sheet positions of the pins on this
+            sheet symbol. Empty for the root sheet.
         uuid_path: KiCad **instance path** of this sheet — the root
             schematic's ``(uuid ...)`` followed by one sheet-symbol
             ``(uuid ...)`` per level, e.g.
@@ -262,7 +262,7 @@ class _SheetVisit:
     sheet_path: str
     schematic: Schematic
     parent: _SheetVisit | None = None
-    parent_pin_names: frozenset[str] = frozenset()
+    parent_pins: tuple[tuple[str, tuple[float, float]], ...] = ()
     uuid_path: str = ""
     source: Path = Path()
 
@@ -323,7 +323,7 @@ def _walk_hierarchy_schematics(
         path: Path,
         sheet_path: str,
         parent: _SheetVisit | None,
-        parent_pin_names: frozenset[str],
+        parent_pins: tuple[tuple[str, tuple[float, float]], ...],
         uuid_path: str,
         ancestors: frozenset[Path],
     ) -> Iterator[_SheetVisit]:
@@ -351,7 +351,7 @@ def _walk_hierarchy_schematics(
             sheet_path=sheet_path,
             schematic=schematic,
             parent=parent,
-            parent_pin_names=parent_pin_names,
+            parent_pins=parent_pins,
             uuid_path=uuid_path,
             source=path,
         )
@@ -364,12 +364,12 @@ def _walk_hierarchy_schematics(
                 parent_dir / entry.filename,
                 f"{sheet_path}/{segment}",
                 visit,
-                frozenset(entry.pin_names),
+                tuple(zip(entry.pin_names, entry.pin_positions, strict=True)),
                 f"{uuid_path}/{entry.uuid}",
                 child_ancestors,
             )
 
-    yield from _walk(Path(sch_path), "", None, frozenset(), "", frozenset())
+    yield from _walk(Path(sch_path), "", None, (), "", frozenset())
 
 
 def _instance_reference_map(visit: _SheetVisit) -> dict[str, str]:
@@ -462,55 +462,60 @@ def _iter_instance_symbols(sch_path: Path) -> Iterator[tuple[str, SymbolInstance
             yield renames.get(ref, ref), sym, visit
 
 
+def _label_net_name(text: str, sheet_path: str | None = None) -> str:
+    """Only the sheet hierarchy supplies path separators in a PCB net name."""
+    leaf = text.replace("/", "{slash}")
+    return leaf if sheet_path is None else f"{sheet_path}/{leaf}"
+
+
 def _sheet_net_identities(
-    sch: Schematic, sheet_path: str, inherited: dict[str, str]
+    visit: _SheetVisit, priorities: dict[str, tuple[int, int, str]]
 ) -> dict[str, str]:
-    """Map each label-driven net name on one sheet to its hierarchy-wide identity.
-
-    The result is keyed by the name :meth:`Schematic.get_all_pin_nets`
-    reports for a net on this sheet (a label's text) and valued by the
-    identity KiCad gives that net.  The decision is made from the
-    **provenance of the name on this sheet** — which kind of label drives
-    it *here* — never from the same spelling appearing somewhere else in
-    the hierarchy.  A global ``SENSE`` on the root sheet therefore does not
-    stop a child's unrelated *local* ``SENSE`` from being ``/ChildA/SENSE``
-    (label scope is set by label type, not by text; issue #5826).
-
-    Precedence, highest first, for a name on this sheet:
-
-    1. **Global label or power symbol** — hierarchy-wide by definition;
-       the bare name (``GLOB``, ``GND``, ``+3V3``, ``PWR_FLAG``).
-    2. **Hierarchical label** mating with a named net on the parent — the
-       net crosses the sheet boundary, so it takes the identity the parent
-       already resolved for it (``inherited``).  A root-sheet local label
-       ``BUS`` wired to the ``BUS`` sheet pin makes the child's
-       hierarchical ``BUS`` the net ``/BUS`` too, so the two halves of one
-       physical net share one identity (the case PR #5824 fixed and
-       ``main``'s per-sheet rule missed).  ``kicad-cli`` names such a net
-       after the parent's local label, which is the identity inherited.
-    3. **Hierarchical label with no named parent net** — left bare, as
-       before.  Its KiCad name comes from whatever the parent wires to the
-       sheet pin, which this label-text model cannot see (issue #4099
-       Phase 2).
-    4. **Local label only** — ``f"{sheet_path}/{name}"``.
-
-    Names absent from the result (auto-generated ``Net-(...)``
-    placeholders) are used as-is.
-    """
+    """Scope authored names and record which name can drive a connected sheet port."""
+    sch = visit.schematic
+    sheet_path = visit.sheet_path
+    depth = sheet_path.count("/")
+    port_names = {name for name, _ in visit.parent_pins}
     identities: dict[str, str] = {}
+
+    def record(text: str, path: str | None, kind: int) -> None:
+        if text:
+            name = _label_net_name(text, path)
+            identities[text] = name
+            rank = (kind, depth, name)
+            priorities[name] = min(priorities.get(name, rank), rank)
+
+    # KiCad chooses a global/power name before a local label, then a
+    # hierarchical port. Among labels of equal kind, the shallower sheet wins.
     for label in sch.labels:
-        if label.text:
-            identities[label.text] = f"{sheet_path}/{label.text}"
-    for hl in sch.hier_labels:
-        if hl.text:
-            identities[hl.text] = inherited.get(hl.text, hl.text)
+        record(label.text, sheet_path, 1)
+    for port in sch.hier_labels:
+        record(port.text, sheet_path if port.text in port_names else None, 2)
     for gl in sch.global_labels:
-        if gl.text:
-            identities[gl.text] = gl.text
+        record(gl.text, None, 0)
     for pwr in sch.power_symbols:
         if pwr.net_name:
-            identities[pwr.net_name] = pwr.net_name
+            record(pwr.net_name, None, 0)
     return identities
+
+
+def _connect_sheet_ports(
+    ports: list[tuple[tuple[float, float], str]],
+    parent: dict,
+    names: dict[tuple[float, float], list[str]],
+    aliases: dict[str, str],
+) -> None:
+    """Link names only where the wire meets a matching sheet pin or hierarchical label."""
+    port_wires = {}
+    for point, port in ports:
+        root = _component_root(parent, point)
+        port_wires[root] = port
+        names.setdefault(point, []).append(port)
+    for point, group in names.items():
+        connected_port = port_wires.get(_component_root(parent, point))
+        if connected_port is not None:
+            for name in group:
+                aliases[_component_root(aliases, name)] = _component_root(aliases, connected_port)
 
 
 def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
@@ -524,15 +529,9 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
     making LVS vacuous (issue #4099).  This version resolves every
     sub-sheet pin as well.
 
-    Each pin is resolved via that sheet's :meth:`Schematic.get_net_for_pin`,
-    which returns the *label-bound* net name (``VCC``, ``GND``,
-    ``LED_ANODE``, ...) rather than collapsing power rails through a
-    ``PWR_FLAG`` symbol.  This PWR_FLAG-safety is why the per-sheet
-    ``get_net_for_pin`` path is used rather than the merged ``net_dict``
-    from ``_collect_hierarchy_components``: the latter unifies every pin
-    touching a ``PWR_FLAG`` symbol into a single ``PWR_FLAG`` net, which
-    loses the VCC/GND distinction and makes LVS spuriously fail on every
-    board that uses PWR_FLAG.
+    Each sheet builds its connectivity graph once for all its pins and ports.
+    Local labels, global labels and power symbols contribute names. A PWR_FLAG
+    declares a driver and does not name or connect distinct power rails.
 
     The returned value is a net **identity**, not a per-pin display label:
     every pin on one connected component maps to the same string, including
@@ -553,52 +552,52 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
     resulting net with that sheet's path — ``/SENSE`` on the root sheet,
     ``/SubMcu/DBG_LED`` inside a sheet named ``SubMcu``.  Two sibling
     sheets that reuse one label text are therefore two nets, not one.
-    Global labels and power-symbol nets keep their bare spelling, and a
-    hierarchical label takes the identity its parent resolved for the
-    mating sheet pin, so a net that crosses a sheet boundary keeps one
-    identity on both sides.  See :func:`_sheet_net_identities` for the
-    precise, per-sheet provenance rules.
+    Global and power names span the hierarchy. A matching sheet pin joins
+    the actual wires on its two sheets. The strongest label on that connection
+    supplies the identity for both halves.
 
     **One sheet file placed twice is two sheets** (issue #5815), each with
     its own qualification (``/MCU_A/DBG_LED`` vs ``/MCU_B/DBG_LED``) and its
     own reference designators, taken from each symbol's ``(instances ...)``
-    block via :func:`_instance_reference_map`.  What remains out of scope is
-    the *sheet-pin* half of that story (issue #4099 Phase 2): a hierarchical
-    label whose mating sheet pin is wired to a differently-named net in each
-    parent still resolves from label text alone, so the two placements share
-    one bare identity there instead of inheriting one name per placement.
+    block via :func:`_instance_reference_map`. Sheet-pin connections are
+    resolved at their positions on each parent placement, including wires
+    without a parent label.
     """
     out: dict[tuple[str, str], str | None] = {}
-    # Keyed by visit identity (``eq=False`` keeps ``_SheetVisit`` hashable
-    # by object), so a repeated sheet path can never alias another sheet.
-    resolved: dict[_SheetVisit, dict[str, str]] = {}
-    # Materialized because the per-placement reference rename below is only
-    # needed -- and only paid for -- when a sheet *file* carries more than one
-    # placement.  Pre-order is preserved, so ``resolved[visit.parent]`` is
-    # always populated before a child is processed.
     visits = list(_walk_hierarchy_schematics(Path(sch_path)))
     placements: dict[Path, int] = {}
+    ports: dict[_SheetVisit, list[tuple[tuple[float, float], str]]] = {}
     for visit in visits:
         key_path = visit.source.resolve()
         placements[key_path] = placements.get(key_path, 0) + 1
+        if visit.parent is None:
+            continue
+        # Sheet pins and child labels mate by name, but their connections to
+        # the wiring on each side are determined by their actual positions.
+        declared = {name for name, _ in visit.parent_pins}
+        active = set()
+        for label in visit.schematic.hier_labels:
+            if label.text in declared:
+                active.add(label.text)
+                point = (round(label.x, 2), round(label.y, 2))
+                ports.setdefault(visit, []).append(
+                    (point, _label_net_name(label.text, visit.sheet_path))
+                )
+        for name, point in visit.parent_pins:
+            if name in active:
+                ports.setdefault(visit.parent, []).append(
+                    (point, _label_net_name(name, visit.sheet_path))
+                )
+
+    aliases: dict[str, str] = {}
+    priorities: dict[str, tuple[int, int, str]] = {}
     for visit in visits:
-        inherited: dict[str, str] = {}
-        if visit.parent is not None:
-            parent_ids = resolved[visit.parent]
-            inherited = {
-                name: parent_ids[name] for name in visit.parent_pin_names if name in parent_ids
-            }
-        identities = _sheet_net_identities(visit.schematic, visit.sheet_path, inherited)
-        resolved[visit] = identities
-        # ``get_all_pin_nets`` builds the sheet's connectivity graph once
-        # and resolves every ``(ref, number)`` pin against it, instead of
-        # ``get_net_for_pin`` rebuilding that graph (an O(wires^2)
-        # all-pairs scan) once per pin (issue #5240). Board 05's ~316-pin
-        # schematic rebuilt the graph 316 times before this change;
-        # profiling attributed roughly 30s of a 42s single-threaded
-        # ``kct check`` run to those redundant rebuilds. Behavior is
-        # identical to the historical per-pin loop -- see
-        # ``get_all_pin_nets``'s docstring for why.
+        sch = visit.schematic
+        identities = _sheet_net_identities(visit, priorities)
+        parent, labels, pins = sch._build_connectivity_graph()
+        names = {pos: [identities.get(raw, raw) for raw in group] for pos, group in labels.items()}
+        if visit in ports:
+            _connect_sheet_ports(ports[visit], parent, names, aliases)
         # One sheet file placed twice answers the same property-based
         # reference designators on both placements; rename each placement's
         # pins to the designator its ``(instances ...)`` block records, so
@@ -607,10 +606,19 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
         # singly-placed sheet -- every sheet in a non-reusing design -- so
         # the usual case pays no extra parse and is bit-for-bit unchanged.
         renames = _instance_reference_map(visit) if placements[visit.source.resolve()] > 1 else {}
-        for (ref, pad), net in visit.schematic.get_all_pin_nets().items():
-            key = (renames.get(ref, ref), pad)
-            out[key] = identities.get(net, net) if net is not None else None
-    return out
+        for (ref, pad), net in sch._pin_nets_from_graph(parent, names, pins).items():
+            out[(renames.get(ref, ref), pad)] = net
+    # Port connections can cross several sheets in either direction. Choose
+    # one name for each complete group after collecting all its drivers.
+    groups: dict[str, list[str]] = {}
+    for name in aliases:
+        groups.setdefault(_component_root(aliases, name), []).append(name)
+    resolved: dict[str, str] = {}
+    for members in groups.values():
+        # Unlisted names come from implicit global power-input pins.
+        winner = min(members, key=lambda name: priorities.get(name, (0, 0, name)))
+        resolved.update(dict.fromkeys(members, winner))
+    return {pad: resolved.get(net, net) if net is not None else None for pad, net in out.items()}
 
 
 def _pcb_pin_to_net(pcb_path: Path) -> dict[tuple[str, str], str | None]:
