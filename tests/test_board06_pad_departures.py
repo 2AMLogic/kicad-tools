@@ -1,5 +1,6 @@
 """Physical controls for the nine-pair fixture's pad-departure repair (issue #9989)."""
 
+import sys
 from math import dist
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -236,19 +237,27 @@ def _write_via_departure(board, *, extra_segments=(), inner_segments=None):
     )
 
 
+@pytest.mark.parametrize("return_x", [9.0, 10.5], ids=["away", "crossing"])
 @pytest.mark.parametrize(("layer", "x"), [("F.Cu", 9.76), ("In2.Cu", 9.72)])
-def test_via_slide_preserves_the_contact_at_a_returning_branch(tmp_path, departures, layer, x):
+def test_via_slide_preserves_the_contact_at_a_returning_branch(
+    tmp_path, monkeypatch, layer, x, return_x
+):
+    from scripts.ci.net_class_map_resolver import load_board_recipe_module
+
     board = tmp_path / "returning-branch.kicad_pcb"
     _write_via_departure(
         board,
         extra_segments=[
-            (layer, (x, 10.45), (9, 10.45), 0.20),
-            (layer, (9, 10.45), (9, 12.6), 0.20),
-            (layer, (9, 12.6), (10, 12.6), 0.20),
+            (layer, (x, 10.45), (return_x, 10.45), 0.20),
+            (layer, (return_x, 10.45), (return_x, 12.6), 0.20),
+            (layer, (return_x, 12.6), (10, 12.6), 0.20),
         ],
     )
     original = board.read_bytes()
-    assert departures.clear_pad_departures(board, _rules()) == 0
+    monkeypatch.syspath_prepend(str(BOARD06))
+    recipe = load_board_recipe_module(BOARD06)
+    # The fixture has no zones to refill or audit.
+    recipe._finalize_signal_copper(board, [sys.executable, "-c", "pass"], lambda tag: True)
     assert board.read_bytes() == original
 
 

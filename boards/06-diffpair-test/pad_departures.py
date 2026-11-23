@@ -90,13 +90,24 @@ def _external_contacts(
     if via_index is not None:
         local.add(("via", via_index))
     contacts = set()
+    attached_ends = set()
     for a, b in graph.bonds:
         first, second = keys[a], keys[b]
         if first in local and second not in local:
             contacts.add(second)
         elif second in local and first not in local:
             contacts.add(first)
-    return contacts
+        # An interior crossing can survive while an end of the very same
+        # branch comes loose. Track each retained end that touches bonded
+        # copper, including ends joined to adjacent pieces of an inner taper.
+        for track, neighbor in ((a, b), (b, a)):
+            item = graph.items[track]
+            if item.kind != "track" or keys[track] in local:
+                continue
+            for end in item.endpoints:
+                if Point(end).distance(graph.items[neighbor].geom) <= item.half_width:
+                    attached_ends.add((keys[track], end))
+    return contacts, attached_ends
 
 
 def _keeps_via_approach(prior, current, retained: list[Segment], stub_layers: set[str]) -> bool:
@@ -342,7 +353,7 @@ def _repair_pad(
     if band > 1.45 * NECK_WIDTH_MM * error_clearance + _EPS:
         return 0
     removed = list(chain)
-    contacts = _external_contacts(previous, original_segments, removed, via_index)
+    contacts, attached_ends = _external_contacts(previous, original_segments, removed, via_index)
     if pcb.remove_segments(removed) != len(removed):
         return 0
     for a, b, width in legs:
@@ -355,7 +366,9 @@ def _repair_pad(
     # branch must still touch this repaired copper at its original end.
     original_ids = {id(s) for s in original_segments}
     added = [s for s in pcb.segments if id(s) not in original_ids]
-    current = _external_contacts(after, pcb.segments, added, via_index)
+    current, current_ends = _external_contacts(after, pcb.segments, added, via_index)
+    if not attached_ends <= current_ends:
+        return 0
     if not contacts <= current:
         retained = [s for s in pcb.segments if id(s) in original_ids and s.net_name == net]
         stub_layers = {s.layer for s in added if s.layer != "F.Cu"}
