@@ -675,7 +675,24 @@ def _unconnected_items(cli: Path, board: Path, report: Path, *, refill=False) ->
     if refill:
         argv.append("--refill-zones")
     subprocess.run([*argv, str(board)], check=True, capture_output=True, text=True)
-    return len(json.loads(report.read_text()).get("unconnected_items", []))
+    items = json.loads(report.read_text()).get("unconnected_items")
+    assert isinstance(items, list), f"{report} must contain an unconnected_items array"
+    return len(items)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"unconnected_items": {"arbitrary": 0}}, {"unconnected_items": None}],
+    ids=["missing", "object", "null"],
+)
+def test_native_open_count_requires_an_array(tmp_path, payload):
+    report = tmp_path / "native.json"
+    report.write_text(json.dumps(payload))
+    with (
+        mock.patch.object(subprocess, "run"),
+        pytest.raises(AssertionError, match="unconnected_items.*array"),
+    ):
+        _unconnected_items(CLI, tmp_path / "control.kicad_pcb", report)
 
 
 class TestPinnedKicad:
