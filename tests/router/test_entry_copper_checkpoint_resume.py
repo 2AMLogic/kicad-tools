@@ -25,7 +25,9 @@ with kicad-tools' own parser -- not router in-memory state -- so no
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -33,6 +35,9 @@ import pytest
 from kicad_tools.cli import main as kct_main
 
 from .test_known_failure_8486 import _commit_copper, _rip_copper
+
+if TYPE_CHECKING:
+    from kicad_tools.router.primitives import Segment
 
 # The auditor's public reproduction flags (PR #9937 comment), plus the
 # hermetic stage switches the verdict-level route tests use
@@ -126,8 +131,6 @@ def _write_coupon(directory: Path) -> Path:
     pcb = directory / "coupon.kicad_pcb"
     pcb.write_text("\n".join(board) + ")\n")
     (directory / "coupon.kicad_pro").write_text("{}\n")
-    rule = {"name": "front-only", "trace_width": 0.2, "clearance": 0.2, "avoid_layers": ["B.Cu"]}
-    (directory / "map.json").write_text(json.dumps({NET_A: rule, NET_B: rule}))
     return pcb
 
 
@@ -162,6 +165,21 @@ def _same_layer_crossings(pcb_path: Path) -> list[str]:
 def _assert_no_crossing(pcb_path: Path) -> None:
     crossings = _same_layer_crossings(pcb_path)
     assert not crossings, f"{pcb_path.name} persists a same-layer A/B crossing: {crossings}"
+
+
+def _same_track(a: Segment, b: Segment) -> bool:
+    """Whether two parsed segments are the same track: same layer, width and
+    endpoints, up to coordinate rounding and endpoint order.
+    """
+    if a.layer != b.layer or not math.isclose(a.width, b.width, abs_tol=1e-6):
+        return False
+    for ends_b in ([(b.x1, b.y1), (b.x2, b.y2)], [(b.x2, b.y2), (b.x1, b.y1)]):
+        if all(
+            math.isclose(pa[0], pb[0], abs_tol=1e-6) and math.isclose(pa[1], pb[1], abs_tol=1e-6)
+            for pa, pb in zip([(a.x1, a.y1), (a.x2, a.y2)], ends_b, strict=True)
+        ):
+            return True
+    return False
 
 
 def _recreate_defect_state(router, net_map: dict[str, int], guard) -> None:
@@ -271,8 +289,13 @@ def test_checkpoint_and_resume_keep_the_persisted_coupon_legal(tmp_path, capfd) 
 
     from kicad_tools.router.optimizer.pcb import parse_segments
 
+    # Net B's blocker track is what keeps the crossing checks below
+    # non-vacuous (net A correctly contributes no copper to the checkpoint),
+    # so pin it per net rather than counting either net's segments.
     snapshot = parse_segments(best.read_text())
-    assert sum(len(v) for v in snapshot.values()) >= 1, "the checkpoint carries no copper"
+    assert snapshot.get(NET_B), "the best checkpoint lost net B's blocker track"
+    interval_snapshot = parse_segments(interval_out.read_text())
+    assert interval_snapshot.get(NET_B), "the interval checkpoint lost net B's blocker track"
     _assert_no_crossing(best)
     _assert_no_crossing(interval_out)
 
@@ -307,7 +330,12 @@ def test_checkpoint_and_resume_keep_the_persisted_coupon_legal(tmp_path, capfd) 
     if resumed_best.exists():
         _assert_no_crossing(resumed_best)
     _assert_no_crossing(resumed)
-    # Completion cannot drop below the checkpoint's: the seed copper survives
-    # into the resumed output.
+    # Completion cannot drop below the checkpoint's: the seed copper -- net
+    # B's blocker, the only copper the checkpoint carries -- survives into
+    # the resumed output as itself, not merely as some routed copper.
     resumed_snapshot = parse_segments(resumed.read_text())
-    assert sum(len(v) for v in resumed_snapshot.values()) >= 1, "resume dropped the seed copper"
+    assert resumed_snapshot.get(NET_B), "resume dropped the seed copper (net B's blocker)"
+    for seed in snapshot[NET_B]:
+        assert any(_same_track(seed, kept) for kept in resumed_snapshot[NET_B]), (
+            f"resume dropped the seed segment {seed.start}->{seed.end} on {seed.layer}"
+        )
