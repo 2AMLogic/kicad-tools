@@ -1462,24 +1462,25 @@ def test_failed_mask_batch_reports_each_action_once(tmp_path, monkeypatch, capsy
     """When the selective rollback fails partway, the fail-closed fallback
     must not re-report actions the rollback already disposed of: each action
     uuid appears under exactly one reason in the JSON (issue #9958)."""
-    # Two independent own-pad entries, one per pad; both fail verification
-    # (neither finding cleared) and the undo of the second-applied move
-    # fails, so the batch is discarded.
+    # Both findings persist. Undo trk-2 first so it has a specific
+    # disposition when undoing trk-a fails and the batch is discarded.
     board = _board2(tmp_path, ENTRY + "\n" + _seg("trk-2", (106, 100.3), (103.7, 100.3)), "103 100")
+    original = board.read_bytes()
     f1 = _own_finding("trk-a", PAD, "R1/1")
     f2 = _own_finding("trk-2", "pad-r2-1", "R2/1")
     still = _report(f1, f2)
     real_undo = MaskCopperRepairer.undo_action
 
     def selective_undo(self, action):
-        return False if action.uuid == "trk-2" else real_undo(self, action)
+        return False if action.uuid == "trk-a" else real_undo(self, action)
 
     monkeypatch.setattr(MaskCopperRepairer, "undo_action", selective_undo)
     code = _run(monkeypatch, board, [still, still, still], extra=("--format", "json"))
     assert code != 0
     payload = json.loads(capsys.readouterr().out)
     records = payload["mask_copper"]["unrepaired"]
-    uuids = [r["uuid"] for r in records]
-    assert len(uuids) == len(set(uuids))
-    assert set(uuids) >= {"trk-a", "trk-2"}
-    assert board.read_text()  # the fail-closed path kept the file intact
+    assert sorted((record["uuid"], record["reason"]) for record in records) == [
+        ("trk-2", "finding_not_cleared"),
+        ("trk-a", "recheck_unavailable"),
+    ]
+    assert board.read_bytes() == original
