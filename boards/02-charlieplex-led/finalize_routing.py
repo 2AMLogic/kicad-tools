@@ -1062,21 +1062,6 @@ def _finalize_candidate(path, schematic):
     _total, off_angle = segment_angle_census(path)
     if off_angle:
         raise ValueError(f"Board02 escape passes emitted off-angle copper: {off_angle[:5]}")
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "kicad_tools.cli",
-            "fix-silkscreen",
-            str(path),
-            "--mfr",
-            "jlcpcb",
-            "--format",
-            "summary",
-        ],
-        check=True,
-        timeout=120,
-    )
     data = _native_report(path)
     if data["violations"]:
         pcb = PCB.load(path)
