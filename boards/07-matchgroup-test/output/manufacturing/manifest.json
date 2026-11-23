@@ -29,12 +29,16 @@
       "size": 3356
     },
     "design-source.zip": {
-      "sha256": "acef4cef00605c9d7207018d0e37180db932d244a751db3b5ba67d4a33f435c0",
-      "size": 1055834
+      "sha256": "721150898a4a0b353ffcb4aacb9b15517d45dd4749e9112b38f38fc183d7ab19",
+      "size": 1055816
     },
     "engineering/README.md": {
-      "sha256": "a2b05b1d1d6e5ee021ff30d32bf92542598002998706d8158543a58463890c36",
-      "size": 7823
+      "sha256": "01d740ab03c93becd281066b1141366ad00287c0e91725e1eca6bf843876ec0e",
+      "size": 7774
+    },
+    "engineering/assembly-fiducials.patch": {
+      "sha256": "85ba93a97d7779b9cda3045c5d1a6cb3a72a81bf7aeedb2d7ceb28ff665906cf",
+      "size": 6604
     },
     "engineering/clock_spacing.py": {
       "sha256": "c4646ecba440bf22f66654faa04b67465da3045172cfa18df2d3edc853ecc35f",

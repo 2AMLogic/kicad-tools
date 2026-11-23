@@ -140,6 +140,8 @@ class BoardConfig:
     # New release sources to add to the existing design-source.zip inventory
     # and bind in the receipt. Scratch or untracked files are never discovered.
     additional_design_sources: tuple[str, ...] = ()
+    # Directly downloadable files: (board-relative source, path inside manufacturing/).
+    additional_bundle_files: tuple[tuple[str, str], ...] = ()
     # Directories searched (relative to the board) when rebuilding
     # ``output/manufacturing.zip``.  Its member names are relative to the first
     # entry that holds them: boards 04-09 ship bare names (``README.txt``), the
@@ -258,6 +260,12 @@ BOARDS: dict[str, BoardConfig] = {
         schematic="output/matchgroup_test.kicad_sch",
         tier="jlcpcb",
         mirrors=(("output/manufacturing/engineering", "real_design/engineering"),),
+        additional_bundle_files=(
+            (
+                "real_design/engineering/assembly-fiducials.patch",
+                "engineering/assembly-fiducials.patch",
+            ),
+        ),
         additional_design_sources=(
             "real_design/repair_class_clearance_6396.py",
             "real_design/repair_copper_gap_9091.py",
@@ -796,6 +804,14 @@ def repin_staged(
     if cfg.drc_targets:
         log(f"  native DRC report -> {len(cfg.drc_targets)} report copies")
 
+    # Install new payloads before rewriting links in the mirrored documentation.
+    bundle_files = []
+    for source, member in cfg.additional_bundle_files:
+        dest = mfg / member
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(staged / source, dest)
+        bundle_files.append(dest)
+
     for mirror, source in cfg.mirrors:
         for path in sorted(p for p in (staged / mirror).rglob("*") if p.is_file()):
             origin = staged / source / path.relative_to(staged / mirror)
@@ -822,7 +838,12 @@ def repin_staged(
         k: v for k, v in after.items() if k != "files"
     }:
         raise GateFailure("manifest refresh changed fields other than 'files'")
-    changed = rebuild_archive(out / "manufacturing.zip", [staged / s for s in cfg.bundle_search])
+    bundle_roots = [staged / s for s in cfg.bundle_search]
+    changed = rebuild_archive(
+        out / "manufacturing.zip",
+        bundle_roots,
+        additional_members=tuple(p.relative_to(bundle_roots[0]).as_posix() for p in bundle_files),
+    )
     log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
 
     lvs_clean, lvs_mismatches = gate_check(staged, cfg)
@@ -871,6 +892,8 @@ def repin_staged(
         del report["inputs"][name]
     for name in cfg.additional_design_sources:
         report["inputs"].setdefault(name, "")
+    for path in bundle_files:
+        report["inputs"].setdefault(path.relative_to(staged).as_posix(), "")
     for name in report["inputs"]:
         report["inputs"][name] = readiness_input_hash(name, (staged / name).read_bytes())
     report["checked_at"] = checked_at
@@ -880,13 +903,19 @@ def repin_staged(
         raise GateFailure(f"staged report does not validate: {verdict['blockers']}")
     log(f"  read_readiness(staged): ready, metrics {verdict.get('metrics')}")
 
+    new_bundle_files = {p for p in bundle_files if not (board / p.relative_to(staged)).exists()}
     published = sorted(
         p.relative_to(staged).as_posix()
         for p in staged.rglob("*")
         if p.is_file()
         and "__pycache__" not in p.relative_to(staged).parts
-        and (board / p.relative_to(staged)).is_file()
-        and p.read_bytes() != (board / p.relative_to(staged)).read_bytes()
+        and (
+            p in new_bundle_files
+            or (
+                (dest := board / p.relative_to(staged)).is_file()
+                and p.read_bytes() != dest.read_bytes()
+            )
+        )
     )
     removed: list[str] = []
     if known_rel is not None:

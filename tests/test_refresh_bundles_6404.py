@@ -236,7 +236,10 @@ def test_board07_package_follows_the_checked_board(mod):
     preflight = {entry["name"]: entry for entry in manifest["preflight"]}
     assert preflight["pcb_file"]["details"] == "Footprints: 49"
     assert [preflight[key]["status"] for key in ("drc", "erc")] == ["OK", "OK"]
+    patch = "engineering/assembly-fiducials.patch"
+    source_patch = (board / "real_design" / patch).read_bytes()
     with zipfile.ZipFile(mfg.parent / "manufacturing.zip") as outer:
+        assert outer.read(patch) == (mfg / patch).read_bytes() == source_patch
         for name in ("kicad_project.zip", "design-source.zip", "bom_jlcpcb.csv", "cpl_jlcpcb.csv"):
             assert outer.read(name) == (mfg / name).read_bytes()
         positions = mod.cpl_frame.read_cpl(outer.read("cpl_jlcpcb.csv"))
@@ -247,6 +250,9 @@ def test_board07_package_follows_the_checked_board(mod):
             member = routed.with_suffix(suffix)
             assert project.read(member.name) == member.read_bytes()
     receipt = json.loads((mfg.parent / "readiness.json").read_bytes())
+    patch_sha = mod.sha256(mfg / patch)
+    assert receipt["inputs"][f"output/manufacturing/{patch}"] == patch_sha
+    assert manifest["files"][patch]["sha256"] == patch_sha
     with zipfile.ZipFile(mfg / "design-source.zip") as source:
         for name in cfg.additional_design_sources:
             assert name in receipt["inputs"]
@@ -360,7 +366,9 @@ def test_bundle_unpacks_gate_native_drc_tuple(mod, tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda *a: [])
+    monkeypatch.setattr(
+        mod.rr, "rebuild_archive", lambda archive, search, *, additional_members=(): []
+    )
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"native": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
@@ -417,7 +425,9 @@ def _repin_board(mod, tmp_path, monkeypatch, *, warnings: int | None = None) -> 
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda *a: [])
+    monkeypatch.setattr(
+        mod.rr, "rebuild_archive", lambda archive, search, *, additional_members=(): []
+    )
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"refilled": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)

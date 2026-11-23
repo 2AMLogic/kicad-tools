@@ -133,7 +133,6 @@ components and 216 bound pads. It runs the ordinary validator on the complete
 pair and writes the result to `release/`.
 
 The production checkout adopted both physical boards, their bound manifests
-and the matching fiducial-aware build recipes (the #8603 adoption). The
-recipe copies in `output/manufacturing/design-source.zip` still predate the
-adoption; #8604 re-issues the manufacturing evidence and independently
-rechecks the routing.
+and the matching fiducial-aware build recipes in #8603. The buyer package
+reissued in #8604 includes the linked patch in `engineering/` and the build
+recipes and patch in `design-source.zip`.
