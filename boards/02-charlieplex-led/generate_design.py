@@ -20,6 +20,7 @@ If no output directory is specified, files are written to ./output/
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,9 @@ from kicad_tools.recipes.precondition import require_spec
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
+
+# Staging directory for a not-yet-gated manufacturing export (#9800).
+CANDIDATE_DIRNAME = "manufacturing-candidate"
 
 
 # =============================================================================
@@ -572,7 +576,14 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
     print("Exporting manufacturing bundle...")
     print("=" * 60)
 
-    mfg_dir = output_dir / "manufacturing"
+    # Stage into a sibling candidate directory (#9800): a run that the final
+    # gate refuses must leave an existing ready release's manifest, Gerbers and
+    # archive byte-identical.  ``promote_candidate_bundle`` publishes the
+    # candidate only after the gate passes; a refused candidate stays here for
+    # inspection.
+    mfg_dir = output_dir / CANDIDATE_DIRNAME
+    if mfg_dir.exists():
+        shutil.rmtree(mfg_dir)
     cmd = [
         sys.executable,
         "-m",
@@ -602,6 +613,21 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         return True
     print("\n   WARNING: manifest.json not produced")
     return False
+
+
+def promote_candidate_bundle(output_dir: Path) -> None:
+    """Publish the staged candidate bundle over ``output/manufacturing``.
+
+    Called only after the pipeline gate passes.  Files are overlaid (the
+    package producer owns other files in the release directory), then the
+    candidate directory is removed.
+    """
+    candidate = output_dir / CANDIDATE_DIRNAME
+    release = output_dir / "manufacturing"
+    if not candidate.is_dir():
+        return
+    shutil.copytree(candidate, release, dirs_exist_ok=True)
+    shutil.rmtree(candidate)
 
 
 # =============================================================================
@@ -764,7 +790,14 @@ def main() -> int:
         # drove the SUMMARY above (route / DRC / LVS legs).  ERC remains an
         # independent gating leg.  (``write_lvs_report`` already raises on a
         # dirty LVS so a False ``lvs_ok`` here would mean LVS short-circuited.)
-        return 0 if erc_success and gate.passed else 1
+        if erc_success and gate.passed:
+            promote_candidate_bundle(output_dir)
+            return 0
+        print(
+            f"\nRefused: candidate bundle left in {output_dir / CANDIDATE_DIRNAME}; "
+            "the existing manufacturing release is untouched."
+        )
+        return 1
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)

@@ -232,3 +232,52 @@ class TestBoard02RouteExitGate:
         assert rc != 0
         assert finalize_calls == []
         assert "routing/finalization failed" in capsys.readouterr().err.lower()
+
+
+class TestBoard02CandidateStaging:
+    """Issue #9800: a refused run must not touch an existing ready release."""
+
+    def _fake_export(self, module, monkeypatch):
+        import types
+
+        def _run(cmd, *a, **k):
+            out = Path(cmd[cmd.index("--output") + 1])
+            (out / "gerbers").mkdir(parents=True, exist_ok=True)
+            (out / "manifest.json").write_text("candidate-manifest")
+            (out / "gerbers" / "gerbers.zip").write_text("candidate-zip")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(module, "subprocess", types.SimpleNamespace(run=_run))
+
+    def _release(self, tmp_path: Path) -> Path:
+        release = tmp_path / "manufacturing"
+        (release / "gerbers").mkdir(parents=True)
+        (release / "manifest.json").write_text("release-manifest")
+        (release / "gerbers" / "gerbers.zip").write_text("release-zip")
+        (release / "report.pdf").write_text("release-report")
+        return release
+
+    def test_export_leaves_existing_release_untouched(self, monkeypatch, tmp_path: Path) -> None:
+        module = _load_board02_module()
+        release = self._release(tmp_path)
+        self._fake_export(module, monkeypatch)
+
+        assert module.export_manufacturing_bundle(tmp_path / "r.kicad_pcb", tmp_path) is True
+
+        assert (release / "manifest.json").read_text() == "release-manifest"
+        assert (release / "gerbers" / "gerbers.zip").read_text() == "release-zip"
+        candidate = tmp_path / module.CANDIDATE_DIRNAME
+        assert (candidate / "manifest.json").read_text() == "candidate-manifest"
+
+    def test_promote_publishes_candidate_over_release(self, monkeypatch, tmp_path: Path) -> None:
+        module = _load_board02_module()
+        release = self._release(tmp_path)
+        self._fake_export(module, monkeypatch)
+        module.export_manufacturing_bundle(tmp_path / "r.kicad_pcb", tmp_path)
+
+        module.promote_candidate_bundle(tmp_path)
+
+        assert (release / "manifest.json").read_text() == "candidate-manifest"
+        assert (release / "gerbers" / "gerbers.zip").read_text() == "candidate-zip"
+        assert (release / "report.pdf").read_text() == "release-report"
+        assert not (tmp_path / module.CANDIDATE_DIRNAME).exists()
