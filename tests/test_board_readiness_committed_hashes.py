@@ -85,21 +85,10 @@ EXPECTED_STALE: dict[str, str] = {
     # Docker toolchain workflow after #9502 moved both producers under
     # run_on_evidence_toolchain.
     #
-    # Issue #9800 (#9795 phase 4): the recipe's board-local silk clip/reference
-    # step was replaced by the shared default silk pass, and the routed PCB
-    # and renders were regenerated from it on the pinned toolchain (SHA-256
-    # bd2202fb...).  The fresh receipt is blocked: the pass deliberately
-    # leaves five via-only ``silk_hole_overlap`` warnings (C1 twice, D4 once,
-    # D9 twice) that the producer's assembly-warning review refuses to
-    # acknowledge -- the via/component-drill/NPTH grading change is owned by
-    # #9112/#9033.  The refused run passed the other ten checks (including
-    # the artifacts gate over the fresh renders); remove this entry when that
-    # grading lands and the package is re-published.
     "02-charlieplex-led": (
-        "Issue #9800: board 02's tree moved to the shared silk pass "
-        "(routed PCB + renders regenerated); the fresh receipt is blocked on "
-        "five via-only silk_hole_overlap warnings whose grading (#9112/#9033) "
-        "owns the re-pin."
+        "Issue #9800: the shared silk pass leaves five via-only warnings "
+        "(#9112/#9033). The publisher also binds carried-forward renders to "
+        "the PCB in the previous project ZIP. Re-pin after both gates pass."
     ),
 }
 
