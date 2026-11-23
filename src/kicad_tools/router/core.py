@@ -2548,6 +2548,12 @@ class Autorouter:
         # Issue #6342: the negotiated loop's rip-up cycle guard, exposed for
         # tests and reports (``None`` until ``route_all_negotiated`` runs).
         self._ripup_cycle_guard: RipupCycleGuard | None = None
+        # Issue #8486 (November 2026 scope): iteration-entry state (connected
+        # pad pairs + entry copper) of the nets the known-failure guard
+        # tracks.  Populated per iteration by ``route_all_negotiated``; empty
+        # outside a negotiated run, where the wrapper then behaves exactly as
+        # before this scope.
+        self._known_failure_entry: dict[int, tuple[frozenset[frozenset[int]], list[Route]]] = {}
         # Issue #3470: both budgets are now CLI-configurable via
         # ``--max-ripups-per-net`` (route_cmd sets these attributes after
         # constructing the router).  ``_route_all_max_ripups_per_net``
@@ -14251,6 +14257,13 @@ class Autorouter:
         # shared by the targeted rip-up sites below.
         ripup_guard = RipupCycleGuard()
         self._ripup_cycle_guard = ripup_guard
+        # Issue #8486 (November 2026 scope): iteration-entry state of the
+        # nets the known-failure guard tracks -- their connected physical pad
+        # pairs plus their entry copper.  A partially connected net that
+        # re-searches to the same (or a worse) result keeps its failure
+        # record and its pads, instead of being treated as freshly routed.
+        # (Declared in ``__init__``; reassigned per run here.)
+        self._known_failure_entry = {}
         # Issue #3438: per-net relief-probe attempt budget.  Each probe
         # costs up to one per-net A* (and a targeted rip-up on success);
         # cap attempts so a geometrically-infeasible net cannot burn the
@@ -15063,16 +15076,29 @@ class Autorouter:
                     else:
                         iter_per_net_cap = derive_iter_per_net_cap(per_net_timeout, iter_remaining)
 
-                    # Track only entry-unrouted nets. Sample their seal or
-                    # copper when searched, after any intervening rip-ups.
-                    ripup_guard.begin_iteration(
-                        iteration,
-                        dict.fromkeys(
-                            n
-                            for n in net_order
-                            if not net_routes.get(n) and len(pads_by_net.get(n, [])) >= 2
-                        ),
+                    # Track entry-unrouted nets and, since the November 2026
+                    # #8486 scope, partially connected ones too: both re-search
+                    # every iteration, and a partial return used to clear the
+                    # failure record outright.  Sample their seal or copper
+                    # witness when searched, after any intervening rip-ups, and
+                    # snapshot each tracked net's connected pad pairs and entry
+                    # copper so progress is judged on physical connectivity
+                    # (see ``_route_net_known_failure_aware``).
+                    partial_entry_nets = self._get_partially_routed_nets(net_routes, pads_by_net)
+                    entry_nets = dict.fromkeys(
+                        n
+                        for n in net_order
+                        if len(pads_by_net.get(n, [])) >= 2
+                        and (not net_routes.get(n) or n in partial_entry_nets)
                     )
+                    ripup_guard.begin_iteration(iteration, entry_nets)
+                    self._known_failure_entry = {
+                        n: (
+                            self._connected_pad_pairs(n, net_routes.get(n) or []),
+                            list(net_routes.get(n) or []),
+                        )
+                        for n in entry_nets
+                    }
 
                     # Issue #2540 + #2803: Snapshot state at top of each iteration
                     # BEFORE any destructive ``rip_up_nets`` call.  If a
@@ -17236,6 +17262,11 @@ class Autorouter:
             # (follow-up to #3488).  No-op when no window is open.
             self._flush_corridor_reservation(net_routes)
 
+            # Issue #8486 (November 2026 scope): the entry snapshots are
+            # iteration-scoped; drop them so post-loop passes see no stale
+            # known-failure state.
+            self._known_failure_entry = {}
+
             # Issue #5517: the rip-up loop is over; everything the caller does
             # next (best-state restore, optimizer, DRC nudge, clearance
             # correction) is post-route, and must not be attributed to the
@@ -18614,6 +18645,15 @@ class Autorouter:
         Sample the live routes immediately before the search. A full reorder
         can remove a blocker after an earlier attempt in the same iteration.
         Healthy nets and searches without a wall-clock budget need no witness.
+
+        Issue #8486 (November 2026 scope): a net that entered the iteration
+        partially connected has an entry snapshot in ``_known_failure_entry``.
+        Its search only counts as routed when it connects strictly more pad
+        pairs than that snapshot; an equal or pad-losing result keeps the
+        failure record (so the back-off reaches it) and the kept copper is
+        the better of the two, so a no-progress retry can never strand
+        already-connected pads.  The deterministic arm (``cap is None``) and
+        untracked nets keep the pre-existing behaviour untouched.
         """
         if cap is not None and net in guard.entry_signature:
             guard.entry_signature[net] = self._relief_witness_signature(
@@ -18623,7 +18663,7 @@ class Autorouter:
         if used is not None and cap is not None and used < cap:
             print(
                 f"      back-off: {self.net_names.get(net, f'Net_{net}')} search capped at "
-                f"{used:.1f}s (was {cap:.1f}s) after repeated no-path searches (issue #8486)",
+                f"{used:.1f}s (was {cap:.1f}s) after repeated no-progress searches (issue #8486)",
                 flush=True,
             )
         t0 = time.time()
@@ -18638,10 +18678,82 @@ class Autorouter:
             and getattr(search, "last_route_deadline_hit", False)
             and getattr(search, "last_route_deadline_iterations", 1) == 0
         )
+        progress = bool(routes)
+        entry = self._known_failure_entry.get(net) if cap is not None else None
+        if entry is not None:
+            old_pairs, old_routes = entry
+            new_pairs = self._connected_pad_pairs(net, routes) if routes else frozenset()
+            progress = bool(routes) and old_pairs < new_pairs
+            if progress:
+                # Ratchet: the next comparison in this iteration is against
+                # the best copper the net has actually kept.
+                self._known_failure_entry[net] = (new_pairs, list(routes))
+            elif old_routes and not new_pairs >= old_pairs:
+                # The re-search lost pads (or found none): discard its copper
+                # and re-commit the entry copper -- but only if that copper is
+                # still legal against the CURRENT board.  Another net may have
+                # legally taken the vacated space since the rip-up, and
+                # ``_mark_route`` carries no clearance gate, so an unchecked
+                # re-land could publish a short into the checkpoints.  When
+                # the entry copper no longer fits, keep the re-search result
+                # (legal by construction); the no-progress back-off still
+                # applies.  Callers mark usage and append the returned routes
+                # exactly as for a fresh search result.
+                if self._entry_copper_still_legal(old_routes):
+                    for route in routes:
+                        self.grid.unmark_route(route)
+                    for route in old_routes:
+                        self._mark_route(route)
+                    routes = list(old_routes)
+            elif routes:
+                # Equal connectivity: the new copper is kept, so ratchet the
+                # entry state to it -- a second search of this net in the same
+                # iteration must not re-land the superseded entry copper.
+                self._known_failure_entry[net] = (new_pairs, list(routes))
         guard.note_search(
-            net, iteration, used, time.time() - t0, bool(routes), setup_stopped=setup_stopped
+            net, iteration, used, time.time() - t0, progress, setup_stopped=setup_stopped
         )
         return routes
+
+    def _entry_copper_still_legal(self, old_routes: list[Route]) -> bool:
+        """True iff the entry copper clears every other net on the live board.
+
+        Issue #8486: gate for re-landing a partial net's superseded copper.
+        Uses the precise edge-to-edge primitives the post-route validator
+        uses, against the current grid (same-net copper is excluded, so the
+        net's own fresh search result does not count against it).
+        """
+        grid = self.grid
+        for route in old_routes:
+            for seg in route.segments:
+                if not grid.validate_segment_clearance(seg=seg, exclude_net=route.net)[0]:
+                    return False
+            for via in route.vias:
+                if not grid.validate_via_clearance(via=via, exclude_net=route.net)[0]:
+                    return False
+                if not grid.validate_via_to_via_clearance(via=via, exclude_net=route.net)[0]:
+                    return False
+        return True
+
+    def _connected_pad_pairs(self, net: int, routes: list[Route]) -> frozenset[frozenset[int]]:
+        """The physical pad pairs ``net``'s copper connects (issue #8486).
+
+        Layer-aware contact graph over the net's own pads and routes, so pad
+        overlap alone counts (the baseline an empty net enters with) and a
+        route that never touches a pad does not.
+        """
+        from .terminal_connectivity import physical_pad_components
+
+        pads = [self.pads[k] for k in self.nets.get(int(net), []) if k in self.pads]
+        if len(pads) < 2:
+            return frozenset()
+        comps = physical_pad_components(pads, list(routes))
+        return frozenset(
+            frozenset((i, j))
+            for i in range(len(pads))
+            for j in range(i + 1, len(pads))
+            if comps[i] == comps[j]
+        )
 
     def _silent_rescue_memoized(
         self,

@@ -1,4 +1,4 @@
-"""Boards 01, 02, 04 and 06 commit the ``.kicad_dru`` their recipes emit (Issue #8385).
+"""Compare the production DRUs of boards 01, 02, 04, 06 and 07 (Issue #8385).
 
 The follow-up to #8357 (board 05, ``test_board05_recipe_dru_reproduces_8357.py``):
 under the same operator ruling (commit what the recipe emits, consistent with
@@ -27,17 +27,14 @@ Each replay was checked against a full recipe run on the pinned toolchain
 from the committed one.  None of them needs kicad-cli: these boards have no
 rule areas, so the keepout step writes nothing.
 
-Board 04 is strict ``xfail``: its recipe emits the block, but its
-evidence cannot be re-pinned on main yet (``refresh_readiness.py`` refuses on
-unaccepted ``redundant_copper_*`` warnings, independent of the DRU; #8399).
-When that lands and the DRU is committed, the strict xfail turns into a
-failure that says to drop the marker.
+Board 07 replays the six-layer rule writer from its production validator
+with the reviewed net-class map. Board 02's exporter-only replay still
+differs from the full recipe's ampacity, drill and silk rules (#8759).
 
 Boards not covered, and why (traced in #8385): board 00's recipe routes
 in-process and its routed ``.kicad_pro`` declares no router class, so it never
 emits the block; board 03 is suppressed by its own designer clearance rule;
-board 05 has its own test; board 07's ``real_design/build.py`` emits the block inside a kicad-cli
-validation run and is blocked on the same #8399 refusal.
+board 05 has its own test.
 """
 
 from __future__ import annotations
@@ -82,11 +79,18 @@ def _board04_native_floors(routed: Path) -> None:
     process["apply_native_floors"](routed)
 
 
+def _board07_reviewed_rules(routed: Path) -> None:
+    source = BOARDS / "07-matchgroup-test" / "real_design"
+    validator = runpy.run_path(str(source / "validate.py"))
+    validator["write_reviewed_rules"](routed, source / "authored-source" / "net_class_map.json")
+
+
 CASES: dict[str, tuple[str, Callable[[Path], None]]] = {
     "01-voltage-divider": ("voltage_divider_routed", _export_writer),
     "02-charlieplex-led": ("charlieplex_3x3_routed", _export_writer),
     "04-stm32-devboard": ("stm32_devboard_routed", _board04_native_floors),
     "06-diffpair-test": ("diffpair_test_routed", _board06_pair_rules_then_export),
+    "07-matchgroup-test": ("matchgroup_test_routed", _board07_reviewed_rules),
 }
 
 PARAMS = [
@@ -98,6 +102,7 @@ PARAMS = [
     # warnings -- so the #8399 redundant_copper_* refusal premise is gone).
     pytest.param("04-stm32-devboard", id="board04"),
     pytest.param("06-diffpair-test", id="board06"),
+    pytest.param("07-matchgroup-test", id="board07"),
 ]
 
 
