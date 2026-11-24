@@ -31,15 +31,24 @@ not reconnectable as one physical component is left untouched, file intact.
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from itertools import pairwise
 from math import dist
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from shapely.geometry import LineString, Point
 
+from kicad_tools.cli.kicad_toolchain import (
+    KiCadEnvironmentError,
+    active_evidence_toolchain,
+    evidence_toolchain,
+)
 from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
+from kicad_tools.cli.runner import run_drc
 from kicad_tools.core.pcb_item_locks import BoardItemLocks
+from kicad_tools.drc.report import load_native_connectivity_report
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.router.board_clearance_rules import (
     BoardClearanceRules,
@@ -47,8 +56,10 @@ from kicad_tools.router.board_clearance_rules import (
     pad_clearance_override,
 )
 from kicad_tools.router.quantize import dogleg_points
+from kicad_tools.router.rule_area_resolve import all_rule_area_zones
 from kicad_tools.router.rules import net_class_map_from_path
-from kicad_tools.schema.pcb import PCB, Segment
+from kicad_tools.schema.pcb import PCB, Segment, Via
+from kicad_tools.sidecars import copy_project_sidecars
 from kicad_tools.validate.connectivity import ConnectivityValidator
 from kicad_tools.validate.copper_contact import CopperContactGraph, build_copper_contact_graph
 from kicad_tools.validate.diffpair_skew import derive_pair_skews
@@ -831,10 +842,8 @@ _CLK_EXITS = (
         old=((0, 0), (0.05, -0.05), (0.05, -0.3), (0.3, -0.55), (0.3, -0.9539)),
         new=((0, 0), (0, -0.625), (0.3, -0.925)),
     ),
-    # J4.2: leaves the pad straight for 0.625 mm, then runs directly to a barrel
-    # seat clear of the mask.  The direct leg keeps the pair's modeled skew inside
-    # its budget: a 45-degree bend plus a horizontal run is 0.045 mm longer, which
-    # models at 20.183 ps against the 20.135 ps limit (this leg models 19.982 ps).
+    # J4.2: leave the pad straight for 0.625 mm, then turn 45 degrees and finish
+    # horizontally at the barrel. Seed 42 models 19.988 ps against 20.135 ps.
     _ClockExit(
         "J4",
         _J4,
@@ -842,7 +851,7 @@ _CLK_EXITS = (
         (0.3, 0.8),
         "MIPI_CLK-",
         old=((0, 0), (0.05, 0.05), (0.05, 0.6), (0.1, 0.65)),
-        new=((0, 0), (0, 0.625), (0.5, 0.85)),
+        new=((0, 0), (0, 0.625), (0.225, 0.85), (0.5, 0.85)),
         via=((0.1, 0.65), (0.5, 0.85)),
         back_old=((0.1, 0.65), (0.7599, 0.65)),
         back_new=((0.5, 0.85), (0.7, 0.65)),
@@ -935,7 +944,7 @@ def _clock_run(
 
 def _stage_clock_exit(
     pcb: PCB, ex: _ClockExit, protected: set[str]
-) -> tuple[list[Segment], list] | None:
+) -> tuple[list[Segment], list[Via]] | None:
     """Rebuild one clock exit in memory; ``None`` leaves the caller to abandon it all."""
     fp = pcb.get_footprint(ex.ref)
     if fp is None or fp.name != ex.footprint or fp.rotation or fp.layer != "F.Cu":
@@ -1034,6 +1043,50 @@ def _stage_clock_exit(
     return added, [via] if via is not None else []
 
 
+def _clock_authored_rules_ok(pcb: PCB, path: Path, tracks: list[Segment], vias: list[Via]) -> bool:
+    """Have KiCad evaluate authored rules on the replacement copper before publishing it."""
+    if not path.with_suffix(".kicad_dru").exists() and not all_rule_area_zones(pcb):
+        return True
+    changed = {item.uuid for item in (*tracks, *vias)}
+    if not all(changed):
+        return False
+    try:
+        with TemporaryDirectory(prefix="board06-clock-") as tmp:
+            candidate = Path(tmp) / path.name
+            pcb.save(candidate)
+            copy_project_sidecars(path, candidate)
+            report = candidate.with_suffix(".json")
+            active = active_evidence_toolchain()
+            toolchain = (
+                nullcontext(active)
+                if active
+                else evidence_toolchain([candidate.parent], required_version=None)
+            )
+            with toolchain as chain:
+                result = run_drc(
+                    candidate,
+                    output_path=report,
+                    kicad_cli=Path(chain.kicad_cli),
+                    schematic_parity=False,
+                    all_track_errors=True,
+                    refill_zones=True,
+                )
+            if not result.success:
+                print(f"   MIPI clock exits kept: {result.stderr}")
+                return False
+            native = load_native_connectivity_report(report)
+    except (OSError, ValueError, KiCadEnvironmentError) as exc:
+        print(f"   MIPI clock exits kept: {exc}")
+        return False
+    for finding in [*native.violations, *native.unconnected_items]:
+        if finding.is_error and (
+            not any(finding.item_uuids) or changed.intersection(finding.item_uuids)
+        ):
+            print(f"   MIPI clock exits kept: {finding.message}")
+            return False
+    return True
+
+
 def _clear_clock_pair(path: Path, rules: DesignRules) -> int:
     """Publish all four MIPI clock exits together, or leave the file untouched.
 
@@ -1043,7 +1096,7 @@ def _clear_clock_pair(path: Path, rules: DesignRules) -> int:
     pcb = PCB.load(path)
     protected = _protected_ids(pcb)
     tracks: list[Segment] = []
-    vias: list = []
+    vias: list[Via] = []
     for ex in _CLK_EXITS:
         staged = _stage_clock_exit(pcb, ex, protected)
         if staged is None:
@@ -1053,6 +1106,8 @@ def _clear_clock_pair(path: Path, rules: DesignRules) -> int:
     if not _within_project_skew_budget(pcb, path, _CLK_NETS):
         return 0
     if not _copper_gap_ok(pcb, path, tracks, vias, rules):
+        return 0
+    if not _clock_authored_rules_ok(pcb, path, tracks, vias):
         return 0
     pcb.save(path)
     print(f"   pad departure MIPI clock pair: {len(_CLK_EXITS)} exits widened to {_CLK_WIDTH} mm")

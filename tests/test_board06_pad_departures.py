@@ -410,7 +410,7 @@ def _clock_pair(path, control="", p_jog=1.0, gap=0.1474):
     Every exit is a stair of narrow pieces, each pad's trunk is 0.225 mm, and the
     negative rail reaches B.Cu through a barrel at each end. ``p_jog`` adds
     positive-rail length through a bump in its trunk: at 1.0 mm the pair models
-    15.3 ps before the repair and 18.3 ps after, against the 20.135 ps budget.
+    15.3 ps before the repair and 18.5 ps after, against the 20.135 ps budget.
     """
     from generate_design import mipi_net_class
 
@@ -419,24 +419,37 @@ def _clock_pair(path, control="", p_jog=1.0, gap=0.1474):
     path.with_suffix(".kicad_pro").write_text(
         json.dumps(
             {
-                "board": {"design_settings": {"rules": {"min_clearance": 0.1016}}},
+                "board": {
+                    "design_settings": {
+                        "rules": {
+                            "min_clearance": 0.1016,
+                            "min_track_width": 0.1016,
+                            "min_through_hole_diameter": 0.20,
+                            "min_via_hole": 0.20,
+                        },
+                    },
+                },
                 "net_settings": {"classes": [{"name": "Default", "clearance": 0.15}]},
             }
         )
     )
     parts = [
         "(kicad_pcb (version 20240108) (generator test)",
-        '(layers (0 "F.Cu" signal) (2 "In1.Cu" power) (4 "In2.Cu" power) (31 "B.Cu" signal))',
+        '(layers (0 "F.Cu" signal) (1 "In1.Cu" power) (2 "In2.Cu" power) (31 "B.Cu" signal)'
+        ' (36 "B.SilkS" user) (37 "F.SilkS" user) (38 "B.Mask" user) (39 "F.Mask" user)'
+        ' (44 "Edge.Cuts" user))',
+        "(gr_rect (start 0 0) (end 35 80) (stroke (width 0.05) (type default))"
+        ' (fill none) (layer "Edge.Cuts"))',
         '(net 1 "MIPI_CLK+") (net 2 "MIPI_CLK-") (net 3 "MIPI_D0+")',
         '(footprint "Connector_FFC:FFC_4P_0.5mm" (layer "F.Cu") (at 0 0)',
         '(property "Reference" "J4" (at 0 0) (layer "F.SilkS"))',
-        '(pad "1" smd rect (at 6.8 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 1))',
-        '(pad "2" smd rect (at 7.6 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 2))',
-        '(pad "3" smd rect (at 8.4 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 3)))',
+        '(pad "1" smd rect (at 6.8 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 1 "MIPI_CLK+"))',
+        '(pad "2" smd rect (at 7.6 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 2 "MIPI_CLK-"))',
+        '(pad "3" smd rect (at 8.4 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 3 "MIPI_D0+")))',
         '(footprint "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm" (layer "F.Cu") (at 0 0)',
         '(property "Reference" "U4" (at 0 0) (layer "F.SilkS"))',
-        '(pad "1" smd rect (at 27 68) (size 0.7 0.3) (layers "F.Cu" "F.Mask") (net 1))',
-        '(pad "2" smd rect (at 27 68.8) (size 0.7 0.3) (layers "F.Cu" "F.Mask") (net 2)))',
+        '(pad "1" smd rect (at 27 68) (size 0.7 0.3) (layers "F.Cu" "F.Mask") (net 1 "MIPI_CLK+"))',
+        '(pad "2" smd rect (at 27 68.8) (size 0.7 0.3) (layers "F.Cu" "F.Mask") (net 2 "MIPI_CLK-")))',
     ]
     count = [0]
 
@@ -455,7 +468,8 @@ def _clock_pair(path, control="", p_jog=1.0, gap=0.1474):
 
     def via(net, at):
         parts.append(
-            f'(via (at {at[0]} {at[1]}) (size 0.6) (drill 0.25) (layers "F.Cu" "B.Cu") (net {net}))'
+            f'(via (at {at[0]} {at[1]}) (size 0.6) (drill 0.25) (layers "F.Cu" "B.Cu")'
+            f' (net {net}) (uuid "{_uid("via", count[0])}"))'
         )
 
     run(1, "F.Cu", _CLOCK_P, [0.11, 0.14, 0.17, 0.2], locked=control == "locked")
@@ -557,6 +571,13 @@ def test_clock_exits_widen_and_move_both_negative_barrels(tmp_path, departures):
             for s in saved.segments
             if s.net_name == net
         )
+    j4_negative = {
+        (_round(s.start), _round(s.end))
+        for s in saved.segments
+        if s.layer == "F.Cu" and s.net_name == "MIPI_CLK-"
+    }
+    assert ((7.6, 70.625), (7.825, 70.85)) in j4_negative
+    assert ((7.825, 70.85), (8.1, 70.85)) in j4_negative
     skew_after, _ = _clock_skew(board)
     assert skew_before < skew_after < budget
     from kicad_tools.validate.connectivity import ConnectivityValidator
@@ -594,7 +615,7 @@ def test_clock_gap_control_passes_at_the_project_minimum(tmp_path, departures):
 def test_clock_skew_breach_keeps_the_original_geometry(tmp_path, departures):
     board = tmp_path / "clock.kicad_pcb"
     # At 0.6 mm of positive-rail bump the pair models 17.5 ps now; the repair adds
-    # 0.555 mm to the slower negative rail (20.6 ps) and would cross the budget.
+    # 0.600 mm to the slower negative rail (20.8 ps) and would cross the budget.
     _clock_pair(board, p_jog=0.6)
     skew, budget = _clock_skew(board)
     assert skew < budget
@@ -610,3 +631,67 @@ def test_clock_without_a_timing_policy_is_left_alone(tmp_path, departures):
     before = board.read_bytes()
     assert departures.clear_pad_departures(board, _rules()) == 0
     assert board.read_bytes() == before
+
+
+def test_clock_with_unverifiable_rules_keeps_the_original_file(tmp_path, departures, monkeypatch):
+    board = tmp_path / "clock.kicad_pcb"
+    _clock_pair(board)
+    board.with_suffix(".kicad_dru").write_text("(version 1)\n")
+    before = board.read_bytes()
+
+    def missing_toolchain(*args, **kwargs):
+        raise departures.KiCadEnvironmentError("kicad-cli unavailable")
+
+    monkeypatch.setattr(departures, "active_evidence_toolchain", lambda: None)
+    monkeypatch.setattr(departures, "evidence_toolchain", missing_toolchain)
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("constraint", ["keepout", "width"])
+@pytest.mark.parametrize("permitted", [False, True], ids=["constrained", "permitted"])
+def test_final_clock_copper_obeys_j4_rule_area(tmp_path, departures, capsys, constraint, permitted):
+    from generate_design import _finalize_signal_copper
+
+    from kicad_tools.cli.kicad_toolchain import docker_fallback_enabled
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if not docker_fallback_enabled() and find_kicad_cli() is None:
+        pytest.skip("kicad-cli is needed to evaluate the authored constraints")
+    board = tmp_path / "clock.kicad_pcb"
+    _clock_pair(board)
+    # Only the widened J4/1 exit reaches the sliver left of its original taper.
+    if constraint == "keepout":
+        x, y, w, h = (6.51 if permitted else 6.71), 69.53, 0.01, 0.02
+        tracks = "not_allowed"
+    else:
+        x, y, w, h = 6.77, 69.72, 0.10, 0.08
+        tracks = "allowed"
+        board.with_suffix(".kicad_dru").write_text(
+            '(version 1)\n(rule "Clock exit width" (layer "F.Cu") '
+            "(condition \"A.NetName == 'MIPI_CLK+' && A.intersectsArea('Clock launch')\") "
+            f"(constraint track_width (max {0.23 if permitted else 0.20}mm)))\n"
+        )
+    area = (
+        '(zone (net 0) (net_name "") (layer "F.Cu") (name "Clock launch") (hatch edge 0.5)'
+        f" (connect_pads (clearance 0)) (min_thickness 0.25) (keepout (tracks {tracks})"
+        " (vias allowed) (pads allowed) (copperpour allowed) (footprints allowed))"
+        " (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))"
+        f" (polygon (pts (xy {x} {y}) (xy {x + w} {y}) (xy {x + w} {y + h}) (xy {x} {y + h}))))"
+    )
+    board.write_text(board.read_text().rstrip()[:-1] + area + ")\n")
+    before = board.read_bytes()
+    # There are no copper pours on this fixture. Run the generator's same
+    # legalization and refill transaction; KiCad evaluates the actual rule area.
+    fill = [sys.executable, "-m", "kicad_tools.cli", "zones", "fill", str(board)]
+    _finalize_signal_copper(board, fill, lambda tag: True)
+    output = capsys.readouterr().out
+    if permitted:
+        assert "MIPI clock pair: 4 exits widened" in output
+        assert sorted(_round(v.position) for v in PCB.load(board).vias) == [
+            (8.1, 70.85),
+            (27.795, 68.8),
+        ]
+    else:
+        assert board.read_bytes() == before
+        assert ("Items not allowed" if constraint == "keepout" else "Clock exit width") in output
