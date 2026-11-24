@@ -14,6 +14,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.core.atomic_write import remove_retained_copy, retained_copy_board
+
 __all__ = ["main", "CleanResult", "find_cleanable_files"]
 
 
@@ -173,6 +175,19 @@ def get_project_schematic_name(project_path: Path) -> str | None:
     return project_path.stem + ".kicad_sch"
 
 
+def _recovery_size(directory: Path) -> int:
+    """Count file bytes whose last directory entry would be removed by cleanup."""
+    links: dict[tuple[int, int], int] = {}
+    size = 0
+    for entry in directory.iterdir():
+        stat = entry.lstat()
+        key = (stat.st_dev, stat.st_ino)
+        links[key] = links.get(key, 0) + 1
+        if links[key] == stat.st_nlink:
+            size += stat.st_size
+    return size
+
+
 def find_cleanable_files(
     project_path: Path,
     deep: bool = False,
@@ -223,6 +238,25 @@ def find_cleanable_files(
     protected_names = {p.path.name for p in result.to_keep}
 
     for file_path in project_dir.iterdir():
+        if file_path.is_dir():
+            # Retained recovery copies of checked rewrites (#10056): the
+            # displaced previous board, kept recoverable beside the live file.
+            recovery = retained_copy_board(file_path)
+            if recovery is not None:
+                try:
+                    size = _recovery_size(file_path)
+                except OSError:
+                    size = 0
+                result.to_delete.append(
+                    CleanableFile(
+                        path=file_path,
+                        category="recovery_copy",
+                        reason=f"retained PCB recovery for {recovery.name}",
+                        size_bytes=size,
+                    )
+                )
+            continue
+
         if not file_path.is_file():
             continue
 
@@ -419,6 +453,13 @@ def format_output_text(result: CleanResult, verbose: bool = False) -> str:
             lines.append(f"  ✗ {f.path.name} ({f.size_str})")
         lines.append("")
 
+    recovery_copies = result.by_category("recovery_copy")
+    if recovery_copies:
+        lines.append(f"Would delete ({len(recovery_copies)} retained recovery copies):")
+        for f in recovery_copies:
+            lines.append(f"  ✗ {f.path.name}/ ({f.size_str})")
+        lines.append("")
+
     if result.to_keep:
         lines.append("Would keep:")
         for f in result.to_keep:
@@ -464,7 +505,7 @@ def format_output_json(result: CleanResult) -> str:
 
 def delete_files(result: CleanResult, verbose: bool = False) -> tuple[int, int]:
     """
-    Delete the files marked for cleanup.
+    Delete the files (and recovery-copy directories) marked for cleanup.
 
     Args:
         result: CleanResult with files to delete
@@ -478,7 +519,11 @@ def delete_files(result: CleanResult, verbose: bool = False) -> tuple[int, int]:
 
     for f in result.to_delete:
         try:
-            f.path.unlink()
+            if f.category == "recovery_copy":
+                if not remove_retained_copy(f.path):
+                    continue
+            else:
+                f.path.unlink()
             deleted += 1
             freed += f.size_bytes
             if verbose:
