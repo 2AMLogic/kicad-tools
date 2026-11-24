@@ -159,16 +159,17 @@ general single-document stdout contract. Callers must not treat parser flag
 coverage alone as proof that the entire stream is one JSON document. See the
 [route reference](cli.md#routing-around-invalid-placement) for disposition scope.
 
-Every `kct route --format json` code path that finishes routing prints the
-same document -- `summary` (with `nets_requested`, `nets_routed` and the single
-final `summary.verdict`), `successful_routes`, `failed_routes`, `suggestions`
-and `placement_disposition` -- whether layer escalation is on or off
-(`--no-auto-layers`), quiet or not, and for every `--strategy` (Issue #6277).
-Only runs that never built a router (dry runs, early validation exits) fall back
-to the minimal `{"exit_code", "verdict"}` document, and a run killed by
-`--timeout` prints no document.
+The detailed `kct route --format json` document includes `summary` (with
+`nets_requested`, `nets_routed` and `verdict`), `successful_routes`,
+`failed_routes`, `suggestions` and `placement_disposition` (Issue #6277).
+Direct routing and default layer escalation emit this form. Consumers should
+also accept a document with only `exit_code` and `verdict`. Dry runs, early
+validation exits and some completed escalation runs emit this shorter form.
+For example, `--no-auto-layers --adaptive-rules` can finish routing and emit
+only `{"exit_code":0,"verdict":"success"}`. A run killed by `--timeout`
+prints no document.
 
-The document also carries a `grid` object -- the routing grid the run
+The detailed document also carries a `grid` object -- the routing grid the run
 actually built (Issue #6875):
 
 | Key | Meaning |
@@ -194,17 +195,17 @@ The board is saved but not verified, so run `kct check` on it before
 manufacturing. It only ever replaces a would-be exit 0 (Issue #6273; see the
 [`kct route` exit-code ladder](cli.md#kct-route-ladder)).
 
-**Named exception to the path-invariant document above (Issue #10049).** On
-exit 3, the single-attempt path (`--layers N` or `--no-auto-layers`) adds
-`"failure_reason": "post_route_drc"` to `summary` when all requested nets
-routed, the saved board passed the connectivity check, and post-route DRC
-violations are the sole failure. `summary.verdict` is `"failed"`. A consumer
-that finishes the copper can run DRC again on the final board. The default
-`--auto-layers` escalation path does not emit this key yet (tracked in
-Issue #10057), even when the same condition holds, so a missing
-`summary.failure_reason` does not mean the failure was not DRC-only: do not
-treat absence as a negative signal. On the single-attempt path, other exit-3
-causes omit the key.
+On a direct routing attempt with all escalation disabled (for example,
+`--layers 2` alone), `summary.failure_reason` is `"post_route_drc"` when
+all requested nets routed, the saved board passed the connectivity check,
+and post-route DRC is the sole failure. The command exits 3 and
+`summary.verdict` is `"failed"`. Other exit-3 causes omit the key (Issue #10049).
+
+With default layer escalation, fully routed copper with known post-route DRC
+errors can exit 0 with `summary.verdict` set to `"success"` and no
+`failure_reason` (Issue #10057). Treat both `summary` and the reason as
+optional. When a clean board is required, run
+`kct check <routed.kicad_pcb> --drc-only` on the saved board after any final copper edits.
 
 Every default route also builds a report-only `RoutingPlan` (tile-level
 demand/capacity/overflow from the tile-based global-routing pass) written
