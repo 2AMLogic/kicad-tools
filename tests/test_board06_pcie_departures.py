@@ -439,3 +439,35 @@ def test_receiver_skips_an_ignored_authored_maximum_width(tmp_path, repair):
     before = board.read_bytes()
     assert repair(board, rules) == 0
     assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("layer", "net", "bound", "limit", "expected"),
+    [
+        ("F.Cu", "PCIE_RX+", "max", "0.1mm + 0.1mm", 0),
+        ("F.Cu", "PCIE_RX+", "min", "0.1mm + 0.15mm", 0),
+        ("B.Cu", "PCIE_RX+", "max", "0.1mm + 0.1mm", 2),
+        ("F.Cu", "PCIE_TX+", "max", "0.1mm + 0.1mm", 2),
+    ],
+)
+def test_receiver_checks_active_width_expression_after_ignored_rule(
+    tmp_path, repair, layer, net, bound, limit, expected
+):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    _add_area(board, _rule_area("J3 connector exit", 9.3, 9.8, 9.4, 9.9, tracks="allowed"))
+    area = "A.intersectsArea('J3 connector exit')"
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "Ignored narrow width" (severity ignore) (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+' && {area}")
+  (constraint track_width (max 0.2mm)))
+(rule "Active width" (layer "{layer}")
+  (condition "A.NetName == '{net}' && {area}")
+  (constraint track_width ({bound} "{limit}")))
+"""
+    )
+    before = board.read_bytes()
+    assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
+    if expected == 0:
+        assert board.read_bytes() == before
