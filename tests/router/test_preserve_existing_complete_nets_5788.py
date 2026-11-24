@@ -35,12 +35,13 @@ What is pinned here
    exactly that, and the fix must not quietly turn it into a no-op.
 5. The detector itself, against board 06's real input: exactly the eight LVDS
    nets are reported complete.
-6. End to end on board 06a (``slow``): every one of the 64 pre-routed LVDS
-   segments survives.
+6. End to end on board 06a (``slow``): every pre-routed segment on each of the
+   eight LVDS nets survives.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,7 @@ _BOARD_06A = (
     / "output"
     / "diffpair_test.kicad_pcb"
 )
+_LVDS_NETS = [f"LVDS{channel}_{leg}" for channel in range(1, 5) for leg in ("N", "P")]
 
 
 def _seg_key(seg) -> tuple:
@@ -322,21 +324,12 @@ class TestBoard06a:
         the eight open ones.
         """
         connected = fully_connected_nets(_BOARD_06A)
-        assert connected == [
-            "LVDS1_N",
-            "LVDS1_P",
-            "LVDS2_N",
-            "LVDS2_P",
-            "LVDS3_N",
-            "LVDS3_P",
-            "LVDS4_N",
-            "LVDS4_P",
-        ]
+        assert connected == _LVDS_NETS
 
     @pytest.mark.slow
     @pytest.mark.integration
-    def test_all_64_lvds_segments_survive(self, tmp_path):
-        """End to end: ``kct route --preserve-existing`` keeps 64/64 LVDS segments.
+    def test_all_pre_routed_lvds_segments_survive(self, tmp_path):
+        """End to end: ``kct route --preserve-existing`` keeps the input LVDS geometry.
 
         Marked ``slow`` (nightly): a full board 06 route is ~25 s with the C++
         backend built and considerably longer without it, which does not fit the
@@ -345,11 +338,12 @@ class TestBoard06a:
         """
         board = _BOARD_06A.read_text()
         orig = parse_segments(board)
-        lvds = sorted(n for n in orig if n.startswith("LVDS"))
-        assert sum(len(orig[n]) for n in lvds) == 64, (
-            "board 06's input no longer carries the 64 pre-routed LVDS segments "
-            "this regression test is written against"
-        )
+        lvds = {
+            net: Counter(map(_seg_key, segments))
+            for net, segments in orig.items()
+            if net.startswith("LVDS") and segments
+        }
+        assert sorted(lvds) == _LVDS_NETS, "expected pre-routed copper on all eight LVDS nets"
 
         out_path = tmp_path / "out.kicad_pcb"
         route_main(
@@ -364,11 +358,9 @@ class TestBoard06a:
         )
         out = parse_segments(out_path.read_text())
 
-        survived = sum(len(_geom(orig[n]) & _geom(out.get(n))) for n in lvds)
-        assert survived == 64, (
-            f"only {survived}/64 pre-routed LVDS segments survived "
-            "--preserve-existing (issue #5788)"
-        )
+        for net, original in lvds.items():
+            missing = original - Counter(map(_seg_key, out.get(net, ())))
+            assert not missing, f"{net} lost {missing.total()} pre-routed segment(s): {missing}"
         # The plane vias the generator placed survive too (the flag's original
         # #3155 promise), and the open LVTTL nets are the ones that gained copper.
         out_vias = parse_vias(out_path.read_text())
