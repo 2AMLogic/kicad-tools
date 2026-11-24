@@ -633,8 +633,9 @@ NOTES: dict[int, str] = {
         "applies and the HV `max()` can only tighten from here. **Not "
         "measured**: `Grid3D::pairwise_required_clearance` "
         "(`grid.cpp:751`) is dormant until `set_pairwise_domains` installs a "
-        "domain matrix, so it would return a meaningless 0.0 -- it needs an HV "
-        "corpus (Phase 2)."
+        "domain matrix, so on this corpus it would return a meaningless 0.0. "
+        "The named `hv-pair-matrix-coupon` fixture measures it with the "
+        "matrix installed and dormant (see Named fixtures; Issue #10048)."
     ),
     15: (
         "`VectorCollisionChecker`, which delegates to `GridCollisionChecker` "
@@ -999,9 +1000,10 @@ CLASSIFICATIONS: dict[int, Classification] = {
             "path would miss. The measurement is therefore a lower bound on "
             "strictness, never a claim that the gate is wrong. The matched-rule "
             "control in `test_corpus.py` widens one pair's requirement and shows "
-            "the same board then reporting it. Owned elsewhere: the HV "
-            "domain-matrix oracle, and `Grid3D::pairwise_required_clearance`, "
-            "which is dormant until a domain matrix is installed."
+            "the same board then reporting it. Measured elsewhere: the HV "
+            "domain-matrix oracle row is the named `hv-pair-matrix-coupon` fixture "
+            "(Named fixtures; Issue #10048), since `Grid3D::pairwise_required_clearance` "
+            "is dormant until a domain matrix is installed."
         ),
     ),
     19: Classification(
@@ -1883,6 +1885,50 @@ def render_document(
         "| `roundrect-corner-gap` | clean (0.22 mm to the exact outline) | "
         "the router's rectangle-bounded pad model **rejects** (0.1164 mm to "
         "the bounding rectangle); `kct check`'s polygon model **accepts** |",
+        "",
+        "### Group 14 domain-matrix coupon (`hv-pair-matrix-coupon`)",
+        "",
+        "Issue [#10048](https://github.com/2AMLogic/kicad-tools/issues/10048), "
+        "acceptance item P2c of #5509. The generated corpus keeps every net at "
+        "0 V, so group 14's C++ matrix is dormant there; this named, "
+        "rule-driven fixture is the row that exercises it. It is committed as "
+        "`hv-pair-matrix-coupon-seed10048.kicad_pcb` + `.kicad_pro` + "
+        "`.kicad_dru` and regenerated with the other fixtures. Eight pairs of "
+        "parallel 0.200 mm F.Cu tracks, project floor 0.200 mm, four authored "
+        "symmetric pair rules in the sibling `.kicad_dru`. The oracle copies "
+        "that rule file into its scratch directory for both fill states -- "
+        "without it kicad-cli reports 2 of the 4 failing pairs. It sits outside "
+        "`NAMED_FIXTURES` because those tests assume one scalar-rule pair per "
+        "board.",
+        "",
+        "| pair | potentials | edge gap, mm | required, mm | kicad-cli (as-is = refilled) "
+        "| C++ validator, matrix installed (both insertion orders) "
+        "| C++ validator, matrix dormant | Python board widening pass "
+        "| Python scalar commit validator |",
+        "|---|---|---|---|---|---|---|---|---|",
+        "| P1 | 150 V / 0 V | 0.700 | 1.600 | **violation** | **reject** | accept "
+        "| **reports** (0.700 / 1.600) | accept |",
+        "| P2 | 150 V / 0 V | 1.800 | 1.600 | clear | accept | accept | clean | accept |",
+        "| P3 | +150 V / -150 V | 3.000 | 3.200 | **violation** | **reject** | accept "
+        "| **reports** (3.000 / 3.200) | accept |",
+        "| P4 | +150 V / -150 V | 3.400 | 3.200 | clear | accept | accept | clean | accept |",
+        "| P5 | 150 V / 150 V | 0.150 | 0.200 | **violation** | **reject** | **reject** "
+        "| skipped (at the floor) | **reject** |",
+        "| P6 | 150 V / 150 V | 0.700 | 0.200 | clear | accept | accept | clean | accept |",
+        "| P7 | 0 V / 0 V | 0.100 | 0.200 | **violation** | **reject** | **reject** "
+        "| skipped (at the floor) | **reject** |",
+        "| P8 | 0 V / 0 V | 0.300 | 0.200 | clear | accept | accept | clean | accept |",
+        "",
+        "The two Python passes cover **different questions**: the board-level "
+        "widening pass reports only pairs whose requirement exceeds the scalar "
+        "floor (P1, P3), the scalar commit validator reports only pairs that "
+        "fail the floor (P5, P7), and the C++ validator answers both once the "
+        "matrix is installed. Neither Python pass alone covers all four "
+        "failures. With the matrix dormant the C++ validator is the scalar "
+        "gate: P1 and P3 are accepted. The two insertion orders (which track "
+        "of a pair is existing copper) give the same pair set. Calibration "
+        "only: no clearance value, creepage rule or production behaviour "
+        "changed, and group 14 stays advisory.",
         "",
         "## Scope and known gaps",
         "",

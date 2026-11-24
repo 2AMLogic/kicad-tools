@@ -1,0 +1,13 @@
+(version 1)
+(rule "hv_150v_to_0v"
+  (condition "(A.NetName == 'P1A' && B.NetName == 'P1B') || (A.NetName == 'P1B' && B.NetName == 'P1A') || (A.NetName == 'P2A' && B.NetName == 'P2B') || (A.NetName == 'P2B' && B.NetName == 'P2A')")
+  (constraint clearance (min 1.600mm)))
+(rule "hv_plus150v_to_minus150v"
+  (condition "(A.NetName == 'P3A' && B.NetName == 'P3B') || (A.NetName == 'P3B' && B.NetName == 'P3A') || (A.NetName == 'P4A' && B.NetName == 'P4B') || (A.NetName == 'P4B' && B.NetName == 'P4A')")
+  (constraint clearance (min 3.200mm)))
+(rule "hv_150v_to_150v"
+  (condition "(A.NetName == 'P5A' && B.NetName == 'P5B') || (A.NetName == 'P5B' && B.NetName == 'P5A') || (A.NetName == 'P6A' && B.NetName == 'P6B') || (A.NetName == 'P6B' && B.NetName == 'P6A')")
+  (constraint clearance (min 0.200mm)))
+(rule "hv_0v_to_0v"
+  (condition "(A.NetName == 'P7A' && B.NetName == 'P7B') || (A.NetName == 'P7B' && B.NetName == 'P7A') || (A.NetName == 'P8A' && B.NetName == 'P8B') || (A.NetName == 'P8B' && B.NetName == 'P8A')")
+  (constraint clearance (min 0.200mm)))
