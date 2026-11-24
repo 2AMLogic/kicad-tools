@@ -332,7 +332,7 @@ def test_foreign_save_at_silk_write_boundary_still_fails_named_stackup(tmp_path,
 
 
 @pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
-@pytest.mark.parametrize("when", ["before_read", "before_publish", "during_publish"])
+@pytest.mark.parametrize("when", ["before_read", "before_publish", "during_publish", "open_handle"])
 def test_silk_preserves_concurrent_drawing_save(tmp_path, monkeypatch, when):
     from kicad_tools.core import atomic_write
     from kicad_tools.drc import repair_silkscreen
@@ -360,6 +360,17 @@ def test_silk_preserves_concurrent_drawing_save(tmp_path, monkeypatch, when):
             return real_rename(source, target)
 
         monkeypatch.setattr(Path, "rename", save_before_rename)
+    elif when == "open_handle":
+        real_link = atomic_write.os.link
+
+        def save_through_open_handle(source, target, **kwargs):
+            # An editor that kept the original file open writes into the
+            # displaced inode after it was verified, just before the link.
+            if target == path and Path(source).name == "repaired":
+                (Path(source).parent / "original").write_bytes(edited)
+            return real_link(source, target, **kwargs)
+
+        monkeypatch.setattr(atomic_write.os, "link", save_through_open_handle)
     else:
         real_link = atomic_write.os.link
 

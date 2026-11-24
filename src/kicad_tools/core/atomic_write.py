@@ -63,6 +63,14 @@ def _publish_checked(
             if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
                 raise SourceChangedError("PCB changed during manufacturing export")
             os.link(repaired, path)
+            # A writer holding the original file open (not re-opening the
+            # pathname) writes into the displaced inode, which the link above
+            # does not see. Re-verify it now: if it changed, that save is
+            # the newer drawing, so give it its name back instead of deleting.
+            if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
+                if os.path.samestat(os.lstat(path), os.lstat(repaired)):
+                    path.unlink()
+                raise SourceChangedError("PCB changed during manufacturing export")
         except BaseException as exc:
             try:
                 os.link(original, path, follow_symlinks=False)
@@ -96,6 +104,10 @@ def atomic_write_text(
     a hard link that fails if another writer takes the name. The path is
     briefly vacant. An interruption in that interval leaves the displaced
     board in ``.<filename>.<random>/original`` for recovery.
+    After linking, the displaced file is re-verified: a save through a
+    handle that was already open on it fails the call and gets the live
+    name back. A write landing after that re-check, before the displaced
+    file is unlinked, is not detectable.
 
     Without a digest, use the ordinary atomic replacement described below.
 
