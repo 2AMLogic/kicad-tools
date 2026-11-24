@@ -14,8 +14,71 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-24
+
+- **Issue #10046** (closed): Document the measured Board 06 seed-42 backend results in the fixture README
+- **Issue #10036** (closed): readiness: publish-time and pre-candidate concurrency guards still raise path-less blockers
+- **Issue #10035** (closed): Search-path via-relocate test asserts nothing about added connections (vacuous loop)
+- **Issue #9989** (closed): Clear Board 06 U4 reset and USB-C configuration-channel pad departures in the nine-pair recipe
+- **Issue #9892** (closed): Board 07: reconcile the seed-42 recipe and reviewed release under the manufacturing gate
+- **PR #10047**: docs(board06): record the measured seed-42 backend results
+- **PR #10045**: fix: preserve routed trace angles during verified mask repair
+- **PR #10044**: docs(board05): record the seed-42 copper cleanup results
+- **PR #10043**: fix: name changed paths in readiness concurrent-edit guards
+- **PR #10042**: test: exercise added via connections through the mask repair search
+- **PR #9994**: fix(board06): rebuild the sideband pad departures as straight mask-clean necks
+- **PR #9993**: fix(board07): clear fixture pad exits and verify the finished manufacturing bundle
+- **PR #9988**: fix(board05): de-slot the front pour between U2/U3 lead escapes
+- **PR #9977**: perf(router): scope the known-failure search witness to reachable copper
+
 ### 2026-11-23
 
+- **Issue #10038** (closed): Cover the project order thickness when the CAD declarations agree
+- **Issue #10037** (closed): Stale comment: sheet-pin `(at ...)` positions are absolute, not sheet-relative
+- **Issue #10032** (closed): Board 06 Python relief routing: select a TX2 path that leaves its displaced partner routable
+- **Issue #10026** (closed): Ecosystem registry drift: upstream license/rename/archive change
+- **Issue #10021** (closed): mask_to_copper is a blocking UNKNOWN on KiCad 10.0.8: the plot profile only covers 10.0.5/10.0.6
+- **Issue #10020** (closed): kct creepage stops when header and stackup thickness differ by 5 um; allow the order thickness to be declared in the project file
+- **Issue #10015** (closed): pcb reinforce: default --hv-threshold lets an anchor through that kct creepage fails on the same voltage map
+- **Issue #10014** (closed): test flake: lint-gate SIGTERM subprocess times out waiting for a new output in bulk CI
+- **Issue #10013** (closed): kct build-native in a consumer install cannot build the DRC/placement extensions, and --check output differs from what the skills expect
+- **Issue #10011** (closed): kct readiness --generate blocks its own first run when its refill re-saves the board
+- **Issue #10010** (closed): Footprint.layer side change leaves embedded zones on the same inner copper layer
+- **Issue #10007** (closed): Board 06 skips its first pour repair when stitching writes named segment and via nets
+- **Issue #10003** (closed): Board 06 route-only CI leaves 12 silkscreen findings on the nine-pair fixture
+- **Issue #9995** (closed): test flake: route silk opt-out regression times out in the native post-route connectivity check
+- **Issue #9987** (closed): Keep the Board 06 JLCPCB Gerbers and project ZIP in sync with the zone clearances added during export
+- **Issue #9985** (closed): Make the native zone-fill probe controls reliable in CI and count saved opens from KiCad’s report
+- **Issue #9973** (closed): Harden the entry-copper checkpoint/resume regression's vacuity guards
+- **Issue #9972** (closed): kct zones fill --output: thermal_asymmetry warning names the discarded temp candidate, not the output board
+- **Issue #9966** (closed): Add a negative control for the segment arm of reset_escape's direct-contact guard
+- **Issue #9958** (closed): fix-drc aborts the mask repair batch while undoing two nudges that share a track endpoint
+- **Issue #8988** (closed): sync --analyze names power-symbol and sheet-pin nets differently from KiCad
+- **PR #10041**: test: cover purchase thickness when the CAD declarations agree
+- **PR #10040**: docs: clarify the page coordinates of schematic sheet pins
+- **PR #10034**: fix(router): reserve partner drill sites in a bounded relief candidate
+- **PR #10033**: docs: record board 05 seed-42 gate re-measure showing five same-net copper gaps
+- **PR #10031**: fix(sync): resolve sheet-pin nets and literal slashes in PCB names
+- **PR #10029**: docs: update the OpenKonnect link after its repository transfer
+- **PR #10028**: test: diagnose and clean up stalled lint-gate signal drivers
+- **PR #10027**: fix: qualify KiCad 10.0.8 for native mask-to-copper checks
+- **PR #10025**: feat: use the project purchase thickness for cross-face creepage
+- **PR #10024**: fix: mirror placed footprint zones through the board copper stack
+- **PR #10023**: fix: identify concurrent edits that block readiness publication
+- **PR #10019**: fix: explain optional native backends in installed packages
+- **PR #10018**: fix(reinforce): apply creepage requirement to sub-threshold voltage-map pairs
+- **PR #10008**: fix(board06): resolve stitched net references in pour repair
+- **PR #10004**: fix(board06): finish route-only silkscreen before the regression gate
+- **PR #10000**: chore(deps): bump the uv-minor-patch group across 1 directory with 4 updates
+- **PR #9998**: fix: search alternate via displacements in the verified mask-copper repair
+- **PR #9996**: test: bound the silk opt-out routing regression
+- **PR #9992**: fix: re-bind stackup provenance to the silk pass's written bytes
+- **PR #9991**: fix: refill saved zone fills when export changes the rules they were filled under
+- **PR #9986**: test: count KiCad 10 unconnected_items and fit the zone-fill probe controls into the zones budget
+- **PR #9983**: fix: defer pass-through nudges on already-dragged conductors and undo mask moves in reverse order
+- **PR #9982**: fix(zones): name the published board in the thermal relief hint
+- **PR #9981**: test(board06): cover a track-only contact on the reset escape
+- **PR #9978**: test: pin net B's blocker and seed tracks in the entry-copper checkpoint regression
 - **PR #10006**: test: bound the input pad-overlap CLI regression
 - **Issue #10005** (closed): test flake: input pad-overlap CLI test times out in the post-route connectivity check
 - **PR #9976**: fix: clear the DRC report path before every kicad-cli launch
