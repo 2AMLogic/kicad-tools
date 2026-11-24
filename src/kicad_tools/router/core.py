@@ -18784,15 +18784,17 @@ class Autorouter:
                     origin_y + (np.arange(i0, i1) + 0.5) * cell,
                 )
 
-            def segment_mask(seg: Any, radius: float, reach_extra: float = 0.0):
-                # ``reach_extra`` widens the distance test (not the subview)
-                # so a cell counts when ANY point of it can meet the envelope.
+            half_diagonal = cell / math.sqrt(2)
+
+            def segment_mask(seg: Any, radius: float):
+                if radius <= 0:
+                    return None
                 box = subview(
                     min(seg.x1, seg.x2),
                     max(seg.x1, seg.x2),
                     min(seg.y1, seg.y2),
                     max(seg.y1, seg.y2),
-                    radius + reach_extra,
+                    radius,
                 )
                 if box is None:
                     return None
@@ -18807,15 +18809,17 @@ class Autorouter:
                         ((mesh_x - seg.x1) * dx + (mesh_y - seg.y1) * dy) / length2, 0.0, 1.0
                     )
                     dist = np.hypot(mesh_x - seg.x1 - t * dx, mesh_y - seg.y1 - t * dy)
-                return i0, i1, j0, j1, dist <= radius + reach_extra
+                return i0, i1, j0, j1, dist <= radius
 
-            def disc_mask(x: float, y: float, radius: float, reach_extra: float = 0.0):
-                box = subview(x, x, y, y, radius + reach_extra)
+            def disc_mask(x: float, y: float, radius: float):
+                if radius <= 0:
+                    return None
+                box = subview(x, x, y, y, radius)
                 if box is None:
                     return None
                 i0, i1, j0, j1, gx, gy = box
                 mesh_x, mesh_y = np.meshgrid(gx, gy)
-                return i0, i1, j0, j1, np.hypot(mesh_x - x, mesh_y - y) <= radius + reach_extra
+                return i0, i1, j0, j1, np.hypot(mesh_x - x, mesh_y - y) <= radius
 
             def pad_mask(pad: Pad, clearance: float):
                 from shapely import contains_xy  # type: ignore[import-untyped]
@@ -18837,7 +18841,7 @@ class Autorouter:
                     return None
                 # A search may pass through a corner of a coarse cell. Mark it
                 # blocked only when the whole cell lies inside the pad's clearance.
-                interior = copper.buffer(clearance - cell / math.sqrt(2))
+                interior = copper.buffer(clearance - half_diagonal)
                 if interior.is_empty:
                     return None
                 x_lo, y_lo, x_hi, y_hi = interior.bounds
@@ -18871,12 +18875,13 @@ class Autorouter:
                             int(failed_net), int(net), route.authored_clearance or 0.0
                         ),
                     )
+                    # A center inside the clearance envelope can still have a
+                    # routable corner. Only block whole cells, as for pads.
                     for s in route.segments:
-                        paint(
-                            blocked, layer_index(s.layer), segment_mask(s, s.width / 2 + required)
-                        )
+                        radius = s.width / 2 + required - half_diagonal
+                        paint(blocked, layer_index(s.layer), segment_mask(s, radius))
                     for v in route.vias:
-                        radius = v.diameter / 2 + required
+                        radius = v.diameter / 2 + required - half_diagonal
                         for li in {layer_index(l) for l in v.drilled_layers}:
                             paint(blocked, li, disc_mask(v.x, v.y, radius))
             for net, keys in self.nets.items():
@@ -18939,17 +18944,15 @@ class Autorouter:
                 # Conservative membership: a cell is hit when any point of it
                 # (not just its center) can lie in the envelope, so a thin
                 # segment or via between sample centers is still retained.
-                half_diag = cell / math.sqrt(2)
                 if isinstance(geometry, Via):
                     raster = disc_mask(
                         geometry.x,
                         geometry.y,
-                        geometry.diameter / 2 + float(clearance_mm),
-                        half_diag,
+                        geometry.diameter / 2 + float(clearance_mm) + half_diagonal,
                     )
                 else:
                     raster = segment_mask(
-                        geometry, geometry.width / 2 + float(clearance_mm), half_diag
+                        geometry, geometry.width / 2 + float(clearance_mm) + half_diagonal
                     )
                 if raster is None:
                     return False

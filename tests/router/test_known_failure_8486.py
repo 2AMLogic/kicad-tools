@@ -793,12 +793,7 @@ def test_detour_budget_follows_the_replacement_owners_clearance(
         assert 0 < gap < 2.0
 
 
-@pytest.mark.requires_router_cpp
-@pytest.mark.parametrize("gate_x", [15.0, 15.3], ids=["between-centers", "near-center"])
-def test_thin_gate_between_coarse_cell_centers_stays_in_the_witness(gate_x):
-    """A thin blocker whose clearance envelope falls between coarse sample
-    centers (wide board default trace, narrow failed net) must stay in the
-    witness, so opening it restores the full budget on the first retry."""
+def _thin_gate_board(gate_x):
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment, Via
     from kicad_tools.router.rules import DesignRules, NetClassRouting
@@ -823,6 +818,10 @@ def test_thin_gate_between_coarse_cell_centers_stays_in_the_witness(gate_x):
     for route in (anchor, gate):
         router.routes.append(route)
         router.grid.mark_route(route)
+    return router, gate
+
+
+def _assert_full_retry_after_opening_gate(router, gate):
     guard = RipupCycleGuard()
     with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
         for it in (1, 2, 3):
@@ -837,6 +836,42 @@ def test_thin_gate_between_coarse_cell_centers_stays_in_the_witness(gate_x):
         assert run.call_args.kwargs["per_net_timeout"] == 30.0
         assert _net_pad_pairs(router, 1, routed) == {frozenset({0, 1})}
         assert 1 not in guard.capped_streak
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize("gate_x", [15.0, 15.3], ids=["between-centers", "near-center"])
+def test_thin_gate_between_coarse_cell_centers_stays_in_the_witness(gate_x):
+    router, gate = _thin_gate_board(gate_x)
+    _assert_full_retry_after_opening_gate(router, gate)
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize("obstacle", ["tracks", "vias"])
+@pytest.mark.parametrize("shift", [0.0, 0.375], ids=["between-centers", "at-centers"])
+def test_first_retry_reaches_gate_through_subcell_gaps(obstacle, shift):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment, Via
+
+    router, gate = _thin_gate_board(15.0)
+    # Both passages have a 0.70 mm copper-edge gap. With zero shift, every
+    # coarse cell center in this row is inside a foreign clearance envelope.
+    y = 13.875
+    layers = (Layer.F_CU, Layer.B_CU)
+    barrier = Route(98, "crossbar")
+    if obstacle == "tracks":
+        spans = [(0, 9.75 + shift), (11.25 + shift, 20.25 + shift), (21.75 + shift, 30)]
+        barrier.segments = [
+            Segment(left, y, right, y, 0.80, layer, 98) for left, right in spans for layer in layers
+        ]
+    else:
+        barrier.vias = [
+            Via(min(30.0, 0.75 * i + shift), y, 0.20, 0.80, layers, 98)
+            for i in range(41)
+            if i not in (14, 28)
+        ]
+    router.routes.append(barrier)
+    router.grid.mark_route(barrier)
+    _assert_full_retry_after_opening_gate(router, gate)
 
 
 @pytest.mark.parametrize("copper", ["segments", "vias"])
