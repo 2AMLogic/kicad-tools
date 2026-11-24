@@ -18724,7 +18724,8 @@ class Autorouter:
                     partner == name,
                     zone_layers,
                 )
-                required = max(clearance.required_mm, authored)
+                # The search can place a via beside a foreign trace or via.
+                required = max(clearance.required_mm, authored, self.rules.via_clearance)
                 for s in route.segments:
                     start, end = sorted(((s.x1, s.y1), (s.x2, s.y2)))
                     item = ("segment", s.layer, start, end, s.width, clearance_key, required)
@@ -18998,10 +18999,14 @@ class Autorouter:
                 # (not just its center) can lie in the envelope, so a thin
                 # segment or via between sample centers is still retained.
                 if isinstance(geometry, Via):
+                    # A drill across the coarse boundary can still block a
+                    # layer change inside it. Keep it in the witness even if
+                    # its copper clears every reachable cell.
+                    drill_distance = (geometry.drill + rules.via_drill) / 2 + rules.min_hole_to_hole
                     raster = disc_mask(
                         geometry.x,
                         geometry.y,
-                        geometry.diameter / 2 + float(clearance_mm) + half_diagonal,
+                        max(geometry.diameter / 2 + clearance_mm, drill_distance) + half_diagonal,
                     )
                 else:
                     raster = segment_mask(

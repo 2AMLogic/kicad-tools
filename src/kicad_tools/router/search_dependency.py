@@ -38,7 +38,8 @@ class SearchDependency:
     ``mask[i, j]`` covers grid cells ``y in [i*block, (i+1)*block)`` and
     ``x in [j*block, (j+1)*block)``.  ``margin_mm`` is the routing copper's
     half-extent plus one grid step of slack, added to every shape's
-    clearance envelope before it is tested against the mask.
+    copper clearance envelope. For a foreign via, ``drill_margin_mm`` is the
+    routing drill radius plus the board's hole-to-hole clearance and grid slack.
     """
 
     mask: np.ndarray
@@ -47,6 +48,7 @@ class SearchDependency:
     origin_x: float
     origin_y: float
     margin_mm: float
+    drill_margin_mm: float = 0.0
 
     @property
     def cell_mm(self) -> float:
@@ -72,6 +74,7 @@ class SearchDependency:
             self.origin_x,
             self.origin_y,
             max(self.margin_mm, other.margin_mm),
+            max(self.drill_margin_mm, other.drill_margin_mm),
         )
 
     def touches(self, item: Any) -> bool:
@@ -84,16 +87,19 @@ class SearchDependency:
         """
         try:
             kind = item[0]
+            copper_margin = float(item[-1]) + self.margin_mm
             if kind == "segment":
                 (x1, y1), (x2, y2) = item[2], item[3]
-                radius = float(item[4]) / 2.0
+                radius = float(item[4]) / 2.0 + copper_margin
             elif kind == "via":
                 x1 = x2 = float(item[1])
                 y1 = y2 = float(item[2])
-                radius = float(item[3]) / 2.0
+                radius = max(
+                    float(item[3]) / 2.0 + copper_margin,
+                    float(item[4]) / 2.0 + self.drill_margin_mm,
+                )
             else:
                 return True
-            radius += float(item[-1]) + self.margin_mm
             return self._envelope_hits(float(x1), float(y1), float(x2), float(y2), radius)
         except (TypeError, ValueError, IndexError):
             return True

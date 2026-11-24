@@ -5170,8 +5170,15 @@ class CppPathfinder:
             return None
         grid = self._grid
         block = max(1, int(round(self.DEPENDENCY_BLOCK_MM / grid.resolution)))
+        drill_reach = self._rules.via_drill / 2 + self._rules.min_hole_to_hole
         return SearchDependency(
-            mask, block, float(grid.resolution), float(grid.origin_x), float(grid.origin_y), margin
+            mask,
+            block,
+            float(grid.resolution),
+            float(grid.origin_x),
+            float(grid.origin_y),
+            margin,
+            drill_margin_mm=drill_reach + grid.resolution,
         )
 
     def reset_fallback_for_net(self, net: int) -> None:

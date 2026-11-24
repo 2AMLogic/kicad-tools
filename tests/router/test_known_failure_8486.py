@@ -1325,6 +1325,19 @@ def test_search_witness_ignores_copper_sealed_behind_a_full_wall():
     assert snapshot(10.0, with_wall=False) != base
 
 
+def test_a_via_behind_the_wall_stays_in_scope_when_its_drill_rule_reaches_across():
+    from kicad_tools.router.primitives import Layer, Route, Via
+
+    router = _three_pad_board(gap=False, width=36.0)
+    wall = _side_wall(120, 30.0)
+    via = Via(33.0, 10.0, 0.25, 0.50, (Layer.F_CU, Layer.B_CU), 122)
+    routes = {120: [wall], 122: [Route(122, "N122", [], [via])]}
+    for gap, expected in ((0.50, False), (4.10, True)):
+        router.rules.min_hole_to_hole = gap
+        witness = router._search_copper_obstacles(1, routes)
+        assert any(item[:3] == ("via", via.x, via.y) for item in witness) is expected
+
+
 @pytest.mark.parametrize(("attribute", "value"), [("height", 0), ("origin_x", 10)])
 def test_unknown_or_partial_board_extent_keeps_the_board_wide_witness(
     monkeypatch, attribute, value
@@ -1795,3 +1808,64 @@ def test_churn_the_search_never_read_keeps_the_backoff_while_a_read_change_resto
         30.0,
     ]
     assert [it for it, net, _cap in guard.backoffs if net == 1] == [3, 4]
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize("remove_near", [True, False], ids=["obstructing-drill", "distant-drill"])
+def test_removing_a_drill_restores_the_budget_only_within_its_search_reach(remove_near):
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.primitives import Layer, Route, Via
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(
+        trace_width=0.15,
+        trace_clearance=0.13,
+        via_diameter=0.50,
+        via_drill=0.25,
+        via_clearance=0.13,
+        min_hole_to_hole=4.10,
+        grid_resolution=0.10,
+    )
+    router = Autorouter(width=15, height=8, rules=rules, physics_enabled=False, adaptive_grid=False)
+    _limit_native_search(router, 360)
+
+    def pad(number, x, y, width, height, net):
+        return {
+            "number": str(number),
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "net": net,
+            "net_name": f"N{net}",
+        }
+
+    router.add_component("U", [pad(1, 4, 4, 0.4, 0.4, 1), pad(2, 10, 4, 0.4, 0.4, 1)])
+    # The inner pad can only escape the fixed SMD ring by changing layer.
+    router.add_component(
+        "RING",
+        [
+            pad(1, 2.6, 4, 0.4, 3.2, 20),
+            pad(2, 5.4, 4, 0.4, 3.2, 21),
+            pad(3, 4, 5.4, 3.2, 0.4, 22),
+            pad(4, 4, 2.6, 3.2, 0.4, 23),
+        ],
+    )
+    vias = [
+        Route(net, f"N{net}", [], [Via(x, 7, 0.25, 0.50, (Layer.F_CU, Layer.B_CU), net)])
+        for net, x in [(33, 4.0), (34, 13.5)]
+    ]
+    _commit_copper(router, vias)
+    guard = RipupCycleGuard()
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for iteration in (1, 2):
+            guard.begin_iteration(iteration, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, iteration)
+            assert run.call_args.kwargs["per_net_timeout"] == 30.0
+        _rip_copper(router, [vias[0] if remove_near else vias[1]])
+        guard.begin_iteration(3, {1: None})
+        routes = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 3)
+        assert bool(_net_pad_pairs(router, 1, routes)) is remove_near
+        assert run.call_args.kwargs["per_net_timeout"] == (
+            30.0 if remove_near else KNOWN_FAILURE_BACKOFF_FLOOR_S
+        )
