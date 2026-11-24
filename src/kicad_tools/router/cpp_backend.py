@@ -1643,6 +1643,10 @@ class CppPathfinder:
 
         # Lazy Python fallback router (constructed on first fallback)
         self._py_router: Router | None = None
+        # Issue #8486: search-dependency recording state (see
+        # ``begin_search_dependency``).
+        self._dependency_margin_mm: float | None = None
+        self._dependency_fallback_ran = False
         # Fallback statistics
         self._fallback_count: int = 0
         self._fallback_nets: list[str] = []
@@ -4925,6 +4929,10 @@ class CppPathfinder:
                     reason,
                 )
 
+        # Issue #8486: the Python A* reads cells the C++ search never did, so
+        # a recorded search dependency no longer describes this call.
+        self._dependency_fallback_ran = True
+
         # Lazy-construct the Python Router on first fallback
         if self._py_router is None:
             from .pathfinder import Router
@@ -5118,6 +5126,52 @@ class CppPathfinder:
             "(issue #6329)",
             net_name,
             detail,
+        )
+
+    #: Issue #8486: target edge (mm) of one coarse dependency block.
+    DEPENDENCY_BLOCK_MM = 0.25
+
+    def begin_search_dependency(self, margin_mm: float) -> bool:
+        """Start recording the cells the C++ searches that follow read.
+
+        ``margin_mm`` is the half-extent of the copper being routed (see
+        :class:`~kicad_tools.router.search_dependency.SearchDependency`).
+        Returns ``False`` on a stale extension without the recorder.
+        """
+        impl = self._impl
+        grid = self._grid
+        if not hasattr(impl, "dependency_begin") or not getattr(grid, "resolution", 0.0) > 0.0:
+            self._dependency_margin_mm = None
+            return False
+        block = max(1, int(round(self.DEPENDENCY_BLOCK_MM / grid.resolution)))
+        impl.dependency_begin(block)
+        self._dependency_margin_mm = float(margin_mm) + float(grid.resolution)
+        self._dependency_fallback_ran = False
+        return True
+
+    def collect_search_dependency(self):
+        """Stop recording; the :class:`SearchDependency` of the searches since
+        :meth:`begin_search_dependency`, or ``None`` when it is not a faithful
+        record (no recording, Python fallback ran, grid resized, nothing read).
+        """
+        margin = self._dependency_margin_mm
+        self._dependency_margin_mm = None
+        if margin is None:
+            return None
+        rows, cols, flat = self._impl.dependency_collect()
+        if self._dependency_fallback_ran or not flat or rows <= 0 or cols <= 0:
+            return None
+        import numpy as np
+
+        from .search_dependency import SearchDependency
+
+        mask = np.asarray(flat, dtype=np.uint8).reshape(rows, cols).astype(bool)
+        if not mask.any():
+            return None
+        grid = self._grid
+        block = max(1, int(round(self.DEPENDENCY_BLOCK_MM / grid.resolution)))
+        return SearchDependency(
+            mask, block, float(grid.resolution), float(grid.origin_x), float(grid.origin_y), margin
         )
 
     def reset_fallback_for_net(self, net: int) -> None:

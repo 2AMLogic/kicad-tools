@@ -1595,3 +1595,203 @@ def test_legality_rejected_worse_result_ratchets_the_entry():
     net1 = [r for r in router.routes if r.net == 1]
     assert all(r is stub1 or r is stub2 for r in net1)
     assert 1 in guard.capped_streak  # both no-progress searches still count
+
+
+# --- issue #8486: the search's dependency set ----------------------------------
+
+
+def _dependency(cells, *, block=2, resolution=0.1, margin=0.2, shape=(40, 40)):
+    """A ``SearchDependency`` whose mask holds the given ``(row, col)`` blocks."""
+    import numpy as np
+
+    from kicad_tools.router.search_dependency import SearchDependency
+
+    mask = np.zeros(shape, dtype=bool)
+    for i, j in cells:
+        mask[i, j] = True
+    return SearchDependency(mask, block, resolution, 0.0, 0.0, margin)
+
+
+def _seg_item(x1, y1, x2, y2, width=0.2, required=0.2):
+    return ("segment", "F.Cu", (x1, y1), (x2, y2), width, ("key",), required)
+
+
+def test_dependency_touches_only_shapes_whose_envelope_reaches_a_read_cell():
+    # One read block at rows/cols 10 -> x, y in [2.0, 2.2) with 0.2 mm blocks.
+    dep = _dependency([(10, 10)])
+    assert dep.touches(_seg_item(1.0, 2.1, 3.0, 2.1))  # crosses the block
+    assert dep.touches(_seg_item(2.6, 2.1, 3.0, 2.1))  # envelope (0.1+0.2+margin) reaches
+    assert not dep.touches(_seg_item(3.2, 2.1, 4.0, 2.1))  # clear of the envelope
+    assert not dep.touches(_seg_item(0.5, 0.5, 1.0, 0.5))
+    via = ("via", 2.1, 3.5, 0.8, 0.4, ("F.Cu", "B.Cu"), ("key",), 0.2)
+    assert not dep.touches(via)
+    assert dep.touches(("via", 2.1, 2.6, 0.8, 0.4, ("F.Cu", "B.Cu"), ("key",), 0.2))
+    # A larger required clearance widens the envelope; unknown shapes are kept.
+    assert dep.touches(_seg_item(3.2, 2.1, 4.0, 2.1, required=1.0))
+    assert dep.touches(("mystery",))
+    assert dep.touches(("segment", "F.Cu"))
+
+
+def test_dependency_union_and_incompatible_grids():
+    a, b = _dependency([(1, 1)]), _dependency([(30, 30)])
+    both = a.union(b)
+    assert both is not None and both.mask[1, 1] and both.mask[30, 30]
+    assert a.union(_dependency([(1, 1)], shape=(10, 10))) is None
+
+
+def _witness(*items, base=COPPER_A):
+    return ("copper", frozenset(items))
+
+
+NEAR_ITEM = _seg_item(2.0, 2.1, 3.0, 2.1)
+FAR_ITEM = _seg_item(30.0, 30.0, 31.0, 30.0)
+
+
+def _streak_with(g, dep, items, iterations=(1, 2), net=7):
+    for it in iterations:
+        g.begin_iteration(it, {net: _witness(*items)})
+        used = g.search_cap(net, it, 30.0)
+        g.note_search(net, it, used, used, routed=False, dependency=dep)
+
+
+def test_unread_copper_leaving_the_witness_keeps_the_backoff():
+    g = RipupCycleGuard()
+    dep = _dependency([(10, 10)])
+    _streak_with(g, dep, (NEAR_ITEM, FAR_ITEM))
+    # FAR_ITEM moved away: its envelope never met a cell the searches read.
+    g.begin_iteration(3, {7: _witness(NEAR_ITEM)})
+    assert g.search_cap(7, 3, 30.0) == 15.0
+    assert g.capped_streak[7][2] == 2
+
+
+def test_read_copper_leaving_the_witness_restores_the_full_budget():
+    g = RipupCycleGuard()
+    _streak_with(g, _dependency([(10, 10)]), (NEAR_ITEM, FAR_ITEM))
+    g.begin_iteration(3, {7: _witness(FAR_ITEM)})  # NEAR_ITEM was removed
+    assert g.search_cap(7, 3, 30.0) == 30.0
+    assert not g.backoffs
+
+
+def test_without_a_dependency_any_removal_restores_the_full_budget():
+    """Python-fallback or stale-extension searches record nothing: the
+    witness-only rule applies, exactly as before."""
+    g = RipupCycleGuard()
+    _streak_with(g, None, (NEAR_ITEM, FAR_ITEM))
+    g.begin_iteration(3, {7: _witness(NEAR_ITEM)})
+    assert g.search_cap(7, 3, 30.0) == 30.0
+
+
+def test_a_search_that_recorded_nothing_drops_the_streak_dependency():
+    g = RipupCycleGuard()
+    _streak_with(g, _dependency([(10, 10)]), (NEAR_ITEM, FAR_ITEM), iterations=(1,))
+    assert 7 in g.streak_dependency
+    g.begin_iteration(2, {7: _witness(NEAR_ITEM, FAR_ITEM)})
+    g.note_search(7, 2, 30.0, 30.0, routed=False, dependency=None)
+    assert 7 not in g.streak_dependency
+    g.begin_iteration(3, {7: _witness(NEAR_ITEM)})
+    assert g.search_cap(7, 3, 30.0) == 30.0
+
+
+def test_dependency_accumulates_over_the_streak_and_resets_on_route():
+    g = RipupCycleGuard()
+    big = {"shape": (200, 200)}
+    g.begin_iteration(1, {7: _witness(NEAR_ITEM, FAR_ITEM)})
+    g.note_search(7, 1, 30.0, 30.0, routed=False, dependency=_dependency([(10, 10)], **big))
+    g.begin_iteration(2, {7: _witness(NEAR_ITEM, FAR_ITEM)})
+    g.note_search(7, 2, 30.0, 30.0, routed=False, dependency=_dependency([(150, 152)], **big))
+    assert g.streak_dependency[7].mask[150, 152] and g.streak_dependency[7].mask[10, 10]
+    # FAR_ITEM sits in the second search's blocks: removing it is now a change.
+    g.begin_iteration(3, {7: _witness(NEAR_ITEM)})
+    assert g.search_cap(7, 3, 30.0) == 30.0
+    g.note_search(7, 3, 30.0, 1.0, routed=True)
+    assert 7 not in g.streak_dependency
+    g.forget_failure(7)
+
+
+def _limit_native_search(router, expansions):
+    """Give the native search a tuned expansion cap, as ``--deterministic-budget``
+    does: it fails at the cap without handing the net to the Python fallback,
+    the same way a wall-clock cap stop does."""
+    cpp = router.router
+    cpp._per_net_iterations = expansions
+    cpp._per_net_iteration_cap_active = True
+    cpp._effective_search_iterations = expansions
+
+
+@pytest.mark.requires_router_cpp
+def test_the_native_search_reports_the_cells_it_read():
+    router = _wall_board(gap=False)
+    _limit_native_search(router, 3000)
+    cpp = router.router
+    assert cpp.begin_search_dependency(0.2)
+    assert not router._route_net_negotiated(1, 1.0, per_net_timeout=30.0)
+    dep = cpp.collect_search_dependency()
+    assert dep is not None
+    ys, xs = dep.mask.nonzero()
+    # The capped search grew from the near pad toward the wall; it read neither
+    # the far side of the wall nor the top of the board.
+    assert xs.size and (xs * dep.cell_mm).max() < 15.5
+    assert dep.touches(_seg_item(6.5, 6.0, 7.5, 6.0))
+    assert not dep.touches(_seg_item(18.0, 18.5, 22.0, 18.5))
+    # Recording stopped: a second collect has nothing to report.
+    assert cpp.collect_search_dependency() is None
+
+
+@pytest.mark.requires_router_cpp
+def test_a_python_fallback_makes_the_recorded_dependency_unusable():
+    """An exhausted native search hands the net to the Python A*, which reads
+    cells the native one did not: no dependency is reported for it."""
+    router = _wall_board(gap=False)
+    cpp = router.router
+    assert cpp.begin_search_dependency(0.2)
+    assert not router._route_net_negotiated(1, 1.0, per_net_timeout=30.0)
+    assert cpp._dependency_fallback_ran
+    assert cpp.collect_search_dependency() is None
+
+
+def _far_track(y):
+    """Foreign copper right of the wall: reachable from the far pad, yet never
+    read by a search that starts on the near side and cannot cross the wall."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    return Route(122, "n122", segments=[Segment(17.0, y, 22.0, y, 0.20, Layer.F_CU, 122)], vias=[])
+
+
+@pytest.mark.requires_router_cpp
+def test_churn_the_search_never_read_keeps_the_backoff_while_a_read_change_restores_it():
+    """The six-net residual: reachable-but-unexamined copper changes between
+    iterations (the coarse reachable scope cannot ignore it).  Copper the
+    search read still restores the full budget at once."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _wall_board(gap=False)
+    _limit_native_search(router, 3000)
+    track = _far_track(18.0)
+    near = Route(50, "n50", segments=[Segment(8.0, 9.0, 11.0, 9.0, 0.25, Layer.F_CU, 50)], vias=[])
+    _commit_copper(router, [track, near])
+    guard = RipupCycleGuard()
+    caps = []
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for it in range(1, 5):
+            _rip_copper(router, [track])
+            track = _far_track(18.0 + 0.15 * it)
+            _commit_copper(router, [track])
+            guard.begin_iteration(it, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+            caps.append(run.call_args.kwargs["per_net_timeout"])
+        assert guard.streak_dependency[1] is not None
+        # Copper the failed searches read is removed: full budget immediately.
+        _rip_copper(router, [near])
+        guard.begin_iteration(5, {1: None})
+        assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 5)
+        caps.append(run.call_args.kwargs["per_net_timeout"])
+    assert caps == [
+        30.0,
+        30.0,
+        KNOWN_FAILURE_BACKOFF_FLOOR_S,
+        KNOWN_FAILURE_BACKOFF_FLOOR_S,
+        30.0,
+    ]
+    assert [it for it, net, _cap in guard.backoffs if net == 1] == [3, 4]
