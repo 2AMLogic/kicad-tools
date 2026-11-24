@@ -15,6 +15,8 @@ front branch and one inner-layer connection to its barrel. Move both barrels
 to the measured 45-degree exits together so their rings clear the mask (#9891).
 U3's PCIe receiver pair instead leaves both lands on their long axis. Its two
 barrels retain the project diameter and reconnect to the original inner trunks.
+Both moves must preserve the receiver's raw trace-length difference and keep
+its modeled propagation delay inside the board's PCIe skew budget.
 
 Every repair is guarded: the departure is derived from the actual pad and its
 connected copper, and anything locked, branched off the recognized shape, or
@@ -35,11 +37,14 @@ from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
 from kicad_tools.core.pcb_item_locks import BoardItemLocks
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.router.quantize import dogleg_points
+from kicad_tools.router.rules import net_class_map_from_path
 from kicad_tools.schema.pcb import PCB, Segment
 from kicad_tools.validate.connectivity import ConnectivityValidator
 from kicad_tools.validate.copper_contact import CopperContactGraph, build_copper_contact_graph
+from kicad_tools.validate.diffpair_skew import derive_pair_skews
 from kicad_tools.validate.mask_copper import default_request_for_manufacturer
 from kicad_tools.validate.mask_geometry import board_mask_margin, pad_mask_margin, pad_mask_shapes
+from kicad_tools.validate.rules.diffpair_length_skew import measured_skew_verdict
 from kicad_tools.validate.rules.impedance import ImpedanceRule
 
 XY = tuple[float, float]
@@ -492,6 +497,34 @@ def _rebuild_pair_branch(
     return len(after.components()) == 1 and contacts <= current and ends <= current_ends
 
 
+def _raw_trace_skew(pcb: PCB, escapes: tuple[_PairEscape, _PairEscape]) -> float:
+    # Only straight traces change. Retained arcs and via barrels cancel when
+    # comparing the signed difference before and after this candidate.
+    positive, negative = (
+        sum(dist(s.start, s.end) for s in pcb.segments if s.net_name == escape.net)
+        for escape in escapes
+    )
+    return positive - negative
+
+
+def _within_project_skew_budget(
+    pcb: PCB, path: Path, escapes: tuple[_PairEscape, _PairEscape]
+) -> bool:
+    # Board 06 writes this map beside the routed board and passes it to kct check.
+    try:
+        classes = net_class_map_from_path(path.with_name("net_class_map.json"), pcb_path=path)
+    except (OSError, TypeError, ValueError):
+        return False
+    for pair in derive_pair_skews(pcb, classes, num_copper_layers=len(pcb.copper_layers)):
+        if (pair.p_name, pair.n_name) == (escapes[0].net, escapes[1].net):
+            return (
+                pair.skew_ps is not None
+                and pair.limits.budget is not None
+                and measured_skew_verdict(pair) == "pass"
+            )
+    return False
+
+
 def _clear_pair_departures(
     path: Path,
     rules: DesignRules,
@@ -502,12 +535,14 @@ def _clear_pair_departures(
     width: float,
     diameter: float,
     escapes: tuple[_PairEscape, _PairEscape],
+    require_timing: bool = False,
 ) -> int:
     """Save the two measured footprint exits together, before refill and DRC."""
     pcb = PCB.load(path)
     fp = pcb.get_footprint(ref)
     if fp is None or fp.name != footprint or fp.rotation or fp.layer != "F.Cu":
         return 0
+    original_skew = _raw_trace_skew(pcb, escapes) if require_timing else None
     for escape in escapes:
         pad = next((p for p in fp.pads if p.number == escape.pad), None)
         if (
@@ -520,6 +555,11 @@ def _clear_pair_departures(
             return 0
         if not _rebuild_pair_branch(pcb, ref, escape, rules, width, diameter):
             return 0
+    if original_skew is not None and (
+        abs(_raw_trace_skew(pcb, escapes) - original_skew) > _EPS
+        or not _within_project_skew_budget(pcb, path, escapes)
+    ):
+        return 0
     pcb.save(path)
     return 2
 
@@ -566,6 +606,7 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
         pad_size=(0.7, 0.3),
         width=0.225,
         diameter=0.60,
+        require_timing=True,
         escapes=(
             _PairEscape("31", "PCIE_RX+", "In1.Cu", (0.60, 0.10), (0.90, 0.0), (1.65, 1.15)),
             _PairEscape("32", "PCIE_RX-", "In2.Cu", (1.00, 0.20), (1.20, 0.0), (3.70, 2.90)),
