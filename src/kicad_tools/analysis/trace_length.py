@@ -254,8 +254,8 @@ def _uniform_lane_contacts(
 
     A plated joint has one landing on such a lane, at the closest point on
     its centreline. Round caps from a cut can touch the joint or other pieces
-    farther along the same lane. Those contacts and any collinear stroke
-    already wholly covered by another add no copper path.
+    farther along the same lane. A straight stroke wholly buried in another
+    adds no copper, including when their centrelines differ at a corner.
     """
     from kicad_tools.geometry.copper import collinear_overlap_length, point_segment_distance
     from kicad_tools.router.connectivity import _UnionFind
@@ -265,7 +265,7 @@ def _uniform_lane_contacts(
     straight = {i for i, item in enumerate(items) if item.kind == TRACK and item.straight}
     runs = _UnionFind()
     continuous: set[tuple[int, int]] = set()
-    covered = {i for i in straight if items[i].key[1] in contacts.covered_collinear_tracks}
+    covered = {i for i in straight if items[i].key[1] in contacts.covered_tracks}
     for a, b in bonds:
         if a not in straight or b not in straight:
             continue

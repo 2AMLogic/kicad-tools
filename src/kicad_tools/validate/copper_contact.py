@@ -150,6 +150,14 @@ class CopperContactGraph:
     @cached_property
     def covered_collinear_tracks(self) -> dict[int, set[int]]:
         """Map each covered PCB segment index to the collinear strokes containing all its copper."""
+        return self._covered_tracks(collinear_only=True)
+
+    @cached_property
+    def covered_tracks(self) -> dict[int, set[int]]:
+        """Straight segments whose entire copper is already present in another segment."""
+        return self._covered_tracks(collinear_only=False)
+
+    def _covered_tracks(self, *, collinear_only: bool) -> dict[int, set[int]]:
         covered: dict[int, set[int]] = {}
         for a, b in self.bonds:
             first, second = self.items[a], self.items[b]
@@ -163,7 +171,7 @@ class CopperContactGraph:
                 continue
             p, q = first.endpoints
             r, s = second.endpoints
-            if collinear_overlap_length(p, q, r, s) is None:
+            if collinear_only and collinear_overlap_length(p, q, r, s) is None:
                 continue
             i, j = first.key[1], second.key[1]
             if first.geom.covers(second.geom):

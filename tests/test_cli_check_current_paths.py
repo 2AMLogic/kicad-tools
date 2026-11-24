@@ -599,6 +599,42 @@ def test_covered_l_trunk(tmp_path, interval, capsys):
     assert _run_check(board, tmp_path / "check.json") == 0
 
 
+def _write_pgnd_corner(tmp_path, *, reverse, buried, return_ends, feeder_x=65, split_feeder=False):
+    from kicad_tools.schema.pcb import PCB
+    from tests.test_pcb_reinforce import _write_single_pad_footprint_lib
+
+    board = tmp_path / "trunk.kicad_pcb"
+    pcb = PCB.create(width=200, height=200, center=False)
+    pad = _write_single_pad_footprint_lib(tmp_path)
+    for ref, x, y in [("J1", feeder_x, 119.6), ("J2", 77.5375, 135)]:
+        pcb.add_footprint_from_file(pad, ref, x, y)
+        pcb.assign_net_to_footprint_pad(ref, "1", "NET1")
+    trunk = [(feeder_x, 119.6), (77.5375, 119.6), (77.5375, 124.5), (77.5375, 135)]
+    if split_feeder:
+        trunk.insert(1, (72, 119.6))
+    tracks = [(a, b, 2.4) for a, b in pairwise(trunk)]
+    if buried:
+        tracks.extend(
+            [
+                ((77.9, 119), (77.5375, 119.3625), 0.2),
+                ((77.5375, 119.3625), (77.5375, 121), 0.2),
+                ((77.5, 119), (77.7, 119.2), 0.2),
+                ((77.7, 119.2), (77.7, 120.8375), 0.2),
+            ]
+        )
+    if return_ends is not None:
+        # The return can join through track width at one or both stations.
+        lower, upper = return_ends
+        points = (lower, (84, lower[1]), (84, upper[1]), upper)
+        tracks.extend((a, b, 0.2) for a, b in pairwise(points))
+    if reverse:
+        tracks = [(end, start, width) for start, end, width in reversed(tracks)]
+    for start, end, width in tracks:
+        pcb.add_trace(start, end, width=width, layer="F.Cu", net="NET1")
+    pcb.save(board)
+    return board
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize(
     "buried,return_ends",
@@ -623,38 +659,8 @@ def test_pgnd_tracks_at_trunk_corner(tmp_path, reverse, buried, return_ends):
         resolve_current_path,
     )
     from kicad_tools.schema.pcb import PCB
-    from tests.test_pcb_reinforce import _write_single_pad_footprint_lib
 
-    board = tmp_path / "trunk.kicad_pcb"
-    pcb = PCB.create(width=200, height=200, center=False)
-    pad = _write_single_pad_footprint_lib(tmp_path)
-    for ref, x, y in [("J1", 65, 119.6), ("J2", 77.5375, 135)]:
-        pcb.add_footprint_from_file(pad, ref, x, y)
-        pcb.assign_net_to_footprint_pad(ref, "1", "NET1")
-    tracks = [
-        ((65, 119.6), (77.5375, 119.6), 2.4),
-        ((77.5375, 119.6), (77.5375, 124.5), 2.4),
-        ((77.5375, 124.5), (77.5375, 135), 2.4),
-    ]
-    if buried:
-        tracks.extend(
-            [
-                ((77.9, 119), (77.5375, 119.3625), 0.2),
-                ((77.5375, 119.3625), (77.5375, 121), 0.2),
-                ((77.5, 119), (77.7, 119.2), 0.2),
-                ((77.7, 119.2), (77.7, 120.8375), 0.2),
-            ]
-        )
-    if return_ends is not None:
-        # The return can join through track width at one or both stations.
-        lower, upper = return_ends
-        points = (lower, (84, lower[1]), (84, upper[1]), upper)
-        tracks.extend((a, b, 0.2) for a, b in pairwise(points))
-    if reverse:
-        tracks = [(end, start, width) for start, end, width in reversed(tracks)]
-    for start, end, width in tracks:
-        pcb.add_trace(start, end, width=width, layer="F.Cu", net="NET1")
-    pcb.save(board)
+    board = _write_pgnd_corner(tmp_path, reverse=reverse, buried=buried, return_ends=return_ends)
     pcb = PCB.load(board)
     spec = _trunk_spec(current_a=2.5)
     for direction in (spec, replace(spec, source=spec.sink, sink=spec.source)):
@@ -673,6 +679,51 @@ def test_pgnd_tracks_at_trunk_corner(tmp_path, reverse, buried, return_ends):
     assert main(["check", str(board), "--only", "path_ampacity", "--allow-incomplete"]) == (
         2 if return_ends is not None else 0
     )
+
+
+@pytest.mark.parametrize(
+    "return_ends",
+    [
+        ((77.5375, 120.5), (77.95, 130)),
+        ((77.8, 120.5), (77.5375, 130)),
+    ],
+)
+@pytest.mark.parametrize("buried,split_feeder", [(False, False), (True, False), (True, True)])
+def test_pgnd_mixed_return_reinforces_only_the_series_feeder(
+    tmp_path, capsys, return_ends, buried, split_feeder
+):
+    from dataclasses import replace
+
+    from kicad_tools.cli import main
+
+    board = _write_pgnd_corner(
+        tmp_path,
+        reverse=False,
+        buried=buried,
+        return_ends=return_ends,
+        feeder_x=55,
+        split_feeder=split_feeder,
+    )
+    spec = _trunk_spec(current_a=2.5)
+    for direction in (spec, replace(spec, source=spec.sink, sink=spec.source)):
+        sidecar = _write_sidecar(tmp_path / "current_paths.json", [direction])
+        args = ["pcb", "reinforce", str(board), "--net", "NET1", "--current-paths", str(sidecar)]
+        for strategy in ("wire", "parallel"):
+            assert main([*args, "--strategy", strategy, "--dry-run", "--format", "json"]) == 0
+            report = json.loads(capsys.readouterr().out)
+            assert report["unresolved_paths"]
+            assert report["run_length_mm"] == pytest.approx(22.5375)
+            if strategy == "wire":
+                (wire,) = report["wires"]
+                assert len(wire["anchors"]) == 2
+                endpoints = {(p["x"], p["y"]) for p in (wire["leg_start"], wire["leg_end"])}
+            else:
+                (copy,) = report["copies"]
+                assert copy["layer"] == "B.Cu"
+                points = [tuple(seg[key]) for seg in copy["segments"] for key in ("start", "end")]
+                assert all(y == 119.6 for x, y in points)
+                endpoints = {min(points), max(points)}
+            assert endpoints == {(55, 119.6), (77.5375, 119.6)}
 
 
 @pytest.mark.parametrize("rejoin", [False, True])
