@@ -78,11 +78,13 @@ U3's eight signal lands follow the TI example board layout for DGN0008C
 (TPS7A16 datasheet, package drawing 4218838/A, 11/2017): 1.4 mm × 0.45 mm
 lands on 0.65 mm pitch with 4.4 mm row centres and R0.05 typ corners. The
 custom `TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias` footprint in
-`board05_revB.pretty` keeps the stock KiCad exposed pad (1.57 × 1.89 mm),
-its four plated thermal vias, its courtyard and silk unchanged; only the
-signal lands differ from the stock `Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_
-EP1.57x1.89mm_ThermalVias` geometry (1.45 mm × 0.50 mm on 4.3 mm row
-centres). Solder mask and paste are 1:1 with the copper lands, the board's
+`board05_revB.pretty` retains the stock KiCad exposed pad (1.57 × 1.89 mm),
+four plated thermal vias, courtyard and silkscreen. Its six outline lines
+and pin-1 marker use the stock 0.12 mm stroke. The board recipe applies
+its existing 0.15 mm silkscreen minimum when it places U3. The eight signal
+lands differ from the stock
+`Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias`
+geometry (1.45 mm × 0.50 mm on 4.3 mm row centres). Solder mask and paste are 1:1 with the copper lands, the board's
 standard non-solder-mask-defined opening: the 0.65 mm pitch then leaves
 0.20 mm from each opening to the neighbouring land's copper, which clears
 the JLCPCB `mask_to_copper` advisory that the stock 0.50 mm lands raised at
