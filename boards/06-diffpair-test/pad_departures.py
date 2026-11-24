@@ -13,6 +13,8 @@ the relocation stub -- the same shape as the J4.RST repair in ``reset_escape``.
 J1's mirrored USB2 data pads B6 and B7 have a different escape. Each has a
 front branch and one inner-layer connection to its barrel. Move both barrels
 to the measured 45-degree exits together so their rings clear the mask (#9891).
+U3's PCIe receiver pair instead leaves both lands on their long axis. Its two
+barrels retain the project diameter and reconnect to the original inner trunks.
 
 Every repair is guarded: the departure is derived from the actual pad and its
 connected copper, and anything locked, branched off the recognized shape, or
@@ -22,6 +24,7 @@ not reconnectable as one physical component is left untouched, file intact.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from itertools import pairwise
 from math import dist
 from pathlib import Path
@@ -387,25 +390,61 @@ def _repair_pad(
     return 1
 
 
-def _rebuild_usb2_branch(
+@dataclass(frozen=True)
+class _PairEscape:
+    pad: str
+    net: str
+    layer: str
+    old_offset: XY
+    new_offset: XY
+    # On U3, the inner taper continues to this measured trunk endpoint.
+    # On J1, the barrel has one constant-width approach segment.
+    inner_end_offset: XY | None = None
+
+
+def _inner_approach(
+    pcb: PCB, escape: _PairEscape, center: XY, old: XY, front: list[Segment], locked: set[str]
+) -> tuple[list[Segment], XY] | None:
+    end = escape.inner_end_offset
+    joint = _xy((center[0] + end[0], center[1] + end[1])) if end is not None else None
+    segments = [s for s in pcb.segments if s.net_name == escape.net and s not in front]
+    used: list[Segment] = []
+    point = old
+    while True:
+        choices = [s for s in segments if s not in used and point in (_xy(s.start), _xy(s.end))]
+        if len(choices) != 1:
+            return None
+        segment = choices[0]
+        if segment.layer != escape.layer or segment.locked or segment.uuid in locked:
+            return None
+        following = _xy(segment.end) if _xy(segment.start) == point else _xy(segment.start)
+        used.append(segment)
+        if joint is None or following == joint:
+            return used, following
+        if not _on_line(old, joint, following) or dist(following, joint) >= dist(point, joint):
+            return None
+        point = following
+
+
+def _rebuild_pair_branch(
     pcb: PCB,
-    pad_number: str,
-    net: str,
-    original_offset: XY,
-    new_offset: XY,
-    layer: str,
+    ref: str,
+    escape: _PairEscape,
     rules: DesignRules,
+    width: float,
+    diameter: float,
 ) -> bool:
-    """Reconnect one mirrored J1 pad to its single inner approach in memory."""
-    center = pcb.get_pad_position("J1", pad_number)
+    """Reconnect one data pad to its original trunk, pending its partner's checks."""
+    center = pcb.get_pad_position(ref, escape.pad)
     if center is None:
         return False
     locked = _locked_ids(pcb)
+    net = escape.net
     walk = _walk_chain(pcb, net, _xy(center), locked)
     if walk is None:
         return False
     tracks, old = walk
-    if _xy((old[0] - center[0], old[1] - center[1])) != original_offset:
+    if _xy((old[0] - center[0], old[1] - center[1])) != escape.old_offset:
         return False
     vias = [(i, v) for i, v in enumerate(pcb.vias) if v.net_name == net and _xy(v.position) == old]
     if len(vias) != 1:
@@ -417,86 +456,78 @@ def _rebuild_usb2_branch(
     size = node.find("size")
     if size is None:
         return False
-    # The seed-42 USB branches use a 0.60 mm barrel and a 0.25 mm drill.
-    # The project's 0.45 mm USB2 via preserves the JLCPCB 0.10 mm annulus.
-    diameter = 0.45
     if (via.size, via.drill) != (0.6, 0.25) or diameter + _EPS < max(
         rules.min_via_diameter_mm, via.drill + 2 * rules.min_annular_ring_mm
     ):
         return False
-    approaches = [
-        s
-        for s in pcb.segments
-        if s not in tracks and s.net_name == net and old in (_xy(s.start), _xy(s.end))
-    ]
-    if len(approaches) != 1:
+    approach = _inner_approach(pcb, escape, _xy(center), old, tracks, locked)
+    if approach is None:
         return False
-    approach = approaches[0]
-    if approach.layer != layer or approach.locked or approach.uuid in locked:
+    inner, joint = approach
+    edited = [*tracks, *inner]
+    if escape.inner_end_offset is None and any(abs(s.width - width) > _EPS for s in edited):
         return False
-    if any(abs(s.width - 0.25) > _EPS for s in [*tracks, approach]):
+    if any(s.width > width + _EPS for s in edited) or abs(inner[-1].width - width) > _EPS:
         return False
 
     original = list(pcb.segments)
-    edited = [*tracks, approach]
     validator = ConnectivityValidator(pcb)
     before = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
     if len(before.components()) != 1:
         return False
     contacts, ends = _external_contacts(before, original, edited, via_index)
-    target = _xy((center[0] + new_offset[0], center[1] + new_offset[1]))
-    joint = _xy(approach.start) if _xy(approach.end) == old else _xy(approach.end)
+    target = _xy((center[0] + escape.new_offset[0], center[1] + escape.new_offset[1]))
     if pcb.remove_segments(edited) != len(edited) or not pcb.relocate_via(via, target):
         return False
     size.set_value(0, diameter)
     via.size = diameter
-    added = pcb.add_trace(center, target, width=approach.width, layer="F.Cu", net=net)
-    points = dogleg_points(*joint, *target)
+    added = pcb.add_trace(center, target, width=width, layer="F.Cu", net=net)
+    # On U3 the measured clear corridor leaves the barrel diagonally.
+    points = dogleg_points(*joint, *target, axis_first=escape.inner_end_offset is not None)
     for a, b in pairwise(points):
         if a != b:
-            added.extend(pcb.add_trace(a, b, width=approach.width, layer=layer, net=net))
+            added.extend(pcb.add_trace(a, b, width=width, layer=escape.layer, net=net))
     after = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
     current, current_ends = _external_contacts(after, pcb.segments, added, via_index)
     return len(after.components()) == 1 and contacts <= current and ends <= current_ends
 
 
-def _clear_usb2_departures(path: Path, rules: DesignRules) -> int:
-    """Move the two USB-C B-row escape barrels together, before refill and DRC."""
+def _clear_pair_departures(
+    path: Path,
+    rules: DesignRules,
+    *,
+    ref: str,
+    footprint: str,
+    pad_size: XY,
+    width: float,
+    diameter: float,
+    escapes: tuple[_PairEscape, _PairEscape],
+) -> int:
+    """Save the two measured footprint exits together, before refill and DRC."""
     pcb = PCB.load(path)
-    fp = pcb.get_footprint("J1")
-    if (
-        fp is None
-        or fp.name != "Connector_USB:USB_C_Receptacle_USB2.0"
-        or fp.rotation
-        or fp.layer != "F.Cu"
-    ):
+    fp = pcb.get_footprint(ref)
+    if fp is None or fp.name != footprint or fp.rotation or fp.layer != "F.Cu":
         return 0
-    # Opposite 45-degree exits keep both barrels outside their openings.
-    # The A-row branches and the remote ends of both inner approaches stay put.
-    for number, net, old, new, layer in (
-        ("B6", "USB2_D+", (0.15, -0.55), (0.55, -0.55), "In1.Cu"),
-        ("B7", "USB2_D-", (0.30, 0.50), (0.55, 0.55), "In2.Cu"),
-    ):
-        pad = next((p for p in fp.pads if p.number == number), None)
+    for escape in escapes:
+        pad = next((p for p in fp.pads if p.number == escape.pad), None)
         if (
             pad is None
-            or pad.net_name != net
+            or pad.net_name != escape.net
             or pad.shape != "rect"
             or pad.rotation
-            or pad.size != (0.3, 0.6)
+            or pad.size != pad_size
         ):
             return 0
-        if not _rebuild_usb2_branch(pcb, number, net, old, new, layer, rules):
+        if not _rebuild_pair_branch(pcb, ref, escape, rules, width, diameter):
             return 0
     pcb.save(path)
     return 2
 
 
 def clear_pad_departures(path: Path, rules: DesignRules) -> int:
-    """Rewrite the sideband and paired USB pad escapes the strict mask view flags.
+    """Rewrite the sideband and paired data escapes the strict mask view flags.
 
-    Each sideband pad and the USB pair have separate load-mutate-save
-    transactions. A declined USB partner leaves both branches as they were.
+    Each sideband pad and each differential pair has a separate save boundary.
     """
     request = default_request_for_manufacturer("jlcpcb")
     if request is None:
@@ -512,4 +543,31 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
             number,
             move_via,
         )
-    return edits + _clear_usb2_departures(path, rules)
+    edits += _clear_pair_departures(
+        path,
+        rules,
+        ref="J1",
+        footprint="Connector_USB:USB_C_Receptacle_USB2.0",
+        pad_size=(0.3, 0.6),
+        width=0.25,
+        diameter=0.45,
+        escapes=(
+            _PairEscape("B6", "USB2_D+", "In1.Cu", (0.15, -0.55), (0.55, -0.55)),
+            _PairEscape("B7", "USB2_D-", "In2.Cu", (0.30, 0.50), (0.55, 0.55)),
+        ),
+    )
+    # Straight, full-width exits clear both mask openings. The extra 0.30 mm
+    # on pad 32 preserves the pair's original routed length difference.
+    return edits + _clear_pair_departures(
+        path,
+        rules,
+        ref="U3",
+        footprint="Package_QFP:LQFP-48_7x7mm_P0.5mm",
+        pad_size=(0.7, 0.3),
+        width=0.225,
+        diameter=0.60,
+        escapes=(
+            _PairEscape("31", "PCIE_RX+", "In1.Cu", (0.60, 0.10), (0.90, 0.0), (1.65, 1.15)),
+            _PairEscape("32", "PCIE_RX-", "In2.Cu", (1.00, 0.20), (1.20, 0.0), (3.70, 2.90)),
+        ),
+    )
