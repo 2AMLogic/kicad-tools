@@ -24,6 +24,7 @@ design were adopted vs. declined for this codebase.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import logging
@@ -49,6 +50,17 @@ def _recovery_prefix(name: str) -> str:
 _RECOVERY_NAME = re.compile(r"^\.(?P<board>.+)\.recovery-\d{8}T\d{6}Z-[^/]+$")
 
 
+def recovery_link_target(directory: Path) -> Path | None:
+    """Source named by a displaced board alias, relative to its original parent."""
+    for link in (directory / "alias", directory / "original"):
+        if link.is_symlink():
+            try:
+                return directory.parent / link.readlink()
+            except FileNotFoundError:
+                continue
+    return None
+
+
 def retained_copy_board(directory: Path) -> Path | None:
     """Return the live board for a completed, cleanup-eligible copy."""
     match = _RECOVERY_NAME.fullmatch(directory.name)
@@ -57,7 +69,7 @@ def retained_copy_board(directory: Path) -> Path | None:
     board = directory.parent / match["board"]
     if (
         (directory / "complete").is_file()
-        and (directory / "original").is_file()
+        and ((directory / "original").is_file() or (directory / "original").is_symlink())
         and board.is_file()
         and not os.path.lexists(directory / "repaired")
     ):
@@ -65,9 +77,21 @@ def retained_copy_board(directory: Path) -> Path | None:
     return None
 
 
-def remove_retained_copy(directory: Path) -> bool:
+def _recovery_boards(path: Path) -> tuple[Path, ...]:
+    if path.is_symlink() and path.is_file():
+        target = path.resolve()
+        parent = path.parent.resolve()
+        if target.is_relative_to(parent):
+            return path, path.parent / target.relative_to(parent)
+    return (path,)
+
+
+def remove_retained_copy(directory: Path, *, selected_board: Path | None = None) -> bool:
     """Recheck eligibility when applying a cleanup preview."""
-    if retained_copy_board(directory) is None:
+    board = retained_copy_board(directory)
+    if board is None or (
+        selected_board is not None and board not in _recovery_boards(selected_board)
+    ):
         return False
     shutil.rmtree(directory)
     return True
@@ -82,25 +106,30 @@ def recovery_copies(path: str | Path) -> list[Path]:
     publication also retains the briefly public inode as ``provisional``
     and any live entry displaced during rollback as ``withdrawn``. An interrupted
     publication's working directory is reserved for manual recovery.
-    Returns the completed directories, oldest
-    first, so callers can inspect the retained versions in rewrite order.
+    A live alias also finds records beside its target inside the board's
+    directory tree. Select an external source directly to inspect its records.
+    Sort by the completion marker's timestamp, then name for tied timestamps.
     """
     path = Path(path)
-    return sorted(
-        (entry for entry in path.parent.iterdir() if retained_copy_board(entry) == path),
-        key=lambda entry: entry.name,
-    )
+    copies = []
+    for board in _recovery_boards(path):
+        for entry in board.parent.iterdir():
+            if retained_copy_board(entry) == board:
+                try:
+                    copies.append(((entry / "complete").stat().st_mtime_ns, entry.name, entry))
+                except FileNotFoundError:
+                    continue  # Explicit cleanup completed during this listing.
+    return [entry for _, _, entry in sorted(copies)]
 
 
 def clear_recovery_copies(path: str | Path) -> list[Path]:
-    """Delete every retained recovery copy beside ``path`` (#10056).
+    """Delete the completed copies returned by ``recovery_copies(path)`` (#10056).
 
-    The live file is never touched. Returns the removed directories, oldest
-    first, so callers can report what was reclaimed.
+    The live file is never touched. Returns the removed directories in listing order.
     """
     removed = []
     for copy_dir in recovery_copies(path):
-        if remove_retained_copy(copy_dir):
+        if remove_retained_copy(copy_dir, selected_board=Path(path)):
             removed.append(copy_dir)
     return removed
 
@@ -147,6 +176,7 @@ def _publish_checked(
     # then link into the vacant name. link() never overwrites a racing save.
     staging = Path(tempfile.mkdtemp(prefix=_recovery_prefix(path.name), dir=path.parent))
     original = staging / "original"
+    displaced = original
     repaired = staging / "repaired"
     complete = staging / "complete"
     linked = False
@@ -167,10 +197,33 @@ def _publish_checked(
         except FileNotFoundError as exc:
             raise SourceChangedError("PCB changed during manufacturing export") from exc
         try:
-            # A displaced relative symlink still refers to the board's
-            # original directory. Resolve its bytes in that context.
-            source = path.parent / original.readlink() if original.is_symlink() else original
-            if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
+            source = original
+            if original.is_symlink():
+                target = original.readlink()
+                source = path.parent / target
+                # Keep the exact directory entry for rollback and a readable
+                # version of the target at the documented recovery path.
+                alias = staging / "alias"
+                try:
+                    original.rename(alias)
+                finally:
+                    if os.path.lexists(alias):
+                        displaced = alias
+                try:
+                    os.link(source.resolve(strict=True), original)
+                except OSError as error:
+                    if error.errno not in {
+                        errno.EXDEV,
+                        errno.EPERM,
+                        errno.EACCES,
+                        errno.ENOTSUP,
+                        errno.EMLINK,
+                    }:
+                        raise
+                    # The destination can be on a different filesystem.
+                    # The direct writer leaves the original target in place.
+                    original.symlink_to(Path("..") / target)
+            if hashlib.sha256(original.read_bytes()).hexdigest() != expected_sha256:
                 raise SourceChangedError("PCB changed during manufacturing export")
             os.link(repaired, path)
             linked = True
@@ -191,7 +244,7 @@ def _publish_checked(
             if linked:
                 _withdraw_published(path, repaired, content, encoding, newline)
             try:
-                os.link(original, path, follow_symlinks=False)
+                os.link(displaced, path, follow_symlinks=False)
             except FileExistsError:
                 restored_original = False
             else:
@@ -217,12 +270,14 @@ def _publish_checked(
                     f"PCB changed during manufacturing export (previous file at {original})"
                 ) from exc
             if not linked:
-                original.unlink()
+                displaced.unlink()
+                if displaced != original:
+                    original.unlink(missing_ok=True)
             raise
     except BaseException:
         # A competing save can leave the displaced board here for manual
         # recovery. Keep its working link so cleanup cannot take it.
-        if not linked and not os.path.lexists(original):
+        if not linked and not os.path.lexists(displaced):
             repaired.unlink(missing_ok=True)
             complete.unlink(missing_ok=True)
             staging.rmdir()
@@ -256,6 +311,12 @@ def atomic_write_text(
     ``recovery_copies()`` lists them, ``clear_recovery_copies()`` (or
     ``kct clean``) removes them. An interruption also leaves the displaced
     file in that directory for recovery.
+
+    A checked write to a symlink replaces the named entry and leaves its
+    target in place. The record keeps the displaced link as ``alias`` and
+    links ``original`` to the target inode. When the target filesystem or
+    permissions prevent the hard link, ``original`` refers to the target
+    by its path, which must remain available for recovery.
 
     Without a digest, use the ordinary atomic replacement described below.
 
