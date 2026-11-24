@@ -66,9 +66,11 @@ Match square header pads to pin 1. Match U1/U2/U3 pin 1, D1/D2 cathode marks,
 D3 LED cathode and C1 capacitor polarity to the assembly drawings. U2 and U3
 exposed pads must be soldered; their numbered plated thermal vias do not
 make these packages through-hole components. The TI PWP0028C land pattern
-is supplied in `board05_revB.pretty`, including its 3.1 × 5.18 mm mask opening,
-segmented paste apertures and thermal vias tented on the back. Include the local symbol
-and footprint libraries when opening the KiCad source project.
+is supplied in `board05_revB.pretty`. Its 3.1 × 5.18 mm mask opening belongs
+to grounded pad 29, inside the 3.4 × 9.7 mm front copper land. Four separate
+paste apertures define the stencil. The thermal vias are tented on the back.
+Include the local symbol and footprint libraries when opening the KiCad source
+project.
 
 ## Primary references
 

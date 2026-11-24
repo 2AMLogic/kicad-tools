@@ -66,7 +66,10 @@ def geometry_fingerprint(path):
 def apply_routing(path):
     path = Path(path)
     recipe = json.loads((ROOT / "routing.json").read_text())
-    if geometry_fingerprint(path) != recipe["geometry_sha256"]:
+    fingerprint = geometry_fingerprint(path)
+    # The published unrouted board predates U2's grounded mask opening.
+    # Both exact inputs reproduce the reviewed copper and its rule file.
+    if fingerprint not in (recipe["geometry_sha256"], recipe.get("published_geometry_sha256")):
         raise ValueError("Revision-B pad/placement/net geometry changed; reroute and validate")
     board = parse_file(path)
     if any(board.find_all(kind) for kind in ("segment", "via", "zone")):
@@ -86,4 +89,4 @@ def apply_routing(path):
                     node.append(parse_string(f"(net_name {json.dumps(name)})"))
         board.append(node)
     path.write_text(serialize_sexp(board))
-    return recipe["geometry_sha256"]
+    return fingerprint

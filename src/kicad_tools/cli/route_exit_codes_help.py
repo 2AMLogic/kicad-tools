@@ -8,7 +8,9 @@ without importing the huge ``route_cmd`` module (issue #6291).
 
 ROUTE_EXIT_CODES_EPILOG = """\
 exit codes:
-  0  all nets routed (or meets --min-completion), DRC clean
+  0  routing met the completion threshold. Default layer escalation
+     can return 0 with post-route DRC errors. For a DRC gate, run
+     'kct check <routed.kicad_pcb> --drc-only' on the saved board.
   1  fatal failure -- no nets routed
   2  partial routing -- below threshold or requested placement-blocked nets
   3  post-route validation or processing failed:

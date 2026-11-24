@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
-  "geometry_sha256": "a6c54a4cb8129270a9436cae6eaf3e2ea2251b7a7e86efbd46d6d998b01a64c6",
+  "geometry_sha256": "3669667dc5770573ced28b7efbcdb71b766226fb30e98e1ced52dcd55d16b68e",
+  "published_geometry_sha256": "a6c54a4cb8129270a9436cae6eaf3e2ea2251b7a7e86efbd46d6d998b01a64c6",
   "description": "Reviewed physical route with complete SMT drill clearance (#5012) and 45-degree copper (#5044); native refill and zero-violation DRC required. Narrow corridor doglegs preserve layer, width, via and pad geometry. Copper-only keepouts remove isolated pour fragments. No pad replacements or DRC waivers. #9073 pad-edge clearance rework: fanout vias re-seated clear of their pad copper (three alley vias shrunk to 0.45/0.2), silkscreen and 45/90-degree corners kept legal; pads, placement and the geometry fingerprint are unchanged. #9921 revises pad escapes, preserves return-plane continuity, and increases pour clearance around mask openings. #9921 pour-slot repair: the four column-end U1 escapes (PWM_A pad 1, HALL_B pad 24, SCK pad 17, PWM_B pad 9) leave their pad centres at 45 degrees into the corner regions, so no parallel front-layer pair remains and the prune pass centre-anchors nothing.",
   "copper": [
     "(segment\n\t(start 178.3 74.8)\n\t(end 178.7464 75.2464)\n\t(width 0.5)\n\t(layer \"F.Cu\")\n\t(net \"+5V\")\n\t(uuid \"030c0a27-4971-4d4f-9bec-0989c0692f83\")\n)",
