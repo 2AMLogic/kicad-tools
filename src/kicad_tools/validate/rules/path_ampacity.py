@@ -302,6 +302,17 @@ class PathAmpacityRule(DRCRule):
                 continue
 
             spec = resolution.spec
+            for segment in resolution.off_path_loops:
+                results.add(
+                    DRCViolation(
+                        rule_id=self.rule_id,
+                        severity="warning",
+                        message=f"Thin loop on {spec.net_name!r} attaches to current path {spec.name!r} through one junction",
+                        location=self._segment_midpoint(segment),
+                        layer=segment.layer,
+                        items=(spec.name, spec.net_name),
+                    )
+                )
             thermal = spec.thermal_design_current()
             if thermal.assumption:
                 results.add(self._assumption_notice(spec, thermal))

@@ -315,6 +315,37 @@ def test_cli_refuses_to_write_unverified_result(tmp_path, capsys):
     assert p.read_text() != before
 
 
+def test_prune_keeps_verification_of_written_overlay_cut(tmp_path, capsys, monkeypatch):
+    from collections import Counter
+
+    board = _board(
+        tmp_path,
+        [("A", 100, 100), ("B", 110, 100)],
+        [
+            ((100, 100), (110, 100), "F.Cu", 4.0),
+            ((100, 100), (110, 100), "F.Cu", 0.2),
+        ],
+    )
+    _cp_specs(tmp_path)
+    monkeypatch.setattr("kicad_tools.pcb_prune._drc_signature", lambda path: Counter())
+    output = tmp_path / "candidate.kicad_pcb"
+    assert (
+        _cli(
+            tmp_path,
+            board,
+            "-o",
+            str(output),
+            "--current-paths",
+            str(tmp_path / "cp8368.json"),
+            "--allow-default-rules",
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["drc_verified"] and report["removed"]["segments"] == 1
+    assert [s.width for s in PCB.load(output).segments] == [4.0]
+
+
 def test_bridge_behind_unmodelled_join_is_kept(tmp_path):
     """The pad-to-via stub is the pad's only connection.  The far side reaches
     pad B through a mid-span T-junction the model does not treat as a join, so
@@ -1094,7 +1125,7 @@ def test_anchored_merge_skips_a_run_touching_a_copper_arc(tmp_path):
 
 @pytest.mark.parametrize("syntax", ["(locked yes)", "legacy"])
 def test_locked_tracks_are_never_merged_or_removed(tmp_path, syntax):
-    """``_merge_unsafe_member`` (locked) and ``_is_protected``: a locked run is
+    """``_merge_unsafe_member`` (locked) and ``protection_reason``: a locked run is
     left exactly as drawn, in both KiCad's ``(locked yes)`` and the KiCad 6
     ``(segment locked ...)`` syntax."""
     steps = [((100 + 0.25 * k, 100), (100 + 0.25 * (k + 1), 100)) for k in range(4)]
@@ -1636,7 +1667,7 @@ def test_contained_collinear_subsegment_is_removed(tmp_path):
     )
     specs = _cp_specs(tmp_path)
     before = _resolve(PCB.load(p), specs, tmp_path)
-    assert before.status == "ambiguous"
+    assert before.ok and before.min_width.width_mm == 0.5
     pcb, res = _prune_declared(p, specs)
     assert [(s.start, s.end) for s in pcb.segments] == [((100, 100), (103.2, 100))]
     assert res.uncut_loops == []
@@ -1647,11 +1678,11 @@ def test_contained_collinear_subsegment_is_removed(tmp_path):
 
 def test_contained_subsegment_with_both_ends_interior_and_offaxis_continuation(tmp_path):
     """Kind 1, both ends interior: L (0,0)->(10,0) at 2.6 mm, S (4,0)->(6,0) at
-    0.5 mm continuing off-axis from (6,0).  The audit splits L at S's ends ->
-    parallel edges.  Dropping S alone would leave the continuation landing
+    0.5 mm continuing off-axis from (6,0).  The audit measures the shared interval once.
+    Dropping S alone would leave the continuation landing
     mid-span on L (``track_dangling``, PR #8392 review), so L is split at (6,0)
     first (issue #8406): the continuation then shares an endpoint with both
-    pieces and S goes, resolving the audit."""
+    pieces and S goes, preserving the measured path."""
     segs = [
         ((100, 100), (110, 100), "F.Cu", 2.6),
         ((104, 100), (106, 100), "F.Cu", 0.5),
@@ -1660,8 +1691,7 @@ def test_contained_subsegment_with_both_ends_interior_and_offaxis_continuation(t
     p = _board(tmp_path, [("A", 100, 100), ("B", 110, 100), ("C", 108, 102)], segs)
     specs = _cp_specs(tmp_path)
     before = _resolve(PCB.load(p), specs, tmp_path)
-    assert before.status == "ambiguous"
-    assert before.witness["start"] == [104.0, 100.0]
+    assert before.ok and before.min_width.width_mm == 2.6
     pcb, res = _prune_declared(p, specs)
     assert {(s.start, s.end) for s in pcb.segments} == {
         ((100, 100), (106, 100)),
@@ -1773,7 +1803,7 @@ def test_contained_subsegment_starting_on_a_via_the_container_passes_over(tmp_pa
         vias=[(103, 100), (103, 99), (103, 103)],
     )
     specs = _cp_specs(tmp_path)
-    assert _resolve(PCB.load(p), specs, tmp_path).status == "ambiguous"
+    assert _resolve(PCB.load(p), specs, tmp_path).min_width.width_mm == 0.5
     pcb, res = _prune_declared(p, specs)
     kept = {(s.start, s.end, s.layer) for s in pcb.segments}
     assert ((103, 100), (103, 103), "B.Cu") not in kept
@@ -1830,8 +1860,32 @@ def test_midspan_crossing_loop_is_reported_not_silently_kept(tmp_path):
     (loop,) = res.uncut_loops
     assert loop["net"] == "SIG"
     assert loop["witness"] == before.witness
-    assert "audit" in loop["reason"]
+    assert "disconnect" in loop["reason"]
     _assert_agree(res, _resolve(pcb, specs, tmp_path))
+
+
+def test_prune_text_names_the_retained_track(tmp_path, capsys):
+    from kicad_tools.cli import main
+
+    board = _crossing_board(tmp_path)
+    _cp_specs(tmp_path)
+    assert (
+        main(
+            [
+                "pcb",
+                "prune",
+                str(board),
+                "--current-paths",
+                str(tmp_path / "cp8368.json"),
+                "--no-drc",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    text = capsys.readouterr().out
+    assert "disconnect" in text
+    assert "on F.Cu" in text and "->" in text
 
 
 def test_cli_prune_reports_audit_loop_in_json(tmp_path, capsys):
@@ -2732,3 +2786,47 @@ def test_prune_json_format_report_goes_to_stderr(tmp_path, capsys):
     assert result["removed"]["segments"] == 2
     assert "Waiver report: 1 waiver key(s) invalidated by this edit" in captured.err
     assert mid.key in captured.err
+
+
+def test_uncovered_tail_to_via_and_pad_survives_prune(tmp_path):
+    from dataclasses import replace
+
+    from kicad_tools.router.current_paths import PathEndpoint, resolve_current_path
+
+    board = _board(
+        tmp_path,
+        [("A", 93.5, 177.45), ("B", 108.7, 182.7), ("C", 110, 169)],
+        [
+            ((93.5, 177.45), (108.7, 177.45), "F.Cu", 4),
+            ((108.7, 177.45), (108.7, 182.7), "F.Cu", 4),
+            ((108.7, 182.7), (108.7, 169), "F.Cu", 0.2),
+            ((108.7, 169), (110, 169), "B.Cu", 0.2),
+        ],
+        vias=[(108.7, 169), (110, 169)],
+    )
+    (spec,) = _cp_specs(tmp_path)
+    tail_spec = replace(spec, sink=PathEndpoint("C", "1"))
+    pcb, result = _prune_declared(board, [spec, tail_spec])
+    assert not result.uncut_loops
+    output = tmp_path / "tail.kicad_pcb"
+    pcb.save(output)
+    for path in (board, output):
+        saved = PCB.load(path)
+        assert resolve_current_path(saved, spec).min_width.width_mm == pytest.approx(4)
+        tail_path = resolve_current_path(saved, tail_spec)
+        assert tail_path.min_width.width_mm == pytest.approx(0.2)
+        assert tail_path.length_mm == pytest.approx(15.2 + 8.45 + 1.3)
+        assert {via.position for via in saved.vias} == {(108.7, 169), (110, 169)}
+    from tests.test_cli_check_current_paths import (
+        _path_ampacity_violations,
+        _run_check,
+        _write_sidecar,
+    )
+
+    sidecar = _write_sidecar(tmp_path / "tail.json", [tail_spec])
+    report = tmp_path / "tail-check.json"
+    assert _run_check(output, report, extra=["--current-paths", str(sidecar)]) == 2
+    assert any(
+        v["actual_value"] == 0.2 and "too narrow" in v["message"]
+        for v in _path_ampacity_violations(report)
+    )
