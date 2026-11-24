@@ -55,6 +55,7 @@ manufacturers:
 #   (02's entry was removed when #9467 cleared its copper to 0 errors.)
 #   05: 83 / 21                  06: 48 / 14   07: 67 / 16
 #   Board 07's six-layer reissue in #8604 cleared all 16 release signatures.
+#   Board 01's repaired VOUT vias cleared its remaining identity in #9058.
 # Board 00 measures 0 mask_to_copper errors and board 04's native path
 # dispatches to the reviewed paid-drill validator whose rule selection does
 # not include mask_to_copper, so neither carries an entry.  The per-board
@@ -64,9 +65,6 @@ manufacturers:
 # carrying a NEW mask error still fails the gate.  Verify with:
 #   KCT_KICAD_DOCKER=1 uv run python scripts/ci/check_routed_drc.py <pcb>
 identity_allowances:
-  boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb:
-    mask_to_copper:
-      VOUT: 8858
   boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb:
     mask_to_copper:
       AREF: 8858
