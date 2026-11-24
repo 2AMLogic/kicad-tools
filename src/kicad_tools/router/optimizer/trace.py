@@ -40,7 +40,7 @@ from .geometry import (
     total_length,
 )
 from .kelvin_gate import kelvin_branch_gate
-from .pad_slits import pad_gap_check
+from .pad_slits import ReplacementCheck, pad_gap_check, via_gap_check
 from .pcb import optimize_pcb
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
@@ -486,6 +486,7 @@ class TraceOptimizer:
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
         self._pad_gap_check = pad_gap_check(getattr(collision_checker, "grid", None))
+        self._via_gap_check: ReplacementCheck | None = None
         self.net_anchors = net_anchors
         # Endpoints of the *other* chains in the current optimize_segments call
         # (same net and layer). A branch can end on a chain's body (a T-join
@@ -673,6 +674,13 @@ class TraceOptimizer:
                     ):
                         result = rewritten
 
+            # A shortcut past a separate branch can open a manufacturing slit.
+            # Keep this chain's original path when that happens: an alternate
+            # detour can expose copper at an intervening pad (Board 05 D1).
+            if self._via_gap_check is not None and not self._via_gap_check(
+                chain, result, self._other_copper
+            ):
+                result = chain
             current[index] = result
             all_optimized.extend(result)
 
@@ -971,9 +979,12 @@ class TraceOptimizer:
 
         # Optimize each layer's segments (chain sorting happens in optimize_segments)
         optimized_segments: list[Segment] = []
-        for _layer, segs in segments_by_layer.items():
-            optimized = self.optimize_segments(segs)
-            optimized_segments.extend(optimized)
+        self._via_gap_check = via_gap_check(getattr(self.collision_checker, "grid", None), route)
+        try:
+            for segs in segments_by_layer.values():
+                optimized_segments.extend(self.optimize_segments(segs))
+        finally:
+            self._via_gap_check = None
 
         # Connectivity-preserving guard: if optimisation dropped any
         # pad-like endpoint from the segment graph, revert to the
