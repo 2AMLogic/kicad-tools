@@ -665,7 +665,10 @@ class RipupCycleGuard:
 
     capped_streak: dict[int, tuple[int, Any, int]] = field(default_factory=dict)
     """``net -> (last failed iteration, witness at first failure, streak)``.
-    Copper that appears during a streak need not remain for the streak to hold."""
+    Copper that appears during a streak need not remain for the streak to hold.
+    A copper-keyed streak re-anchors on a witness change that earned a full
+    attempt but keeps its count (issue #8486): only progress -- a route, or a
+    partial result connecting new pad pairs -- restarts it from zero."""
 
     full_search_iter: dict[int, int] = field(default_factory=dict)
     """``net -> iteration`` of its last negotiated search that ran at the full
@@ -769,6 +772,10 @@ class RipupCycleGuard:
         whose failures ended before its cap is also bounded by its own last
         failing search time (still floored, never above ``cap``).  ``None``
         (no wall-clock cap, the deterministic arm) is never touched.
+        A witness change that reaches the streak restores the full ``cap``
+        for the one search it earns; that search's failure re-anchors the
+        streak on the post-change witness with its count kept, so the next
+        change-free iteration is backed off again right away.
 
         A copper-keyed net whose streak survives on the coarse key (see
         :meth:`_known_capped`) is re-searched at the full ``cap`` at least
@@ -823,7 +830,10 @@ class RipupCycleGuard:
         streak; a no-progress search (no path, or -- for a net that entered
         partially connected -- a result connecting no new pad pair) extends it
         whether or not it reached its cap (a sub-cap failure additionally
-        bounds the next cap, :meth:`search_cap`).
+        bounds the next cap, :meth:`search_cap`).  A full-cap search that a
+        witness change earned extends the streak as well (re-anchored on the
+        post-change witness, copper keys only): like the periodic re-probe,
+        the change buys one full attempt, not a streak restart.
         A *second* failing search in the same iteration (the negotiated loop
         searches a failed net both in the zero-overflow recovery and in the
         reroute pass) counts toward known-fail seconds only while the witness
@@ -856,7 +866,21 @@ class RipupCycleGuard:
         # Anchor to the failure that started the streak. Adding then removing
         # unrelated copper cannot undo that observation.
         if prev is None:
-            self.capped_streak[net] = (iteration, sig, 1)
+            # The streak was invalidated for this search by a witness change
+            # (a removal that touched the dependency set, or a coarse-key
+            # wobble), so the search just ran at the full cap the change
+            # earned.  That earned attempt counts like the periodic re-probe
+            # (#8486): the streak re-anchors on the post-change witness but
+            # KEEPS its count, so an unchanged iteration after it backs
+            # straight off instead of running a second unearned full search.
+            # Copper keys only: a seal change or a copper/seal regime switch
+            # is a structurally new failure mode and still restarts at one.
+            carried = (
+                prior[2]
+                if prior is not None and _is_copper_key(prior[1]) and _is_copper_key(sig)
+                else 0
+            )
+            self.capped_streak[net] = (iteration, sig, carried + 1)
         else:
             self.capped_streak[net] = (iteration, prev[1], prev[2] + 1)
 
