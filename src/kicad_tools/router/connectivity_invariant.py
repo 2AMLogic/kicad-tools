@@ -147,6 +147,27 @@ def build_multi_pad_net_pads(
     return net_pads
 
 
+def discard_orphan_escape_stubs(router: Autorouter) -> int:
+    """Discard temporary access copper that joins no two pads and has no other route."""
+    orphan_nets = {route.net for route in router.routes if getattr(route, "is_escape", False)}
+    if not orphan_nets:
+        return 0
+    orphan_nets.difference_update(
+        r.net for r in router.routes if not getattr(r, "is_escape", False)
+    )
+    orphan_nets.difference_update(route.net for route in getattr(router, "existing_routes", ()))
+    if not orphan_nets:
+        return 0
+    pads = build_multi_pad_net_pads(router, orphan_nets)
+    for net, status in validate_net_connectivity(router.routes, pads).items():
+        if status["connected_pads"] > 1:
+            orphan_nets.discard(net)
+    before = len(router.routes)
+    if orphan_nets:
+        router.routes = [route for route in router.routes if route.net not in orphan_nets]
+    return before - len(router.routes)
+
+
 def snapshot_connectivity(
     router: Autorouter,
     multi_pad_net_ids: set[int] | None = None,

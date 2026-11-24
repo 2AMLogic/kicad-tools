@@ -233,6 +233,8 @@ class EscapeRoute:
     segments: list[Segment] = field(default_factory=list)
     via: Via | None = None
     ring_index: int = 0
+    # A pad-to-barrel stub has no outgoing track until the main search lands.
+    requires_main_route: bool = False
 
 
 def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
@@ -1898,7 +1900,7 @@ class EscapeRouter:
 
         if remaining_package.pads:
             if package.package_type == PackageType.BGA:
-                escapes = self._escape_bga_rings(remaining_package)
+                escapes = self._escape_bga_rings(package, paired_pad_keys)
             elif package.package_type in (
                 PackageType.QFP,
                 PackageType.QFN,
@@ -3442,7 +3444,9 @@ class EscapeRouter:
             )
         return count
 
-    def _escape_bga_rings(self, package: PackageInfo) -> list[EscapeRoute]:
+    def _escape_bga_rings(
+        self, package: PackageInfo, paired_pad_keys: set[tuple[float, float]]
+    ) -> list[EscapeRoute]:
         """Generate ring-based escape routes for BGA packages.
 
         Outer ring pins escape horizontally/vertically on top layer.
@@ -3458,33 +3462,70 @@ class EscapeRouter:
         escapes: list[EscapeRoute] = []
         center_x, center_y = package.center
 
-        # Issue #3419: Skip pads that belong to skipped/plane nets (net=0).
-        # Plane nets (GND, VCC, etc.) are stitched via planes, not routed
-        # via escapes.  Generating escapes for them wastes the BGA perimeter
-        # channel that the signal nets need -- mirrors the equivalent filter
-        # in ``_escape_qfp_alternating`` (Issue #2513).
-        routable_pads = [p for p in package.pads if p.net != 0]
+        # Skipped and already-paired balls still occupy physical positions.
+        # A targeted reroute of one inner ball must use the same ring as a
+        # full-package route. Filter the outputs after assigning the rings.
+        rings = self._group_pads_by_ring(package.pads, center_x, center_y)
 
-        # Group pads by ring (distance from center)
-        rings = self._group_pads_by_ring(routable_pads, center_x, center_y)
-
+        board_pads = self.grid._pads or package.pads
+        drills = [(v.x, v.y, v.drill) for route in self.grid.routes for v in route.vias]
+        drills.extend((p.x, p.y, p.drill) for p in board_pads if p.through_hole and p.drill > 0)
         for ring_idx, ring_pads in enumerate(rings):
-            # Alternate layers: even rings on F.Cu, odd on B.Cu
-            escape_layer = Layer.F_CU if ring_idx % 2 == 0 else Layer.B_CU
-            needs_via = ring_idx > 0  # Outer ring stays on top
-
             for pad in ring_pads:
-                escape = self._create_ring_escape(
-                    pad=pad,
-                    center=(center_x, center_y),
-                    ring_idx=ring_idx,
-                    escape_layer=escape_layer,
-                    needs_via=needs_via,
-                    package=package,
-                )
-                escapes.append(escape)
-
+                if pad.net == 0 or (pad.x, pad.y) in paired_pad_keys:
+                    continue
+                escape = self._bga_pad_escape(pad, ring_idx, package, board_pads, drills)
+                if escape is not None:
+                    escapes.append(escape)
         return escapes
+
+    def _bga_pad_escape(
+        self,
+        pad: Pad,
+        ring_idx: int,
+        package: PackageInfo,
+        board_pads: list[Pad],
+        drills: list[tuple[float, float, float]],
+    ) -> EscapeRoute | None:
+        """Choose a dogbone around copper already committed on this board."""
+        from .rule_area_grid import escape_copper_rule_area_hit
+
+        radial = self._get_quadrant_direction(pad.x, pad.y, *package.center)
+        alternatives = (d for d in EscapeDirection if d not in (radial, EscapeDirection.VIA_DOWN))
+        for direction in (radial, *alternatives):
+            escape = self._create_ring_escape(pad, direction, ring_idx, package)
+            via = escape.via
+            if via is None or not self.grid.routes:
+                return escape
+
+            if self.edge_clearance is not None and self.board_bounds is not None:
+                self._apply_edge_clearance([escape])
+                via = escape.via
+                assert via is not None
+            approach, tail = escape.segments
+            if not (
+                self.grid.validate_segment_clearance(approach, pad.net)[0]
+                and self.grid.validate_via_clearance(via, pad.net)[0]
+                and self.grid.validate_via_to_via_clearance(via, pad.net)[0]
+                and self._can_place_via(
+                    via.x, via.y, net=pad.net, foreign_pads=board_pads, existing_drills=drills
+                )
+                and not escape_copper_rule_area_hit(
+                    self.grid, [approach], [via], pad.net, self.rules
+                )
+            ):
+                continue
+            # The barrel is a real endpoint even when the straight departure
+            # across the landing layer is blocked. Let the main search turn
+            # there instead of laying a known crossing on the preserved board.
+            if not self.grid.validate_segment_clearance(tail, pad.net)[0] or (
+                escape_copper_rule_area_hit(self.grid, [tail], [], pad.net, self.rules)
+            ):
+                escape.segments = [approach]
+                escape.escape_point = (via.x, via.y)
+                escape.requires_main_route = True
+            return escape
+        return None
 
     def _group_pads_by_ring(
         self,
@@ -3536,31 +3577,10 @@ class EscapeRouter:
         return rings
 
     def _create_ring_escape(
-        self,
-        pad: Pad,
-        center: tuple[float, float],
-        ring_idx: int,
-        escape_layer: Layer,
-        needs_via: bool,
-        package: PackageInfo,
+        self, pad: Pad, direction: EscapeDirection, ring_idx: int, package: PackageInfo
     ) -> EscapeRoute:
-        """Create an escape route for a pad in a ring.
-
-        Args:
-            pad: The pad to escape
-            center: Package center
-            ring_idx: Which ring this pad is in (0=outer)
-            escape_layer: Layer to escape to
-            needs_via: Whether a via is needed
-            package: Package info for bounds
-
-        Returns:
-            EscapeRoute for this pad
-        """
-        center_x, center_y = center
-
-        # Determine escape direction based on quadrant
-        direction = self._get_quadrant_direction(pad.x, pad.y, center_x, center_y)
+        """Build the surface stub and, for an inner ring, the via and landing stub."""
+        escape_layer = Layer.F_CU if ring_idx % 2 == 0 else Layer.B_CU
 
         # Calculate escape point (beyond package edge + clearance)
         dx, dy = self._direction_to_vector(direction)
@@ -3587,7 +3607,7 @@ class EscapeRouter:
         via: Via | None = None
         via_pos: tuple[float, float] | None = None
 
-        if needs_via:
+        if ring_idx > 0:
             # Place via offset from pad
             via_offset = self.via_spacing
             via_x = pad.x + dx * via_offset
@@ -9306,6 +9326,7 @@ class EscapeRouter:
                 net_name=escape.pad.net_name,
                 segments=escape.segments,
                 vias=[escape.via] if escape.via else [],
+                is_escape=escape.requires_main_route,
             )
 
             # Mark on grid
