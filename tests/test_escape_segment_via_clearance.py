@@ -209,7 +209,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=5,
             net_name="SWDIO",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="34",
         )
@@ -290,7 +290,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=5,
             net_name="NRST",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="7",
         )
@@ -366,7 +366,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=5,
             net_name="SWDIO",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="34",
         )
@@ -435,7 +435,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=5,
             net_name="SWDIO",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="34",
         )
@@ -509,7 +509,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=5,
             net_name="SWDIO",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="34",
         )
@@ -569,7 +569,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=5,
             net_name="SWDIO",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="34",
         )
@@ -605,7 +605,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=7,
             net_name="GPIO",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="36",
         )
@@ -655,7 +655,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=7,
             net_name="GPIO",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="36",
         )
@@ -749,7 +749,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=5,
             net_name="SWDIO",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="34",
         )
@@ -809,7 +809,7 @@ class TestApplyEscapeRoutesGate:
             height=1.4,
             net=5,
             net_name="SWDIO",
-            layer=Layer.F_CU,
+            layer=Layer.B_CU,
             ref="U1",
             pin="34",
         )
