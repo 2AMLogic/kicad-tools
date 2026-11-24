@@ -84,6 +84,12 @@ EXPECTED_STALE: dict[str, str] = {
     # regenerated board 09's output and receipt via the #9469 pinned
     # Docker toolchain workflow after #9502 moved both producers under
     # run_on_evidence_toolchain.
+    #
+    "02-charlieplex-led": (
+        "Issue #9800: the shared silk pass leaves five via-only warnings "
+        "(#9112/#9033). The publisher also binds carried-forward renders to "
+        "the PCB in the previous project ZIP. Re-pin after both gates pass."
+    ),
 }
 
 BOARDS = sorted(p.parent.parent for p in BOARDS_DIR.glob("*/output/readiness.json"))
