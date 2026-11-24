@@ -1279,6 +1279,8 @@ def print_routing_diagnostics_json(
         grid_selection: ``"explicit"`` / ``"auto"`` for ``grid.selection``
             (Issue #6875) -- see :func:`get_routing_diagnostics_json`.
         silk_fix: Report for silk legalisation on the saved candidate, when run.
+        post_route_drc_only: Set when the saved board is fully connected and only
+            post-route DRC failed. Adds ``summary.failure_reason="post_route_drc"``.
     """
     diagnostics = get_routing_diagnostics_json(
         router,
