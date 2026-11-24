@@ -26,12 +26,57 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 class SourceChangedError(ValueError):
     """The board no longer contains the bytes validated for export."""
+
+
+def _recovery_prefix(name: str) -> str:
+    """Staging-directory prefix that marks it as a retained recovery copy."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f".{name}.recovery-{stamp}-"
+
+
+def recovery_copies(path: str | Path) -> list[Path]:
+    """Retention directories left beside ``path`` by checked rewrites (#10056).
+
+    Each successful checked rewrite keeps the displaced previous file as a
+    recoverable copy in a private sibling directory named
+    ``.<name>.recovery-<utc-stamp>-<random>/original``; an interrupted
+    publication leaves the same layout. Returns the directories, oldest
+    first, so callers can inspect the retained versions in rewrite order.
+    """
+    path = Path(path)
+    prefix = f".{path.name}.recovery-"
+    return sorted(
+        (
+            entry
+            for entry in path.parent.iterdir()
+            if not entry.is_symlink()
+            and entry.is_dir()
+            and entry.name.startswith(prefix)
+            and (entry / "original").is_file()
+        ),
+        key=lambda entry: entry.name,
+    )
+
+
+def clear_recovery_copies(path: str | Path) -> list[Path]:
+    """Delete every retained recovery copy beside ``path`` (#10056).
+
+    The live file is never touched. Returns the removed directories, oldest
+    first, so callers can report what was reclaimed.
+    """
+    removed = []
+    for copy_dir in recovery_copies(path):
+        shutil.rmtree(copy_dir)
+        removed.append(copy_dir)
+    return removed
 
 
 def _publish_checked(
@@ -40,7 +85,7 @@ def _publish_checked(
     # A digest check followed by os.replace() can still erase a save between
     # the two calls. Move the current entry aside, verify that exact file,
     # then link into the vacant name. link() never overwrites a racing save.
-    staging = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
+    staging = Path(tempfile.mkdtemp(prefix=_recovery_prefix(path.name), dir=path.parent))
     original = staging / "original"
     repaired = staging / "repaired"
     try:
@@ -82,7 +127,10 @@ def _publish_checked(
                 ) from exc
             original.unlink()
             raise
-        original.unlink()
+        # Success: retain the displaced previous file as a recoverable copy
+        # (#10056). Its inode keeps this last link, so a save landing through
+        # an editor's still-open handle after the re-check above stays
+        # recoverable in the recovery directory instead of being lost.
     finally:
         repaired.unlink(missing_ok=True)
         if not os.path.lexists(original):
@@ -102,12 +150,18 @@ def atomic_write_text(
     With ``expected_sha256``, reserve the destination by moving it into a
     private sibling directory, check the displaced bytes, and publish with
     a hard link that fails if another writer takes the name. The path is
-    briefly vacant. An interruption in that interval leaves the displaced
-    board in ``.<filename>.<random>/original`` for recovery.
-    After linking, the displaced file is re-verified: a save through a
-    handle that was already open on it fails the call and gets the live
-    name back. A write landing after that re-check, before the displaced
-    file is unlinked, is not detectable.
+    briefly vacant. After linking, the displaced file is re-verified: a
+    save through a handle that was already open on it fails the call and
+    gets the live name back.
+
+    A successful checked rewrite retains the displaced previous file as a
+    recoverable copy in ``.<filename>.recovery-<utc-stamp>-<random>/original``
+    beside the destination (#10056): a write landing after that re-check,
+    through a handle still open on the previous file, stays recoverable
+    there instead of being lost. Each rewrite adds one such directory;
+    ``recovery_copies()`` lists them, ``clear_recovery_copies()`` (or
+    ``kct clean``) removes them. An interruption also leaves the displaced
+    file in that directory for recovery.
 
     Without a digest, use the ordinary atomic replacement described below.
 

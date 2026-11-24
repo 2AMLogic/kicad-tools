@@ -1,0 +1,237 @@
+"""Checked rewrites retain a recoverable copy of the previous board (#10056).
+
+Maintainer decision (2026-11-24): every successful checked manufacturing
+rewrite keeps a discoverable, recoverable copy of the displaced previous
+file, so a save landing through an editor's still-open handle after the
+post-link re-verification stays recoverable instead of being lost with the
+unlinked inode. Retained copies are inspectable and removable through
+``recovery_copies`` / ``clear_recovery_copies`` and ``kct clean``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.core.atomic_write import (
+    SourceChangedError,
+    atomic_write_text,
+    clear_recovery_copies,
+    recovery_copies,
+)
+
+
+def _checked_rewrite(board: Path, next_content: bytes) -> None:
+    atomic_write_text(
+        board,
+        next_content.decode("utf-8"),
+        encoding="utf-8",
+        newline="",
+        expected_sha256=hashlib.sha256(board.read_bytes()).hexdigest(),
+    )
+
+
+def _save_through_open_handle(fd: int, payload: bytes) -> None:
+    """The delayed-save probe from the issue: ftruncate + pwrite + fsync."""
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, payload, 0)
+    os.fsync(fd)
+
+
+class TestCheckedRewriteRetention:
+    def test_successful_checked_rewrite_retains_previous_version(self, tmp_path):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_bytes(b"(kicad_pcb original)")
+
+        _checked_rewrite(board, b"(kicad_pcb repaired)")
+
+        assert board.read_bytes() == b"(kicad_pcb repaired)"
+        copies = recovery_copies(board)
+        assert len(copies) == 1
+        assert copies[0].name.startswith(".board.kicad_pcb.recovery-")
+        assert (copies[0] / "original").read_bytes() == b"(kicad_pcb original)"
+
+    def test_delayed_save_through_open_handle_stays_recoverable(self, tmp_path):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_bytes(b"(kicad_pcb original)")
+        fd = os.open(board, os.O_RDWR)
+        try:
+            _checked_rewrite(board, b"(kicad_pcb repaired)")
+            # The editor's save lands after publication, past the post-link
+            # re-check that _publish_checked performs. Before #10056 the
+            # displaced inode's last link was dropped and this save was lost.
+            _save_through_open_handle(fd, b"(kicad_pcb editors-later-save)")
+        finally:
+            os.close(fd)
+
+        assert board.read_bytes() == b"(kicad_pcb repaired)"
+        copies = recovery_copies(board)
+        assert len(copies) == 1
+        assert (copies[0] / "original").read_bytes() == b"(kicad_pcb editors-later-save)"
+
+    def test_save_landing_inside_the_recheck_window_stays_recoverable(self, tmp_path, monkeypatch):
+        """A save landing between the post-link re-check and the old unlink."""
+        from kicad_tools.core import atomic_write
+
+        board = tmp_path / "board.kicad_pcb"
+        original = b"(kicad_pcb original)"
+        board.write_bytes(original)
+        edited = b"(kicad_pcb editors-window-save)"
+        original_digest = hashlib.sha256(original).hexdigest()
+        real_sha256 = atomic_write.hashlib.sha256
+        seen: list[int] = []
+
+        def sha_after_recheck(data):
+            digest = real_sha256(data)
+            # The digest of the displaced bytes is computed twice (the
+            # displacement check, then the post-link re-check). Simulate the
+            # editor writing through its open handle right after the second
+            # read begins -- inside the window the unlink used to close.
+            if bytes(data) == original:
+                seen.append(1)
+                if len(seen) == 2:
+                    (recovery_copies(board)[0] / "original").write_bytes(edited)
+            return digest
+
+        monkeypatch.setattr(atomic_write.hashlib, "sha256", sha_after_recheck)
+        atomic_write_text(
+            board,
+            "(kicad_pcb repaired)",
+            encoding="utf-8",
+            newline="",
+            expected_sha256=original_digest,
+        )
+
+        assert seen == [1, 1]
+        assert board.read_bytes() == b"(kicad_pcb repaired)"
+        copies = recovery_copies(board)
+        assert len(copies) == 1
+        assert (copies[0] / "original").read_bytes() == edited
+
+    def test_successive_rewrites_retain_one_copy_each(self, tmp_path):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_bytes(b"(kicad_pcb v1)")
+        _checked_rewrite(board, b"(kicad_pcb v2)")
+        _checked_rewrite(board, b"(kicad_pcb v3)")
+
+        assert board.read_bytes() == b"(kicad_pcb v3)"
+        copies = recovery_copies(board)
+        assert len(copies) == 2
+        retained = sorted((entry / "original").read_bytes() for entry in copies)
+        assert retained == [b"(kicad_pcb v1)", b"(kicad_pcb v2)"]
+
+    def test_failed_checked_publication_leaves_no_recovery_copy(self, tmp_path):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_bytes(b"(kicad_pcb original)")
+
+        with pytest.raises(SourceChangedError):
+            atomic_write_text(
+                board,
+                "(kicad_pcb repaired)",
+                encoding="utf-8",
+                newline="",
+                expected_sha256="0" * 64,
+            )
+
+        assert board.read_bytes() == b"(kicad_pcb original)"
+        assert recovery_copies(board) == []
+        assert [entry for entry in tmp_path.iterdir() if entry.is_dir()] == []
+
+    def test_plain_atomic_write_leaves_no_recovery_dir(self, tmp_path):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_bytes(b"(kicad_pcb old)")
+
+        atomic_write_text(board, "(kicad_pcb new)", encoding="utf-8")
+
+        assert board.read_bytes() == b"(kicad_pcb new)"
+        assert recovery_copies(board) == []
+        assert [entry for entry in tmp_path.iterdir() if entry.is_dir()] == []
+
+
+class TestRecoveryHelpers:
+    def test_clear_recovery_copies_removes_retained_dirs_only(self, tmp_path):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_bytes(b"(kicad_pcb v1)")
+        _checked_rewrite(board, b"(kicad_pcb v2)")
+        _checked_rewrite(board, b"(kicad_pcb v3)")
+
+        removed = clear_recovery_copies(board)
+
+        assert len(removed) == 2
+        assert recovery_copies(board) == []
+        assert board.read_bytes() == b"(kicad_pcb v3)"
+
+    def test_dirs_without_original_are_not_recovery_copies(self, tmp_path):
+        board = tmp_path / "board.kicad_pcb"
+        board.write_bytes(b"(kicad_pcb)")
+        decoy = tmp_path / ".board.kicad_pcb.recovery-20261124T160000Z-ab12cd"
+        decoy.mkdir()
+        (decoy / "notes").write_text("not a retained board")
+
+        assert recovery_copies(board) == []
+        assert clear_recovery_copies(board) == []
+        assert decoy.exists()
+
+    def test_recovery_copies_do_not_leak_across_boards(self, tmp_path):
+        board_a = tmp_path / "a.kicad_pcb"
+        board_b = tmp_path / "b.kicad_pcb"
+        board_a.write_bytes(b"(a v1)")
+        board_b.write_bytes(b"(b v1)")
+        _checked_rewrite(board_a, b"(a v2)")
+
+        assert recovery_copies(board_b) == []
+        assert len(recovery_copies(board_a)) == 1
+
+
+MINIMAL_PROJECT = '{\n  "meta": {"filename": "proj.kicad_pro", "version": 1}\n}\n'
+
+
+class TestCleanRemovesRecoveryCopies:
+    def _project_with_retained_copy(self, tmp_path: Path) -> tuple[Path, Path]:
+        from kicad_tools.cli.clean_cmd import find_cleanable_files  # noqa: F401
+
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        project_file = project_dir / "proj.kicad_pro"
+        project_file.write_text(MINIMAL_PROJECT)
+        board = project_dir / "proj.kicad_pcb"
+        board.write_bytes(b"(kicad_pcb v2)")
+        _checked_rewrite(board, b"(kicad_pcb v3)")
+        return project_file, board
+
+    def test_clean_flags_retained_recovery_copies(self, tmp_path):
+        from kicad_tools.cli.clean_cmd import find_cleanable_files
+
+        project_file, board = self._project_with_retained_copy(tmp_path)
+
+        result = find_cleanable_files(project_file)
+
+        flagged = result.by_category("recovery_copy")
+        assert len(flagged) == 1
+        assert flagged[0].path == recovery_copies(board)[0]
+        assert flagged[0].size_bytes == len(b"(kicad_pcb v2)")
+        assert board in [kept.path for kept in result.to_keep]
+
+    def test_clean_force_deletes_retained_recovery_copies(self, tmp_path, capsys):
+        from kicad_tools.cli.clean_cmd import main as clean_main
+
+        project_file, board = self._project_with_retained_copy(tmp_path)
+
+        assert clean_main(["--force", str(project_file)]) == 0
+
+        assert recovery_copies(board) == []
+        assert board.read_bytes() == b"(kicad_pcb v3)"
+        out = capsys.readouterr().out
+        assert "recovery" in out
+
+    def test_clean_dry_run_keeps_retained_recovery_copies(self, tmp_path, capsys):
+        from kicad_tools.cli.clean_cmd import main as clean_main
+
+        project_file, board = self._project_with_retained_copy(tmp_path)
+
+        assert clean_main([str(project_file)]) == 0
+
+        assert len(recovery_copies(board)) == 1

@@ -584,6 +584,35 @@ An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is no
 
 The hand-edited-CSV route is not an option: it breaks the manifest checksums.
 
+## Retained recovery copies beside the board
+
+Export sometimes rewrites the source board itself under a verified-bytes
+check: refreshing the saved zone fills to match the generated DRC rules,
+and the default silk legalisation pass. Each successful checked rewrite
+keeps the displaced previous file as a recoverable copy in a sibling
+directory named
+`.<board>.kicad_pcb.recovery-<UTC timestamp>-<random>/original` (issue
+#10056). If KiCad or another editor still had the previous file open and
+saves into it after the export published, that save stays recoverable in
+the retained copy rather than being lost.
+
+Inspect the retained versions with any diff tool:
+
+```bash
+diff boards/04-stm32-devboard/04-stm32-devboard.kicad_pcb \
+     boards/04-stm32-devboard/.04-stm32-devboard.kicad_pcb.recovery-*/original
+```
+
+One copy is kept per rewrite, so the directories accumulate until you
+remove them:
+
+```bash
+kct clean boards/04-stm32-devboard/04-stm32-devboard.kicad_pro --force
+```
+
+`kct clean` reports the retained recovery copies in its default dry run
+and deletes them with `--force`; the live board is never touched.
+
 ## Next Steps
 
 - **[Query API](query-api.md)** - Advanced filtering for design analysis

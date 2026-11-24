@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -128,6 +129,11 @@ BACKUP_PATTERNS = [
     re.compile(r"-rescue\.kicad_", re.IGNORECASE),
 ]
 
+# Retained recovery copies from checked manufacturing rewrites (issue #10056):
+# .<board>.recovery-<YYYYMMDDTHHMMSSZ>-<random>/ holding the displaced previous
+# file as "original" beside the live board.
+RECOVERY_COPY_PATTERN = re.compile(r"^\.(?P<board>.+)\.recovery-\d{8}T\d{6}Z-[^/]+$")
+
 # Additional patterns for deep clean mode
 DEEP_CLEAN_PATTERNS = [
     # Gerber and drill files
@@ -223,6 +229,25 @@ def find_cleanable_files(
     protected_names = {p.path.name for p in result.to_keep}
 
     for file_path in project_dir.iterdir():
+        if file_path.is_dir():
+            # Retained recovery copies of checked rewrites (#10056): the
+            # displaced previous board, kept recoverable beside the live file.
+            recovery = RECOVERY_COPY_PATTERN.match(file_path.name)
+            if recovery and (file_path / "original").is_file():
+                try:
+                    size = (file_path / "original").stat().st_size
+                except OSError:
+                    size = 0
+                result.to_delete.append(
+                    CleanableFile(
+                        path=file_path,
+                        category="recovery_copy",
+                        reason=f"retained previous copy of {recovery.group('board')}",
+                        size_bytes=size,
+                    )
+                )
+            continue
+
         if not file_path.is_file():
             continue
 
@@ -419,6 +444,13 @@ def format_output_text(result: CleanResult, verbose: bool = False) -> str:
             lines.append(f"  ✗ {f.path.name} ({f.size_str})")
         lines.append("")
 
+    recovery_copies = result.by_category("recovery_copy")
+    if recovery_copies:
+        lines.append(f"Would delete ({len(recovery_copies)} retained recovery copies):")
+        for f in recovery_copies:
+            lines.append(f"  ✗ {f.path.name}/ ({f.size_str})")
+        lines.append("")
+
     if result.to_keep:
         lines.append("Would keep:")
         for f in result.to_keep:
@@ -464,7 +496,7 @@ def format_output_json(result: CleanResult) -> str:
 
 def delete_files(result: CleanResult, verbose: bool = False) -> tuple[int, int]:
     """
-    Delete the files marked for cleanup.
+    Delete the files (and recovery-copy directories) marked for cleanup.
 
     Args:
         result: CleanResult with files to delete
@@ -478,7 +510,10 @@ def delete_files(result: CleanResult, verbose: bool = False) -> tuple[int, int]:
 
     for f in result.to_delete:
         try:
-            f.path.unlink()
+            if f.path.is_dir() and not f.path.is_symlink():
+                shutil.rmtree(f.path)
+            else:
+                f.path.unlink()
             deleted += 1
             freed += f.size_bytes
             if verbose:
