@@ -8186,7 +8186,20 @@ def _fill_zones_after_route(
     _fill_kwargs: dict = {}
     if args is not None and _finishing_time_left(args) is not None:
         _fill_kwargs["time_left"] = lambda: _finishing_time_left(args)
-    result = run_fill_zones(output_path, kicad_cli=kicad_cli, **_fill_kwargs)
+    if getattr(args, "_preserved_departure_trial", False) is True:
+        # Preserve the input's thermal settings on this speculative first
+        # fill. Ask KiCad to save its actual fill once; the oracle below
+        # decides whether any power connection needs additional copper.
+        from kicad_tools.cli.runner import _run_fill_zones_via_drc
+
+        remaining = _finishing_time_left(args)
+        if remaining is not None and remaining <= 0:
+            return
+        result = _run_fill_zones_via_drc(output_path, None, kicad_cli, timeout=remaining)
+        if not result.refill_saved:
+            return
+    else:
+        result = run_fill_zones(output_path, kicad_cli=kicad_cli, **_fill_kwargs)
     if args is not None:
         # Issue #6273: the measured KiCad load + fill time of THIS board is
         # the cost estimate the later kicad-cli stages (oracle DRC rounds,
@@ -10811,6 +10824,7 @@ def _publish_preserved_departure(pcb_path, output_path, route_sexp, args, router
         _copy_checkpoint_constraint_sidecars(output_path, staged)
         _write_routed_pcb(pcb_path, staged, route_sexp, guard_copper_loss=True)
         trial = copy(args)
+        trial._preserved_departure_trial = True
         _run_post_save_stitching(trial, staged, quiet=quiet)
         _fill_zones_after_route(staged, quiet=quiet, router=router, args=trial)
         _complete_pour_nets_with_oracle(staged, args=trial, quiet=quiet, router=router)
@@ -10830,6 +10844,7 @@ def _publish_preserved_departure(pcb_path, output_path, route_sexp, args, router
             if staged.with_suffix(ext).is_file()
         ]
         _publish_transaction([*moves, (output_path, staged)])
+        del trial._preserved_departure_trial
         vars(args).update(vars(trial))
         relocate({staged: output_path})
         return True

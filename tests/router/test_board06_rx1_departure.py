@@ -175,3 +175,23 @@ def test_candidate_and_power_pour_publish_together(tmp_path, monkeypatch, fill_o
     )
     if not accepted:
         assert output.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_speculative_refill_requires_a_verified_save(tmp_path, monkeypatch, saved):
+    from kicad_tools.cli import route_cmd, runner
+
+    board = tmp_path / "staged.kicad_pcb"
+    board.write_text('(kicad_pcb (version 20240108) (zone (net 1) (layer "B.Cu")))\n')
+    args = SimpleNamespace(pcb=board, _preserved_departure_trial=True)
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: tmp_path / "kicad-cli")
+    monkeypatch.setattr(route_cmd, "_finishing_time_left", lambda _args: 25)
+    monkeypatch.setattr(runner, "validate_net_format", lambda _path: SimpleNamespace(valid=True))
+
+    def native(path, output, cli, timeout):
+        assert path == board and output is None and timeout == 25
+        return runner.KiCadCLIResult(success=True, refill_saved=saved)
+
+    monkeypatch.setattr(runner, "_run_fill_zones_via_drc", native)
+    route_cmd._fill_zones_after_route(board, quiet=True, args=args)
+    assert args._zone_fill_verified is saved
