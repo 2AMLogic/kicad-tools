@@ -433,3 +433,39 @@ Two checks with the nightly `--skip mask_to_copper` took 12.8 and 17.4 seconds
 on the same host. A second from-scratch seed-42 route reproduced the saved
 PCB byte for byte. Running the public `--grade-only` control on the original
 seed-42 board exited 1 with three errors and 77 warnings.
+
+## RUN trace clearance at its own via, 2026-11-24 (issue #9424)
+
+On `2de8d8e2e`, the seed-42 RUN shortcut left a 0.085833 mm gap beside
+its own F.Cu via. The fabrication profile requires 0.1016 mm. On
+`c75ceefd2` the optimizer extends the trace leaving the via and reconnects
+it to the same straight run. The saved board replaces two 0.15 mm RUN
+segments with three. All 396 other tracks, 121 vias and 200 pad records
+retain their geometry.
+
+| Unattended run | Route time | Nightly errors | Nightly warnings |
+|---|---:|---:|---:|
+| Original, seed 42 | 332.1 s | 2 | 77 |
+| Revised, seed 42 | 371.7 s | 1 | 77 |
+| Revised, seed 7 | 351.6 s | 1 | 77 |
+| Revised, seed 1337 | 323.7 s | 1 | 77 |
+| Revised, seed 42 repeated from scratch | 363.5 s | 1 | 77 |
+
+The original seed-42 PCB has the same SHA-256 as the three boards in the VM
+comparison above. All four revised boards have SHA-256
+`c5e6401c916c3ffcae56bb68014a3fad11b4797df6f0adc9770843d964808aa5`.
+Every route completed 37/37 nets and 143/143 connections. Pinned KiCad
+10.0.6 reported zero DRC violations, unconnected items or ERC violations.
+
+| Full fabrication check including mask | Original errors / warnings | Revised errors / warnings |
+|---|---:|---:|
+| Saved board | 15 / 100 | 14 / 100 |
+| After independent KiCad refill | 14 / 104 | 13 / 104 |
+
+For each seed and each board form, the RUN gap was the only error removed.
+The complete warning records matched the corresponding original, with zero
+waivers. Native DRC remained clean after refill and copper LVS matched 149
+pads on both forms. All 399 revised tracks are horizontal, vertical or 45
+degrees. The stored board still has 13 mask-to-copper errors, and the
+refilled board has 12. RESET and the 77 nightly warnings keep the unattended
+gate at exit 1.

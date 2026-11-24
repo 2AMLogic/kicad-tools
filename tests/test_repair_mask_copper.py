@@ -21,7 +21,7 @@ import pytest
 from shapely.geometry import Point  # type: ignore[import-untyped]
 
 from kicad_tools.cli import fix_drc_cmd
-from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer
+from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer, MaskRepairResult
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 from kicad_tools.sexp import parse_file
@@ -2364,3 +2364,116 @@ def test_failed_mask_batch_reports_each_action_once(tmp_path, monkeypatch, capsy
         ("trk-a", "recheck_unavailable"),
     ]
     assert board.read_bytes() == original
+
+
+# ---------------------------------------------------------------------------
+# Issue #9939: a jog between two parallel runs slides along them
+# ---------------------------------------------------------------------------
+
+
+def _jog_fixture(tmp_path, *, copies=1, anchor=(98.0, 100.4), extra="", lock=""):
+    """The pad lead enters at (99, 100); the jog leaves it at 45 degrees.
+
+    Each track is repeated ``copies`` times, like the coincident BTN2 routes on
+    Board 03, so the whole group has to move together.
+    """
+    shapes = {
+        "lead": ((100.5, 100.0), (99.0, 100.0)),
+        "jog": ((99.0, 100.0), (98.6, 100.4)),
+        "run": ((98.6, 100.4), anchor),
+    }
+    tracks = [
+        _seg(f"{name}-{i}", a, b).replace(
+            "(segment ", f"(segment {lock} " if (name, i) == ("run", 0) else "(segment "
+        )
+        for name, (a, b) in shapes.items()
+        for i in range(copies)
+    ]
+    return _board(tmp_path, "\n".join([*tracks, extra])), shapes
+
+
+def _entry_finding(conductor: str):
+    finding = _finding(conductor)
+    finding.required_value_mm = 0.09
+    finding.actual_value_mm = 0.0
+    return finding
+
+
+_JOG_OPTS = {"max_displacement": 1.0, "clearance_mm": 0.127, "warning_clearance_mm": 0.15}
+
+
+@pytest.mark.parametrize("copies", [1, 3])
+def test_jog_between_parallel_runs_slides_without_changing_any_angle(tmp_path, copies):
+    board, shapes = _jog_fixture(tmp_path, copies=copies)
+    before = board.read_bytes()
+    original = {f"{n}-{i}": _end(board, f"{n}-{i}") for n in shapes for i in range(copies)}
+    repairer = MaskCopperRepairer(board)
+    findings = [_entry_finding(f"jog-{i}") for i in range(copies)]
+    assert repairer.repair(findings, dry_run=True, **_JOG_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair(findings, **_JOG_OPTS)
+    assert result.repaired == 1
+    (action,) = result.actions
+    assert action.action == "nudge_clear" and action.dy == 0 and action.dx < 0
+    assert len(action.points) == 4 * copies  # both jog ends and both joined run ends
+    repairer.save(board)
+    assert not repairer.off_angle_tracks()
+    for i in range(copies):
+        lead, jog, run = (_end(board, f"{n}-{i}") for n in ("lead", "jog", "run"))
+        # The pad end of the lead and the downstream anchor never move.
+        assert lead[0] == original[f"lead-{i}"][0]
+        assert run[1] == original[f"run-{i}"][1]
+        # The joints follow the jog along their own lines.
+        assert lead[1] == jog[0] and jog[1] == run[0]
+        assert lead[1][1] == 100.0 and run[0][1] == 100.4
+        assert math.isclose(jog[0][0] - jog[1][0], 0.4, abs_tol=1e-9)
+        copper, _ = _saved_copper(board, f"jog-{i}")
+        assert copper.distance(_pad_poly(board, "R1/1")) >= 0.15
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert {k: _end(board, k) for k in original} == original
+
+
+def test_jog_slide_declines_when_a_run_would_collapse_and_leaves_the_board_alone(tmp_path):
+    # The downstream run is too short to give up the 0.25 mm the jog needs.
+    board, _ = _jog_fixture(tmp_path, anchor=(98.4, 100.4))
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    pads = repairer._openings()
+    slid = repairer._slide_jog_along_runs(
+        repairer._segment_nodes()["jog-0"],
+        "jog-0",
+        PAD,
+        pads,
+        MaskRepairResult(),
+        1.0,
+        False,
+        0.127,
+        0.09,
+        0.02,
+        0.15,
+        set(),
+    )
+    assert slid is False
+    assert not repairer.modified and repairer.doc.to_string() == before
+
+
+def test_jog_slide_vetoed_by_other_net_copper_or_a_split_restores_everything(tmp_path):
+    crowd = _seg("foreign", (98.75, 99.4), (98.75, 99.72), net=2)
+    cases = {
+        "foreign-copper": crowd,
+        # A thin same-net branch touching the middle of the jog would be orphaned.
+        "branch-on-jog": _seg("branch", (98.8, 100.2), (98.8, 103.0), width=0.04),
+        "locked-run": "",
+    }
+    for name, extra in cases.items():
+        sub = tmp_path / name
+        sub.mkdir()
+        board, _ = _jog_fixture(sub, extra=extra, lock="locked" if name == "locked-run" else "")
+        repairer = MaskCopperRepairer(board)
+        before = repairer.doc.to_string()
+        result = repairer.repair([_entry_finding("jog-0")], dry_run=True, **_JOG_OPTS)
+        assert not any(a.action == "nudge_clear" for a in result.actions), name
+        assert repairer.doc.to_string() == before, name
