@@ -153,8 +153,10 @@ is the separate mechanical sweep **#4674**.
 
 `kct route --format json` now reaches the existing routing-diagnostics formatter.
 For boards with placement-invalid nets, the final attempt summary also contains
-`placement_disposition`, including early outcomes. This flag controls diagnostic
-payloads; routing progress and all strategy paths are not yet normalized to the
+`placement_disposition`, including early outcomes. When all requested nets complete
+and verified DRC alone fails, the same JSON object carries `exit_code: 3`,
+`output_written`, and `summary.failure_reason: "post_route_drc"` on both layer
+paths. This flag controls diagnostic payloads; routing progress and all strategy paths are not yet normalized to the
 general single-document stdout contract. Callers must not treat parser flag
 coverage alone as proof that the entire stream is one JSON document. See the
 [route reference](cli.md#routing-around-invalid-placement) for disposition scope.

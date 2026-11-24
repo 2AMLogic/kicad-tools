@@ -24908,18 +24908,14 @@ def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = fr
                         )
                         json_stream.flush()
                     return 1
+            # Placement is diagnosed inside the route. Hold JSON until finish()
+            # has inspected the board that was actually written.
             capture = (
-                json_stream.capture()
-                if json_stream is not None
-                and (
-                    gate is not None
-                    or _route_json_capture is not None
-                    or _budget_retry_static_eligible(args)
-                    or _plane_retry_eligible(args)
-                )
-                else contextlib.nullcontext(None)
+                json_stream.capture() if json_stream is not None else contextlib.nullcontext(None)
             )
+            placement_fields: dict = {}
             handed_off = False
+            document = ""
             with capture as held:
                 try:
                     try:
@@ -24956,40 +24952,38 @@ def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = fr
                         finally:
                             _lint_gate_unstage_args(args, gate, requested_output)
                         result = outcome.exit_code(result)
-                    exit_code = finish(args, result)
+                    exit_code = finish(args, result, json_fields=placement_fields)
                     if json_stream is not None and not json_stream.written:
                         # The layer/rule-escalation paths (the default) never reached
                         # the direct-route JSON emitter; publish the same document
                         # for the final router so --format json always yields one.
                         _emit_route_json_fallback(args, exit_code)
                 finally:
-                    if _route_json_capture is not None and held is not None:
-                        # Issue #9620 review: an inner (retry) run hands its
-                        # JSON document to the requesting outer run -- consumed
-                        # exactly once there; the inner never also writes it
-                        # locally (its nested json guard would land the
-                        # document on stderr).
-                        _route_json_capture.append(held.getvalue())
-                        handed_off = True
-            retry_json = getattr(args, "_budget_retry_json_document", None)
-            if held is not None and json_stream is not None and not handed_off:
+                    if held is not None:
+                        # A promoted retry's diagnostics describe the published
+                        # board. Its final placement report comes from finish().
+                        document = (
+                            getattr(args, "_budget_retry_json_document", None) or held.getvalue()
+                        )
+                        if placement_fields:
+                            import json
+
+                            payload = json.loads(document) if document.strip() else {}
+                            payload.update(placement_fields)
+                            document = json.dumps(payload, indent=2) + "\n"
+                        if _route_json_capture is not None:
+                            # The requesting outer run publishes the inner retry
+                            # exactly once, after it decides which board to keep.
+                            _route_json_capture.append(document)
+                            handed_off = True
+            if json_stream is not None and not handed_off:
                 if gate is not None and outcome is not None:
                     from .route_lint_gate import merge_into_json_document
 
-                    json_stream.write(
-                        merge_into_json_document(
-                            retry_json if retry_json else held.getvalue(),
-                            outcome,
-                            exit_code,
-                            relocate=gate.relocate,
-                        )
+                    document = merge_into_json_document(
+                        document, outcome, exit_code, relocate=gate.relocate
                     )
-                elif retry_json:
-                    # The coarser retry promoted its board (Issue #9620): its
-                    # document, not the first pass's, describes -o now.
-                    json_stream.write(retry_json)
-                else:
-                    json_stream.write(held.getvalue())
+                json_stream.write(document)
                 json_stream.flush()
             return exit_code
     except DRCConstraintPropagationError as exc:
