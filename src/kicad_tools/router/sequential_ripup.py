@@ -235,9 +235,10 @@ class _PassStats:
 def _escape_infrastructure_nets(router: Autorouter) -> set[int]:
     """Nets whose only copper so far is dense-package escape infrastructure.
 
-    ``generate_escape_routes`` appends its stubs to ``router.routes`` with
-    ``is_escape`` left ``False`` (only the #1603 SUB-grid stubs set that flag),
-    and remaps each escaped pad in ``router._escape_pad_overrides``. So the
+    ``generate_escape_routes`` remaps each escaped pad in
+    ``router._escape_pad_overrides``. Most dense-package stubs have
+    ``is_escape`` left ``False``. Sub-grid stubs and BGA dogbones that still
+    need a departure from the via set the flag. So the
     naive "any non-``is_escape`` route means pre-routed" test -- correct on the
     negotiated entry point, where the escape pre-phase has not run -- throws
     away most of the board on the escape/two-phase path: on board 03 it cut the
