@@ -62,7 +62,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from kicad_tools.cli.export_cmd import _find_pcb_for_export
@@ -79,7 +82,12 @@ from kicad_tools.cli.runner import (
     run_pcb_export_svg,
     run_pcb_render,
 )
-from kicad_tools.pcb.model_audit import audit_pcb_models, resolve_pinned_model_dir
+from kicad_tools.pcb.model_audit import (
+    ModelAuditReport,
+    audit_pcb_models,
+    is_library_rooted_ref,
+    resolve_pinned_model_dir,
+)
 
 # Minimum KiCad version required for `kicad-cli pcb render`.
 MIN_RENDER_VERSION = (8, 0, 4)
@@ -204,28 +212,81 @@ def _render_pcb(
     models: str = "host",
     allow_incomplete: bool = False,
 ) -> dict:
-    """Write the four render artifacts for *pcb_path* into *renders_dir*.
+    """Render one private copy for every view, model inspection and provenance digest."""
+    renders_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = pcb_path.resolve().parent
+    with tempfile.TemporaryDirectory(prefix=".render-input-", dir=renders_dir) as scratch:
+        # Mirror the project path so even parent-relative model references have
+        # the same meaning. Only the selected PCB and its inputs are staged.
+        snapshot = (
+            Path(scratch).resolve() / source_dir.relative_to(source_dir.anchor) / pcb_path.name
+        )
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copyfile(pcb_path, snapshot)
+            project = pcb_path.with_suffix(".kicad_pro")
+            if project.is_file():
+                shutil.copyfile(project, snapshot.with_suffix(".kicad_pro"))
+        except OSError as exc:
+            (renders_dir / PROVENANCE_FILE).unlink(missing_ok=True)
+            if not quiet:
+                print(f"  {name}: ERROR {exc}", file=sys.stderr)
+            return {
+                "board": name,
+                "pcb": str(pcb_path),
+                "status": "error",
+                "outputs": {},
+                "errors": [str(exc)],
+                "model_check": {"status": "not_run", "checked_models": 0, "unresolved_models": []},
+            }
+        return _render_snapshot(
+            snapshot,
+            renders_dir,
+            source=pcb_path,
+            name=name,
+            do_3d=do_3d,
+            kicad_cli=kicad_cli,
+            quiet=quiet,
+            models=models,
+            allow_incomplete=allow_incomplete,
+        )
 
-    Shared by both directory-scanning mode (``_render_board``) and the direct
-    ``.kicad_pcb`` file mode. Returns a status dict for JSON output.
 
-    Status entries:
-        board: label used in status output
-        pcb: resolved PCB path
-        status: "ok" | "partial" | "error"
-        outputs: {name: path} for files written
-        errors: list of error strings
-    """
+def _stage_local_models(report: ModelAuditReport, project_dir: Path, snapshot_dir: Path) -> None:
+    """Copy project-relative model files to the same locations beside the private board."""
+    for _, raw, _, resolved in report.refs:
+        if not resolved or raw.startswith("kicad-embed://") or is_library_rooted_ref(raw):
+            continue
+        if Path(raw).expanduser().is_absolute():
+            continue
+        source = Path(resolved)
+        if source.is_file():
+            target = snapshot_dir / os.path.relpath(source, project_dir)
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+
+
+def _render_snapshot(
+    pcb_path: Path,
+    renders_dir: Path,
+    *,
+    source: Path,
+    name: str,
+    do_3d: bool,
+    kicad_cli: Path | None,
+    quiet: bool,
+    models: str,
+    allow_incomplete: bool,
+) -> dict:
     result: dict = {
         "board": name,
-        "pcb": str(pcb_path),
+        "pcb": str(source),
         "status": "skipped",
         "outputs": {},
         "errors": [],
         "model_check": {"status": "not_run", "checked_models": 0, "unresolved_models": []},
     }
-
-    renders_dir.mkdir(parents=True, exist_ok=True)
 
     written: dict[str, str] = {}
     errors: list[str] = []
@@ -246,7 +307,11 @@ def _render_pcb(
     # --- 3D ray-traced renders ---
     if do_3d:
         try:
-            report = audit_pcb_models(pcb_path, env=models, kicad_cli=kicad_cli)
+            project_dir = source.resolve().parent
+            report = audit_pcb_models(
+                pcb_path, env=models, kicad_cli=kicad_cli, project_dir=project_dir
+            )
+            _stage_local_models(report, project_dir, pcb_path.parent)
             result["model_check"] = inspect_pcb_models(pcb_path, kicad_cli, report=report)
             for missing in result["model_check"]["unresolved_models"]:
                 errors.append(

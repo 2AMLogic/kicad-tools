@@ -128,6 +128,35 @@ def test_unchanged_board_carries_renders_forward(tmp_path):
     assert module._renders("pcb-front.svg")(options) == fresh["pcb-front.svg"]
 
 
+def test_repeat_equivalent_saves_preserve_the_original_render_binding(tmp_path):
+    module = _load_release_module()
+    _, _, images, options = _fixture_board(tmp_path, silk_changed=False, provenance=None)
+    renders = options.board_dir / "output" / "renders"
+    package = options.board_dir / "output" / "manufacturing"
+    binding = json.dumps(_bind(options, options.pcb.read_bytes(), images)).encode()
+    (renders / PROVENANCE).write_bytes(binding)
+    (package / "renders" / PROVENANCE).write_bytes(binding)
+    for name, data in images.items():
+        (package / "renders" / name).write_bytes(data)
+
+    for _ in range(2):
+        _snapshot_old(module, options)
+        options.pcb.write_bytes(options.pcb.read_bytes() + b"\n")
+        for name, data in images.items():
+            assert module._renders(name)(options) == data
+        assert module._render_provenance(options) == binding
+        with zipfile.ZipFile(package / "kicad_project.zip", "w") as archive:
+            archive.write(options.pcb, options.pcb.name)
+
+    (renders / RENDERS[0]).write_bytes(b"different image")
+    with pytest.raises(RuntimeError, match=RENDERS[0]):
+        module._render_provenance(options)
+    (renders / RENDERS[0]).write_bytes(images[RENDERS[0]])
+    (renders / PROVENANCE).write_text(json.dumps(_bind(options, b"unrelated board", images)))
+    with pytest.raises(RuntimeError, match="does not bind"):
+        module._render_provenance(options)
+
+
 # -- the changed-artwork branch ------------------------------------------
 
 
@@ -236,6 +265,7 @@ def test_package_extras_ships_bound_renders_and_their_provenance(tmp_path):
         assert (shipped / "renders" / name).read_bytes() == fresh[name]
     # The provenance travels with the package: a fab upload carries its binding.
     assert (shipped / "renders" / PROVENANCE).read_bytes() == provenance_file.read_bytes()
+    assert provenance_file in release._extra_inputs(options)
     # The gate-evidence copies the shared producer always adds are in place.
     assert (shipped / "check-report.json").is_file()
     assert (shipped / "native-drc.json").is_file()

@@ -45,7 +45,9 @@ dropped.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -305,16 +307,18 @@ def _bom_policy(old: bytes, new: bytes) -> None:
     raise RuntimeError("bom_jlcpcb.csv changed; re-review component identities in HARDWARE.md")
 
 
-def _validated_provenance(options: ReadinessOptions) -> bytes:
-    """``output/renders``' provenance sidecar, verified against the checked
-    PCB and the four shipped renders (#9800).
-
-    Raises the historical re-render refusal when the sidecar is missing,
-    unreadable, bound to a different PCB, or names an image whose bytes no
-    longer match -- a refused run publishes nothing, so the previous ready
-    package stays in place and reviewable.
-    """
-    path = options.board_dir / "output" / "renders" / RENDER_PROVENANCE
+def _render_provenance(options: ReadinessOptions) -> bytes | None:
+    """Verify the render set against this PCB or a content-equivalent published PCB."""
+    renders = options.board_dir / "output" / "renders"
+    path = renders / RENDER_PROVENANCE
+    with zipfile.ZipFile(io.BytesIO(RELEASE.old("kicad_project.zip"))) as archive:
+        archived_pcb = archive.read(options.pcb.name)
+    current_pcb = options.pcb.read_bytes()
+    unchanged = archived_pcb == current_pcb or board_content(
+        archived_pcb, ignore=PIN_ANNOTATION_NODES
+    ) == board_content(current_pcb, ignore=PIN_ANNOTATION_NODES)
+    if unchanged and not path.exists():
+        return None
     try:
         data = path.read_bytes()
         provenance = json.loads(data)
@@ -324,12 +328,30 @@ def _validated_provenance(options: ReadinessOptions) -> bytes:
             f"({RENDER_PROVENANCE} unreadable: {exc})"
         ) from None
     problems: list[str] = []
-    if not isinstance(provenance, dict) or provenance.get("pcb_sha256") != _sha(options.pcb):
-        problems.append(f"{RENDER_PROVENANCE} does not bind the checked PCB")
     recorded = provenance.get("outputs") if isinstance(provenance, dict) else None
     recorded = recorded if isinstance(recorded, dict) else {}
+    bound_pcb = provenance.get("pcb_sha256") if isinstance(provenance, dict) else None
+    if bound_pcb != hashlib.sha256(current_pcb).hexdigest():
+        # Keep the original render input's digest across equivalent saves. A
+        # previous package may itself have carried this same binding forward.
+        bound = unchanged and bound_pcb == hashlib.sha256(archived_pcb).hexdigest()
+        if (
+            unchanged
+            and not bound
+            and isinstance(bound_pcb, str)
+            and re.fullmatch("[0-9a-f]{64}", bound_pcb)
+        ):
+            try:
+                bound = data == RELEASE.old(f"renders/{RENDER_PROVENANCE}") and all(
+                    hashlib.sha256(RELEASE.old(f"renders/{name}")).hexdigest() == recorded.get(name)
+                    for name in RENDERS
+                )
+            except KeyError:
+                bound = False
+        if not bound:
+            problems.append(f"{RENDER_PROVENANCE} does not bind the checked PCB")
     for name in RENDERS:
-        image = options.board_dir / "output" / "renders" / name
+        image = renders / name
         digest = _sha(image) if image.is_file() else None
         if recorded.get(name) is None or digest is None or recorded[name] != digest:
             problems.append(name)
@@ -342,26 +364,9 @@ def _validated_provenance(options: ReadinessOptions) -> bytes:
     return data
 
 
-def _render_provenance(options: ReadinessOptions) -> bytes | None:
-    """Ship the render binding with the package; nothing to bind on a pure
-    carry-forward (the archived PCB already vouches for those renders)."""
-    if not (options.board_dir / "output" / "renders" / RENDER_PROVENANCE).is_file():
-        return None
-    return _validated_provenance(options)
-
-
 def _renders(name: str):
     def produce(options: ReadinessOptions) -> bytes:
-        archive = RELEASE.old("kicad_project.zip")
-        with zipfile.ZipFile(__import__("io").BytesIO(archive)) as zf:
-            rendered_from = zf.read(options.pcb.name)
-        # Pad pin types (#6025) draw nothing, so they do not invalidate a render.
-        if board_content(rendered_from, ignore=PIN_ANNOTATION_NODES) != board_content(
-            options.pcb.read_bytes(), ignore=PIN_ANNOTATION_NODES
-        ):
-            # Changed artwork (#9800): the archived PCB no longer vouches for
-            # ``output/renders``, so ``kct render``'s binding must.
-            _validated_provenance(options)
+        _render_provenance(options)
         return (options.board_dir / "output" / "renders" / name).read_bytes()
 
     return produce
@@ -403,6 +408,9 @@ def _inputs(options: ReadinessOptions) -> list[Path]:
     files += [Path("firmware") / n for n in (".gitignore", *FIRMWARE)]
     files += [Path("output/lvs.json")]
     files += [Path("output/renders") / n for n in RENDERS]
+    binding = Path("output/renders") / RENDER_PROVENANCE
+    if (board / binding).is_file():
+        files.append(binding)
     return files
 
 
