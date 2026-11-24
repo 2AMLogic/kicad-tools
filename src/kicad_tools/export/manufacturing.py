@@ -578,7 +578,19 @@ def _create_project_zip(
     Other .kicad_pcb variants (intermediate builds,
     working copies, etc.) and backup files are excluded to keep the
     manufacturing package clean.
+
+    The board, its rules, the project file and the root sheet are delivered
+    under one basename -- the one :mod:`kicad_tools.export.project_identity`
+    picks -- so KiCad opens them as one project (Issue #10108). The ``VERSION.md``
+    kept beside the board travels too, and one describing any renaming is
+    written when the checked names differ.
     """
+    from kicad_tools.export.project_identity import (
+        VERSION_FILE,
+        archive_layout,
+        project_identity,
+    )
+
     # Resolve once: table-derived members are built from the resolved root, so
     # every member (and its archive name) must share that spelling.  An
     # unresolved/relative/symlinked project_dir (e.g. macOS /var -> /private/var
@@ -610,9 +622,11 @@ def _create_project_zip(
     from kicad_tools.report.utils import find_schematic, walk_schematic_hierarchy
 
     root_sch = Path(schematic_path) if schematic_path else find_schematic(pcb_path)
+    walked_sheets: list[Path] = []
     if root_sch is not None and root_sch.is_file():
         walked = walk_schematic_hierarchy(root_sch, lambda sheet: sheet.is_relative_to(project_dir))
         project_files.extend(walked.sheets)
+        walked_sheets = walked.sheets
         for sheet in walked.outside:
             logger.warning("Sub-sheet outside the project directory not bundled: %s", sheet)
     else:
@@ -627,10 +641,33 @@ def _create_project_zip(
 
     project_files.extend(_project_symbol_files(project_dir))
     project_files.extend(_project_footprint_files(project_dir))
+    version_file = project_dir / VERSION_FILE
+    if version_file.is_file():
+        project_files.append(version_file)
     project_files = sorted(set(project_files))
+
+    project_file = pcb_path.with_suffix(".kicad_pro")
+    archived_root = root_sch.resolve() if root_sch is not None else None
+    identity = project_identity(
+        pcb_path,
+        project_file if project_file in project_files else None,
+        archived_root if archived_root in walked_sheets else None,
+    )
+    layout = archive_layout(
+        identity, project_files, lambda source: source.parent.relative_to(project_dir).as_posix()
+    )
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in project_files:
-            zf.write(f, f.relative_to(project_dir).as_posix())
+        for source in project_files:
+            real = source.resolve()
+            member = layout.names[real]
+            if real == identity.project or (
+                layout.record is not None and real == identity.version_source
+            ):
+                zf.writestr(member, layout.member_bytes(real, real.read_bytes()))
+            else:
+                zf.write(source, member)
+        if layout.record is not None:
+            zf.writestr(layout.record_name, layout.record)
 
     logger.info(f"Created project ZIP: {zip_path} ({len(project_files)} files)")
     return zip_path

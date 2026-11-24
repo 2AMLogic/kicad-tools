@@ -108,7 +108,7 @@ class TestCreateProjectZipInventory:
         names = self._names(
             tmp_path / "a.kicad_pcb", tmp_path, schematic_path=tmp_path / "y.kicad_sch"
         )
-        assert names == {"a.kicad_pcb", "y.kicad_sch"}
+        assert names == {"y.kicad_pcb", "y.kicad_sch", "VERSION.md"}
 
 
 class TestCreateProjectZip:

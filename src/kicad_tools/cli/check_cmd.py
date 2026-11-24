@@ -1010,6 +1010,7 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
     import zlib
 
     from kicad_tools.export import verify_manifest
+    from kicad_tools.export.project_identity import archived_pcb_member
 
     candidates = [
         pcb_path.parent / "manufacturing" / "manifest.json",
@@ -1052,11 +1053,13 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
             raise ValueError("; ".join(problems))
         # The exporter stores the selected source PCB at the archive root.
         # Do not accept a same-basename nested file or a duplicate ZIP member.
+        # A board packaged under its project identity's basename is the one
+        # PCB member, filed beside the project file of the same stem (#10108).
         with zipfile.ZipFile(archive_path) as archive:
-            matches = [n for n in archive.namelist() if Path(n).name == pcb_path.name]
-            if matches != [pcb_path.name]:
+            member = archived_pcb_member(archive.namelist(), pcb_path)
+            if member is None:
                 raise ValueError("project archive must contain one exact source PCB member")
-            archived_digest = hashlib.sha256(archive.read(pcb_path.name)).hexdigest()
+            archived_digest = hashlib.sha256(archive.read(member)).hexdigest()
         if archived_digest != hashlib.sha256(pcb_path.read_bytes()).hexdigest():
             raise ValueError("routed PCB content differs from the manifest-bound project archive")
     except (

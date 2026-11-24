@@ -59,7 +59,12 @@ def test_export_preserves_reviewed_floors_in_project_zip(monkeypatch, board):
     monkeypatch.setattr(ManufacturingPackage, "export", export)
     assert recipe.generate_manufacturing(board, board.parent)
     with zipfile.ZipFile(board.parent / "manufacturing/kicad_project.zip") as archive:
-        project = json.loads(archive.read("stm32_devboard_routed.kicad_pro"))
+        # The routed project is delivered under the root sheet's basename, the
+        # one project KiCad opens with schematic and board together (#10108).
+        project = json.loads(archive.read("stm32_devboard.kicad_pro"))
+        assert project["meta"]["filename"] == "stm32_devboard.kicad_pro"
+        assert archive.read("stm32_devboard.kicad_pcb") == board.read_bytes()
+        assert "stm32_devboard_routed.kicad_pro" not in archive.namelist()
         for name in ("board04_symbols.kicad_sym", "kicad_tools_pwr.kicad_sym", "sym-lib-table"):
             assert archive.read(name) == (board.parent / name).read_bytes()
     rules = project["board"]["design_settings"]["rules"]

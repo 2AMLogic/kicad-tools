@@ -27,6 +27,82 @@ URIs before exporting. Libraries supplied by KiCad's global installation
 are not copied; footprint libraries and 3D models are outside this symbol
 packaging support.
 
+## The Editable Project: One Basename, One Working Revision
+
+KiCad opens a project through one basename: `board.kicad_pro` pairs with
+`board.kicad_sch` and `board.kicad_pcb` in the same directory. Keep that
+layout for the working revision, and let an adjacent `VERSION.md` say which
+revision it holds:
+
+```
+board/
+├── board.kicad_pro     # net classes, design rules and library tables
+├── board.kicad_sch     # root sheet; its sub-sheets stay beside it
+├── board.kicad_pcb     # the working revision's board
+├── board.kicad_dru     # custom rules, when the board has them
+├── VERSION.md          # the working revision and where the retired ones are
+└── history/            # retired snapshots, suffixed with the revision they froze
+    └── board_v07.{kicad_pro,kicad_sch,kicad_pcb,kicad_dru}
+```
+
+The working revision always keeps the same file names. When a revision is
+finished, copy the trio into `history/` with the `_vNN` suffix of the revision
+it freezes, then continue editing the same `board.*` files as the next
+revision:
+
+| Step | Files in `board/` | `VERSION.md` |
+| --- | --- | --- |
+| Working on v07 | `board.kicad_pro`, `board.kicad_sch`, `board.kicad_pcb` | `Working revision: v07` |
+| v07 retired | add `history/board_v07.kicad_pro`, `history/board_v07.kicad_sch`, `history/board_v07.kicad_pcb` | v07 is frozen under `history/` |
+| Working on v08 | the same `board.kicad_pro`, `board.kicad_sch`, `board.kicad_pcb` | `Working revision: v08` |
+
+```markdown
+# board revisions
+
+Working revision: v08
+
+| Revision | Status | Where |
+| --- | --- | --- |
+| v07 | retired | `history/board_v07.kicad_pcb` |
+| v08 | working | `board.kicad_pcb` |
+```
+
+### What the package delivers
+
+`kct export` and `kct readiness --generate` put one openable project in
+`kicad_project.zip`: the board, its `.kicad_dru`, the project file and the
+root sheet share the root sheet's basename, and the `VERSION.md` kept beside
+the board travels with them.
+
+The checked files do not have to be laid out that way yet. A revisioned board
+(`board_v07.kicad_pcb` with `board_v07.kicad_pro`) or `kct route`'s
+`board_routed.kicad_pcb`, checked against `board.kicad_sch`, is packaged as
+one `board` project:
+
+| In `kicad_project.zip` | Checked source |
+| --- | --- |
+| `board.kicad_pcb` | `board_v07.kicad_pcb` |
+| `board.kicad_dru` | `board_v07.kicad_dru` |
+| `board.kicad_pro` | `board_v07.kicad_pro` |
+| `board.kicad_sch` | `board.kicad_sch` |
+| `VERSION.md` | written while packaging |
+
+The renaming happens in the archive only. The checked files are not modified,
+the packaged `board.kicad_pro` names itself correctly in `meta.filename`, and
+`VERSION.md` records the working revision and the table above, so the revision
+stays recoverable after extraction. With `--project-root` the archive keeps
+the project tree, so `${KIPRJMOD}/../` references still resolve, and the same
+renaming applies inside it.
+
+`kct readiness --verify` binds every member to its checked source: a changed
+source or an edited member fails verification. A bundle written before this
+layout, which keeps the checked file names, still verifies; regenerate it to
+receive the paired project. When the archive already holds another file under
+the project's name — the unrouted original's `board.kicad_pro` beside a
+`board_routed.kicad_pro`, for instance — readiness refuses before advertising
+the archive and names both files: keep only the selected board's project
+beside it, or rename one of them.
+
 ## Prerequisites
 
 ```bash

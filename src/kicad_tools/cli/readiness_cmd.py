@@ -56,7 +56,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.analysis.routing_quality import (
     RULE_OFF_AXIS_LENGTH_WARNING,
@@ -83,6 +83,9 @@ from .known_issues import (
     parse_known_issue,
     validate_known_issues,
 )
+
+if TYPE_CHECKING:
+    from kicad_tools.export.project_identity import ArchiveLayout
 
 logger = logging.getLogger(__name__)
 
@@ -434,11 +437,14 @@ def _run_export(
         if not result.success:
             return EngineRun(False, "Generic manufacturing export failed")
         archive = output_dir / "kicad_project.zip"
+        sidecars = {pcb.with_suffix(".kicad_pro"), pcb.with_suffix(".kicad_dru")}
         with zipfile.ZipFile(archive, "a", zipfile.ZIP_DEFLATED) as zf:
             present = set(zf.namelist())
             for source in _project_dependencies(pcb, Path(pcb.anchor)):  # bounded upstream
                 if not source.is_relative_to(pcb.parent):
                     continue  # Collected later by _normalize_project_archive (#5813).
+                if source in sidecars:
+                    continue  # Already archived under the project identity's name.
                 relative = source.relative_to(pcb.parent).as_posix()
                 if relative not in present:
                     zf.write(source, relative)
@@ -2698,8 +2704,12 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
     """Every (resolved) file the archived project must contain to be the checked design.
 
     This is the single inventory shared by archive collection and provenance, so
-    nothing provenance requires can be missing from ``kicad_project.zip``.
+    nothing provenance requires can be missing from ``kicad_project.zip``. The
+    ``VERSION.md`` kept beside the board is part of it, so the revision record
+    travels with the editable project (Issue #10108).
     """
+    from kicad_tools.export.project_identity import VERSION_FILE
+
     explicit = options.project_root is not None
     sources: set[Path] = set()
     if options.pcb.is_file():
@@ -2707,6 +2717,9 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
         sources.update(
             p.resolve() for p in _project_dependencies(options.pcb, options.root, explicit)
         )
+        version = options.pcb.parent / VERSION_FILE
+        if version.is_file():
+            sources.add(version.resolve())
     if options.schematic is not None and options.schematic.is_file():
         sources.update(_schematic_hierarchy(options.schematic, options.root, explicit))
     if options.project is not None:
@@ -2720,43 +2733,98 @@ def _external_dependencies(options: ReadinessOptions) -> list[Path]:
     return [p for p in _required_sources(options) if not p.is_relative_to(board)]
 
 
-def _archive_names(options: ReadinessOptions, sources: Sequence[Path]) -> dict[Path, str]:
-    """Archive member names: PCB-directory relative, or root relative with externals."""
+def _archive_layout(options: ReadinessOptions, sources: Sequence[Path]) -> ArchiveLayout:
+    """Member names of the ``kicad_project.zip`` these inputs must deliver.
+
+    Names are PCB-directory relative, or project-root relative once any required
+    file lies outside the PCB directory (Issue #5813), so ``${KIPRJMOD}/../``
+    references keep working inside the archive. The board, its rules, the
+    project file and the root sheet are delivered under the project identity's
+    basename (Issue #10108).
+    """
+    from kicad_tools.export.project_identity import archive_layout, project_identity
+
+    identity = project_identity(options.pcb, options.project, options.schematic)
     base = options.pcb.parent.resolve()
-    if all(s.resolve().is_relative_to(base) for s in sources):
-        return {s: s.resolve().relative_to(base).as_posix() for s in sources}
-    return {s: s.resolve().relative_to(options.root).as_posix() for s in sources}
+
+    def in_board_directory(real: Path) -> str:
+        return real.parent.relative_to(base).as_posix()
+
+    def in_project_root(real: Path) -> str:
+        return real.parent.relative_to(options.root).as_posix()
+
+    directory_of = (
+        in_board_directory
+        if all(source.resolve().is_relative_to(base) for source in sources)
+        else in_project_root
+    )
+    return archive_layout(identity, sources, directory_of)
 
 
 def _normalize_project_archive(options: ReadinessOptions) -> None:
-    """Make kicad_project.zip contain every file provenance requires (#5813).
+    """Make kicad_project.zip the editable project provenance requires (#5813, #10108).
 
     The exporter only archives the PCB directory's top level and its library
     folders.  Sub-sheets in a subdirectory, ``${KIPRJMOD}/../`` libraries and
     out-of-directory schematics are added here.  When any required file lies
     outside the PCB directory, members are re-rooted relative to the project
     root so that ``${KIPRJMOD}/../x`` references keep working inside the archive.
-    Members the exporter already wrote are never overwritten: provenance must
-    still see (and reject) an export that archived the wrong bytes.
+
+    The board, its rules, the project file and the root sheet then take the
+    project identity's basename so KiCad opens them as one project.  A member
+    the exporter already wrote is moved, never re-read, and a ``VERSION.md``
+    member records the renaming: provenance must still see (and reject) an
+    export that archived the wrong bytes.  When another file already occupies
+    the delivered name, nothing is renamed and :class:`ProjectIdentityError`
+    names both files.
     """
+    from kicad_tools.export.project_identity import ProjectIdentityError
+
     archive = options.output_dir / "kicad_project.zip"
     if not archive.is_file():
         return
-    required = _required_sources(options)
-    names_for = _archive_names(options, required)
+    layout = _archive_layout(options, _required_sources(options))
     base = options.pcb.parent.resolve()
-    rerooted = not all(s.is_relative_to(base) for s in required)
+    rerooted = not all(source.is_relative_to(base) for source in layout.names)
     with zipfile.ZipFile(archive) as zf:
         members = {
             info.filename: zf.read(info.filename) for info in zf.infolist() if not info.is_dir()
         }
     prefix = base.relative_to(options.root).as_posix() if rerooted else "."
     rebuilt = {(f"{prefix}/{n}" if prefix != "." else n): d for n, d in members.items()}
-    missing = [s for s in required if names_for[s] not in rebuilt]
-    if not missing and not rerooted:
+    for source, delivered in layout.names.items():
+        checked = layout.checked(source)
+        if delivered == checked:
+            continue
+        if delivered in rebuilt:
+            if checked in rebuilt:
+                raise ProjectIdentityError(
+                    f"kicad_project.zip cannot deliver {checked} as {delivered}: another file "
+                    "is already archived under that name. Keep only the selected board's "
+                    "project beside it, or rename one of the two files"
+                )
+            continue
+        if checked in rebuilt:
+            rebuilt[delivered] = rebuilt.pop(checked)
+    for source, delivered in layout.names.items():
+        if delivered not in rebuilt:
+            rebuilt[delivered] = source.read_bytes()
+        rebuilt[delivered] = layout.member_bytes(source, rebuilt[delivered])
+    if layout.record is not None:
+        rebuilt[layout.record_name] = layout.record
+    elif layout.identity.version_source is not None:
+        rebuilt[layout.record_name] = layout.identity.version_source.read_bytes()
+    else:
+        rebuilt.pop(layout.record_name, None)
+    delivered_names = set(layout.names.values())
+    for name in [
+        name
+        for name in rebuilt
+        if name.endswith((".kicad_pcb", ".kicad_pro", ".kicad_dru")) and name not in delivered_names
+    ]:
+        del rebuilt[name]
+    if not rerooted and rebuilt == members:
         return
-    for source in missing:
-        rebuilt[names_for[source]] = source.read_bytes()
     tmp = archive.with_suffix(".zip.tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in sorted(rebuilt):
@@ -2781,9 +2849,14 @@ def _is_project_local_library_member(relative: str) -> bool:
 def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     """Match PCB and native dependencies by relative path, not basename.
 
-    When every problem is a project-local library member missing from the zip,
-    one extra line says the bundle predates the exporter writing them (#8749).
-    Pass/fail is unchanged.
+    The board, its rules, the project file and the root sheet must appear under
+    the delivered project's basename (Issue #10108), byte-equal to the checked
+    sources once the declared packaging transforms are applied. A bundle
+    written before that rule is accepted while it keeps every renamed file
+    under its checked name, even when another archived file already holds the
+    delivered name; mixing the two is not. When every problem is a
+    project-local library member missing from the zip, one extra line says the
+    bundle predates the exporter writing them (#8749). Pass/fail is unchanged.
     """
     archive = options.output_dir / "kicad_project.zip"
     problems: list[str] = []
@@ -2792,19 +2865,46 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
         sources = set(_required_sources(options)) | {options.pcb.resolve()}
         if options.schematic is not None:
             sources.add(options.schematic.resolve())
-        names_for = _archive_names(options, sorted(sources))
+        layout = _archive_layout(options, sorted(sources))
         with zipfile.ZipFile(archive) as zf:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
             if len(names) != len(set(names)):
                 problems.append("duplicate file identities in kicad_project.zip")
+            delivered_layout = False
+            checked_layout: list[str] = []
             for source in sorted(sources):
-                relative = names_for[source]
-                if relative not in names:
-                    problems.append(f"{relative} is absent from kicad_project.zip")
-                    missing_members.append(relative)
-                elif zf.read(relative) != source.read_bytes():
+                delivered, checked = layout.names[source], layout.checked(source)
+                if delivered in names and zf.read(delivered) == layout.member_bytes(
+                    source, source.read_bytes()
+                ):
+                    delivered_layout = delivered_layout or delivered != checked
+                elif checked in names and (delivered not in names or options.operation == "verify"):
+                    if zf.read(checked) == source.read_bytes():
+                        checked_layout.append(checked)
+                    else:
+                        problems.append(
+                            f"{checked} inside kicad_project.zip differs from the checked source"
+                        )
+                elif delivered in names:
                     problems.append(
-                        f"{relative} inside kicad_project.zip differs from the checked source"
+                        f"{delivered} inside kicad_project.zip differs from the checked source"
+                    )
+                else:
+                    problems.append(f"{delivered} is absent from kicad_project.zip")
+                    missing_members.append(delivered)
+            if checked_layout and (delivered_layout or options.operation == "generate"):
+                problems.append(
+                    "kicad_project.zip keeps checked file names instead of forming the "
+                    f"{layout.identity.name} project ({', '.join(checked_layout[:3])}); "
+                    "regenerate the package"
+                )
+            if delivered_layout:
+                record = layout.record_name
+                if record not in names:
+                    problems.append(f"{record} is absent from kicad_project.zip")
+                elif zf.read(record) != layout.record:
+                    problems.append(
+                        f"{record} inside kicad_project.zip does not match the checked sources"
                     )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         problems.append(f"Project provenance could not be verified: {exc}")
