@@ -195,15 +195,15 @@ The board is saved but not verified, so run `kct check` on it before
 manufacturing. It only ever replaces a would-be exit 0 (Issue #6273; see the
 [`kct route` exit-code ladder](cli.md#kct-route-ladder)).
 
-On a direct routing attempt with all escalation disabled (for example,
-`--layers 2` alone), `summary.failure_reason` is `"post_route_drc"` when
-all requested nets routed, the saved board passed the connectivity check,
-and post-route DRC is the sole failure. The command exits 3 and
-`summary.verdict` is `"failed"`. Other exit-3 causes omit the key (Issue #10049).
-
-With default layer escalation, fully routed copper with known post-route DRC
-errors can exit 0 with `summary.verdict` set to `"success"` and no
-`failure_reason` (Issue #10057). Treat both `summary` and the reason as
+On any finishing path — a direct attempt with all escalation disabled (for
+example `--layers 2` alone) or the default layer escalation —
+`summary.failure_reason` is `"post_route_drc"` when all requested nets routed,
+the saved board passed the connectivity check, and post-route DRC is the sole
+failure. The command exits 3 and `summary.verdict` is `"failed"`. Other
+exit-3 causes omit the key (Issue #10049). Before Issue #10057 the default
+`--auto-layers` path alone returned exit 0 with `summary.verdict` set to
+`"success"` and no `failure_reason` for this case; scripts that accepted
+exit 0 there now see exit 3. Treat both `summary` and the reason as
 optional. When a clean board is required, run
 `kct check <routed.kicad_pcb> --drc-only` on the saved board after any final copper edits.
 

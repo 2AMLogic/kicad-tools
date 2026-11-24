@@ -235,3 +235,88 @@ def test_recipe_distinguishes_post_route_drc_from_a_failed_repair(
         generate_design_mod._route_completed(subprocess.CompletedProcess(args, rc, stdout))
         is not rollback
     )
+
+
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize(
+    "layer_args",
+    [[], ["--no-auto-layers"]],
+    ids=["auto-layers", "no-auto-layers"],
+)
+def test_route_json_post_route_drc_failure_reason_on_both_layer_paths(
+    tmp_path, capsys, monkeypatch, layer_args
+):
+    """Issue #10057: the default ``--auto-layers`` path reports the DRC-only failure.
+
+    The same input runs through both public layer paths: a fully routed board
+    whose verified post-route DRC (stubbed to one error) is the sole failure
+    must exit 3 and emit ``summary.failure_reason == "post_route_drc"``
+    identically -- the escalation path emits through
+    ``_emit_route_json_fallback``, the direct one through its own tail
+    (#6277 path invariance).
+    """
+    from kicad_tools.cli import main, route_cmd
+
+    pcb = tmp_path / "input.kicad_pcb"
+    shutil.copyfile(Path(__file__).parent / "fixtures/projects/test_project.kicad_pcb", pcb)
+    monkeypatch.setattr(route_cmd, "run_post_route_drc", lambda *a, **kw: (1, 0))
+    args = [
+        "route",
+        str(pcb),
+        "-o",
+        str(tmp_path / "out.kicad_pcb"),
+        "--no-optimize",
+        "--no-sync-check",
+        "--no-auto-pour",
+        "--no-placement-feedback",
+        "--oracle-rounds",
+        "0",
+        "--no-current-paths",
+        "--format",
+        "json",
+        *layer_args,
+    ]
+    rc = main(args)
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert rc == 3
+    assert summary["verdict"] == "failed"
+    assert summary.get("failure_reason") == "post_route_drc"
+
+
+@pytest.mark.timeout(240)
+def test_route_json_default_path_other_exit3_cause_omits_failure_reason(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #10057: an ``--auto-fix`` rollback exits 3 on the default path without the key.
+
+    ``summary.failure_reason = "post_route_drc"`` must stay exclusive to the
+    DRC-only failure; the rollback exit 3 (issue #2852) is another cause, on
+    the escalation path too.
+    """
+    from kicad_tools.cli import main, route_cmd
+
+    pcb = tmp_path / "input.kicad_pcb"
+    shutil.copyfile(Path(__file__).parent / "fixtures/projects/test_project.kicad_pcb", pcb)
+    monkeypatch.setattr(route_cmd, "run_post_route_drc", lambda *a, **kw: (1, 0))
+    monkeypatch.setattr(route_cmd, "_run_auto_fix", lambda *a, **kw: 3)
+    args = [
+        "route",
+        str(pcb),
+        "-o",
+        str(tmp_path / "out.kicad_pcb"),
+        "--no-optimize",
+        "--no-sync-check",
+        "--no-auto-pour",
+        "--no-placement-feedback",
+        "--oracle-rounds",
+        "0",
+        "--no-current-paths",
+        "--auto-fix",
+        "--format",
+        "json",
+    ]
+    rc = main(args)
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert rc == 3
+    assert summary["verdict"] == "failed"
+    assert summary.get("failure_reason") is None
