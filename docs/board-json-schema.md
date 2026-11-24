@@ -150,6 +150,28 @@ verification must check manifest hashes **and** source correspondence (for
 example, compare the project's archived PCB against the checked PCB); mtime
 or internal bundle consistency alone does not establish freshness.
 
+A project whose editable board lives in a sibling directory (for example
+`kicad/` beside its generated release) may declare a project-local output
+root in its kicad-tools TOML (Issue #10106):
+
+```toml
+[readiness]
+output_root = "output"
+```
+
+The declaration authorizes the sibling destination: `kct readiness` publishes
+`<output_root>/manufacturing/`, `<output_root>/manufacturing.zip`, the
+generated receipt `<output_root>/readiness.json`, evidence under
+`<output_root>/readiness/`, and verification/attempt diagnostics under
+`<output_root>/readiness-verification/` and `<output_root>/readiness-attempt/`.
+Such a receipt keys `inputs` against the declaring project instead of the
+board directory and records the explicit bases in `project_root` (the board
+directory's relative location within the project) and `output_root` (the
+declared root, project-relative); sibling dependencies are hashed directly in
+`inputs` instead of `external_inputs`. Without a declaration the board-local
+destinations and the `--output` containment refusals are unchanged, and a
+user-wide config never authorizes a sibling.
+
 `kct check`'s Manifest subcheck verifies every bundle SHA-256 and compares
 its hashed `kicad_project.zip` source PCB member with the current PCB bytes.
 The source member must occur exactly once at the archive root; nested or

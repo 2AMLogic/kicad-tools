@@ -337,6 +337,7 @@ class TestGenerateTemplate:
         assert "[export]" in template
         assert "[route]" in template
         assert "[parts]" in template
+        assert "[readiness]" in template
 
     def test_generate_template_documents_options(self):
         """Template documents key configuration options."""
@@ -345,6 +346,66 @@ class TestGenerateTemplate:
         assert "manufacturer" in template
         assert "trace_width" in template
         assert "strategy" in template
+        assert "output_root" in template
+
+
+class TestFindReadinessOutputRoot:
+    """Project-local ``[readiness] output_root`` discovery (Issue #10106)."""
+
+    def test_no_config_returns_none(self, tmp_path):
+        from kicad_tools.config import find_readiness_output_root
+
+        assert find_readiness_output_root(tmp_path) is None
+
+    def test_no_readiness_section_returns_none(self, tmp_path):
+        from kicad_tools.config import find_readiness_output_root
+
+        (tmp_path / ".kicad-tools.toml").write_text("[export]\noutput_dir = 'mfg'\n")
+
+        assert find_readiness_output_root(tmp_path) is None
+
+    def test_declared_root_resolves_against_declaring_toml(self, tmp_path):
+        from kicad_tools.config import find_readiness_output_root
+
+        (tmp_path / "kicad-tools.toml").write_text('[readiness]\noutput_root = "output"\n')
+
+        root, declared_by = find_readiness_output_root(tmp_path / "kicad")
+
+        assert root == (tmp_path / "output").resolve()
+        assert declared_by == tmp_path / "kicad-tools.toml"
+
+    def test_non_relative_value_refuses(self, tmp_path):
+        from kicad_tools.config import find_readiness_output_root
+
+        (tmp_path / ".kicad-tools.toml").write_text('[readiness]\noutput_root = "/etc"\n')
+
+        with pytest.raises(ConfigError, match="relative path inside the project"):
+            find_readiness_output_root(tmp_path)
+
+    def test_parent_escaping_value_refuses(self, tmp_path):
+        from kicad_tools.config import find_readiness_output_root
+
+        (tmp_path / ".kicad-tools.toml").write_text('[readiness]\noutput_root = "../escape"\n')
+
+        with pytest.raises(ConfigError, match="relative path inside the project"):
+            find_readiness_output_root(tmp_path)
+
+    def test_empty_value_refuses(self, tmp_path):
+        from kicad_tools.config import find_readiness_output_root
+
+        (tmp_path / ".kicad-tools.toml").write_text('[readiness]\noutput_root = ""\n')
+
+        with pytest.raises(ConfigError, match="non-empty relative path"):
+            find_readiness_output_root(tmp_path)
+
+    def test_readiness_section_merges_into_config(self, tmp_path, monkeypatch):
+        (tmp_path / ".kicad-tools.toml").write_text('[readiness]\noutput_root = "out"\n')
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("kicad_tools.config.USER_CONFIG_PATH", tmp_path / "missing.toml")
+
+        config = Config.load()
+
+        assert config.readiness.output_root == "out"
 
 
 class TestGetConfigPaths:
