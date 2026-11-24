@@ -357,10 +357,10 @@ def _write_purchase_spec(directory, value, artifact="board.kicad_pcb"):
     )
 
 
-def _near_nominal_bore():
+def _near_nominal_bore(core_mm=1.525):
     # Move the left edge clear so it cannot hide the conductor gate transition.
     return (
-        _with_stackup(board_cross_face_bore_source(), 1.525)
+        _with_stackup(board_cross_face_bore_source(), core_mm)
         .replace("100 100)", "95 100)")
         .replace("100 120)", "95 120)")
     )
@@ -441,6 +441,25 @@ def test_command_line_purchase_overrides_project(tmp_path, capsys):
     )
     assert rc == 1 and report["board_thickness_source"] == "order"
     assert report["board_thickness_mm"] == 0.8
+
+
+def test_project_purchase_overrides_agreeing_cad(tmp_path, capsys):
+    source = _near_nominal_bore(core_mm=1.53)  # Both CAD declarations specify 1.6 mm.
+    cad_rc, cad = _run_thickness_cli(tmp_path, capsys, source)
+    assert cad_rc == 0 and cad["gate_passed"]
+
+    flag_rc, flag = _run_thickness_cli(tmp_path, capsys, source, "--order-thickness-mm", "0.8")
+    _write_purchase_spec(tmp_path, 0.8)
+    project_rc, project = _run_thickness_cli(tmp_path, capsys, source)
+
+    assert project_rc == flag_rc == 1
+    assert project["board_thickness_source"] == "project.kct"
+    assert project["board_thickness_mm"] == 0.8
+    assert "board_thickness_declarations_mm" not in project
+    assert project["pairs"] == flag["pairs"]
+    ground = next(pair for pair in project["pairs"] if pair["net_b"] == "GND")
+    assert ground["creepage_mm"] == pytest.approx(2.95, abs=0.01)
+    assert ground["pass"] is False
 
 
 @pytest.mark.parametrize("invalid", ["0", "-1", ".nan", ".inf", "true"])

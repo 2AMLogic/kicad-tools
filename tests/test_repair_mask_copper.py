@@ -1409,7 +1409,7 @@ def test_via_alternate_move_keeps_approach_lines_and_adds_aligned_tails(tmp_path
     copper = (
         PASS_VIA
         + "\n"
-        + _seg("trk-f", (101.35, 98.2), (101.35, 99.6))
+        + _seg("trk-f", (102.35, 98.6), (101.35, 99.6))
         + "\n"
         + _seg("trk-b", (101.35, 98.2), (101.35, 99.6), layer="B.Cu")
     )
@@ -1424,7 +1424,7 @@ def test_via_alternate_move_keeps_approach_lines_and_adds_aligned_tails(tmp_path
 
     # A foreign wall sits where the primary push lands, closer than the
     # project's own clearance: the drag is vetoed, the search must go around.
-    blocker = _seg("trk-x", (101.95, 99.2), (101.95, 100.0), net=2)
+    blocker = _seg("trk-x", (101.95, 99.6), (101.95, 100.2), net=2, layer="B.Cu")
     board = _board(tmp_path, copper + "\n" + blocker)
     repairer = MaskCopperRepairer(board)
     result = repairer.repair(
@@ -1442,7 +1442,7 @@ def test_via_alternate_move_keeps_approach_lines_and_adds_aligned_tails(tmp_path
     assert Point(centre).buffer(0.3).distance(blocker_geom) >= 0.2 - 1e-6
 
     # Each slid end stays on its own approach line, inside the new land.
-    assert action.end_moves
+    assert {move[0] for move in action.end_moves} == {"trk-f", "trk-b"}
     for uuid, tag, _ox, _oy, new_x, new_y in action.end_moves:
         ends = dict(zip(["start", "end"], _end(board, uuid), strict=True))
         moved, fixed = ends[tag], ends["end" if tag == "start" else "start"]
@@ -1453,9 +1453,20 @@ def test_via_alternate_move_keeps_approach_lines_and_adds_aligned_tails(tmp_path
         assert abs(cross) < 1e-3  # collinear: the approach kept its angle
         assert math.dist(moved, centre) + 0.1 <= 0.3 + 1e-6  # inside the land, width included
 
-    # Any added connection is 45-legal as serialized and inside the land.
+    # Each layer needs its own connection from the slid end to the via centre.
+    assert sorted((tail[6], tail[7]) for tail in action.added_segments) == [
+        ("B.Cu", 1),
+        ("F.Cu", 1),
+    ]
+    reloaded = MaskCopperRepairer(board)
     for tail in action.added_segments:
-        _uuid, sx, sy, ex, ey, width, layer, net = tail
+        uuid, sx, sy, ex, ey, width, layer, net = tail
+        track = {"F.Cu": "trk-f", "B.Cu": "trk-b"}[layer]
+        assert (sx, sy) == _end(board, track)[1]
+        assert (ex, ey) == centre
+        segment = reloaded._segment_by_uuid(uuid)
+        assert segment.find("layer").get_first_atom() == layer
+        assert segment.find("net").get_first_atom() == net
         assert _is_quantum_aligned(ex - sx, ey - sy)
         for point in ((sx, sy), (ex, ey)):
             assert math.dist(point, centre) + width / 2 <= 0.3 + 1e-6
@@ -1464,9 +1475,8 @@ def test_via_alternate_move_keeps_approach_lines_and_adds_aligned_tails(tmp_path
             (round(ex, 6), round(ey, 6)),
         }
 
-    undo = MaskCopperRepairer(board)
-    assert undo.undo_action(action)
-    undo.save(board)
+    assert reloaded.undo_action(action)
+    reloaded.save(board)
     assert _saved_copper(board, "via-p")[1] == (101.35, 99.6)
     for uuid, _tag, *_rest in action.end_moves:
         assert _end(board, uuid)[1] == (101.35, 99.6)
