@@ -2443,6 +2443,11 @@ def _add_sch_parser(subparsers) -> None:
         action="store_true",
         help="Only assign numbers to unannotated (?) references",
     )
+    sch_reannotate.add_argument(
+        "--pcb",
+        metavar="BOARD",
+        help="Also apply the renumbering to footprint references in this .kicad_pcb",
+    )
     sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
 
     # sch repair-instances

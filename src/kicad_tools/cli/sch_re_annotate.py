@@ -488,6 +488,7 @@ def run_re_annotate(
     format: str = "text",
     unannotated_only: bool = False,
     include_power: bool = False,
+    pcb_path: Path | None = None,
 ) -> int:
     """Run the re-annotate operation.
 
@@ -503,12 +504,20 @@ def run_re_annotate(
             references, leaving already-assigned references unchanged.
         include_power: If True, also annotate ``#PWR?`` and ``#FLG?`` power
             symbols (excluded by default).
+        pcb_path: If set, apply the same old->new mapping to footprint
+            references in this ``.kicad_pcb`` board.  The board is loaded
+            and renamed before any schematic write, and saved only after
+            the schematic writes succeed.
 
     Returns:
         0 on success, 1 on error.
     """
     if not schematic_path.exists():
         print(f"Error: File not found: {schematic_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path is not None and not pcb_path.exists():
+        print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
         return 1
 
     # Collect all schematic files in hierarchy order
@@ -568,12 +577,89 @@ def run_re_annotate(
             # even when there is nothing to do.
             import json
 
-            print(json.dumps({"mappings": [], "total": 0, "dry_run": dry_run}, indent=2))
+            output: dict = {"mappings": [], "total": 0, "dry_run": dry_run}
+            if pcb_path is not None:
+                output["pcb"] = {
+                    "path": str(pcb_path),
+                    "renamed": 0,
+                    "warnings": [],
+                }
+            print(json.dumps(output, indent=2))
         elif not uuid_mapping:
             print("No references to renumber.")
         else:
             print("All references are already sequential. No changes needed.")
         return 0
+
+    # Phase 2b: prepare the board-side rename plan when --pcb was given.
+    # The board is loaded and renamed in memory *before* any schematic
+    # write, so a load or plan failure cannot leave the pair half-synced;
+    # the board file is saved only after the schematic writes succeed.
+    pcb_board = None
+    board_mapping: dict[str, str] = {}
+    pcb_warnings: list[str] = []
+
+    if pcb_path is not None:
+        from kicad_tools.cli.commands.pcb import (
+            _build_rename_plan,
+            _update_footprint_reference,
+        )
+        from kicad_tools.schema.pcb import PCB
+
+        try:
+            pcb_board = PCB.load(pcb_path)
+        except Exception as e:
+            print(f"Error loading PCB {pcb_path}: {e}", file=sys.stderr)
+            return 1
+
+        existing_refs = {fp.reference for fp in pcb_board.footprints}
+
+        # Board footprints carry base references (no unit suffix), so
+        # multi-unit schematic refs (U1A -> U2A) collapse to U1 -> U2.
+        for info in sorted(effective_mapping.values(), key=lambda i: i["new"]):
+            if info["unannotated"]:
+                pcb_warnings.append(
+                    f"Skipping '{info['old']}' on the board: unannotated reference is ambiguous"
+                )
+                continue
+            old_pfx, old_num, _ = _parse_reference(info["old"])
+            new_pfx, new_num, _ = _parse_reference(info["new"])
+            if old_num is None or new_num is None:
+                continue
+            old_base = _format_reference(old_pfx, old_num)
+            new_base = _format_reference(new_pfx, new_num)
+            if old_base == new_base:
+                continue
+            if board_mapping.get(old_base, new_base) != new_base:
+                pcb_warnings.append(
+                    f"Skipping '{old_base}' on the board: units map to "
+                    f"different targets "
+                    f"({board_mapping[old_base]} vs {new_base})"
+                )
+                continue
+            board_mapping[old_base] = new_base
+
+        # A mapped old ref absent from the board is a warning, not an error.
+        for old_base in [r for r in board_mapping if r not in existing_refs]:
+            pcb_warnings.append(f"Reference '{old_base}' not found in PCB")
+            del board_mapping[old_base]
+
+        if board_mapping:
+            rename_steps, plan_warnings, plan_errors = _build_rename_plan(
+                board_mapping, existing_refs
+            )
+            pcb_warnings.extend(plan_warnings)
+            if plan_errors:
+                for err in plan_errors:
+                    print(f"Error: {err}", file=sys.stderr)
+                return 1
+            for step_from, step_to, _via_temp in rename_steps:
+                if not _update_footprint_reference(pcb_board, step_from, step_to):
+                    print(
+                        f"Error: Failed to rename '{step_from}' -> '{step_to}' in PCB",
+                        file=sys.stderr,
+                    )
+                    return 1
 
     # Phase 3: Output mapping / apply changes
     if format == "json":
@@ -587,6 +673,12 @@ def run_re_annotate(
             "total": len(effective_mapping),
             "dry_run": dry_run,
         }
+        if pcb_path is not None:
+            output["pcb"] = {
+                "path": str(pcb_path),
+                "renamed": len(board_mapping),
+                "warnings": pcb_warnings,
+            }
         print(json.dumps(output, indent=2))
     else:
         print(f"Re-annotation mapping ({len(effective_mapping)} changes):")
@@ -603,6 +695,14 @@ def run_re_annotate(
             print(f"  {prefix}:")
             for old, new in changes:
                 print(f"    {old} -> {new}")
+
+        if pcb_path is not None:
+            print()
+            print(f"  PCB {pcb_path} ({len(board_mapping)} footprint rename(s)):")
+            for old, new in sorted(board_mapping.items()):
+                print(f"    {old} -> {new}")
+            for w in pcb_warnings:
+                print(f"  Warning: {w}")
         print()
 
     if dry_run:
@@ -687,11 +787,27 @@ def run_re_annotate(
                 print(f"Error writing {sch_file}: {e}", file=sys.stderr)
                 return 1
 
+    # Phase 5b: Write the renamed board (only after the schematic writes
+    # succeeded).
+    if pcb_path is not None and pcb_board is not None and board_mapping:
+        if backup:
+            bak = create_backup(pcb_path)
+            if format == "text":
+                print(f"  Backup: {bak.name}")
+        try:
+            pcb_board.save(pcb_path)
+        except Exception as e:
+            print(f"Error writing {pcb_path}: {e}", file=sys.stderr)
+            return 1
+
     if format == "text":
-        print(
+        message = (
             f"Re-annotated {len(effective_mapping)} reference(s) "
             f"across {len(modified_files)} file(s)."
         )
+        if pcb_path is not None and board_mapping:
+            message += f" Renamed {len(board_mapping)} footprint reference(s) in {pcb_path}."
+        print(message)
 
     return 0
 
@@ -973,6 +1089,12 @@ def main(argv: list[str] | None = None):
         help="Also annotate unannotated #PWR? and #FLG? power symbols",
     )
     parser.add_argument(
+        "--pcb",
+        type=Path,
+        metavar="BOARD",
+        help="Also apply the renumbering to footprint references in this .kicad_pcb",
+    )
+    parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
@@ -995,6 +1117,7 @@ def main(argv: list[str] | None = None):
         format=args.format,
         unannotated_only=args.unannotated_only,
         include_power=args.include_power,
+        pcb_path=args.pcb,
     )
 
 
