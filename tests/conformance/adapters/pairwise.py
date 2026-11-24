@@ -252,7 +252,12 @@ class PairwiseAdapter:
                         pair.net_a,
                         pair.net_b,
                         gap_mm=result.min_clearance if result.min_clearance < 1e9 else None,
-                        required_mm=pair.required_mm,
+                        required_mm=max(
+                            rules.trace_clearance,
+                            grid.pairwise_required_clearance(
+                                nets[existing_net], nets[candidate_net]
+                            ),
+                        ),
                     )
                 )
         return found

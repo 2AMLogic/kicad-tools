@@ -56,6 +56,7 @@ from tests.conformance.fixtures import (
     fixture_stem,
     hv_coupon_rules_text,
     roundrect_corner_support,
+    write_named_fixtures,
 )
 from tests.conformance.generator import pad_shape
 from tests.conformance.oracle import run_oracle
@@ -657,17 +658,16 @@ def _coupon_pair_nets(pair) -> frozenset[str]:
     return frozenset({pair.net_a, pair.net_b})
 
 
-def test_hv_coupon_files_are_committed_and_current() -> None:
+def test_hv_coupon_files_are_committed_and_current(tmp_path: Path) -> None:
     """Board, project and rule file are committed, and match the generator."""
     board = domain_matrix_fixture_path(HV_COUPON_NAME)
-    assert board.exists()
-    assert board.with_suffix(".kicad_pro").exists()
-    rules = board.with_suffix(".kicad_dru")
-    assert rules.exists(), "the authored pair rules are part of the fixture"
-    assert rules.read_text() == hv_coupon_rules_text(), (
-        "the committed .kicad_dru drifted from the generator -- regenerate with "
-        "`uv run python -m tests.conformance.fixtures --write`"
-    )
+    write_named_fixtures(tmp_path)
+    for suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+        committed = board.with_suffix(suffix)
+        assert committed.read_bytes() == (tmp_path / committed.name).read_bytes(), (
+            f"{committed.name} drifted from the generator. Regenerate with "
+            "`uv run python -m tests.conformance.fixtures --write`"
+        )
 
 
 def test_hv_coupon_carries_four_authored_rules_and_the_pinned_floor() -> None:
