@@ -34,6 +34,15 @@ step "Emit board.json via kct board-metrics"
 rm -rf /tmp/board02-staging
 mkdir -p /tmp/board02-staging/02-charlieplex-led/output
 cp -r /tmp/board02-ci/. /tmp/board02-staging/02-charlieplex-led/output/
+# The recipe leaves its export in manufacturing-candidate/ (release publication
+# belongs to package_release.py). board-metrics and check_board_00_e2e.py read
+# output/manufacturing/, so expose the candidate under that name in this
+# disposable staging copy only -- never in the recipe output.
+STAGED_OUT=/tmp/board02-staging/02-charlieplex-led/output
+if [ -d "$STAGED_OUT/manufacturing-candidate" ] && [ ! -e "$STAGED_OUT/manufacturing" ]; then
+  mv "$STAGED_OUT/manufacturing-candidate" "$STAGED_OUT/manufacturing"
+fi
+test -f "$STAGED_OUT/manufacturing/manifest.json"
 uv run kct board-metrics /tmp/board02-staging/02-charlieplex-led
 
 step "Assert plane-net completion (no floating pads, #4531)"
