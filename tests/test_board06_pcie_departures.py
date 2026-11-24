@@ -316,14 +316,18 @@ def test_transmitter_uses_the_declared_pair_rate(tmp_path, repair):
     assert repair(board, rules) == 2
 
 
-def _rule_area(name, x0, y0, x1, y1, *, tracks):
+def _rule_area_poly(name, pts, *, tracks):
     return (
         f'(zone (net 0) (net_name "") (layers "F.Cu") (uuid "{UUID_AREA}") (name "{name}") '
         "(hatch edge 0.5) (connect_pads (clearance 0)) (min_thickness 0.2) "
         f"(keepout (tracks {tracks}) (vias allowed) (pads allowed) (copperpour allowed) "
         "(footprints allowed)) (fill (thermal_gap 0.5) (thermal_bridge_width 0.5)) "
-        f"(polygon (pts (xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1}))))"
+        f"(polygon (pts {' '.join(f'(xy {x} {y})' for x, y in pts)})))"
     )
+
+
+def _rule_area(name, x0, y0, x1, y1, *, tracks):
+    return _rule_area_poly(name, [(x0, y0), (x1, y0), (x1, y1), (x0, y1)], tracks=tracks)
 
 
 UUID_AREA = "00000000-0000-0000-0000-0000000009a1"
@@ -343,9 +347,41 @@ def test_receiver_declines_both_rails_inside_a_track_keepout(tmp_path, repair):
     before = board.read_bytes()
     assert repair(board, rules) == 0
     assert board.read_bytes() == before
+    # Near miss: a band the original 0.144/0.156 mm taper clears (its copper
+    # tops out 0.012 mm below the band) but the widened 0.225 mm rail enters.
+    _taper_board(board, "J3", pair="RX")
+    _add_area(board, _rule_area("keep", 9.3, 9.94, 9.4, 9.95, tracks="not_allowed"))
+    before = board.read_bytes()
+    assert repair(board, rules) == 0
+    assert board.read_bytes() == before
     # Control: the same area moved clear of the widened rail is allowed.
     _taper_board(board, "J3", pair="RX")
     _add_area(board, _rule_area("keep", 9.3, 9.3, 9.4, 9.4, tracks="not_allowed"))
+    assert repair(board, rules) == 2
+
+
+def test_receiver_declines_a_keepout_whose_ring_is_degenerate(tmp_path, repair):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    _add_area(
+        board,
+        _rule_area_poly(
+            "keep", [(9.3, 9.85), (9.4, 9.85), (9.5, 9.85), (9.6, 9.85)], tracks="not_allowed"
+        ),
+    )
+    before = board.read_bytes()
+    assert repair(board, rules) == 0
+    assert board.read_bytes() == before
+    # Control: a self-intersecting ring still recovers via buffer(0), so a
+    # keepout clear of both rails does not fail closed on its own shape.
+    _taper_board(board, "J3", pair="RX")
+    _add_area(
+        board,
+        _rule_area_poly(
+            "keep", [(9.3, 10.2), (9.5, 10.4), (9.5, 10.2), (9.3, 10.4)], tracks="not_allowed"
+        ),
+    )
     assert repair(board, rules) == 2
 
 
@@ -367,3 +403,25 @@ def test_receiver_declines_both_rails_over_an_authored_maximum_width(tmp_path, r
     # Control: a maximum that admits the 0.225 mm rail is allowed.
     dru.write_text(template.format(limit="0.23"))
     assert repair(board, rules) == 2
+
+
+def test_receiver_skips_an_ignored_authored_maximum_width(tmp_path, repair):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    _add_area(board, _rule_area("J3 connector exit", 9.3, 9.8, 9.4, 9.9, tracks="allowed"))
+    dru = board.with_suffix(".kicad_dru")
+    template = (
+        '(version 1)\n(rule "exit width" {severity}(layer "F.Cu") '
+        "(condition \"A.NetName == 'PCIE_RX+' && A.intersectsArea('J3 connector exit')\") "
+        "(constraint track_width (max 0.2mm)))"
+    )
+    dru.write_text(template.format(severity="(severity ignore) "))
+    assert repair(board, rules) == 2
+    # Control: without the ignored severity the same rule still declines.
+    _taper_board(board, "J3", pair="RX")
+    _add_area(board, _rule_area("J3 connector exit", 9.3, 9.8, 9.4, 9.9, tracks="allowed"))
+    dru.write_text(template.format(severity=""))
+    before = board.read_bytes()
+    assert repair(board, rules) == 0
+    assert board.read_bytes() == before

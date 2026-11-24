@@ -705,7 +705,11 @@ def _zone_shape(zone):
     if not rings:
         return None
     shape = Polygon(rings[0], holes=rings[1:])
-    return shape if shape.is_valid else shape.buffer(0)
+    if not shape.is_valid:
+        shape = shape.buffer(0)
+    # A ring shapely cannot repair (collinear/zero-area) has no interior left
+    # to keep copper out of; report it as degenerate so callers fail closed.
+    return shape if not shape.is_empty and shape.area > 0 else None
 
 
 def _pcie_taper_authored_rules_ok(pcb: PCB, path: Path, added: list[Segment]) -> bool:
@@ -739,6 +743,9 @@ def _pcie_taper_authored_rules_ok(pcb: PCB, path: Path, added: list[Segment]) ->
         if zone.name
     }
     for rule in tree.find_all("rule"):
+        severity_node = rule.find_child("severity")
+        if severity_node is not None and str(severity_node.get_first_atom()).casefold() == "ignore":
+            continue  # where an ignored rule wins, KiCad checks nothing
         layer_node = rule.find_child("layer")
         layer = layer_node.get_first_atom() if layer_node is not None else None
         if layer is not None and _layer_matches(str(layer), "F.Cu") is False:
