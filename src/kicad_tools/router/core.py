@@ -2506,6 +2506,9 @@ class Autorouter:
 
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
+        # A targeted incremental CLI run can stage and validate this recovery.
+        self.preserved_departure_net: str | None = None
+        self.pending_preserved_departure: RoutingFailure | None = None
         # Issue #5944: congested/blocked classification of the unrouted
         # connections (``unrouted_cause.UnroutedDiagnosis``), stashed by the
         # CLI while the grid is still live and emitted by the JSON report.
@@ -7428,6 +7431,7 @@ class Autorouter:
             )
             self.routing_failures.append(failure)
 
+        failure_start = len(self.routing_failures)
         if (use_mst or kelvin is not None) and len(pad_objs) > 2:
             # Issue #2329: Disable Steiner tree decomposition for nets with
             # structurally off-grid pads.  RSMT Steiner points inherit
@@ -7459,6 +7463,24 @@ class Autorouter:
                 record_failure,
                 per_net_timeout=per_net_timeout,
             )
+
+        if (
+            not new_routes
+            and len(pad_objs) == 2
+            and self.existing_routes
+            and self.preserved_departure_net is not None
+            and self.preserved_departure_net == self.net_names.get(net)
+            and len(self.routing_failures) == failure_start + 1
+            and self.routing_failures[failure_start].net == net
+            and not self._net_budget_spent(per_net_timeout, _route_net_started)
+        ):
+            from .preserved_pad_escape import retry_preserved_departure
+
+            deadline = _route_net_started + per_net_timeout if per_net_timeout is not None else None
+            retry = retry_preserved_departure(self, pad_objs[0], pad_objs[1], deadline)
+            if retry is not None and mark_route(retry):
+                new_routes.append(retry)
+                self.pending_preserved_departure = self.routing_failures.pop(failure_start)
 
         routes.extend(new_routes)
 

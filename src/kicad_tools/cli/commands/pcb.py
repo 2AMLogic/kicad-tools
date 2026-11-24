@@ -1002,6 +1002,10 @@ def _prune(args, pcb_path: Path, files: contextlib.ExitStack) -> int:
                     stats[key] = stats.get(key, 0) + val
                 res = _replace(
                     step,
+                    # A final pass with no edits has nothing to verify. Keep
+                    # the DRC result for every edit actually included in the output.
+                    drc_verified=res.drc_verified and (step.drc_verified or not step.accepted),
+                    drc_note=step.drc_note if res.drc_verified and step.accepted else res.drc_note,
                     plans=[*res.plans, *step.plans],
                     accepted=[*res.accepted, *step.accepted],
                     creepage_rejected=[*res.creepage_rejected, *step.creepage_rejected],
@@ -1178,11 +1182,13 @@ def _prune(args, pcb_path: Path, files: contextlib.ExitStack) -> int:
             )
         for n in result["region_skipped"]:
             print(f"    {n['net']}: region_skipped (edits extend outside --region)")
-        for u in res.uncut_loops:
+        for u in result["uncut_loops"]:
             print(
                 f"    {u['net']}: loop left in place ({u.get('reason', 'all segments >= --wide')}, "
                 f"min width {u['min_width']} mm, {len(u['segments'])} segments)"
             )
+            for segment in u["segments"]:
+                print(f"      {segment}")
 
     if not dry_run and changed and not res.drc_verified and not unverified:
         return refuse(

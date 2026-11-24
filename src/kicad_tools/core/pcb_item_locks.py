@@ -1,4 +1,4 @@
-"""KiCad PCB item locks, including locks inherited through group membership."""
+"""KiCad PCB item locks and generator ownership inherited through groups."""
 
 from __future__ import annotations
 
@@ -27,37 +27,51 @@ def _item_id(item: SExp) -> str | None:
     return None
 
 
+def _descendants(members_by_group: dict[str, list[str]], pending: list[str]) -> set[str]:
+    descendants: set[str] = set()
+    while pending:
+        member = pending.pop()
+        if member not in descendants:
+            descendants.add(member)
+            pending.extend(members_by_group.get(member, ()))
+    return descendants
+
+
 class BoardItemLocks:
-    """Index the members of locked groups once for a board's copper edits."""
+    """Index locked and generator-owned members separately for a board's copper edits."""
 
     def __init__(self, board: SExp):
         members_by_group: dict[str, list[str]] = {}
-        pending: list[str] = []
+        locked: list[str] = []
+        generated: list[str] = []
         # Group definitions belong to the board or a footprint. Nested groups
         # reference one another by UUID in members, independently of file order.
         for owner in (board, *board.find_children("footprint"), *board.find_children("module")):
             for group in owner.children:
                 if group.name not in ("group", "generated"):
                     continue
-                members = group.find_child("members")
-                if members is None:
-                    continue
-                ids = [str(member).lower() for member in members.get_atoms()]
+                ids = [
+                    str(member).lower()
+                    for members in group.find_children("members")
+                    for member in members.get_atoms()
+                ]
                 group_id = _item_id(group)
                 if group_id:
                     members_by_group[group_id] = ids
                 if is_locally_locked(group):
-                    pending.extend(ids)
+                    locked.extend(ids)
+                if group.name == "generated":
+                    generated.extend(ids)
 
-        self._locked_members: set[str] = set()
-        while pending:
-            member = pending.pop()
-            if member not in self._locked_members:
-                self._locked_members.add(member)
-                pending.extend(members_by_group.get(member, ()))
+        self._locked_members = _descendants(members_by_group, locked)
+        self._generated_members = _descendants(members_by_group, generated)
 
     def is_locked(self, item: SExp) -> bool:
         """An explicit item unlock still inherits the lock of any enclosing group."""
         return is_locally_locked(item) or (
             bool(self._locked_members) and _item_id(item) in self._locked_members
         )
+
+    def is_generator_owned(self, item: SExp) -> bool:
+        """A generator owns every track in its groups, even when it is unlocked."""
+        return bool(self._generated_members) and _item_id(item) in self._generated_members

@@ -328,7 +328,9 @@ class TestCtrlC:
 
         old_int = signal.signal(signal.SIGINT, previous_int)
         try:
-            assert route_cmd._in_process_main_impl(_argv(source, output)) == 0
+            # The layer-escalation run owns the handlers and restores them on return.
+            argv = _argv(source, output, "--no-chain-complete")
+            assert route_cmd._in_process_main_impl(argv) == 0
             assert signal.getsignal(signal.SIGINT) is previous_int
         finally:
             signal.signal(signal.SIGINT, old_int)

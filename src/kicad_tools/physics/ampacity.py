@@ -70,6 +70,11 @@ one function for each:
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.manufacturers import DesignRules
+    from kicad_tools.schema.pcb import PCB
 
 # IPC-2221 empirical constant k, by layer position.
 _K_EXTERNAL = 0.048
@@ -311,3 +316,37 @@ def adiabatic_fusing_current(
     temp_ratio = (_COPPER_MELTING_C - ambient_c) / (_COPPER_INVERSE_TEMP_COEFF_C + ambient_c)
     numerator = math.log10(temp_ratio + 1.0)
     return float(area_cmil * math.sqrt(numerator / (_ONDERDONK_TIME_CONSTANT * duration_s)))
+
+
+def required_widths_for(
+    pcb: PCB, current_a: float, design_rules: DesignRules | None = None
+) -> dict[str, float]:
+    """IPC-2221 width (mm) a declared current needs on each copper layer.
+
+    Outer layers (``F.Cu`` / ``B.Cu``) use the external constant, inner layers
+    the internal one, at the supplied design-rule weights or those of an explicit
+    stackup (``Stackup.outer_inner_copper_oz``; 1 oz where none is declared).
+    Issue #8368: a flat "internal, 1 oz" figure overstated the outer-layer
+    width of a 2 oz board several times over, so every cut was refused.
+    """
+    if design_rules is not None:
+        outer_oz, inner_oz = design_rules.outer_copper_oz, design_rules.inner_copper_oz
+    else:
+        from kicad_tools.physics.stackup import Stackup
+
+        try:
+            derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+        except Exception:  # noqa: BLE001 - a malformed stackup falls back to 1 oz
+            derived = None
+        outer, inner = derived or (None, None)
+        outer_oz, inner_oz = outer or 1.0, inner or 1.0
+    names = [layer.name for layer in pcb.copper_layers] or ["F.Cu", "B.Cu"]
+    out: dict[str, float] = {}
+    for name in names:
+        external = name in ("F.Cu", "B.Cu")
+        out[name] = width_for_current(
+            current_a,
+            outer_oz if external else inner_oz,
+            layer="external" if external else "internal",
+        )
+    return out

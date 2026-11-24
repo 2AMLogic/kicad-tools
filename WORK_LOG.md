@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-24
 
+- **PR #10030**: fix(current-paths): measure shared copper once and locate off-route loops
+- **PR #10071**: fix(router): preserve trace clearance beside same-net branch vias
+- **PR #10068**: fix(drc): clear shared pad exits without bending their tracks
+- **PR #10077**: test(route): isolate the escalation plane audit from chained completion
+- **Issue #10016** (closed): current paths: a thin same-net track inside or beside a wide one makes the path 'ambiguous'; prune has no cut for it
+- **Issue #10076** (closed): test flake: test_reports_committed_plane_signal[layers] times out (>60s) on the Test job
+- **PR #10074**: perf(router): count a change-earned full retry against the copper back-off streak
 - **PR #10073**: fix(board06): widen PCIe transmitter exits on their routed centerlines
 - **PR #10061**: feat(render): bind rendered artifacts to the PCB they depict
 - **PR #10017**: fix: scope fill evidence to the selected board revision
