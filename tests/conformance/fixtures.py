@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from tests.conformance.board import FIXTURES_DIR, write_case
@@ -42,11 +43,20 @@ from tests.conformance.generator import (
 )
 
 __all__ = [
+    "DOMAIN_MATRIX_FIXTURES",
+    "DOMAIN_MATRIX_FIXTURE_BUILDERS",
     "FIXTURE_BUILDERS",
     "FIXTURE_RULES",
+    "HV_COUPON_NAME",
+    "HV_COUPON_PAIRS",
+    "HV_COUPON_VOLTAGES",
     "NAMED_FIXTURES",
+    "HvCouponPair",
+    "build_hv_pair_matrix_coupon",
     "build_named_fixture",
+    "domain_matrix_fixture_path",
     "fixture_pcb_path",
+    "hv_coupon_rules_text",
     "roundrect_corner_support",
     "write_named_fixtures",
 ]
@@ -411,6 +421,171 @@ def build_roundrect_corner_gap() -> CopperCase:
     )
 
 
+# ---------------------------------------------------------------------------
+# Fixture 5 -- #10048 / #5509 P2c: the eight-pair high-voltage track coupon
+# ---------------------------------------------------------------------------
+#
+# Unlike the four fixtures above this one is *rule-driven*: the requirement a
+# pair must meet comes from authored ``.kicad_dru`` rules and a voltage map,
+# not from the project's scalar clearance.  It therefore carries a sidecar
+# rule file and a voltage map, and it lives in its own registry
+# (:data:`DOMAIN_MATRIX_FIXTURE_BUILDERS`) rather than in
+# :data:`FIXTURE_BUILDERS`: every test parametrized over ``NAMED_FIXTURES``
+# assumes one scalar-rule pair per board and would mis-score eight pairs, two
+# of them governed by a rule the scalar consumers cannot see.
+
+HV_COUPON_NAME = "hv-pair-matrix-coupon"
+HV_COUPON_SEED = 10048
+HV_COUPON_TRACK_WIDTH_MM = 0.2
+"""Both tracks of every pair; equal to the project floor and the router's ``dru``."""
+
+HV_COUPON_PROJECT_CLEARANCE_MM = 0.20
+"""Project floor and the router's scalar ``trace_clearance`` (the 0 V / 0 V rule)."""
+
+_HV_COUPON_TRACK_X = (10.0, 30.0)
+_HV_COUPON_ROW_PITCH_MM = 10.0
+"""Row pitch: far above the widest cross-pair requirement (3.2 mm), so a
+cross-pair finding can only mean a harness bug, never a coupon pair."""
+
+
+@dataclass(frozen=True)
+class HvCouponPair:
+    """One track pair of the coupon: voltages, authored requirement, edge gap."""
+
+    label: str
+    net_a: str
+    net_b: str
+    volts_a: float
+    volts_b: float
+    required_mm: float
+    gap_mm: float
+    rule_name: str
+    """The authored ``.kicad_dru`` rule that carries this pair's requirement."""
+
+    @property
+    def violates(self) -> bool:
+        """Whether the edge gap is below the authored requirement."""
+        return self.gap_mm < self.required_mm
+
+
+# Edge-to-edge gaps and requirements are the issue's measured table (#5509
+# P2c): the requirements are the IEC 60664-1 pollution-degree-2, material
+# group IIIa values the existing pairwise parity tests already pin
+# (``tests/router/test_pairwise_cpp_parity.py``): 150 V -> 1.6 mm, 300 V ->
+# 3.2 mm; 150 V / 150 V and 0 V / 0 V fall back to the 0.2 mm floor.
+HV_COUPON_PAIRS: tuple[HvCouponPair, ...] = (
+    HvCouponPair("P1", "P1A", "P1B", 150.0, 0.0, 1.6, 0.700, "hv_150v_to_0v"),
+    HvCouponPair("P2", "P2A", "P2B", 150.0, 0.0, 1.6, 1.800, "hv_150v_to_0v"),
+    HvCouponPair("P3", "P3A", "P3B", 150.0, -150.0, 3.2, 3.000, "hv_plus150v_to_minus150v"),
+    HvCouponPair("P4", "P4A", "P4B", 150.0, -150.0, 3.2, 3.400, "hv_plus150v_to_minus150v"),
+    HvCouponPair("P5", "P5A", "P5B", 150.0, 150.0, 0.2, 0.150, "hv_150v_to_150v"),
+    HvCouponPair("P6", "P6A", "P6B", 150.0, 150.0, 0.2, 0.700, "hv_150v_to_150v"),
+    HvCouponPair("P7", "P7A", "P7B", 0.0, 0.0, 0.2, 0.100, "hv_0v_to_0v"),
+    HvCouponPair("P8", "P8A", "P8B", 0.0, 0.0, 0.2, 0.300, "hv_0v_to_0v"),
+)
+
+HV_COUPON_VOLTAGES: dict[str, float] = {
+    net: volts
+    for pair in HV_COUPON_PAIRS
+    for net, volts in ((pair.net_a, pair.volts_a), (pair.net_b, pair.volts_b))
+}
+"""The voltage map the coupon's matrix is built from (signed, as supplied)."""
+
+
+def build_hv_pair_matrix_coupon() -> CopperCase:
+    """Eight pairs of parallel 0.2 mm F.Cu tracks, one per row.
+
+    Rows are :data:`_HV_COUPON_ROW_PITCH_MM` apart; within a row track ``A``
+    sits on the row line and track ``B`` is offset by ``width + gap``, so the
+    *edge* gap is the authored one.  Four pairs sit below their authored
+    requirement (P1, P3, P5, P7) and four are the clear controls (P2, P4, P6,
+    P8) -- the controls prove a rule is not simply flagging everything.
+
+    The 0.2 mm requirement of P5-P8 equals the project floor, so
+    only P1-P4 are *widened* by the voltage map; P5 and P7 fail the scalar
+    floor in every reading, P1 and P3 only when the rule (or the matrix) is
+    present.
+    """
+    segments: list[SegmentSpec] = []
+    intents: list[PairIntent] = []
+    for row, pair in enumerate(HV_COUPON_PAIRS):
+        y_a = 5.0 + row * _HV_COUPON_ROW_PITCH_MM
+        y_b = round(y_a + HV_COUPON_TRACK_WIDTH_MM + pair.gap_mm, 6)
+        for net, y in ((pair.net_a, y_a), (pair.net_b, y_b)):
+            segments.append(
+                SegmentSpec(
+                    net=net,
+                    start=_hv_point(_HV_COUPON_TRACK_X[0], y),
+                    end=_hv_point(_HV_COUPON_TRACK_X[1], y),
+                    width=HV_COUPON_TRACK_WIDTH_MM,
+                    layer="F.Cu",
+                )
+            )
+        intents.append(
+            PairIntent(
+                kind=PairKind.SEG_SEG,
+                net_a=pair.net_a,
+                net_b=pair.net_b,
+                target_gap_mm=pair.gap_mm,
+                required_mm=pair.required_mm,
+                expect_violation=pair.violates,
+            )
+        )
+
+    return CopperCase(
+        seed=HV_COUPON_SEED,
+        name=HV_COUPON_NAME,
+        width=_HV_COUPON_TRACK_X[1] + 10.0,
+        height=5.0 + len(HV_COUPON_PAIRS) * _HV_COUPON_ROW_PITCH_MM,
+        layers=2,
+        rules=CaseRules(
+            project_clearance=HV_COUPON_PROJECT_CLEARANCE_MM,
+            trace_clearance=HV_COUPON_PROJECT_CLEARANCE_MM,
+            via_clearance=VIA_CLEARANCE_MM,
+            min_hole_to_hole=HOLE_TO_HOLE_MM,
+            min_drill_clearance=HOLE_TO_HOLE_MM,
+            grid_resolution=GRID_RESOLUTION_MM,
+        ),
+        segments=tuple(segments),
+        pairs=tuple(intents),
+        notes=(
+            "Eight track pairs, project floor 0.20 mm, four authored symmetric "
+            "pair rules in the sibling .kicad_dru (#10048, acceptance item P2c "
+            "of #5509). P1/P3 fail only against the authored HV requirement; "
+            "P5/P7 fail the scalar floor; P2/P4/P6/P8 are clear controls."
+        ),
+    )
+
+
+def _hv_point(x: float, y: float) -> tuple[float, float]:
+    return (x, round(y, 6))
+
+
+def hv_coupon_rules_text(pairs: tuple[HvCouponPair, ...] = HV_COUPON_PAIRS) -> str:
+    """The coupon's ``.kicad_dru`` text: one symmetric rule per potential class.
+
+    Each rule matches both orderings of every net pair in its class
+    (``A.NetName`` / ``B.NetName`` swapped), so the requirement does not
+    depend on which side KiCad calls ``A``.  The text is deterministic.
+    """
+    by_rule: dict[str, list[HvCouponPair]] = {}
+    for pair in pairs:
+        by_rule.setdefault(pair.rule_name, []).append(pair)
+
+    lines = ["(version 1)"]
+    for rule_name, members in by_rule.items():
+        required = members[0].required_mm
+        clauses = []
+        for pair in members:
+            clauses.append(f"(A.NetName == '{pair.net_a}' && B.NetName == '{pair.net_b}')")
+            clauses.append(f"(A.NetName == '{pair.net_b}' && B.NetName == '{pair.net_a}')")
+        condition = " || ".join(clauses)
+        lines.append(f'(rule "{rule_name}"')
+        lines.append(f'  (condition "{condition}")')
+        lines.append(f"  (constraint clearance (min {required:.3f}mm)))")
+    return "\n".join(lines) + "\n"
+
+
 FIXTURE_BUILDERS = {
     "issue5398-seg-via-0p18-order": build_issue5398_seg_via_order,
     "issue5410-dqs-n-halo-vs-legal-via": build_issue5410_dqs_n_halo,
@@ -419,6 +594,17 @@ FIXTURE_BUILDERS = {
 }
 
 NAMED_FIXTURES = tuple(FIXTURE_BUILDERS)
+
+DOMAIN_MATRIX_FIXTURE_BUILDERS = {
+    HV_COUPON_NAME: build_hv_pair_matrix_coupon,
+}
+"""Rule-driven fixtures with a ``.kicad_dru`` sidecar and a voltage map.
+
+Kept apart from :data:`FIXTURE_BUILDERS` on purpose -- see the Fixture 5
+comment above.  Committed and regenerated by the same ``--write`` entry point.
+"""
+
+DOMAIN_MATRIX_FIXTURES = tuple(DOMAIN_MATRIX_FIXTURE_BUILDERS)
 
 
 def build_named_fixture(name: str) -> CopperCase:
@@ -443,6 +629,12 @@ def fixture_pcb_path(name: str, directory: Path | None = None) -> Path:
     return (directory or FIXTURES_DIR) / f"{fixture_stem(case)}.kicad_pcb"
 
 
+def domain_matrix_fixture_path(name: str, directory: Path | None = None) -> Path:
+    """Path of a committed rule-driven fixture board (its ``.kicad_dru`` is a sibling)."""
+    case = DOMAIN_MATRIX_FIXTURE_BUILDERS[name]()
+    return (directory or FIXTURES_DIR) / f"{fixture_stem(case)}.kicad_pcb"
+
+
 def write_named_fixtures(directory: Path | None = None) -> list[Path]:
     """Write every named fixture; returns the ``.kicad_pcb`` paths written."""
     target = Path(directory) if directory is not None else FIXTURES_DIR
@@ -450,6 +642,13 @@ def write_named_fixtures(directory: Path | None = None) -> list[Path]:
     for name in NAMED_FIXTURES:
         case = build_named_fixture(name)
         board = write_case(case, target, stem=fixture_stem(case))
+        written.append(board.pcb_path)
+    for name, builder in DOMAIN_MATRIX_FIXTURE_BUILDERS.items():
+        case = builder()
+        board = write_case(case, target, stem=fixture_stem(case))
+        # The authored pair rules live beside the board: kicad-cli (and the
+        # oracle's scratch staging) load the same-stem ``.kicad_dru``.
+        board.pcb_path.with_suffix(".kicad_dru").write_text(hv_coupon_rules_text())
         written.append(board.pcb_path)
     return written
 
@@ -473,9 +672,13 @@ def main(argv: list[str] | None = None) -> int:
 
     target = args.out or FIXTURES_DIR
     if not args.write:
-        print(f"Would write {len(NAMED_FIXTURES)} fixtures to {target}")
+        print(
+            f"Would write {len(NAMED_FIXTURES) + len(DOMAIN_MATRIX_FIXTURES)} fixtures to {target}"
+        )
         for name in NAMED_FIXTURES:
             print(f"  {fixture_stem(build_named_fixture(name))}")
+        for builder in DOMAIN_MATRIX_FIXTURE_BUILDERS.values():
+            print(f"  {fixture_stem(builder())}")
         return 0
 
     for path in write_named_fixtures(target):
