@@ -65,6 +65,7 @@ from kicad_tools.drc.violation import DRCViolation, ViolationType
 from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.transaction import board_transaction
+from kicad_tools.validate.mask_copper import default_request_for_manufacturer
 
 # Topology advisories that are deliberately excluded from the pure-Python
 # DRC fallback report (issue #4680).
@@ -1550,12 +1551,16 @@ def _run_mask_pass(
         load_path = output_path
     try:
         repairer = MaskCopperRepairer(load_path, project_pcb_path=pcb_path)
+        request = default_request_for_manufacturer(args.mfr)
         result = repairer.repair(
             mask_violations,
             max_displacement=args.max_displacement,
             dry_run=args.dry_run,
             clearance_mm=design_rules.min_clearance_mm if design_rules is not None else None,
             design_rules=design_rules,
+            warning_clearance_mm=(
+                request.policy.warning_clearance_mm if request and request.policy else None
+            ),
         )
         if args.dry_run or not result.actions:
             return result

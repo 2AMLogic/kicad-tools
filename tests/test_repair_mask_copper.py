@@ -370,6 +370,19 @@ def test_bend_undo_restores_group_members_and_each_authored_endpoint(tmp_path):
     assert undo.doc.get("group").get("members").get_atoms() == ["joined"]
 
 
+def test_bend_refuses_a_collateral_track_in_a_generator_subgroup(tmp_path, monkeypatch, capsys):
+    joined = _seg("joined", (100.7, 100.3), (100.7, 105))
+    group = '(group "escapes" (uuid subgroup) (members joined))'
+    generator = "(generated (uuid tuning) (members subgroup))"
+    board = _board(tmp_path, "\n".join([ENTRY, joined, generator, group]))
+    original = board.read_bytes()
+    _run(monkeypatch, board, [_report(_finding("trk-a")), _report()], extra=("--format", "json"))
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == 0
+    assert board.read_bytes() == original
+    assert "cannot split locked or generated track joined" in result["unrepaired"][0]["detail"]
+
+
 @pytest.mark.parametrize("identity", ["uuid", "tstamp", "anonymous"])
 def test_off_angle_track_introduced_during_refill_is_never_published(
     tmp_path, monkeypatch, capsys, identity
@@ -941,6 +954,93 @@ def _pt_finding(
         required_value_mm=required,
         actual_value_mm=measured,
     )
+
+
+def _shared_exit_fixture(tmp_path, *, reverse=False, extra=""):
+    junction = (101.125, 100.0)
+    ends = {
+        "lead-a": ((100.0, 100.0), junction),
+        "lead-b": ((100.0, 100.0), junction),
+        "short": (junction, (101.525, 100.4)),
+        "long": (junction, (101.925, 100.8)),
+    }
+    copper = [_seg(uid, *(pair[::-1] if reverse else pair)) for uid, pair in ends.items()]
+    # The rounded barrel blocks translating the outgoing tracks to the right.
+    copper.append(
+        "(via (at 101.925 100) (size 0.60) (drill 0.30) "
+        '(layers "F.Cu" "B.Cu") (net 2) (uuid "obstacle"))'
+    )
+    return _board(tmp_path, "\n".join([*copper, extra])), ends
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_shared_exit_slides_without_changing_track_angles_and_undoes_together(tmp_path, reverse):
+    board, ends = _shared_exit_fixture(tmp_path, reverse=reverse)
+    original = {uid: _end(board, uid) for uid in ends}
+    before = board.read_bytes()
+    findings = [_pt_finding(uid, measured=0.025) for uid in ("short", "long")]
+    repairer = MaskCopperRepairer(board)
+    opts = {"max_displacement": 0.50, "clearance_mm": 0.127, "warning_clearance_mm": 0.15}
+    assert repairer.repair(findings, dry_run=True, **opts).repaired == 1
+    assert board.read_bytes() == before
+    result = repairer.repair(findings, **opts)
+    (action,) = result.actions
+    repairer.save(board)
+    assert {uid for _, uid, *_ in action.points} == set(ends)
+    assert not repairer.off_angle_tracks()
+    for uid in ("short", "long"):
+        assert _end(board, uid)[0 if reverse else 1] == original[uid][0 if reverse else 1]
+        copper, _ = _saved_copper(board, uid)
+        assert copper.distance(Point(101.0, 100.0)) > 0.15
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert {uid: _end(board, uid) for uid in ends} == original
+
+
+def test_shared_exit_with_a_fixed_pad_end_declines_without_mutating_the_group(tmp_path):
+    via = '(via (at 100 100) (size 0.50) (drill 0.25) (layers "F.Cu" "B.Cu") (net 1) (uuid "bond"))'
+    board, _ = _shared_exit_fixture(tmp_path, extra=via)
+    before = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_pt_finding("short", measured=0.025)], clearance_mm=0.127)
+    assert not result.actions
+    assert not repairer.modified
+    assert board.read_bytes() == before
+
+
+def test_shared_exit_respects_project_clearance_at_the_translated_pad_lead(tmp_path):
+    board, _ = _shared_exit_fixture(
+        tmp_path, extra=_via("above-lead", (100.45, 100.82), size=0.30, drill=0.15, net=2)
+    )
+    finding = _pt_finding("short", measured=0.025)
+    assert MaskCopperRepairer(board).repair([finding], clearance_mm=0.127).repaired == 1
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"net_settings": {"classes": [{"name": "Default", "clearance": 0.60}]}})
+    )
+    repairer = MaskCopperRepairer(board)
+    assert repairer.repair([finding], clearance_mm=0.127).repaired == 0
+    assert not repairer.modified
+
+
+@pytest.mark.parametrize(
+    ("groups", "expected"),
+    [
+        ('(generated (uuid tuning) (members "lead-a"))', 0),
+        ('(group "leads" (uuid child) (members "lead-a")) (generated (uuid g) (members CHILD))', 0),
+        ('(generated (uuid g) (members child)) (group "exits" (uuid child) (members long))', 0),
+        ('(group "leads" (uuid child) (members "lead-a"))', 1),
+    ],
+    ids=["direct-lead", "nested-lead", "nested-outgoing", "ordinary-group"],
+)
+def test_shared_exit_respects_generator_ownership(tmp_path, groups, expected):
+    board, _ = _shared_exit_fixture(tmp_path, extra=groups)
+    repairer = MaskCopperRepairer(board)
+    original = repairer.doc.to_string()
+    result = repairer.repair([_pt_finding("short", measured=0.025)], clearance_mm=0.127)
+    assert result.repaired == expected
+    assert repairer.modified == bool(expected)
+    if not expected:
+        assert repairer.doc.to_string() == original
 
 
 def _saved_copper(path: Path, uuid: str):

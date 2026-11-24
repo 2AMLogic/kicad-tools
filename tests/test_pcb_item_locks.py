@@ -3,7 +3,7 @@
 import pytest
 
 from kicad_tools.core.pcb_item_locks import BoardItemLocks
-from kicad_tools.sexp import parse_sexp
+from kicad_tools.sexp import parse_sexp, parse_string
 
 
 def test_legacy_nested_group_ids_and_case_insensitive_members():
@@ -62,3 +62,25 @@ def test_generated_tracks_and_footprint_group_members(flag, locked):
     locks = BoardItemLocks(doc)
     assert locks.is_locked(segment) is locked
     assert locks.is_locked(pad) is locked
+    assert locks.is_generator_owned(segment)
+    assert not locks.is_generator_owned(pad)
+
+
+def test_generator_follows_nested_legacy_ids_through_a_cycle():
+    doc = parse_string(
+        """(kicad_pcb
+          (module "Test"
+            (group "inner" (id leaf) (members middle owned))
+            (generated (uuid pattern) (members middle))
+            (group "outer" (id middle) (members LEAF))
+            (segment (tstamp OWNED)))
+          (segment (uuid unrelated)))"""
+    )
+    module = doc.find_child("module")
+    assert module is not None
+    owned, unrelated = module.find_child("segment"), doc.find_child("segment")
+    assert owned is not None and unrelated is not None
+    locks = BoardItemLocks(doc)
+    assert locks.is_generator_owned(owned)
+    assert not locks.is_locked(owned)
+    assert not locks.is_generator_owned(unrelated)
