@@ -26,6 +26,7 @@ Coverage mirrors ``tests/test_cli_check_net_class_map.py`` /
 from __future__ import annotations
 
 import json
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -599,8 +600,19 @@ def test_covered_l_trunk(tmp_path, interval, capsys):
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("buried,external_return", [(True, False), (True, True), (False, True)])
-def test_pgnd_tracks_at_trunk_corner(tmp_path, reverse, buried, external_return):
+@pytest.mark.parametrize(
+    "buried,return_ends",
+    [
+        (True, None),
+        (True, ((77.7, 120.8375), (77.9, 128))),
+        (False, ((77.7, 120.8375), (77.9, 128))),
+        (False, ((77.5375, 120.5), (77.95, 130))),
+        (True, ((77.5375, 120.5), (77.95, 130))),
+        (False, ((77.8, 120.5), (77.5375, 130))),
+        (True, ((77.8, 120.5), (77.5375, 130))),
+    ],
+)
+def test_pgnd_tracks_at_trunk_corner(tmp_path, reverse, buried, return_ends):
     """Issue #10016 case 2, with terminal pads clear of the measured corner."""
     from dataclasses import replace
 
@@ -633,15 +645,11 @@ def test_pgnd_tracks_at_trunk_corner(tmp_path, reverse, buried, external_return)
                 ((77.7, 119.2), (77.7, 120.8375), 0.2),
             ]
         )
-    if external_return:
-        # Both ends join through copper width, away from the trunk centerline.
-        tracks.extend(
-            [
-                ((77.7, 120.8375), (84, 120.8375), 0.2),
-                ((84, 120.8375), (84, 128), 0.2),
-                ((84, 128), (77.9, 128), 0.2),
-            ]
-        )
+    if return_ends is not None:
+        # The return can join through track width at one or both stations.
+        lower, upper = return_ends
+        points = (lower, (84, lower[1]), (84, upper[1]), upper)
+        tracks.extend((a, b, 0.2) for a, b in pairwise(points))
     if reverse:
         tracks = [(end, start, width) for start, end, width in reversed(tracks)]
     for start, end, width in tracks:
@@ -651,7 +659,7 @@ def test_pgnd_tracks_at_trunk_corner(tmp_path, reverse, buried, external_return)
     spec = _trunk_spec(current_a=2.5)
     for direction in (spec, replace(spec, source=spec.sink, sink=spec.source)):
         result = resolve_current_path(pcb, direction)
-        if external_return:
+        if return_ends is not None:
             assert result.status == "ambiguous"
         else:
             assert result.ok, result.reason
@@ -663,7 +671,7 @@ def test_pgnd_tracks_at_trunk_corner(tmp_path, reverse, buried, external_return)
             }
     _write_sidecar(tmp_path / "current_paths.json", [spec])
     assert main(["check", str(board), "--only", "path_ampacity", "--allow-incomplete"]) == (
-        2 if external_return else 0
+        2 if return_ends is not None else 0
     )
 
 

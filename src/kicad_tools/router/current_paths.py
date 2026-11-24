@@ -3126,7 +3126,7 @@ def _unmodeled_bonds(
     contacts: CopperContactGraph,
     groups: list[ParallelGroup],
     *,
-    detached_tracks: set[int] | None = None,
+    off_path_tracks: set[int] | None = None,
 ) -> set[tuple[int, int]]:
     """Physical bonds absent from the centerline model and its proved conductors."""
     from kicad_tools.validate.copper_contact import PAD, TRACK, VIA
@@ -3135,9 +3135,9 @@ def _unmodeled_bonds(
     for index, item in enumerate(contacts.items):
         if item.kind == TRACK and item.key[0] == "segment":
             ids[index] = id(pcb.segments[item.key[1]])
-        elif detached_tracks is None and item.kind == VIA:
+        elif off_path_tracks is None and item.kind == VIA:
             ids[index] = id(pcb.vias[item.key])
-        elif detached_tracks is None and item.kind == PAD:
+        elif off_path_tracks is None and item.kind == PAD:
             fp, pad = item.key
             ids[index] = id(pcb.footprints[fp].pads[pad])
     conductors = [{id(segment) for segment in group.segments} for group in groups]
@@ -3149,7 +3149,7 @@ def _unmodeled_bonds(
         for a, b in contacts.bonds
         if a in ids
         and b in ids
-        and (detached_tracks is None or ids[a] in detached_tracks or ids[b] in detached_tracks)
+        and (off_path_tracks is None or ids[a] in off_path_tracks or ids[b] in off_path_tracks)
         and graph.item_nodes.get(ids[a], set()).isdisjoint(graph.item_nodes.get(ids[b], ()))
         and not any(ids[a] in conductor and ids[b] in conductor for conductor in conductors)
     }
@@ -4269,20 +4269,20 @@ def resolve_current_path(
             sink=sink,
         )
 
-    # A separate centerline component can bond to two stations through track
-    # width. Its contacts need checking even when the routed tree has no loop.
+    # A branch can join the routed path at one modeled station and touch it
+    # again through track width. Check physical bonds for off-path tracks
+    # even when the centerline graph has no cycle.
     measured_groups, buried_ids = _without_buried_arms(parallel_groups)
     pad_internal = {id(s) for segments in adjacency.internal.values() for s in segments}
     missing_bonds = set()
     if on_path_groups or off_path_loops or adjacency.overlap_edges or buried_ids:
         missing_bonds = _unmodeled_bonds(pcb, adjacency, physical_contacts(), parallel_groups)
     elif len(path_segments) < len(net_segments):
-        _, connected_edges = _contracted_component(adjacency, start, ())
-        connected_tracks = {id(s) for edge in connected_edges for s in edge.tracks()}
-        detached = {id(s) for s in net_segments} - connected_tracks - pad_internal
-        if detached:
+        on_path_tracks = {id(segment) for segment in path_segments}
+        off_path = {id(segment) for segment in net_segments} - on_path_tracks - pad_internal
+        if off_path:
             missing_bonds = _unmodeled_bonds(
-                pcb, adjacency, physical_contacts(), parallel_groups, detached_tracks=detached
+                pcb, adjacency, physical_contacts(), parallel_groups, off_path_tracks=off_path
             )
     if missing_bonds:
         evidence = physical_spans(missing_bonds)
