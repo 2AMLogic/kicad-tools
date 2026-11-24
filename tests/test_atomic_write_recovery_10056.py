@@ -10,6 +10,7 @@ unlinked inode. Retained copies are inspectable and removable through
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -304,3 +305,77 @@ def test_cleanup_rechecks_missing_board_after_preview(tmp_path):
     assert delete_files(preview) == (0, 0)
     assert clear_recovery_copies(board) == []
     assert (copy.path / "original").read_bytes() == b"original board"
+
+
+def test_recovery_marker_allocation_failure_preserves_board(tmp_path, monkeypatch):
+    board = tmp_path / "board.kicad_pcb"
+    board.write_bytes(b"original board")
+    real_touch = Path.touch
+
+    def fail_marker(path, *args, **kwargs):
+        if path.name == "complete":
+            raise OSError(errno.ENOSPC, "no space for recovery marker")
+        return real_touch(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "touch", fail_marker)
+    with pytest.raises(OSError, match="no space for recovery marker"):
+        _checked_rewrite(board, b"new board")
+
+    assert board.read_bytes() == b"original board"
+    assert list(tmp_path.iterdir()) == [board]
+
+
+@pytest.mark.parametrize("editor_save", [None, "replace", "in-place"])
+def test_failed_recovery_finalization_preserves_newest_board(tmp_path, monkeypatch, editor_save):
+    board = tmp_path / "board.kicad_pcb"
+    board.write_bytes(b"original board")
+    real_unlink = Path.unlink
+    attempted = False
+
+    def fail_final_unlink(path, *args, **kwargs):
+        nonlocal attempted
+        if not attempted and path.name == "repaired" and board.is_file() and board.samefile(path):
+            attempted = True
+            assert recovery_copies(board) == []
+            if editor_save == "replace":
+                editor = tmp_path / "save.tmp"
+                editor.write_bytes(b"editor save")
+                editor.replace(board)
+            elif editor_save == "in-place":
+                board.write_bytes(b"editor save")
+            raise OSError(errno.EIO, "cannot finish recovery record")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_final_unlink)
+    with pytest.raises((OSError, SourceChangedError)):
+        _checked_rewrite(board, b"new board")
+
+    assert attempted
+    assert recovery_copies(board) == []
+    if editor_save:
+        assert board.read_bytes() == b"editor save"
+        (original,) = tmp_path.glob(".*.recovery-*/original")
+        assert original.read_bytes() == b"original board"
+    else:
+        assert board.read_bytes() == b"original board"
+        assert list(tmp_path.iterdir()) == [board]
+
+
+def test_cleanup_at_commit_cannot_invalidate_publication(tmp_path, monkeypatch):
+    board = tmp_path / "board.kicad_pcb"
+    board.write_bytes(b"previous")
+    real_unlink = Path.unlink
+    cleaned = []
+
+    def clean_after_unlink(path, *args, **kwargs):
+        if path.name == "repaired" and board.is_file() and board.samefile(path):
+            real_unlink(path, *args, **kwargs)
+            cleaned.extend(clear_recovery_copies(board))
+            raise OSError(errno.EIO, "filesystem returned an error after removing the link")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", clean_after_unlink)
+    _checked_rewrite(board, b"new board")
+    assert len(cleaned) == 1
+    assert board.read_bytes() == b"new board"
+    assert list(tmp_path.iterdir()) == [board]

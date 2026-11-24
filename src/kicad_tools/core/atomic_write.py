@@ -25,6 +25,7 @@ design were adopted vs. declined for this codebase.
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import shutil
@@ -56,6 +57,7 @@ def retained_copy_board(directory: Path) -> Path | None:
         (directory / "complete").is_file()
         and (directory / "original").is_file()
         and board.is_file()
+        and not os.path.lexists(directory / "repaired")
     ):
         return board
     return None
@@ -74,8 +76,8 @@ def recovery_copies(path: str | Path) -> list[Path]:
 
     Each successful checked rewrite keeps the displaced previous file as a
     recoverable copy in a private sibling directory named
-    ``.<name>.recovery-<utc-stamp>-<random>/original``; an interrupted
-    publication leaves an unmarked directory reserved for manual recovery.
+    ``.<name>.recovery-<utc-stamp>-<random>/original``. An interrupted
+    publication's working directory is reserved for manual recovery.
     Returns the completed directories, oldest
     first, so callers can inspect the retained versions in rewrite order.
     """
@@ -99,6 +101,42 @@ def clear_recovery_copies(path: str | Path) -> list[Path]:
     return removed
 
 
+def _withdraw_published(
+    path: Path, repaired: Path, content: str, encoding: str | None, newline: str | None
+) -> None:
+    """Withdraw our link on rollback, keeping a save that replaced its name."""
+    withdrawn = repaired.with_name("withdrawn")
+    try:
+        path.rename(withdrawn)
+    except FileNotFoundError:
+        return
+    # Test the entry we actually moved. Checking the live name before unlinking
+    # it could delete a different writer's save between those two operations.
+    try:
+        ours = os.path.samestat(withdrawn.lstat(), repaired.lstat())
+    except OSError:
+        ours = False
+    if ours:
+        # An editor can also save in place on our inode. Recreate the exact
+        # text encoding and newline translation only on this rollback path.
+        expected = io.BytesIO()
+        with io.TextIOWrapper(expected, encoding=encoding, newline=newline) as stream:
+            stream.write(content)
+            stream.flush()
+            try:
+                ours = withdrawn.read_bytes() == expected.getvalue()
+            except OSError:
+                ours = False
+    if not ours:
+        try:
+            os.link(withdrawn, path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise SourceChangedError(
+                f"PCB changed during manufacturing export (concurrent save at {withdrawn})"
+            ) from exc
+    withdrawn.unlink()
+
+
 def _publish_checked(
     path: Path, content: str, expected_sha256: str, encoding: str | None, newline: str | None
 ) -> None:
@@ -108,6 +146,7 @@ def _publish_checked(
     staging = Path(tempfile.mkdtemp(prefix=_recovery_prefix(path.name), dir=path.parent))
     original = staging / "original"
     repaired = staging / "repaired"
+    complete = staging / "complete"
     try:
         with repaired.open("w", encoding=encoding, newline=newline) as stream:
             stream.write(content)
@@ -117,10 +156,14 @@ def _publish_checked(
         probe = staging / "link-test"
         os.link(repaired, probe)
         probe.unlink()
+        # Reserve recovery metadata while the live board is still untouched.
+        # The repaired link keeps cleanup out until the final unlink commits.
+        complete.touch()
         try:
             path.rename(original)
         except FileNotFoundError as exc:
             raise SourceChangedError("PCB changed during manufacturing export") from exc
+        linked = False
         try:
             # A displaced relative symlink still refers to the board's
             # original directory. Resolve its bytes in that context.
@@ -128,15 +171,23 @@ def _publish_checked(
             if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
                 raise SourceChangedError("PCB changed during manufacturing export")
             os.link(repaired, path)
-            # A writer holding the original file open (not re-opening the
-            # pathname) writes into the displaced inode, which the link above
-            # does not see. Re-verify it now: if it changed, that save is
-            # the newer drawing, so give it its name back instead of deleting.
+            linked = True
+            # An editor holding the displaced inode can still save to it.
             if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
-                if os.path.samestat(os.lstat(path), os.lstat(repaired)):
-                    path.unlink()
                 raise SourceChangedError("PCB changed during manufacturing export")
+            try:
+                repaired.unlink()
+            except OSError:
+                # A filesystem may complete the removal before returning an
+                # error. Only an absent link confirms that it committed.
+                try:
+                    repaired.lstat()
+                except FileNotFoundError:
+                    return
+                raise
         except BaseException as exc:
+            if linked:
+                _withdraw_published(path, repaired, content, encoding, newline)
             try:
                 os.link(original, path, follow_symlinks=False)
             except FileExistsError:
@@ -147,16 +198,14 @@ def _publish_checked(
                 ) from exc
             original.unlink()
             raise
-        # Success: retain the displaced previous file as a recoverable copy
-        # (#10056). Its inode keeps this last link, so a save landing through
-        # an editor's still-open handle after the re-check above stays
-        # recoverable in the recovery directory instead of being lost.
-    finally:
-        repaired.unlink(missing_ok=True)
+    except BaseException:
+        # A competing save can leave the displaced board here for manual
+        # recovery. Keep its working link so cleanup cannot take it.
         if not os.path.lexists(original):
+            repaired.unlink(missing_ok=True)
+            complete.unlink(missing_ok=True)
             staging.rmdir()
-    # Final writer action. Rollback and interrupted publications never reach it.
-    (staging / "complete").touch()
+        raise
 
 
 def atomic_write_text(

@@ -610,10 +610,11 @@ remove them:
 kct clean boards/04-stm32-devboard/04-stm32-devboard.kicad_pro --force
 ```
 
-`kct clean` reports the retained recovery copies in its default dry run
-and deletes them with `--force` while the board exists. The writer adds a
-`complete` marker after publication succeeds. Cleanup leaves unmarked
-directories available for manual recovery, including after an interruption.
+`kct clean` lists completed recovery copies in its default dry run and
+deletes them with `--force` while the board exists. The writer reserves
+the `complete` marker before moving the board. The copy becomes eligible
+for cleanup once the writer verifies the new board and removes its working
+link, `repaired`. Interrupted writes remain available for manual recovery.
 
 ## Next Steps
 
