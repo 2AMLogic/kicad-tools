@@ -152,6 +152,8 @@ def compress_staircase(
     config: OptimizationConfig,
     path_is_clear: Callable[[Segment], bool] | None = None,
     other_copper: Iterable[Segment] = (),
+    replacement_is_clear: Callable[[list[Segment], list[Segment], list[Segment]], bool]
+    | None = None,
 ) -> list[Segment]:
     """Compress staircase patterns into optimal diagonal+orthogonal paths.
 
@@ -214,9 +216,16 @@ def compress_staircase(
                         continue
                     if end_idx > staircase_end and len(candidate) >= end_idx - i:
                         continue
-                    if path_is_clear is None or all(path_is_clear(seg) for seg in candidate):
-                        replacement = candidate
-                        break
+                    if path_is_clear is not None and not all(
+                        path_is_clear(seg) for seg in candidate
+                    ):
+                        continue
+                    if replacement_is_clear is not None and not replacement_is_clear(
+                        segments[i:end_idx], candidate, kept
+                    ):
+                        continue
+                    replacement = candidate
+                    break
                 if replacement:
                     consumed = end_idx
                     break
