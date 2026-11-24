@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-24
 
+- **PR #10073**: fix(board06): widen PCIe transmitter exits on their routed centerlines
+- **PR #10061**: feat(render): bind rendered artifacts to the PCB they depict
+- **PR #10017**: fix: scope fill evidence to the selected board revision
+- **PR #10070**: test(route): exercise the live router pin without chained completion
+- **Issue #10069** (closed): test flake: test_full_route_restores_sigint_handler_env_and_router_pin times out in the Test job
+- **Issue #10012** (closed): Readiness evidence folders collect project/rule sidecars of every board revision in the directory
 - **PR #10059**: perf(router): restore the retry budget only when copper the failed search read changes
 - **PR #10066**: fix(board06): clear both PCIe receiver pad exits and preserve trace-length skew
 - **Issue #5509** (closed): Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
