@@ -60,21 +60,6 @@ def _load_board_recipe_module():
 # ---------------------------------------------------------------------------
 
 
-BOARD07_MASK_NETS: tuple[str, ...] = (
-    # Issue #8858 (board 07 increment, seed-42 regen): every ``mask_to_copper``
-    # error net signature the regeneration carries, each entry citing #8858.
-    "A0",
-    "A2",
-    "A3",
-    "A5",
-    "A7",
-    "GND",
-    "MIPI_CLK_P",
-    "TMDS_D2_N",
-    "TMDS_D2_P",
-)
-
-
 class TestBoard07Allowance:
     """Issue #3828 / #7339 / #7367: the allowance names identities, never a count."""
 
@@ -91,14 +76,13 @@ class TestBoard07Allowance:
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
         assert not hasattr(mod, "check_zero_violations")
 
-    def test_fixture_allowance_matches_mask_nets(self):
-        """The final export carries only the mask net signatures tracked in #8858."""
+    def test_repaired_fixture_rejects_a_returning_mask_error(self):
+        """A mask error on a formerly allowed net must fail the fixture gate (#9892)."""
         mod = _load_helper_module()
-        allowed = mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
-        assert {i for r, i in allowed if r == "physical_copper_gap"} == set()
-        expected = {("mask_to_copper", net): 8858 for net in BOARD07_MASK_NETS}
-        assert allowed == expected
-        assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == allowed
+        key = mod.MATCHGROUP_FIXTURE_KEY
+        assert mod.board_allowance(key) == {}
+        errors = {"mask_to_copper": 1}
+        assert mod.unexpected_baseline_errors(key, errors, {"mask_to_copper": {"A0"}}) == errors
 
 
 class TestBoard07SkewRetune:

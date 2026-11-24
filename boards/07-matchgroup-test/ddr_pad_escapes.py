@@ -1,20 +1,29 @@
-"""Clear the pad shoulders on the four-layer fixture's single-ended DDR tracks."""
+"""Board 07 fixture pad exits and length compensation for the DDR byte."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 from copy import deepcopy
+from dataclasses import dataclass
 from itertools import pairwise
 from math import dist, inf, isclose
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from kicad_tools.core.pcb_item_locks import BoardItemLocks
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
+from kicad_tools.router.rule_area_resolve import all_rule_area_zones
 from kicad_tools.schema.pcb import PCB, Segment
-from kicad_tools.validate.mask_geometry import board_mask_margin, pad_mask_margin, pad_mask_shapes
+from kicad_tools.sexp import SExp
+from kicad_tools.validate.mask_geometry import (
+    ADVANCED_PAD_FEATURES,
+    board_mask_margin,
+    pad_mask_margin,
+    pad_mask_shapes,
+)
 
 XY = tuple[float, float]
 # JLCPCB's 0.15 mm warning band plus the plotted-outline construction allowance.
@@ -64,12 +73,15 @@ def _corner_options(points: list[XY]):
                     yield [(0, 0), launch, (x, launch[1]), (dx, y), (dx, dy)]
 
 
-def _contact_limits(line, width, neighbors):
+def _contact_limits(line, width, neighbors, *, keep_contact_depth=False):
     """Bound each distance and retain same-net contacts, including mid-track taps."""
     limits = []
     for geom, clearance in neighbors:
         old = line.distance(geom)
         upper = width / 2 if clearance is None and old <= width / 2 + 1e-6 else inf
+        if keep_contact_depth and upper < inf:
+            # A formerly overlapping joint must not be reduced to a tangent.
+            upper = old
         lower = min(old, width / 2 + (0.001 if clearance is None else clearance))
         limits.append((geom, lower - 1e-6, upper + 1e-6))
     return limits
@@ -205,18 +217,32 @@ def _replace_chain(doc, origin, chain, revised, nodes, copper):
         doc.remove(node)
 
 
-def clear_ddr_pad_escapes(path: Path, nets: list[str]) -> int:
-    """Move only unbranched, unlocked F.Cu runs between a DDR pad and its next landing."""
-    doc = load_pcb(path)
-    board = PCB(doc)
+@dataclass
+class _EscapeLayer:
+    """Copper, mask and fixed landings on one outer layer of the fixture."""
+
+    ends: dict[tuple[str, XY], list[Segment]]
+    copper: dict[str, tuple[str, BaseGeometry]]
+    masks: dict[str, BaseGeometry]
+    nodes: dict[str, SExp]
+    landings: set[XY]
+    pad_centers: dict[str, XY]
+    track_keepouts: list[BaseGeometry]
+
+
+def _index_escape_layer(doc, board: PCB, layer: str) -> _EscapeLayer | None:
     ends: dict[tuple[str, XY], list[Segment]] = defaultdict(list)
     copper: dict[str, tuple[str, BaseGeometry]] = {}
     masks: dict[str, BaseGeometry] = {}
+    layer_pads = {}
+    locks = BoardItemLocks(doc)
     nodes = {
-        uid.get_string(): node for node in doc.find_all("segment") if (uid := node.find("uuid"))
+        uid.get_string(): node
+        for node in doc.find_all("segment")
+        if (uid := node.find("uuid")) and not locks.is_locked(node)
     }
     for seg in board.segments:
-        if seg.layer == "F.Cu":
+        if seg.layer == layer:
             for point in (seg.start, seg.end):
                 ends[(seg.net_name, _xy(*point))].append(seg)
             copper[seg.uuid] = (
@@ -225,46 +251,81 @@ def clear_ddr_pad_escapes(path: Path, nets: list[str]) -> int:
             )
     landings = set()
     for arc in board.arcs:
-        if arc.layer == "F.Cu":
+        if arc.layer == layer:
             copper[arc.uuid] = (
                 arc.net_name,
                 LineString(arc.centerline_points()).buffer(arc.width / 2),
             )
             landings.update((_xy(*arc.start), _xy(*arc.end)))
     for via in board.vias:
-        if "F.Cu" in via.layers or "*.Cu" in via.layers:
+        if layer in via.layers or "*.Cu" in via.layers:
             landings.add(_xy(*via.position))
             copper[via.uuid] = via.net_name, Point(via.position).buffer(via.size / 2, quad_segs=32)
-    targets = []
     base_margin, declared = board_mask_margin(board)
     if base_margin is None:
-        return 0
+        return None
     version_node = doc.find("version")
     version = version_node.get_int() if version_node else 0
     for fp in board.footprints:
         for pad in fp.pads:
-            if not {"F.Cu", "*.Cu"}.intersection(pad.layers):
+            if not {layer, "*.Cu"}.intersection(pad.layers):
                 continue
+            raw = pad._sexp_node
+            if pad.drill_offset != (0.0, 0.0) or (
+                raw is not None
+                and any(raw.find_child(tag) is not None for tag in ADVANCED_PAD_FEATURES)
+            ):
+                return None
             margin, _ = pad_mask_margin(pad, fp, base_margin, declared, board_version=version or 0)
             if margin is None:
-                return 0
+                return None
             try:
                 poly, mask = pad_mask_shapes(pad, fp, margin)
             except ValueError:
                 # A pad we cannot bound may obstruct the proposed copper.
-                return 0
+                return None
             center = board.get_pad_position(fp.reference, pad.number)
             if center is None:
                 continue
             landings.add(_xy(*center))
             key = f"{fp.reference}/{pad.number}"
+            if key in copper:
+                # Two lands with the same reference and number cannot own one escape.
+                return None
             copper[key] = pad.net_name, poly
-            if {"F.Mask", "*.Mask"}.intersection(pad.layers):
+            if {layer.replace(".Cu", ".Mask"), "*.Mask"}.intersection(pad.layers):
                 masks[key] = mask
-                if fp.reference in {"U1", "U2"} and pad.net_name in nets:
-                    targets.append(
-                        (nets.index(pad.net_name), key, pad.net_name, _xy(*center), mask)
-                    )
+                layer_pads[key] = _xy(*center)
+    track_keepouts = []
+    for area in all_rule_area_zones(board):
+        if area.keepout.tracks_allowed or not {layer, "*.Cu", "F&B.Cu"}.intersection(
+            area.layers or [area.layer]
+        ):
+            continue
+        rings = area.rule_area_contours or [area.polygon]
+        if not rings[0] or len(rings[0]) < 3:
+            return None
+        polygon = Polygon(rings[0], holes=rings[1:])
+        if not polygon.is_valid:
+            return None
+        track_keepouts.append(polygon)
+    return _EscapeLayer(ends, copper, masks, nodes, landings, layer_pads, track_keepouts)
+
+
+def clear_ddr_pad_escapes(path: Path, nets: list[str]) -> int:
+    """Move only unbranched, unlocked F.Cu runs between a DDR pad and its next landing."""
+    doc = load_pcb(path)
+    board = PCB(doc)
+    surface = _index_escape_layer(doc, board, "F.Cu")
+    if surface is None:
+        return 0
+    ends, copper, masks = surface.ends, surface.copper, surface.masks
+    nodes, landings = surface.nodes, surface.landings
+    targets = []
+    for key, center in surface.pad_centers.items():
+        net = copper[key][0]
+        if key.split("/")[0] in {"U1", "U2"} and net in nets:
+            targets.append((nets.index(net), key, net, center, masks[key]))
 
     edits = 0
     for _, key, net, center, mask in sorted(targets):
@@ -304,3 +365,141 @@ def clear_ddr_pad_escapes(path: Path, nets: list[str]) -> int:
     if edits:
         save_pcb(doc, path)
     return edits
+
+
+def _escapes():
+    """Reviewed bends in mm from each pad center, before the first recipe fill."""
+    ground = [
+        (-0.10, -0.30),
+        (-0.10, -0.40),
+        (-0.15, -0.45),
+        (-0.15, -0.70),
+        (-0.20, -0.75),
+        (-0.20, -0.80),
+    ]
+    for pad in ("U2/13", "U3/7", "U5/13"):
+        yield pad, "GND", "F.Cu", ground, [ground[0], (-0.10, -0.70), ground[-1]]
+    yield (
+        "U4/B5",
+        "GND",
+        "F.Cu",
+        [(0.18, -0.18), (0.33, -0.33), (0.33, -0.38), (0.43, -0.48)],
+        [(0.18, -0.18), (0.43, -0.43), (0.43, -0.48)],
+    )
+
+    # Move the header's diagonal beyond its through-hole land, keeping its length.
+    for pin, net, layer, neck in (
+        (2, "A0", "F.Cu", 0.82),
+        (4, "A2", "F.Cu", 0.94),
+        (5, "A3", "B.Cu", 0.80),
+        (7, "A5", "B.Cu", 0.92),
+    ):
+        end = (neck + 5.60, -1.20)
+        yield (
+            f"J3/{pin}",
+            net,
+            layer,
+            [(0, 0), (neck, 0), (neck + 1.20, -1.20), end],
+            [(0, 0), (1.05, 0), (2.25, -1.20), end],
+        )
+    # Replace the nearest two tuning bumps with one that clears the A1 track.
+    yield (
+        "J3/9",
+        "A7",
+        "B.Cu",
+        [
+            (0, 0),
+            (0.4, 0),
+            (0.4, 0.4927),
+            (0.8, 0.4927),
+            (0.8, 0),
+            (1.2, 0),
+            (1.2, 0.4927),
+            (1.6, 0.4927),
+            (1.6, 0),
+        ],
+        [(0, 0), (1.2, 0), (1.2, 0.74), (1.6, 0.74), (1.6, 0)],
+    )
+    yield (
+        "U5/1",
+        "A0",
+        "F.Cu",
+        [(0, 0), (0, -0.2), (-0.2, -0.4), (-0.2, -0.8)],
+        [(0, 0), (0, -0.6), (-0.2, -0.8)],
+    )
+    # The short straight on CLK_P leaves its partner enough coupled length.
+    yield (
+        "U3/1",
+        "MIPI_CLK_P",
+        "F.Cu",
+        [(0, 0), (0, -0.1657), (-0.495, -0.6607)],
+        [(0, 0), (0, -0.09), (-0.495, -0.585), (-0.495, -0.6607)],
+    )
+    for pin, net, y in (("E1", "TMDS_D2_P", 0.235), ("F1", "TMDS_D2_N", -0.235)):
+        yield (
+            f"U4/{pin}",
+            net,
+            "F.Cu",
+            [(0, 0), (-0.235, y), (-0.7, y)],
+            [(0, 0), (-0.465, 0), (-0.7, y)],
+        )
+
+
+def _pad_relative(center: XY, offsets: list[XY]) -> list[XY]:
+    return [(round(center[0] + x, 6), round(center[1] + y, 6)) for x, y in offsets]
+
+
+def _match_escape(surface: _EscapeLayer, net: str, points: list[XY]):
+    """Match the entire unlocked run; an intermediate landing or branch owns the bend."""
+    for point in points[1:-1]:
+        if point in surface.landings or len(surface.ends[net, point]) != 2:
+            return []
+    chain = []
+    for start, end in pairwise(points):
+        matches = [
+            seg
+            for seg in surface.ends[net, start]
+            if any((round(x, 6), round(y, 6)) == end for x, y in (seg.start, seg.end))
+        ]
+        if len(matches) != 1:
+            return []
+        seg = matches[0]
+        if seg.uuid not in surface.nodes:
+            return []
+        if chain and seg.width != chain[0].width:
+            return []
+        chain.append(seg)
+    return chain
+
+
+def clear_fixture_pad_escapes(path: Path) -> int:
+    """Splice the measured chains only where the original landings and clearance survive."""
+    doc = load_pcb(path)
+    board = PCB(doc)
+    layers = {name: _index_escape_layer(doc, board, name) for name in ("F.Cu", "B.Cu")}
+    changes = 0
+    for key, net, layer, old, new in _escapes():
+        surface = layers[layer]
+        if not surface or key not in surface.pad_centers or surface.copper[key][0] != net:
+            continue
+        center = surface.pad_centers[key]
+        original, revised = _pad_relative(center, old), _pad_relative(center, new)
+        chain = _match_escape(surface, net, original)
+        if not chain:
+            continue
+        ids = {seg.uuid for seg in chain}
+        nearby = _neighbors(original, ids, key, net, surface.copper, surface.masks)
+        nearby.append((surface.copper[key][1], None))
+        limits = _contact_limits(
+            LineString(original), chain[0].width, nearby, keep_contact_depth=True
+        )
+        line = LineString(revised)
+        if any(line.distance(area) <= chain[0].width / 2 for area in surface.track_keepouts):
+            continue
+        if not all(low <= line.distance(geom) <= high for geom, low, high in limits):
+            continue
+        _replace_chain(doc, board.board_origin, chain, revised, surface.nodes, surface.copper)
+        changes += 1
+    if changes:
+        save_pcb(doc, path)
+    return changes
