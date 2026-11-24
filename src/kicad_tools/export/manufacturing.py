@@ -704,71 +704,97 @@ def _atomic_restore_bytes(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
-class _DrcSidecarUndo:
-    """Pre-write snapshot of the DRC sidecars Step 0a rewrites (issue #10091).
+class _StagedSource:
+    """Scratch copy of the board and its DRC sidecars (issue #10091).
 
     Maintainer decision, 2026-11-24: a named-stackup export that cannot
-    perform the requested silkscreen repair must leave the input PCB,
-    project (``.kicad_pro``) and custom rules (``.kicad_dru``) as it found
-    them -- existing files byte for byte, a missing sibling still absent --
-    while the error, exit status and package refusal stay unchanged. The
-    sidecars still have to be written before the silk pass (kicad-cli loads
-    them from beside the board, and ordinary preflight failures keep their
-    emission), so the refusal path undoes this export's own writes instead
-    of deferring them: bytes are restored only while the on-disk file still
-    carries what this export wrote, so an editor save that arrived in
-    between is preserved rather than clobbered by a stale restore.
+    perform the requested silkscreen repair must leave the input PCB, the
+    project (``.kicad_pro``), the custom rules (``.kicad_dru``) and any
+    zone-fill marker as it found them -- and must not disturb an editor save
+    that lands meanwhile.  Rule emission, the zone refill and the silk pass
+    therefore run on this copy, in a hidden directory beside the board (same
+    filesystem, so the silk pass meets the same link/permission limits), and
+    :meth:`publish` writes the results back only after every one of them
+    succeeded.  A refusal just discards the copy: nothing live was touched.
     """
 
-    _EXISTS_UNREADABLE: Any = object()  # present but unreadable: nothing safe to restore
-    _UNKNOWN: Any = object()  # post-write bytes never latched
+    _SUFFIXES = (".kicad_pro", ".kicad_dru")
 
-    def __init__(self, pcb_path: Path) -> None:
-        self._entries: list[tuple[Path, Any, Any]] = []
-        for suffix in (".kicad_pro", ".kicad_dru"):
-            path = pcb_path.with_suffix(suffix)
-            self._entries.append(
-                (path, self._read_or(path, self._EXISTS_UNREADABLE), self._UNKNOWN)
-            )
-
-    def record_written(self) -> None:
-        """Latch the on-disk bytes right after Step 0a's writes."""
-        self._entries = [
-            (path, before, self._read_or(path, self._UNKNOWN)) for path, before, _ in self._entries
-        ]
-
-    def rollback(self) -> None:
-        """Undo this export's sidecar writes; keep any newer foreign save."""
-        for path, before, written in self._entries:
-            if before is self._EXISTS_UNREADABLE or written is self._UNKNOWN:
-                continue
-            current = self._read_or(path, self._UNKNOWN)
-            if current is self._UNKNOWN or current == before:
-                continue  # unreadable now, absent, or already the bytes we found
-            if written is None or current != written:
-                logger.info(
-                    "%s changed on disk since this export wrote it; leaving it as found",
-                    path.name,
-                )
-                continue
-            if before is None:
-                try:
-                    path.unlink()
-                except OSError as exc:
-                    logger.warning(
-                        "Could not remove %s after the refused silk repair: %s", path, exc
-                    )
-            else:
-                _atomic_restore_bytes(path, before)
+    def __init__(self, live_pcb: Path) -> None:
+        self.live = live_pcb
+        self.dir = Path(tempfile.mkdtemp(prefix=f".{live_pcb.name}.export-", dir=live_pcb.parent))
+        try:
+            self.pcb = self.dir / live_pcb.name
+            self.pcb_bytes = live_pcb.read_bytes()
+            self.pcb.write_bytes(self.pcb_bytes)
+            self.sidecars_before: dict[str, bytes | None] = {}
+            for suffix in self._SUFFIXES:
+                data = self._read(live_pcb.with_suffix(suffix))
+                self.sidecars_before[suffix] = data
+                if data is not None:
+                    self.pcb.with_suffix(suffix).write_bytes(data)
+            marker = self._marker(live_pcb)
+            self.marker_before = self._read(marker)
+            if self.marker_before is not None:
+                self._marker(self.pcb).write_bytes(self.marker_before)
+        except BaseException:
+            self.close()
+            raise
 
     @staticmethod
-    def _read_or(path: Path, fallback: Any) -> Any:
+    def _marker(pcb: Path) -> Path:
+        return pcb.with_name(f".{pcb.name}.zonefill")
+
+    @staticmethod
+    def _read(path: Path) -> bytes | None:
         try:
             return path.read_bytes()
         except FileNotFoundError:
             return None
-        except OSError:
-            return fallback
+
+    def close(self) -> None:
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def publish(self) -> None:
+        """Write the staged results to the live names.
+
+        Raises ``SourceChangedError`` if the board or a sidecar no longer
+        holds the bytes the export started from (an editor save); in that
+        case nothing is written.  The live files are checked again right
+        before each is replaced.
+        """
+        from kicad_tools.core.atomic_write import SourceChangedError, atomic_write_text
+
+        def unchanged() -> None:
+            if self._read(self.live) != self.pcb_bytes:
+                raise SourceChangedError("PCB changed during manufacturing export")
+            for suffix, before in self.sidecars_before.items():
+                if self._read(self.live.with_suffix(suffix)) != before:
+                    raise SourceChangedError(
+                        f"{self.live.with_suffix(suffix).name} changed during manufacturing export"
+                    )
+
+        unchanged()
+        staged_pcb = self.pcb.read_bytes()
+        if staged_pcb != self.pcb_bytes:
+            atomic_write_text(
+                self.live,
+                staged_pcb.decode("utf-8"),
+                encoding="utf-8",
+                newline="",
+                expected_sha256=hashlib.sha256(self.pcb_bytes).hexdigest(),
+            )
+        for suffix, before in self.sidecars_before.items():
+            data = self._read(self.pcb.with_suffix(suffix))
+            live = self.live.with_suffix(suffix)
+            if data is None or data == before:
+                continue
+            if self._read(live) != before:
+                raise SourceChangedError(f"{live.name} changed during manufacturing export")
+            _atomic_restore_bytes(live, data)
+        marker = self._read(self._marker(self.pcb))
+        if marker is not None and marker != self.marker_before:
+            _atomic_restore_bytes(self._marker(self.live), marker)
 
 
 class ManufacturingPackage:
@@ -796,9 +822,16 @@ class ManufacturingPackage:
         config: ManufacturingConfig | None = None,
     ):
         self.pcb_path = Path(pcb_path)
+        # Live board path while ``pcb_path`` points at a staged copy (#10091).
+        self._live_pcb_path: Path | None = None
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.config = config or ManufacturingConfig()
+
+    @property
+    def _lookup_pcb_path(self) -> Path:
+        """Board path for sibling-sidecar discovery (the live one when staged)."""
+        return self._live_pcb_path or self.pcb_path
 
     def export(
         self,
@@ -857,100 +890,57 @@ class ManufacturingPackage:
             logger.error(f"Assembly generation failed: {e}")
             return result
 
-        # Step 0a: Emit DRC-constraint sources next to the source board so
-        # that kicad-cli pcb drc (run here in preflight, in CI, or by the
-        # gallery render pipeline) loads the manufacturer profile's relaxed
-        # built-in minimums instead of KiCad's stricter hard-coded defaults.
-        # Written before preflight so the constraints exist even when a
-        # strict-preflight failure aborts the rest of the pipeline.
-        sidecar_undo: _DrcSidecarUndo | None = None
-        if self.config.emit_drc_constraints:
-            if self.config.stackup_id and self.config.silk_fix and self.manufacturer != "generic":
-                # Issue #10091 (maintainer decision, 2026-11-24): if the
-                # required silk repair below refuses to run, undo these
-                # sidecar writes on the way out so the input directory is
-                # left exactly as it was found.
-                sidecar_undo = _DrcSidecarUndo(self.pcb_path)
-            self._write_drc_constraints(result)
-            if sidecar_undo is not None:
-                sidecar_undo.record_written()
-            # KiCad plots the saved copper. Check it under the rules that will
-            # ship before plotting, archiving or binding a named stackup (#9987).
-            refill_digest = self._refresh_zone_fill(result, selected_stackup_source_hash)
-            if not result.success:
-                return result
-            if self.config.stackup_id and refill_digest is not None:
-                selected_stackup_source_hash = refill_digest
+        # Steps 0a-0c.  A named-stackup export with the default silk repair
+        # runs them on a scratch copy and publishes only on success, so a
+        # refused repair leaves the board and its siblings untouched (#10091).
+        from kicad_tools.core.atomic_write import SourceChangedError
 
-        # Step 0b (issue #5009): resolve the selected manufacturer profile's
-        # declared via-in-pad fabrication process (if any) for this board's
-        # actual layer/copper configuration, so the manifest and README
-        # steps below can bind it into the bundle.
-        self._resolve_fabrication_process(result)
-        self._resolve_ordered_copper(result)
-
-        # Step 0c (issue #9799): the default silk legalisation pass.  Runs
-        # BEFORE the first check that judges silk, and the checks, plots and
-        # hashes below all read these same repaired bytes (the pass edits
-        # the board in place; a zero-edit board is not re-saved, so an
-        # already-legal board is untouched and idempotent across the
-        # route -> export pipeline).  ``--no-silk-fix`` skips it entirely.
-        # The ``generic`` pseudo-tier has no profile, so it skips too.
-        if self.config.silk_fix and self.manufacturer != "generic":
-            from kicad_tools.cli.silk_default_pass import run_default_silk_pass
-            from kicad_tools.core.atomic_write import SourceChangedError
-
+        staged: _StagedSource | None = None
+        live_pcb = self.pcb_path
+        if (
+            self.config.emit_drc_constraints
+            and self.config.stackup_id
+            and self.config.silk_fix
+            and self.manufacturer != "generic"
+        ):
             try:
-                result.silk_fix = run_default_silk_pass(
-                    self.pcb_path,
-                    mfr=self.manufacturer,
-                    quiet=True,
-                    expected_sha256=selected_stackup_source_hash,
-                )
-            except SourceChangedError as exc:
-                result.errors.append(f"Stackup ordering validation failed: {exc}")
+                staged = _StagedSource(live_pcb)
+            except OSError as exc:
+                result.errors.append(f"Could not stage {live_pcb.name} for export: {exc}")
                 return result
-            if self.config.stackup_id and result.silk_fix is None:
-                result.silk_fix = {
-                    "applied": False,
-                    "manufacturer": self.manufacturer,
-                    "error": "could not resolve the manufacturer's silk rules for this board",
-                }
-            if result.silk_fix is not None and not result.silk_fix.get("applied"):
-                message = "Silk legalisation pass could not run: " + str(
-                    result.silk_fix.get("error", "unknown reason")
-                )
-                if self.config.stackup_id:
-                    # Issue #10051 (maintainer decision, 2026-11-24): a
-                    # named-stackup export must not publish unrepaired silk.
-                    # The requested repair could not run -- e.g. the
-                    # filesystem lacks the hard-link support the checked
-                    # publication path probes for -- so stop here, before
-                    # any output is written.  ``--no-silk-fix`` is the
-                    # explicit way to ship the original artwork instead.
-                    result.errors.append(
-                        message + " (a named-stackup export requires the requested silk "
-                        "repair; pass --no-silk-fix to ship the original artwork)"
-                    )
-                    if sidecar_undo is not None:
-                        # Issue #10091 (maintainer decision, 2026-11-24):
-                        # the refusal must leave the project and rules
-                        # sidecars as it found them.
-                        sidecar_undo.rollback()
-                    return result
-                result.warnings.append(message)
-            # Issue #9990: the pass is export's own edit of the source board.
-            # Re-bind the named-stackup provenance to the bytes the pass
-            # itself wrote (its report carries their sha256), through the
-            # same validation used at the start of export() -- so the
-            # ordering record describes the bytes that ship, while an edit
-            # other than the pass's own still fails the final change guard.
-            written = result.silk_fix.get("output_sha256") if result.silk_fix else None
-            if self.config.stackup_id and written:
-                rebound = self._stackup_hash_after_own_edit(result, written)
-                if rebound is None:
-                    return result
-                selected_stackup_source_hash = rebound
+            self._live_pcb_path = live_pcb
+            self.pcb_path = staged.pcb
+        try:
+            proceed, selected_stackup_source_hash = self._prepare_source(
+                result, selected_stackup_source_hash
+            )
+        finally:
+            self.pcb_path = live_pcb
+            self._live_pcb_path = None
+        if staged is not None:
+            try:
+                if proceed:
+                    staged_dir = staged.dir
+                    try:
+                        staged.publish()
+                    except SourceChangedError as exc:
+                        result.errors.append(f"Stackup ordering validation failed: {exc}")
+                        return result
+                    except OSError as exc:
+                        result.errors.append(
+                            f"Silk legalisation pass could not run: {exc} (a named-stackup "
+                            "export requires the requested silk repair; pass --no-silk-fix "
+                            "to ship the original artwork)"
+                        )
+                        return result
+                    result.drc_constraint_paths = [
+                        live_pcb.with_name(Path(os.path.relpath(q, staged_dir)).name)
+                        for q in result.drc_constraint_paths
+                    ]
+            finally:
+                staged.close()
+        if not proceed:
+            return result
 
         # Step 0: Pre-flight validation
         preflight_cfg = self.config.preflight
@@ -1053,6 +1043,96 @@ class ManufacturingPackage:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _prepare_source(
+        self, result: ManufacturingResult, selected_stackup_source_hash: str | None
+    ) -> tuple[bool, str | None]:
+        """Steps 0a-0c: rules, zone refill, fabrication process, silk pass.
+
+        Returns ``(proceed, source_hash)``; errors are recorded on *result*.
+        """
+        # Step 0a: Emit DRC-constraint sources next to the source board so
+        # that kicad-cli pcb drc (run here in preflight, in CI, or by the
+        # gallery render pipeline) loads the manufacturer profile's relaxed
+        # built-in minimums instead of KiCad's stricter hard-coded defaults.
+        # Written before preflight so the constraints exist even when a
+        # strict-preflight failure aborts the rest of the pipeline.
+        if self.config.emit_drc_constraints:
+            self._write_drc_constraints(result)
+            # KiCad plots the saved copper. Check it under the rules that will
+            # ship before plotting, archiving or binding a named stackup (#9987).
+            refill_digest = self._refresh_zone_fill(result, selected_stackup_source_hash)
+            if not result.success:
+                return False, selected_stackup_source_hash
+            if self.config.stackup_id and refill_digest is not None:
+                selected_stackup_source_hash = refill_digest
+
+        # Step 0b (issue #5009): resolve the selected manufacturer profile's
+        # declared via-in-pad fabrication process (if any) for this board's
+        # actual layer/copper configuration, so the manifest and README
+        # steps below can bind it into the bundle.
+        self._resolve_fabrication_process(result)
+        self._resolve_ordered_copper(result)
+
+        # Step 0c (issue #9799): the default silk legalisation pass.  Runs
+        # BEFORE the first check that judges silk, and the checks, plots and
+        # hashes below all read these same repaired bytes (the pass edits
+        # the board in place; a zero-edit board is not re-saved, so an
+        # already-legal board is untouched and idempotent across the
+        # route -> export pipeline).  ``--no-silk-fix`` skips it entirely.
+        # The ``generic`` pseudo-tier has no profile, so it skips too.
+        if self.config.silk_fix and self.manufacturer != "generic":
+            from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+            from kicad_tools.core.atomic_write import SourceChangedError
+
+            try:
+                result.silk_fix = run_default_silk_pass(
+                    self.pcb_path,
+                    mfr=self.manufacturer,
+                    quiet=True,
+                    expected_sha256=selected_stackup_source_hash,
+                )
+            except SourceChangedError as exc:
+                result.errors.append(f"Stackup ordering validation failed: {exc}")
+                return False, selected_stackup_source_hash
+            if self.config.stackup_id and result.silk_fix is None:
+                result.silk_fix = {
+                    "applied": False,
+                    "manufacturer": self.manufacturer,
+                    "error": "could not resolve the manufacturer's silk rules for this board",
+                }
+            if result.silk_fix is not None and not result.silk_fix.get("applied"):
+                message = "Silk legalisation pass could not run: " + str(
+                    result.silk_fix.get("error", "unknown reason")
+                )
+                if self.config.stackup_id:
+                    # Issue #10051 (maintainer decision, 2026-11-24): a
+                    # named-stackup export must not publish unrepaired silk.
+                    # The requested repair could not run -- e.g. the
+                    # filesystem lacks the hard-link support the checked
+                    # publication path probes for -- so stop here, before
+                    # any output is written.  ``--no-silk-fix`` is the
+                    # explicit way to ship the original artwork instead.
+                    result.errors.append(
+                        message + " (a named-stackup export requires the requested silk "
+                        "repair; pass --no-silk-fix to ship the original artwork)"
+                    )
+                    return False, selected_stackup_source_hash
+                result.warnings.append(message)
+            # Issue #9990: the pass is export's own edit of the source board.
+            # Re-bind the named-stackup provenance to the bytes the pass
+            # itself wrote (its report carries their sha256), through the
+            # same validation used at the start of export() -- so the
+            # ordering record describes the bytes that ship, while an edit
+            # other than the pass's own still fails the final change guard.
+            written = result.silk_fix.get("output_sha256") if result.silk_fix else None
+            if self.config.stackup_id and written:
+                rebound = self._stackup_hash_after_own_edit(result, written)
+                if rebound is None:
+                    return False, selected_stackup_source_hash
+                selected_stackup_source_hash = rebound
+
+        return True, selected_stackup_source_hash
 
     def _stackup_hash_after_own_edit(
         self, result: ManufacturingResult, written_sha256: str
@@ -1553,7 +1633,7 @@ class ManufacturingPackage:
         # a reviewed project floor instead of silently reverting it to the
         # profile's conservative default.
         rules, fab_override_msg = resolve_pcb_fabrication_overrides(
-            self.pcb_path, rules, manufacturer_id=profile.id
+            self._lookup_pcb_path, rules, manufacturer_id=profile.id
         )
         if fab_override_msg is not None:
             if fab_override_msg.startswith("ignoring"):
@@ -1728,7 +1808,7 @@ class ManufacturingPackage:
         from dataclasses import replace
 
         exempt: set[str] = set()
-        pcb_path = Path(self.pcb_path)
+        pcb_path = Path(self._lookup_pcb_path)
         try:
             from ..validate.rules.waivers import discover_waivers_sidecar, load_waivers
 
@@ -1834,14 +1914,14 @@ class ManufacturingPackage:
         )
         from ..manufacturers.project_generator import dedupe_net_classes
 
-        ncm_path = _discover_net_class_map_sidecar(Path(self.pcb_path))
+        ncm_path = _discover_net_class_map_sidecar(Path(self._lookup_pcb_path))
         if ncm_path is None:
             return None
         try:
             from ..router.rules import net_class_map_from_path
             from ..schema.pcb import PCB
 
-            net_class_map = net_class_map_from_path(ncm_path, pcb_path=self.pcb_path)
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=self._lookup_pcb_path)
             net_class_map, _ = resolve_net_class_map_for_board(
                 net_class_map, PCB.load(str(self.pcb_path))
             )

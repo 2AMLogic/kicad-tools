@@ -319,7 +319,8 @@ def test_foreign_save_at_silk_write_boundary_still_fails_named_stackup(tmp_path,
 
     def write_then_foreign_save(target, content, **kwargs):
         real_write(target, content, **kwargs)
-        if Path(target) == path:
+        # The silk pass writes the exporter's private staged copy (#10091).
+        if Path(target).name == path.name:
             Path(target).write_text(Path(target).read_text() + "\n")
 
     monkeypatch.setattr(sexp_file, "atomic_write_text", write_then_foreign_save)
@@ -475,10 +476,14 @@ def test_linkless_refusal_leaves_missing_sidecars_absent(tmp_path, monkeypatch):
     """
     _break_hard_link_support(monkeypatch)
     path = _silk_defect_stackup_board(tmp_path)
+    pcb_before = path.read_bytes()
     result = _stackup_package(path).export(tmp_path / "out")
 
     assert not result.success
     assert "Silk legalisation pass could not run" in result.errors[-1]
+    assert path.read_bytes() == pcb_before
+    assert not path.with_name(f".{path.name}.zonefill").exists()
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".")) == []
     assert not path.with_suffix(".kicad_pro").exists()
     assert not path.with_suffix(".kicad_dru").exists()
 
