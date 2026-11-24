@@ -74,6 +74,8 @@ from kicad_tools.geometry.copper import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
 # Endpoint/centre coincidence radius (mm); mirrors ``POSITION_TOLERANCE``.
@@ -150,20 +152,99 @@ class CopperContactGraph:
     @cached_property
     def covered_collinear_tracks(self) -> dict[int, set[int]]:
         """Map each covered PCB segment index to the collinear strokes containing all its copper."""
-        covered: dict[int, set[int]] = {}
+        return self._covered_tracks(collinear_only=True)
+
+    @cached_property
+    def covered_tracks(self) -> dict[int, set[int]]:
+        """Straight segments whose entire copper is already present in another segment."""
+        return self._covered_tracks(collinear_only=False)
+
+    def _straight_track_bonds(self) -> Iterator[tuple[int, int]]:
         for a, b in self.bonds:
             first, second = self.items[a], self.items[b]
             if (
-                first.kind != TRACK
-                or second.kind != TRACK
-                or not (first.straight and second.straight)
+                first.kind == second.kind == TRACK
+                and first.straight
+                and second.straight
+                and first.net == second.net
+                and first.layers == second.layers
             ):
-                continue
-            if first.layers != second.layers or first.net != second.net:
+                yield a, b
+
+    @cached_property
+    def uniform_track_lanes(self) -> tuple[dict[int, int], set[tuple[int, int]]]:
+        """Item-to-lane index and direct bonds between continuous uniform centrelines."""
+        from kicad_tools.router.connectivity import _UnionFind
+
+        runs = _UnionFind()
+        continuous: set[tuple[int, int]] = set()
+        for a, b in self._straight_track_bonds():
+            first, second = self.items[a], self.items[b]
+            if first.half_width != second.half_width:
                 continue
             p, q = first.endpoints
             r, s = second.endpoints
-            if collinear_overlap_length(p, q, r, s) is None:
+            if collinear_overlap_length(p, q, r, s) is not None:
+                runs.union(a, b)
+                continuous.add((a, b))
+        return {i: runs.find(i) for bond in continuous for i in bond}, continuous
+
+    @cached_property
+    def split_track_carriers(self) -> dict[int, list[frozenset[int]]]:
+        """PCB segment indices jointly covering a narrower stroke across a cut in one lane."""
+        from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+        lanes, _ = self.uniform_track_lanes
+        candidates: dict[tuple[int, int], set[int]] = {}
+        for a, b in self._straight_track_bonds():
+            if self.items[a].half_width > self.items[b].half_width:
+                a, b = b, a
+            if b in lanes and self.items[a].half_width < self.items[b].half_width:
+                candidates.setdefault((a, lanes[b]), set()).add(b)
+
+        covered: dict[int, list[frozenset[int]]] = {}
+        for (a, _), neighbors in candidates.items():
+            if len(neighbors) < 2:
+                continue
+            narrow = self.items[a]
+            carriers = frozenset(self.items[i].key[1] for i in neighbors)
+            if not carriers.isdisjoint(self.covered_tracks.get(narrow.key[1], ())):
+                continue
+            if unary_union([self.items[i].geom for i in neighbors]).covers(narrow.geom):
+                covered.setdefault(narrow.key[1], []).append(carriers)
+        return covered
+
+    @cached_property
+    def _straight_segment_geoms(self) -> dict[int, Any]:
+        return {
+            item.key[1]: item.geom
+            for item in self.items
+            if item.kind == TRACK and item.key[0] == "segment"
+        }
+
+    def carriers_cover(self, narrow: int, carriers: frozenset[int] | set[int]) -> bool:
+        """Whether the union of ``carriers`` wholly covers straight segment ``narrow``.
+
+        A covering run from :attr:`split_track_carriers` may include an
+        off-route track whose round cap merely touches the buried stroke;
+        whether the stroke is carried by *declared* copper is decided by the
+        subset of the run that is on the resolved path, so the caller passes
+        that subset here and the union is re-tested without it (#10085).
+        """
+        from shapely.ops import unary_union
+
+        geoms = self._straight_segment_geoms
+        target = geoms.get(narrow)
+        pieces = [geoms[i] for i in carriers if i in geoms]
+        return target is not None and bool(pieces) and unary_union(pieces).covers(target)
+
+    def _covered_tracks(self, *, collinear_only: bool) -> dict[int, set[int]]:
+        covered: dict[int, set[int]] = {}
+        for a, b in self._straight_track_bonds():
+            first, second = self.items[a], self.items[b]
+            p, q = first.endpoints
+            r, s = second.endpoints
+            if collinear_only and collinear_overlap_length(p, q, r, s) is None:
                 continue
             i, j = first.key[1], second.key[1]
             if first.geom.covers(second.geom):

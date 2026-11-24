@@ -254,29 +254,17 @@ def _uniform_lane_contacts(
 
     A plated joint has one landing on such a lane, at the closest point on
     its centreline. Round caps from a cut can touch the joint or other pieces
-    farther along the same lane. Those contacts and any collinear stroke
-    already wholly covered by another add no copper path.
+    farther along the same lane. A straight stroke wholly buried in another
+    adds no copper, including when their centrelines differ at a corner.
     """
-    from kicad_tools.geometry.copper import collinear_overlap_length, point_segment_distance
-    from kicad_tools.router.connectivity import _UnionFind
+    from kicad_tools.geometry.copper import point_segment_distance
     from kicad_tools.validate.copper_contact import PAD, TRACK, VIA
 
     items, bonds = contacts.items, contacts.bonds
     straight = {i for i, item in enumerate(items) if item.kind == TRACK and item.straight}
-    runs = _UnionFind()
-    continuous: set[tuple[int, int]] = set()
-    covered = {i for i in straight if items[i].key[1] in contacts.covered_collinear_tracks}
-    for a, b in bonds:
-        if a not in straight or b not in straight:
-            continue
-        first, second = items[a], items[b]
-        if first.layers != second.layers or first.half_width != second.half_width:
-            continue
-        p, q = first.endpoints
-        r, s = second.endpoints
-        if collinear_overlap_length(p, q, r, s) is not None:
-            runs.union(a, b)
-            continuous.add((a, b))
+    lanes, continuous = contacts.uniform_track_lanes
+    covered_segments = contacts.covered_tracks.keys() | contacts.split_track_carriers.keys()
+    covered = {i for i in straight if items[i].key[1] in covered_segments}
     if not continuous and not covered:
         return bonds, continuous
 
@@ -287,14 +275,14 @@ def _uniform_lane_contacts(
             redundant.add((a, b))
             continue
         if a in straight and b in straight:
-            if runs.find(a) == runs.find(b) and (a, b) not in continuous:
+            if lanes.get(a, a) == lanes.get(b, b) and (a, b) not in continuous:
                 redundant.add((a, b))
             continue
         track, joint = (a, b) if a in straight else (b, a)
         center = items[joint].center
         if track in straight and items[joint].kind in (PAD, VIA) and center is not None:
             distance = point_segment_distance(center, *items[track].endpoints)
-            landings[joint, runs.find(track)].append((distance, (a, b)))
+            landings[joint, lanes.get(track, track)].append((distance, (a, b)))
     for candidates in landings.values():
         _, nearest = min(candidates)
         redundant.update(bond for _, bond in candidates if bond != nearest)

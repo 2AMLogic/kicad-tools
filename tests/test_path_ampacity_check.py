@@ -1365,7 +1365,9 @@ class TestButtressWireUnwiredBranch:
     """
 
     @staticmethod
-    def _board(bend_y: float) -> tuple[PCB, list[CurrentPathSpec], list[dict]]:
+    def _board(
+        bend_y: float, *, neck_length: float
+    ) -> tuple[PCB, list[CurrentPathSpec], list[dict]]:
         from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
 
         pcb = PCB.create(width=200, height=120, center=False)
@@ -1377,7 +1379,11 @@ class TestButtressWireUnwiredBranch:
         ):
             pcb.add_trace(a, b, width=w, layer="F.Cu", net=_WIRE_NET)
         pcb.add_trace((85, 50), (105, bend_y), width=2.0, layer="F.Cu", net=_WIRE_NET)
-        pcb.add_trace((105, bend_y), (105, 80), width=6.5, layer="F.Cu", net=_WIRE_NET)
+        shoulder = (105, bend_y + neck_length)
+        if neck_length:
+            # Widen only after the branch has cleared the trunk's copper.
+            pcb.add_trace((105, bend_y), shoulder, width=2.0, layer="F.Cu", net=_WIRE_NET)
+        pcb.add_trace(shoulder, (105, 80), width=6.5, layer="F.Cu", net=_WIRE_NET)
         _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
         _add_th_pad_footprint(pcb, ref="J2", x=150.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
         _add_th_pad_footprint(pcb, ref="J3", x=105.0, y=80.0, net=_WIRE_NET, drill=1.0, size=2.0)
@@ -1408,7 +1414,7 @@ class TestButtressWireUnwiredBranch:
     def test_unwired_branch_stub_fails_width_and_fusing(self, bend_y: float) -> None:
         from kicad_tools.validate.checker import DRCChecker
 
-        pcb, specs, wires = self._board(bend_y)
+        pcb, specs, wires = self._board(bend_y, neck_length=5.0)
         assert len(wires) == 1  # only the trunk is wired
         errors = (
             DRCChecker(pcb, current_path_specs=specs, reinforcement_wires=wires)
@@ -1432,6 +1438,16 @@ class TestButtressWireUnwiredBranch:
         assert not [
             v for v in errors if abs(v.location[1] - 50.0) < 0.5 and 31.5 < v.location[0] < 138.5
         ]
+
+    @pytest.mark.parametrize("bend_y", [53.0, 54.0])
+    def test_widening_at_the_bend_gives_both_paths_a_physical_return(self, bend_y: float) -> None:
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        pcb, specs, _ = self._board(bend_y, neck_length=0.0)
+        for spec in specs:
+            result = resolve_current_path(pcb, spec)
+            assert result.status == "ambiguous"
+            assert result.witness["loop_branches"]
 
 
 class TestButtressWireCreditThroughChecker:

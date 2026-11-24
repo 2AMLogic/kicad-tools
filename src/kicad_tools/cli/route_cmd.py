@@ -3546,6 +3546,12 @@ def _make_checkpoint_callback(
     def _checkpoint_inner(best_routes, best_metrics) -> None:
         from kicad_tools.cli.progress import flush_print
 
+        active = router_provider() if router_provider is not None else None
+        if getattr(active, "pending_preserved_departure", None) is not None:
+            # The completed-attempt archive can retain provisional copper. The
+            # live board and best-checkpoint path must await its refill verdict.
+            return
+
         if best_checkpoint is not None:
             try:
                 _offer_best(best_routes, best_metrics)
@@ -3641,7 +3647,11 @@ def _make_checkpoint_callback(
     def _checkpoint_completed_inner(routes, metrics) -> None:
         import tempfile
 
-        if best_checkpoint is not None:
+        active = router_provider() if router_provider is not None else None
+        if (
+            best_checkpoint is not None
+            and getattr(active, "pending_preserved_departure", None) is None
+        ):
             try:
                 _offer_best(routes, metrics, label="completed attempt")
             except Exception as exc:  # noqa: BLE001 - never abort routing
@@ -8039,6 +8049,7 @@ def _fill_zones_after_route(
     record_stage("native-zone-fill")
     if args is not None:
         args._placement_repair_error = None
+        args._zone_fill_verified = False
     _canonicalize_routed_uuids(output_path, args=args)
     disposition = getattr(router, "placement_disposition", None)
     if disposition is not None and disposition.preserve_copper_nets:
@@ -8117,6 +8128,8 @@ def _fill_zones_after_route(
     if not has_unquoted(text, r"\(zone[ \n\t]"):
         # Nothing to fill -- skip silently to avoid log noise on the
         # majority of boards that have no copper pours.
+        if args is not None:
+            args._zone_fill_verified = True
         return
 
     if not quiet:
@@ -8173,7 +8186,20 @@ def _fill_zones_after_route(
     _fill_kwargs: dict = {}
     if args is not None and _finishing_time_left(args) is not None:
         _fill_kwargs["time_left"] = lambda: _finishing_time_left(args)
-    result = run_fill_zones(output_path, kicad_cli=kicad_cli, **_fill_kwargs)
+    if getattr(args, "_preserved_departure_trial", False) is True:
+        # Preserve the input's thermal settings on this speculative first
+        # fill. Ask KiCad to save its actual fill once; the oracle below
+        # decides whether any power connection needs additional copper.
+        from kicad_tools.cli.runner import _run_fill_zones_via_drc
+
+        remaining = _finishing_time_left(args)
+        if remaining is not None and remaining <= 0:
+            return
+        result = _run_fill_zones_via_drc(output_path, None, kicad_cli, timeout=remaining)
+        if not result.refill_saved:
+            return
+    else:
+        result = run_fill_zones(output_path, kicad_cli=kicad_cli, **_fill_kwargs)
     if args is not None:
         # Issue #6273: the measured KiCad load + fill time of THIS board is
         # the cost estimate the later kicad-cli stages (oracle DRC rounds,
@@ -8195,6 +8221,8 @@ def _fill_zones_after_route(
 
     # Validate net format after zone fill -- kicad-cli may corrupt nets.
     report = validate_net_format(output_path)
+    if args is not None:
+        args._zone_fill_verified = report.valid
     if not report.valid:
         logger.warning(
             "Net format corruption detected after zone fill: "
@@ -10783,6 +10811,45 @@ def _complete_pour_nets_with_oracle(
             _canonicalize_routed_uuids(output_path, args=args)
 
 
+def _publish_preserved_departure(pcb_path, output_path, route_sexp, args, router, quiet) -> bool:
+    """Publish the targeted breakout only after the saved refill and pour oracle agree."""
+    from copy import copy
+
+    from .route_receipt import relocate
+
+    source = Path(args.pcb)
+    _copy_checkpoint_constraint_sidecars(source, output_path)
+    with tempfile.TemporaryDirectory(prefix=".kct-departure-", dir=output_path.parent) as directory:
+        staged = Path(directory) / output_path.name
+        _copy_checkpoint_constraint_sidecars(output_path, staged)
+        _write_routed_pcb(pcb_path, staged, route_sexp, guard_copper_loss=True)
+        trial = copy(args)
+        trial._preserved_departure_trial = True
+        _run_post_save_stitching(trial, staged, quiet=quiet)
+        _fill_zones_after_route(staged, quiet=quiet, router=router, args=trial)
+        _complete_pour_nets_with_oracle(staged, args=trial, quiet=quiet, router=router)
+        if not (
+            getattr(trial, "_zone_fill_verified", False)
+            and getattr(trial, "_pour_connectivity_verified", False)
+        ):
+            # Keep the input's saved fills. The declined signal and its
+            # temporary cut through the original power pour stay together.
+            relocate({staged: None})
+            _write_routed_pcb(source, output_path, "", guard_copper_loss=True)
+            return False
+
+        moves: list[tuple[Path, Path | None]] = [
+            (output_path.with_suffix(ext), staged.with_suffix(ext))
+            for ext in (".kicad_pro", ".kicad_dru")
+            if staged.with_suffix(ext).is_file()
+        ]
+        _publish_transaction([*moves, (output_path, staged)])
+        del trial._preserved_departure_trial
+        vars(args).update(vars(trial))
+        relocate({staged: output_path})
+        return True
+
+
 def _pour_closer_net_class_map(router, args) -> dict | None:
     """The router's effective net-class map for the pour closer (Issue #6374).
 
@@ -10820,6 +10887,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     )
 
     args._stranded_pour_links = 0
+    args._pour_connectivity_verified = False
     args._exhausted_mixed_plane_pads = frozenset()
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
@@ -10854,6 +10922,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             return 0
         pour_nets = set(find_all_plane_nets(load_pcb(output_path)))
         if not pour_nets:
+            args._pour_connectivity_verified = True
             return 0
 
         def refill(path: Path) -> object:
@@ -10936,6 +11005,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
                 print("  stranded-pour status UNKNOWN -- the run is reported unverified")
         return 0
     args._stranded_pour_links = result.final_links
+    args._pour_connectivity_verified = result.final_links == 0
     args._oracle_completion = result
     reserved_nets: frozenset[str] = getattr(args, "_plane_reservation_nets", frozenset())
     if (
@@ -26220,6 +26290,16 @@ def _run_main_impl(args, parser, argv) -> int:
     # Issue #1841: Tell the autorouter which pour nets lack zones
     router._pour_nets_without_zones = set(_no_zone)
 
+    requested_nets = getattr(args, "_route_only_nets", ()) or ()
+    if (
+        not args.dry_run
+        and args.preserve_existing
+        and args.strategy == "basic"
+        and _resolve_escape_routing_flag(args) is True
+        and len(requested_nets) == 1
+    ):
+        router.preserved_departure_net = next(iter(requested_nets))
+
     # Set up Ctrl+C handling to save partial results.  Issue #4559: the
     # handler (and the router pinned here) is restored/released by
     # ``_process_state_guard`` when ``main()`` exits -- mirroring the
@@ -27349,6 +27429,9 @@ def _run_main_impl(args, parser, argv) -> int:
         # ``--placement-delta-feedback`` already disables the cache up front
         # (above); this covers the auto arm, which cannot know in advance that
         # it will fire.
+        if getattr(router, "pending_preserved_departure", None) is not None:
+            # A route-only cache cannot carry a verified refill or its power repairs.
+            use_cache = False
         if use_cache and _moved_placement_path is not None:
             use_cache = False
             if not quiet:
@@ -27589,6 +27672,7 @@ def _run_main_impl(args, parser, argv) -> int:
         return _stop_rc
 
     # Save output
+    departure = getattr(router, "pending_preserved_departure", None)
     output_content = ""  # Tracks written content for output connectivity verification
     if args.dry_run:
         if not quiet:
@@ -27614,14 +27698,23 @@ def _run_main_impl(args, parser, argv) -> int:
 
             # Issue #2808: atomic write via _write_routed_pcb.  No layer
             # escalation in this flow, so layer_count defaults to 2 (no-op).
-            _write_routed_pcb(
-                pcb_path,
-                output_path,
-                combined_sexp,
-                # Issue #4413: abort rather than overwrite when a
-                # preserve/nets/region save would drop nearly all copper.
-                guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
-            )
+            if departure is None:
+                _write_routed_pcb(
+                    pcb_path,
+                    output_path,
+                    combined_sexp,
+                    guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
+                )
+            elif not _publish_preserved_departure(
+                pcb_path, output_path, combined_sexp, args, router, quiet
+            ):
+                router.routes[:] = [route for route in router.routes if route.net != departure.net]
+                departure.reason = (
+                    "Preserved breakout declined: native refill did not verify all pour connections"
+                )
+                router.routing_failures.append(departure)
+                stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
+                print(f"  {departure.reason}. Kept the input board.", file=sys.stderr)
 
             # We need output_content for the connectivity verification below;
             # re-read since the atomic write left output_path with the final
@@ -27661,15 +27754,13 @@ def _run_main_impl(args, parser, argv) -> int:
         )
     output_verification_regressed = output_verification.regressed
 
-    # Run power plane stitching if requested
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
-    # Fill copper-pour zones now that traces (and any stitching vias)
-    # are in place (issue #2516).  Must run BEFORE DRC so the DRC sees
-    # filled zones rather than bare zone outlines.
-    if not args.dry_run and stats["nets_routed"] > 0:
-        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+    if departure is None:
+        _run_post_save_stitching(args, output_path, quiet=quiet)
+        # Fill before DRC so KiCad sees poured copper (issue #2516). A
+        # provisional departure already ran both steps on its staged board.
+        if not args.dry_run and stats["nets_routed"] > 0:
+            _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
+            _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.

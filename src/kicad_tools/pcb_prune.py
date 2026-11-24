@@ -74,6 +74,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from kicad_tools.physics.ampacity import required_widths_for as required_widths_for
 from kicad_tools.schema.pcb import PCB, Pad, Segment, _mm_atom
 
 if TYPE_CHECKING:
@@ -323,7 +324,7 @@ class _NetModel:
         for i in seg_ids:
             self._find_held(i)
         #: hard protection: never removed (free end, locked, zone/pad/via crossing)
-        self.hard_protected = [self._is_protected(i) for i in range(n)]
+        self.hard_protected = [self.protection_reason(i) is not None for i in range(n)]
         #: any protection, overlap-only included: never snapped
         self.protected = [self.hard_protected[i] or bool(self.overlap[i]) for i in range(n)]
         #: pieces made by a covered-track split (issue #8406): never merged,
@@ -514,26 +515,26 @@ class _NetModel:
     def held_nodes(self, i: int) -> set[int]:
         return self.held[i][0] | self.held[i][1]
 
-    def _is_protected(self, i: int) -> bool:
+    def protection_reason(self, i: int) -> str | None:
         """May segment ``i`` hide a join the model does not see?
 
-        Returns ``True`` for *hard* protection.  A body that merely touches
+        Names the contact requiring hard protection.  A body that merely touches
         other same-net segments is recorded in ``self.overlap[i]`` instead:
         such a segment may still be removed when the connectivity holds over
         those body-touching neighbours too (issue #8216's spur beside a via).
         """
         s = self.nodes[i]
         if s.kind != "seg":
-            return True
+            return "only tracks are cut individually"
         if getattr(s.ref, "locked", False):
-            return True
+            return "the track is locked"
         for e in (0, 1):
             if not self.hard_anchors(i, e) and not (self.held[i][e] and not self.anch[i][e]):
                 # A free end (could be an unseen join), or an end held only by
                 # a zone outline (the fill may have a void there).  An end that
                 # rests on a same-net via / pad by overlap alone is soft
                 # (issue #8259): it is never a join, see ``held``.
-                return True
+                return "an endpoint has no proved copper anchor"
         held = self.held_nodes(i)
         hw = s.radius
         for j, o in enumerate(self.nodes):
@@ -550,18 +551,18 @@ class _NetModel:
                 if _shared_layers(s, o) and any(
                     _in_polygon(p, o.ref.polygon) for p in _seg_samples(s.a, s.b)
                 ):
-                    return True
+                    return "its body crosses a zone whose fill may contain a void"
             elif o.kind == "arc":
                 # Unmodelled copper arc: a body contact may be what feeds it.
                 if _shared_layers(s, o) and _arc_reaches(o, s.a, s.b, hw):
-                    return True
+                    return "its body contacts an arc away from its endpoint joins"
             elif _shared_layers(s, o):
                 reach = o.radius if o.kind == "via" else math.hypot(o.hx, o.hy)
                 if _pt_seg_dist(o.a, s.a, s.b) <= hw + reach + _EPS:
-                    return True
+                    return f"its body contacts a {o.kind} away from its endpoint joins"
         # Same-net zones that already anchor an end do not need protecting
         # beyond the above; a zone anchored at an end is a modelled join.
-        return False
+        return None
 
     # -- queries -------------------------------------------------------------
 
@@ -1826,11 +1827,8 @@ def _plan_contained_segments(
 ) -> None:
     """Remove segments lying wholly inside a collinear same-net track (#8368).
 
-    A shorter track on the centreline of a longer, no-narrower one adds no
-    copper, but the current-path audit splits the longer track at the short
-    one's ends and sees two parallel edges -- a loop prune could not see,
-    since the pair shares at most one endpoint.  Removing the covered track
-    removes no copper, so no ampacity check applies; the usual guards still do:
+    Removing a shorter track entirely covered by a no-narrower collinear
+    carrier preserves the conductor outline. The usual connectivity guards apply:
 
     * everything joined at the covered tracks' ends must also join the
       container by a contact that exists with them present
@@ -1883,22 +1881,21 @@ def _plan_contained_segments(
 DEFAULT_WIDE_MM = 0.5
 
 
-def _cut_ok(model: _NetModel, group: set[int], removed: set[int], baseline) -> bool:
-    """The shared acceptance test for removing ``group`` (terminals unchanged,
-    neighbours still joined, no stranded, degraded or de-centred ends).
-
-    The via / pad-side :meth:`_NetModel.decentres` check applies here exactly
-    as in :func:`_plan_net`'s generic loop pass (issue #8358): a via-closed
-    loop cut must not leave a via held on a layer only by an off-centre end.
-    """
+def _cut_obstacle(model: _NetModel, group: set[int], removed: set[int], baseline) -> str | None:
+    """First connectivity or joint that prevents removing these items."""
     touched = {k for g in group for k in model.adj[g] | model.overlap[g]} - group
-    return not (
-        model.partition(removed | group) != baseline
-        or not model.still_joined(touched, removed | group)
-        or model.strands_end(group, removed)
-        or model.degrades_ends(touched, removed, removed | group)
-        or model.decentres(touched, removed, removed | group)
-    )
+    remaining = removed | group
+    if model.partition(remaining) != baseline:
+        return "removing it would disconnect terminals"
+    if not model.still_joined(touched, remaining):
+        return "removing it would disconnect neighbouring copper"
+    if model.strands_end(group, removed):
+        return "a neighbouring track would lose its endpoint anchor"
+    if model.degrades_ends(touched, removed, remaining):
+        return "a neighbouring endpoint would be held only by a copper overlap"
+    if model.decentres(touched, removed, remaining):
+        return "a via or pad would lose its centred connection"
+    return None
 
 
 def _width(model: _NetModel, i: int) -> float:
@@ -2038,7 +2035,7 @@ def _expand_cut(
         if orphans is None:
             continue
         full = cand | orphans
-        if _cut_ok(model, full, removed, baseline):
+        if _cut_obstacle(model, full, removed, baseline) is None:
             return full
     return None
 
@@ -2048,39 +2045,6 @@ def _describe_required(required: Required, comp: set[int], model: _NetModel) -> 
         return f"{required:.3g} mm"
     layers = sorted({model.nodes[i].layers[0] for i in comp})
     return ", ".join(f"{_required_on(required, lyr):.3g} mm on {lyr}" for lyr in layers)
-
-
-def required_widths_for(pcb: PCB, current_a: float) -> dict[str, float]:
-    """IPC-2221 width (mm) a declared current needs on each copper layer.
-
-    Outer layers (``F.Cu`` / ``B.Cu``) use the external constant, inner layers
-    the internal one, each at the board's own copper weight from an explicit
-    stackup (``Stackup.outer_inner_copper_oz``; 1 oz where none is declared).
-    Issue #8368: a flat "internal, 1 oz" figure overstated the outer-layer
-    width of a 2 oz board several times over, so every cut was refused.
-    """
-    from kicad_tools.physics.ampacity import width_for_current
-
-    outer_oz = inner_oz = 1.0
-    try:
-        from kicad_tools.physics.stackup import Stackup
-
-        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
-    except Exception:  # noqa: BLE001 - a malformed stackup falls back to 1 oz
-        derived = None
-    if derived is not None:
-        outer_oz = derived[0] or outer_oz
-        inner_oz = derived[1] or inner_oz
-    names = [layer.name for layer in pcb.copper_layers] or ["F.Cu", "B.Cu"]
-    out: dict[str, float] = {}
-    for name in names:
-        external = name in ("F.Cu", "B.Cu")
-        out[name] = width_for_current(
-            current_a,
-            outer_oz if external else inner_oz,
-            layer="external" if external else "internal",
-        )
-    return out
 
 
 def current_path_declarations(
@@ -2160,7 +2124,11 @@ def _plan_declared_loops(
         group = _group_for(model, s, removed)
         if (
             group
-            and _cut_ok(model, group, removed, baseline)
+            and (
+                any(_width(model, g) >= wide for g in group)
+                or not _ampacity_ok(model, group, required)
+            )
+            and _cut_obstacle(model, group, removed, baseline) is None
             and _via_effects(model, group, removed) is not None
         ):
             stuck.add(s)
@@ -2688,7 +2656,14 @@ def prune_board(
         result = pcb if apply else PCB.load(pcb_path)
         if not apply and accepted:
             apply_plans(result, accepted)
-        uncut.extend(audit_loops_left(result, current_paths, uncut))
+        retained = {
+            p.net_name: p.reject_reason or "the proposed edit failed native DRC" for p in rejected
+        }
+        retained.update({p.net_name: p.reject_reason for p in creepage_rejected})
+        retained.update(
+            {p.net_name: "the edits extend outside the selected region" for p in region_skipped}
+        )
+        uncut.extend(audit_loops_left(result, current_paths, uncut, retained=retained))
     return pcb, PruneResult(
         plans,
         accepted,
@@ -2871,10 +2846,45 @@ def cleanup_copper(routed: Path | str, max_passes: int = 10) -> dict[str, int]:
     raise RuntimeError(f"Copper cleanup did not converge in {max_passes} passes: {totals}")
 
 
+def _witness_cut_reason(model: _NetModel | None, witness: dict[str, object]) -> str:
+    """Explain the proposed whole-item cut on the board the audit actually read."""
+    if witness.get("kind") == "via":
+        return "the loop closes through a via barrel; prune can remove only an orphaned via"
+    if model is not None:
+        for index, node in enumerate(model.nodes):
+            if node.kind != "seg" or node.ref.layer != witness.get("layer"):
+                continue
+            if [list(node.ref.start), list(node.ref.end)] != [
+                witness.get("start"),
+                witness.get("end"),
+            ]:
+                continue
+            if node.ref.locked:
+                return "the track is locked"
+            cut = {index}
+            obstacle = _cut_obstacle(model, cut, set(), model.partition(set()))
+            if obstacle:
+                return obstacle
+            if _via_effects(model, cut, set()) is None:
+                return "removing it would strand a via on one layer"
+            if not model.end_ok(index, cut):
+                return "the full track has an endpoint without another anchor"
+            if protection := model.protection_reason(index):
+                return protection
+            if not _group_for(model, index, set()):
+                return "the cut would orphan a protected neighbouring track"
+            if not model.has_cycle():
+                return "the prune model cannot trace an alternate connection through endpoint joins"
+            return "this whole-track cut needs a verified net-level edit before it can be applied"
+    return "the witness locates a copper interval without a matching whole-track cut"
+
+
 def audit_loops_left(
     pcb: PCB,
     specs: Sequence[CurrentPathSpec],
     reported: Sequence[dict[str, Any]] = (),
+    *,
+    retained: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Loops the current-path audit still sees on the pruned board (#8368).
 
@@ -2895,6 +2905,7 @@ def audit_loops_left(
         witness_text,
     )
 
+    models: dict[int, _NetModel] | None = None
     seen = {str(u.get("net")) for u in reported}
     out: list[dict[str, Any]] = []
     for spec in specs:
@@ -2905,15 +2916,15 @@ def audit_loops_left(
             continue
         seen.add(spec.net_name)
         w = res.witness
+        if models is None:
+            models = _build_net_models(pcb)
+        model = models.get(res.source.net_number) if res.source else None
         out.append(
             {
                 "net": spec.net_name,
                 "segments": [witness_text(w)],
                 "min_width": round(float(cast("float", w.get("width", 0.0))), 6),
-                "reason": (
-                    "the current-path audit still sees a loop/parallel path that "
-                    "prune has no safe cut for"
-                ),
+                "reason": (retained or {}).get(spec.net_name) or _witness_cut_reason(model, w),
                 "witness": w,
             }
         )

@@ -139,16 +139,13 @@ BOARD07_MASK_NETS: tuple[str, ...] = ()
 BOARD06_GAP_NETS: tuple[str, ...] = ()
 
 # The seed-42 fixture originally measured 22 mask error nets (#8858).
-# Repairing the three sideband departures (#9989) left 19; the MIPI clock exit
-# repair (#10083) retired MIPI_CLK+ and MIPI_CLK-, leaving the following 17.
+# The sideband, PCIe and MIPI clock repairs retired nine of those net identities.
 BOARD06_MASK_NETS = (
     "+1V2",
     "+3V3",
     "GND",
     "MIPI_D0+",
     "MIPI_D0-",
-    "PCIE_RX+",
-    "PCIE_RX-",
     "USB2_D+",
     "USB2_D-",
     "USB3_RX1+",
@@ -501,7 +498,16 @@ def test_board06_measured_mask_population_passes_and_drains():
     for net in ("GND", "MIPI_CLK+"):
         recurring_gap = found + [gap_violation((net,))]
         assert gate.unallowed_blocking(BOARD06_KEY, recurring_gap) == [("physical_copper_gap", net)]
-    for net in ("ADDR_BUS", "MIPI_RST", "USB_CC1", "USB_CC2", "PCIE_TX+", "PCIE_TX-"):
+    for net in (
+        "ADDR_BUS",
+        "MIPI_RST",
+        "USB_CC1",
+        "USB_CC2",
+        "PCIE_TX+",
+        "PCIE_TX-",
+        "PCIE_RX+",
+        "PCIE_RX-",
+    ):
         regressed = found + [mask_violation(net)]
         assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", net)]
     last_mask_net = BOARD06_MASK_NETS[-1]

@@ -1534,3 +1534,58 @@ class TestWitnessRendering:
         assert describe_witness({}) == ""
         assert describe_witness({}, (5.0, 5.0)) == ""
         assert witness_text({}) == ""
+
+
+def test_single_junction_loop_with_physical_return_to_trunk_stays_ambiguous():
+    pcb = _t_network_pcb(trunk_width=4)
+    pcb.add_trace((60, 70), (70, 65), width=0.2, layer="F.Cu", net="NET1")
+    pcb.add_trace((70, 65), (60, 50), width=0.2, layer="F.Cu", net="NET1")
+    # The spur ends inside the wide track, away from its centreline.
+    pcb.add_trace((70, 65), (90, 51), width=0.2, layer="F.Cu", net="NET1")
+    assert resolve_current_path(pcb, _trunk_spec(current_a=5)).status == "ambiguous"
+
+
+def test_offset_branch_within_straight_trunk_preserves_minimum_width():
+    pcb = _same_layer_bars_pcb(0.6, width=0.2, straight_width=4)
+    spec = _trunk_spec(current_a=5)
+    result = resolve_current_path(pcb, spec)
+    assert result.ok and result.min_width.width_mm == pytest.approx(4)
+    assert result.length_mm == pytest.approx(12)
+    assert not result.parallel_groups
+    assert reinforcement_eligible_segment_ids(pcb, [spec]) == {id(pcb.segments[0])}
+    assert not audit_current_paths(pcb, [spec]).uncovered
+
+
+def test_overlay_beyond_a_midtrack_turn_is_excluded_from_reinforcement():
+    from dataclasses import replace
+
+    pcb = _t_network_pcb(trunk_width=4)
+    pcb.remove_segments(list(pcb.segments[:2]))
+    pcb.add_trace((20, 50), (120, 50), width=4, layer="F.Cu", net="NET1")
+    pcb.add_trace((25, 50), (45, 50), width=0.2, layer="F.Cu", net="NET1")
+    branch = replace(_trunk_spec(), source=PathEndpoint("U3", "1"))
+    result = resolve_current_path(pcb, branch)
+    assert result.ok and result.length_mm == pytest.approx(80)
+    assert reinforcement_eligible_segment_ids(pcb, [branch]) == {id(pcb.segments[0])}
+
+
+def test_covered_interval_with_tail_rejoining_through_copper_width():
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=200, height=200, center=False)
+    for ref, (x, y) in [("J1", (93.5, 177.45)), ("J2", (108.7, 182.7))]:
+        _add_pad_footprint(pcb, ref=ref, x=x, y=y, net="NET1")
+    pcb.add_trace((93.5, 177.45), (108.7, 177.45), width=4, layer="B.Cu", net="NET1")
+    pcb.add_trace((108.7, 177.45), (108.7, 182.7), width=4, layer="B.Cu", net="NET1")
+    pcb.add_trace((108.7, 169), (108.7, 182.7), width=0.2, layer="B.Cu", net="NET1")
+    pcb.add_trace((108.7, 169), (98, 176.5), width=0.2, layer="B.Cu", net="NET1")
+    assert resolve_current_path(pcb, _trunk_spec(current_a=5)).status == "ambiguous"
+
+
+def test_thin_loop_on_an_arm_of_a_doubled_trunk():
+    pcb = _doubled_pcb()
+    for start, end in [((26, 50), (22, 60)), ((22, 60), (30, 60)), ((30, 60), (26, 50))]:
+        pcb.add_trace(start, end, width=0.2, layer="B.Cu", net="NET1")
+    result = resolve_current_path(pcb, _j_spec())
+    assert result.ok and len(result.parallel_groups) == 1 and len(result.off_path_loops) == 1
+    assert all(s.width != 0.2 for s in result.segments)

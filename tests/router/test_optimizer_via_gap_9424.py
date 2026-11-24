@@ -1,4 +1,4 @@
-"""The normal optimizer must grade new traces against vias on another route of the same net."""
+"""The normal optimizer must grade new traces against vias on the same net."""
 
 from argparse import Namespace
 from itertools import pairwise
@@ -9,7 +9,7 @@ from shapely.geometry import LineString, Point
 
 from kicad_tools.cli.route_cmd import _optimize_traces
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.layers import Layer
+from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.optimizer.pad_slits import via_gap_check
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
@@ -35,7 +35,7 @@ def _gap(segments, via):
         CopperSource(
             LineString([seg.start, seg.end]).buffer(seg.width / 2, quad_segs=64),
             "F.Cu",
-            "VM",
+            seg.net_name,
             f"track-{i}",
             "track",
         )
@@ -44,7 +44,11 @@ def _gap(segments, via):
     ]
     sources.append(
         CopperSource(
-            Point(via.x, via.y).buffer(via.diameter / 2, quad_segs=64), "F.Cu", "VM", "via", "via"
+            Point(via.x, via.y).buffer(via.diameter / 2, quad_segs=64),
+            "F.Cu",
+            via.net_name,
+            "via",
+            "via",
         )
     )
     return min(
@@ -142,3 +146,100 @@ def test_only_exposed_via_copper_can_block_a_shortcut(shield):
     check = via_gap_check(grid, track)
     replacement = _segments([(2, 5.45), (8, 5.45)], Layer.F_CU)
     assert (check is None or check(track.segments, replacement, [])) == (shield != "bare")
+
+
+@pytest.mark.parametrize(
+    ("bend", "next_bend", "blocked", "trunk_start"),
+    [
+        pytest.param((163.990, 105.465), (163.990, 108.715), False, 106.375, id="extend-launch"),
+        pytest.param((164.055, 105.400), (164.055, 108.780), False, 106.245, id="clear-shortcut"),
+        pytest.param((163.990, 105.465), (163.990, 108.715), True, 109.625, id="obstructed-exit"),
+    ],
+)
+def test_run_staircase_beside_its_own_via(bend, next_bend, blocked, trunk_start):
+    """Board 05's RUN exit and the two MISO objects that constrain its shortcut."""
+    router = Autorouter(
+        24,
+        40,
+        origin_x=150,
+        origin_y=92,
+        rules=DesignRules(
+            grid_resolution=0.1, trace_width=0.15, same_net_trace_gap_band_edge_mm=0.1016
+        ),
+        layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+        force_python=True,
+        physics_enabled=False,
+    )
+    start, barrel, end = (164.25, 101.0), (164.25, 105.205), (158.335, 128.54)
+    for ref, (x, y), layer in (("A", start, Layer.B_CU), ("B", end, Layer.F_CU)):
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": y,
+                    "width": 0.35,
+                    "height": 0.35,
+                    "shape": "rect",
+                    "net": 19,
+                    "net_name": "RUN",
+                    "layer": layer,
+                }
+            ],
+        )
+    points = [barrel, bend, next_bend, (164.9, 109.625), (164.9, 121.975), end]
+    via = Via(*barrel, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 19, "RUN")
+    back = Segment(*start, *barrel, 0.15, Layer.B_CU, 19, "RUN")
+    front = [Segment(*a, *b, 0.15, Layer.F_CU, 19, "RUN") for a, b in pairwise(points)]
+    route = Route(net=19, net_name="RUN", segments=[back, *front], vias=[via])
+    miso = Route(
+        net=12,
+        net_name="MISO",
+        segments=[Segment(163.405, 104.2675, 163.405, 108.91, 0.2, Layer.F_CU, 12, "MISO")],
+        vias=[Via(164.315, 109.82, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 12, "MISO")],
+    )
+    router.routes = [route]
+    router.grid.mark_route(route)
+    router.grid.mark_route(miso)
+    if blocked:
+        obstacle = Segment(163.49, 105.49, 163.55, 105.49, 0.15, Layer.F_CU, 50, "BLOCK")
+        router.grid.mark_route(Route(net=50, net_name="BLOCK", segments=[obstacle]))
+    assert _gap(front, via) is None
+
+    _optimize_traces(router, Namespace(), quiet=True)
+
+    (result,) = router.routes
+    assert result.vias == [via]
+    assert back in result.segments
+    assert _gap(result.segments, via) is None
+    assert ((164.9, trunk_start), (164.9, 121.975)) in [
+        (seg.start, seg.end) for seg in result.segments
+    ]
+    if blocked:
+        assert result.segments == route.segments
+
+
+def test_via_exit_at_either_end_uses_only_its_drilled_layers():
+    from kicad_tools.router.optimizer.pad_slits import via_exit_doglegs
+
+    points = [(0.0, 0.0), (-0.26, 0.26), (0.65, 1.17), (0.65, 5.0)]
+    forward = _segments(points, Layer.F_CU)
+    reverse = _segments(reversed(points), Layer.F_CU)
+    via = Via(0, 0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 26, "VM")
+    grid = SimpleNamespace(
+        routes=[Route(net=26, net_name="VM", segments=forward, vias=[via])],
+        rules=DesignRules(same_net_trace_gap_band_edge_mm=0.1016),
+        resolution=0.1,
+    )
+    ((_, repaired),) = via_exit_doglegs(forward, grid)
+    ((_, backwards),) = via_exit_doglegs(reverse, grid)
+    assert [(s.start, s.end) for s in repaired] == [(s.end, s.start) for s in reversed(backwards)]
+    assert repaired[-1] is forward[-1]
+    assert backwards[0] is reverse[0]
+    assert _gap(repaired, via) is None
+
+    via.layers = (Layer.IN1_CU, Layer.IN2_CU)
+    via.span_type = "buried"
+    assert list(via_exit_doglegs(forward, grid)) == []
+    assert list(via_exit_doglegs(reverse, grid)) == []
