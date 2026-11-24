@@ -80,6 +80,7 @@ def run_default_silk_pass(
     layers: int | None = None,
     copper_oz: float | None = None,
     quiet: bool = False,
+    expected_sha256: str | None = None,
 ) -> dict[str, Any] | None:
     """Run the shared silk-legalisation pass in place on *board* (#9799).
 
@@ -96,6 +97,8 @@ def run_default_silk_pass(
         copper_oz: Outer copper weight; probed from the board stackup when
             ``None`` (the profile default applies when unprobeable).
         quiet: Suppress the human-readable summary lines.
+        expected_sha256: Verified source digest for an in-place manufacturing
+            export. A source change raises SourceChangedError to stop export.
 
     Returns:
         A JSON-safe document describing the outcome (see
@@ -107,10 +110,13 @@ def run_default_silk_pass(
     if rules is None:
         return None
 
+    from kicad_tools.core.atomic_write import SourceChangedError
     from kicad_tools.drc.repair_silkscreen import legalize_silk
 
     try:
-        report = legalize_silk(board_path, rules)
+        report = legalize_silk(board_path, rules, expected_sha256=expected_sha256)
+    except SourceChangedError:
+        raise
     except ImportError as exc:
         print(f"Warning: silk legalisation skipped (shapely missing): {exc}", file=sys.stderr)
         return {"applied": False, "manufacturer": mfr, "error": f"shapely missing: {exc}"}

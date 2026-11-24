@@ -24,8 +24,58 @@ design were adopted vs. declined for this codebase.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import tempfile
 from pathlib import Path
+
+
+class SourceChangedError(ValueError):
+    """The board no longer contains the bytes validated for export."""
+
+
+def _publish_checked(
+    path: Path, content: str, expected_sha256: str, encoding: str | None, newline: str | None
+) -> None:
+    # A digest check followed by os.replace() can still erase a save between
+    # the two calls. Move the current entry aside, verify that exact file,
+    # then link into the vacant name. link() never overwrites a racing save.
+    staging = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
+    original = staging / "original"
+    repaired = staging / "repaired"
+    try:
+        with repaired.open("w", encoding=encoding, newline=newline) as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Verify hard links are supported here before displacing the board.
+        probe = staging / "link-test"
+        os.link(repaired, probe)
+        probe.unlink()
+        try:
+            path.rename(original)
+        except FileNotFoundError as exc:
+            raise SourceChangedError("PCB changed during manufacturing export") from exc
+        try:
+            if hashlib.sha256(original.read_bytes()).hexdigest() != expected_sha256:
+                raise SourceChangedError("PCB changed during manufacturing export")
+            os.link(repaired, path)
+        except BaseException as exc:
+            try:
+                os.link(original, path)
+            except FileExistsError:
+                # Another save owns the live name. Keep the displaced version
+                # available too, including when it was itself an editor save.
+                raise SourceChangedError(
+                    f"PCB changed during manufacturing export (previous file at {original})"
+                ) from exc
+            original.unlink()
+            raise
+        original.unlink()
+    finally:
+        repaired.unlink(missing_ok=True)
+        if not original.exists():
+            staging.rmdir()
 
 
 def atomic_write_text(
@@ -34,8 +84,17 @@ def atomic_write_text(
     *,
     encoding: str | None = "utf-8",
     newline: str | None = None,
+    expected_sha256: str | None = None,
 ) -> None:
-    """Atomically write ``content`` to ``path``.
+    """Publish ``content`` to ``path``.
+
+    With ``expected_sha256``, reserve the destination by moving it into a
+    private sibling directory, check the displaced bytes, and publish with
+    a hard link that fails if another writer takes the name. The path is
+    briefly vacant. An interruption in that interval leaves the displaced
+    board in ``.<filename>.<random>/original`` for recovery.
+
+    Without a digest, use the ordinary atomic replacement described below.
 
     Writes to a sibling ``<path>.tmp`` file (same directory, so the final
     ``os.replace`` is guaranteed to be a same-filesystem rename -- atomic
@@ -66,6 +125,9 @@ def atomic_write_text(
             original ``path`` (if it existed) is left untouched.
     """
     path = Path(path)
+    if expected_sha256 is not None:
+        _publish_checked(path, content, expected_sha256, encoding, newline)
+        return
     tmp_path = path.with_suffix(path.suffix + ".tmp")
 
     if newline is not None:

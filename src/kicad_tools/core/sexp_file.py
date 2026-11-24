@@ -166,13 +166,14 @@ def load_pcb(path: str | Path) -> SExp:
     return sexp
 
 
-def save_pcb(sexp: SExp, path: str | Path) -> str:
+def save_pcb(sexp: SExp, path: str | Path, *, expected_sha256: str | None = None) -> str:
     """
     Save a KiCad PCB file.
 
     Args:
         sexp: The PCB SExp tree
         path: Path to save to
+        expected_sha256: Only replace the board with this source digest.
 
     Returns:
         The sha256 hex digest of the exact bytes handed to the atomic
@@ -192,7 +193,7 @@ def save_pcb(sexp: SExp, path: str | Path) -> str:
     path = Path(path)
     text = serialize_sexp(sexp, preserve_source=True)
     check_kicad_lock(path)
-    atomic_write_text(path, text, encoding="utf-8", newline="")
+    atomic_write_text(path, text, encoding="utf-8", newline="", expected_sha256=expected_sha256)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 

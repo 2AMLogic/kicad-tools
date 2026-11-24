@@ -331,6 +331,54 @@ def test_foreign_save_at_silk_write_boundary_still_fails_named_stackup(tmp_path,
     assert result.stackup_path is None and result.manifest_path is None
 
 
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+@pytest.mark.parametrize("when", ["before_read", "before_publish", "during_publish"])
+def test_silk_preserves_concurrent_drawing_save(tmp_path, monkeypatch, when):
+    from kicad_tools.core import atomic_write
+    from kicad_tools.drc import repair_silkscreen
+
+    path = _silk_defect_stackup_board(tmp_path)
+    drawing = (
+        b'(gr_line (start 1 1) (end 2 2) (stroke (width 0.1) (type solid)) (layer "Dwgs.User"))'
+    )
+    edited = path.read_bytes().rstrip()[:-1] + drawing + b")\n"
+
+    if when == "before_read":
+        real_pass = repair_silkscreen.legalize_silk
+
+        def save_before_read(*args, **kwargs):
+            path.write_bytes(edited)
+            return real_pass(*args, **kwargs)
+
+        monkeypatch.setattr(repair_silkscreen, "legalize_silk", save_before_read)
+    elif when == "before_publish":
+        real_rename = Path.rename
+
+        def save_before_rename(source, target):
+            if source == path:
+                path.write_bytes(edited)
+            return real_rename(source, target)
+
+        monkeypatch.setattr(Path, "rename", save_before_rename)
+    else:
+        real_link = atomic_write.os.link
+
+        def save_before_link(source, target):
+            if target == path and not path.exists():
+                path.write_bytes(edited)
+            return real_link(source, target)
+
+        monkeypatch.setattr(atomic_write.os, "link", save_before_link)
+
+    out = tmp_path / "out"
+    result = _stackup_package(path).export(out)
+    assert not result.success
+    assert "changed during" in result.errors[-1]
+    assert path.read_bytes() == edited
+    assert not (out / "stackup-ordering.json").exists()
+    assert not (out / "manifest.json").exists()
+
+
 def test_save_pcb_returns_hash_of_published_bytes(tmp_path):
     import hashlib
 

@@ -679,10 +679,18 @@ class ManufacturingPackage:
         # The ``generic`` pseudo-tier has no profile, so it skips too.
         if self.config.silk_fix and self.manufacturer != "generic":
             from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+            from kicad_tools.core.atomic_write import SourceChangedError
 
-            result.silk_fix = run_default_silk_pass(
-                self.pcb_path, mfr=self.manufacturer, quiet=True
-            )
+            try:
+                result.silk_fix = run_default_silk_pass(
+                    self.pcb_path,
+                    mfr=self.manufacturer,
+                    quiet=True,
+                    expected_sha256=selected_stackup_source_hash,
+                )
+            except SourceChangedError as exc:
+                result.errors.append(f"Stackup ordering validation failed: {exc}")
+                return result
             if result.silk_fix is not None and not result.silk_fix.get("applied"):
                 result.warnings.append(
                     "Silk legalisation pass could not run: "
