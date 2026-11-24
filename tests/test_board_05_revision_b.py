@@ -24,6 +24,22 @@ def hardware():
     return load("hardware")
 
 
+def test_driver_thermal_mask_opening_belongs_to_grounded_pad_29(tmp_path, hardware):
+    path = tmp_path / "rev-b.kicad_pcb"
+    hardware.build_pcb().save(path)
+    driver = PCB.load(path).get_footprint("U2")
+    (opening,) = [pad for pad in driver.pads if "F.Mask" in pad.layers and pad.position == (0, 0)]
+    assert (opening.number, opening.net_name) == ("29", "GND")
+    assert set(opening.layers) == {"F.Cu", "F.Mask"}
+    assert opening.size == (3.1, 5.18)
+    (land,) = [pad for pad in driver.pads if pad.number == "29" and pad.layers == ["F.Cu"]]
+    assert land.position == opening.position
+    assert land.size == (3.4, 9.7)
+    stencil = [pad for pad in driver.pads if pad.layers == ["F.Paste"]]
+    assert len(stencil) == 4
+    assert all(not pad.number and not pad.net_name for pad in stencil)
+
+
 def test_real_driver_current_comparator_and_power(hardware):
     parts = {part.ref: part for part in hardware.parts()}
     assert parts["U2"].mpn == "DRV8313PWPR"
