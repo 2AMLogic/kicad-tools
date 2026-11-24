@@ -975,6 +975,25 @@ class TestFinalizeRoutesConnectivityInvariant:
         assert stats["nets_routed"] == 1
         assert route_sexp.count("(segment") == 3
 
+    def test_finalize_discards_only_an_unconnected_access_stub(self):
+        from kicad_tools.cli.route_cmd import _finalize_routes
+
+        for end_x, expected_removals in [(111.0, 1), (115.0, 0)]:
+            router = self._make_router_with_pads()
+            router.routes = [
+                Route(
+                    net=1,
+                    net_name="DEGRADE",
+                    segments=[Segment(110, 90, end_x, 90, 0.2, Layer.F_CU, 1)],
+                    is_escape=True,
+                )
+            ]
+            pcb, _, cleanup = _finalize_routes(
+                router, multi_pad_net_ids={1}, nets_to_route=1, quiet=True, strict=True
+            )
+            assert cleanup["orphan_escape_routes_removed"] == expected_removals
+            assert pcb.count("(segment") == 1 - expected_removals
+
     def test_finalize_strict_no_regression_does_not_exit(self):
         """Strict mode is a pass-through when nothing regresses."""
         from kicad_tools.cli.route_cmd import _finalize_routes

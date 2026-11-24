@@ -23391,24 +23391,9 @@ class Autorouter:
         }
 
         # -- Step 0 (Issue #3441): Drop orphan escape stubs --
-        # Sub-grid escape stubs (#1603) are pad-access aids for the main
-        # routing pass.  When the net ultimately FAILED to route, its stub
-        # is dead copper touching the pad -- it makes the output report
-        # the net as "partially connected" (segments exist, pads not all
-        # connected) instead of cleanly unrouted, and leaves stray stubs
-        # on the board.  Remove escape-stub routes for nets that have no
-        # real (non-escape) route.  Runs before the connectivity snapshot
-        # so the restore guard below doesn't resurrect them.
-        nets_with_real_routes = {r.net for r in self.routes if not getattr(r, "is_escape", False)}
-        orphan_escapes = [
-            r
-            for r in self.routes
-            if getattr(r, "is_escape", False) and r.net not in nets_with_real_routes
-        ]
-        if orphan_escapes:
-            orphan_ids = {id(r) for r in orphan_escapes}
-            self.routes = [r for r in self.routes if id(r) not in orphan_ids]
-            stats["orphan_escape_routes_removed"] = len(orphan_escapes)
+        from .connectivity_invariant import discard_orphan_escape_stubs
+
+        stats["orphan_escape_routes_removed"] = discard_orphan_escape_stubs(self)
 
         # -- Snapshot pre-cleanup connectivity --
         pre_components = self._count_net_components(self.routes)
