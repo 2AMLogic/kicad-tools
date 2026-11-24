@@ -749,25 +749,10 @@ def count_errors_via_kct_check(
 # A2/A3/A5/MIPI_CLK_P/TMDS_D2_P/TMDS_D2_N 1 each) are recorded in the
 # research note.  Both Board 07 CI artifacts show that the 18 +1V8 pads
 # connect solidly to their own pour and qualify as info under #9436.
-# Issue #9960 cleared both pad exits on each of DQ0-DQ7 and DM0. The 18
-# remaining errors span the nine net signatures below. Verify with:
-#   KCT_KICAD_DOCKER=1 uv run kct check \
-#     boards/07-matchgroup-test/regression-output/matchgroup_test_routed.kicad_pcb \
-#     --mfr jlcpcb --errors-only --format json
-#   (native-in-container rerun for CI parity: the Docker-fallback and
-#   native kicad-cli disagree on the pour-stitch via population but agree
-#   on every mask_to_copper finding.)
-MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("mask_to_copper", "A0"): 8858,
-    ("mask_to_copper", "A2"): 8858,
-    ("mask_to_copper", "A3"): 8858,
-    ("mask_to_copper", "A5"): 8858,
-    ("mask_to_copper", "A7"): 8858,
-    ("mask_to_copper", "GND"): 8858,
-    ("mask_to_copper", "MIPI_CLK_P"): 8858,
-    ("mask_to_copper", "TMDS_D2_N"): 8858,
-    ("mask_to_copper", "TMDS_D2_P"): 8858,
-}
+# #9960 cleared the 18 DDR findings. #9892 cleared the remaining 18 across
+# address, GND, MIPI clock and HDMI pad exits on the four-layer seed-42 build.
+# Any blocking finding on the regenerated fixture now fails the identity gate.
+MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
 #: absent here has no allowance at all: every blocking finding counts.

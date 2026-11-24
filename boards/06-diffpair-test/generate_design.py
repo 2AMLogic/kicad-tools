@@ -3436,6 +3436,19 @@ def _resolve_quantize_treatment(
     )
 
 
+def _clear_pad_departures(pcb_path: Path) -> int:
+    """Rewrite the five sideband pad escapes the strict mask view flags (#9989).
+
+    Runs inside the step-13 transaction, so the refill, pour audit and
+    clearance gates below grade the rebuilt escapes like any other repair.
+    """
+    from pad_departures import clear_pad_departures
+
+    from kicad_tools.manufacturers import get_profile
+
+    return clear_pad_departures(pcb_path, get_profile("jlcpcb").get_design_rules(layers=4))
+
+
 def _finalize_signal_copper(
     pcb_path: Path, fill_argv: list[str], audit_pours: Callable[[str], bool]
 ) -> None:
@@ -3452,34 +3465,25 @@ def _finalize_signal_copper(
         n_split = _split_offangle_chords(pcb_path, before)
         n_vias = _legalize_signal_vias(pcb_path)
         n_edge = _relocate_pad_edge_vias(pcb_path)
-        if not (n_split or n_vias or n_edge):
-            print("   No repairable via/chord residuals detected")
+        legalized = bool(n_split or n_vias or n_edge)
+        pours_ok = True
+        if legalized:
+            print(
+                f"   {n_vias} via defect(s) repaired, {n_edge} pad-edge via(s) moved, "
+                f"{n_split} chord(s) split"
+            )
+            pours_ok = _refill_zones_and_audit(pcb_path, fill_argv, audit_pours, "legal")
+        # The pad-departure repair (#9989) runs on the refilled board and is
+        # followed by its own refill: its rebuilt escapes and the U1.12
+        # barrel's new seat must both be graded against a fresh pour, inside
+        # this transaction, before the final gate.
+        n_dep = _clear_pad_departures(pcb_path)
+        if n_dep:
+            print(f"   {n_dep} pad departure(s) cleared")
+            pours_ok = _refill_zones_and_audit(pcb_path, fill_argv, audit_pours, "depart")
+        elif not legalized:
+            print("   No repairable via, chord or pad-departure residuals detected")
             return
-        print(
-            f"   {n_vias} via defect(s) repaired, {n_edge} pad-edge via(s) moved, "
-            f"{n_split} chord(s) split"
-        )
-        print("13b. Re-filling zones after legalization...")
-        result = subprocess.run(fill_argv, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Zone re-fill failed (rc={result.returncode})")
-        print("13c. Copper-union pour audit + clearance gate (post-legalize)...")
-        pours_ok = audit_pours("[legal]")
-        # Relocated signal copper can carve an existing pour connection away
-        # during refill. Reconnect it inside this transaction; every added
-        # repair must survive legalization, refill, and the final gates.
-        for repair_round in range(MAX_POUR_REPAIR_ROUNDS):
-            if pours_ok:
-                break
-            added_vias, added_bridges = _repair_pour_connectivity(pcb_path, POUR_NETS)
-            if not (added_vias or added_bridges):
-                break
-            _legalize_signal_vias(pcb_path)
-            _relocate_pad_edge_vias(pcb_path)
-            result = subprocess.run(fill_argv, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"Post-legalize pour re-fill failed (rc={result.returncode})")
-            pours_ok = audit_pours(f"[legal-r{repair_round + 1}]")
         new_clearances = _clearance_signature(pcb_path) - before
         if not pours_ok or new_clearances:
             raise RuntimeError(
@@ -3492,6 +3496,39 @@ def _finalize_signal_copper(
         # refill is unnecessary and could itself fail after the rollback.
         pcb_path.write_bytes(original)
         raise
+
+
+def _refill_zones_and_audit(
+    pcb_path: Path, fill_argv: list[str], audit_pours: Callable[[str], bool], tag: str
+) -> bool:
+    """Refill the zones, audit the pours, and repair any carved connection.
+
+    The shared tail of step 13's transaction (used after the legalization
+    edits and again after the #9989 pad-departure repair): every mutation is
+    followed by its own refill and physical pour audit before the gate.
+    """
+    print(f"13b. Re-filling zones ({tag})...")
+    result = subprocess.run(fill_argv, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Zone re-fill failed (rc={result.returncode})")
+    print(f"13c. Copper-union pour audit + clearance gate ({tag})...")
+    pours_ok = audit_pours(f"[{tag}]")
+    # Relocated signal copper can carve an existing pour connection away
+    # during refill. Reconnect it inside this transaction; every added
+    # repair must survive legalization, refill, and the final gates.
+    for repair_round in range(MAX_POUR_REPAIR_ROUNDS):
+        if pours_ok:
+            break
+        added_vias, added_bridges = _repair_pour_connectivity(pcb_path, POUR_NETS)
+        if not (added_vias or added_bridges):
+            break
+        _legalize_signal_vias(pcb_path)
+        _relocate_pad_edge_vias(pcb_path)
+        result = subprocess.run(fill_argv, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Post-legalize pour re-fill failed (rc={result.returncode})")
+        pours_ok = audit_pours(f"[{tag}-r{repair_round + 1}]")
+    return pours_ok
 
 
 def _write_router_netclass_sidecars(routed_path: Path, net_class_map: dict) -> list[Path]:
