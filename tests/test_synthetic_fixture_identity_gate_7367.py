@@ -138,12 +138,8 @@ BOARD07_MASK_NETS: tuple[str, ...] = ()
 # #9019 cleared the MIPI_CLK+ taper and #9846 cleared the GND stitch stubs.
 BOARD06_GAP_NETS: tuple[str, ...] = ()
 
-# Issue #8858 (measured 2026-11-18, pinned image, seed-42 regen at main
-# 304c70e2c): every ``mask_to_copper`` error net signature the regeneration
-# carries.  Two independent regenerations reproduced all 22 signatures and
-# their per-net counts exactly (200 findings: 122 same-net pass-throughs,
-# 78 same-net own-pad entries).  The committed allowance must list exactly
-# these; a net that starts failing or stops failing trips the gate.
+# The seed-42 fixture originally measured 22 mask error nets (#8858).
+# Repairing the three sideband departures (#9989) left the following 19.
 BOARD06_MASK_NETS = (
     "+1V2",
     "+3V3",
@@ -152,7 +148,6 @@ BOARD06_MASK_NETS = (
     "MIPI_CLK-",
     "MIPI_D0+",
     "MIPI_D0-",
-    "MIPI_RST",
     "PCIE_RX+",
     "PCIE_RX-",
     "PCIE_TX+",
@@ -165,8 +160,6 @@ BOARD06_MASK_NETS = (
     "USB3_RX2-",
     "USB3_TX1-",
     "USB3_TX2+",
-    "USB_CC1",
-    "USB_CC2",
 )
 
 
@@ -511,8 +504,9 @@ def test_board06_measured_mask_population_passes_and_drains():
     for net in ("GND", "MIPI_CLK+"):
         recurring_gap = found + [gap_violation((net,))]
         assert gate.unallowed_blocking(BOARD06_KEY, recurring_gap) == [("physical_copper_gap", net)]
-    regressed = found + [mask_violation("ADDR_BUS")]
-    assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", "ADDR_BUS")]
+    for net in ("ADDR_BUS", "MIPI_RST", "USB_CC1", "USB_CC2"):
+        regressed = found + [mask_violation(net)]
+        assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", net)]
     last_mask_net = BOARD06_MASK_NETS[-1]
     drained = [
         v for v in found if not (v["rule_id"] == "mask_to_copper" and v["nets"] == [last_mask_net])

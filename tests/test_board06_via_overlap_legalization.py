@@ -692,6 +692,8 @@ def test_finalization_restores_copper_and_fills_on_every_failure(
     monkeypatch.setattr(recipe, "_split_offangle_chords", split)
     # Issue #7296: the pad-edge pass parses the board; these fixtures are bytes.
     monkeypatch.setattr(recipe, "_relocate_pad_edge_vias", lambda p: 0)
+    # Issue #9989: the pad-departure pass parses the board too.
+    monkeypatch.setattr(recipe, "_clear_pad_departures", lambda p: 0)
     monkeypatch.setattr(recipe, "_legalize_signal_vias", legalize)
     monkeypatch.setattr(recipe.subprocess, "run", refill)
     with pytest.raises(KeyboardInterrupt if failure == "interrupt" else RuntimeError):
@@ -702,7 +704,10 @@ def test_finalization_restores_copper_and_fills_on_every_failure(
         assert "pour" not in calls  # stale/failed fills cannot pass the physical gate
 
 
-def test_finalization_commits_only_after_successful_physical_gates(tmp_path, recipe, monkeypatch):
+@pytest.mark.parametrize("repair_stage", ["_legalize_signal_vias", "_clear_pad_departures"])
+def test_finalization_commits_only_after_successful_physical_gates(
+    tmp_path, recipe, monkeypatch, repair_stage
+):
     path = tmp_path / "candidate.kicad_pcb"
     path.write_bytes(b"original")
     calls = []
@@ -710,6 +715,8 @@ def test_finalization_commits_only_after_successful_physical_gates(tmp_path, rec
     monkeypatch.setattr(recipe, "_split_offangle_chords", lambda p, before: 0)
     # Issue #7296: the pad-edge pass parses the board; these fixtures are bytes.
     monkeypatch.setattr(recipe, "_relocate_pad_edge_vias", lambda p: 0)
+    # Issue #9989: the pad-departure pass parses the board too.
+    monkeypatch.setattr(recipe, "_clear_pad_departures", lambda p: 0)
 
     def legalize(candidate):
         candidate.write_bytes(b"new copper")
@@ -726,7 +733,8 @@ def test_finalization_commits_only_after_successful_physical_gates(tmp_path, rec
         calls.append("audit")
         return True
 
-    monkeypatch.setattr(recipe, "_legalize_signal_vias", legalize)
+    monkeypatch.setattr(recipe, "_legalize_signal_vias", lambda p: 0)
+    monkeypatch.setattr(recipe, repair_stage, legalize)
     monkeypatch.setattr(recipe.subprocess, "run", refill)
     recipe._finalize_signal_copper(path, ["fill", str(path)], audit)
     assert path.read_bytes() == b"new copper and matching fills"
@@ -756,6 +764,8 @@ def test_finalization_recovers_pour_cut_by_relocated_copper(
     monkeypatch.setattr(recipe, "_split_offangle_chords", lambda p, before: 0)
     # Issue #7296: the pad-edge pass parses the board; these fixtures are bytes.
     monkeypatch.setattr(recipe, "_relocate_pad_edge_vias", lambda p: 0)
+    # Issue #9989: the pad-departure pass parses the board too.
+    monkeypatch.setattr(recipe, "_clear_pad_departures", lambda p: 0)
     monkeypatch.setattr(recipe, "_legalize_signal_vias", lambda p: 1)
     calls = []
 
