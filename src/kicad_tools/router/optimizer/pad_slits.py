@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from ..primitives import Pad, Route, Segment
@@ -50,7 +52,7 @@ def pad_gap_check(grid: RoutingGrid | None) -> ReplacementCheck | None:
 
 
 def via_gap_check(grid: RoutingGrid | None, route: Route) -> ReplacementCheck | None:
-    """Guard shortcuts past a stationary via on another route of the same net."""
+    """Guard shortcuts past vias on the current route and other routes of the same net."""
     edge = getattr(getattr(grid, "rules", None), "same_net_trace_gap_band_edge_mm", None)
     if grid is None or not isinstance(edge, (int, float)) or edge <= 0:
         return None
@@ -60,24 +62,19 @@ def via_gap_check(grid: RoutingGrid | None, route: Route) -> ReplacementCheck | 
     from kicad_tools.core.types import copper_span_contains
 
     siblings = [other for other in grid.routes if other is not route and other.net == route.net]
-    if not any(other.vias for other in siblings):
-        return None
     layers = {s.layer for s in route.segments}
     barrels = defaultdict(list)
-    background = defaultdict(list)
     for branch in [route, *siblings]:
         for via in branch.vias:
             copper = Point(via.x, via.y).buffer(via.diameter / 2, quad_segs=64)
             for layer in layers:
                 if copper_span_contains(*via.drilled_layers, layer):
-                    if branch is route:
-                        background[via.net, layer].append(("via", copper))
-                    else:
-                        barrels[via.net, layer].append(copper)
+                    barrels[via.net, layer].append(copper)
     if not barrels:
         return None
-    # The live grid still contains the original route. Only its siblings
-    # and stationary pads stay in the union unchanged during the rewrite.
+    # The live grid still contains the original route. Its unchanged traces
+    # come from the candidate chain and its kept segments during each check.
+    background = defaultdict(list)
     for pad in grid.pads:
         if pad.steiner_point or pad.net != route.net:
             continue
@@ -89,6 +86,69 @@ def via_gap_check(grid: RoutingGrid | None, route: Route) -> ReplacementCheck | 
     return _copper_gap_check(
         barrels, edge, "via", [s for other in siblings for s in other.segments], background
     )
+
+
+def via_exit_doglegs(
+    segments: list[Segment], grid: RoutingGrid | None
+) -> Iterator[tuple[list[Segment], list[Segment]]]:
+    """Extend a short launch from a via before a right-angle turn and reconnect its far end."""
+    from kicad_tools.core.types import copper_span_contains
+
+    from ..quantize import dogleg_points, is_45_aligned
+    from .algorithms import _reverse_path
+
+    if grid is None or len(segments) < 2:
+        return
+    edge = grid.rules.same_net_trace_gap_band_edge_mm
+    if edge is None or edge <= 0:
+        return
+    vias = [v for route in grid.routes if route.net == segments[0].net for v in route.vias]
+    for reverse in (False, True):
+        first, second = _reverse_path(segments[-2:]) if reverse else segments[:2]
+        if first.end != second.start or first.width != second.width:
+            continue
+        dx, dy = first.x2 - first.x1, first.y2 - first.y1
+        tx, ty = second.x2 - second.x1, second.y2 - second.y1
+        length = math.hypot(dx, dy)
+        if (
+            not length
+            or (tx == 0 and ty == 0)
+            or not is_45_aligned(dx, dy)
+            or not math.isclose(dx * tx + dy * ty, 0, abs_tol=1e-9)
+        ):
+            continue
+        via = next(
+            (
+                v
+                for v in vias
+                if v.net == first.net
+                and (v.x, v.y) == first.start
+                and copper_span_contains(*v.drilled_layers, first.layer)
+            ),
+            None,
+        )
+        if via is None:
+            continue
+        # At a perpendicular turn the original launch length is also the distance
+        # from the barrel center to the extended line of the returning trace.
+        missing = (via.diameter + first.width) / 2 + edge - length
+        if missing <= 0:
+            continue
+        pitch = grid.resolution
+        step_length = pitch * length / max(abs(dx), abs(dy))
+        scale = math.ceil(missing / step_length) * step_length / length
+        bend = (first.x2 + dx * scale, first.y2 + dy * scale)
+        points = [first.start, *dogleg_points(*bend, *second.end)]
+        legs = [
+            Segment(*a, *b, first.width, first.layer, first.net, first.net_name)
+            for a, b in pairwise(points)
+            if a != b
+        ]
+        if reverse:
+            legs = _reverse_path(legs)
+            yield legs, [*segments[:-2], *legs]
+        else:
+            yield legs, [*legs, *segments[2:]]
 
 
 def _copper_gap_check(
