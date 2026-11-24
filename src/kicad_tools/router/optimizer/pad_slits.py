@@ -151,17 +151,30 @@ def via_exit_doglegs(
             yield legs, [*legs, *segments[2:]]
 
 
+def _band_edge(grid: RoutingGrid | None, attr: str) -> float | None:
+    edge = getattr(getattr(grid, "rules", None), attr, None)
+    if (
+        isinstance(edge, bool)
+        or not isinstance(edge, (int, float))
+        or not math.isfinite(edge)
+        or edge <= 0
+    ):
+        return None
+    return float(edge)
+
+
 def covered_via_elbow(
     segments: list[Segment], route: Route, grid: RoutingGrid | None
 ) -> list[Segment] | None:
     """Retract a slitted diagonal onto a trunk and via that already carry the elbow."""
     if grid is None or len(segments) != 2 or not route.vias:
         return None
-    edge = grid.rules.same_net_trace_gap_band_edge_mm
+    trace_edge = _band_edge(grid, "same_net_trace_gap_band_edge_mm")
+    pad_edge = _band_edge(grid, "same_net_pad_gap_band_edge_mm")
+    active_edges = [edge for edge in (trace_edge, pad_edge) if edge is not None]
     first, second = segments
     if (
-        edge is None
-        or edge <= 0
+        not active_edges
         or first.end != second.start
         or (first.width, first.layer, first.net) != (second.width, second.layer, second.net)
     ):
@@ -200,7 +213,8 @@ def covered_via_elbow(
     if bend == run.start or not 0 < math.dist(bend, arm.end) < (via.diameter + run.width) / 2:
         return None
 
-    siblings = [other for other in grid.routes if other is not route and other.net == route.net]
+    other_routes = [other for other in grid.routes if other is not route]
+    siblings = [other for other in other_routes if other.net == route.net]
     tracks = [s for other in siblings for s in other.segments if s.layer == run.layer]
     # The long leg must follow a stationary trace across its full length. The
     # short transverse leg must fit entirely inside that same trace and barrel.
@@ -226,45 +240,63 @@ def covered_via_elbow(
     if not stationary.covers(copper(candidate[1])):
         return None
 
+    scan_edge = max(active_edges)
     diagonal = copper(arm)
-    window = diagonal.envelope.buffer(edge)
+    window = diagonal.envelope.buffer(scan_edge)
+    search_window = window.buffer(scan_edge)
     layer, net = run.layer.name, str(run.net)
     local: list[CopperSource] = []
 
-    def add(shape, kind: str) -> None:
-        if shape is not None and shape.intersects(window):
-            local.append(CopperSource(shape, layer, net, kind, kind))
+    def add(shape, source_net: int, kind: str) -> None:
+        if shape is not None and shape.intersects(search_window):
+            local.append(CopperSource(shape, layer, str(source_net), f"{kind}:{len(local)}", kind))
 
-    for s in tracks:
-        add(copper(s), "track")
-    for other in [route, *siblings]:
+    for other in other_routes:
+        for s in other.segments:
+            if s.layer == run.layer:
+                add(copper(s), s.net, "track")
+    for other in [route, *other_routes]:
         for v in other.vias:
             if copper_span_contains(*v.drilled_layers, run.layer):
-                add(Point(v.x, v.y).buffer(v.diameter / 2, quad_segs=64), "via")
+                add(Point(v.x, v.y).buffer(v.diameter / 2, quad_segs=64), v.net, "via")
     for pad in grid.pads:
         if (
-            pad.net == run.net
-            and not pad.steiner_point
+            not pad.steiner_point
+            and not (not pad.through_hole and getattr(pad, "drill", 0.0) > 0)
             and (pad.through_hole or pad.layer == run.layer)
         ):
-            add(_pad_copper(pad), "pad")
+            add(_pad_copper(pad), pad.net, "pad")
 
     # A third branch can join the protruding arm. Removing its only contact
     # would disconnect it even when both endpoints of this route survive.
     if any(
-        s.geometry.intersects(diagonal) and not s.geometry.intersects(stationary) for s in local
+        s.net == net and s.geometry.intersects(diagonal) and not s.geometry.intersects(stationary)
+        for s in local
     ):
         return None
+
+    def violates_policy(gap) -> bool:
+        limit = pad_edge if "pad" in gap.kinds else trace_edge
+        return limit is not None and gap.distance < limit
+
     previous = [*local, CopperSource(diagonal, layer, net, "diagonal", "track")]
+    previous_gaps = list(iter_source_gaps(previous, scan_edge))
     if not any(
-        "diagonal" in gap.ids and "track" in gap.ids for gap in iter_source_gaps(previous, edge)
+        "diagonal" in gap.ids and gap.nets == (net,) and violates_policy(gap)
+        for gap in previous_gaps
     ):
         return None
+    prior_worst: dict[tuple[str, ...], float] = {}
+    for gap in previous_gaps:
+        if "diagonal" not in gap.ids and violates_policy(gap):
+            prior_worst[gap.ids] = min(prior_worst.get(gap.ids, math.inf), gap.distance)
     # The replacement is wholly covered. Its copper union equals the stationary
     # copper alone; check any newly exposed facing edges around the removed arm.
     if any(
-        window.intersects(Point(gap.a)) or window.intersects(Point(gap.b))
-        for gap in iter_source_gaps(local, edge)
+        violates_policy(gap)
+        and (window.intersects(Point(gap.a)) or window.intersects(Point(gap.b)))
+        and gap.distance < prior_worst.get(gap.ids, math.inf) - 1e-6
+        for gap in iter_source_gaps(local, scan_edge)
     ):
         return None
     return _reverse_path(candidate) if reverse else candidate

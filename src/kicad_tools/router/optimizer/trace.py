@@ -1001,13 +1001,15 @@ class TraceOptimizer:
         try:
             for segs in segments_by_layer.values():
                 result = self.optimize_segments(segs)
-                if result != segs and self._via_gap_check is not None:
+                if result != segs and (
+                    self._via_gap_check is not None or self._pad_gap_check is not None
+                ):
                     elbow = covered_via_elbow(result, route, grid)
                     if (
                         elbow is not None
                         and all(self._path_is_clear(s) for s in elbow)
                         and self._accepts_chain_rewrite(result, elbow)
-                        and self._via_gap_check(result, elbow, [])
+                        and (self._via_gap_check is None or self._via_gap_check(result, elbow, []))
                     ):
                         result = elbow
                 optimized_segments.extend(result)

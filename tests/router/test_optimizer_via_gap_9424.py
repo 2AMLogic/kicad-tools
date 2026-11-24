@@ -245,15 +245,35 @@ def test_via_exit_at_either_end_uses_only_its_drilled_layers():
     assert list(via_exit_doglegs(reverse, grid)) == []
 
 
-@pytest.mark.parametrize("nearby", [True, False], ids=["exposed-slit", "clear-diagonal"])
-def test_reset_branch_enters_via_from_its_existing_trunk(nearby):
+@pytest.mark.parametrize(
+    ("nearby", "extra_pad"),
+    [
+        pytest.param(True, False, id="exposed-slit"),
+        pytest.param(False, False, id="clear-diagonal"),
+        pytest.param(True, True, id="exposed-pad-gap"),
+    ],
+)
+def test_reset_branch_enters_via_from_its_existing_trunk(nearby, extra_pad):
     """Board 05's RESET connection before optimization, with its adjacent branches."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+    from kicad_tools.validate.rules.physical_gap import (
+        check_physical_copper_gap_fab_view,
+        fab_gap_policy_from_entry,
+    )
+
+    policy = fab_gap_policy_from_entry(get_profile("jlcpcb").get_dfm_entry(4, 1.0, 0.5))
     router = Autorouter(
         24,
         26,
         origin_x=150,
         origin_y=73,
-        rules=DesignRules(grid_resolution=0.1, same_net_trace_gap_band_edge_mm=0.1016),
+        rules=DesignRules(
+            grid_resolution=0.1,
+            same_net_trace_gap_band_edge_mm=policy.trace.detection_edge_mm,
+            same_net_pad_gap_band_edge_mm=policy.pad.detection_edge_mm,
+        ),
         layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
         force_python=True,
         physics_enabled=False,
@@ -296,6 +316,24 @@ def test_reset_branch_enters_via_from_its_existing_trunk(nearby):
             }
         ],
     )
+    if extra_pad:
+        router.add_component(
+            "TP1",
+            [
+                {
+                    "number": "1",
+                    "net": 20,
+                    "net_name": "RESET",
+                    "layer": Layer.F_CU,
+                    "x": 160.115,
+                    "y": 94.55,
+                    "width": 0.25,
+                    "height": 0.25,
+                    "shape": "rect",
+                    "rotation": -45,
+                }
+            ],
+        )
     via = Via(*barrel, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 20, "RESET")
     front = legs([start, (159.96, 95.6975), (159.96, 95.26), (159.96, 94.545), barrel])
     back = legs([barrel, (158.725, 93.31), (170.49, 81.545), end], Layer.B_CU)
@@ -312,22 +350,38 @@ def test_reset_branch_enters_via_from_its_existing_trunk(nearby):
     (saved,) = router.routes
     assert saved.vias == [via]
     actual = [s for s in saved.segments if s.layer == Layer.F_CU]
-    copper = [
-        CopperSource(
-            LineString([s.start, s.end]).buffer(s.width / 2, quad_segs=64),
-            "F.Cu",
-            "RESET",
-            str(i),
-            "trace",
-        )
-        for i, s in enumerate([*actual, *sibling.segments])
-    ]
-    copper.append(
-        CopperSource(Point(barrel).buffer(0.3, quad_segs=64), "F.Cu", "RESET", "via", "via")
-    )
-    assert [gap.distance for gap in iter_source_gaps(copper, 0.1016)] == []
-    corner = (160.1, 94.35) if nearby else (160.1, 94.685)
+    corner = (160.1, 94.35) if (nearby and not extra_pad) else (160.1, 94.685)
     assert [(s.start, s.end) for s in actual] == [(start, corner), (corner, barrel)]
+
+    footprints = [
+        f'(footprint "{p.ref}" (layer "{p.layer.kicad_name}") (at {p.x} {p.y}) '
+        f'(pad "{p.pin}" smd {p.shape} (at 0 0 {p.rotation}) (size {p.width} {p.height}) '
+        f'(layers "{p.layer.kicad_name}") (roundrect_rratio 0.25) '
+        f'(net {p.net} "{p.net_name}") (uuid "pad-{p.ref}-{p.pin}")))'
+        for p in router.grid.pads
+    ]
+    pcb = PCB(
+        parse_string(
+            "(kicad_pcb (version 20240108) (generator pcbnew)\n"
+            "  (general (thickness 1.6))\n"
+            '  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))\n'
+            '  (net 0 "") (net 20 "RESET") (net 21 "STATUS_LED")\n'
+            + "\n".join([*footprints, saved.to_sexp(), sibling.to_sexp()])
+            + "\n)"
+        )
+    )
+    findings = [
+        v
+        for v in check_physical_copper_gap_fab_view(pcb, policy).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+    pad_findings = [v for v in findings if v.fab_band == "pad"]
+    trace_findings = [v for v in findings if v.fab_band == "trace"]
+    assert pad_findings == []
+    if extra_pad:
+        assert [v.actual_value for v in trace_findings] == pytest.approx([0.029810], abs=1e-6)
+    else:
+        assert trace_findings == []
 
 
 @pytest.mark.parametrize(
@@ -343,6 +397,12 @@ def test_reset_branch_enters_via_from_its_existing_trunk(nearby):
         ("buried-via", False),
         ("branch-contact", False),
         ("gap-below-policy", False),
+        ("exposed-pad-gap", False),
+        ("pad-gap-within-policy", True),
+        ("trace-gap-between-thresholds", True),
+        ("wider-trace-threshold", False),
+        ("trace-only-policy", True),
+        ("pad-only-trace-slit", False),
     ],
 )
 def test_via_elbow_preserves_existing_copper_and_branch_contacts(case, expected):
@@ -371,13 +431,46 @@ def test_via_elbow_preserves_existing_copper_and_branch_contacts(case, expected)
     neighbour = _segments(
         [point(p) for p in [(159.7, 91.165), (159.7, 94.61), (159.96, 94.87)]], Layer.F_CU
     )
+    pads = []
     if case == "branch-contact":
         neighbour.append(Segment(159.92, 94.64, 159.925, 94.64, 0.01, Layer.F_CU, 26, "VM"))
+    elif case in {"exposed-pad-gap", "pad-gap-within-policy"}:
+        pads.append(
+            Pad(
+                x=160.115,
+                y=94.55,
+                width=0.25,
+                height=0.25,
+                net=26,
+                net_name="VM",
+                layer=Layer.F_CU,
+                ref="TP1",
+                pin="1",
+                shape="rect",
+                rotation=-45,
+            )
+        )
+    elif case in {"trace-gap-between-thresholds", "wider-trace-threshold"}:
+        neighbour.append(Segment(160.1, 94.48, 160.065, 94.515, 0.2, Layer.F_CU, 26, "VM"))
+
+    trace_edge = (
+        None
+        if case == "pad-only-trace-slit"
+        else 0.01
+        if case == "gap-below-policy"
+        else 0.1524
+        if case == "wider-trace-threshold"
+        else 0.1016
+    )
+    pad_edge = (
+        None if case == "trace-only-policy" else 0.105 if case == "pad-gap-within-policy" else 0.15
+    )
     grid = SimpleNamespace(
         rules=DesignRules(
-            same_net_trace_gap_band_edge_mm=0.01 if case == "gap-below-policy" else 0.1016
+            same_net_trace_gap_band_edge_mm=trace_edge,
+            same_net_pad_gap_band_edge_mm=pad_edge,
         ),
-        pads=[],
+        pads=pads,
         routes=[
             original,
             Route(net=net, net_name="spine", segments=[trunk]),
