@@ -40,7 +40,7 @@ from .geometry import (
     total_length,
 )
 from .kelvin_gate import kelvin_branch_gate
-from .pad_slits import ReplacementCheck, pad_gap_check, via_gap_check
+from .pad_slits import ReplacementCheck, pad_gap_check, via_exit_doglegs, via_gap_check
 from .pcb import optimize_pcb
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
@@ -663,24 +663,10 @@ class TraceOptimizer:
             for enabled, apply_pass in passes:
                 if enabled:
                     rewritten = apply_pass(result)
-                    if (
-                        self._keeps_anchors(result, rewritten)
-                        and not self._lays_copper_twice(result, rewritten)
-                        and self._keeps_pad_escapes(result, rewritten)
-                        and (
-                            self._pad_gap_check is None
-                            or self._pad_gap_check(result, rewritten, self._other_copper)
-                        )
-                    ):
+                    if self._accepts_chain_rewrite(result, rewritten):
                         result = rewritten
 
-            # A shortcut past a separate branch can open a manufacturing slit.
-            # Keep this chain's original path when that happens: an alternate
-            # detour can expose copper at an intervening pad (Board 05 D1).
-            if self._via_gap_check is not None and not self._via_gap_check(
-                chain, result, self._other_copper
-            ):
-                result = chain
+            result = self._keep_via_clearance(chain, result)
             current[index] = result
             all_optimized.extend(result)
 
@@ -727,6 +713,31 @@ class TraceOptimizer:
             return True
         return rewrite_keeps_pad_escapes(
             old, new, self._pad_zones, self.config.tolerance, self._pad_zone_clearance
+        )
+
+    def _keep_via_clearance(self, original: list[Segment], result: list[Segment]) -> list[Segment]:
+        check = self._via_gap_check
+        if check is None or check(original, result, self._other_copper):
+            return result
+
+        # Keep the optimized tail if extending the launch clears the barrel.
+        # The rest of the chain and the copper on other nets constrain that move.
+        grid = getattr(self.collision_checker, "grid", None)
+        for changed, candidate in via_exit_doglegs(result, grid):
+            if (
+                all(self._path_is_clear(leg) for leg in changed)
+                and self._accepts_chain_rewrite(original, candidate)
+                and check(original, candidate, self._other_copper)
+            ):
+                return candidate
+        return original
+
+    def _accepts_chain_rewrite(self, old: list[Segment], new: list[Segment]) -> bool:
+        return (
+            self._keeps_anchors(old, new)
+            and not self._lays_copper_twice(old, new)
+            and self._keeps_pad_escapes(old, new)
+            and (self._pad_gap_check is None or self._pad_gap_check(old, new, self._other_copper))
         )
 
     def _lays_copper_twice(self, old: list[Segment], new: list[Segment]) -> bool:
