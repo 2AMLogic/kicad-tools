@@ -925,21 +925,21 @@ def _max_branch_distance(a: Sequence[Segment], b: Sequence[Segment]) -> float:
     return max(one_way(a, b), one_way(b, a))
 
 
+def _track_contains(carrier: Segment, track: Segment) -> bool:
+    """Both end disks inside the same convex copper stroke prove full containment."""
+    margin = (carrier.width - track.width) / 2
+    return (
+        carrier.layer == track.layer
+        and margin > 0
+        and all(
+            point_to_segment_distance(*point, *carrier.start, *carrier.end) <= margin
+            for point in (track.start, track.end)
+        )
+    )
+
+
 def _without_buried_arms(groups: list[ParallelGroup]) -> tuple[list[ParallelGroup], set[int]]:
     """In a proved parallel group, discard arms wholly inside another arm's copper."""
-
-    def contains(carrier: Segment, track: Segment) -> bool:
-        margin = (carrier.width - track.width) / 2
-        # The carrier capsule is convex. Eroding it by the smaller radius
-        # leaves another capsule; containing both endpoints contains the stroke.
-        return (
-            carrier.layer == track.layer
-            and margin > 0
-            and all(
-                point_to_segment_distance(*point, *carrier.start, *carrier.end) <= margin
-                for point in (track.start, track.end)
-            )
-        )
 
     measured = []
     buried: set[int] = set()
@@ -952,7 +952,8 @@ def _without_buried_arms(groups: list[ParallelGroup]) -> tuple[list[ParallelGrou
         arms = []
         for branch in group.branches:
             if any(
-                other is not branch and all(any(contains(c, s) for c in other) for s in branch)
+                other is not branch
+                and all(any(_track_contains(c, s) for c in other) for s in branch)
                 for other in group.branches
             ):
                 buried.update(id(s) for s in branch)
@@ -1669,6 +1670,8 @@ class _GraphEdge:
 @dataclass
 class _CopperGraph:
     adjacency: dict[_Node, list[tuple[_Node, _GraphEdge]]] = field(default_factory=dict)
+    # Original track identities wholly inside each wider same-net carrier.
+    contained_tracks: dict[int, set[int]] = field(default_factory=dict)
     # Physical objects keyed by identity, with all their modeled junctions after pad contraction.
     item_nodes: dict[int, set[_Node]] = field(default_factory=dict)
     # All split edges of every authored track involved in a shared interval.
@@ -1924,6 +1927,7 @@ def _build_graph(
         and len(set(via.layers)) == 2
         and all(layer in layers for layer in via.layers)
     ]
+    graph = _CopperGraph()
     contacts: dict[str, set[tuple[float, float]]] = {layer: set() for layer in layers}
     for seg in segments:
         contacts.setdefault(seg.layer, set()).update((_node_key(seg.start), _node_key(seg.end)))
@@ -1931,9 +1935,13 @@ def _build_graph(
     # them can hide a real parallel route even when neither trace ends there.
     for i, first in enumerate(segments):
         for second in segments[i + 1 :]:
-            if first.layer != second.layer or not segments_intersect(
-                *first.start, *first.end, *second.start, *second.end
-            ):
+            if first.layer != second.layer:
+                continue
+            if first.width != second.width:
+                carrier, track = (first, second) if first.width > second.width else (second, first)
+                if _track_contains(carrier, track):
+                    graph.contained_tracks.setdefault(id(carrier), set()).add(id(track))
+            if not segments_intersect(*first.start, *first.end, *second.start, *second.end):
                 continue
             dx, dy = first.end[0] - first.start[0], first.end[1] - first.start[1]
             ex, ey = second.end[0] - second.start[0], second.end[1] - second.start[1]
@@ -2000,7 +2008,6 @@ def _build_graph(
     from kicad_tools.core.geometry import rotate_pad_offset
     from kicad_tools.schema.physical_identity import footprint_keys
 
-    graph = _CopperGraph()
     graph.overlap_edges = {
         id(track): set() for _, _, edge in edges if edge.overlaid for track in edge.tracks()
     }
@@ -3114,7 +3121,12 @@ def _loop_free_path_segments(
 
 
 def _unmodeled_bonds(
-    pcb: PCB, graph: _CopperGraph, contacts: CopperContactGraph, groups: list[ParallelGroup]
+    pcb: PCB,
+    graph: _CopperGraph,
+    contacts: CopperContactGraph,
+    groups: list[ParallelGroup],
+    *,
+    detached_tracks: set[int] | None = None,
 ) -> set[tuple[int, int]]:
     """Physical bonds absent from the centerline model and its proved conductors."""
     from kicad_tools.validate.copper_contact import PAD, TRACK, VIA
@@ -3123,19 +3135,23 @@ def _unmodeled_bonds(
     for index, item in enumerate(contacts.items):
         if item.kind == TRACK and item.key[0] == "segment":
             ids[index] = id(pcb.segments[item.key[1]])
-        elif item.kind == VIA:
+        elif detached_tracks is None and item.kind == VIA:
             ids[index] = id(pcb.vias[item.key])
-        elif item.kind == PAD:
+        elif detached_tracks is None and item.kind == PAD:
             fp, pad = item.key
             ids[index] = id(pcb.footprints[fp].pads[pad])
-    doubled = [{id(segment) for segment in group.segments} for group in groups]
+    conductors = [{id(segment) for segment in group.segments} for group in groups]
+    # Contacts within one continuous stroke add no alternative route. A contact
+    # on an exposed tail or between tracks on distinct carriers still needs proof.
+    conductors.extend({carrier, *tracks} for carrier, tracks in graph.contained_tracks.items())
     return {
         (a, b)
         for a, b in contacts.bonds
         if a in ids
         and b in ids
+        and (detached_tracks is None or ids[a] in detached_tracks or ids[b] in detached_tracks)
         and graph.item_nodes.get(ids[a], set()).isdisjoint(graph.item_nodes.get(ids[b], ()))
-        and not any(ids[a] in group and ids[b] in group for group in doubled)
+        and not any(ids[a] in conductor and ids[b] in conductor for conductor in conductors)
     }
 
 
@@ -4253,14 +4269,21 @@ def resolve_current_path(
             sink=sink,
         )
 
-    # Clearing a modeled cycle must not hide a return through a width-only
-    # contact, for instance where the exposed end of an overlay rejoins the bar.
+    # A separate centerline component can bond to two stations through track
+    # width. Its contacts need checking even when the routed tree has no loop.
     measured_groups, buried_ids = _without_buried_arms(parallel_groups)
-    missing_bonds = (
-        _unmodeled_bonds(pcb, adjacency, physical_contacts(), parallel_groups)
-        if on_path_groups or off_path_loops or adjacency.overlap_edges or buried_ids
-        else set()
-    )
+    pad_internal = {id(s) for segments in adjacency.internal.values() for s in segments}
+    missing_bonds = set()
+    if on_path_groups or off_path_loops or adjacency.overlap_edges or buried_ids:
+        missing_bonds = _unmodeled_bonds(pcb, adjacency, physical_contacts(), parallel_groups)
+    elif len(path_segments) < len(net_segments):
+        _, connected_edges = _contracted_component(adjacency, start, ())
+        connected_tracks = {id(s) for edge in connected_edges for s in edge.tracks()}
+        detached = {id(s) for s in net_segments} - connected_tracks - pad_internal
+        if detached:
+            missing_bonds = _unmodeled_bonds(
+                pcb, adjacency, physical_contacts(), parallel_groups, detached_tracks=detached
+            )
     if missing_bonds:
         evidence = physical_spans(missing_bonds)
         if evidence.witness:
@@ -4278,7 +4301,6 @@ def resolve_current_path(
             )
 
     group_tracks = {id(s) for group in parallel_groups for s in group.segments} - buried_ids
-    buried = tuple(s for s in path_segments if id(s) in buried_ids)
     path_segments = [s for s in path_segments if id(s) not in buried_ids]
     on_path = {id(segment) for segment in path_segments}
     for array in (*arrays, *on_path_groups):
@@ -4286,10 +4308,16 @@ def resolve_current_path(
         for contacts in array.track_contacts.values():
             group_tracks.update(contacts)
     fully_covered, partial_spans = _route_overlaps(adjacency, route_edges, group_tracks)
+    whole_carriers = on_path - partial_spans.keys()
+    # At a pad, the continuation proof assigns internal copper to its own
+    # branch. A sense tap leaving the pad still needs its own declaration.
+    for carrier, tracks in adjacency.contained_tracks.items():
+        if carrier in whole_carriers:
+            buried_ids.update(tracks - on_path - fully_covered - pad_internal)
+    buried = tuple(s for s in net_segments if id(s) in buried_ids)
     if on_path_groups:
         # A narrow stroke can also be covered by the round cap of a proved
         # row's carrier, beyond its last centreline station.
-        whole_carriers = on_path - partial_spans.keys()
         fully_covered.update(
             id(pcb.segments[index])
             for index, carriers in physical_contacts().covered_collinear_tracks.items()

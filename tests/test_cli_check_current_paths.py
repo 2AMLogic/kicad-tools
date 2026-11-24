@@ -598,6 +598,75 @@ def test_covered_l_trunk(tmp_path, interval, capsys):
     assert _run_check(board, tmp_path / "check.json") == 0
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("buried,external_return", [(True, False), (True, True), (False, True)])
+def test_pgnd_tracks_at_trunk_corner(tmp_path, reverse, buried, external_return):
+    """Issue #10016 case 2, with terminal pads clear of the measured corner."""
+    from dataclasses import replace
+
+    from kicad_tools.cli import main
+    from kicad_tools.router.current_paths import (
+        audit_current_paths,
+        reinforcement_eligible_segment_ids,
+        resolve_current_path,
+    )
+    from kicad_tools.schema.pcb import PCB
+    from tests.test_pcb_reinforce import _write_single_pad_footprint_lib
+
+    board = tmp_path / "trunk.kicad_pcb"
+    pcb = PCB.create(width=200, height=200, center=False)
+    pad = _write_single_pad_footprint_lib(tmp_path)
+    for ref, x, y in [("J1", 65, 119.6), ("J2", 77.5375, 135)]:
+        pcb.add_footprint_from_file(pad, ref, x, y)
+        pcb.assign_net_to_footprint_pad(ref, "1", "NET1")
+    tracks = [
+        ((65, 119.6), (77.5375, 119.6), 2.4),
+        ((77.5375, 119.6), (77.5375, 124.5), 2.4),
+        ((77.5375, 124.5), (77.5375, 135), 2.4),
+    ]
+    if buried:
+        tracks.extend(
+            [
+                ((77.9, 119), (77.5375, 119.3625), 0.2),
+                ((77.5375, 119.3625), (77.5375, 121), 0.2),
+                ((77.5, 119), (77.7, 119.2), 0.2),
+                ((77.7, 119.2), (77.7, 120.8375), 0.2),
+            ]
+        )
+    if external_return:
+        # Both ends join through copper width, away from the trunk centerline.
+        tracks.extend(
+            [
+                ((77.7, 120.8375), (84, 120.8375), 0.2),
+                ((84, 120.8375), (84, 128), 0.2),
+                ((84, 128), (77.9, 128), 0.2),
+            ]
+        )
+    if reverse:
+        tracks = [(end, start, width) for start, end, width in reversed(tracks)]
+    for start, end, width in tracks:
+        pcb.add_trace(start, end, width=width, layer="F.Cu", net="NET1")
+    pcb.save(board)
+    pcb = PCB.load(board)
+    spec = _trunk_spec(current_a=2.5)
+    for direction in (spec, replace(spec, source=spec.sink, sink=spec.source)):
+        result = resolve_current_path(pcb, direction)
+        if external_return:
+            assert result.status == "ambiguous"
+        else:
+            assert result.ok, result.reason
+            assert result.min_width.width_mm == pytest.approx(2.4)
+            assert result.length_mm == pytest.approx(27.9375)
+            assert not audit_current_paths(pcb, [direction]).uncovered
+            assert reinforcement_eligible_segment_ids(pcb, [direction]) == {
+                id(s) for s in pcb.segments if s.width == 2.4
+            }
+    _write_sidecar(tmp_path / "current_paths.json", [spec])
+    assert main(["check", str(board), "--only", "path_ampacity", "--allow-incomplete"]) == (
+        2 if external_return else 0
+    )
+
+
 @pytest.mark.parametrize("rejoin", [False, True])
 def test_thin_sense_cycle_check(tmp_path, rejoin):
     from kicad_tools.router.current_paths import reinforcement_eligible_segment_ids
