@@ -1,6 +1,6 @@
 # Board 06 TX2 relief replay
 
-This is a reduced test case for issue #9936. It restores the saved copper, negotiated usage and congestion history from an earlier iteration-two relief capture on Board 06. Its input PCB has the same SHA-256 as the input to the complete seed-42 run. The captured occupancy predates that run. The routing source for this replay is `efafdb1f4c2d16743fec94b1e96f0b458e81b76a`. [Full run and both saved boards](https://github.com/2AMLogic/kicad-tools/actions/runs/45017437753) · [Historical capture context](https://github.com/2AMLogic/kicad-tools/pull/9915#issuecomment-7078414198)
+Issues #9936 and #10032 use this reduced test case. It restores the saved copper, negotiated usage and congestion history from an earlier iteration-two relief capture on Board 06. Its input PCB has the same SHA-256 as the input to the complete seed-42 run. The captured occupancy predates that run. The routing source for this replay is `efafdb1f4c2d16743fec94b1e96f0b458e81b76a`. [Full run and both saved boards](https://github.com/2AMLogic/kicad-tools/actions/runs/45017437753) · [Historical capture context](https://github.com/2AMLogic/kicad-tools/pull/9915#issuecomment-7078414198)
 
 From the root of this checkout, run the following commands. Each output directory must be new.
 
@@ -15,7 +15,7 @@ PYTHONHASHSEED=42 uv run python evidence/board06-tx2-replay/replay.py cpp /tmp/t
 
 The first transaction connects its target. The second reaches the opposite pad pair, displaces the first route and fails to reconnect it. The nested attempt encounters the reciprocal failure. The saved output keeps the first net and contains zero added or removed tracks or vias relative to the preceding saved board. Reversing the order exchanges which net survives. The Python runs hit two 120-second deadlines. C++ reached its million-expansion limit in the reduced case. The complete C++ run connected all 21 benchmark signals.
 
-`results.json` names both the outer transaction and the net actually being searched. Each run writes two PCBs with their routed project and design-rule sidecars. The checkpoint uses JSON, and the numeric NumPy archive loads with `allow_pickle=False`.
+`results.json` names both the outer transaction and the net actually being searched. Each run writes the starting board and both post-transaction PCBs with their matching project and design-rule sidecars. The checkpoint uses JSON, and the numeric NumPy archive loads with `allow_pickle=False`.
 
 ## Post-#9936 measurements
 
@@ -51,3 +51,39 @@ Both controls retain the captured neighbor copper. The routed profile files are 
 | `crossing-candidates.kicad_pcb` | One each | Zero each | 9 |
 
 The first control adds the two actual TX2 routes from the complete C++ board. TX2+ uses 66 front-copper segments and TX2− uses nine, all 0.275 mm wide, with no vias. The second combines Python's two independently successful routes. KiCad finds five shorts, one crossing, two clearance errors and one differential-pair gap error. These partially routed controls have 156 opens on other nets and six footprint-library warnings. The first control demonstrates that both nets can coexist with this captured neighbor copper. The four outer failures in the complete Python run have different occupancy and victim counts.
+
+## Partner drill clearance on the Python replay (#10032)
+
+The first TX2− probe selects a BGA via at (151.75, 70.35) mm. This leaves 0.0500 mm between its drill and the displaced TX2+ drill at (151.45, 70.35) mm. The project requires 0.5000 mm. The Python relief transaction tries a normal route from U2.F3 to J1.B3 with the original TX2+ drill sites reserved. This extra search has a 4,096-expansion ceiling and honors a smaller existing cap. On this capture the frontier drained in 0.28 s. The ordinary rescue then found a TX2− path, failed to reconnect TX2+, and restored every track, via and pad island. TX2+ remained connected and TX2− remained open.
+
+An independent reverse search on the captured neighbors, with the other leg absent, excludes each BGA-side via it finds before trying again. Both legs exhausted their frontiers after two sites. All dimensions below are in millimeters. The two 0.25 mm drills leave their center distance minus 0.25 mm between hole edges.
+
+| TX2+ site | TX2− site | Hole gap |
+| --- | --- | ---: |
+| (151.45, 69.70) | (151.75, 69.70) | 0.0500 |
+| (151.45, 69.70) | (151.75, 70.35) | 0.4659 |
+| (151.45, 70.35) | (151.75, 69.70) | 0.4659 |
+| (151.45, 70.35) | (151.75, 70.35) | 0.0500 |
+
+`partner-candidate.json` contains the original connected TX2+ and a Python TX2− candidate found while reserving space around that positive path. Its segment records store (x1, y1, x2, y2, layer, width), and its via records store (x, y, first layer, last layer, diameter, drill). Both routes use the captured neighbors. The second control moves only the TX2− via from (151.75, 69.70) to (151.75, 69.65) and joins the old center to the new one on F.Cu and In1.Cu inside the via land. This yields 0.5116 mm of hole clearance. The original Python grid rejects the moved via. Its via-clearance footprint reaches the F.Cu cell at (151.80, 69.20), which `_apply_stitch_via_halo` reserved when registering U2.E3 (+1V2). That reservation preserves space to stitch a plane-net pad. The C++ physical control instead uses front copper throughout both legs.
+
+| Saved PCB | TX2+ / TX2− pad islands | Native TX2 opens | Native errors | Native warnings |
+| --- | --- | --- | ---: | ---: |
+| Before and after the failed rescue | 1 / 2 | One on TX2− | 0 | 11 |
+| Recorded candidate, opposite drill rows | 1 / 1 | Zero | 0 | 12, including `hole_to_hole` |
+| One-cell physical control | 1 / 1 | Zero | 0 | 11 |
+| Existing C++ joint control | 1 / 1 | Zero | 0 | 11 |
+
+The 11 shared warnings concern silkscreen and text. All boards have 156 unrelated opens. These partial-board measurements apply to the captured occupancy. [Full-board comparison and remaining four negative legs](https://github.com/2AMLogic/kicad-tools/issues/9850)
+
+From the repository root, use new output paths. The native checker regenerates the seven fixture footprints from Board 06’s generator, installs them in a scratch project, and runs pinned KiCad 10.0.6 with the board’s routed project and rule files. It refuses a library-environment finding.
+
+```sh
+fixture=evidence/board06-tx2-replay
+PYTHONHASHSEED=42 uv run python "$fixture/replay.py" python /tmp/tx2-rescue
+PYTHONHASHSEED=42 uv run python "$fixture/terminal_sites.py" /tmp/tx2-sites
+uv run python "$fixture/native_check.py" /tmp/tx2-rescue/after-2.kicad_pcb /tmp/tx2-rollback.json
+uv run python "$fixture/native_check.py" /tmp/tx2-sites/paired-candidate.kicad_pcb /tmp/tx2-paired.json
+uv run python "$fixture/native_check.py" /tmp/tx2-sites/one-cell-control.kicad_pcb /tmp/tx2-one-cell.json
+uv run python "$fixture/native_check.py" "$fixture/jointly-connected.kicad_pcb" /tmp/tx2-joint.json
+```
