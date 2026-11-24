@@ -363,10 +363,10 @@ def test_silk_preserves_concurrent_drawing_save(tmp_path, monkeypatch, when):
     else:
         real_link = atomic_write.os.link
 
-        def save_before_link(source, target):
+        def save_before_link(source, target, **kwargs):
             if target == path and not path.exists():
                 path.write_bytes(edited)
-            return real_link(source, target)
+            return real_link(source, target, **kwargs)
 
         monkeypatch.setattr(atomic_write.os, "link", save_before_link)
 

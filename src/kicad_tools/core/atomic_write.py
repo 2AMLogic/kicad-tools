@@ -57,12 +57,15 @@ def _publish_checked(
         except FileNotFoundError as exc:
             raise SourceChangedError("PCB changed during manufacturing export") from exc
         try:
-            if hashlib.sha256(original.read_bytes()).hexdigest() != expected_sha256:
+            # A displaced relative symlink still refers to the board's
+            # original directory. Resolve its bytes in that context.
+            source = path.parent / original.readlink() if original.is_symlink() else original
+            if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
                 raise SourceChangedError("PCB changed during manufacturing export")
             os.link(repaired, path)
         except BaseException as exc:
             try:
-                os.link(original, path)
+                os.link(original, path, follow_symlinks=False)
             except FileExistsError:
                 # Another save owns the live name. Keep the displaced version
                 # available too, including when it was itself an editor save.
@@ -74,7 +77,7 @@ def _publish_checked(
         original.unlink()
     finally:
         repaired.unlink(missing_ok=True)
-        if not original.exists():
+        if not os.path.lexists(original):
             staging.rmdir()
 
 
