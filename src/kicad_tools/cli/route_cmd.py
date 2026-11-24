@@ -5481,6 +5481,237 @@ def _write_net_class_map_sidecar(
             print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
+#: ``meta`` key recording the exact-name ``netclass_patterns`` the route step
+#: wrote into the sibling ``.kicad_pro`` (Issue #10133).  Same provenance
+#: contract as the #6390 ``meta.kct_router_netclasses`` record: a re-run drops
+#: exactly these patterns before re-adding the current route's set, so a net
+#: whose class changed between routes never keeps a stale assignment, while a
+#: hand-authored pattern is never touched.
+KCT_NETCLASS_PATTERNS_META_KEY = "kct_netclass_patterns"
+
+#: Net-name characters KiCad's netclass-pattern matching treats as wildcards.
+#: A net whose name carries one cannot be assigned through an exact-name
+#: pattern -- the pattern would reach beyond the net itself (#10133; the
+#: pattern-evaluation hazards of #10122) -- so the net is skipped with a
+#: warning while its class is still declared for its sibling nets.
+_NETCLASS_PATTERN_WILDCARD_CHARS = ("*", "?")
+
+
+def _write_netclasses_to_project(
+    output_path: Path,
+    net_class_map: dict | None,
+    quiet: bool = False,
+    loaded_net_class_map: dict | None = None,
+    via_drill: float | None = None,
+) -> None:
+    """Declare the classes the router routed with in the sibling ``.kicad_pro``.
+
+    Issue #10133: the router classifies every net and serializes the result
+    to the ``<stem>.net_class_map.json`` sidecar, but nothing told KiCad --
+    the project's ``net_settings`` kept a flat ``Default``, so Board Setup
+    showed classes unrelated to the copper and KiCad's own DRC did not know
+    the intended widths.  This writes one ``net_settings.classes`` entry per
+    router class actually used -- ``track_width``, ``clearance`` and
+    ``via_diameter`` from the router's
+    :class:`~kicad_tools.router.rules.NetClassRouting` -- and one
+    ``netclass_patterns`` entry per routed net, spelled with the net's exact
+    name (never a wildcard; the evaluation hazards of #10122).  GND and
+    power rails land in their own dedicated classes because the classifier
+    gives them non-``Default`` classes ("Ground", "Power", ...).
+
+    Authored intent always wins, through the existing merge helpers:
+
+    * :func:`~kicad_tools.core.project_file.add_netclass_definition` merges
+      into a same-named class -- only the passed keys are written and the
+      four floor keys keep the larger value (#7385) -- so hand-authored
+      classes, colours and diff-pair keys survive verbatim;
+    * a net a hand-authored pattern or explicit assignment already
+      classifies keeps its authored class (the #6390 rule).  The kct-owned
+      assignments ``_write_drc_constraint_sidecars`` recorded moments
+      earlier under ``meta.kct_router_netclasses`` do NOT count as authored
+      -- every routed net is re-stated as a pattern (#10133 AC) -- and the
+      exact-name patterns a previous kct route recorded under
+      ``meta.kct_netclass_patterns`` are dropped first, so a re-run states
+      the current route's classes instead of going stale (and is
+      idempotent).
+
+    Non-fatal exactly like the sidecar writes: a missing ``.kicad_pro``, a
+    read-only directory, an unreadable project or an authored netclass block
+    that cannot be evaluated safely each degrade to a warning and never fail
+    the route.  A kct-stamped project (#6390 AC5) is re-stamped after the
+    merge so the renamed-output conflict check still recognises it; a
+    hand-authored project is never stamped here.  A no-op merge (identical
+    bytes) leaves the file untouched.
+
+    Args:
+        output_path: Path to the routed PCB file; the project is its
+            ``.kicad_pro`` sibling.
+        net_class_map: The autorouter's ``{net_name: NetClassRouting}`` map.
+            Empty/``None`` writes nothing, mirroring the sidecar writer.
+        quiet: If True, suppress the confirmation and warning lines.
+        loaded_net_class_map: The user's loaded ``--net-class-map`` entries,
+            merged over ``net_class_map`` -- the same effective map the
+            sidecar and DRC-constraint writes use (#4428 round-trip
+            fidelity).
+        via_drill: The board-wide via drill the router actually drills
+            (``router.rules.via_drill``; ``NetClassRouting`` carries only the
+            diameter), written as newly-created classes' ``via_drill``.
+            ``None`` leaves the helper default / authored value in place.
+    """
+    import json
+
+    from kicad_tools.core.project_file import (
+        add_netclass_definition,
+        add_netclass_pattern,
+        get_netclass_patterns,
+        load_project,
+        save_project,
+    )
+
+    effective_map = dict(net_class_map or {})
+    if loaded_net_class_map:
+        effective_map.update(loaded_net_class_map)
+    if not effective_map:
+        return
+
+    project_path = output_path.with_suffix(".kicad_pro")
+    if not project_path.exists():
+        if not quiet:
+            print(
+                f"  Warning: no {project_path.name} beside the routed board; "
+                "net classes not written to the project"
+            )
+        return
+
+    try:
+        project = load_project(project_path)
+    except (OSError, ValueError) as e:
+        if not quiet:
+            print(f"  Warning: could not read {project_path.name}: {e}")
+        return
+
+    from kicad_tools.manufacturers.project_generator import (
+        _authored_netclass_members,
+        board_net_names,
+        is_kct_owned_project,
+        router_netclass_provenance,
+        stamp_kct_project,
+    )
+
+    # Re-stamp decision taken BEFORE mutating: only a project whose stamp
+    # currently validates stays kct-owned across this write.  Stamping a
+    # hand-authored project here would let a later renamed-output route
+    # overwrite the user's project silently.
+    restamp = is_kct_owned_project(project)
+
+    # Drop the exact-name patterns a previous route recorded (ours to
+    # replace); a hand-authored pattern never carries this provenance.
+    meta = project.get("meta")
+    record = meta.pop(KCT_NETCLASS_PATTERNS_META_KEY, []) if isinstance(meta, dict) else []
+    recorded = (
+        {net for net in record if isinstance(net, str)} if isinstance(record, list) else set()
+    )
+    if recorded:
+        patterns = get_netclass_patterns(project)
+        patterns[:] = [
+            p for p in patterns if not (isinstance(p, dict) and p.get("pattern") in recorded)
+        ]
+
+    # Only nets the board actually carries (the #6390 filter): a loaded user
+    # map may name nets that are not on this board.
+    board_nets = board_net_names(output_path)
+    names = set(effective_map) if board_nets is None else set(effective_map) & board_nets
+    names.discard("")
+
+    assigned: list[str] = []
+    declared: list[str] = []
+    if names:
+        try:
+            authored = _authored_netclass_members(project, sorted(names))
+        except ValueError as e:
+            # The authored netclass block cannot be evaluated safely: kct
+            # must not guess which nets it classifies (#6390 rule).  Only
+            # the provenance cleanup above is persisted.
+            if not quiet:
+                print(
+                    f"  Warning: net classes not assigned in {project_path.name}: "
+                    f"authored netclasses cannot be evaluated safely ({e})"
+                )
+            authored = None
+        if authored is not None:
+            # kct's own #6390 assignments are not authored intent: subtract
+            # them so every routed net is still re-stated as a pattern.
+            authored -= set(router_netclass_provenance(project)[1])
+            # A class the map gives two values keeps the stricter (larger)
+            # one -- the #6390 clearance rule, applied to every floor this
+            # write owns.
+            classes: dict[str, dict[str, float]] = {}
+            members: dict[str, list[str]] = {}
+            skipped: list[str] = []
+            for net in sorted(names):
+                routing = effective_map[net]
+                class_name = str(getattr(routing, "name", "") or "")
+                if not class_name or class_name == "Default":
+                    continue
+                if any(ch in net for ch in _NETCLASS_PATTERN_WILDCARD_CHARS):
+                    skipped.append(net)
+                    continue
+                if net in authored:
+                    continue
+                agg = classes.setdefault(class_name, {"width": 0.0, "clearance": 0.0, "via": 0.0})
+                agg["width"] = max(agg["width"], float(getattr(routing, "trace_width", 0.0) or 0.0))
+                agg["clearance"] = max(
+                    agg["clearance"], float(getattr(routing, "clearance", 0.0) or 0.0)
+                )
+                agg["via"] = max(agg["via"], float(getattr(routing, "via_size", 0.0) or 0.0))
+                members.setdefault(class_name, []).append(net)
+            for class_name in sorted(classes):
+                agg = classes[class_name]
+                add_netclass_definition(
+                    project,
+                    class_name,
+                    track_width=agg["width"],
+                    clearance=agg["clearance"],
+                    via_diameter=agg["via"],
+                    via_drill=via_drill,
+                )
+                declared.append(class_name)
+                for net in members[class_name]:
+                    add_netclass_pattern(project, class_name, net)
+                    assigned.append(net)
+            if skipped and not quiet:
+                print(
+                    "  Warning: nets named with wildcard characters "
+                    f"({', '.join(skipped)}) not assigned to a class: an "
+                    "exact-name pattern would match more than the net"
+                )
+
+    if assigned:
+        project.setdefault("meta", {})[KCT_NETCLASS_PATTERNS_META_KEY] = sorted(assigned)
+    if restamp:
+        stamp_kct_project(project)
+
+    payload = json.dumps(project, indent=2)
+    try:
+        if payload == project_path.read_text(encoding="utf-8"):
+            return  # nothing changed -- leave the file (and its mtime) alone
+    except OSError:
+        pass
+    try:
+        save_project(project, project_path)
+    except OSError as e:
+        # Non-fatal: a blocked / read-only output directory must not fail
+        # the route.
+        if not quiet:
+            print(f"  Warning: could not write net classes to {project_path.name}: {e}")
+        return
+    if not quiet and assigned:
+        print(
+            f"  Net classes written to project: {project_path.name} "
+            f"({', '.join(sorted(set(declared)))})"
+        )
+
+
 def _write_routing_plan_sidecar(
     output_path: Path,
     routing_plan: "RoutingPlan | None",
@@ -6653,6 +6884,21 @@ def run_post_route_drc(
         coupled_pairs=_coupled_pairs,
         pair_gaps=_router_pair_gaps(_coupled_pairs, _effective_class_map or None, router),
         edge_clearance=edge_clearance,
+    )
+
+    # Issue #10133: declare the classes the router routed with in the
+    # project's ``net_settings`` (one class per used router class plus one
+    # exact-name pattern per routed net), so KiCad's Board Setup and native
+    # DRC see the widths the copper actually uses.  Deliberately AFTER the
+    # constraint sidecars above: they create / stage / merge the destination
+    # ``.kicad_pro``, and this merge must land in the final file rather
+    # than be clobbered by -- or trip the conflict check of -- the staged
+    # regeneration.
+    _write_netclasses_to_project(
+        output_path,
+        _effective_class_map or None,
+        quiet=quiet,
+        via_drill=getattr(getattr(router, "rules", None), "via_drill", None),
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
