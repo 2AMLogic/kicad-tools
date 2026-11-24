@@ -113,7 +113,7 @@ def test_walker_reports_each_sheets_path() -> None:
     assert [v.sheet_path for v in visits] == ["", "/MCU", "/AUX"]
     # Each child records the sheet pins of the symbol that instantiated it:
     # ``MCU`` mates with the root's ``BUS`` pin, ``AUX`` has none.
-    assert [sorted(v.parent_pin_names) for v in visits] == [[], ["BUS"], []]
+    assert [v.parent_pins for v in visits] == [(), (("BUS", (50.0, 36.0)),), ()]
     assert [v.parent for v in visits] == [None, visits[0], visits[0]]
 
 
@@ -408,6 +408,68 @@ def test_one_schematic_net_needs_one_board_spelling(
 
     assert {(m.ref, m.pad) for m in result.mismatches} == expected_offenders
     assert result.clean is (not expected_offenders)
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [(None, "/MCU/BUS"), ("AUX/DBG_LED", "/AUX{slash}DBG_LED")],
+    ids=["unnamed-parent-wire", "literal-slash-in-label"],
+)
+def test_sheet_pin_follows_the_parent_wire(
+    tmp_path: Path, label: str | None, expected: str
+) -> None:
+    """A port joins the copper groups on its wire, independent of the printed port name."""
+    root = _stage_fixture_schematics(tmp_path, {})
+    text = root.read_text()
+    start = text.index('\t(label "BUS"')
+    end = text.index("\n\t)", start) + len("\n\t)")
+    replacement = text[start:end].replace('"BUS"', f'"{label}"') if label else ""
+    root.write_text(text[:start] + replacement + text[end:])
+
+    pin_map = _schematic_pin_to_net(root)
+    assert pin_map[("R10", "1")] == expected
+    assert pin_map[("R1", "1")] == expected
+    # AUX's local DBG_LED is a distinct net from a literal slash on the root.
+    assert pin_map[("R3", "2")] == "/AUX/DBG_LED"
+    assert pin_map[("R3", "2")] != expected
+
+    board = tmp_path / "ports.kicad_pcb"
+    board.write_text(_BOARD_PCB.read_text().replace('"/BUS"', f'"{expected}"'))
+    assert compare_netlists(root, board).clean
+    # Bind just R3.2 to the net crossing MCU's sheet pin.
+    text = board.read_text()
+    before, marker, after = text.partition('(uuid "sqlvs-fp-r3")')
+    assert marker
+    after = after.replace('(net 1 "/AUX/DBG_LED")', f'(net 2 "{expected}")', 1)
+    board.write_text(before + marker + after)
+    assert {(m.ref, m.pad) for m in compare_netlists(root, board).mismatches} == {("R3", "2")}
+
+
+@pytest.mark.parametrize(
+    ("child_label", "parent_named", "expected"),
+    [
+        ("label", True, "/BUS"),
+        ("global_label", True, "CHILD_NET"),
+        ("label", False, "/MCU/CHILD_NET"),
+    ],
+)
+def test_child_label_and_sheet_pin_share_one_net(
+    tmp_path: Path, child_label: str, parent_named: bool, expected: str
+) -> None:
+    """The same crossing can be named by a label on either side of the interface."""
+    port = '(hierarchical_label "BUS"'
+    shape = "(shape input)" if child_label == "global_label" else ""
+    extra = (
+        f'({child_label} "CHILD_NET" {shape} (at 90 46.19 180) '
+        '(effects (font (size 1.27 1.27))) (uuid "74e9a0bc-b2fb-4cd8-8445-9e99280d3234"))'
+    )
+    changes = {"sub_mcu_sq.kicad_sch": {port: extra + "\n\t" + port}}
+    if not parent_named:
+        # Move the root label off the wire to leave the connected sheet pin unnamed.
+        changes["root_sq.kicad_sch"] = {"(at 45 36 0)": "(at 45 30 0)"}
+    root = _stage_fixture_schematics(tmp_path, changes)
+    pins = _schematic_pin_to_net(root)
+    assert pins[("R10", "1")] == pins[("R1", "1")] == expected
 
 
 def test_hier_label_inherits_a_global_parent_net_bare(tmp_path: Path) -> None:

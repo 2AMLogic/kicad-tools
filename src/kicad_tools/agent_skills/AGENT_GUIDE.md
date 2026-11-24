@@ -67,8 +67,11 @@ Install the packaged `kct` skills, rendered for your harness
 
 ## 5. Pitfalls
 
-- **Slow routing?** Run `kct build-native --check` first. Without the C++
-  backend, routing is 10-100x slower. Build it with `kct build-native`.
+- **Slow routing?** Run `kct build-native --check`. Look for
+  `C++ backend: available` and exit code 0. Build a missing router with
+  `kct build-native` for 10–100× faster routing. Placement and DRC can use
+  Python fallbacks. Building their optional extensions requires a kicad-tools
+  source checkout.
 - **A stale `kct` on `PATH`.** `which -a kct` and `kct --version` show which
   install answers. Inside a project, prefer `uv run kct ...`.
 - **`kicad-cli` hangs on macOS** (#5877). KiCad 10 scans `~/Documents` at

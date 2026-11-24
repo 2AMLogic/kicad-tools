@@ -1096,8 +1096,23 @@ of the requirement is recorded in the report but can never by itself produce
 **Cross-face creepage.** Use `kct creepage board.kicad_pcb --min 3.3
 --order-thickness-mm 0.80` when ordering a board with a nominal finished
 thickness of 0.80 mm. The census uses this value for paths through a bore or
-around a slot or board edge. When the PCB header and stackup disagree, the
-command reports both declarations and requires the purchase thickness to
+around a slot or board edge. To record the selection for repeated creepage,
+audit, repair and route-link checks, put the nominal purchase value in
+`project.kct` alongside the board or one directory above it.
+
+```yaml
+requirements:
+  manufacturing:
+    order_thickness_mm: 0.80
+```
+
+In a project containing multiple revisions, set `project.artifacts.pcb` or
+`project.artifacts.pcb_routed` to the board being ordered. The census uses the
+declaration for that board and its routing stages. The explicit CLI value
+overrides the project setting for one run. The JSON field
+`board_thickness_source` identifies a project selection as `project.kct` and
+an explicit selection as `order`. When the PCB header and stackup disagree,
+the command reports both declarations and requires the purchase thickness to
 resolve a cross-face measurement. Single-face geometry uses no board thickness.
 
 **Derived clearance (IEC 60664-1, issue #7057).** With `--standard` /

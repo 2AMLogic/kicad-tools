@@ -262,6 +262,41 @@ KCT_BOARD06_SHADOW=1 PYTHONHASHSEED=42 uv run python \
 # KCT_SHADOW_DEBUG=1 adds the [coupled-tail] / [coupled-follow] instrumentation
 ```
 
+### Saved-board backend comparison, seed 42
+
+With the default recipe (shadow off), the C++ router connected all 21 signal
+nets on routing revision `046f1bcc3`. Pure Python connected 17. Both runs used
+the same input PCB, project and net-class map. The pad groups on the saved
+boards and KiCad 10.0.6’s unconnected-item reports agreed on every signal.
+[Workflow run and measurement archive](https://github.com/2AMLogic/kicad-tools/actions/runs/45193223262)
+
+| Backend | Signals connected | Open signals on the saved board |
+| --- | ---: | --- |
+| C++ | 21/21 | None |
+| Pure Python | 17/21 | `USB3_RX1-`, `USB3_RX2-`, `USB3_TX1-`, `USB3_TX2-` |
+
+Of the nine signals originally open with Python, five now connect on both
+backends. These were `MIPI_RST`, `USB3_RX1+`, `USB3_RX2+`, `USB3_TX1+` and `USB3_TX2+`.
+Each remaining negative leg has two pad islands and one native open on the
+Python board. The other 12 signals connect on both boards.
+
+In `python/route.log`, the router found a path for each negative leg, then
+rolled it back when it could not restore every net it had displaced. Each
+listed search stopped at its wall-clock deadline before the log recorded frontier exhaustion.
+
+| Python relief target | Displaced nets restored | Displaced search at the deadline (endpoints, node expansions) |
+| --- | ---: | --- |
+| `USB3_RX1-` | 5/7 | `USB3_RX1+` (J1.B11 → U2.B5, 296,960) and `USB3_TX1+` (J1.A2 → U2.B2, 289,792) |
+| `USB3_RX2-` | 2/4 | `USB3_TX2+` (J1.B2 → U2.F2, 177,152) and `USB3_RX2+` (J1.A11 → U2.F5, 294,912) |
+| `USB3_TX1-` | 6/8 | `USB3_TX1+` (J1.A2 → U2.B2, 273,408) and `USB_CC2` (J1.B5 → U1.13, 267,264) |
+| `USB3_TX2-` | 3/4 | `USB3_TX2+` (J1.B2 → U2.F2, 232,448) |
+
+Whether those searches could finish with more time remains open. An earlier
+TX2 experiment used a reduced set of neighboring routes. Moving one via by
+0.05 mm gave zero native TX2 opens and cleared the drill-clearance warning.
+The Python router rejected that site because it was reserved for the U2.E3
+power stitch. [Reduced-board TX2 measurements](https://github.com/2AMLogic/kicad-tools/pull/10034#issuecomment-7116139195)
+
 ### The two downstream modes
 
 **All figures in this subsection are from the shadow-ON configuration

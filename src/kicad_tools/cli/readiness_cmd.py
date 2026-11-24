@@ -4099,6 +4099,40 @@ def _snapshot_inventory(root: Path) -> dict[str, str]:
     }
 
 
+def _inventory_changes(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """Name each path that was added, removed or modified between two inventories."""
+    changes = [f"added {name}" for name in sorted(after.keys() - before.keys())]
+    changes.extend(f"removed {name}" for name in sorted(before.keys() - after.keys()))
+    changes.extend(
+        f"modified {name}"
+        for name in sorted(before.keys() & after.keys())
+        if after[name] != before[name]
+    )
+    return changes
+
+
+def _with_changes(message: str, changes: list[str]) -> str:
+    """Append the named changes to ``message``; an empty list leaves it unchanged."""
+    return f"{message}: {', '.join(changes)}" if changes else message
+
+
+def _release_changes(
+    board_dir: Path, before: dict[str, str], external_before: dict[Path, str]
+) -> list[str]:
+    """Name changed inputs relative to the original board directory."""
+    changes = _inventory_changes(before, _snapshot_inventory(board_dir))
+    for path, digest in sorted(external_before.items()):
+        if not path.is_file():
+            kind = "removed"
+        elif _sha256_file(path) != digest:
+            kind = "modified"
+        else:
+            continue
+        relative = Path(os.path.relpath(path, board_dir)).as_posix()
+        changes.append(f"{kind} external input {relative}")
+    return changes
+
+
 def _publication_identity(path: Path) -> tuple[Any, ...] | None:
     """Identify the actual file, including same-content inode replacements."""
     try:
@@ -4137,9 +4171,13 @@ def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str
 
 
 def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[str, str]) -> None:
-    if _snapshot_inventory(destination) != before:
+    current = _snapshot_inventory(destination)
+    if current != before:
         raise RuntimeError(
-            "Release changed during verification; refusing to overwrite concurrent work"
+            _with_changes(
+                "Release changed during verification; refusing to overwrite concurrent work",
+                _inventory_changes(before, current),
+            )
         )
     after = _snapshot_inventory(candidate)
     changed = sorted(
@@ -4183,8 +4221,14 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
                     installed[name] = identity
                 finally:
                     staged.unlink(missing_ok=True)
-            if _snapshot_inventory(destination) != after:
-                raise RuntimeError("Concurrent edit during publication")
+            current = _snapshot_inventory(destination)
+            if current != after:
+                raise RuntimeError(
+                    _with_changes(
+                        "Concurrent edit during publication",
+                        _inventory_changes(after, current),
+                    )
+                )
         except Exception as exc:
             conflicts = []
             for name, identity in reversed(installed.items()):
@@ -4321,8 +4365,14 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 / "output"
                 / ("readiness" if options.operation == "generate" else diagnostic_name),
             )
-            if _snapshot_inventory(candidate) != before:
-                raise RuntimeError("Source changed while creating candidate snapshot")
+            copied = _snapshot_inventory(candidate)
+            if copied != before:
+                raise RuntimeError(
+                    _with_changes(
+                        "Source changed while creating candidate snapshot",
+                        _inventory_changes(before, copied),
+                    )
+                )
             if options.operation == "generate" and options.output_dir.exists():
                 manifest = _read_json(options.output_dir / "manifest.json")
                 if manifest.get("producer") != "kct readiness":
@@ -4331,11 +4381,11 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                     )
                 shutil.rmtree(staged.output_dir)
             result = _run_readiness_candidate(staged, engines)
-            if _snapshot_inventory(original) != before or any(
-                not p.is_file() or _sha256_file(p) != digest
-                for p, digest in external_before.items()
-            ):
-                raise RuntimeError("Release changed while checks were running")
+            changes = _release_changes(original, before, external_before)
+            if changes:
+                raise RuntimeError(
+                    "Release changed while checks were running: " + ", ".join(changes)
+                )
             if options.operation == "generate" and result.exit_code == 0:
                 _publish_candidate(candidate, original, before)
                 return replace(

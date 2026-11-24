@@ -36,6 +36,7 @@ that modifications can be written back to disk, following the same pattern as
 from __future__ import annotations
 
 import copy
+import hashlib
 import math
 import uuid as _uuid
 from dataclasses import dataclass, field, replace
@@ -1633,6 +1634,12 @@ class SilkLegalizeReport:
     unresolved: list[SilkLegalizeUnresolved] = field(default_factory=list)
     dry_run: bool = False
     output_path: str = ""
+    #: sha256 of the bytes the pass itself wrote (empty when it wrote
+    #: nothing).  Consumers that guard on the source (the manufacturing
+    #: export's change guard, #9990) re-bind to this hash -- not to a fresh
+    #: read of the live file -- so an external edit during or after the pass
+    #: still fails their guard.
+    output_sha256: str = ""
     #: Checker rule IDs addressed by the active repair stages. Hole repairs
     #: consider drilled pads only, and each stage targets supported primitives.
     rules_covered: list[str] = field(default_factory=list)
@@ -1930,5 +1937,6 @@ def legalize_silk(
             destination = Path(output) if output else pcb_path
             placer.save(destination)
             report.output_path = str(destination)
+            report.output_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
 
     return report

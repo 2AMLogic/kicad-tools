@@ -280,3 +280,106 @@ no-warning gate with 51 `pour_slot`, 9 `silk_hole_overlap`, 8
 and 1 `sharp_trace_corner` warning. Its two zone-fill clearance findings were
 informational under #8938. On macOS the harness recorded the three physical
 gap errors and 73 warnings per seed.
+
+## Re-measured 2026-11-23 on `be9eb6a12`: the gap errors are back (Issue #9424)
+
+One seed (42) through the gate script on the pinned toolchain
+(`KCT_KICAD_DOCKER=1`, pinned kicad-cli 10.0.6; the gate refuses any other
+kicad-cli release), Linux x86_64, load average 12 to 14 while it ran. The
+revision is `be9eb6a12`, which requires C++ router build 79
+(`_REQUIRED_CPP_BUILD_VERSION` in `router/cpp_backend.py`; the 2026-11-22 runs
+above used build 78). The extension was built in the worktree; the
+`kct build-native --check` output itself was not captured, so build 79 is the
+build the revision requires rather than a recorded check line. Seeds 7 and
+1337 were **not** run in this pass, so the three-seed criterion is still open.
+The seed-42 route log carries no `[deterministic-budget] per-net wall clock
+bound` or `stage deadline fired` line.
+
+| | seed 42 |
+|---|---|
+| `kct route` exit / nets | 0 / 37 of 37 (142 of 142 connections) |
+| kicad-cli DRC err / warn / unconnected, ERC | 0 / 0 / 0, 0 |
+| copper / label LVS | clean / clean |
+| `kct check --skip mask_to_copper` | **5 err** / 65 warn |
+| vias / route wall s | 128 / 545.7 |
+| board sha1 | `59865268d8fc...` |
+
+The board is not the one the 2026-11-22 Linux runs produced (124 vias, sha1
+`64411406e173...`, 0 errors, 77 warnings). The revision window is `7416c1c24`
+(router build 78) to `be9eb6a12` (build 79), including the 78 to 79 build bump.
+It was not bisected, so no individual merge is identified as the cause. The
+route now carries the same family of same-net via/trace slits the macOS
+replays found:
+
+| Net | Layer | Gap (mm) | Required (mm) | Items |
+|---|---|---:|---:|---|
+| DRIVER_SLEEP | B.Cu | 0.0387 | 0.1016 | trace `144.945,104.425 -> 149.625,109.105` beside via `146.83,106.895` |
+| RESET | B.Cu | 0.0772 | 0.1016 | trace `170.49,75.305 -> 174.325,79.14` beside via `170.165,75.63` |
+| SPEED | F.Cu | 0.0467 | 0.1500 | trace `169.96,126.59 -> 169.96,131` against a pad (`fab_band: pad`) |
+| RUN | F.Cu | 0.0858 | 0.1016 | trace `163.99,105.465 -> 164.9,106.375` beside via `164.25,105.205` |
+| RESET | F.Cu | 0.0700 | 0.1016 | traces `159.83,94.415 -> 159.83,95.568` and `160.1,90.313 -> 160.1,95.838` |
+
+Against the macOS build-79 replay at `06b494587`
+([#9844 comment](https://github.com/2AMLogic/kicad-tools/issues/9844#issuecomment-7086213789),
+witnesses SPEED, RUN, VM and RESET), SPEED (0.0467 mm) and RUN (0.0858 mm)
+reproduce the same gap widths. RESET (F.Cu) is the same net, layer and region
+and the same trace-to-trace class, but a different gap: 0.0700 mm here against
+0.02981 mm at (159.943, 94.690) there. DRIVER_SLEEP is not among those
+witnesses, and VM did not recur in this run. Against the earlier build-78
+macOS replay above (SPEED and two IREF gaps) only SPEED recurs. All five are
+`same_net`, so none is a short. The 65 warnings are 49 `pour_slot`, 6
+`redundant_copper_covered`, 4 `redundant_copper_detour` and 6
+`silk_hole_overlap`. The 0-error, 0-warning bar fails, and
+`--skip mask_to_copper` is still in the gate.
+
+This pass changed no router source. The gap errors are the new work. Whether
+they follow the revision window above or the host load (12 to 14 here, 17.8 to
+40.5 on the 2026-11-22 runs) was not tested: no bisect or repeated low-load run
+was done. The 49 structural
+`pour_slot` warnings are the larger remainder under the operator ruling of
+2026-11-23 (keep the strict bar, stay red until source repair lands).
+
+## Recipe copper cleanup does not clear the gate (2026-11-23, issue #9424)
+
+Seed 42 only, pinned kicad-cli via `KCT_KICAD_DOCKER=1`, Linux x86_64, router
+build 79, worktree on `b0222a8d5` (loadavg 6.5 to 8.6 at start and end of the
+route).
+
+**Rerun reproduces.** A second seed-42 run of `board_05_unattended.py` gave
+the same 5 `physical_copper_gap` errors and 65 warnings as the run above
+(route exit 0, 37/37 nets, 128 vias, DRC 0/0/0, ERC 0, LVS clean; route wall
+433.5 s against 545.7 s). The error and warning counts did not move between
+the two runs, and the board sha1 was not compared.
+
+**Experiment: add the recipe's cleanup to the gate.** `redesign/build.py`
+runs `cleanup_copper` (`kct pcb dedupe` plus the DRC-verified `kct pcb prune`,
+issue #8278) after the copper is placed; the unattended gate does not. The
+hypothesis was that the six `redundant_copper_covered` warnings are a missing
+gate step, not a router defect. The same loop was applied to the saved seed-42
+board and the board was regraded with `--grade-only`. It was a throwaway
+experiment; the gate script is unchanged.
+
+| `kct check --skip mask_to_copper` | Before cleanup | After cleanup |
+|---|---:|---:|
+| `physical_copper_gap` errors | 5 | 5 |
+| `pour_slot` | 49 | 50 |
+| `redundant_copper_covered` | 6 | 2 |
+| `redundant_copper_detour` | 4 | 6 |
+| `redundant_copper_staircase` | 0 | 1 |
+| `silk_hole_overlap` | 6 | 6 |
+| total warnings | 65 | 65 |
+
+- The cleanup does **not** reach a fixed point: it raised "did not converge in
+  10 passes" with 12 segments removed and 12 ends snapped in total. After the
+  first passes only net VM is still planned. Each pass adds the stub
+  `(21.0, 8.0) -> (21.755, 7.245)` and the next pass removes the segment it
+  added as a "redundant branch", so the loop churns on a net it has already
+  cleaned. Whether that is a defect in `pcb_prune` or a property of this
+  route was not isolated.
+- Pruning moved warnings between classes (covered down by 4, detour up by 2,
+  staircase up by 1, `pour_slot` up by 1) and left the 5 same-net gaps
+  untouched, so it is not a repair path for the gate.
+
+Not done this pass: seeds 7 and 1337, the full-mask `mask_to_copper` run, and
+any source repair of the five gaps or the pour-slot warnings. The skip and the
+0-error, 0-warning bar stay as they are, per the 2026-11-23 operator ruling.

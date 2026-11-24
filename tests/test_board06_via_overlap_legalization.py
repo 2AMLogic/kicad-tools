@@ -76,7 +76,7 @@ def test_legalizer_repairs_partial_drill_overlaps_without_changing_fixture(tmp_p
     ]
 
 
-def _write_reset_escape(path, *, ring_stub=False, branch=False, tap=False):
+def _write_reset_escape(path, *, ring_stub=False, branch=False, tap_tip=None):
     """The J4.RST approach, with the rest of the signal represented by U1.1."""
     tracks = [
         ("F.Cu", (10, 10), (10.1, 10.1), 0.1016),
@@ -94,13 +94,14 @@ def _write_reset_escape(path, *, ring_stub=False, branch=False, tap=False):
             tracks.append((layer, (10.5, 10.1), (via_x, 10.1), 0.4))
     if branch:
         tracks.append(("F.Cu", (10.4, 10.1), (10.4, 11.5), 0.2))
-    if tap:
-        # The first end touches the original barrel. Its other end also
-        # reaches U1, so pad-to-pad connectivity alone misses a detached tap.
+    if tap_tip is not None:
+        # The tap also reaches U1 through the return tracks. The whole net
+        # stays connected even if the repair detaches the tip from the escape.
+        tap_x = tap_tip[0]
         tracks.extend(
             [
-                ("F.Cu", (10.43, 10.39), (10.43, 12), 0.12),
-                ("F.Cu", (10.43, 12), (15, 12), 0.12),
+                ("F.Cu", tap_tip, (tap_x, 12), 0.12),
+                ("F.Cu", (tap_x, 12), (15, 12), 0.12),
                 ("F.Cu", (15, 12), (15, 10.1), 0.12),
             ]
         )
@@ -169,9 +170,20 @@ def test_reset_escape_respects_a_group_locked_neck(tmp_path, recipe):
     assert path.read_bytes() == original
 
 
-def test_reset_escape_retains_a_via_tap_with_an_alternate_connection(tmp_path, recipe):
+@pytest.mark.parametrize(
+    ("ring_stub", "tap_tip"),
+    [
+        pytest.param(False, (10.43, 10.39), id="via-barrel"),
+        # With the barrel at x=10.675, this tip touches only the 0.4 mm
+        # track's shoulder. Narrowing the neck would separate their copper.
+        pytest.param(True, (10.36, 10.32), id="track-shoulder"),
+    ],
+)
+def test_reset_escape_retains_a_tap_with_an_alternate_connection(
+    tmp_path, recipe, ring_stub, tap_tip
+):
     path = tmp_path / "tapped.kicad_pcb"
-    _write_reset_escape(path, tap=True)
+    _write_reset_escape(path, ring_stub=ring_stub, tap_tip=tap_tip)
     original = path.read_bytes()
     assert recipe._relocate_pad_edge_vias(path) == 0
     assert path.read_bytes() == original
@@ -680,6 +692,8 @@ def test_finalization_restores_copper_and_fills_on_every_failure(
     monkeypatch.setattr(recipe, "_split_offangle_chords", split)
     # Issue #7296: the pad-edge pass parses the board; these fixtures are bytes.
     monkeypatch.setattr(recipe, "_relocate_pad_edge_vias", lambda p: 0)
+    # Issue #9989: the pad-departure pass parses the board too.
+    monkeypatch.setattr(recipe, "_clear_pad_departures", lambda p: 0)
     monkeypatch.setattr(recipe, "_legalize_signal_vias", legalize)
     monkeypatch.setattr(recipe.subprocess, "run", refill)
     with pytest.raises(KeyboardInterrupt if failure == "interrupt" else RuntimeError):
@@ -690,7 +704,10 @@ def test_finalization_restores_copper_and_fills_on_every_failure(
         assert "pour" not in calls  # stale/failed fills cannot pass the physical gate
 
 
-def test_finalization_commits_only_after_successful_physical_gates(tmp_path, recipe, monkeypatch):
+@pytest.mark.parametrize("repair_stage", ["_legalize_signal_vias", "_clear_pad_departures"])
+def test_finalization_commits_only_after_successful_physical_gates(
+    tmp_path, recipe, monkeypatch, repair_stage
+):
     path = tmp_path / "candidate.kicad_pcb"
     path.write_bytes(b"original")
     calls = []
@@ -698,6 +715,8 @@ def test_finalization_commits_only_after_successful_physical_gates(tmp_path, rec
     monkeypatch.setattr(recipe, "_split_offangle_chords", lambda p, before: 0)
     # Issue #7296: the pad-edge pass parses the board; these fixtures are bytes.
     monkeypatch.setattr(recipe, "_relocate_pad_edge_vias", lambda p: 0)
+    # Issue #9989: the pad-departure pass parses the board too.
+    monkeypatch.setattr(recipe, "_clear_pad_departures", lambda p: 0)
 
     def legalize(candidate):
         candidate.write_bytes(b"new copper")
@@ -714,7 +733,8 @@ def test_finalization_commits_only_after_successful_physical_gates(tmp_path, rec
         calls.append("audit")
         return True
 
-    monkeypatch.setattr(recipe, "_legalize_signal_vias", legalize)
+    monkeypatch.setattr(recipe, "_legalize_signal_vias", lambda p: 0)
+    monkeypatch.setattr(recipe, repair_stage, legalize)
     monkeypatch.setattr(recipe.subprocess, "run", refill)
     recipe._finalize_signal_copper(path, ["fill", str(path)], audit)
     assert path.read_bytes() == b"new copper and matching fills"
@@ -744,6 +764,8 @@ def test_finalization_recovers_pour_cut_by_relocated_copper(
     monkeypatch.setattr(recipe, "_split_offangle_chords", lambda p, before: 0)
     # Issue #7296: the pad-edge pass parses the board; these fixtures are bytes.
     monkeypatch.setattr(recipe, "_relocate_pad_edge_vias", lambda p: 0)
+    # Issue #9989: the pad-departure pass parses the board too.
+    monkeypatch.setattr(recipe, "_clear_pad_departures", lambda p: 0)
     monkeypatch.setattr(recipe, "_legalize_signal_vias", lambda p: 1)
     calls = []
 
