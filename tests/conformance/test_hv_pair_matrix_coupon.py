@@ -152,7 +152,9 @@ def test_cpp_reports_the_requirement_actually_installed(case, order: str) -> Non
     ):
         verdicts = {v.nets: v for v in adapter.cpp_validator_verdicts(case, voltages, order=order)}
         _compare_reading(pair in verdicts, True, f"{order} {sorted(pair)} rejected")
-        assert verdicts[pair].required_mm == pytest.approx(required)
+        _compare_reading(
+            verdicts[pair].required_mm, pytest.approx(required), f"{order} {sorted(pair)}"
+        )
 
 
 @pytest.mark.requires_router_cpp
