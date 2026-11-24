@@ -1,12 +1,18 @@
 """Physical controls for the nine-pair fixture's pad-departure repair (issue #9989)."""
 
+import json
 import sys
+from itertools import pairwise
 from math import dist
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 from shapely.geometry import LineString, box
+
+from kicad_tools.router.rules import net_class_map_from_path, net_class_map_to_dict
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.validate.diffpair_skew import derive_pair_skews
 
 BOARD06 = Path(__file__).resolve().parents[1] / "boards/06-diffpair-test"
 
@@ -390,3 +396,217 @@ def test_neck_that_would_reach_the_impedance_exemption_is_refused(tmp_path, depa
     original = board.read_bytes()
     assert departures.clear_pad_departures(board, _rules()) == 0
     assert board.read_bytes() == original
+
+
+# --- MIPI clock pair exits (issue #10083) -------------------------------------------------
+
+_CLOCK_P = [(6.8, 70.0), (6.85, 69.95), (6.85, 69.7), (7.1, 69.45), (7.1, 69.0461)]
+_CLOCK_P_TRUNK = [(7.1, 68.35), (7.85, 67.6), (26.0835, 67.6)]
+
+
+def _clock_pair(path, control="", p_jog=1.0, gap=0.1474):
+    """J4 and U4's clock pads as the seed-42 router leaves them.
+
+    Every exit is a stair of narrow pieces, each pad's trunk is 0.225 mm, and the
+    negative rail reaches B.Cu through a barrel at each end. ``p_jog`` adds
+    positive-rail length through a bump in its trunk: at 1.0 mm the pair models
+    15.3 ps before the repair and 18.3 ps after, against the 20.135 ps budget.
+    """
+    from generate_design import mipi_net_class
+
+    pair = {net: mipi_net_class() for net in ("MIPI_CLK+", "MIPI_CLK-")}
+    path.with_name("net_class_map.json").write_text(json.dumps(net_class_map_to_dict(pair)))
+    path.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "board": {"design_settings": {"rules": {"min_clearance": 0.1016}}},
+                "net_settings": {"classes": [{"name": "Default", "clearance": 0.15}]},
+            }
+        )
+    )
+    parts = [
+        "(kicad_pcb (version 20240108) (generator test)",
+        '(layers (0 "F.Cu" signal) (2 "In1.Cu" power) (4 "In2.Cu" power) (31 "B.Cu" signal))',
+        '(net 1 "MIPI_CLK+") (net 2 "MIPI_CLK-") (net 3 "MIPI_D0+")',
+        '(footprint "Connector_FFC:FFC_4P_0.5mm" (layer "F.Cu") (at 0 0)',
+        '(property "Reference" "J4" (at 0 0) (layer "F.SilkS"))',
+        '(pad "1" smd rect (at 6.8 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 1))',
+        '(pad "2" smd rect (at 7.6 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 2))',
+        '(pad "3" smd rect (at 8.4 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 3)))',
+        '(footprint "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm" (layer "F.Cu") (at 0 0)',
+        '(property "Reference" "U4" (at 0 0) (layer "F.SilkS"))',
+        '(pad "1" smd rect (at 27 68) (size 0.7 0.3) (layers "F.Cu" "F.Mask") (net 1))',
+        '(pad "2" smd rect (at 27 68.8) (size 0.7 0.3) (layers "F.Cu" "F.Mask") (net 2)))',
+    ]
+    count = [0]
+
+    def run(net, layer, points, widths, locked=False):
+        # Split each leg in two so every stair has interior joints.
+        for (a, b), width in zip(pairwise(points), widths, strict=True):
+            mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            for start, end in ((a, mid), (mid, b)):
+                count[0] += 1
+                parts.append(
+                    f"(segment (start {start[0]} {start[1]}) (end {end[0]} {end[1]}) "
+                    f'(width {width}) (layer "{layer}") (net {net})'
+                    + (" (locked yes)" if locked and count[0] == 3 else "")
+                    + f' (uuid "{_uid("clk", count[0])}"))'
+                )
+
+    def via(net, at):
+        parts.append(
+            f'(via (at {at[0]} {at[1]}) (size 0.6) (drill 0.25) (layers "F.Cu" "B.Cu") (net {net}))'
+        )
+
+    run(1, "F.Cu", _CLOCK_P, [0.11, 0.14, 0.17, 0.2], locked=control == "locked")
+    trunk = [_CLOCK_P[-1], *_CLOCK_P_TRUNK]
+    if p_jog:
+        trunk.insert(3, (14.0, 67.6))
+        trunk.insert(4, (14.0, 67.6 + p_jog / 2))
+        trunk.insert(5, (14.6, 67.6 + p_jog / 2))
+        trunk.insert(6, (14.6, 67.6))
+    run(1, "F.Cu", trunk, [0.225] * (len(trunk) - 1))
+    run(1, "F.Cu", [(26.0835, 67.6), (26.6, 67.6), (27.0, 68.0)], [0.15, 0.12])
+    if control == "branch":
+        parts.append(
+            '(segment (start 6.85 69.7) (end 6.4 69.7) (width 0.2) (layer "F.Cu") (net 1)'
+            f' (uuid "{_uid("clk", 900)}"))'
+        )
+    run(2, "F.Cu", [(7.6, 70.0), (7.65, 70.05), (7.65, 70.6), (7.7, 70.65)], [0.11, 0.15, 0.18])
+    via(2, (7.7, 70.65))
+    run(2, "B.Cu", [(7.7, 70.65), (8.3599, 70.65)], [0.19])
+    run(
+        2,
+        "B.Cu",
+        [(8.3599, 70.65), (8.5, 70.65), (10.35, 68.8), (26.0, 68.8)],
+        [0.225] * 3,
+    )
+    run(2, "B.Cu", [(26.0, 68.8), (26.8, 68.8), (27.6, 68.8)], [0.19, 0.15])
+    via(2, (27.6, 68.8))
+    run(2, "F.Cu", [(27.6, 68.8), (27.0, 68.8)], [0.14])
+    if control in ("foreign-gap", "foreign-short"):
+        # A data track beside the moved U4 barrel (0.795 mm out from the pad),
+        # ``gap`` mm from its edge, or overlapping it for the short.
+        edge = 27.795 + 0.3
+        x = edge + 0.05 + (gap if control == "foreign-gap" else -0.025)
+        parts.append(
+            f"(segment (start {x} 68.3) (end {x} 69.3) (width 0.1) "
+            f'(layer "F.Cu") (net 3) (uuid "{_uid("clk", 901)}"))'
+        )
+    path.write_text("\n".join([*parts, ")"]))
+
+
+def _clock_skew(path):
+    pcb = PCB.load(path)
+    classes = net_class_map_from_path(path.with_name("net_class_map.json"), pcb_path=path)
+    (pair,) = (
+        p
+        for p in derive_pair_skews(pcb, classes, num_copper_layers=len(pcb.copper_layers))
+        if p.p_name == "MIPI_CLK+"
+    )
+    return pair.skew_ps, pair.limits.budget.budget_ps
+
+
+def _clock_snapshot(pcb):
+    return (
+        sorted(
+            (s.net_name, s.layer, _round(s.start), _round(s.end), s.width) for s in pcb.segments
+        ),
+        sorted((v.net_name, _round(v.position)) for v in pcb.vias),
+    )
+
+
+def _rail_length(pcb, net):
+    return sum(dist(s.start, s.end) for s in pcb.segments if s.net_name == net)
+
+
+def test_clock_exits_widen_and_move_both_negative_barrels(tmp_path, departures):
+    board = tmp_path / "clock.kicad_pcb"
+    _clock_pair(board)
+    before = PCB.load(board)
+    skew_before, budget = _clock_skew(board)
+    assert departures.clear_pad_departures(board, _rules()) == 4
+    saved = PCB.load(board)
+    # The positive rail keeps its length exactly; the negative rail grows.
+    assert _rail_length(saved, "MIPI_CLK+") == pytest.approx(
+        _rail_length(before, "MIPI_CLK+"), abs=1e-6
+    )
+    assert _rail_length(saved, "MIPI_CLK-") > _rail_length(before, "MIPI_CLK-")
+    assert sorted((v.net_name, _round(v.position), v.size, v.drill) for v in saved.vias) == [
+        ("MIPI_CLK-", (8.1, 70.85), 0.6, 0.25),
+        ("MIPI_CLK-", (27.795, 68.8), 0.6, 0.25),
+    ]
+    # Every pad exit is trunk-width copper: no narrow piece is left beside a pad.
+    for ref, number in (("J4", "1"), ("J4", "2"), ("U4", "1"), ("U4", "2")):
+        center = saved.get_pad_position(ref, number)
+        near = [
+            s
+            for s in saved.segments
+            if s.layer == "F.Cu"
+            and s.net_name.startswith("MIPI_CLK")
+            and min(dist(s.start, center), dist(s.end, center)) < 1.0
+        ]
+        assert near
+        assert all(s.width == pytest.approx(0.225) for s in near)
+    # J4's exits leave the pad straight for 0.625 mm.
+    for net, sign in (("MIPI_CLK+", -1), ("MIPI_CLK-", 1)):
+        center = saved.get_pad_position("J4", "1" if net == "MIPI_CLK+" else "2")
+        assert any(
+            _round(s.start) == _round(center)
+            and _round(s.end) == _round((center[0], center[1] + sign * 0.625))
+            for s in saved.segments
+            if s.net_name == net
+        )
+    skew_after, _ = _clock_skew(board)
+    assert skew_before < skew_after < budget
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    assert not ConnectivityValidator(board).validate().issues
+    once = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == once
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        "foreign-gap",  # the U4 barrel would leave 0.1474 mm against the 0.15 mm minimum
+        "foreign-short",  # an adjacent data net the moved barrel would touch
+        "locked",
+        "branch",
+    ],
+)
+def test_clock_rejections_keep_the_original_geometry(tmp_path, departures, control):
+    board = tmp_path / "clock.kicad_pcb"
+    _clock_pair(board, control)
+    before = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == before
+
+
+def test_clock_gap_control_passes_at_the_project_minimum(tmp_path, departures):
+    """The 0.1474 mm rejection above is the gap, not the foreign track's presence."""
+    board = tmp_path / "clock.kicad_pcb"
+    _clock_pair(board, "foreign-gap", gap=0.151)
+    assert departures.clear_pad_departures(board, _rules()) == 4
+
+
+def test_clock_skew_breach_keeps_the_original_geometry(tmp_path, departures):
+    board = tmp_path / "clock.kicad_pcb"
+    # At 0.6 mm of positive-rail bump the pair models 17.5 ps now; the repair adds
+    # 0.555 mm to the slower negative rail (20.6 ps) and would cross the budget.
+    _clock_pair(board, p_jog=0.6)
+    skew, budget = _clock_skew(board)
+    assert skew < budget
+    before = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == before
+
+
+def test_clock_without_a_timing_policy_is_left_alone(tmp_path, departures):
+    board = tmp_path / "clock.kicad_pcb"
+    _clock_pair(board)
+    board.with_name("net_class_map.json").unlink()
+    before = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == before
