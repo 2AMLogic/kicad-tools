@@ -27,6 +27,124 @@ def test_default_verification_never_exports_or_rewrites_sources(tmp_path):
     assert not (board / "output/readiness.json").exists()
 
 
+@pytest.mark.parametrize(
+    "operation,diagnostic_name",
+    [("--verify", "readiness-verification"), ("--generate", "readiness-attempt")],
+)
+def test_published_fill_snapshots_follow_the_current_run(tmp_path, operation, diagnostic_name):
+    class WritesLocalSettings(FakeEngines):
+        def native_drc(self, pcb, report_path):
+            if pcb.parent.name == "fill-refilled":
+                pcb.with_suffix(".kicad_prl").write_text("native local settings")
+            return super().native_drc(pcb, report_path)
+
+    board = make_board(tmp_path)
+    output = board / "output"
+    diagnostics = output / diagnostic_name
+    notes = diagnostics / "refilled-native" / "operator"
+    notes.mkdir(parents=True)
+    note = notes / "review.txt"
+    note.write_text("keep this note")
+    for revision in ("rev_a", "rev_b"):
+        pcb = output / f"{revision}.kicad_pcb"
+        pcb.write_text("(kicad_pcb original)\n")
+        pcb.with_suffix(".kicad_pro").write_text('{"board": {}}\n')
+        pcb.with_suffix(".kicad_dru").write_text("(version 1)\n")
+
+    for revision, include_rule in (("rev_a", True), ("rev_b", True), ("rev_b", False)):
+        pcb = output / f"{revision}.kicad_pcb"
+        if not include_rule:
+            pcb.with_suffix(".kicad_dru").unlink()
+        engines = WritesLocalSettings(board, native_errors=1).bundle()
+        assert (
+            cmd.main([str(pcb), operation, "--pcb-only", "--mfr", "jlcpcb"], engines=engines) == 1
+        )
+        receipt = json.loads((diagnostics / "fill-consistency.json").read_text())
+        expected = {pcb.name, pcb.with_suffix(".kicad_pro").name}
+        if include_rule:
+            expected.add(pcb.with_suffix(".kicad_dru").name)
+        assert set(receipt["context_sha256"]) == expected
+        for name in ("fill-saved", "fill-refilled"):
+            snapshot = diagnostics / name
+            assert {p.name for p in snapshot.iterdir()} == expected
+        assert note.read_text() == "keep this note"
+
+
+def test_failed_fill_snapshot_install_restores_both_snapshots_and_receipts(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    destination = tmp_path / "diagnostics"
+    for name in ("fill-saved", "fill-refilled"):
+        snapshot = source / name
+        snapshot.mkdir(parents=True)
+        (snapshot / "board").write_text("first")
+    (source / "fill-consistency.json").write_text('{"run": 1}')
+    cmd._publish_diagnostics(source, destination, {"run": 1})
+    before = inventory(destination)
+    for name in ("fill-saved", "fill-refilled"):
+        (source / name / "board").write_text("second")
+    (source / "fill-consistency.json").write_text('{"run": 2}')
+
+    real_replace = cmd.os.replace
+
+    def fail_after_first_install(src, dst):
+        if src.parent.name == "incoming" and dst == destination / "fill-refilled":
+            raise OSError("injected snapshot installation failure")
+        return real_replace(src, dst)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cmd.os, "replace", fail_after_first_install)
+        with pytest.raises(OSError, match="injected snapshot installation failure"):
+            cmd._publish_diagnostics(source, destination, {"run": 2})
+    assert inventory(destination) == before
+
+    # A subsequent refusal before the fill gate has no replayable snapshots.
+    cmd._publish_diagnostics(None, destination, {"run": 3})
+    assert {p.name for p in destination.iterdir()} == {"readiness.json"}
+    assert json.loads((destination / "readiness.json").read_text()) == {"run": 3}
+
+
+def test_busy_diagnostic_publisher_reports_blocked_and_keeps_previous_run(tmp_path, capsys):
+    board = make_board(tmp_path)
+    diagnostics = board / "output/readiness-verification"
+    diagnostics.mkdir(parents=True)
+    previous = diagnostics / "readiness.json"
+    previous.write_text('{"run": 1}')
+    with cmd._publication_lock(diagnostics / ".readiness-publish.lock"):
+        exit_code = cmd.main(
+            [str(board), "--verify", "--mfr", "jlcpcb", "--format", "json"],
+            engines=FakeEngines(board).bundle(),
+        )
+        assert exit_code == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == cmd.STATUS_BLOCKED
+        assert "publisher holds the release lock" in payload["error"]
+        assert "report_path" not in payload
+        assert previous.read_text() == '{"run": 1}'
+
+
+def test_generation_failure_before_fill_keeps_prior_release_evidence_out_of_attempt(
+    tmp_path, monkeypatch
+):
+    board = make_board(tmp_path)
+    release = board / "output/readiness"
+    for name in ("fill-saved", "fill-refilled"):
+        (release / name).mkdir(parents=True)
+        (release / name / "retired.kicad_pcb").write_text("old board")
+    (release / "fill-consistency.json").write_text('{"revision": "retired"}')
+    previous = inventory(release)
+
+    def fail_before_fill(options, engines):
+        raise OSError("failed before the fill gate")
+
+    monkeypatch.setattr(cmd, "_run_readiness_candidate", fail_before_fill)
+    engines = FakeEngines(board).bundle()
+    assert cmd.main([str(board), "--generate", "--mfr", "jlcpcb"], engines=engines) == 1
+    attempt = board / "output/readiness-attempt"
+    assert {p.name for p in attempt.iterdir()} == {"readiness.json"}
+    assert "failed before the fill gate" in (attempt / "readiness.json").read_text()
+    assert inventory(release) == previous
+
+
 def test_failed_generation_preserves_previous_release(tmp_path):
     board = make_board(tmp_path)
     old = board / "output/manufacturing"
