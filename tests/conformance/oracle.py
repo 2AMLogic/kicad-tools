@@ -258,8 +258,8 @@ def run_oracle(
 
     Args:
         pcb_path: Board to measure.  Neither it nor its directory is ever
-            touched: the board and its sibling ``.kicad_pro`` are copied into
-            a scratch subdirectory first, and kicad-cli only ever sees the
+            touched: the board and its same-stem ``.kicad_pro`` and optional
+            ``.kicad_dru`` are copied into a scratch subdirectory first, and kicad-cli only ever sees the
             copy.  Two separate reasons make this mandatory -- ``--refill-zones
             --save-board`` rewrites the board, and *any* kicad-cli run drops a
             ``.kicad_prl`` local-settings file next to the project.  Running
@@ -298,6 +298,17 @@ def run_oracle(
         project = pcb_path.with_suffix(".kicad_pro")
         if project.exists():
             shutil.copyfile(project, measured.with_suffix(".kicad_pro"))
+        # The board's same-stem custom-rule file is part of the measured input:
+        # kicad-cli loads it next to the board, so dropping it silently turns
+        # every rule-driven pair into a scalar one (Issue #10048).  A reused
+        # ``work_dir`` may still hold the previous run's copy, so the staged
+        # file is removed when the source no longer has one.
+        rules_src = pcb_path.with_suffix(".kicad_dru")
+        rules_dst = measured.with_suffix(".kicad_dru")
+        if rules_src.exists():
+            shutil.copyfile(rules_src, rules_dst)
+        else:
+            rules_dst.unlink(missing_ok=True)
 
         if refill:
             fill = run_refill_zones(measured)

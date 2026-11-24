@@ -40,14 +40,21 @@ from tests.conformance.conftest import (
     requires_kicad_cli,
 )
 from tests.conformance.fixtures import (
+    DOMAIN_MATRIX_FIXTURE_BUILDERS,
     GRID_RESOLUTION_MM,
     HOLE_TO_HOLE_MM,
+    HV_COUPON_NAME,
+    HV_COUPON_PAIRS,
+    HV_COUPON_PROJECT_CLEARANCE_MM,
+    HV_COUPON_TRACK_WIDTH_MM,
     NAMED_FIXTURES,
     PROJECT_CLEARANCE_MM,
     TRACE_CLEARANCE_MM,
     VIA_CLEARANCE_MM,
     build_named_fixture,
+    domain_matrix_fixture_path,
     fixture_stem,
+    hv_coupon_rules_text,
     roundrect_corner_support,
 )
 from tests.conformance.generator import pad_shape
@@ -631,3 +638,82 @@ def test_kernel_agrees_with_kicad_cli_on_every_named_fixture(name: str) -> None:
         f"Capture the case and fix `{kernel.name}` through "
         "tests/router/test_clearance_kernel_parity.py, never by relaxing this."
     )
+
+
+# ---------------------------------------------------------------------------
+# Domain-matrix coupon (Issue #10048) -- kicad-cli's verdict
+# ---------------------------------------------------------------------------
+#
+# The coupon is rule-driven, so it is not in ``NAMED_FIXTURES`` (see the
+# Fixture 5 comment in ``fixtures.py``).  Its consumer measurements live in
+# ``test_hv_pair_matrix_coupon.py``; this section holds only ground truth.
+
+
+def _coupon_case():
+    return DOMAIN_MATRIX_FIXTURE_BUILDERS[HV_COUPON_NAME]()
+
+
+def _coupon_pair_nets(pair) -> frozenset[str]:
+    return frozenset({pair.net_a, pair.net_b})
+
+
+def test_hv_coupon_files_are_committed_and_current() -> None:
+    """Board, project and rule file are committed, and match the generator."""
+    board = domain_matrix_fixture_path(HV_COUPON_NAME)
+    assert board.exists()
+    assert board.with_suffix(".kicad_pro").exists()
+    rules = board.with_suffix(".kicad_dru")
+    assert rules.exists(), "the authored pair rules are part of the fixture"
+    assert rules.read_text() == hv_coupon_rules_text(), (
+        "the committed .kicad_dru drifted from the generator -- regenerate with "
+        "`uv run python -m tests.conformance.fixtures --write`"
+    )
+
+
+def test_hv_coupon_carries_four_authored_rules_and_the_pinned_floor() -> None:
+    case = _coupon_case()
+    assert case.rules.project_clearance == HV_COUPON_PROJECT_CLEARANCE_MM == 0.20
+    assert case.rules.trace_clearance == HV_COUPON_PROJECT_CLEARANCE_MM
+    assert len(HV_COUPON_PAIRS) == 8
+    assert len({pair.rule_name for pair in HV_COUPON_PAIRS}) == 4
+    assert hv_coupon_rules_text().count("(rule ") == 4
+    assert [pair.required_mm for pair in HV_COUPON_PAIRS] == [
+        1.6, 1.6, 3.2, 3.2, 0.2, 0.2, 0.2, 0.2,
+    ]  # fmt: skip
+    # Four pairs fail their requirement and four are clear controls.
+    assert [pair.label for pair in HV_COUPON_PAIRS if pair.violates] == ["P1", "P3", "P5", "P7"]
+    assert case.zone is None, "no pour: fill state cannot change the verdict by construction"
+
+
+def test_hv_coupon_track_gaps_are_realised_by_the_board_geometry() -> None:
+    """Edge gap = centreline distance - track width, for every pair."""
+    case = _coupon_case()
+    by_net = {segment.net: segment for segment in case.segments}
+    for pair in HV_COUPON_PAIRS:
+        a, b = by_net[pair.net_a], by_net[pair.net_b]
+        assert a.width == b.width == HV_COUPON_TRACK_WIDTH_MM
+        assert a.layer == b.layer == "F.Cu"
+        assert a.start[0] == b.start[0] and a.end[0] == b.end[0]
+        edge_gap = abs(b.start[1] - a.start[1]) - a.width
+        assert edge_gap == pytest.approx(pair.gap_mm, abs=1e-9), pair.label
+
+
+@requires_kicad_cli
+@pytest.mark.parametrize("refill", _FILL_STATES, ids=["asis", "refilled"])
+def test_hv_coupon_kicad_cli_flags_exactly_the_four_failing_pairs(refill: bool) -> None:
+    """Pinned-toolchain truth for all eight pairs, controls included, per fill mode."""
+    result = run_oracle(domain_matrix_fixture_path(HV_COUPON_NAME), refill=refill)
+    assert not result.dropped, f"unmapped clearance rows: {result.dropped}"
+
+    flagged = {v.nets: v for v in result.of_kind("clearance")}
+    expected = {_coupon_pair_nets(p) for p in HV_COUPON_PAIRS if p.violates}
+    controls = {_coupon_pair_nets(p) for p in HV_COUPON_PAIRS if not p.violates}
+    assert set(flagged) == expected, result.describe()
+    assert not (set(flagged) & controls), "a clear control was flagged"
+
+    for pair in HV_COUPON_PAIRS:
+        if not pair.violates:
+            continue
+        verdict = flagged[_coupon_pair_nets(pair)]
+        assert verdict.required_mm == pytest.approx(pair.required_mm, abs=1e-6), pair.label
+        assert verdict.gap_mm == pytest.approx(pair.gap_mm, abs=0.001), pair.label
