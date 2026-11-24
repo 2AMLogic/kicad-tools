@@ -40,6 +40,7 @@ from .geometry import (
     total_length,
 )
 from .kelvin_gate import kelvin_branch_gate
+from .pad_slits import pad_gap_check
 from .pcb import optimize_pcb
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
@@ -484,6 +485,7 @@ class TraceOptimizer:
         """
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
+        self._pad_gap_check = pad_gap_check(getattr(collision_checker, "grid", None))
         self.net_anchors = net_anchors
         # Endpoints of the *other* chains in the current optimize_segments call
         # (same net and layer). A branch can end on a chain's body (a T-join
@@ -664,6 +666,10 @@ class TraceOptimizer:
                         self._keeps_anchors(result, rewritten)
                         and not self._lays_copper_twice(result, rewritten)
                         and self._keeps_pad_escapes(result, rewritten)
+                        and (
+                            self._pad_gap_check is None
+                            or self._pad_gap_check(result, rewritten, self._other_copper)
+                        )
                     ):
                         result = rewritten
 
@@ -835,7 +841,13 @@ class TraceOptimizer:
         Returns:
             List with staircase patterns compressed.
         """
-        return compress_staircase(segments, self.config, self._path_is_clear, self._other_copper)
+        return compress_staircase(
+            segments,
+            self.config,
+            self._path_is_clear,
+            self._other_copper,
+            replacement_is_clear=self._pad_gap_check,
+        )
 
     def convert_corners_45(self, segments: list[Segment]) -> list[Segment]:
         """Convert 90-degree corners to 45-degree chamfers.

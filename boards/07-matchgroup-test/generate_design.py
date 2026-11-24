@@ -54,6 +54,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
@@ -64,7 +65,7 @@ from kicad_tools.pcb.center_sheet import (
     edge_cuts_bbox,
     translate_pcb_text,
 )
-from kicad_tools.recipes.gate import evaluate_pipeline_gate
+from kicad_tools.recipes.gate import PipelineGateResult, evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
 from kicad_tools.router.rules import (
     NET_CLASS_POWER,
@@ -1952,12 +1953,35 @@ def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
     return [t.name for t in report.targets if t.achieved]
 
 
+def _route_completed(result: subprocess.CompletedProcess) -> bool:
+    """Accept full connectivity when DRC is the only check the recipe must repeat."""
+    if result.returncode not in (0, 3):
+        return False
+    try:
+        summary = json.loads(result.stdout)["summary"]
+        complete = (
+            summary["nets_requested"] > 0
+            and summary["nets_routed"] == summary["nets_requested"]
+            and summary["nets_partial"] == summary["nets_unrouted"] == 0
+            and summary["has_disconnected_islands"] is False
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return complete and (
+        (result.returncode == 0 and summary.get("verdict") == "success")
+        or (
+            result.returncode == 3
+            and summary.get("verdict") == "failed"
+            and summary.get("failure_reason") == "post_route_drc"
+        )
+    )
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB by invoking ``kct route`` with the proven flag recipe.
 
-    Returns True if ``kct route`` reports full success (return code 0);
-    False if it produced a partial routing (still acceptable -- the
-    output file is written either way and downstream DRC continues).
+    Returns whether the router connected every signal with no unresolved non-DRC
+    failure. The complete recipe checks DRC again on the finished, tuned copper.
 
     Issue #2991: Previously this function called ``router.route_all()``
     directly through the in-process API, configured with a custom
@@ -2438,6 +2462,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         str(output_path),
         "--manufacturer",
         "jlcpcb",
+        "--format",
+        "json",
         "--route-engine",
         ROUTE_ENGINE,
         "--strategy",
@@ -2591,27 +2617,24 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Command: PYTHONHASHSEED={env['PYTHONHASHSEED']} {' '.join(cmd)}")
     print("\n3. Routing...")
 
-    result = subprocess.run(cmd, capture_output=False, text=True, env=env)
-
-    # ``kct route`` returns 0 on full success and a non-zero code on
-    # partial / failed routing.  Either way it writes a routed PCB to
-    # ``output_path`` (the partial-results file is at
-    # ``<stem>_partial.kicad_pcb``).  As long as the output file
-    # exists, downstream steps (zone generation + DRC) can run; report
-    # success/partial purely informationally.
-    success = result.returncode == 0
-
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, env=env)
     if not output_path.exists():
         print(f"\n   ERROR: ``kct route`` did not produce {output_path}", file=sys.stderr)
         return False
 
-    if success:
-        print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
+    success = _route_completed(result)
+    if success and result.returncode == 3:
+        print("   All signal nets connected. Post-route DRC will be checked after final tuning.")
+    elif success:
+        print("   All signal nets connected.")
     else:
-        print(
-            f"\n   PARTIAL: ``kct route`` exited with code {result.returncode} "
-            "(partial routing; downstream zone + DRC will continue)"
-        )
+        print(f"   Signal routing incomplete or unverified (router exit {result.returncode}).")
+
+    from ddr_pad_escapes import clear_fixture_pad_escapes
+
+    fixed = clear_fixture_pad_escapes(output_path)
+    if fixed:
+        print(f"   Adjusted {fixed} pad exits before generating zones.")
 
     # Phase 3H (#2723) integration point.  When --length-match-groups
     # lands, the CLI's own routing pipeline will apply
@@ -2896,7 +2919,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return success
 
 
-def run_drc(pcb_path: Path) -> bool:
+def run_drc(pcb_path: Path, *, drc_only: bool = False) -> bool:
     """Run kct check --mfr jlcpcb on the routed PCB."""
     print("\n" + "=" * 60)
     print("Running DRC (kct check --mfr jlcpcb)...")
@@ -2913,6 +2936,8 @@ def run_drc(pcb_path: Path) -> bool:
         "jlcpcb",
         "--errors-only",
     ]
+    if drc_only:
+        cmd.append("--drc-only")
     if sidecar.exists():
         cmd.extend(["--net-class-map", str(sidecar)])
 
@@ -2927,6 +2952,28 @@ def run_drc(pcb_path: Path) -> bool:
     except Exception as e:
         print(f"\n   Error running DRC: {e}")
         return False
+
+
+def check_finished_board(
+    schematic: Path, routed: Path, route_complete: bool, *, bundle_written: bool
+) -> PipelineGateResult:
+    """Check the routed board under its own rules, including its archive after export."""
+    copper_clean, _ = write_lvs_report(
+        schematic, routed, routed.parent, require_clean=False, run_copper=True, run_label=True
+    )
+    checked = run_drc(routed, drc_only=not bundle_written)
+    return evaluate_pipeline_gate(
+        routed,
+        route_ok=route_complete,
+        lvs_ok=copper_clean,
+        export_ok=checked if bundle_written else None,
+        supplemental_drc_ok=checked,
+        supplemental_reason=(
+            "completed bundle failed the DRC, ERC, LVS or manifest check"
+            if bundle_written
+            else "kct check found errors on the final routed copper"
+        ),
+    )
 
 
 def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
@@ -2979,7 +3026,7 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
             print(f"\n   Error: {result.stderr}")
         return False
     manifest = mfg_dir / "manifest.json"
-    if manifest.exists():
+    if manifest.is_file():
         print(f"\n   Manifest: {manifest}")
         return True
     print("\n   WARNING: manifest.json not produced")
@@ -3136,89 +3183,24 @@ def main() -> int:
                 write_placement_delta_report(output_dir, delta_path, delta_report)
             routed_path = output_dir / "matchgroup_test_routed.kicad_pcb"
             route_success = route_pcb(pcb_path, routed_path)
-            drc_ok = run_drc(routed_path)
 
-            # LVS (#3779, wired schematic #4012).  The fixture schematic is
-            # fully wired (generate_schematic.py emits a wire stub + global
-            # label for all 244 pins, PIN_NETS mirroring generate_pcb.py
-            # pad-for-pad), so the copper comparator binds 244/244 pads and
-            # carries real evidence.  Since #7557 (U4's TMDS balls on its
-            # J2-facing column) every signal net routes on seed 42, so the
-            # honest verdict is ``clean=true``; before it, TMDS_D0_N was the
-            # one expected open.  ``require_clean=False`` keeps a dirty
-            # verdict advisory HERE so the recipe still reaches the
-            # manufacturing-bundle export and writes ``lvs.json`` for triage;
-            # the verdict gates through ``lvs_ok`` below and the
-            # board-07-end-to-end CI job (``check_copper_lvs.py`` with no
-            # known opens + ``check_board_00_e2e.py --lvs-only``).  This step
-            # only runs in ``--step all`` (the ``--step route`` CI branch has
-            # no schematic).
-            copper_clean, _label_clean = write_lvs_report(
-                sch_path,
-                routed_path,
-                output_dir,
-                require_clean=False,
-                run_copper=True,
-                run_label=True,
-            )
-            if not copper_clean:
-                print(
-                    "[lvs] copper-LVS is dirty -- a REGRESSION: every signal "
-                    "net routes on seed 42 since #7557.  lvs.json carries the "
-                    "clean=false verdict; see the summary above for the "
-                    "opens/shorts this run produced."
-                )
-
-            # Export manufacturing bundle (#3147) so ``kct fleet status``
-            # reports ``ship_ready=true`` (the bundle's manifest mtime must
-            # be newer than the freshly routed PCB).  Run unconditionally:
-            # routing is allowed to be PARTIAL on this board, and a current
-            # bundle still clears the ``"artifacts stale"`` blocker.
-            mfg_ok = export_manufacturing_bundle(routed_path, output_dir)
-
-            # Issue #3912: derive BOTH the SUMMARY and the exit code from ONE
-            # shared PipelineGateResult so they can never diverge.  The
-            # previous ``return 0 if route_success else 1`` gated ONLY on
-            # route completion while the SUMMARY printed an independent
-            # ``DRC:`` line -- exactly the exit-code-vs-SUMMARY drift this
-            # issue eliminates.
-            #
-            # The gate reflects the board's state HONESTLY rather than
-            # papering over it:
-            #   * ``route_ok=route_success`` -- ``kct route`` exits non-zero
-            #     unless the copper is DRC-clean: since #7557 all 31 signal
-            #     nets connect on seed 42, but the skew/impedance residuals
-            #     (#7550/#7349/#7619) make it exit 3 ("connected but DRC
-            #     dirty"), so the ``Routing:`` line reads PARTIAL.
-            #     ``route_allowance`` is left at 0 ON PURPOSE: inflating it
-            #     would flip the line to a FALSE "SUCCESS" (route_status()
-            #     reads SUCCESS whenever route_ok is True).
-            #   * ``lvs_ok=copper_clean`` -- since #7557 the copper-LVS verdict
-            #     is clean, so it is a gating leg: a new open or short fails it.
-            #   * ``supplemental_drc_ok=drc_ok`` -- ``run_drc``
-            #     (``kct check --mfr jlcpcb``) is the only engine that sees
-            #     the match-group / diffpair length-skew rule families
-            #     kicad-cli cannot express, so its verdict tightens the DRC
-            #     leg (the authoritative geometric ``kicad-cli --refill-zones``
-            #     leg runs inside the gate).
-            # Net effect: the board honestly ends FAIL (route exit 3 + real
-            # kct-check DRC residuals) and exits non-zero -- NOT a false exit 0
-            # for a board that is not DRC-clean.  The board-07-end-to-end CI
-            # job tolerates this non-zero recipe exit (`|| true`) and gates on
-            # the LVS-clean + allowlist asserters instead.
-            gate = evaluate_pipeline_gate(
-                routed_path,
-                route_ok=route_success,
-                route_allowance=0,
-                lvs_ok=copper_clean,
-                export_ok=mfg_ok,
-                supplemental_drc_ok=drc_ok,
-                supplemental_reason=(
-                    "kct check --mfr jlcpcb reported error-level DRC findings "
-                    "(match-group / diffpair skew + allowlisted residuals; see "
-                    "DRC output above)"
-                ),
-            )
+            gate = check_finished_board(sch_path, routed_path, route_success, bundle_written=False)
+            if gate.passed:
+                if export_manufacturing_bundle(routed_path, output_dir):
+                    # Export can change silk, zone fills or the project rules.
+                    # Verify the exact board and archive the exporter left on disk.
+                    gate = check_finished_board(
+                        sch_path, routed_path, route_success, bundle_written=True
+                    )
+                else:
+                    gate = replace(
+                        gate,
+                        export_ok=False,
+                        reasons=[
+                            *gate.reasons,
+                            "manufacturing export failed or did not produce its manifest",
+                        ],
+                    )
 
             print("\n" + "=" * 60)
             print("SUMMARY")

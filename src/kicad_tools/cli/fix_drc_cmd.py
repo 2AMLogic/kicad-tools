@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.core.atomic_write import atomic_write_text
+from kicad_tools.drc.mask_trace_angles import MaskTraceAngleError
 from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
 from kicad_tools.drc.repair_copper_gap import (
     CopperGapRepairer,
@@ -1430,7 +1431,11 @@ def _mask_action_touches(action: MaskRepairAction | MaskNudgeAction, touched: se
     same-net end it dragged, so a new finding on a dragged track or against
     a second opening reverts the whole grouped edit.
     """
-    if action.uuid in touched or action.pad_uuid in touched:
+    if (
+        action.uuid in touched
+        or action.pad_uuid in touched
+        or any(bend.added_uuid in touched for bend in action.bends)
+    ):
         return True
     for opening in getattr(action, "openings", ()):
         if opening in touched:
@@ -1503,10 +1508,16 @@ def _mask_native_state(board: Path) -> tuple[Counter, int]:
     report = run_geometric_drc(board, refill_zones=False, all_track_errors=True)
     if not report.ran:
         raise RuntimeError(f"could not check saved copper: {report.note}")
-    failures = Counter(
-        (v.type_str, v.rule, tuple(sorted(v.item_uuids if any(v.item_uuids) else v.items)))
-        for v in report.error_violations
-    )
+    failures: Counter = Counter()
+    for v in report.error_violations:
+        items: tuple[str, ...] | tuple[tuple[float, float, str], ...]
+        if v.type_str == "invalid_outline" and v.items == ["PCB"]:
+            # KiCad assigns the whole-board marker a fresh UUID on each read.
+            # Compare the reported outline location across the two DRC runs.
+            items = tuple((loc.x_mm, loc.y_mm, loc.layer) for loc in v.locations)
+        else:
+            items = tuple(sorted(v.item_uuids if any(v.item_uuids) else v.items))
+        failures[v.type_str, v.rule, items] += 1
     return failures, report.unconnected_count
 
 
@@ -1549,6 +1560,12 @@ def _run_mask_pass(
         if args.dry_run or not result.actions:
             return result
         with _with_project_rules(load_path, pcb_path, private=True) as candidate:
+            before = MaskCopperRepairer(candidate)
+            repairer.align_moved_tracks(
+                before, result, design_rules.min_clearance_mm if design_rules is not None else None
+            )
+            if not result.actions:
+                return result
             has_zones = any(zone.find("keepout") is None for zone in repairer.doc.find_all("zone"))
             edited_nets = {act.net_name for act in result.actions}
             pad_islands = (
@@ -1564,8 +1581,11 @@ def _run_mask_pass(
             # A pull-in extends track copper. Enforce the project's native
             # electrical and physical rules even when connectivity checks are disabled.
             has_pull_in = any(action.action == "pull_in" for action in result.actions)
+            has_bends = any(action.bends for action in result.actions)
             before_native = (
-                _mask_native_state(candidate) if has_zones or check_nudges or has_pull_in else None
+                _mask_native_state(candidate)
+                if has_zones or check_nudges or has_pull_in or has_bends
+                else None
             )
             # On a partially connected board one new contact can hide a split,
             # even on the same net. Keep KiCad's actual pad groups for that case.
@@ -1576,7 +1596,21 @@ def _run_mask_pass(
             )
             proposed = len(result.actions)
             repairer.save(candidate)
-            _verify_mask_actions(result, report, args, pcb_path, candidate, pad_islands)
+            _verify_mask_actions(
+                result,
+                report,
+                args,
+                pcb_path,
+                candidate,
+                pad_islands,
+                lost_contacts=repairer.disconnected_bends(before, result.actions),
+            )
+            if has_bends and result.repaired < proposed:
+                lost = MaskCopperRepairer(candidate).disconnected_bends(before, result.actions)
+                if lost:
+                    raise _MaskPadConnectionLost(
+                        f"saved repair disconnected copper on {', '.join(sorted(lost))}"
+                    )
             if result.actions and has_zones:
                 from kicad_tools.cli.runner import run_refill_zones
 
@@ -1638,16 +1672,23 @@ def _run_mask_pass(
                 ):
                     raise RuntimeError("final saved mask repair introduced clearance errors")
             if result.actions:
+                skewed = (
+                    MaskCopperRepairer(candidate).off_angle_tracks() - before.off_angle_tracks()
+                )
+                if skewed:
+                    raise MaskTraceAngleError(
+                        f"saved repair introduced off-angle tracks {', '.join(sorted(skewed))}"
+                    )
                 atomic_write_text(output_path, candidate.read_text())
             elif output_path != load_path and not output_path.exists():
                 atomic_write_text(output_path, load_path.read_text())
     except Exception as e:
         print(f"Error during mask-to-copper repair: {e}", file=sys.stderr)
-        reason = (
-            "pad_connection_lost"
-            if isinstance(e, _MaskPadConnectionLost)
-            else "recheck_unavailable"
-        )
+        reason = "recheck_unavailable"
+        if isinstance(e, _MaskPadConnectionLost):
+            reason = "pad_connection_lost"
+        elif isinstance(e, MaskTraceAngleError):
+            reason = "would_bend_trace"
         # Actions the selective rollback already disposed of keep their
         # specific reason; the fallback must not report an action under a
         # second reason (issue #9958).
@@ -1672,6 +1713,7 @@ _VERIFY_DISPOSITIONS = frozenset(
         "finding_not_cleared",
         "new_mask_finding",
         "new_drc_error",
+        "would_bend_trace",
     }
 )
 
@@ -1683,6 +1725,8 @@ def _verify_mask_actions(
     pcb_path: Path,
     candidate: Path,
     pad_islands: dict[str, list[frozenset]],
+    *,
+    lost_contacts: set[str] | None = None,
 ) -> None:
     """Undo a grouped move if its saved geometry fails the mask, clearance or pad checks."""
     after = _run_python_drc(
@@ -1716,6 +1760,7 @@ def _verify_mask_actions(
     )
 
     disconnected = _split_mask_nets(pad_islands, candidate) if pad_islands else set()
+    disconnected.update(lost_contacts or ())
     keep = []
     revert = []
     for act in result.actions:
@@ -2358,7 +2403,7 @@ def _print_json(
                     "from": [a.old_x, a.old_y],
                     "to": [a.new_x, a.new_y],
                     "displacement_mm": round(a.displacement_mm, 4),
-                    "connections": len(getattr(a, "added_segments", ())),
+                    "connections": len(getattr(a, "added_segments", ())) + len(a.bends),
                     "reverted": (bool(rolled_back) or (a.uuid in reverted_uuids)),
                 }
                 for a in mask_result.actions
