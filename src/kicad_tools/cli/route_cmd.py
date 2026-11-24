@@ -27823,21 +27823,20 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Issue #6239: the single final verdict, mirroring the banner chain below
     # (and the exit code), so ``--format json`` reports what the text path does.
+    other_checks_passed = (
+        layer_intent_new_count == 0
+        and pairwise_violation_count == 0
+        and short_violation_count == 0
+        and not input_clearance_errors
+        and not stranded_pour_blocking
+        and not getattr(args, "_placement_fill_error", None)
+        and not getattr(args, "_placement_repair_error", None)
+        and not _placement_blocked(args)
+        and not output_verification_regressed
+    )
     _final_verdict = (
         "success"
-        if (
-            layer_intent_new_count == 0
-            and not (pairwise_violation_count > 0 and drc_passed)
-            and short_violation_count == 0
-            and not input_clearance_errors
-            and not stranded_pour_blocking
-            and not getattr(args, "_placement_fill_error", None)
-            and not getattr(args, "_placement_repair_error", None)
-            and not _placement_blocked(args)
-            and not output_verification_regressed
-            and drc_passed
-            and (all_nets_routed or meets_threshold)
-        )
+        if other_checks_passed and drc_passed and (all_nets_routed or meets_threshold)
         else "failed"
     )
     # Issue #6273: a would-be success whose DRC / stranded-pour check was
@@ -28019,6 +28018,18 @@ def _run_main_impl(args, parser, argv) -> int:
             verdict=_final_verdict,
             grid_selection=getattr(args, "_grid_selection", None),
             silk_fix=args._route_silk_fix,
+            # Consumers that finish the copper can recheck DRC on the final board.
+            # Every other exit-3 cause keeps its original failure verdict.
+            post_route_drc_only=(
+                other_checks_passed
+                and all_nets_routed
+                and not output_verification.has_disconnected
+                and drc_errors > 0
+                and not _unverified
+                and seg_seg_violation_count == 0
+                and getattr(args, "_auto_fix_status", None) != "skipped_deadline"
+                and fix_result != 3
+            ),
         )
 
     # Save partial results on clean partial exit (not just SIGINT)
