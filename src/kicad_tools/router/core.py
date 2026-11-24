@@ -18746,10 +18746,11 @@ class Autorouter:
                     partner == name,
                     zone_layers,
                 )
-                required = max(clearance.required_mm, authored)
+                # The search can place a via beside a foreign trace or via.
+                required = max(clearance.required_mm, authored, self.rules.via_clearance)
                 for s in route.segments:
                     start, end = sorted(((s.x1, s.y1), (s.x2, s.y2)))
-                    item = ("segment", s.layer, start, end, s.width, clearance_key)
+                    item = ("segment", s.layer, start, end, s.width, clearance_key, required)
                     entries.append(
                         (item, s, required, window is None or _segment_meets_window(window, s))
                     )
@@ -18762,6 +18763,7 @@ class Autorouter:
                         v.drill,
                         v.drilled_layers,
                         clearance_key,
+                        required,
                     )
                     entries.append(
                         (via_item, v, required, window is None or _via_meets_window(window, v))
@@ -19019,10 +19021,14 @@ class Autorouter:
                 # (not just its center) can lie in the envelope, so a thin
                 # segment or via between sample centers is still retained.
                 if isinstance(geometry, Via):
+                    # A drill across the coarse boundary can still block a
+                    # layer change inside it. Keep it in the witness even if
+                    # its copper clears every reachable cell.
+                    drill_distance = (geometry.drill + rules.via_drill) / 2 + rules.min_hole_to_hole
                     raster = disc_mask(
                         geometry.x,
                         geometry.y,
-                        geometry.diameter / 2 + float(clearance_mm) + half_diagonal,
+                        max(geometry.diameter / 2 + clearance_mm, drill_distance) + half_diagonal,
                     )
                 else:
                     raster = segment_mask(
@@ -19060,10 +19066,12 @@ class Autorouter:
         already-connected pads.  The deterministic arm (``cap is None``) and
         untracked nets keep the pre-existing behaviour untouched.
         """
+        recording = False
         if cap is not None and net in guard.entry_signature:
             guard.entry_signature[net] = self._relief_witness_signature(
                 net, self._build_net_routes_map(), search_geometry=True
             )
+            recording = self._begin_search_dependency(net)
         used, retry_fallback = guard.search_budget(net, iteration, cap)
         if retry_fallback and isinstance(self.router, CppPathfinder):
             self.router.reset_fallback_for_net(net)
@@ -19074,7 +19082,14 @@ class Autorouter:
                 flush=True,
             )
         t0 = time.time()
-        routes = self._route_net_negotiated(net, present_factor, per_net_timeout=used)
+        try:
+            routes = self._route_net_negotiated(net, present_factor, per_net_timeout=used)
+        finally:
+            dependency = (
+                self.router.collect_search_dependency()
+                if recording and isinstance(self.router, CppPathfinder)
+                else None
+            )
         # Issue #8644: a deadline stop with zero A* expansions ended in setup.
         # The flags live on the Python ``Router``; ``CppPathfinder`` owns none
         # and runs mask setup in its ``_py_router`` fallback, so read from there.
@@ -19127,9 +19142,35 @@ class Autorouter:
                 # iteration must not re-land the superseded entry copper.
                 self._known_failure_entry[net] = (new_pairs, list(routes))
         guard.note_search(
-            net, iteration, used, time.time() - t0, progress, setup_stopped=setup_stopped
+            net,
+            iteration,
+            used,
+            time.time() - t0,
+            progress,
+            setup_stopped=setup_stopped,
+            dependency=dependency,
         )
         return routes
+
+    def _begin_search_dependency(self, net: int) -> bool:
+        """Start recording which grid cells ``net``'s searches read (#8486).
+
+        The native backend only; ``False`` for the Python router or a stale
+        extension, which keep the witness-only back-off rule.  The margin is
+        the half-extent of the widest copper the net's search places.
+        """
+        router = self.router
+        if not isinstance(router, CppPathfinder):
+            return False
+        extent = max(self.rules.trace_width, self.rules.via_diameter)
+        net_class = self.net_class_map.get(self.net_names.get(net, ""))
+        if net_class is not None:
+            extent = max(
+                extent,
+                float(getattr(net_class, "trace_width", 0.0) or 0.0),
+                float(getattr(net_class, "via_size", 0.0) or 0.0),
+            )
+        return router.begin_search_dependency(extent / 2.0)
 
     def _entry_copper_still_legal(self, old_routes: list[Route]) -> bool:
         """True iff the entry copper clears every other net on the live board.

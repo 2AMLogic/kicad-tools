@@ -2,6 +2,26 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-24
+
+- **PR #5725**: test(mfr): gate native SMD Pad Clearance on a measured availability probe
+- **PR #5723**: test(drc): match native DRC findings on the bare rule name
+- **PR #5722**: test: converge kicad-cli discovery on find_kicad_cli()
+- **Issue #5721** (closed): Native SMD Pad Clearance rule does not fire on kicad-cli 10.0.1 (undeclared minimum version)
+- **PR #5719**: perf(router): memoise the coupled diff-pair halo via refinement on the pure-Python fallback
+- **PR #5718**: fix(validate): stop classifying KiCad's instance-lock warning as a failed export
+- **PR #5717**: test(perf): replace the dormant-partner timing gate with a structural assertion
+- **PR #5716**: test(mfr): scope ampacity DRU fallback to what it actually guards
+- **PR #5715**: fix(router): apply the diff-pair partner clearance waiver in the coupled halo refinement (#5711), and rerun the #5410 DQ3 prefix on current main
+- **Issue #5714** (closed): test: converge kicad-cli discovery on find_kicad_cli() — 14 shutil.which sites across 12 modules
+- **Issue #5713** (closed): test(mfr): SMD Pad Clearance rule silently absent on KiCad 10.0.1 — plus a negative assertion that passes vacuously when it is
+- **Issue #5711** (closed): Coupled halo refinement: C++ arm omits the diff-pair partner-clearance waiver the Python arm applies (212-cell over-block)
+- **Issue #5707** (closed): Flaky CI: test_native_advanced_layer_matches_independent_gerber fails on kicad-cli 'Invalid lock file' (native export returned 0)
+- **Issue #5703** (closed): Native DRC assertions match on a KiCad-version-dependent description prefix (rule '...')
+- **Issue #5702** (closed): test_mfr: ampacity DRU fallback pins a stale rule-name set, fails whenever kicad-cli is off PATH
+- **PR #5698**: perf(router): read collision-grid planes directly in the optimizer's obstacle scan
+- **Issue #5696** (closed): router: memoise the coupled diff-pair halo refinement on the pure-Python fallback
+
 ### 2026-09-23
 
 - **PR #5710**: feat(drc): emit SMD pad clearance floor natively, scoped by reference
