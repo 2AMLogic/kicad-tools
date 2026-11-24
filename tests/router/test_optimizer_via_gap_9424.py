@@ -243,3 +243,149 @@ def test_via_exit_at_either_end_uses_only_its_drilled_layers():
     via.span_type = "buried"
     assert list(via_exit_doglegs(forward, grid)) == []
     assert list(via_exit_doglegs(reverse, grid)) == []
+
+
+@pytest.mark.parametrize("nearby", [True, False], ids=["exposed-slit", "clear-diagonal"])
+def test_reset_branch_enters_via_from_its_existing_trunk(nearby):
+    """Board 05's RESET connection before optimization, with its adjacent branches."""
+    router = Autorouter(
+        24,
+        26,
+        origin_x=150,
+        origin_y=73,
+        rules=DesignRules(grid_resolution=0.1, same_net_trace_gap_band_edge_mm=0.1016),
+        layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+        force_python=True,
+        physics_enabled=False,
+    )
+    start, barrel, end = (160.1, 95.8375), (159.765, 94.35), (170.49, 75.305)
+
+    def legs(points, layer=Layer.F_CU):
+        return [Segment(*a, *b, 0.2, layer, 20, "RESET") for a, b in pairwise(points)]
+
+    for ref, (x, y), layer in (("A", start, Layer.F_CU), ("B", end, Layer.B_CU)):
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": y,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "shape": "rect",
+                    "net": 20,
+                    "net_name": "RESET",
+                    "layer": layer,
+                }
+            ],
+        )
+    router.add_component(
+        "U1",
+        [
+            {
+                "number": "30",
+                "x": 159.3,
+                "y": 95.8375,
+                "width": 0.55,
+                "height": 1.475,
+                "shape": "roundrect",
+                "net": 21,
+                "net_name": "STATUS_LED",
+                "layer": Layer.F_CU,
+            }
+        ],
+    )
+    via = Via(*barrel, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 20, "RESET")
+    front = legs([start, (159.96, 95.6975), (159.96, 95.26), (159.96, 94.545), barrel])
+    back = legs([barrel, (158.725, 93.31), (170.49, 81.545), end], Layer.B_CU)
+    route = Route(net=20, net_name="RESET", segments=[*front, *back], vias=[via])
+    trunk = legs([start, (160.1, 92.41)])
+    other = legs([(159.7, 91.165), (159.7, 94.61), (159.96, 94.87)]) if nearby else []
+    sibling = Route(net=20, net_name="RESET", segments=[*trunk, *other])
+    router.routes = [route]
+    router.grid.mark_route(route)
+    router.grid.mark_route(sibling)
+
+    _optimize_traces(router, Namespace(), quiet=True)
+
+    (saved,) = router.routes
+    assert saved.vias == [via]
+    actual = [s for s in saved.segments if s.layer == Layer.F_CU]
+    copper = [
+        CopperSource(
+            LineString([s.start, s.end]).buffer(s.width / 2, quad_segs=64),
+            "F.Cu",
+            "RESET",
+            str(i),
+            "trace",
+        )
+        for i, s in enumerate([*actual, *sibling.segments])
+    ]
+    copper.append(
+        CopperSource(Point(barrel).buffer(0.3, quad_segs=64), "F.Cu", "RESET", "via", "via")
+    )
+    assert [gap.distance for gap in iter_source_gaps(copper, 0.1016)] == []
+    corner = (160.1, 94.35) if nearby else (160.1, 94.685)
+    assert [(s.start, s.end) for s in actual] == [(start, corner), (corner, barrel)]
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("forward", True),
+        ("reverse", True),
+        ("horizontal-trunk", True),
+        ("foreign-trunk", False),
+        ("other-layer", False),
+        ("narrow-trunk", False),
+        ("short-trunk", False),
+        ("buried-via", False),
+        ("branch-contact", False),
+        ("gap-below-policy", False),
+    ],
+)
+def test_via_elbow_preserves_existing_copper_and_branch_contacts(case, expected):
+    from kicad_tools.router.optimizer.pad_slits import covered_via_elbow
+
+    start, corner, barrel = (160.1, 95.8375), (160.1, 94.685), (159.765, 94.35)
+    bend = (160.1, 94.35)
+
+    def point(p):
+        return p[::-1] if case == "horizontal-trunk" else p
+
+    points = [start, corner, barrel]
+    if case == "reverse":
+        points.reverse()
+    chain = _segments([point(p) for p in points], Layer.F_CU)
+    via = Via(*point(barrel), 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 26, "VM")
+    if case == "buried-via":
+        via.layers = (Layer.IN1_CU, Layer.IN2_CU)
+        via.span_type = "buried"
+    original = Route(net=26, net_name="VM", segments=chain, vias=[via])
+    net = 27 if case == "foreign-trunk" else 26
+    layer = Layer.B_CU if case == "other-layer" else Layer.F_CU
+    width = 0.15 if case == "narrow-trunk" else 0.2
+    extent = corner if case == "short-trunk" else (160.1, 92.41)
+    trunk = Segment(*point(start), *point(extent), width, layer, net, "spine")
+    neighbour = _segments(
+        [point(p) for p in [(159.7, 91.165), (159.7, 94.61), (159.96, 94.87)]], Layer.F_CU
+    )
+    if case == "branch-contact":
+        neighbour.append(Segment(159.92, 94.64, 159.925, 94.64, 0.01, Layer.F_CU, 26, "VM"))
+    grid = SimpleNamespace(
+        rules=DesignRules(
+            same_net_trace_gap_band_edge_mm=0.01 if case == "gap-below-policy" else 0.1016
+        ),
+        pads=[],
+        routes=[
+            original,
+            Route(net=net, net_name="spine", segments=[trunk]),
+            Route(net=26, net_name="VM", segments=neighbour),
+        ],
+    )
+    result = covered_via_elbow(chain, original, grid)
+    if expected:
+        assert result == _segments([point(points[0]), point(bend), point(points[-1])], Layer.F_CU)
+    else:
+        assert result is None

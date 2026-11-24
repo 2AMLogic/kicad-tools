@@ -151,6 +151,125 @@ def via_exit_doglegs(
             yield legs, [*legs, *segments[2:]]
 
 
+def covered_via_elbow(
+    segments: list[Segment], route: Route, grid: RoutingGrid | None
+) -> list[Segment] | None:
+    """Retract a slitted diagonal onto a trunk and via that already carry the elbow."""
+    if grid is None or len(segments) != 2 or not route.vias:
+        return None
+    edge = grid.rules.same_net_trace_gap_band_edge_mm
+    first, second = segments
+    if (
+        edge is None
+        or edge <= 0
+        or first.end != second.start
+        or (first.width, first.layer, first.net) != (second.width, second.layer, second.net)
+    ):
+        return None
+
+    from shapely.geometry import LineString, Point
+
+    from kicad_tools.core.types import copper_span_contains
+    from kicad_tools.validate.rules.physical_gap import CopperSource, iter_source_gaps
+
+    from .algorithms import _reverse_path
+
+    reverse = first.x1 != first.x2 and first.y1 != first.y2
+    run, arm = _reverse_path(segments) if reverse else segments
+    dx, dy = abs(arm.x2 - arm.x1), abs(arm.y2 - arm.y1)
+    if dx == 0 or not math.isclose(dx, dy, abs_tol=1e-8):
+        return None
+    via = next(
+        (
+            v
+            for v in route.vias
+            if v.net == run.net
+            and (v.x, v.y) == arm.end
+            and copper_span_contains(*v.drilled_layers, run.layer)
+        ),
+        None,
+    )
+    if via is None:
+        return None
+    if run.x1 == run.x2:
+        bend = (run.x1, via.y)
+    elif run.y1 == run.y2:
+        bend = (via.x, run.y1)
+    else:
+        return None
+    if bend == run.start or not 0 < math.dist(bend, arm.end) < (via.diameter + run.width) / 2:
+        return None
+
+    siblings = [other for other in grid.routes if other is not route and other.net == route.net]
+    tracks = [s for other in siblings for s in other.segments if s.layer == run.layer]
+    # The long leg must follow a stationary trace across its full length. The
+    # short transverse leg must fit entirely inside that same trace and barrel.
+    line = LineString([run.start, bend])
+    if not line.covers(LineString([run.start, run.end])):
+        return None
+    spine = next(
+        (s for s in tracks if s.width >= run.width and LineString([s.start, s.end]).covers(line)),
+        None,
+    )
+    if spine is None:
+        return None
+
+    def copper(s: Segment):
+        return LineString([s.start, s.end]).buffer(s.width / 2, quad_segs=64)
+
+    candidate = [
+        Segment(*a, *b, run.width, run.layer, run.net, run.net_name)
+        for a, b in pairwise([run.start, bend, arm.end])
+    ]
+    barrel = Point(arm.end).buffer(via.diameter / 2, quad_segs=64)
+    stationary = copper(spine).union(barrel)
+    if not stationary.covers(copper(candidate[1])):
+        return None
+
+    diagonal = copper(arm)
+    window = diagonal.envelope.buffer(edge)
+    layer, net = run.layer.name, str(run.net)
+    local: list[CopperSource] = []
+
+    def add(shape, kind: str) -> None:
+        if shape is not None and shape.intersects(window):
+            local.append(CopperSource(shape, layer, net, kind, kind))
+
+    for s in tracks:
+        add(copper(s), "track")
+    for other in [route, *siblings]:
+        for v in other.vias:
+            if copper_span_contains(*v.drilled_layers, run.layer):
+                add(Point(v.x, v.y).buffer(v.diameter / 2, quad_segs=64), "via")
+    for pad in grid.pads:
+        if (
+            pad.net == run.net
+            and not pad.steiner_point
+            and (pad.through_hole or pad.layer == run.layer)
+        ):
+            add(_pad_copper(pad), "pad")
+
+    # A third branch can join the protruding arm. Removing its only contact
+    # would disconnect it even when both endpoints of this route survive.
+    if any(
+        s.geometry.intersects(diagonal) and not s.geometry.intersects(stationary) for s in local
+    ):
+        return None
+    previous = [*local, CopperSource(diagonal, layer, net, "diagonal", "track")]
+    if not any(
+        "diagonal" in gap.ids and "track" in gap.ids for gap in iter_source_gaps(previous, edge)
+    ):
+        return None
+    # The replacement is wholly covered. Its copper union equals the stationary
+    # copper alone; check any newly exposed facing edges around the removed arm.
+    if any(
+        window.intersects(Point(gap.a)) or window.intersects(Point(gap.b))
+        for gap in iter_source_gaps(local, edge)
+    ):
+        return None
+    return _reverse_path(candidate) if reverse else candidate
+
+
 def _copper_gap_check(
     shapes: dict[tuple[int, Layer], list[BaseGeometry]],
     edge: float,
