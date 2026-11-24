@@ -270,6 +270,142 @@ def test_fix_drc_only_mask_copper_repairs_and_verifies(tmp_path, monkeypatch, ca
     assert "MASK-TO-COPPER: 1/1" in capsys.readouterr().out
 
 
+def test_verified_mask_move_keeps_collateral_traces_aligned(tmp_path, monkeypatch):
+    from collections import Counter
+
+    from kicad_tools.router.quantize import is_45_aligned
+
+    # The finding names only trk-a. Its horizontal approach and the vertical
+    # neighbor become skewed when their common endpoint moves to the pad.
+    # An unrelated authored skew must remain exactly as drawn.
+    other = _seg("other", (110, 110), (113, 111), net=2)
+    joined = _seg("joined", (100.7, 100.3), (100.7, 105), width=0.3)
+    board = _board(tmp_path, "\n".join([ENTRY, joined, other]))
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    _run(monkeypatch, board, [_report(_finding("trk-a")), _report()])
+    tracks = MaskCopperRepairer(board)
+    off_angle = set()
+    for uid in tracks._segment_nodes():
+        start, end = _end(board, uid)
+        if not is_45_aligned(end[0] - start[0], end[1] - start[1]):
+            off_angle.add(uid)
+    assert off_angle == {"other"}
+    assert _end(board, "other") == [(110, 110), (113, 111)]
+    assert _end(board, "trk-a")[1] == _end(board, "joined")[0] == (100, 100)
+    legs = {
+        (tuple(_end(board, uid)), node.get("width").get_float())
+        for uid, node in tracks._segment_nodes().items()
+        if uid not in {"other", "joined", "trk-a"}
+    }
+    assert legs == {
+        (((95, 100.3), _end(board, "trk-a")[0]), 0.2),
+        ((_end(board, "joined")[1], (100.7, 105)), 0.3),
+    }
+
+
+def test_finding_on_new_leg_rolls_back_whole_junction(tmp_path, monkeypatch, capsys):
+    from collections import Counter
+
+    board = _board(tmp_path, ENTRY + "\n" + _seg("joined", (100.7, 100.3), (100.7, 105)))
+    original = board.read_bytes()
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    found_leg = []
+
+    def check(path, **kwargs):
+        ids = MaskCopperRepairer(path)._segment_nodes().keys() - {"trk-a", "joined"}
+        if not ids:
+            return _report(_finding("trk-a"))
+        assert len(ids) == 2
+        found_leg.extend(ids)
+        obstructed = _finding(sorted(ids)[0])
+        obstructed.items[0] = "another-opening"
+        return _report(obstructed)
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", check)
+    code = fix_drc_cmd.main(
+        [str(board), "--only", "mask-copper", "--max-displacement", "1", "--no-connectivity-check"]
+    )
+    assert code != 0 and found_leg
+    assert "new_mask_finding" in capsys.readouterr().out
+    assert board.read_bytes() == original
+
+
+def test_mask_move_refuses_both_elbows_when_a_bonded_endpoint_would_separate(
+    tmp_path, monkeypatch, capsys
+):
+    # The tap already enters R1 by a second path. Both possible elbows take
+    # the approach away from its original contact at the tip of the tap.
+    tap = _seg("tap", (101.8, 100.49), (100.68, 100.49))
+    board = _board(tmp_path, ENTRY + "\n" + tap)
+    original = board.read_bytes()
+    assert _saved_copper(board, "trk-a")[0].intersects(_saved_copper(board, "tap")[0])
+    _run(monkeypatch, board, [_report(_finding("trk-a"))], extra=("--format", "json"))
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == 0 and board.read_bytes() == original
+    assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [
+        ("trk-a", "would_bend_trace")
+    ]
+    assert "neither elbow" in result["unrepaired"][0]["detail"]
+
+
+def test_bend_undo_restores_group_members_and_each_authored_endpoint(tmp_path):
+    copper = _seg("trk-a", (95, 100.30004), (100.70003, 100.30004))
+    joined = _seg("joined", (100.7001, 100.30009), (100.7001, 105))
+    group = '(group "escapes" (uuid "group-a") (members "joined"))'
+    board = _board(tmp_path, "\n".join([copper, joined, group]))
+    old = {uid: _end(board, uid) for uid in ("trk-a", "joined")}
+    proposal = MaskCopperRepairer(board)
+    result = proposal.repair([_finding("trk-a")], max_displacement=1.0)
+    proposal.align_moved_tracks(MaskCopperRepairer(board), result)
+    action = result.actions[0]
+    assert len(action.bends) == 2
+    added = next(bend.added_uuid for bend in action.bends if bend.uuid == "joined")
+    assert proposal.doc.get("group").get("members").get_atoms() == ["joined", added]
+    proposal.save()
+    undo = MaskCopperRepairer(board)
+    assert undo.undo_action(action)
+    undo.save()
+    assert set(undo._segment_nodes()) == old.keys()
+    assert {uid: _end(board, uid) for uid in old} == old
+    assert undo.doc.get("group").get("members").get_atoms() == ["joined"]
+
+
+@pytest.mark.parametrize("identity", ["uuid", "tstamp", "anonymous"])
+def test_off_angle_track_introduced_during_refill_is_never_published(
+    tmp_path, monkeypatch, capsys, identity
+):
+    from collections import Counter
+
+    from kicad_tools.cli import runner
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(tmp_path, PASS + zone)
+    output = tmp_path / "prior.kicad_pcb"
+    output.write_bytes(b"previous verified board")
+    before = board.read_bytes()
+
+    def refill(candidate, *, require_save):
+        edited = MaskCopperRepairer(candidate)
+        extra = _seg("refill-skew", (110, 110), (112, 111), net=2)
+        if identity == "anonymous":
+            extra = extra.replace('(uuid "refill-skew")', "")
+        elif identity == "tstamp":
+            extra = extra.replace("(uuid ", "(tstamp ")
+        from kicad_tools.sexp import parse_string
+
+        edited.doc.append(parse_string(extra))
+        edited.save()
+        return runner.KiCadCLIResult(success=True)
+
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    _run(monkeypatch, board, [_report(_pt_finding("trk-p")), _report()], extra=("-o", str(output)))
+    out = capsys.readouterr()
+    assert "would_bend_trace" in out.out
+    assert ("110 110" if identity == "anonymous" else "refill-skew") in out.err
+    assert output.read_bytes() == b"previous verified board" and board.read_bytes() == before
+
+
 def test_fix_drc_reverts_a_move_that_does_not_clear_its_finding(tmp_path, monkeypatch, capsys):
     board = _board(tmp_path, ENTRY)
     before = _report(_finding("trk-a"))

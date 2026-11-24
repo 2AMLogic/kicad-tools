@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -58,6 +59,7 @@ from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyp
 
 from ..schema.pcb import Arc
 from ..sexp import SExp
+from .mask_trace_angles import MaskTraceAngleError, MaskTraceBend, off_angle_tracks
 from .repair_copper_gap import CopperGapRepairer
 from .violation import DRCViolation, ViolationType
 
@@ -134,6 +136,8 @@ class MaskRepairAction:
     # (issue #9891: a joined member's near-pad end is often its own
     # pull-in candidate).
     end_tag: str = ""
+    bends: list[MaskTraceBend] = field(default_factory=list)
+    joined_origins: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
 
     def __str__(self) -> str:
         return (
@@ -171,6 +175,7 @@ class MaskNudgeAction:
     detail: str = ""
     openings: list[str] = field(default_factory=list)
     points: list[tuple[str, str, str | None, float, float]] = field(default_factory=list)
+    bends: list[MaskTraceBend] = field(default_factory=list)
 
     def __str__(self) -> str:
         return (
@@ -345,6 +350,159 @@ class MaskCopperRepairer(CopperGapRepairer):
             return atom
         return self.nets.get(atom, "") if isinstance(atom, int) else ""
 
+    def off_angle_tracks(self) -> Counter[str]:
+        return off_angle_tracks(self.doc)
+
+    def align_moved_tracks(
+        self,
+        before: MaskCopperRepairer,
+        result: MaskRepairResult,
+        clearance_mm: float | None = None,
+    ) -> None:
+        """Prepare legal legs for verification, including incidental junction members."""
+        original, tracks = before._segment_nodes(), self._segment_nodes()
+        skewed = self.off_angle_tracks() - before.off_angle_tracks()
+        if not skewed:
+            return
+        pads = before._openings()
+        owners: dict[str, set[int]] = {}
+        moving_items = []
+        for index, act in enumerate(result.actions):
+            if isinstance(act, MaskNudgeAction):
+                ids = {u for kind, u, *_ in act.points if kind == "segment"}
+                moving_items.append({u for _, u, *_ in act.points})
+            else:
+                ids = {act.uuid, *(u for u, _ in act.joined)}
+                moving_items.append(ids)
+            for uid in ids:
+                owners.setdefault(uid, set()).add(index)
+        # A generator owns its members' geometry. Ordinary unlocked groups
+        # instead acquire the added leg when their member is split.
+        generated = {
+            _bare(uid).lower()
+            for group in self.doc.find_children("generated")
+            for members in group.find_children("members")
+            for uid in members.get_atoms()
+        }
+        bends = []
+        rejected: dict[int, str] = {}
+        for uid in sorted(skewed):
+            if uid not in owners:
+                raise MaskTraceAngleError(f"off-angle track {uid} belongs to no proposed repair")
+            try:
+                if uid not in original or len(owners[uid]) != 1:
+                    raise MaskTraceAngleError(f"off-angle track {uid} has no unique original move")
+                if before._locks.is_locked(original[uid]) or uid.lower() in generated:
+                    raise MaskTraceAngleError(f"cannot split locked or generated track {uid}")
+                index = next(iter(owners[uid]))
+                act = result.actions[index]
+                openings = (
+                    act.openings if isinstance(act, MaskNudgeAction) and act.uuid == uid else []
+                )
+                bend = before._choose_bend(
+                    uid,
+                    original[uid],
+                    tracks[uid],
+                    moving_items[index],
+                    pads,
+                    clearance_mm,
+                    openings,
+                )
+                bends.append((index, bend))
+            except MaskTraceAngleError as exc:
+                rejected.update(dict.fromkeys(owners[uid], str(exc)))
+        # Edits sharing a conductor must unwind together in reverse order.
+        # Independent repairs can still go through the normal verification.
+        while True:
+            extra = {
+                i: f"shares track {uid} with a declined mask repair"
+                for uid, indices in owners.items()
+                if indices & rejected.keys()
+                for i in indices - rejected.keys()
+            }
+            if not extra:
+                break
+            rejected.update(extra)
+        for index in sorted(rejected, reverse=True):
+            act = result.actions[index]
+            if not self.undo_action(act):
+                raise MaskTraceAngleError(f"could not restore {act.uuid}: {rejected[index]}")
+            result.unrepaired.append(
+                MaskUnrepaired("would_bend_trace", act.uuid, detail=rejected[index])
+            )
+        for index, bend in bends:
+            if index in rejected:
+                continue
+            uid = bend.uuid
+            self._insert_segment_after_last(bend.split(self.doc, tracks[uid]))
+            result.actions[index].bends.append(bend)
+        result.actions = [act for i, act in enumerate(result.actions) if i not in rejected]
+        result.repaired = len(result.actions)
+
+    def _choose_bend(
+        self,
+        uid: str,
+        old: SExp,
+        new: SExp,
+        moving: set[str],
+        pads: dict,
+        clearance_mm: float | None,
+        openings: list[str],
+    ) -> MaskTraceBend:
+        """Try the two legal elbows against the original copper and its bonded endpoints."""
+        start, end = self._xy(old.find("start")), self._xy(old.find("end"))
+        layer_node = old.find("layer")
+        if start is None or end is None or layer_node is None:
+            raise MaskTraceAngleError(f"cannot read track {uid}")
+        layer, net = _bare(layer_node.get_first_atom()), self._net_name(old)
+        radius = _num(old.find("width")) / 2
+        old_copper = LineString([start, end]).buffer(radius, quad_segs=16)
+        best = None
+        best_gap = -1.0
+        for bend in MaskTraceBend.candidates(uid, old, new):
+            moved = self._xy(new.find(bend.moved_tag))
+            if moved is None:
+                raise MaskTraceAngleError(f"cannot read moved endpoint of track {uid}")
+            copper = LineString([bend.fixed, bend.elbow, moved]).buffer(radius, quad_segs=16)
+            moves = [(old_copper, copper, layer)]
+            if self._loses_same_net_contact(moves, layer, net, moving, pads, protect_ends=True):
+                continue
+            if self._copper_floor_reason(moves, layer, net, uid, pads, clearance_mm) is not None:
+                continue
+            # The fixed-end approach can run past the very opening the nudge
+            # needs to clear. Test the whole two-leg copper on both sides.
+            gap = min((copper.distance(pads[u][0]) for u in openings), default=0.0)
+            if gap > best_gap + 1e-6:
+                best, best_gap = bend, gap
+        if best is not None:
+            return best
+        raise MaskTraceAngleError(f"neither elbow preserves contact and clearance for track {uid}")
+
+    def disconnected_bends(
+        self, before: MaskCopperRepairer, actions: list[MaskRepairAction | MaskNudgeAction]
+    ) -> set[str]:
+        """Check all physical copper groups, including taps without a pad on either side."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        names = {act.net_name for act in actions if act.bends}
+        if not names:
+            return set()
+        old_board, new_board = PCB(before.doc), PCB(self.doc)
+        old, new = ConnectivityValidator(old_board), ConnectivityValidator(new_board)
+        disconnected = set()
+        for name in names:
+            old_net, new_net = old_board.get_net_by_name(name), new_board.get_net_by_name(name)
+            if (
+                old_net is None
+                or new_net is None
+                or not new._contact_graph(new_net.number).preserves_connections(
+                    old._contact_graph(old_net.number)
+                )
+            ):
+                disconnected.add(name)
+        return disconnected
+
     @staticmethod
     def _xy(node: SExp | None) -> tuple[float, float] | None:
         if node is None:
@@ -353,6 +511,17 @@ class MaskCopperRepairer(CopperGapRepairer):
         if len(atoms) < 2:
             return None
         return float(atoms[0]), float(atoms[1])
+
+    def _joined_origins(
+        self, joined: list[tuple[str, SExp, str]]
+    ) -> dict[tuple[str, str], tuple[float, float]]:
+        # A junction accepts coordinates within 0.01 mm of the primary end.
+        # Retain each authored coordinate for a selective rollback.
+        return {
+            (uid, tag): point
+            for uid, node, tag in joined
+            if (point := self._xy(node.find(tag))) is not None
+        }
 
     def _openings(
         self,
@@ -763,6 +932,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             displacement_mm=displacement,
             detail=f"moved track end {displacement:.4f}mm to the pad centre",
             joined=[(u, t) for u, _, t in joined],
+            joined_origins=self._joined_origins(joined),
             end_tag="start" if start_in else "end",
         )
         result.actions.append(action)
@@ -901,6 +1071,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             displacement_mm=displacement,
             detail=f"pulled track end {displacement:.4f}mm in to the pad centre",
             joined=[(u, t) for u, _, t in joined],
+            joined_origins=self._joined_origins(joined),
             end_tag="start" if near_node is start_node else "end",
         )
         net = pcb.get_net_by_name(net_name)
@@ -1308,6 +1479,8 @@ class MaskCopperRepairer(CopperGapRepairer):
         net_name: str,
         moving: set[str],
         pads: dict,
+        *,
+        protect_ends: bool = False,
     ) -> bool:
         """Whether a reshaped leg would stop touching same-net copper it touches now.
 
@@ -1336,6 +1509,10 @@ class MaskCopperRepairer(CopperGapRepairer):
             if start is None or end is None or width_node is None:
                 return True
             neighbours.append(LineString([start, end]).buffer(_num(width_node) / 2, quad_segs=16))
+            if protect_ends:
+                neighbours.extend(
+                    Point(p).buffer(_num(width_node) / 2, quad_segs=16) for p in (start, end)
+                )
         for node in self.doc.find_all("arc"):
             layer_node = node.find("layer")
             if (
@@ -1355,6 +1532,9 @@ class MaskCopperRepairer(CopperGapRepairer):
         for via in self.doc.find_all("via"):
             at = self._xy(via.find("at"))
             size_node = via.find("size")
+            uid = via.find("uuid")
+            if protect_ends and uid is not None and _bare(uid.get_first_atom()) in moving:
+                continue
             if (
                 at is None
                 or size_node is None
@@ -2521,13 +2701,24 @@ class MaskCopperRepairer(CopperGapRepairer):
         Returns ``False`` when a node is gone or no point sits at its
         post-move position (callers fall back to a snapshot restore).
         """
+        tracks = self._segment_nodes() if action.bends else {}
+        if not all(bend.intact(tracks) for bend in action.bends):
+            return False
         if isinstance(action, MaskViaRelocateAction):
-            return self._undo_via_relocate(action)
-        if isinstance(action, MaskNudgeAction):
-            return self._undo_nudge(action)
+            restored = self._undo_via_relocate(action)
+        elif isinstance(action, MaskNudgeAction):
+            restored = self._undo_nudge(action)
+        else:
+            restored = self._undo_recentre(action)
+        if restored:
+            for bend in action.bends:
+                bend.restore(self.doc, tracks)
+        return restored
+
+    def _undo_recentre(self, action: MaskRepairAction) -> bool:
         segments = self._segment_nodes()
         targets = [(action.uuid, action.end_tag or None), *((u, t) for u, t in action.joined)]
-        restore: list[SExp] = []
+        restore: list[tuple[SExp, tuple[float, float]]] = []
         for uuid, tag in targets:
             node = segments.get(_bare(uuid))
             if node is None:
@@ -2541,13 +2732,16 @@ class MaskCopperRepairer(CopperGapRepairer):
                     and xy is not None
                     and math.dist(xy, (action.new_x, action.new_y)) < _TOLERANCE_MM
                 ):
-                    restore.append(end_node)
+                    point = action.joined_origins.get(
+                        (uuid, candidate), (action.old_x, action.old_y)
+                    )
+                    restore.append((end_node, point))
                     break
             else:
                 return False
-        for end_node in restore:
-            end_node.set_value(0, round(action.old_x, 4))
-            end_node.set_value(1, round(action.old_y, 4))
+        for end_node, (x, y) in restore:
+            end_node.set_value(0, x)
+            end_node.set_value(1, y)
         self.modified = True
         return True
 
@@ -2585,7 +2779,9 @@ class MaskCopperRepairer(CopperGapRepairer):
         """
         if isinstance(action, MaskNudgeAction):
             shapes: list[BaseGeometry] = []
-            for kind, uuid, _tag, _old_x, _old_y in action.points:
+            items = {(kind, uid) for kind, uid, *_ in action.points}
+            items.update(("segment", bend.added_uuid) for bend in action.bends)
+            for kind, uuid in items:
                 node = self._segment_by_uuid(uuid) if kind == "segment" else self._via_by_uuid(uuid)
                 if node is None:
                     return None
@@ -2608,7 +2804,11 @@ class MaskCopperRepairer(CopperGapRepairer):
             return shapes[0] if len(shapes) == 1 else unary_union(shapes)
         segments = self._segment_nodes()
         recentre_shapes: list[BaseGeometry] = []
-        for uuid in (action.uuid, *(u for u, _ in action.joined)):
+        for uuid in (
+            action.uuid,
+            *(u for u, _ in action.joined),
+            *(b.added_uuid for b in action.bends),
+        ):
             node = segments.get(_bare(uuid))
             if node is None:
                 return None
