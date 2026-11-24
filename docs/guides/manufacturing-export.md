@@ -611,7 +611,9 @@ kct clean boards/04-stm32-devboard/04-stm32-devboard.kicad_pro --force
 ```
 
 `kct clean` reports the retained recovery copies in its default dry run
-and deletes them with `--force`; the live board is never touched.
+and deletes them with `--force` while the board exists. The writer adds a
+`complete` marker after publication succeeds. Cleanup leaves unmarked
+directories available for manual recovery, including after an interruption.
 
 ## Next Steps
 

@@ -10,10 +10,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from kicad_tools.core.atomic_write import remove_retained_copy, retained_copy_board
 
 __all__ = ["main", "CleanResult", "find_cleanable_files"]
 
@@ -129,11 +130,6 @@ BACKUP_PATTERNS = [
     re.compile(r"-rescue\.kicad_", re.IGNORECASE),
 ]
 
-# Retained recovery copies from checked manufacturing rewrites (issue #10056):
-# .<board>.recovery-<YYYYMMDDTHHMMSSZ>-<random>/ holding the displaced previous
-# file as "original" beside the live board.
-RECOVERY_COPY_PATTERN = re.compile(r"^\.(?P<board>.+)\.recovery-\d{8}T\d{6}Z-[^/]+$")
-
 # Additional patterns for deep clean mode
 DEEP_CLEAN_PATTERNS = [
     # Gerber and drill files
@@ -232,8 +228,8 @@ def find_cleanable_files(
         if file_path.is_dir():
             # Retained recovery copies of checked rewrites (#10056): the
             # displaced previous board, kept recoverable beside the live file.
-            recovery = RECOVERY_COPY_PATTERN.match(file_path.name)
-            if recovery and (file_path / "original").is_file():
+            recovery = retained_copy_board(file_path)
+            if recovery is not None:
                 try:
                     size = (file_path / "original").stat().st_size
                 except OSError:
@@ -242,7 +238,7 @@ def find_cleanable_files(
                     CleanableFile(
                         path=file_path,
                         category="recovery_copy",
-                        reason=f"retained previous copy of {recovery.group('board')}",
+                        reason=f"retained previous copy of {recovery.name}",
                         size_bytes=size,
                     )
                 )
@@ -510,8 +506,9 @@ def delete_files(result: CleanResult, verbose: bool = False) -> tuple[int, int]:
 
     for f in result.to_delete:
         try:
-            if f.path.is_dir() and not f.path.is_symlink():
-                shutil.rmtree(f.path)
+            if f.category == "recovery_copy":
+                if not remove_retained_copy(f.path):
+                    continue
             else:
                 f.path.unlink()
             deleted += 1

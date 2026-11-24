@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -42,26 +43,45 @@ def _recovery_prefix(name: str) -> str:
     return f".{name}.recovery-{stamp}-"
 
 
+_RECOVERY_NAME = re.compile(r"^\.(?P<board>.+)\.recovery-\d{8}T\d{6}Z-[^/]+$")
+
+
+def retained_copy_board(directory: Path) -> Path | None:
+    """Return the live board for a completed, cleanup-eligible copy."""
+    match = _RECOVERY_NAME.fullmatch(directory.name)
+    if match is None or directory.is_symlink():
+        return None
+    board = directory.parent / match["board"]
+    if (
+        (directory / "complete").is_file()
+        and (directory / "original").is_file()
+        and board.is_file()
+    ):
+        return board
+    return None
+
+
+def remove_retained_copy(directory: Path) -> bool:
+    """Recheck eligibility when applying a cleanup preview."""
+    if retained_copy_board(directory) is None:
+        return False
+    shutil.rmtree(directory)
+    return True
+
+
 def recovery_copies(path: str | Path) -> list[Path]:
     """Retention directories left beside ``path`` by checked rewrites (#10056).
 
     Each successful checked rewrite keeps the displaced previous file as a
     recoverable copy in a private sibling directory named
     ``.<name>.recovery-<utc-stamp>-<random>/original``; an interrupted
-    publication leaves the same layout. Returns the directories, oldest
+    publication leaves an unmarked directory reserved for manual recovery.
+    Returns the completed directories, oldest
     first, so callers can inspect the retained versions in rewrite order.
     """
     path = Path(path)
-    prefix = f".{path.name}.recovery-"
     return sorted(
-        (
-            entry
-            for entry in path.parent.iterdir()
-            if not entry.is_symlink()
-            and entry.is_dir()
-            and entry.name.startswith(prefix)
-            and (entry / "original").is_file()
-        ),
+        (entry for entry in path.parent.iterdir() if retained_copy_board(entry) == path),
         key=lambda entry: entry.name,
     )
 
@@ -74,8 +94,8 @@ def clear_recovery_copies(path: str | Path) -> list[Path]:
     """
     removed = []
     for copy_dir in recovery_copies(path):
-        shutil.rmtree(copy_dir)
-        removed.append(copy_dir)
+        if remove_retained_copy(copy_dir):
+            removed.append(copy_dir)
     return removed
 
 
@@ -135,6 +155,8 @@ def _publish_checked(
         repaired.unlink(missing_ok=True)
         if not os.path.lexists(original):
             staging.rmdir()
+    # Final writer action. Rollback and interrupted publications never reach it.
+    (staging / "complete").touch()
 
 
 def atomic_write_text(

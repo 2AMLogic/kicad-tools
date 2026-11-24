@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -93,17 +95,20 @@ class TestCheckedRewriteRetention:
             if bytes(data) == original:
                 seen.append(1)
                 if len(seen) == 2:
-                    (recovery_copies(board)[0] / "original").write_bytes(edited)
+                    assert board.is_file()
+                    assert clear_recovery_copies(board) == []
+                    _save_through_open_handle(handle.fileno(), edited)
             return digest
 
         monkeypatch.setattr(atomic_write.hashlib, "sha256", sha_after_recheck)
-        atomic_write_text(
-            board,
-            "(kicad_pcb repaired)",
-            encoding="utf-8",
-            newline="",
-            expected_sha256=original_digest,
-        )
+        with board.open("r+b") as handle:
+            atomic_write_text(
+                board,
+                "(kicad_pcb repaired)",
+                encoding="utf-8",
+                newline="",
+                expected_sha256=original_digest,
+            )
 
         assert seen == [1, 1]
         assert board.read_bytes() == b"(kicad_pcb repaired)"
@@ -235,3 +240,67 @@ class TestCleanRemovesRecoveryCopies:
         assert clean_main([str(project_file)]) == 0
 
         assert len(recovery_copies(board)) == 1
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_cleanup_while_writer_has_displaced_board(tmp_path, monkeypatch, capsys, fail):
+    from kicad_tools.cli.clean_cmd import main as clean_main
+
+    project = tmp_path / "board.kicad_pro"
+    project.write_text(MINIMAL_PROJECT)
+    board = project.with_suffix(".kicad_pcb")
+    board.write_bytes(b"original board")
+    displaced, resume = Event(), Event()
+    real_link = os.link
+
+    def pause_publication(source, destination, **kwargs):
+        if destination == board and source.name == "repaired":
+            displaced.set()
+            assert resume.wait(10)
+            if fail:
+                raise OSError("publication failed")
+        return real_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "link", pause_publication)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        writer = pool.submit(_checked_rewrite, board, b"new board")
+        try:
+            assert displaced.wait(10)
+            assert not board.exists()
+            assert recovery_copies(board) == []
+            assert clear_recovery_copies(board) == []
+            for flags in ([], ["--force"]):
+                assert clean_main([str(project), *flags]) == 0
+                assert ".recovery-" not in capsys.readouterr().out
+            assert next(tmp_path.glob(".*.recovery-*/original")).read_bytes() == b"original board"
+        finally:
+            resume.set()
+        if fail:
+            with pytest.raises(OSError, match="publication failed"):
+                writer.result()
+            assert board.read_bytes() == b"original board"
+            assert recovery_copies(board) == []
+        else:
+            writer.result()
+            (copy,) = recovery_copies(board)
+            assert (copy / "original").read_bytes() == b"original board"
+            assert clean_main([str(project), "--force"]) == 0
+            assert not copy.exists()
+            assert board.read_bytes() == b"new board"
+
+
+def test_cleanup_rechecks_missing_board_after_preview(tmp_path):
+    from kicad_tools.cli.clean_cmd import delete_files, find_cleanable_files
+
+    project = tmp_path / "board.kicad_pro"
+    project.write_text(MINIMAL_PROJECT)
+    board = project.with_suffix(".kicad_pcb")
+    board.write_bytes(b"original board")
+    _checked_rewrite(board, b"new board")
+    preview = find_cleanable_files(project)
+    (copy,) = preview.by_category("recovery_copy")
+    board.unlink()
+
+    assert delete_files(preview) == (0, 0)
+    assert clear_recovery_copies(board) == []
+    assert (copy.path / "original").read_bytes() == b"original board"
