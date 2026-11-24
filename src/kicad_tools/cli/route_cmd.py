@@ -4204,9 +4204,17 @@ def _finalize_routes(
     from kicad_tools.cli.progress import flush_print
     from kicad_tools.router.connectivity_invariant import (
         ConnectivityRegressionError,
+        discard_orphan_escape_stubs,
         enforce_connectivity_invariant,
         snapshot_connectivity,
     )
+
+    # A temporary pad-to-via stub can touch one pad without connecting it to
+    # another pad. Drop these before the snapshot so rollback protects actual
+    # connections and does not restore a failed escape.
+    pre_cleanup_segments = sum(len(r.segments) for r in router.routes)
+    pre_cleanup_vias = sum(len(r.vias) for r in router.routes)
+    orphan_stubs = discard_orphan_escape_stubs(router)
 
     # Issue #3124: snapshot per-net connectivity *before* cleanup so we
     # can revert any net that loses a reachable pad during the cleanup
@@ -4219,9 +4227,9 @@ def _finalize_routes(
     # so that metrics reflect the segments actually written to the output
     # file.  The cleanup is safe (it restores segments whose removal would
     # fragment a net).  See io.py for the canonical ordering.
-    pre_cleanup_segments = sum(len(r.segments) for r in router.routes)
-    pre_cleanup_vias = sum(len(r.vias) for r in router.routes)
     cleanup_stats = router.cleanup_artifacts()
+    if orphan_stubs:
+        cleanup_stats["orphan_escape_routes_removed"] += orphan_stubs
     post_cleanup_segments = sum(len(r.segments) for r in router.routes)
     post_cleanup_vias = sum(len(r.vias) for r in router.routes)
 
