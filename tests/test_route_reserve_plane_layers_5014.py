@@ -343,6 +343,8 @@ class TestEscalationPlaneAudit:
             "--skip-drc",
             "--quiet",
             "--no-optimize",
+            # Audit this run's copper without chaining an unbounded `kct check` subprocess.
+            "--no-chain-complete",
             "--max-layers",
             "4",
         ]
