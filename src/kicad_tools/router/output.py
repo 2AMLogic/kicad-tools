@@ -1257,6 +1257,7 @@ def print_routing_diagnostics_json(
     verdict: str | None = None,
     grid_selection: str | None = None,
     silk_fix: dict | None = None,
+    post_route_drc_only: bool = False,
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -1292,6 +1293,8 @@ def print_routing_diagnostics_json(
     )
     if silk_fix is not None:
         diagnostics["silk_fix"] = silk_fix
+    if post_route_drc_only:
+        diagnostics["summary"]["failure_reason"] = "post_route_drc"
     if verdict is not None:
         diagnostics["summary"]["verdict"] = verdict
     # json_stdout(): the real stdout even while ``kct route --format json``
