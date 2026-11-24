@@ -48,6 +48,11 @@ EXPECTED_STALE: dict[str, str] = {
         "was last refreshed; the gate-pass rebuild + re-pin (blocked by the "
         "#8399 warning-flood stalemate) re-emits the zip."
     ),
+    "05-bldc-motor-controller/redesign/routing.py": (
+        "Issue #9921: the published Board 05 archive uses the previous U2 footprint. "
+        "The live recipe also accepts the grounded pad-29 footprint. Remove this entry "
+        "when the manufacturing rebuild publishes the matching source archive."
+    ),
 }
 
 
