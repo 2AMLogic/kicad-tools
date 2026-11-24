@@ -465,6 +465,123 @@ def test_linkless_filesystem_silk_optout_exports_original_artwork(tmp_path, monk
 
 
 @pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_linkless_refusal_leaves_missing_sidecars_absent(tmp_path, monkeypatch):
+    """Issue #10091: the refused repair must not conjure the sidecars.
+
+    The live FAT32 run of the merged refusal left a generated 1,732-byte
+    ``.kicad_pro`` and a 2,106-byte ``.kicad_dru`` beside a bare input PCB.
+    A sibling that was absent before the export must still be absent after
+    the refusal.
+    """
+    _break_hard_link_support(monkeypatch)
+    path = _silk_defect_stackup_board(tmp_path)
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert not result.success
+    assert "Silk legalisation pass could not run" in result.errors[-1]
+    assert not path.with_suffix(".kicad_pro").exists()
+    assert not path.with_suffix(".kicad_dru").exists()
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_linkless_refusal_restores_authored_sidecars(tmp_path, monkeypatch):
+    """Issue #10091: authored project and rules bytes survive the refusal.
+
+    The same live run showed both siblings of an authored project change
+    before the refusal fired. Existing files must be preserved byte for
+    byte -- here an authored text variable and a named custom rule.
+    """
+    _break_hard_link_support(monkeypatch)
+    path = _silk_defect_stackup_board(tmp_path)
+    pro = path.with_suffix(".kicad_pro")
+    dru = path.with_suffix(".kicad_dru")
+    pro.write_text(
+        json.dumps({"meta": {"variables": {"my_text_variable": "authored"}}}, indent=2),
+        encoding="utf-8",
+    )
+    dru.write_text('(rule "my authored rule" (constraint clearance (min 0.5mm)))\n')
+    pro_before, dru_before = pro.read_bytes(), dru.read_bytes()
+
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert not result.success
+    assert "Silk legalisation pass could not run" in result.errors[-1]
+    assert pro.read_bytes() == pro_before
+    assert dru.read_bytes() == dru_before
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_linkless_refusal_preserves_editor_save_during_export(tmp_path, monkeypatch):
+    """Issue #10091: an editor save landing mid-export is not clobbered.
+
+    The rollback may only undo the bytes this export itself wrote: a newer
+    save that arrives between the sidecar write and the refusal keeps the
+    live name, so restoring a stale pre-export snapshot must not happen.
+    """
+    from kicad_tools.cli import silk_default_pass
+
+    _break_hard_link_support(monkeypatch)
+    path = _silk_defect_stackup_board(tmp_path)
+    dru = path.with_suffix(".kicad_dru")
+    dru.write_text('(rule "authored" (constraint clearance (min 0.4mm)))\n')
+    editor_save = '(rule "editor mid-export save" (constraint clearance (min 0.6mm)))\n'
+
+    real_pass = silk_default_pass.run_default_silk_pass
+
+    def save_then_run_pass(pcb, **kwargs):
+        dru.write_text(editor_save)  # the editor saves while export runs
+        return real_pass(pcb, **kwargs)
+
+    monkeypatch.setattr(silk_default_pass, "run_default_silk_pass", save_then_run_pass)
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert not result.success
+    assert "Silk legalisation pass could not run" in result.errors[-1]
+    assert dru.read_text() == editor_save
+
+
+def test_strict_preflight_failure_still_emits_drc_constraints(tmp_path, monkeypatch):
+    """Issue #10091 regression guard: only the silk refusal undoes the writes.
+
+    Step 0a writes the sidecars before preflight on purpose -- a
+    strict-preflight failure still leaves the emitted rules beside the
+    board -- so the refusal rollback must not leak into that path.
+    """
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig, PreflightResult
+
+    path = authored_pcb(tmp_path, "JLC04161H-3313")
+    pkg = ManufacturingPackage(
+        path,
+        manufacturer="jlcpcb",
+        config=ManufacturingConfig(
+            stackup_id="JLC04161H-3313",
+            bom_source="pcb",
+            include_bom=False,
+            include_pnp=False,
+            include_gerbers=False,
+            include_report=False,
+            include_project_zip=True,
+            preflight=PreflightConfig(),
+            strict_preflight=True,
+            silk_fix=False,
+        ),
+    )
+
+    def failing_preflight():
+        return [PreflightResult(name="drc", status="FAIL", message="simulated failure")]
+
+    monkeypatch.setattr(pkg, "_run_preflight", failing_preflight)
+    result = pkg.export(tmp_path / "out")
+
+    assert not result.success
+    assert any("Preflight FAIL [drc]" in e for e in result.errors)
+    assert result.drc_constraint_paths
+    assert path.with_suffix(".kicad_pro").exists()
+    assert path.with_suffix(".kicad_dru").exists()
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
 def test_unrunnable_silk_pass_plain_export_keeps_warning(tmp_path, monkeypatch):
     """Issue #10051 boundary: only the named-stackup export escalates.
 

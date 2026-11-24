@@ -695,6 +695,82 @@ def _build_manifest(
     return manifest
 
 
+def _atomic_restore_bytes(path: Path, data: bytes) -> None:
+    """Publish ``data`` to ``path`` atomically (tmp + fsync + replace)."""
+    tmp = path.with_name(path.name + ".restore.tmp")
+    tmp.write_bytes(data)
+    with open(tmp, "r+b") as f:
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+class _DrcSidecarUndo:
+    """Pre-write snapshot of the DRC sidecars Step 0a rewrites (issue #10091).
+
+    Maintainer decision, 2026-11-24: a named-stackup export that cannot
+    perform the requested silkscreen repair must leave the input PCB,
+    project (``.kicad_pro``) and custom rules (``.kicad_dru``) as it found
+    them -- existing files byte for byte, a missing sibling still absent --
+    while the error, exit status and package refusal stay unchanged. The
+    sidecars still have to be written before the silk pass (kicad-cli loads
+    them from beside the board, and ordinary preflight failures keep their
+    emission), so the refusal path undoes this export's own writes instead
+    of deferring them: bytes are restored only while the on-disk file still
+    carries what this export wrote, so an editor save that arrived in
+    between is preserved rather than clobbered by a stale restore.
+    """
+
+    _EXISTS_UNREADABLE: Any = object()  # present but unreadable: nothing safe to restore
+    _UNKNOWN: Any = object()  # post-write bytes never latched
+
+    def __init__(self, pcb_path: Path) -> None:
+        self._entries: list[tuple[Path, Any, Any]] = []
+        for suffix in (".kicad_pro", ".kicad_dru"):
+            path = pcb_path.with_suffix(suffix)
+            self._entries.append(
+                (path, self._read_or(path, self._EXISTS_UNREADABLE), self._UNKNOWN)
+            )
+
+    def record_written(self) -> None:
+        """Latch the on-disk bytes right after Step 0a's writes."""
+        self._entries = [
+            (path, before, self._read_or(path, self._UNKNOWN)) for path, before, _ in self._entries
+        ]
+
+    def rollback(self) -> None:
+        """Undo this export's sidecar writes; keep any newer foreign save."""
+        for path, before, written in self._entries:
+            if before is self._EXISTS_UNREADABLE or written is self._UNKNOWN:
+                continue
+            current = self._read_or(path, self._UNKNOWN)
+            if current is self._UNKNOWN or current == before:
+                continue  # unreadable now, absent, or already the bytes we found
+            if written is None or current != written:
+                logger.info(
+                    "%s changed on disk since this export wrote it; leaving it as found",
+                    path.name,
+                )
+                continue
+            if before is None:
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    logger.warning(
+                        "Could not remove %s after the refused silk repair: %s", path, exc
+                    )
+            else:
+                _atomic_restore_bytes(path, before)
+
+    @staticmethod
+    def _read_or(path: Path, fallback: Any) -> Any:
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return fallback
+
+
 class ManufacturingPackage:
     """
     Generate a complete manufacturing package for PCB production.
@@ -787,8 +863,17 @@ class ManufacturingPackage:
         # built-in minimums instead of KiCad's stricter hard-coded defaults.
         # Written before preflight so the constraints exist even when a
         # strict-preflight failure aborts the rest of the pipeline.
+        sidecar_undo: _DrcSidecarUndo | None = None
         if self.config.emit_drc_constraints:
+            if self.config.stackup_id and self.config.silk_fix and self.manufacturer != "generic":
+                # Issue #10091 (maintainer decision, 2026-11-24): if the
+                # required silk repair below refuses to run, undo these
+                # sidecar writes on the way out so the input directory is
+                # left exactly as it was found.
+                sidecar_undo = _DrcSidecarUndo(self.pcb_path)
             self._write_drc_constraints(result)
+            if sidecar_undo is not None:
+                sidecar_undo.record_written()
             # KiCad plots the saved copper. Check it under the rules that will
             # ship before plotting, archiving or binding a named stackup (#9987).
             refill_digest = self._refresh_zone_fill(result, selected_stackup_source_hash)
@@ -847,6 +932,11 @@ class ManufacturingPackage:
                         message + " (a named-stackup export requires the requested silk "
                         "repair; pass --no-silk-fix to ship the original artwork)"
                     )
+                    if sidecar_undo is not None:
+                        # Issue #10091 (maintainer decision, 2026-11-24):
+                        # the refusal must leave the project and rules
+                        # sidecars as it found them.
+                        sidecar_undo.rollback()
                     return result
                 result.warnings.append(message)
             # Issue #9990: the pass is export's own edit of the source board.
