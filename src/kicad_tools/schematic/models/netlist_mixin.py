@@ -8,12 +8,23 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from .wire_geometry import wire_segments_connect
 
 if TYPE_CHECKING:
     pass
+
+
+_Node = TypeVar("_Node")
+
+
+def _component_root(parent: dict[_Node, _Node], node: _Node) -> _Node:
+    """Return a union-find representative with path compression."""
+    while (next_node := parent.get(node, node)) != node:
+        parent[node] = parent.get(next_node, next_node)
+        node = parent[node]
+    return node
 
 
 @dataclass(frozen=True)
@@ -469,19 +480,12 @@ class SchematicNetlistMixin:
             Same semantics as :meth:`get_net_for_pin`'s return value.
         """
 
-        def find(p):
-            if p not in parent:
-                parent[p] = p
-            if parent[p] != p:
-                parent[p] = find(parent[p])
-            return parent[p]
-
         # Find the root of this pin's position
-        pin_root = find(pin_pos)
+        pin_root = _component_root(parent, pin_pos)
 
         # Look for net names in the same connected component
         for point, net_names in point_to_net_names.items():
-            if find(point) == pin_root and net_names:
+            if _component_root(parent, point) == pin_root and net_names:
                 return net_names[0]
 
         # No named net — this component carries no label or power symbol.
@@ -501,7 +505,7 @@ class SchematicNetlistMixin:
         component_pins: list[PinRef] = []
         connected_elsewhere = False
         for point, pins in point_to_pins.items():
-            if find(point) != pin_root:
+            if _component_root(parent, point) != pin_root:
                 continue
             component_pins.extend(pins)
             if point != pin_pos:
@@ -588,8 +592,12 @@ class SchematicNetlistMixin:
             if floating), covering every ``(ref, number)`` pair reachable
             by iterating ``self.symbols`` and their ``symbol_def.pins``.
         """
-        parent, point_to_net_names, point_to_pins = self._build_connectivity_graph()
+        return self._pin_nets_from_graph(*self._build_connectivity_graph())
 
+    def _pin_nets_from_graph(
+        self, parent: dict, point_to_net_names: dict, point_to_pins: dict
+    ) -> dict[tuple[str, str], str | None]:
+        """Resolve symbol pins on a graph that may also contain sheet-pin connections."""
         result: dict[tuple[str, str], str | None] = {}
         for sym in self.symbols:  # type: ignore[attr-defined]
             ref = sym.reference

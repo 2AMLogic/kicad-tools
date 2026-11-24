@@ -25,6 +25,7 @@ import math
 import os
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
@@ -54,6 +55,7 @@ from .search_radius import search_radius_cells
 from .via_clearance import (
     OWN_NET_BAND_STEP_TOL_MM,
     _segment_box_gap_mm,
+    drill_hole_to_hole_clear,
     point_clear_of_copper,
     segment_clears_foreign_via,
 )
@@ -592,6 +594,7 @@ class Router:
         # Key: (gx, gy, net), Value: True if valid, False if blocked
         # Cache is cleared when routes are modified (invalidates blocking state)
         self._via_cache: dict[tuple[int, int, int, int], bool] = {}
+        self.relief_partner_drills: list[tuple[float, float, float]] = []
 
         # Issue #5617: memo for the route-halo via probe that opens
         # ``_is_via_blocked`` (``_via_halo_clear([], layer, gx, gy, net,
@@ -4314,6 +4317,24 @@ class Router:
             self._pad_edge_site_cache[key] = hit
         return hit
 
+    @contextlib.contextmanager
+    def trial_partner_drills(self, drills: list[tuple[float, float, float]]) -> Iterator[None]:
+        """Keep the displaced leg's drill sites free during one bounded relief candidate."""
+        previous_drills = self.relief_partner_drills
+        previous_cap = self._max_iterations_override
+        self.relief_partner_drills = drills
+        # Allow one short reverse search at the tight terminal before the
+        # ordinary transaction. A failed trial must not consume a full net budget.
+        trial_cap = 4096
+        self._max_iterations_override = (
+            trial_cap if previous_cap is None else min(previous_cap, trial_cap)
+        )
+        try:
+            yield
+        finally:
+            self._max_iterations_override = previous_cap
+            self.relief_partner_drills = previous_drills
+
     def _check_via_placement_cached(
         self,
         gx: int,
@@ -4338,6 +4359,14 @@ class Router:
         Returns:
             True if via CAN be placed (all layers clear), False if blocked.
         """
+        # Test the temporary reservation before either cache. Entering or
+        # leaving the trial cannot reuse a positive or poison a later search.
+        if self.relief_partner_drills:
+            x, y = self.grid.grid_to_world(gx, gy)
+            if not drill_hole_to_hole_clear(
+                x, y, self.rules.via_drill, self.relief_partner_drills, self.rules.min_hole_to_hole
+            ):
+                return False
         # Issue #5617: memoised per cell (see ``_component_hole_clear_cached``).
         if not self._component_hole_clear_cached(gx, gy):
             return False

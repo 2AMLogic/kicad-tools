@@ -1368,7 +1368,10 @@ def _moves_with_new_errors(
     baseline_errors: list[DRCViolation] = []
     with tempfile.TemporaryDirectory() as tmp:
         undo = MaskCopperRepairer(output_path)
-        if all(undo.undo_action(act) for act in actions):
+        # Reverse application order: a grouped edit that dragged a shared
+        # endpoint after an earlier action only rolls back last-applied-first
+        # (issue #9958).
+        if all(undo.undo_action(act) for act in reversed(actions)):
             base_path = Path(tmp) / output_path.name
             undo.save(base_path)
             baseline = _run_python_drc(
@@ -1645,11 +1648,32 @@ def _run_mask_pass(
             if isinstance(e, _MaskPadConnectionLost)
             else "recheck_unavailable"
         )
+        # Actions the selective rollback already disposed of keep their
+        # specific reason; the fallback must not report an action under a
+        # second reason (issue #9958).
+        disposed = {u.uuid for u in result.unrepaired if u.reason in _VERIFY_DISPOSITIONS}
         for act in result.actions:
-            result.unrepaired.append(MaskUnrepaired(reason=reason, uuid=act.uuid, detail=str(e)))
+            if act.uuid not in disposed:
+                result.unrepaired.append(
+                    MaskUnrepaired(reason=reason, uuid=act.uuid, detail=str(e))
+                )
         result.actions = []
         result.repaired = 0
     return result
+
+
+#: Reasons the selective rollback (``_verify_mask_actions``) reports per
+#: action; the fail-closed fallback re-reports only actions without one of
+#: these, so each action appears under exactly one reason (issue #9958).
+_VERIFY_DISPOSITIONS = frozenset(
+    {
+        "recheck_unavailable",
+        "pad_connection_lost",
+        "finding_not_cleared",
+        "new_mask_finding",
+        "new_drc_error",
+    }
+)
 
 
 def _verify_mask_actions(
@@ -1709,7 +1733,10 @@ def _verify_mask_actions(
             keep.append(act)
     if revert:
         undo = MaskCopperRepairer(candidate)
-        for act, reason in revert:
+        # Reverse application order: a grouped edit that dragged a shared
+        # endpoint after an earlier action only rolls back last-applied-first
+        # (issue #9958).
+        for act, reason in reversed(revert):
             if not undo.undo_action(act):
                 raise RuntimeError(f"could not revert mask recentre {act.uuid!r}")
             result.unrepaired.append(MaskUnrepaired(reason=reason, uuid=act.uuid))
@@ -2331,6 +2358,7 @@ def _print_json(
                     "from": [a.old_x, a.old_y],
                     "to": [a.new_x, a.new_y],
                     "displacement_mm": round(a.displacement_mm, 4),
+                    "connections": len(getattr(a, "added_segments", ())),
                     "reverted": (bool(rolled_back) or (a.uuid in reverted_uuids)),
                 }
                 for a in mask_result.actions
