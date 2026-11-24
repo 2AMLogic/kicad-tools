@@ -458,9 +458,9 @@ class Route:
     net_name: str
     segments: list[Segment] = field(default_factory=list)
     vias: list[Via] = field(default_factory=list)
-    # Issue #3441: True for sub-grid escape stubs (#1603) emitted by the
-    # pre-pass.  An escape stub only connects an off-grid pad to its
-    # nearest grid point -- it is NOT a full net route, so the negotiated
+    # Issue #3441: True for temporary pad access, including a sub-grid
+    # escape (#1603) or a BGA dogbone that terminates at its via (#9850).
+    # Its net still needs a route from the access point, so the negotiated
     # loop's pre-routed-net filter (#2464) must not treat nets that have
     # only escape stubs as already routed (doing so left board 07's six
     # TMDS nets permanently at 1/2 pads connected when the pre-pass was

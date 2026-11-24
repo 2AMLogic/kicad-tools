@@ -942,6 +942,32 @@ _STRIP_R = "(xy 152.9 87) (xy 154 87) (xy 154 87.5) (xy 152.9 87.5)"
 _BLOCK_HOLED = "(xy 150 88) (xy 154 88) (xy 154 92) (xy 150 92) (xy 150 88) (xy 151.6 90.6) (xy 152.4 90.6) (xy 152.4 91.4) (xy 151.6 91.4) (xy 151.6 90.6) (xy 150 88)"
 
 
+@pytest.mark.parametrize("both_bonded", [True, False])
+def test_split_pour_joins_existing_barrels(tmp_path, both_bonded):
+    """A local weld cannot reconnect a pad that already reaches its own fill."""
+    from kicad_tools.router.oracle_completion import OracleLink, PourLinkCloser
+
+    board = tmp_path / "split.kicad_pcb"
+    second_net = 2 if both_bonded else 1
+    board.write_text(
+        _cut_pcb(_STRIP, _BLOCK).removesuffix(")\n")
+        + '  (gr_rect (start 145 80) (end 165 105) (layer "Edge.Cuts") (width 0.1))\n'
+        + '  (via (at 151 87.25) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))\n'
+        + f'  (via (at 151 88.8) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net {second_net}))\n'
+        + ")\n"
+    )
+    net = "+3.3V"
+    zone = OracleEndpoint.parse(f"Zone [{net}] on F.Cu", 150, 87)
+    closer = PourLinkCloser(via_size=0.6, via_drill=0.3, clearance=0.2, trace_width=0.2)
+    (link,) = closer.canonical_stranded_links(board, [OracleLink(net, zone, zone)])
+    if both_bonded:
+        assert (link.a.kind, link.b.kind) == ("via", "via")
+        assert (link.a.x, link.a.y) == pytest.approx((151, 87.25))
+        assert (link.b.x, link.b.y) == pytest.approx((151, 88.8))
+    else:
+        assert (link.a.kind, link.b.kind) == ("pad", "zone")
+
+
 class TestCutAttribution:
     def _closer(self):
         from kicad_tools.router.oracle_completion import PourLinkCloser
