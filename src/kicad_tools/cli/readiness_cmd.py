@@ -50,7 +50,8 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -1552,17 +1553,7 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
             blockers=[f"Saved/refilled copper could not be measured: {exc}"],
         )
     finally:
-        # kicad-cli leaves per-user files (e.g. ``<board>.kicad_prl``) beside the
-        # boards it saved; they are not evidence and VCS ignores them (#6076).
-        for name in ("fill-saved", "fill-refilled"):
-            directory = options.evidence_dir / name
-            if directory.is_dir():
-                for path in sorted(directory.rglob("*"), reverse=True):
-                    if _is_transient_local(path.relative_to(directory)):
-                        if path.is_dir():
-                            shutil.rmtree(path, ignore_errors=True)
-                        elif path.exists():
-                            path.unlink()
+        _remove_fill_local_settings(options.evidence_dir)
         evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
 
 
@@ -4187,23 +4178,33 @@ def _publication_identity(path: Path) -> tuple[Any, ...] | None:
     )
 
 
-def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str]) -> None:
-    """Serialize cooperating publishers and preserve observed external edits.
+class ReadinessPublicationBusy(RuntimeError):
+    """Another process is installing readiness results at this destination."""
 
-    A sibling lock avoids adding files to the release inventory. An abandoned
-    lock fails closed; it must not be removed while another publisher is live.
-    Per-file checks narrow external-editor races, but do not promise atomicity
-    against writers that ignore this lock.
-    """
-    lock = destination.parent / f".{destination.name}.readiness-publish.lock"
+
+@contextmanager
+def _publication_lock(lock: Path) -> Iterator[None]:
+    """Serialize writers. An abandoned lock requires the owner to clear it."""
     try:
         lock.mkdir()
     except FileExistsError as exc:
-        raise RuntimeError("Another readiness publisher holds the release lock") from exc
+        raise ReadinessPublicationBusy(
+            f"Another readiness publisher holds the release lock {lock}"
+        ) from exc
     try:
-        _publish_candidate_locked(candidate, destination, before)
+        yield
     finally:
         lock.rmdir()
+
+
+def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str]) -> None:
+    """Publish a checked release and preserve observed external edits.
+
+    Per-file checks narrow external-editor races but cannot guarantee atomicity
+    against writers that ignore the lock.
+    """
+    with _publication_lock(destination.parent / f".{destination.name}.readiness-publish.lock"):
+        _publish_candidate_locked(candidate, destination, before)
 
 
 def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[str, str]) -> None:
@@ -4297,13 +4298,84 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
             raise
 
 
+def _remove_fill_local_settings(evidence: Path) -> None:
+    """Discard per-user files written beside a snapshot by refill or subsequent DRC."""
+    for name in ("fill-saved", "fill-refilled"):
+        directory = evidence / name
+        for path in sorted(directory.rglob("*"), reverse=True):
+            if _is_transient_local(path.relative_to(directory)):
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+
+
+def _retain_other_diagnostics(previous: Path, staged: Path) -> None:
+    """Keep operator files alongside newly generated diagnostics in shared subdirectories."""
+    for entry in previous.iterdir():
+        target = staged / entry.name
+        if target.is_symlink():
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            if not target.exists():
+                shutil.copytree(entry, target, symlinks=True)
+            elif target.is_dir():
+                _retain_other_diagnostics(entry, target)
+        elif not target.exists():
+            shutil.copy2(entry, target, follow_symlinks=False)
+
+
+def _publish_diagnostics(source: Path | None, destination: Path, report: dict) -> Path:
+    """Publish this run's receipts and complete fill snapshots together."""
+    destination.mkdir(parents=True, exist_ok=True)
+    snapshots = {"fill-saved", "fill-refilled"}
+    with (
+        _publication_lock(destination / ".readiness-publish.lock"),
+        tempfile.TemporaryDirectory(dir=destination) as temp,
+    ):
+        incoming = Path(temp) / "incoming"
+        backup = Path(temp) / "backup"
+        incoming.mkdir()
+        backup.mkdir()
+        if source is not None and source.is_dir():
+            shutil.copytree(source, incoming, dirs_exist_ok=True)
+            for entry in incoming.iterdir():
+                prior = destination / entry.name
+                if (
+                    entry.name not in snapshots
+                    and entry.is_dir()
+                    and prior.is_dir()
+                    and not prior.is_symlink()
+                ):
+                    _retain_other_diagnostics(prior, entry)
+        (incoming / "readiness.json").write_text(json.dumps(report, indent=2) + "\n")
+
+        # Withdraw the old receipts first and install the new ones last. A
+        # missing snapshot or fill receipt removes its previous incarnation.
+        receipts = ["readiness.json", "fill-consistency.json"]
+        names = snapshots | {entry.name for entry in incoming.iterdir()}
+        order = receipts + sorted(names.difference(receipts))
+        with ExitStack() as rollback:
+            for name in order:
+                prior = destination / name
+                if prior.exists() or prior.is_symlink():
+                    os.replace(prior, backup / name)
+                    rollback.callback(os.replace, backup / name, prior)
+            for name in reversed(order):
+                new = incoming / name
+                if new.exists():
+                    os.replace(new, destination / name)
+                    rollback.callback(os.replace, destination / name, new)
+            rollback.pop_all()
+    return destination / "readiness.json"
+
+
 def _preflight_failure(
     options: ReadinessOptions, original: Path, exc: Exception
 ) -> ReadinessResult:
     """Report an unresolvable dependency without touching sources or any release."""
     name = "readiness-verification" if options.operation == "verify" else "readiness-attempt"
     diagnostics = original / "output" / name
-    diagnostics.mkdir(parents=True, exist_ok=True)
     report = {
         "schema_version": 1,
         "status": STATUS_BLOCKED,
@@ -4311,8 +4383,7 @@ def _preflight_failure(
         "blockers": [f"Readiness candidate was not published: {exc}"],
         "checks": [],
     }
-    report_path = diagnostics / "readiness.json"
-    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    report_path = _publish_diagnostics(None, diagnostics, report)
     return ReadinessResult(report, report_path, 1)
 
 
@@ -4386,6 +4457,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 return None
             return candidate_root / path.resolve().relative_to(project_root)
 
+        diagnostic_source = None
         try:
             staged = replace(
                 options,
@@ -4416,7 +4488,18 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                         "Existing package is not a generic readiness package; use --verify and regenerate it with its recipe"
                     )
                 shutil.rmtree(staged.output_dir)
-            result = _run_readiness_candidate(staged, engines)
+            diagnostic_source = staged.evidence_dir
+            # Generation can start with evidence copied from a previous release.
+            # A failure before the fill gate must not publish that older context.
+            if options.operation == "generate":
+                for name in ("fill-saved", "fill-refilled", "fill-consistency.json"):
+                    prior = diagnostic_source / name
+                    if prior.exists():
+                        prior.rename(Path(temporary) / name)
+            try:
+                result = _run_readiness_candidate(staged, engines)
+            finally:
+                _remove_fill_local_settings(diagnostic_source)
             changes = _release_changes(original, before, external_before)
             if changes:
                 raise RuntimeError(
@@ -4427,25 +4510,14 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 return replace(
                     result, report_path=original / result.report_path.relative_to(candidate)
                 )
-            # Preserve diagnostics but never replace the existing release report.
-            if staged.evidence_dir.exists():
-                diagnostics.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(staged.evidence_dir, diagnostics, dirs_exist_ok=True)
             report = result.report
             if options.operation == "generate":
                 report["candidate_not_published"] = True
-            report_path = diagnostics / "readiness.json"
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(json.dumps(report, indent=2) + "\n")
-            return replace(result, report_path=report_path)
         except KiCadEnvironmentError:
             # Issue #6962: the environment, not the board, failed -- write no
             # evidence at all, not even a blocked diagnostic receipt.
             raise
         except Exception as exc:
-            if "staged" in locals() and staged.evidence_dir.exists():
-                shutil.copytree(staged.evidence_dir, diagnostics, dirs_exist_ok=True)
-            diagnostics.mkdir(parents=True, exist_ok=True)
             report = {
                 "schema_version": 1,
                 "status": STATUS_BLOCKED,
@@ -4453,9 +4525,9 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 "blockers": [f"Readiness candidate was not published: {exc}"],
                 "checks": [],
             }
-            report_path = diagnostics / "readiness.json"
-            report_path.write_text(json.dumps(report, indent=2) + "\n")
-            return ReadinessResult(report, report_path, 1)
+            result = ReadinessResult(report, diagnostics / "readiness.json", 1)
+        report_path = _publish_diagnostics(diagnostic_source, diagnostics, report)
+        return replace(result, report_path=report_path)
 
 
 def _run_readiness_candidate(
@@ -5065,20 +5137,25 @@ def run_from_args(args: argparse.Namespace, engines: Engines | None = None) -> i
                     result = run_readiness(options, engines)
             else:
                 result = run_readiness(options, engines)
-    except KiCadEnvironmentError as exc:
-        error = f"KiCad environment refused; no evidence written: {exc}"
+    except (KiCadEnvironmentError, ReadinessPublicationBusy) as exc:
+        if isinstance(exc, KiCadEnvironmentError):
+            error = f"KiCad environment refused; no evidence written: {exc}"
+            failure_status, exit_code = STATUS_UNVERIFIED, 2
+        else:
+            error = str(exc)
+            failure_status, exit_code = STATUS_BLOCKED, 1
         if as_json:
             emit_json(
                 {
                     "command": "readiness",
                     "success": False,
                     "error": error,
-                    "status": STATUS_UNVERIFIED,
+                    "status": failure_status,
                 }
             )
         else:
             print(f"error: {error}", file=sys.stderr)
-        return 2
+        return exit_code
 
     if as_json:
         emit_json(
