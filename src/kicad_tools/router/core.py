@@ -1136,6 +1136,8 @@ def build_worker_router(config: dict) -> Autorouter:
             rotation=pad_data.get("rotation", 0.0),
             shape=pad_data.get("shape", "rect"),
             roundrect_rratio=pad_data.get("roundrect_rratio"),
+            chamfered_outline=pad_data.get("chamfered_outline", ()),
+            copper_offset=pad_data.get("copper_offset", (0.0, 0.0)),
         )
         key = pad.key
         if key in router.pads and router.pads[key].net != pad.net:
@@ -3863,6 +3865,8 @@ class Autorouter:
                 rotation=pad_info.get("rotation", 0.0),
                 shape=pad_info.get("shape", "rect"),
                 roundrect_rratio=pad_info.get("roundrect_rratio"),
+                chamfered_outline=pad_info.get("chamfered_outline", ()),
+                copper_offset=pad_info.get("copper_offset", (0.0, 0.0)),
                 # Issue #6243: a neutralised pad keeps its authored minimum.
                 authored_clearance=float(pad_info.get("authored_clearance", 0.0) or 0.0),
             )
@@ -22121,6 +22125,8 @@ class Autorouter:
                     "rotation": pad.rotation,
                     "shape": pad.shape,
                     "roundrect_rratio": pad.roundrect_rratio,
+                    "chamfered_outline": pad.chamfered_outline,
+                    "copper_offset": pad.copper_offset,
                     "pin_pitch": self.grid._pad_pin_pitch.get(id(pad)),
                 }
             )

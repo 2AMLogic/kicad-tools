@@ -631,3 +631,65 @@ def build_escape_fence_budgets(
         budget.source_net = int(source_net)
         budgets.append(budget)
     return budgets
+
+
+def trace_fences_cover_goal(
+    trace_fence_rects: Iterable[tuple[int, int, int, int, int]],
+    *,
+    end_metal: tuple[int, int, int, int],
+    end_layers: Iterable[int],
+    start_metal: tuple[int, int, int, int],
+    start_layers: Iterable[int],
+) -> bool:
+    """True when no legal goal cell is reachable under the trace fences (Issue #8486).
+
+    A sound-only skip test for the fenced A*: ``True`` means the fenced
+    search can **never** accept a goal, so running it would only drain its
+    budget before the unfenced retry.  The native search accepts a goal only
+    when it *pops* a node inside the end pad's metal box on a valid end
+    layer, and a node reaches the open set only by (a) being seeded from the
+    start pad's metal box on a valid start layer -- a seed needs no step, so
+    no fence can stop it -- or (b) a trace step or via landing, both of which
+    an infinite trace-fence cell refuses (a via may neither land on a fenced
+    trace cell nor inside a via fence, so trace-fence coverage also closes
+    via entry).  ``True`` therefore requires:
+
+    * the start and end metal boxes do NOT intersect on a layer valid for
+      both (no seed is a goal), and
+    * every cell of the end metal box on EVERY valid end layer is inside a
+      trace fence rect of that layer.
+
+    ``trace_fence_rects`` are ``(gx1, gy1, gx2, gy2, layer)`` tuples with
+    inclusive grid bounds -- the trace-fence half of
+    :func:`escape_fence_rects`' output (via fences, ``layer ==
+    PAD_VIA_FENCE_LAYER``, are irrelevant here: they refuse via drops only,
+    never a trace step onto the goal).  Any conservative miss (an uncovered
+    cell, an intersecting box, an empty goal box) returns ``False``: the
+    caller then runs the fenced search exactly as before.
+    """
+    ex1, ey1, ex2, ey2 = end_metal
+    if ex1 > ex2 or ey1 > ey2:
+        return False
+    end_layer_list = [int(l) for l in end_layers]
+    if not end_layer_list:
+        return False
+    sx1, sy1, sx2, sy2 = start_metal
+    if (
+        {int(l) for l in start_layers} & set(end_layer_list)
+        and sx1 <= ex2
+        and ex1 <= sx2
+        and sy1 <= ey2
+        and ey1 <= sy2
+    ):
+        return False
+    by_layer: dict[int, list[tuple[int, int, int, int]]] = {}
+    for gx1, gy1, gx2, gy2, layer in trace_fence_rects:
+        if int(layer) >= 0:
+            by_layer.setdefault(int(layer), []).append((gx1, gy1, gx2, gy2))
+    for layer in end_layer_list:
+        rects = by_layer.get(layer, ())
+        for gx in range(ex1, ex2 + 1):
+            for gy in range(ey1, ey2 + 1):
+                if not any(gx1 <= gx <= gx2 and gy1 <= gy <= gy2 for gx1, gy1, gx2, gy2 in rects):
+                    return False
+    return True
