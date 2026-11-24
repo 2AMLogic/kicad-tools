@@ -77,10 +77,12 @@ def board_content(data: bytes, *, ignore: tuple[str, ...] = ()) -> str:
         atoms = []
         for atom in (c for c in node.children if c.is_atom):
             value = atom.value
-            # Native saves write integral coordinates without a decimal point.
-            if node.name in ("xy", "xyz", "at", "start", "mid", "end", "size", "width"):
-                if isinstance(value, float) and value.is_integer():
-                    value = int(value)
+            # Native saves write integral numbers without a decimal point
+            # (``1.0`` -> ``1``), in every dimensional field (``thickness``,
+            # ``drill``, ``size``...), not a fixed list of node names. Only the
+            # spelling is normalised: ``1.5`` stays distinct from ``1``.
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
             atoms.append(repr(value))
         lists = [canon(c) for c in node.children if not c.is_atom and c.name not in skipped]
         if node.name != "pts":

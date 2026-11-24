@@ -199,6 +199,49 @@ def test_polygon_render_binding_across_staging(tmp_path):
         assert module._renders(name)(options) == images[name]
 
 
+@pytest.mark.parametrize(
+    ("source", "staged", "other"),
+    [
+        (
+            b'(kicad_pcb (gr_text "I" (at 129.5 94) (layer "F.SilkS") (effects '
+            b"(font (size 4 4) (thickness 1.0)))))",
+            b'(kicad_pcb (gr_text "I" (at 129.5 94) (layer "F.SilkS") (effects '
+            b"(font (size 4 4) (thickness 1)))))",
+            b'(kicad_pcb (gr_text "I" (at 129.5 94) (layer "F.SilkS") (effects '
+            b"(font (size 4 4) (thickness 1.5)))))",
+        ),
+        (
+            b'(kicad_pcb (footprint "R" (pad "1" thru_hole circle (at 0 0) '
+            b'(size 2 2) (drill 1.0) (layers "*.Cu"))))',
+            b'(kicad_pcb (footprint "R" (pad "1" thru_hole circle (at 0 0) '
+            b'(size 2 2) (drill 1) (layers "*.Cu"))))',
+            b'(kicad_pcb (footprint "R" (pad "1" thru_hole circle (at 0 0) '
+            b'(size 2 2) (drill 1.2) (layers "*.Cu"))))',
+        ),
+    ],
+    ids=["thickness", "drill"],
+)
+def test_whole_number_spelling_is_not_a_content_change(tmp_path, source, staged, other):
+    """A native save rewrites ``1.0`` as ``1`` in any dimensional field; that
+    spelling must not unbind fresh renders, while a different value must."""
+    assert board_content(source) == board_content(staged)
+    assert board_content(source) != board_content(other)
+
+    module = _load_release_module()
+    _, _, images, options = _fixture_board(tmp_path, silk_changed=True, provenance=None)
+    options.source_pcb_bytes = source
+    options.pcb.write_bytes(staged)
+    renders = options.board_dir / "output" / "renders"
+    receipt = json.dumps(_bind(options, source, images)).encode()
+    (renders / PROVENANCE).write_bytes(receipt)
+    _snapshot_old(module, options)
+    assert module._render_provenance(options) == receipt
+
+    options.pcb.write_bytes(other)
+    with pytest.raises(RuntimeError, match="does not bind"):
+        module._render_provenance(options)
+
+
 def test_changed_artwork_ships_provenance_bound_renders(tmp_path):
     module = _load_release_module()
     board, old, fresh, options = _fixture_board(
