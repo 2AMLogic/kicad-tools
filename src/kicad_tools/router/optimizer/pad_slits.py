@@ -1,15 +1,30 @@
-"""Check optimizer rewrites against the fabrication gap around their own SMD pads."""
+"""Check optimizer rewrites against the fabrication gap around same-net pads and vias."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
-from ..primitives import Segment
+from ..primitives import Pad, Route, Segment
 
 if TYPE_CHECKING:
+    from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
+
     from ..grid import RoutingGrid
+    from ..layers import Layer
+
+
+ReplacementCheck = Callable[[list[Segment], list[Segment], list[Segment]], bool]
+
+
+def _pad_copper(pad: Pad):
+    from kicad_tools.geometry.copper import standard_pad_polygon
+
+    from ..clearance_shapes import pad_kernel_params
+
+    shape, ratio = pad_kernel_params(pad)
+    return standard_pad_polygon(pad.x, pad.y, pad.width, pad.height, shape, pad.rotation, ratio)
 
 
 def _leg(seg: Segment) -> tuple:
@@ -18,33 +33,81 @@ def _leg(seg: Segment) -> tuple:
     return (a, b, seg.width) if a <= b else (b, a, seg.width)
 
 
-def pad_gap_check(
-    grid: RoutingGrid | None,
-) -> Callable[[list[Segment], list[Segment], list[Segment]], bool] | None:
+def pad_gap_check(grid: RoutingGrid | None) -> ReplacementCheck | None:
     """Bind the resolved pad-spacing limit and the router's stationary pad copper."""
     edge = getattr(getattr(grid, "rules", None), "same_net_pad_gap_band_edge_mm", None)
     if grid is None or not isinstance(edge, (int, float)) or edge <= 0:
         return None
 
-    from shapely.geometry import LineString  # type: ignore[import-untyped]
-    from shapely.strtree import STRtree  # type: ignore[import-untyped]
-
-    from kicad_tools.geometry.copper import standard_pad_polygon
-    from kicad_tools.validate.rules.physical_gap import CopperSource, iter_source_gaps
-
-    from ..clearance_shapes import pad_kernel_params
-
     pads = defaultdict(list)
     for pad in grid.pads:
         if pad.through_hole or pad.steiner_point or not pad.net:
             continue
-        shape, ratio = pad_kernel_params(pad)
-        copper = standard_pad_polygon(
-            pad.x, pad.y, pad.width, pad.height, shape, pad.rotation, ratio
-        )
+        copper = _pad_copper(pad)
         if copper is not None:
             pads[pad.net, pad.layer].append(copper)
-    trees = {key: STRtree(polygons) for key, polygons in pads.items()}
+    return _copper_gap_check(pads, edge, "pad")
+
+
+def via_gap_check(grid: RoutingGrid | None, route: Route) -> ReplacementCheck | None:
+    """Guard shortcuts past a stationary via on another route of the same net."""
+    edge = getattr(getattr(grid, "rules", None), "same_net_trace_gap_band_edge_mm", None)
+    if grid is None or not isinstance(edge, (int, float)) or edge <= 0:
+        return None
+
+    from shapely.geometry import Point  # type: ignore[import-untyped]
+
+    from kicad_tools.core.types import copper_span_contains
+
+    siblings = [other for other in grid.routes if other is not route and other.net == route.net]
+    if not any(other.vias for other in siblings):
+        return None
+    layers = {s.layer for s in route.segments}
+    barrels = defaultdict(list)
+    background = defaultdict(list)
+    for branch in [route, *siblings]:
+        for via in branch.vias:
+            copper = Point(via.x, via.y).buffer(via.diameter / 2, quad_segs=64)
+            for layer in layers:
+                if copper_span_contains(*via.drilled_layers, layer):
+                    if branch is route:
+                        background[via.net, layer].append(("via", copper))
+                    else:
+                        barrels[via.net, layer].append(copper)
+    if not barrels:
+        return None
+    # The live grid still contains the original route. Only its siblings
+    # and stationary pads stay in the union unchanged during the rewrite.
+    for pad in grid.pads:
+        if pad.steiner_point or pad.net != route.net:
+            continue
+        copper = _pad_copper(pad)
+        if copper is not None:
+            for layer in layers:
+                if pad.through_hole or pad.layer == layer:
+                    background[pad.net, layer].append(("pad", copper))
+    return _copper_gap_check(
+        barrels, edge, "via", [s for other in siblings for s in other.segments], background
+    )
+
+
+def _copper_gap_check(
+    shapes: dict[tuple[int, Layer], list[BaseGeometry]],
+    edge: float,
+    kind: str,
+    sibling_copper: Sequence[Segment] = (),
+    background: dict[tuple[int, Layer], list[tuple[str, BaseGeometry]]] | None = None,
+) -> ReplacementCheck:
+    from shapely.geometry import LineString
+    from shapely.strtree import STRtree  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.rules.physical_gap import CopperSource, iter_source_gaps
+
+    trees = {key: STRtree(polygons) for key, polygons in shapes.items()}
+    background = background or {}
+    background_trees = {
+        key: STRtree([shape for _, shape in items]) for key, items in background.items()
+    }
 
     def replacement_is_clear(
         original: list[Segment], candidate: list[Segment], kept: list[Segment]
@@ -62,19 +125,28 @@ def pad_gap_check(
         ]
         if not changed:
             return True
-        # Uniform-width legs. Only pads within the fab band of new copper can gain a slit.
+        # Only features within the fab band of a changed leg can gain a slit.
         _, hits = tree.query(changed, predicate="dwithin", distance=edge + first.width / 2)
         layer, net = first.layer.name, str(first.net)
         for idx in set(hits):
-            pad_copper = pads[key][idx]
-            left, bottom, right, top = pad_copper.bounds
-            sources = [CopperSource(pad_copper, layer, net, "pad", "pad")]
-            for neighbour in tree.query(pad_copper, predicate="dwithin", distance=edge):
+            target = shapes[key][idx]
+            left, bottom, right, top = target.bounds
+            sources = [CopperSource(target, layer, net, kind, kind)]
+            nearby = background_trees.get(key)
+            if nearby is not None:
+                for item in nearby.query(target, predicate="dwithin", distance=edge):
+                    feature, copper = background[key][item]
+                    sources.append(CopperSource(copper, layer, net, "kept", feature))
+            for neighbour in tree.query(target, predicate="dwithin", distance=edge):
                 if neighbour != idx:
                     sources.append(
-                        CopperSource(pads[key][neighbour], layer, net, "neighbour", "pad")
+                        CopperSource(shapes[key][neighbour], layer, net, "neighbour", kind)
                     )
-            for segments, is_candidate in ((candidate, True), (kept, False)):
+            for segments, is_candidate in (
+                (candidate, True),
+                (kept, False),
+                (sibling_copper, False),
+            ):
                 for seg in segments:
                     reach = edge + seg.width / 2
                     if (
@@ -91,10 +163,10 @@ def pad_gap_check(
                     )
                     owner = "replacement" if is_candidate and _leg(seg) not in previous else "kept"
                     sources.append(CopperSource(copper, layer, net, owner))
-            # The closest point alone misses a slit beside an actual pad join.
+            # The closest point alone misses a slit beside an actual copper join.
             # Grade facing edges of the copper union the way fabrication DRC does.
             if any(
-                "replacement" in gap.ids and "pad" in gap.ids
+                "replacement" in gap.ids and kind in gap.ids
                 for gap in iter_source_gaps(sources, edge)
             ):
                 return False
