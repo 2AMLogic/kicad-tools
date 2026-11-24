@@ -18,6 +18,48 @@ from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 
+def test_positional_pad_identity_still_routes():
+    # Existing positional callers may supply every field through the footprint side.
+    source = Pad(
+        2,
+        2,
+        0.6,
+        0.6,
+        1,
+        "SIG",
+        Layer.F_CU,
+        "U1",
+        "1",
+        False,
+        0,
+        False,
+        False,
+        "",
+        0,
+        "rect",
+        None,
+        None,
+        0,
+        "U1",
+        False,
+        "west-land",
+        0.2,
+        (1, 1),
+        Layer.F_CU,
+    )
+    assert source.key == ("U1", "west-land")
+    assert (source.authored_clearance, source.footprint_origin, source.side) == (
+        0.2,
+        (1, 1),
+        Layer.F_CU,
+    )
+    assert source.terminal_layers is None
+    rules = DesignRules(grid_resolution=0.1)
+    router = Router(RoutingGrid(8, 6, rules, layer_stack=LayerStack.two_layer()), rules)
+    target = Pad(3, 2, 0.6, 0.6, 1, "SIG", ref="J1", pin="1")
+    assert router.route(source, target, per_net_timeout=2) is not None
+
+
 def departure_fixture():
     rules = DesignRules(
         trace_width=0.275,

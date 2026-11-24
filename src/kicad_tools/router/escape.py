@@ -366,7 +366,8 @@ def escape_endpoint_pad(
         extent = None
 
     on_layer = pad.through_hole or preferred == pad.layer
-    unchanged = ex == pad.x and ey == pad.y and on_layer
+    offset_x, offset_y = pad.copper_offset
+    unchanged = ex == pad.x and ey == pad.y and on_layer and not (offset_x or offset_y)
     if extent is None and unchanged:
         width, height = pad.width, pad.height
         shape, rotation = pad.shape, pad.rotation
@@ -376,7 +377,7 @@ def escape_endpoint_pad(
             if on_layer:
                 # Transform clockwise board rotation into pad-local coordinates.
                 theta = math.radians(pad.rotation)
-                dx, dy = ex - pad.x, ey - pad.y
+                dx, dy = ex - (pad.x + offset_x), ey - (pad.y + offset_y)
                 x = abs(dx * math.cos(theta) - dy * math.sin(theta))
                 y = abs(dx * math.sin(theta) + dy * math.cos(theta))
                 hw, hh = pad.width / 2, pad.height / 2

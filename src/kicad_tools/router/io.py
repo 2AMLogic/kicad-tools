@@ -44,6 +44,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.core.geometry import rotate_pad_offset
 from kicad_tools.sexp.scan import find_unquoted, iter_unquoted
 
 logger = logging.getLogger(__name__)
@@ -2858,6 +2859,7 @@ def load_pads_for_analysis(
                     shape=pad_shape,
                     roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
                     chamfered_outline=_pad_chamfered_outline(pad_block),
+                    copper_offset=_pad_copper_offset_from_block(pad_block, pad_rot),
                 )
             )
 
@@ -4998,6 +5000,7 @@ def route_pcb(
                     "shape": pad.get("shape", "rect"),
                     "roundrect_rratio": pad.get("roundrect_rratio"),
                     "chamfered_outline": pad.get("chamfered_outline", ()),
+                    "copper_offset": pad.get("copper_offset", (0.0, 0.0)),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
                     "net_name": net_name,
@@ -5140,9 +5143,21 @@ def _schema_pad_shape(pad, ref: str) -> str:
     )
 
 
+def _pad_copper_offset_from_block(block: str, rotation: float) -> tuple[float, float]:
+    """KiCad stores the copper displacement in pad-local axes under ``drill``."""
+    if "(offset" not in block:
+        return (0.0, 0.0)
+    from kicad_tools.sexp import parse_string
+
+    drill = parse_string(block).find_child("drill")
+    offset = drill.find_child("offset") if drill is not None else None
+    if offset is None:
+        return (0.0, 0.0)
+    return rotate_pad_offset(offset.get_float(0) or 0.0, offset.get_float(1) or 0.0, rotation)
+
+
 def _pad_chamfered_outline(source: str | SExp | None) -> tuple[tuple[float, float], ...]:
     """Copper of a mixed chamfered/rounded pad, relative to its centre in board axes."""
-    from kicad_tools.core.geometry import rotate_pad_offset
     from kicad_tools.sexp import parse_string
 
     if isinstance(source, str):
@@ -5189,10 +5204,12 @@ def _pad_chamfered_outline(source: str | SExp | None) -> tuple[tuple[float, floa
 
 def _schema_pad_shape_fields(pad, ref: str) -> dict:
     """Geometry shared by the schema-based router entry points."""
+    offset_x, offset_y = pad.drill_offset
     return {
         "shape": _schema_pad_shape(pad, ref),
         "roundrect_rratio": _schema_pad_rratio(pad),
         "chamfered_outline": _pad_chamfered_outline(getattr(pad, "_sexp_node", None)),
+        "copper_offset": rotate_pad_offset(offset_x, offset_y, pad.rotation),
     }
 
 
@@ -5388,6 +5405,7 @@ def _install_fine_pitch_regions_from_components(
                         shape=pad_info.get("shape", "rect"),
                         roundrect_rratio=pad_info.get("roundrect_rratio"),
                         chamfered_outline=pad_info.get("chamfered_outline", ()),
+                        copper_offset=pad_info.get("copper_offset", (0.0, 0.0)),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -5978,6 +5996,7 @@ def load_pcb_for_routing(
                     "shape": pad_shape,
                     "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),
                     "chamfered_outline": _pad_chamfered_outline(pad_block),
+                    "copper_offset": _pad_copper_offset_from_block(pad_block, pad_rot),
                 }
             )
 

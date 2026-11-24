@@ -659,7 +659,6 @@ class Pad:
     drill_rotation: float = 0.0
     component_id: str = ""
     escape_terminal: bool = False  # Metal bounds must stay within committed escape copper
-    terminal_layers: tuple[Layer, ...] | None = None
     terminal_id: str = ""
     """Internal physical land identity; ``pin`` keeps its authored display name."""
 
@@ -699,6 +698,10 @@ class Pad:
 
     chamfered_outline: tuple[tuple[float, float], ...] = ()
     """Copper boundary of an authored chamfered pad, in board-axis offsets from its centre."""
+
+    terminal_layers: tuple[Layer, ...] | None = field(default=None, kw_only=True)
+    copper_offset: tuple[float, float] = field(default=(0.0, 0.0), kw_only=True)
+    """Board-axis displacement from the pad anchor to its copper centre, in mm."""
 
     @property
     def component_key(self) -> str:

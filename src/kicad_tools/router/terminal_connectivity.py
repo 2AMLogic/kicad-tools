@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import shapely  # type: ignore[import-untyped]
+from shapely.affinity import translate  # type: ignore[import-untyped]
 from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
@@ -29,12 +30,15 @@ def _contact_outline(pad: Pad):
     missing, KiCad's maximum ratio of 0.5 gives the stadium contained in
     every roundrect of those dimensions (issue #6371).
     """
+    dx, dy = pad.copper_offset
     if pad.shape != "roundrect":
-        return _pad_outline(pad, contact=True)
+        outline = _pad_outline(pad, contact=True)
+        return translate(outline, dx, dy) if dx or dy else outline
+    cx, cy = pad.x + dx, pad.y + dy
     if pad.chamfered_outline:
-        return shapely.Polygon([(pad.x + dx, pad.y + dy) for dx, dy in pad.chamfered_outline])
+        return shapely.Polygon([(cx + x, cy + y) for x, y in pad.chamfered_outline])
     ratio = pad.roundrect_rratio if pad.roundrect_rratio is not None else 0.5
-    shape = pad_gate_polygon(pad.x, pad.y, pad.width, pad.height, pad.shape, pad.rotation, ratio)
+    shape = pad_gate_polygon(cx, cy, pad.width, pad.height, pad.shape, pad.rotation, ratio)
     return shape if shape is not None else shapely.Polygon()
 
 
@@ -42,10 +46,8 @@ def physical_pad_components(pads: list[Pad], routes: list[Route]) -> list[int]:
     """Return copper-component IDs, preserving a node for each physical pad.
 
     Contacts require intersecting copper on a shared layer. PTH pads and vias
-    bridge only the layers their barrels span. Rounded rectangles use the
-    inscribed stadium (see :func:`_contact_outline`) because Pad lacks
-    corner-radius metadata; a missing corner contact must not become a false
-    completion.
+    bridge only the layers their barrels span. Pad contact uses the authored
+    copper outline and its offset from the drill anchor.
     """
     return physical_copper_components(
         pads,
