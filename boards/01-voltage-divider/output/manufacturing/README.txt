@@ -2,7 +2,7 @@ Manufacturing package for voltage_divider_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-11-13T23:50:00+00:00
+Generated        : 2026-11-24T17:18:27Z
 
 Assembly package: BOM and CPL are included.
 
@@ -24,6 +24,7 @@ Contents
   kicad_project.zip
   manifest.json
   native-drc.json
+  procurement-review.md
   report.md
   report.pdf
   schematic.pdf
@@ -35,7 +36,7 @@ Hand-solder / through-hole items
 
 Warning review (per rule)
 -------------------------
-  physical_copper_gap: 8
+  mask_to_copper: 8
   All assembly-affecting warning counts are zero.
 
 Copper cleanup
@@ -63,3 +64,4 @@ Accepted-risk waivers
 Sign-off
 --------
   Fresh kct check and native KiCad DRC (saved and refilled copper): zero errors.
+  Procurement identities reviewed against supplier listings; see procurement-review.md and source project.kct.

@@ -1,6 +1,15 @@
 # Board01 Voltage Divider — procurement reconciliation
 
-## Current package — 2026-09-10
+## Grouped BOM approval, November 24, 2026
+
+The maintainer approved the grouped BOM for this manufacturing package. J1 and J2 share one BOM line for two ZX-PZ2.54-1-2PZZ through-hole headers (LCSC C7501260). R1 and R2 retain 0805W8F1002T5E (LCSC C17414). The existing JLCPCB placement file lists all four parts, including the two through-hole headers under the October 18 assembly decision. Procurement still reviews the headers’ eligibility, stock and orientation before an assembly order. [Board 01 assembly decision](https://github.com/2AMLogic/kicad-tools/issues/7239) [Approval on issue #9058](https://github.com/2AMLogic/kicad-tools/issues/9058#issuecomment-7138611002)
+
+| Reviewed file | SHA-256 |
+| --- | --- |
+| `bom_jlcpcb.csv` | `e27d3eb62752fff2b81d590930c5034c38cef022b4bf458891f038622e6ee878` |
+| `cpl_jlcpcb.csv` | `847457252c291c9086804931f5016de06f78dc1aa1020d4a0068bc98ddd89c36` |
+
+## Supplier review, September 10, 2026
 
 The committed [project.kct](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/01-voltage-divider/project.kct),
 [BOM](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/01-voltage-divider/output/manufacturing/bom_jlcpcb.csv) and
