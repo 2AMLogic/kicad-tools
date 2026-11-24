@@ -760,6 +760,34 @@ class MaskCopperRepairer(CopperGapRepairer):
                 pass_throughs.setdefault(conductor, []).append(violation)
                 continue
             if OWN_PAD_ENTRY_MARKER not in violation.message:
+                # An overlapping pass-through track that hugs the pad edge and
+                # turns in at its corner may take the mirror elbow (#9939).
+                flip_seg = segments.get(conductor)
+                if (
+                    PASS_THROUGH_MARKER in violation.message
+                    and flip_seg is not None
+                    and len(openings) == 1
+                    and openings[0] in pads
+                    and conductor not in moved
+                    and conductor not in touched_by_action
+                    and self._flip_elbow_into_pad(
+                        flip_seg,
+                        conductor,
+                        openings[0],
+                        pads,
+                        result,
+                        max_displacement,
+                        dry_run,
+                        clearance_mm,
+                        violation.required_value_mm,
+                        touched_by_action,
+                    )
+                ):
+                    moved.add(conductor)
+                    action = result.actions[-1]
+                    if isinstance(action, MaskNudgeAction):
+                        touched_by_action.update(point[1] for point in action.points)
+                    continue
                 result.skip("not_own_pad_entry", violation, conductor)
                 continue
             seg = segments.get(conductor)
@@ -1303,6 +1331,21 @@ class MaskCopperRepairer(CopperGapRepairer):
             return refusal
         via_node = self._via_by_uuid(conductor)
         if via_node is not None:
+            via_at = self._xy(via_node.find("at"))
+            if via_at is not None and any(
+                uid in touched_by_action
+                for uid, node in self._segment_nodes().items()
+                if any(
+                    (end := self._xy(node.find(tag))) is not None
+                    and math.dist(end, via_at) < _TOLERANCE_MM
+                    for tag in ("start", "end")
+                )
+            ):
+                # An earlier action this run already moved a track that
+                # reaches this via; a second edit on it cannot be attributed
+                # to one repair and would roll both back. The next pass sees
+                # the settled copper.
+                return "segment_end_already_moved", ""
             return self._nudge_via_clear(
                 via_node,
                 conductor,
@@ -1819,6 +1862,137 @@ class MaskCopperRepairer(CopperGapRepairer):
                     points=points,
                 )
                 return self._apply_nudge(action, result, dry_run) is None
+        return False
+
+    def _flip_elbow_into_pad(
+        self,
+        seg: SExp,
+        seg_uuid: str,
+        opening: str,
+        pads: dict,
+        result: MaskRepairResult,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        required: float | None,
+        touched: set[str],
+    ) -> bool:
+        """Swap the two legs of an elbow so its corner lands inside the pad.
+
+        An overlapping pass-through track that runs along a pad's edge and
+        turns into the pad at the corner is half under the pad's own opening
+        and half beside it, and is never an own-pad entry because no authored
+        end is strictly inside the pad. When the track and exactly one other
+        same-net track form a two-leg chain between two fixed anchors, the
+        mirror elbow (the same two legs in the opposite order) joins the same
+        anchors. Every leg keeps its length and angle, so legal directions stay
+        legal, and the moved corner becomes the strictly-inside end of a
+        straight entry. Only that single shared point moves, so the existing
+        nudge action owns the edit for rollback. Returns ``True`` when applied.
+        """
+        if required is None or opening in self._pivot_pad_bounds:
+            return False
+        pad, _, pad_layers, net, ref, shape = pads[opening]
+        if shape == "unsupported" or not net or self._net_name(seg) != net:
+            return False
+        if self._locks.is_locked(seg) or self._locks.is_generator_owned(seg) or seg_uuid in touched:
+            return False
+        layer_node, width_node = seg.find("layer"), seg.find("width")
+        if layer_node is None or width_node is None:
+            return False
+        layer = _bare(layer_node.get_first_atom())
+        if layer not in pad_layers and "*.Cu" not in pad_layers:
+            return False
+        width = _num(width_node)
+        start, end = self._xy(seg.find("start")), self._xy(seg.find("end"))
+        if start is None or end is None or width <= 0:
+            return False
+        rules = self._board_rules
+        if rules.dru_error:
+            return False
+        copper_floor = max(clearance_mm or 0.0, rules.net_requirement(net, self.net_names))
+        inside = pad.buffer(-_INSIDE_EPS_MM)
+
+        for elbow, anchor, tag in ((end, start, "end"), (start, end, "start")):
+            members, blocked = self._junction(layer, elbow, seg_uuid, net)
+            if blocked or len(members) != 1 or self._has_fixed_junction_contact(elbow, layer, net):
+                continue
+            other_uuid, other, other_tag = members[0]
+            if (
+                other_uuid in touched
+                or self._locks.is_locked(other)
+                or self._locks.is_generator_owned(other)
+            ):
+                continue
+            far = self._xy(other.find("end" if other_tag == "start" else "start"))
+            other_width_node = other.find("width")
+            if far is None or other_width_node is None:
+                continue
+            other_width = _num(other_width_node) or width
+            # The two legs trade places between the same two anchors.
+            flipped = (
+                round(anchor[0] + far[0] - elbow[0], 4),
+                round(anchor[1] + far[1] - elbow[1], 4),
+            )
+            dx, dy = flipped[0] - elbow[0], flipped[1] - elbow[1]
+            displacement = math.hypot(dx, dy)
+            if displacement < _TOLERANCE_MM or displacement > max_displacement:
+                continue
+            if math.dist(flipped, anchor) < _MIN_RUN_MM or math.dist(flipped, far) < _MIN_RUN_MM:
+                continue
+            # The corner must become an end strictly inside the owner pad.
+            if not inside.contains(Point(flipped)):
+                continue
+
+            moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
+                (
+                    LineString([anchor, elbow]).buffer(width / 2, quad_segs=16),
+                    LineString([anchor, flipped]).buffer(width / 2, quad_segs=16),
+                    layer,
+                ),
+                (
+                    LineString([elbow, far]).buffer(other_width / 2, quad_segs=16),
+                    LineString([flipped, far]).buffer(other_width / 2, quad_segs=16),
+                    layer,
+                ),
+            ]
+            points: list[tuple[str, str, str | None, float, float]] = [
+                ("segment", seg_uuid, tag, *elbow),
+                ("segment", other_uuid, other_tag, *elbow),
+            ]
+            if not self._slide_keeps_connections(points, dx, dy, net):
+                continue
+            if self._copper_floor_reason(moves, layer, net, seg_uuid, pads, copper_floor):
+                continue
+            if self._other_opening_reason(
+                [opening],
+                moves,
+                [(elbow, flipped, frozenset({layer}))],
+                pads,
+                required,
+                displacement,
+            ):
+                continue
+            action = MaskNudgeAction(
+                action="nudge_clear",
+                uuid=seg_uuid,
+                kind="segment",
+                pad_uuid=opening,
+                pad_ref=ref,
+                net_name=net,
+                layer=layer,
+                old_x=elbow[0],
+                old_y=elbow[1],
+                new_x=flipped[0],
+                new_y=flipped[1],
+                dx=dx,
+                dy=dy,
+                displacement_mm=displacement,
+                detail=f"flipped a two-leg elbow {displacement:.4f}mm so its corner enters {ref}",
+                openings=[opening],
+                points=points,
+            )
+            return self._apply_nudge(action, result, dry_run) is None
         return False
 
     def _slide_keeps_connections(
