@@ -106,6 +106,12 @@ _TAIL_LAND_MARGIN_MM = 0.001
 # the slid endpoint (the end lands inside the land and already touches the
 # annulus) instead of serializing a near-zero-length segment.
 _MIN_TAIL_MM = 0.005
+# Slide search for a jog between two parallel runs: candidate step, the
+# perpendicular offset within which a joined run still counts as on the common
+# axis, and the shortest run a slide may leave behind.
+_SLIDE_STEP_MM = 0.005
+_RUN_AXIS_TOLERANCE_MM = 0.0002
+_MIN_RUN_MM = 0.05
 # The four connection line directions through the new via centre (each used
 # in both orientations): 0, 45, 90 and 135 degrees.
 _ALIGNED_TAIL_DIRS = ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0))
@@ -768,6 +774,26 @@ class MaskCopperRepairer(CopperGapRepairer):
                 continue
             if conductor in touched_by_action:
                 result.skip("segment_end_already_moved", violation, conductor)
+                continue
+            if self._slide_jog_along_runs(
+                seg,
+                conductor,
+                openings[0],
+                pads,
+                result,
+                max_displacement,
+                dry_run,
+                clearance_mm,
+                violation.required_value_mm,
+                margin_mm,
+                warning_clearance_mm,
+                touched_by_action,
+            ):
+                # A jog between parallel runs slides whole; no end is recentred.
+                moved.add(conductor)
+                action = result.actions[-1]
+                if isinstance(action, MaskNudgeAction):
+                    touched_by_action.update(point[1] for point in action.points)
                 continue
             reason = self._repair_one(
                 seg, conductor, openings[0], pads, result, max_displacement, dry_run, clearance_mm
@@ -1599,6 +1625,239 @@ class MaskCopperRepairer(CopperGapRepairer):
             )
             return self._apply_nudge(action, result, dry_run) is None
         return False
+
+    def _slide_jog_along_runs(
+        self,
+        seg: SExp,
+        seg_uuid: str,
+        opening: str,
+        pads: dict,
+        result: MaskRepairResult,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        required: float | None,
+        margin_mm: float,
+        warning_clearance_mm: float | None,
+        touched: set[str],
+    ) -> bool:
+        """Slide a jog between two parallel runs along them, clear of the opening.
+
+        The conductor is a straight track whose two ends each join only
+        same-net tracks that run along one common axis (the pad lead on one
+        side, the downstream run on the other), and any coincident copies of
+        the jog. Translating the jog (and every copy) along that axis moves
+        each joined run end along its own line, so every angle is kept, the
+        far ends of the runs stay fixed, and the jog leaves the opening it
+        entered. All points receive one translation so the existing nudge
+        action owns the edit for rollback. Returns ``True`` when applied.
+        """
+        if required is None or opening in self._pivot_pad_bounds:
+            return False
+        pad, _, pad_layers, net, ref, shape = pads[opening]
+        if shape == "unsupported" or not net or self._net_name(seg) != net:
+            return False
+        if self._locks.is_locked(seg):
+            return False
+        layer_node, width_node = seg.find("layer"), seg.find("width")
+        if layer_node is None or width_node is None:
+            return False
+        layer = _bare(layer_node.get_first_atom())
+        if layer not in pad_layers and "*.Cu" not in pad_layers:
+            return False
+        width = _num(width_node)
+        start, end = self._xy(seg.find("start")), self._xy(seg.find("end"))
+        if start is None or end is None or width <= 0 or math.dist(start, end) < _TOLERANCE_MM:
+            return False
+        near, far = (
+            (end, start)
+            if pad.distance(Point(end)) < pad.distance(Point(start))
+            else (
+                start,
+                end,
+            )
+        )
+
+        copies: dict[str, SExp] = {seg_uuid: seg}
+        runs: list[tuple[str, SExp, str, tuple[float, float], tuple[float, float]]] = []
+        sides: list[int] = []
+        for point, opposite in ((near, far), (far, near)):
+            members, blocked = self._junction(layer, point, seg_uuid, net)
+            if blocked or self._has_fixed_junction_contact(point, layer, net):
+                return False
+            count = 0
+            for uid, node, tag in members:
+                other = self._xy(node.find("end" if tag == "start" else "start"))
+                if other is None or node.find("width") is None:
+                    return False
+                if math.dist(other, opposite) < _TOLERANCE_MM:
+                    copies[uid] = node
+                    continue
+                runs.append((uid, node, tag, point, other))
+                count += 1
+            sides.append(count)
+        if min(sides) == 0:
+            return False
+        if set(copies) & touched or any(
+            self._locks.is_generator_owned(node) for node in copies.values()
+        ):
+            return False
+
+        # One common axis for every run; the jog itself must cross it.
+        _, _, _, first_point, first_other = runs[0]
+        axis_len = math.dist(first_point, first_other)
+        if axis_len < _TOLERANCE_MM:
+            return False
+        ux = (first_point[0] - first_other[0]) / axis_len
+        uy = (first_point[1] - first_other[1]) / axis_len
+        jog = (far[0] - near[0], far[1] - near[1])
+        if abs(jog[0] * uy - jog[1] * ux) < 0.1 * math.hypot(*jog):
+            return False
+        low, high = -math.inf, math.inf
+        for uid, node, _tag, point, other in runs:
+            vx, vy = point[0] - other[0], point[1] - other[1]
+            if abs(vx * uy - vy * ux) > _RUN_AXIS_TOLERANCE_MM or self._locks.is_locked(node):
+                return False
+            if self._locks.is_generator_owned(node) or uid in touched:
+                return False
+            along = vx * ux + vy * uy
+            # The run keeps its direction and a minimum length either way.
+            if along > 0:
+                low = max(low, _MIN_RUN_MM - along)
+            else:
+                high = min(high, -along - _MIN_RUN_MM)
+        if not low < 0 < high:
+            return False
+
+        rules = self._board_rules
+        if rules.dru_error:
+            return False
+        copper_floor = max(clearance_mm or 0.0, rules.net_requirement(net, self.net_names))
+
+        def jogged(point: tuple[float, float], dx: float, dy: float) -> tuple[float, float]:
+            return round(point[0] + dx, 4), round(point[1] + dy, 4)
+
+        jog_copper = LineString([near, far]).buffer(width / 2, quad_segs=16)
+        # Prefer the manufacturer's advisory band when the slide fits it.
+        for gap in dict.fromkeys((max(warning_clearance_mm or 0.0, required), required)):
+            for sign in (1.0, -1.0):
+                found = None
+                for step in range(1, int(max_displacement / _SLIDE_STEP_MM + 1e-9) + 1):
+                    signed = sign * step * _SLIDE_STEP_MM
+                    if not low < signed < high:
+                        break
+                    dx, dy = round(signed * ux, 4), round(signed * uy, 4)
+                    if translate(jog_copper, dx, dy).distance(pad) >= gap + margin_mm - 1e-9:
+                        found = (dx, dy)
+                        break
+                if found is None:
+                    continue
+                dx, dy = found
+                moves: list[tuple[BaseGeometry, BaseGeometry, str]] = []
+                points: list[tuple[str, str, str | None, float, float]] = []
+                moved_points: list[
+                    tuple[tuple[float, float], tuple[float, float], frozenset[str]]
+                ] = []
+                for uid, node in copies.items():
+                    s, e = self._xy(node.find("start")), self._xy(node.find("end"))
+                    w = _num(node.find("width")) or width
+                    if s is None or e is None:
+                        return False
+                    new_s, new_e = jogged(s, dx, dy), jogged(e, dx, dy)
+                    moves.append(
+                        (
+                            LineString([s, e]).buffer(w / 2, quad_segs=16),
+                            LineString([new_s, new_e]).buffer(w / 2, quad_segs=16),
+                            layer,
+                        )
+                    )
+                    points.append(("segment", uid, "start", *s))
+                    points.append(("segment", uid, "end", *e))
+                    moved_points += [(s, new_s, frozenset({layer})), (e, new_e, frozenset({layer}))]
+                for uid, node, tag, point, other in runs:
+                    w = _num(node.find("width")) or width
+                    new_point = jogged(point, dx, dy)
+                    moves.append(
+                        (
+                            LineString([other, point]).buffer(w / 2, quad_segs=16),
+                            LineString([other, new_point]).buffer(w / 2, quad_segs=16),
+                            layer,
+                        )
+                    )
+                    points.append(("segment", uid, tag, *point))
+                    moved_points.append((point, new_point, frozenset({layer})))
+                if not self._slide_keeps_connections(points, dx, dy, net):
+                    continue
+                if self._copper_floor_reason(moves, layer, net, seg_uuid, pads, copper_floor):
+                    continue
+                displacement = math.hypot(dx, dy)
+                if self._other_opening_reason(
+                    [opening], moves, moved_points, pads, required, displacement
+                ):
+                    continue
+                new_near = jogged(near, dx, dy)
+                action = MaskNudgeAction(
+                    action="nudge_clear",
+                    uuid=seg_uuid,
+                    kind="segment",
+                    pad_uuid=opening,
+                    pad_ref=ref,
+                    net_name=net,
+                    layer=layer,
+                    old_x=near[0],
+                    old_y=near[1],
+                    new_x=new_near[0],
+                    new_y=new_near[1],
+                    dx=dx,
+                    dy=dy,
+                    displacement_mm=displacement,
+                    detail=(
+                        f"slid a jog of {len(copies)} track(s) {displacement:.4f}mm along "
+                        f"its parallel runs clear of {ref}"
+                    ),
+                    openings=[opening],
+                    points=points,
+                )
+                return self._apply_nudge(action, result, dry_run) is None
+        return False
+
+    def _slide_keeps_connections(
+        self,
+        points: list[tuple[str, str, str | None, float, float]],
+        dx: float,
+        dy: float,
+        net_name: str,
+    ) -> bool:
+        """Whether translating ``points`` leaves every same-net contact group joined.
+
+        Compares the net's whole copper-contact graph (tracks, arcs, vias, pads
+        and fill) before and after the edit, so a jog that stops touching a pad
+        its attached run still reaches is accepted while a real split is not.
+        The document is restored before returning.
+        """
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        pcb = PCB(self.doc)
+        net = pcb.get_net_by_name(net_name)
+        if net is None:
+            return False
+        previous = ConnectivityValidator(pcb)._contact_graph(net.number)
+        original: list[tuple[SExp, list]] = []
+        try:
+            for _kind, uuid, tag, old_x, old_y in points:
+                node = self._segment_by_uuid(uuid)
+                end_node = None if node is None or tag is None else node.find(tag)
+                if end_node is None:
+                    return False
+                original.append((end_node, list(end_node.children)))
+                end_node.set_value(0, round(old_x + dx, 4))
+                end_node.set_value(1, round(old_y + dy, 4))
+            current = ConnectivityValidator(PCB(self.doc))._contact_graph(net.number)
+            return bool(current.preserves_connections(previous))
+        finally:
+            for end_node, children in original:
+                end_node.children[:] = children
 
     def _has_fixed_junction_contact(
         self, point: tuple[float, float], layer: str, net_name: str

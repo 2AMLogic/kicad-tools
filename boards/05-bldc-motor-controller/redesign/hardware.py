@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent
 R = "Resistor_SMD:R_0805_2012Metric"
 C = "Capacitor_SMD:C_0805_2012Metric"
 DRV_FP = "board05_revB:TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias"
-LDO_FP = "Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias"
+LDO_FP = "board05_revB:TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias"
 # Installed KiCad models with the correct visible body and lead geometry.
 # Their hidden exposed-pad dimensions are approximate; fabrication uses pads.
 MODEL_ALIASES = {
