@@ -19042,7 +19042,9 @@ class Autorouter:
             guard.entry_signature[net] = self._relief_witness_signature(
                 net, self._build_net_routes_map(), search_geometry=True
             )
-        used = guard.search_cap(net, iteration, cap)
+        used, retry_fallback = guard.search_budget(net, iteration, cap)
+        if retry_fallback and isinstance(self.router, CppPathfinder):
+            self.router.reset_fallback_for_net(net)
         if used is not None and cap is not None and used < cap:
             print(
                 f"      back-off: {self.net_names.get(net, f'Net_{net}')} search capped at "

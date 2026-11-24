@@ -832,9 +832,13 @@ def _assert_full_retry_after_opening_gate(router, gate):
         router.grid.unmark_route(gate)
         router.routes.remove(gate)
         guard.begin_iteration(4, {1: None})
+        previous_reductions = router.router.fallback_stats["python_fallback_reduced_repeats"]
         routed = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 4)
         assert run.call_args.kwargs["per_net_timeout"] == 30.0
         assert _net_pad_pairs(router, 1, routed) == {frozenset({0, 1})}
+        assert (
+            router.router.fallback_stats["python_fallback_reduced_repeats"] == previous_reductions
+        )
         assert 1 not in guard.capped_streak
 
 
