@@ -383,3 +383,53 @@ experiment; the gate script is unchanged.
 Not done this pass: seeds 7 and 1337, the full-mask `mask_to_copper` run, and
 any source repair of the five gaps or the pour-slot warnings. The skip and the
 0-error, 0-warning bar stay as they are, per the 2026-11-23 operator ruling.
+
+## VM trace clearance beside a branch via, 2026-11-24 (issue #9424)
+
+On `ca3e73781`, the ordinary trace optimizer replaced five VM legs on F.Cu
+with a two-leg shortcut. Its 0.20 mm trace passed within 0.017193 mm of a
+0.60 mm via on another branch of VM. The applied fabrication rule requires
+0.1016 mm. On `55af96912`, the optimizer keeps the original path in this
+case. Moving the same via 0.40 mm farther away still gives the two-leg
+shortcut in the normal optimizer regression. [Original route and geometry controls](https://github.com/2AMLogic/kicad-tools/issues/9424#issuecomment-7128595990)
+
+The public unattended recipe ran on macOS 27.2.1 arm64 with C++ router build 79 and
+pinned KiCad 10.0.6. Each unskipped check used the saved board's own project,
+footprint libraries, fabrication profile and net-class map. An independent
+refill used `kicad-cli pcb drc --refill-zones --save-board` on a copy, then
+repeated full-mask fabrication checks, native DRC and copper LVS on that copy.
+
+| Seed | Route time (s) | Nightly errors | Nightly warnings | Saved full-mask errors | Saved full-mask warnings |
+|---:|---:|---:|---:|---:|---:|
+| 42 | 324.9 | 2 | 77 | 15 | 100 |
+| 7 | 413.0 | 2 | 77 | 15 | 100 |
+| 1337 | 488.7 | 2 | 77 | 15 | 100 |
+
+All three saved PCBs have SHA-256
+`6da1a3cb6d1d7dab22717546dd139b88a39ef914e595551b31c2c1e4115f61f2`.
+Each route completed 37/37 nets and 143/143 connections with 121 vias. Native
+DRC reported zero violations or unconnected items, ERC reported zero violations,
+and copper and label LVS passed. Every saved board and refilled copy had 149
+matched pads and 398 horizontal, vertical or 45-degree tracks. The route logs
+showed the configured 60 s whole-sweep and 10 s per-net wall-clock limits and
+contained zero per-net or stage deadline markers. The public gate exited 1 on
+the fabrication findings.
+
+| Seed 42 comparison | Full-mask errors | Full-mask warnings | Waived |
+|---|---:|---:|---:|
+| Original saved board | 16 | 100 | 0 |
+| Repaired saved board | 15 | 100 | 0 |
+| Original after independent refill | 15 | 104 | 0 |
+| Repaired after independent refill | 14 | 104 | 0 |
+
+The independent refills for seeds 7 and 1337 also had 14 errors and 104 warnings.
+Comparing each form against its own original removed exactly the VM error and
+preserved every warning identity, including repeated findings. On the repaired
+saved board the remaining errors were two physical copper gaps (RUN and RESET)
+and 13 mask-to-copper findings.
+
+Two full-mask checks of the saved seed-42 board took 41.5 and 45.0 seconds.
+Two checks with the nightly `--skip mask_to_copper` took 12.8 and 17.4 seconds
+on the same host. A second from-scratch seed-42 route reproduced the saved
+PCB byte for byte. Running the public `--grade-only` control on the original
+seed-42 board exited 1 with three errors and 77 warnings.
