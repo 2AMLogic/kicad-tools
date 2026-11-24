@@ -16,7 +16,9 @@ to the measured 45-degree exits together so their rings clear the mask (#9891).
 U3's PCIe receiver pair instead leaves both lands on their long axis. Its two
 barrels retain the project diameter and reconnect to the original inner trunks.
 Both moves must preserve the receiver's raw trace-length difference and keep
-its modeled propagation delay inside the board's PCIe skew budget.
+its modeled propagation delay inside the board's PCIe skew budget. At both ends
+of the transmitter pair, replace the fragmented taper with trunk-width copper
+on the original centerlines, retaining each rail's length and contacts.
 
 Every repair is guarded: the departure is derived from the actual pad and its
 connected copper, and anything locked, branched off the recognized shape, or
@@ -36,6 +38,11 @@ from shapely.geometry import LineString, Point
 from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
 from kicad_tools.core.pcb_item_locks import BoardItemLocks
 from kicad_tools.manufacturers.base import DesignRules
+from kicad_tools.router.board_clearance_rules import (
+    BoardClearanceRules,
+    item_props_for_type,
+    pad_clearance_override,
+)
 from kicad_tools.router.quantize import dogleg_points
 from kicad_tools.router.rules import net_class_map_from_path
 from kicad_tools.schema.pcb import PCB, Segment
@@ -507,16 +514,14 @@ def _raw_trace_skew(pcb: PCB, escapes: tuple[_PairEscape, _PairEscape]) -> float
     return positive - negative
 
 
-def _within_project_skew_budget(
-    pcb: PCB, path: Path, escapes: tuple[_PairEscape, _PairEscape]
-) -> bool:
+def _within_project_skew_budget(pcb: PCB, path: Path, nets: tuple[str, str]) -> bool:
     # Board 06 writes this map beside the routed board and passes it to kct check.
     try:
         classes = net_class_map_from_path(path.with_name("net_class_map.json"), pcb_path=path)
     except (OSError, TypeError, ValueError):
         return False
     for pair in derive_pair_skews(pcb, classes, num_copper_layers=len(pcb.copper_layers)):
-        if (pair.p_name, pair.n_name) == (escapes[0].net, escapes[1].net):
+        if (pair.p_name, pair.n_name) == nets:
             return (
                 pair.skew_ps is not None
                 and pair.limits.budget is not None
@@ -557,8 +562,179 @@ def _clear_pair_departures(
             return 0
     if original_skew is not None and (
         abs(_raw_trace_skew(pcb, escapes) - original_skew) > _EPS
-        or not _within_project_skew_budget(pcb, path, escapes)
+        or not _within_project_skew_budget(pcb, path, (escapes[0].net, escapes[1].net))
     ):
+        return 0
+    pcb.save(path)
+    return 2
+
+
+_TX_NETS = ("PCIE_TX+", "PCIE_TX-")
+_TX_WIDTH = 0.225
+
+
+def _rebuild_transmitter_taper(
+    pcb: PCB, pad, points: list[XY], protected: set[str]
+) -> list[Segment] | None:
+    """Widen an unbranched taper only along its existing, measured centerline."""
+    net = pad.net_name
+    junctions = defaultdict(list)
+    for segment in pcb.segments:
+        if segment.layer == "F.Cu" and segment.net_name == net:
+            for endpoint in (segment.start, segment.end):
+                junctions[_xy(endpoint)].append(segment)
+
+    removed: list[Segment] = []
+    visited = [points[0]]
+    while visited[-1] != points[-1]:
+        choices = [s for s in junctions[visited[-1]] if s not in removed]
+        if len(choices) != 1:
+            return None
+        segment = choices[0]
+        if (
+            segment.locked
+            or (segment.uuid or "").lower() in protected
+            or not 0 < segment.width < _TX_WIDTH - _EPS
+        ):
+            return None
+        end = _xy(segment.end) if _xy(segment.start) == visited[-1] else _xy(segment.start)
+        if end in visited:
+            return None
+        removed.append(segment)
+        visited.append(end)
+
+    trunks = [s for s in junctions[points[-1]] if s not in removed]
+    if len(trunks) != 1 or abs(trunks[0].width - _TX_WIDTH) > _EPS:
+        return None
+    original_line, replacement = LineString(visited), LineString(points)
+    if (
+        original_line.hausdorff_distance(replacement) > _EPS
+        or abs(original_line.length - replacement.length) > _EPS
+    ):
+        return None
+
+    validator = ConnectivityValidator(pcb)
+    before = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    if len(before.components()) != 1:
+        return None
+    contacts, ends = _external_contacts(before, pcb.segments, removed, None)
+    if pcb.remove_segments(removed) != len(removed):
+        return None
+    added = []
+    for start, end in pairwise(points):
+        added.extend(pcb.add_trace(start, end, width=_TX_WIDTH, layer="F.Cu", net=net))
+    after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    new_contacts, new_ends = _external_contacts(after, pcb.segments, added, None)
+    if len(after.components()) != 1 or new_contacts != contacts or not ends <= new_ends:
+        return None
+    return added
+
+
+def _transmitter_clearance_ok(
+    pcb: PCB, path: Path, added: list[Segment], rules: DesignRules
+) -> bool:
+    """Check F.Cu obstacles under the project rules before publishing either rail."""
+    project = BoardClearanceRules.from_board(path)
+    if project.dru_error:
+        return False
+    candidates = [
+        (
+            track,
+            LineString([track.start, track.end]),
+            item_props_for_type(
+                "track", track.net_name, False, layer="F.Cu", footprint_ref="", footprint_lib_id=""
+            ),
+        )
+        for track in added
+    ]
+    for item in build_copper_contact_graph(ConnectivityValidator(pcb), None).items:
+        # The enclosing producer regenerates and grades all pours after the edit.
+        if item.kind == "fill" or "F.Cu" not in item.layers:
+            continue
+        net = pcb.get_net(item.net)
+        name = net.name if net else ""
+        override = None
+        if item.kind == "pad":
+            fp = pcb.footprints[item.key[0]]
+            pad = fp.pads[item.key[1]]
+            obstacle = item_props_for_type(
+                "pad", name, pad.type == "thru_hole", pad.type, fp.layer, fp.reference, fp.name
+            )
+            override = pad_clearance_override(fp, pad)
+        else:
+            obstacle = item_props_for_type(
+                item.kind,
+                name,
+                item.kind == "via",
+                layer="F.Cu",
+                footprint_ref="",
+                footprint_lib_id="",
+            )
+        for track, line, props in candidates:
+            if item.net == track.net_number:
+                continue
+            electrical = (
+                project.clearance(props, obstacle, "F.Cu")
+                if override is None
+                else max(override, project.min_clearance or 0)
+            )
+            gap = max(
+                electrical,
+                project.physical_clearance(props, obstacle, "F.Cu"),
+                rules.min_clearance_mm,
+            )
+            if line.distance(item.geom) < track.width / 2 + gap - _EPS:
+                return False
+    return True
+
+
+def _clear_transmitter_pair(path: Path, ref: str, rules: DesignRules) -> int:
+    """Publish both pad exits together after checking copper spacing and pair delay."""
+    pcb = PCB.load(path)
+    if ref == "U3":
+        footprint, size = "Package_QFP:LQFP-48_7x7mm_P0.5mm", (0.7, 0.3)
+        exits = (
+            ("28", ((0.25, 0.0), (0.821, 0.571))),
+            ("29", ((0.25, 0.0), (0.821, -0.571))),
+        )
+    else:
+        footprint, size = "Connector_PCIE:PCIE_Mini_Edge", (0.5, 0.6)
+        exits = (
+            ("5", ((-0.15, 0.15), (-0.15, 0.20), (-0.9798, 0.20))),
+            ("6", ((-0.15, 0.15), (-0.9887, 0.15))),
+        )
+    fp = pcb.get_footprint(ref)
+    if fp is None or fp.name != footprint or fp.rotation or fp.layer != "F.Cu":
+        return 0
+    # Replacing an authored group member would leave its UUID dangling. This
+    # includes a track inside a subgroup of an unlocked tuning pattern.
+    protected = {uid.lower() for uid in _locked_ids(pcb) if uid}
+    for owner in (pcb._sexp, *pcb._sexp.find_children("footprint")):
+        for group in (*owner.find_children("group"), *owner.find_children("generated")):
+            members = group.find_child("members")
+            if members is not None:
+                protected.update(str(member).lower() for member in members.get_atoms())
+    added = []
+    for net, (number, offsets) in zip(_TX_NETS, exits, strict=True):
+        pad = next((p for p in fp.pads if p.number == number), None)
+        center = pcb.get_pad_position(ref, number)
+        if (
+            pad is None
+            or center is None
+            or pad.net_name != net
+            or pad.shape != "rect"
+            or pad.rotation
+            or pad.size != size
+        ):
+            return 0
+        points = [_xy(center), *(_xy((center[0] + dx, center[1] + dy)) for dx, dy in offsets)]
+        tracks = _rebuild_transmitter_taper(pcb, pad, points, protected)
+        if tracks is None:
+            return 0
+        added.extend(tracks)
+    if not _within_project_skew_budget(pcb, path, _TX_NETS):
+        return 0
+    if not _transmitter_clearance_ok(pcb, path, added, rules):
         return 0
     pcb.save(path)
     return 2
@@ -598,7 +774,7 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
     )
     # Straight, full-width exits clear both mask openings. The extra 0.30 mm
     # on pad 32 preserves the pair's original routed length difference.
-    return edits + _clear_pair_departures(
+    edits += _clear_pair_departures(
         path,
         rules,
         ref="U3",
@@ -611,4 +787,9 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
             _PairEscape("31", "PCIE_RX+", "In1.Cu", (0.60, 0.10), (0.90, 0.0), (1.65, 1.15)),
             _PairEscape("32", "PCIE_RX-", "In2.Cu", (1.00, 0.20), (1.20, 0.0), (3.70, 2.90)),
         ),
+    )
+    return (
+        edits
+        + _clear_transmitter_pair(path, "U3", rules)
+        + _clear_transmitter_pair(path, "J3", rules)
     )

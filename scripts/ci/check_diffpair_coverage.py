@@ -321,8 +321,6 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("mask_to_copper", "MIPI_D0-"): 8858,
     ("mask_to_copper", "PCIE_RX+"): 8858,
     ("mask_to_copper", "PCIE_RX-"): 8858,
-    ("mask_to_copper", "PCIE_TX+"): 8858,
-    ("mask_to_copper", "PCIE_TX-"): 8858,
     ("mask_to_copper", "USB2_D+"): 8858,
     ("mask_to_copper", "USB2_D-"): 8858,
     ("mask_to_copper", "USB3_RX1+"): 8858,
