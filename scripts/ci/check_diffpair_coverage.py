@@ -297,8 +297,9 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # seed-42 regeneration of this board carried 200 ``mask_to_copper``
     # errors (122 same-net pass-throughs, 78 same-net own-pad entries; the
     # #9326/#9332 repair path's population) across 22 net signatures.
-    # The sideband pad repairs (#9989) retired MIPI_RST, USB_CC1 and USB_CC2,
-    # leaving 76 findings across the 19 signatures below.
+    # The sideband and PCIe repairs retired MIPI_RST, both USB_CC nets and
+    # both PCIe pairs. The clock repair (#10083) retired the five MIPI_CLK+
+    # and six MIPI_CLK- findings. The remaining signatures are listed below.
     # Two independent regenerations reproduced every original
     # signature and per-net count exactly, so the entries are keyed by NET
     # SIGNATURE like the #8957 slits (mask_to_copper's items are
@@ -315,12 +316,8 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("mask_to_copper", "+1V2"): 8858,
     ("mask_to_copper", "+3V3"): 8858,
     ("mask_to_copper", "GND"): 8858,
-    ("mask_to_copper", "MIPI_CLK+"): 8858,
-    ("mask_to_copper", "MIPI_CLK-"): 8858,
     ("mask_to_copper", "MIPI_D0+"): 8858,
     ("mask_to_copper", "MIPI_D0-"): 8858,
-    ("mask_to_copper", "PCIE_RX+"): 8858,
-    ("mask_to_copper", "PCIE_RX-"): 8858,
     ("mask_to_copper", "USB2_D+"): 8858,
     ("mask_to_copper", "USB2_D-"): 8858,
     ("mask_to_copper", "USB3_RX1+"): 8858,

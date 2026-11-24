@@ -4315,13 +4315,19 @@ def resolve_current_path(
         if carrier in whole_carriers:
             buried_ids.update(tracks - on_path - fully_covered - pad_internal)
     # An authored cut may divide the containing lane between two or more
-    # tracks. Only count the buried stroke if its entire carrier is on-path.
+    # tracks. The stroke is buried when the on-path members of a covering
+    # run alone account for all its copper -- an off-route neighbour whose
+    # round cap merely touches the stroke must not keep a wholly covered
+    # stroke reported (#10085).
     accounted = on_path | fully_covered | pad_internal | buried_ids
     if len(accounted) < len(net_segments):
         for index, alternatives in physical_contacts().split_track_carriers.items():
             track = id(pcb.segments[index])
             if track not in accounted and any(
-                all(id(pcb.segments[i]) in whole_carriers for i in run) for run in alternatives
+                physical_contacts().carriers_cover(
+                    index, {i for i in run if id(pcb.segments[i]) in whole_carriers}
+                )
+                for run in alternatives
             ):
                 buried_ids.add(track)
     buried = tuple(s for s in net_segments if id(s) in buried_ids)

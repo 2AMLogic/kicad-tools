@@ -8,8 +8,8 @@
 
 These tests assert:
 
-* ``resolve_committed_net_class_map`` returns the committed sidecar for
-  boards 00/02/03/04/05/06/07 and ``None`` for a no-sidecar board (01).
+* ``resolve_committed_net_class_map`` finds the committed sidecars for
+  boards 00–07, including board 01's PCB-specific filename.
   Boards 00/04/05 gained sidecars in #7206 to declare ``target_ampacity``.
 * ``ReportDataCollector`` forwards ``net_class_map_path`` so the DRC snapshot
   evaluates the sidecar-gated families (board 07: passed=False, blocking > 0).
@@ -20,6 +20,7 @@ These tests assert:
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -91,27 +92,10 @@ def test_resolver_finds_committed_sidecar(board_dir: str) -> None:
     assert sidecar.parent == routed.resolve().parent
 
 
-@pytest.mark.parametrize(
-    "board_dir",
-    ["01-voltage-divider"],
-)
-def test_resolver_returns_none_without_sidecar(board_dir: str) -> None:
-    """No-sidecar boards resolve to None (graceful no-op contract, AC 4)."""
-    output = REPO_ROOT / "boards" / board_dir / "output"
-    routed = next(output.glob("*_routed.kicad_pcb"), None)
-    if routed is None:
-        # Some early boards ship only an unrouted PCB; any PCB works for the
-        # "no sidecar committed" assertion.
-        routed = next(output.glob("*.kicad_pcb"), None)
-    if routed is None:
-        pytest.skip(f"{board_dir} has no PCB checked in")
-
-    # Guard the premise itself (#7539): if this board gains a sidecar, move
-    # it to the committed-sidecar list instead of letting this test go red.
-    assert not (routed.parent / SIDECAR_FILENAME).exists(), (
-        f"{board_dir} now commits {SIDECAR_FILENAME}; pick a no-sidecar board"
-    )
-    assert resolve_committed_net_class_map(routed) is None
+def test_resolver_finds_board01_stem_sidecar() -> None:
+    expected = BOARD_01_PCB.with_suffix(".net_class_map.json")
+    assert expected.is_file()
+    assert resolve_committed_net_class_map(BOARD_01_PCB) == expected
 
 
 def test_resolver_returns_none_for_missing_neighbor(tmp_path: Path) -> None:
@@ -199,15 +183,11 @@ def test_board_07_no_op_without_sidecar(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("pcb_path", [BOARD_01_PCB])
-def test_no_sidecar_board_graceful(pcb_path: Path, tmp_path: Path) -> None:
-    """A board with no committed sidecar produces a DRC snapshot with no
-    sidecar-gated families and no exception (AC 4, regression)."""
-    if not pcb_path.is_file():
-        pytest.skip(f"{pcb_path.name} not checked in")
-
-    # Resolution yields None, so the report keeps its no-op behavior.
-    assert resolve_committed_net_class_map(pcb_path) is None
-
-    drc = _collect_drc(pcb_path, None, tmp_path)
+def test_no_sidecar_board_graceful(tmp_path: Path) -> None:
+    """A standalone copy of a real PCB exercises the no-sidecar report path."""
+    pcb_path = tmp_path / BOARD_01_PCB.name
+    shutil.copyfile(BOARD_01_PCB, pcb_path)
+    sidecar = resolve_committed_net_class_map(pcb_path)
+    assert sidecar is None
+    drc = _collect_drc(pcb_path, sidecar, tmp_path)
     assert not (set(drc.get("violations_by_type", {})) & GATED_RULE_FAMILIES)
