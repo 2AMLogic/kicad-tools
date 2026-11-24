@@ -16,6 +16,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-24
 
+- **PR #10084**: fix(board06): clear the MIPI clock pad exits within the skew budget
+- **Issue #10083** (closed): Board 06: clear the MIPI clock pad exits while meeting the project skew limit
+- **Issue #8610** (closed): route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4)
 - **PR #10090**: fix(router): keep fabrication clearance around a route’s own via
 - **PR #10089**: fix(current-paths): bury a split-feeder stroke whose cover is all on-path
 - **PR #10087**: fix(drc): slide a jog between parallel runs out of a pad opening

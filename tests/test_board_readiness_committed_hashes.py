@@ -20,21 +20,6 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # directory name.  Each entry cites the issue that owns the refresh; remove the
 # entry when that lands (strict xfail turns an unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {
-    # Issue #9058: board 01's recipe now slides the two VOUT vias out of
-    # R1.2/R2.1's mask apertures and re-fills the pours after the
-    # fiducials land (plus UUID canonicalization), so a fresh regen no
-    # longer carries the 2 via pass-through errors and is byte-stable
-    # across runs.  The re-pin itself still waits on the operator's
-    # review of the five same-net own-pour zone findings (J1.2/J2.2
-    # front+back, R2.2) -- declaration review per the operator ruling,
-    # not a rule change.  Remove the entry when the re-pin lands.
-    "01-voltage-divider": (
-        "Issue #9058: board 01 evidence is stale against the "
-        "recipe-repaired copper (vias slid out of the R1.2/R2.1 mask "
-        "apertures, pours refilled post-fiducials); the re-pin waits on "
-        "the operator's review of the 5 same-net own-pour "
-        "mask_to_copper findings."
-    ),
     # PR #9177 (issue #9143) landed the fiducials + board-ID silk on board 03
     # and refreshed its evidence, but deliberately did NOT re-issue the
     # readiness receipt: every fresh board-03 receipt is blocked (385
