@@ -74,6 +74,8 @@ from kicad_tools.geometry.copper import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
 # Endpoint/centre coincidence radius (mm); mirrors ``POSITION_TOLERANCE``.
@@ -157,18 +159,65 @@ class CopperContactGraph:
         """Straight segments whose entire copper is already present in another segment."""
         return self._covered_tracks(collinear_only=False)
 
-    def _covered_tracks(self, *, collinear_only: bool) -> dict[int, set[int]]:
-        covered: dict[int, set[int]] = {}
+    def _straight_track_bonds(self) -> Iterator[tuple[int, int]]:
         for a, b in self.bonds:
             first, second = self.items[a], self.items[b]
             if (
-                first.kind != TRACK
-                or second.kind != TRACK
-                or not (first.straight and second.straight)
+                first.kind == second.kind == TRACK
+                and first.straight
+                and second.straight
+                and first.net == second.net
+                and first.layers == second.layers
             ):
+                yield a, b
+
+    @cached_property
+    def uniform_track_lanes(self) -> tuple[dict[int, int], set[tuple[int, int]]]:
+        """Item-to-lane index and direct bonds between continuous uniform centrelines."""
+        from kicad_tools.router.connectivity import _UnionFind
+
+        runs = _UnionFind()
+        continuous: set[tuple[int, int]] = set()
+        for a, b in self._straight_track_bonds():
+            first, second = self.items[a], self.items[b]
+            if first.half_width != second.half_width:
                 continue
-            if first.layers != second.layers or first.net != second.net:
+            p, q = first.endpoints
+            r, s = second.endpoints
+            if collinear_overlap_length(p, q, r, s) is not None:
+                runs.union(a, b)
+                continuous.add((a, b))
+        return {i: runs.find(i) for bond in continuous for i in bond}, continuous
+
+    @cached_property
+    def split_track_carriers(self) -> dict[int, list[frozenset[int]]]:
+        """PCB segment indices jointly covering a narrower stroke across a cut in one lane."""
+        from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+        lanes, _ = self.uniform_track_lanes
+        candidates: dict[tuple[int, int], set[int]] = {}
+        for a, b in self._straight_track_bonds():
+            if self.items[a].half_width > self.items[b].half_width:
+                a, b = b, a
+            if b in lanes and self.items[a].half_width < self.items[b].half_width:
+                candidates.setdefault((a, lanes[b]), set()).add(b)
+
+        covered: dict[int, list[frozenset[int]]] = {}
+        for (a, _), neighbors in candidates.items():
+            if len(neighbors) < 2:
                 continue
+            narrow = self.items[a]
+            carriers = frozenset(self.items[i].key[1] for i in neighbors)
+            if not carriers.isdisjoint(self.covered_tracks.get(narrow.key[1], ())):
+                continue
+            if unary_union([self.items[i].geom for i in neighbors]).covers(narrow.geom):
+                covered.setdefault(narrow.key[1], []).append(carriers)
+        return covered
+
+    def _covered_tracks(self, *, collinear_only: bool) -> dict[int, set[int]]:
+        covered: dict[int, set[int]] = {}
+        for a, b in self._straight_track_bonds():
+            first, second = self.items[a], self.items[b]
             p, q = first.endpoints
             r, s = second.endpoints
             if collinear_only and collinear_overlap_length(p, q, r, s) is None:

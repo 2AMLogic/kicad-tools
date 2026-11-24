@@ -320,3 +320,29 @@ def test_board09_split_revisions_share_a_pad_partition():
     for name in (before_pcb, after_pcb):
         assert component_of(name, "C12.1") == component_of(name, "R17.1")
         assert component_of(name, "C4.1") == component_of(name, "Q2.2")
+
+
+@pytest.mark.parametrize(
+    "gap,second_width,second_layer,second_net,offset,covered",
+    [
+        (0.0, 2.4, "F.Cu", "PWR", 0.3, True),
+        (0.02, 2.4, "F.Cu", "PWR", 0.3, False),
+        (0.0, 2.0, "F.Cu", "PWR", 0.3, False),
+        (0.0, 2.4, "B.Cu", "PWR", 0.3, False),
+        (0.0, 2.4, "F.Cu", "SENSE", 0.3, False),
+        (0.0, 2.4, "F.Cu", "PWR", 1.15, False),
+    ],
+)
+def test_track_across_a_cut_needs_one_complete_uniform_carrier(
+    gap, second_width, second_layer, second_net, offset, covered
+):
+    from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+    pcb = PCB.create(width=40, height=40, center=False)
+    pcb.add_trace((5, 10), (15, 10), width=2.4, layer="F.Cu", net="PWR")
+    pcb.add_trace((25, 10), (15 + gap, 10), width=second_width, layer=second_layer, net=second_net)
+    pcb.add_trace((10, 10 + offset), (20, 10 + offset), width=0.2, layer="F.Cu", net="PWR")
+    graph = build_copper_contact_graph(ConnectivityValidator(pcb), with_bonds=True)
+
+    assert 2 not in graph.covered_tracks
+    assert graph.split_track_carriers == ({2: [frozenset({0, 1})]} if covered else {})

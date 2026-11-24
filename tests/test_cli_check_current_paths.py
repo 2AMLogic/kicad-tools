@@ -726,6 +726,49 @@ def test_pgnd_mixed_return_reinforces_only_the_series_feeder(
             assert endpoints == {(55, 119.6), (77.5375, 119.6)}
 
 
+@pytest.mark.parametrize("offset", [0.0, 0.3])
+@pytest.mark.parametrize("has_return", [False, True])
+def test_buried_track_spanning_a_split_feeder(tmp_path, capsys, offset, has_return):
+    from dataclasses import replace
+
+    from kicad_tools.cli import main
+    from kicad_tools.router.current_paths import audit_current_paths, resolve_current_path
+    from kicad_tools.schema.pcb import PCB
+
+    board = _write_pgnd_corner(
+        tmp_path,
+        reverse=False,
+        buried=False,
+        return_ends=((77.5375, 120.5), (77.95, 130)) if has_return else None,
+        feeder_x=55,
+        split_feeder=True,
+    )
+    pcb = PCB.load(board)
+    y = 119.6 + offset
+    pcb.add_trace((65, y), (75, y), width=0.2, layer="F.Cu", net="NET1")
+    pcb.save(board)
+    spec = _trunk_spec(current_a=2.5)
+    for direction in (spec, replace(spec, source=spec.sink, sink=spec.source)):
+        result = resolve_current_path(pcb, direction)
+        if has_return:
+            assert result.status == "ambiguous"
+        else:
+            assert result.ok, result.reason
+            assert result.min_width.width_mm == pytest.approx(2.4)
+            assert result.length_mm == pytest.approx(37.9375)
+            assert not audit_current_paths(pcb, [direction]).uncovered
+        sidecar = _write_sidecar(tmp_path / "current_paths.json", [direction])
+        assert main(["check", str(board), "--only", "path_ampacity", "--allow-incomplete"]) == (
+            2 if has_return else 0
+        )
+        capsys.readouterr()
+        args = ["pcb", "reinforce", str(board), "--net", "NET1", "--current-paths", str(sidecar)]
+        for strategy in ("wire", "parallel"):
+            assert main([*args, "--strategy", strategy, "--dry-run", "--format", "json"]) == 0
+            report = json.loads(capsys.readouterr().out)
+            assert report["run_length_mm"] == pytest.approx(22.5375 if has_return else 37.9375)
+
+
 @pytest.mark.parametrize("rejoin", [False, True])
 def test_thin_sense_cycle_check(tmp_path, rejoin):
     from kicad_tools.router.current_paths import reinforcement_eligible_segment_ids
