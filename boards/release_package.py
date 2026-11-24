@@ -103,8 +103,10 @@ class Release:
     #: (e.g. a hand-written procurement review), each with the package files
     #: whose bytes it vouches for; refused if any of those changed.
     reviewed: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    #: package-relative name -> callable(options) returning the bytes to ship.
-    generated: dict[str, Callable[[ReadinessOptions], bytes]] = field(default_factory=dict)
+    #: package-relative name -> callable(options) returning the bytes to ship,
+    #: or ``None`` to ship nothing under that name this run (e.g. an optional
+    #: provenance sidecar absent from a pure carry-forward, #9800).
+    generated: dict[str, Callable[[ReadinessOptions], bytes | None]] = field(default_factory=dict)
     #: Board-specific checks, run once (lazily) before the package is finished.
     checks: Callable[[ReadinessOptions], list[CheckOutcome]] | None = None
     #: Files (relative to the board dir) hashed into readiness ``inputs``.
@@ -173,9 +175,12 @@ class Release:
         shutil.copyfile(evidence / "kct-check.json", out / "check-report.json")
         shutil.copyfile(evidence / "native-drc.json", out / "native-drc.json")
         for name, produce in self.generated.items():
+            data = produce(options)
+            if data is None:
+                continue
             target = out / name
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(produce(options))
+            target.write_bytes(data)
         for archive in ("kicad_project.zip", "gerbers/gerbers.zip"):
             if (out / archive).is_file():
                 normalize_zip(out / archive)

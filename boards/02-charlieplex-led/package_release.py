@@ -29,7 +29,10 @@ re-validated by this run:
   ``lvs.json`` (``write_lvs_report`` re-run); ``project.kct``, ``HARDWARE.md``
   and ``firmware/`` (current sources, after the firmware check);
   ``renders/`` (carried forward only while the board's copper, footprints and
-  graphics are identical, UUIDs aside, to the board they were rendered from);
+  graphics are identical, UUIDs aside, to the board they were rendered from;
+  when the printed artwork changed, fresh renders ship only with ``kct
+  render``'s ``renders/render-provenance.json`` binding them to the checked
+  PCB's bytes, and that binding travels inside the package -- Issue #9800);
   ``design-source.zip`` (rebuilt, byte-reproducibly, from the current board
   sources).
 
@@ -90,6 +93,10 @@ ACCEPTED_CPL_MOVES = {
 }
 
 RENDERS = ("3d-back.png", "3d-front.png", "pcb-back.svg", "pcb-front.svg")
+#: ``kct render``'s sidecar binding the shipped renders to the PCB bytes they
+#: were rendered from (#9800).  Board 02's printed artwork changed with the
+#: shared silk pass (#10001), so the fresh renders ship only through it.
+RENDER_PROVENANCE = "render-provenance.json"
 #: Board-level sources archived in design-source.zip and hashed as inputs.
 SOURCE_GLOBS = ("*.py", "*.md", "project.kct")
 
@@ -298,6 +305,51 @@ def _bom_policy(old: bytes, new: bytes) -> None:
     raise RuntimeError("bom_jlcpcb.csv changed; re-review component identities in HARDWARE.md")
 
 
+def _validated_provenance(options: ReadinessOptions) -> bytes:
+    """``output/renders``' provenance sidecar, verified against the checked
+    PCB and the four shipped renders (#9800).
+
+    Raises the historical re-render refusal when the sidecar is missing,
+    unreadable, bound to a different PCB, or names an image whose bytes no
+    longer match -- a refused run publishes nothing, so the previous ready
+    package stays in place and reviewable.
+    """
+    path = options.board_dir / "output" / "renders" / RENDER_PROVENANCE
+    try:
+        data = path.read_bytes()
+        provenance = json.loads(data)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"board content changed since renders/ was made; re-render it "
+            f"({RENDER_PROVENANCE} unreadable: {exc})"
+        ) from None
+    problems: list[str] = []
+    if not isinstance(provenance, dict) or provenance.get("pcb_sha256") != _sha(options.pcb):
+        problems.append(f"{RENDER_PROVENANCE} does not bind the checked PCB")
+    recorded = provenance.get("outputs") if isinstance(provenance, dict) else None
+    recorded = recorded if isinstance(recorded, dict) else {}
+    for name in RENDERS:
+        image = options.board_dir / "output" / "renders" / name
+        digest = _sha(image) if image.is_file() else None
+        if recorded.get(name) is None or digest is None or recorded[name] != digest:
+            problems.append(name)
+    if problems:
+        raise RuntimeError(
+            "board content changed since renders/ was made; re-render it ("
+            + "; ".join(problems)
+            + ")"
+        )
+    return data
+
+
+def _render_provenance(options: ReadinessOptions) -> bytes | None:
+    """Ship the render binding with the package; nothing to bind on a pure
+    carry-forward (the archived PCB already vouches for those renders)."""
+    if not (options.board_dir / "output" / "renders" / RENDER_PROVENANCE).is_file():
+        return None
+    return _validated_provenance(options)
+
+
 def _renders(name: str):
     def produce(options: ReadinessOptions) -> bytes:
         archive = RELEASE.old("kicad_project.zip")
@@ -307,7 +359,9 @@ def _renders(name: str):
         if board_content(rendered_from, ignore=PIN_ANNOTATION_NODES) != board_content(
             options.pcb.read_bytes(), ignore=PIN_ANNOTATION_NODES
         ):
-            raise RuntimeError("board content changed since renders/ was made; re-render it")
+            # Changed artwork (#9800): the archived PCB no longer vouches for
+            # ``output/renders``, so ``kct render``'s binding must.
+            _validated_provenance(options)
         return (options.board_dir / "output" / "renders" / name).read_bytes()
 
     return produce
@@ -363,6 +417,7 @@ RELEASE = Release(
         "HARDWARE.md": _copy("HARDWARE.md"),
         **{f"firmware/{n}": _copy(f"firmware/{n}") for n in FIRMWARE},
         **{f"renders/{n}": _renders(n) for n in RENDERS},
+        f"renders/{RENDER_PROVENANCE}": _render_provenance,
         "design-source.zip": _design_source,
     },
     checks=board_checks,

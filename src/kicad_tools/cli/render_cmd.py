@@ -20,6 +20,12 @@ logic:
 The routed PCB (``*_routed.kicad_pcb``) is preferred; the command falls back
 to the unrouted ``*.kicad_pcb`` when no routed artifact exists.
 
+A complete run also writes ``renders/render-provenance.json`` (#9800), which
+binds those artifacts to the rendered PCB's SHA-256 (and each artifact's own
+SHA-256) so a release producer can prove fresh renders belong to the checked
+board after its printed artwork changed.  An incomplete run removes any stale
+sidecar instead.
+
 Before 3D rendering, referenced model files are checked using native configured
 paths, the render environment, and the PCB directory. Unresolved models identify
 their component and path in text diagnostics and JSON ``model_check``. Images
@@ -54,6 +60,7 @@ written to ``<pcb-dir>/renders/`` by default, or to the directory given with
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -92,6 +99,12 @@ RENDER_OUTPUTS = {
 
 # Coverage summary consumed by ``kct board-metrics`` (board.json ``model_coverage``).
 COVERAGE_FILE = "model-coverage.json"
+
+#: Provenance sidecar (#9800): binds the rendered artifacts to the PCB bytes
+#: they depict, so a release producer can prove fresh renders belong to the
+#: checked board after its printed artwork changed.  Deterministic -- no
+#: timestamps -- so committed copies stay stable across machines.
+PROVENANCE_FILE = "render-provenance.json"
 
 MODEL_SETS = ("pinned", "host")
 
@@ -153,6 +166,31 @@ def _discover_boards(root: Path) -> list[Path]:
                 if (grandchild / "output").is_dir():
                     boards.append(grandchild)
     return boards
+
+
+def _write_provenance(pcb_path: Path, renders_dir: Path, written: dict[str, str]) -> None:
+    """Bind the rendered artifacts to the PCB bytes they depict (#9800).
+
+    The sidecar records the rendered PCB's name and SHA-256 plus each written
+    artifact's SHA-256, so a consumer can verify both that the renders belong
+    to a known board revision and that no image was edited afterwards.  It is
+    rewritten (or removed, on an incomplete run) with the images, never
+    carried forward on its own.
+    """
+    payload = {
+        "generator": "kct render",
+        "pcb": pcb_path.name,
+        "pcb_sha256": hashlib.sha256(pcb_path.read_bytes()).hexdigest(),
+        "outputs": {
+            RENDER_OUTPUTS[key]: hashlib.sha256(
+                (renders_dir / RENDER_OUTPUTS[key]).read_bytes()
+            ).hexdigest()
+            for key in sorted(written)
+        },
+    }
+    (renders_dir / PROVENANCE_FILE).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _render_pcb(
@@ -261,6 +299,13 @@ def _render_pcb(
         result["status"] = "partial"
     else:
         result["status"] = "error"
+
+    # A complete run binds its images to the PCB bytes; an incomplete one must
+    # not leave a binding for mixed/stale images (#9800).
+    if result["status"] == "ok":
+        _write_provenance(pcb_path, renders_dir, written)
+    else:
+        (renders_dir / PROVENANCE_FILE).unlink(missing_ok=True)
 
     if not quiet:
         for key in written:

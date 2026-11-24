@@ -38,6 +38,13 @@ EXPECTED_STALE: dict[str, str] = {
         "producer keeps the previous design-source.zip until the five via-only "
         "warnings (#9112/#9033) and the changed artwork's render binding pass."
     ),
+    "02-charlieplex-led/package_release.py": (
+        "Issue #9800: the live publisher gained the changed-artwork render "
+        "binding (renders ship only with kct render's render-provenance.json "
+        "tied to the checked PCB). The registered producer keeps the previous "
+        "design-source.zip until the five via-only warnings (#9112/#9033) "
+        "clear and the package can be re-issued."
+    ),
     # Zip last refreshed in 99122e5a1; the live recipe has moved since, and
     # ``refresh_readiness.py`` cannot re-emit the zip while the strict gate
     # refuses on the unaccepted warning flood (#8399 stalemate).
