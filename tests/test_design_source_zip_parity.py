@@ -33,6 +33,11 @@ REFRESH_SCRIPT = REPO_ROOT / "scripts" / "boards" / "refresh_readiness.py"
 # owns the refresh; remove the entry when that lands (strict xfail turns an
 # unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {
+    "02-charlieplex-led/generate_design.py": (
+        "Issue #9800: the live recipe uses the shared silk pass. The registered "
+        "producer keeps the previous design-source.zip until the five via-only "
+        "warnings (#9112/#9033) and the changed artwork's render binding pass."
+    ),
     # Zip last refreshed in 99122e5a1; the live recipe has moved since, and
     # ``refresh_readiness.py`` cannot re-emit the zip while the strict gate
     # refuses on the unaccepted warning flood (#8399 stalemate).
