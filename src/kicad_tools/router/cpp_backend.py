@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from . import wall_deadline as _wall_deadline
 from .neck_down import band_safe_taper, taper_width_fn, tapered_run_pieces
 from .pad_landing import pad_landing_geometry
+from .pad_lanes import trace_fences_cover_goal
 from .resource_guard import reraise_if_resource_exhaustion
 from .route_via_gap import route_own_via_slit
 from .search_radius import search_radius_cells
@@ -1876,6 +1877,7 @@ class CppPathfinder:
         # :meth:`_escape_fence_budgets`.
         self._pad_lane_fences: list = []  # list[pad_lanes.FenceLane]
         self._escape_fence_fallbacks = 0
+        self._escape_fence_preempted = 0  # Issue #8486: goal-covered skips
 
     def set_segment_foreign_context(
         self,
@@ -2907,6 +2909,56 @@ class CppPathfinder:
             via_size=net_via_size,
         )
         fence_state = {"on": bool(escape_fences)}
+        # Issue #8486: a fenced search whose EVERY legal goal cell is covered
+        # by an infinite trace fence can never accept a goal -- the native A*
+        # refuses those cells on trace steps and via landings alike, and only
+        # a start seed (which needs no step) could bypass that.  On the
+        # reported 97-net board the unfenced retry after such fenced
+        # timeouts consumed 942.72 s of duplicate second searches.  When the
+        # goal is provably fence-covered, skip the hopeless fenced search and
+        # run the unfenced one directly with the FULL budget: the fenced
+        # search was certain to fail, so the produced copper is exactly the
+        # old failed-fenced-then-unfenced sequence's, minus its wasted first
+        # budget.  Sound-only: any uncovered goal cell, a start seed that is
+        # itself a goal, or an empty goal box keeps the fenced search.
+        if escape_fences and trace_fences_cover_goal(
+            [
+                (
+                    int(b.gx1),
+                    int(b.gy1),
+                    int(b.gx2),
+                    int(b.gy2),
+                    int(b.layer),
+                )
+                for b in escape_fences
+                if int(b.layer) >= 0 and math.isinf(float(b.overflow_penalty))
+            ],
+            end_metal=(
+                int(end_pad_bounds.metal_gx1),
+                int(end_pad_bounds.metal_gy1),
+                int(end_pad_bounds.metal_gx2),
+                int(end_pad_bounds.metal_gy2),
+            ),
+            end_layers=list(end_layers or []),
+            start_metal=(
+                int(start_pad_bounds.metal_gx1),
+                int(start_pad_bounds.metal_gy1),
+                int(start_pad_bounds.metal_gx2),
+                int(start_pad_bounds.metal_gy2),
+            ),
+            start_layers=list(start_layers or []),
+        ):
+            fence_state["on"] = False
+            self._escape_fence_fallbacks = getattr(self, "_escape_fence_fallbacks", 0) + 1
+            self._escape_fence_preempted = getattr(self, "_escape_fence_preempted", 0) + 1
+            logger.info(
+                "escape fence pre-empted before the search (fallback #%d, "
+                "pre-empted #%d, net=%d): every legal goal cell is trace-fence "
+                "covered, running the unfenced search with the full budget",
+                self._escape_fence_fallbacks,
+                self._escape_fence_preempted,
+                start.net,
+            )
         # Issue #9019: the own-net slit-band gate is a hard step refusal; like
         # the fence it must never lose a connection, so a failed gated search
         # retries once with it off.
