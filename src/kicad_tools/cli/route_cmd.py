@@ -14919,8 +14919,7 @@ def route_with_layer_escalation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
 
     # Issue #10057: fail on verified DRC errors, the way the single-attempt
@@ -14948,7 +14947,7 @@ def route_with_layer_escalation(
         ),
     )
     with contextlib.suppress(AttributeError, TypeError):
-        args._post_route_drc_only = _drc_only_failure
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -15971,8 +15970,7 @@ def route_with_rule_relaxation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
 
     # Issue #10057: fail on verified DRC errors, the way the single-attempt
@@ -16000,7 +15998,7 @@ def route_with_rule_relaxation(
         ),
     )
     with contextlib.suppress(AttributeError, TypeError):
-        args._post_route_drc_only = _drc_only_failure
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -18584,8 +18582,7 @@ def route_with_combined_escalation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
 
     # Issue #10057: fail on verified DRC errors, the way the single-attempt
@@ -18613,7 +18610,7 @@ def route_with_combined_escalation(
         ),
     )
     with contextlib.suppress(AttributeError, TypeError):
-        args._post_route_drc_only = _drc_only_failure
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -25040,23 +25037,20 @@ def _lint_gate_unstage_args(args, gate, requested_output) -> None:
 def _emit_route_json_fallback(args, exit_code: int) -> None:
     """Emit the routing-diagnostics JSON for runs that bypassed it (issue #5938).
 
-    ``route_with_layer_escalation`` (the default path) prints only a prose
-    summary, so ``kct route --format json`` used to put no JSON on stdout at
-    all.  The escalation wrappers stash their final result on
-    ``args._last_layer_result``; reuse :func:`print_routing_diagnostics_json`
-    on it so both paths share one document shape.  They also stash their
-    ``post_route_drc_only`` verdict on ``args`` (Issue #10057), so
-    ``summary.failure_reason`` reaches this document exactly as the direct
-    emitter would report it.  Runs that never built a
-    router (dry runs, early validation exits) get a minimal ``exit_code``
-    document instead.
+    Layer escalation retains its selected result for diagnostics. All three
+    escalation paths also retain the result whose verified DRC alone failed.
+    Adaptive paths preserve the top-level exit code and verdict that callers
+    receive on their other outcomes.
     """
     import json
 
     from kicad_tools.json_stdout import json_stdout
 
     silk_fix = getattr(args, "_route_silk_fix", None)
-    last = getattr(args, "_last_layer_result", None)
+    layer_result = getattr(args, "_last_layer_result", None)
+    drc_result = getattr(args, "_post_route_drc_result", None) if exit_code == 3 else None
+    last = drc_result if drc_result is not None else layer_result
+    verdict = _verdict_for_exit(exit_code)
     if last is not None:
         from kicad_tools.router import print_routing_diagnostics_json
 
@@ -25070,18 +25064,19 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 nets_to_route_ids=multi_pad_ids,
                 single_pad_count=getattr(last, "single_pad_count", 0),
                 # Issue #6239: the exit code is the run's single final verdict.
-                verdict=_verdict_for_exit(exit_code),
+                verdict=verdict,
                 grid_selection=getattr(args, "_grid_selection", None),
                 silk_fix=silk_fix,
-                # Issue #10057: the escalation tails stash the same condition
-                # the direct emitter computes inline, so the key is emitted
-                # on every finishing path (#6277).
-                post_route_drc_only=getattr(args, "_post_route_drc_only", False),
+                post_route_drc_only=drc_result is not None,
+                exit_code=exit_code if layer_result is None else None,
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
-    document = {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)}
+    document = {"exit_code": exit_code, "verdict": verdict}
+    if drc_result is not None:
+        # The verified failure still matters if rich diagnostic formatting fails.
+        document["summary"] = {"verdict": verdict, "failure_reason": "post_route_drc"}
     if silk_fix is not None:
         document["silk_fix"] = silk_fix
     print(json.dumps(document, indent=2), file=json_stdout())

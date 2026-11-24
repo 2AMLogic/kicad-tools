@@ -239,27 +239,25 @@ def test_recipe_distinguishes_post_route_drc_from_a_failed_repair(
 
 @pytest.mark.timeout(240)
 @pytest.mark.parametrize(
-    "layer_args",
-    [[], ["--no-auto-layers"]],
-    ids=["auto-layers", "no-auto-layers"],
+    ("layer_args", "drc_errors"),
+    [
+        pytest.param([], 1, id="default"),
+        pytest.param(["--no-auto-layers"], 1, id="direct"),
+        pytest.param(["--auto-layers", "--adaptive-rules"], 1, id="combined-failure"),
+        pytest.param(["--no-auto-layers", "--adaptive-rules"], 1, id="adaptive-failure"),
+        pytest.param(["--auto-layers", "--adaptive-rules"], 0, id="combined-clean"),
+        pytest.param(["--no-auto-layers", "--adaptive-rules"], 0, id="adaptive-clean"),
+    ],
 )
-def test_route_json_post_route_drc_failure_reason_on_both_layer_paths(
-    tmp_path, capsys, monkeypatch, layer_args
+def test_route_json_reports_verified_post_route_drc(
+    tmp_path, capsys, monkeypatch, layer_args, drc_errors
 ):
-    """Issue #10057: the default ``--auto-layers`` path reports the DRC-only failure.
-
-    The same input runs through both public layer paths: a fully routed board
-    whose verified post-route DRC (stubbed to one error) is the sole failure
-    must exit 3 and emit ``summary.failure_reason == "post_route_drc"``
-    identically -- the escalation path emits through
-    ``_emit_route_json_fallback``, the direct one through its own tail
-    (#6277 path invariance).
-    """
+    """Report the final DRC verdict for the selected route in every layer/rule mode."""
     from kicad_tools.cli import main, route_cmd
 
     pcb = tmp_path / "input.kicad_pcb"
     shutil.copyfile(Path(__file__).parent / "fixtures/projects/test_project.kicad_pcb", pcb)
-    monkeypatch.setattr(route_cmd, "run_post_route_drc", lambda *a, **kw: (1, 0))
+    monkeypatch.setattr(route_cmd, "run_post_route_drc", lambda *a, **kw: (drc_errors, 0))
     args = [
         "route",
         str(pcb),
@@ -277,10 +275,19 @@ def test_route_json_post_route_drc_failure_reason_on_both_layer_paths(
         *layer_args,
     ]
     rc = main(args)
-    summary = json.loads(capsys.readouterr().out)["summary"]
-    assert rc == 3
-    assert summary["verdict"] == "failed"
-    assert summary.get("failure_reason") == "post_route_drc"
+    doc = json.loads(capsys.readouterr().out)
+    assert (tmp_path / "out.kicad_pcb").is_file()
+    if "--adaptive-rules" in layer_args:
+        assert doc["exit_code"] == rc
+        assert doc["verdict"] == ("failed" if drc_errors else "success")
+    if drc_errors == 0:
+        assert rc == 0 and "failure_reason" not in doc.get("summary", {})
+        return
+    summary = doc["summary"]
+    assert rc == 3 and summary["verdict"] == "failed"
+    assert summary["failure_reason"] == "post_route_drc"
+    assert summary["nets_requested"] == summary["nets_routed"] > 0
+    assert not summary["has_disconnected_islands"]
 
 
 @pytest.mark.timeout(240)

@@ -168,8 +168,10 @@ Direct routing and default layer escalation emit this form. Consumers should
 also accept a document with only `exit_code` and `verdict`. Dry runs, early
 validation exits and some completed escalation runs emit this shorter form.
 For example, `--no-auto-layers --adaptive-rules` can finish routing and emit
-only `{"exit_code":0,"verdict":"success"}`. A run killed by `--timeout`
-prints no document.
+only `{"exit_code":0,"verdict":"success"}`. When verified post-route DRC is the
+sole failure, adaptive routing with either layer setting keeps the top-level
+`exit_code` and `verdict` and adds the routing summary with
+`failure_reason: "post_route_drc"`. A run killed by `--timeout` prints no document.
 
 The detailed document also carries a `grid` object -- the routing grid the run
 actually built (Issue #6875):

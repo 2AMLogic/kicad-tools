@@ -422,7 +422,16 @@ def test_json_attempt_summary_includes_placement_on_all_outcomes(
         assert any(s.net_name == "GOOD" for s in PCB.load(output).segments)
 
 
-@pytest.mark.parametrize("layer_args", [[], ["--no-auto-layers"]], ids=["default", "direct"])
+@pytest.mark.parametrize(
+    "layer_args",
+    [
+        [],
+        ["--no-auto-layers"],
+        ["--auto-layers", "--adaptive-rules"],
+        ["--no-auto-layers", "--adaptive-rules"],
+    ],
+    ids=["default", "direct", "adaptive-layers", "adaptive-fixed-layers"],
+)
 def test_placement_report_keeps_verified_drc_reason(tmp_path, capfd, layer_args):
     from kicad_tools.cli import main as outer_main
 
