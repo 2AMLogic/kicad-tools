@@ -156,7 +156,7 @@ CONSUMER_XFAIL_REASON = "consumer verdict is report-only until that consumer's e
 
 
 def item_group(item: pytest.Item) -> int | None:
-    """The Epic #5509 group an item measures, from its adapter parameter.
+    """The Epic #5509 group declared by the consumer marker or adapter parameter.
 
     Two parametrisation styles are in use and both resolve: ``test_corpus.py``
     passes the adapter *object* as ``adapter`` (so ``.group`` is right there),
@@ -172,6 +172,10 @@ def item_group(item: pytest.Item) -> int | None:
     different notions of "which group is this item" would let the assertion
     pass while the gate it checks was never applied.
     """
+    marker = item.get_closest_marker("consumer")
+    group = marker.kwargs.get("group") if marker else None
+    if isinstance(group, int):
+        return group
     callspec = getattr(item, "callspec", None)
     if callspec is None:
         return None
@@ -248,8 +252,9 @@ def assert_migrated_group_agrees(
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
-        "consumer: an adapter-vs-kicad-cli comparison; report-only (auto-xfail) "
-        "unless its group is in report.MIGRATED_GROUPS",
+        "consumer(group=None, raises=None): an advisory consumer measurement until its "
+        "group migrates. Rows without an adapter parameter may specify their group. "
+        "Use raises to limit the xfail to measured disagreements.",
     )
 
 
@@ -282,21 +287,22 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     router_cpp_built = GridCppAdapter().available()
 
     for item in items:
-        if item.get_closest_marker("consumer") is None:
+        marker = item.get_closest_marker("consumer")
+        if marker is None:
             continue
         if item_group(item) in MIGRATED_GROUPS:
             # Switched to the kernel in its own epic phase: the whole point of
             # that phase is that this row stops being allowed to disagree.
             continue
-        if _item_needs_router_cpp(item) and not router_cpp_built:
+        raises = marker.kwargs.get("raises")
+        if raises is None and _item_needs_router_cpp(item) and not router_cpp_built:
             # Issue #9705: the row's ``requires_router_cpp`` marker fails it
             # with the build hint at setup. A plain xfail would absorb that
             # ``Failed`` (it is a ``BaseException``, matched by ``raises is
             # None``) and turn the missing extension back into a silent green
             # XFAIL -- so this xfail only absorbs ``AssertionError``, the
             # measured disagreement it exists for. The hint stays a failure.
-            item.add_marker(
-                pytest.mark.xfail(strict=False, reason=CONSUMER_XFAIL_REASON, raises=AssertionError)
-            )
-            continue
-        item.add_marker(pytest.mark.xfail(strict=False, reason=CONSUMER_XFAIL_REASON))
+            raises = AssertionError
+        item.add_marker(
+            pytest.mark.xfail(strict=False, reason=CONSUMER_XFAIL_REASON, raises=raises)
+        )
