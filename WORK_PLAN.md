@@ -36,27 +36,24 @@ Human-approved issues ready for implementation (`loom:issue`).
 
 Issues currently being built (`loom:building`).
 
-- **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
-- **#9800**: Boards 02/03/05: drop per-board silk wiring and retire silk tolerances (#9795 phase 4)
-- **#9891**: Board 06: repair the seed-42 recipe to reproduce its strict release DRC result
 - **#9939**: Repair Board 03’s 38 remaining mask-to-copper findings while preserving legal trace angles
-- **#10012**: Readiness evidence folders collect project/rule sidecars of every board revision in the directory
 - **#10016**: current paths: a thin same-net track inside or beside a wide one makes the path 'ambiguous'; prune has no cut for it
 - **#10067**: Board 06 Python routing: clear the RX1− departure at J1.B10 on the two-open board
-- **#10069**: test flake: test_full_route_restores_sigint_handler_env_and_router_pin times out in the Test job
+- **#10076**: test flake: test_reports_committed_plane_signal[layers] times out (>60s) on the Test job
+- **#10078**: Board 06: clear the PCIe receiver exits at J3 pads 8 and 9 on the seed-42 fixture
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#10017**: fix: scope fill evidence to the selected board revision
-- **#10061**: feat(render): bind rendered artifacts to the PCB they depict
+- **#10030**: fix(current-paths): measure shared copper once and locate off-route loops
 - **#10068**: fix(drc): clear shared pad exits without bending their tracks
-- **#10070**: test(route): exercise the live router pin without chained completion
 - **#10071**: fix(router): preserve trace clearance beside same-net branch vias
+- **#10075**: fix(router): verify off-pad breakouts against preserved pours
+- **#10077**: test(route): isolate the escalation plane audit from chained completion
 
 ## Approved (Awaiting Merge)
 
@@ -97,13 +94,13 @@ Issues carrying `loom:curated`.
 - **#9891**: Board 06: repair the seed-42 recipe to reproduce its strict release DRC result *(curated)*
 - **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package *(curated)*
 - **#9939**: Repair Board 03’s 38 remaining mask-to-copper findings while preserving legal trace angles *(curated)*
-- **#10012**: Readiness evidence folders collect project/rule sidecars of every board revision in the directory *(curated)*
 - **#10016**: current paths: a thin same-net track inside or beside a wide one makes the path 'ambiguous'; prune has no cut for it *(curated)*
 - **#10051**: Named-stackup silk repair now needs hard-link support; on a filesystem without it the pass degrades to a warning *(curated)*
 - **#10056**: Checked PCB publication can still lose a save that lands between its post-link re-check and the unlink *(curated)*
 - **#10057**: kct route --format json omits summary.failure_reason on the default --auto-layers path *(curated)*
 - **#10067**: Board 06 Python routing: clear the RX1− departure at J1.B10 on the two-open board *(curated)*
-- **#10069**: test flake: test_full_route_restores_sigint_handler_env_and_router_pin times out in the Test job *(curated)*
+- **#10076**: test flake: test_reports_committed_plane_signal[layers] times out (>60s) on the Test job *(curated)*
+- **#10078**: Board 06: clear the PCIe receiver exits at J3 pads 8 and 9 on the seed-42 fixture *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -123,7 +120,7 @@ _None._
 | Very important | 1 |
 | Important | 1 |
 | Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 10 |
+| In Progress (`loom:building`) | 7 |
 | PRs awaiting review | 6 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 36 |
