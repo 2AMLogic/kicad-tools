@@ -1,0 +1,267 @@
+(kicad_pcb
+(version 20260206)
+(generator "pcbnew")
+(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+		(9 "F.Adhes" user "F.Adhesive")
+		(11 "B.Adhes" user "B.Adhesive")
+		(13 "F.Paste" user)
+		(15 "B.Paste" user)
+		(5 "F.SilkS" user "F.Silkscreen")
+		(7 "B.SilkS" user "B.Silkscreen")
+		(1 "F.Mask" user)
+		(3 "B.Mask" user)
+		(25 "Edge.Cuts" user)
+		(27 "Margin" user)
+		(31 "F.CrtYd" user "F.Courtyard")
+		(29 "B.CrtYd" user "B.Courtyard")
+		(35 "F.Fab" user)
+		(33 "B.Fab" user)
+	)
+(net 0 "")
+(net 1 "VIN")
+(net 2 "VOUT")
+(net 3 "GND")
+(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+  (layer
+	"F.Cu"
+)
+  (at 158.5 87.5)
+  (property
+	"Reference"
+	"J2"
+	(at 0 -3.5 0)
+	(layer "F.SilkS")
+	(uuid "85466bda-fe88-556a-af5a-cc2339f11d21")
+	(effects
+		(font
+			(size 1 1)
+			(thickness 0.15)
+		)
+	)
+)
+  (pad
+	"1"
+	thru_hole
+	rect
+	(at 0 -1.27)
+	(size 1.7 1.7)
+	(drill 1)
+	(layers "*.Cu" "*.Mask")
+	(remove_unused_layers no)
+	(pinfunction "Pin_1")
+	(pintype "passive")
+	(uuid "089fa207-3db0-53a3-8b87-7b6ee5fd4e34")
+	(net 2 "VOUT")
+)
+  (pad
+	"2"
+	thru_hole
+	oval
+	(at 0 1.27)
+	(size 1.7 1.7)
+	(drill 1)
+	(layers "*.Cu" "*.Mask")
+	(remove_unused_layers no)
+	(pinfunction "Pin_2")
+	(pintype "passive")
+	(uuid "0d971a0b-5abd-5710-96a6-b0b18a831b61")
+	(net 3 "GND")
+)
+)
+(footprint "Resistor_SMD:R_0805_2012Metric"
+  (layer
+	"F.Cu"
+)
+  (at 148.5 83)
+  (property
+	"Reference"
+	"R1"
+	(at 0 -1.5 0)
+	(layer "F.SilkS")
+	(uuid "4d54ddd3-114a-53e3-aa42-551090e302dd")
+	(effects
+		(font
+			(size 1 1)
+			(thickness 0.15)
+		)
+	)
+)
+  (pad
+	"1"
+	smd
+	roundrect
+	(at -1 0)
+	(size 1 1.3)
+	(layers "F.Cu" "F.Mask" "F.Paste")
+	(roundrect_rratio 0.25)
+	(pintype "passive")
+	(uuid "255e10f6-ecb6-59e5-a9fe-9f5bcb79cae5")
+	(net 1 "VIN")
+)
+  (pad
+	"2"
+	smd
+	roundrect
+	(at 1 0)
+	(size 1 1.3)
+	(layers "F.Cu" "F.Mask" "F.Paste")
+	(roundrect_rratio 0.25)
+	(pintype "passive")
+	(uuid "bccf7f8e-55ac-579e-83b9-bf87a1e95848")
+	(net 2 "VOUT")
+)
+)
+(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+  (layer
+	"F.Cu"
+)
+  (at 138.5 87.5)
+  (property
+	"Reference"
+	"J1"
+	(at 0 -3.5 0)
+	(layer "F.SilkS")
+	(uuid "a758461b-c6ab-5045-82f2-df50b5536a8b")
+	(effects
+		(font
+			(size 1 1)
+			(thickness 0.15)
+		)
+	)
+)
+  (pad
+	"1"
+	thru_hole
+	rect
+	(at 0 -1.27)
+	(size 1.7 1.7)
+	(drill 1)
+	(layers "*.Cu" "*.Mask")
+	(remove_unused_layers no)
+	(pinfunction "Pin_1")
+	(pintype "passive")
+	(uuid "41f82185-fa66-54d9-bc80-829d53ee4fa4")
+	(net 1 "VIN")
+)
+  (pad
+	"2"
+	thru_hole
+	oval
+	(at 0 1.27)
+	(size 1.7 1.7)
+	(drill 1)
+	(layers "*.Cu" "*.Mask")
+	(remove_unused_layers no)
+	(pinfunction "Pin_2")
+	(pintype "passive")
+	(uuid "ddb46d30-2e65-56e7-9a2a-face747d099b")
+	(net 3 "GND")
+)
+)
+(footprint "Resistor_SMD:R_0805_2012Metric"
+  (layer
+	"F.Cu"
+)
+  (at 148.5 92)
+  (property
+	"Reference"
+	"R2"
+	(at 0 -1.5 0)
+	(layer "F.SilkS")
+	(uuid "696f9fb8-8011-5887-bcc4-67337f2d516f")
+	(effects
+		(font
+			(size 1 1)
+			(thickness 0.15)
+		)
+	)
+)
+  (pad
+	"1"
+	smd
+	roundrect
+	(at -1 0)
+	(size 1 1.3)
+	(layers "F.Cu" "F.Mask" "F.Paste")
+	(roundrect_rratio 0.25)
+	(pintype "passive")
+	(uuid "ab5bd8af-b774-5961-814a-259efb5c5987")
+	(net 2 "VOUT")
+)
+  (pad
+	"2"
+	smd
+	roundrect
+	(at 1 0)
+	(size 1 1.3)
+	(layers "F.Cu" "F.Mask" "F.Paste")
+	(roundrect_rratio 0.25)
+	(pintype "passive")
+	(thermal_bridge_width 0.3)
+	(thermal_gap 0.2)
+	(uuid "bb9ea913-cd23-5482-ad01-1649aade3542")
+	(net 3 "GND")
+)
+)
+(gr_rect
+		(start 133.5 75)
+		(end 163.5 100)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(fill no)
+		(layer "Edge.Cuts")
+		(uuid "89fe15ef-d9bf-57b8-9ebb-421947d5fa20")
+	)
+(segment
+		(start 147.5 91)
+		(end 147.5 92)
+		(width 0.5)
+		(layer "F.Cu")
+		(uuid "b72f1bef-f82d-5d23-b910-d985286f67eb")
+		(net 2)
+	)
+(segment
+		(start 149.5 83)
+		(end 149.5 83.9)
+		(width 0.5)
+		(layer "F.Cu")
+		(uuid "e050a184-bfb2-5ab4-aa93-f19429afc9bf")
+		(net 2)
+	)
+(via
+		(at 147.5 91)
+		(size 0.8)
+		(drill 0.3)
+		(layers "F.Cu" "B.Cu")
+		(uuid "7da5252a-2a2e-5afd-aeb8-31094e432caa")
+		(net 2)
+	)
+(via
+		(at 149.5 83.9)
+		(size 0.8)
+		(drill 0.3)
+		(layers "F.Cu" "B.Cu")
+		(uuid "c2a37d69-0790-5a1e-a741-b0b622606aef")
+		(net 2)
+	)
+(segment
+		(start 147.5 88.2)
+		(end 147.5 91)
+		(width 0.5)
+		(layer "B.Cu")
+		(uuid "0ebaff6b-fd8c-54f7-897f-312849b5246c")
+		(net 2)
+	)
+(segment
+		(start 149.5 83.9)
+		(end 149.5 86.2)
+		(width 0.5)
+		(layer "B.Cu")
+		(uuid "129c1984-9bda-53f7-954b-57cd32fc7c3f")
+		(net 2)
+	)
+)

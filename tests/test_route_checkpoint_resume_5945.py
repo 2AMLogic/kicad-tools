@@ -323,7 +323,14 @@ class TestRouteAutoPasses:
         board = _copy_board(VD_UNROUTED, tmp_path / "vd.kicad_pcb")
         out = tmp_path / "out.kicad_pcb"
         ck = tmp_path / "ck.kicad_pcb"
-        routed_text = VD_ROUTED.read_text()
+        # Pass 1 has three connected nets and a silk stroke that publication must widen.
+        routed = _copy_board(VD_ROUTED, tmp_path / "pass1.kicad_pcb")
+        thin_silk = (
+            "\t(gr_line (start 144 78) (end 145 78) (stroke (width 0.08) (type default)) "
+            '(layer "F.SilkS") (uuid "84fc9cb1-8ca5-4480-a717-fa5668db60ef"))\n'
+        )
+        routed_text = routed.read_text().rstrip().removesuffix(")") + thin_silk + ")\n"
+        routed.write_text(routed_text)
         unrouted_text = VD_UNROUTED.read_text()
         sources: list[str] = []
 
@@ -341,7 +348,7 @@ class TestRouteAutoPasses:
 
         # The regressing pass was undone: the output still holds pass 1.
         assert rc == 1
-        assert out.read_bytes() == self._published_board(VD_ROUTED, tmp_path)
+        assert out.read_bytes() == self._published_board(routed, tmp_path)
         assert len(fully_connected_nets(out)) == 3
         meta = read_checkpoint_meta(ck)
         assert meta is not None and meta["pass"] == 1

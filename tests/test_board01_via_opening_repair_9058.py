@@ -2,9 +2,8 @@
 
 ``boards/01-voltage-divider/generate_design.py`` Step 5.55 slides any via
 whose mask aperture overlaps its own pad's aperture out along its attached
-traces.  The committed routed board still carries both offending VOUT vias
-(at R1.2 and R2.1), so a scratch copy of it is a hermetic fixture: no
-router, no kicad-cli.
+traces. The fixture retains the original pad apertures, VOUT vias, attached
+segments and board outline from before the repair at R1.2 and R2.1.
 """
 
 from __future__ import annotations
@@ -20,14 +19,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "01-voltage-divider"
 COMMITTED_ROUTED = BOARD_DIR / "output" / "voltage_divider_routed.kicad_pcb"
 
-# The two moves the repair makes on the committed copper (also what a full
-# pinned-toolchain regen logged in the PR #9277 review).
+PRE_REPAIR = REPO_ROOT / "tests" / "fixtures" / "board01_pre9058_via_openings.kicad_pcb"
+
+# The two moves measured on the original copper in PR #9277.
 EXPECTED_MOVES = {
     (16.0, 8.9): (16.0, 9.5),  # out of R1/2's aperture
     (14.0, 16.0): (14.0, 15.5),  # out of R2/1's aperture
 }
 
-# B.Cu segment attached to the (14.0, 16.0) via; vertical in the committed
+# B.Cu segment attached to the (14.0, 16.0) via; vertical in the original
 # board, so the via slides along the y axis.
 _B_CU_SEGMENT_AT_R2 = "0ebaff6b-fd8c-54f7-897f-312849b5246c"
 
@@ -48,7 +48,7 @@ def _rounded(xy) -> tuple[float, float]:
 @pytest.fixture
 def board_copy(tmp_path: Path) -> Path:
     dst = tmp_path / "voltage_divider_routed.kicad_pcb"
-    shutil.copyfile(COMMITTED_ROUTED, dst)
+    shutil.copyfile(PRE_REPAIR, dst)
     return dst
 
 
@@ -80,8 +80,20 @@ def _circle_hits(pos, radius: float, box) -> bool:
 def test_fixture_still_has_both_offending_vias() -> None:
     from kicad_tools.schema.pcb import PCB
 
-    pcb = PCB.load(str(COMMITTED_ROUTED))
+    pcb = PCB.load(str(PRE_REPAIR))
     assert {_rounded(v.position) for v in pcb.vias} == set(EXPECTED_MOVES)
+
+
+def test_published_board_keeps_both_vias_clear(tmp_path: Path) -> None:
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / COMMITTED_ROUTED.name
+    shutil.copyfile(COMMITTED_ROUTED, board)
+    pcb = PCB.load(str(board))
+    assert {_rounded(v.position) for v in pcb.vias} == set(EXPECTED_MOVES.values())
+    before = board.read_bytes()
+    assert _load_board01_module().repair_same_net_via_opening_overlaps(board) == []
+    assert board.read_bytes() == before
 
 
 def test_repair_makes_exactly_the_two_moves_and_is_idempotent(board_copy: Path) -> None:
@@ -138,7 +150,7 @@ def test_misaligned_attached_segment_fails_closed(board_copy: Path) -> None:
         r"\(layer \"B\.Cu\"\)\s*\(uuid \"" + _B_CU_SEGMENT_AT_R2 + r"\"\))"
     )
     bent, n = pattern.subn(r"(start 143.5 90)\1", text)
-    assert n == 1, "fixture segment not found; committed board changed?"
+    assert n == 1, "expected the original R2 segment in the regression fixture"
     board_copy.write_text(bent)
     before = board_copy.read_bytes()
 
