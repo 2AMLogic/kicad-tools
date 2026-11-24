@@ -370,6 +370,19 @@ def test_bend_undo_restores_group_members_and_each_authored_endpoint(tmp_path):
     assert undo.doc.get("group").get("members").get_atoms() == ["joined"]
 
 
+def test_bend_refuses_a_collateral_track_in_a_generator_subgroup(tmp_path, monkeypatch, capsys):
+    joined = _seg("joined", (100.7, 100.3), (100.7, 105))
+    group = '(group "escapes" (uuid subgroup) (members joined))'
+    generator = "(generated (uuid tuning) (members subgroup))"
+    board = _board(tmp_path, "\n".join([ENTRY, joined, generator, group]))
+    original = board.read_bytes()
+    _run(monkeypatch, board, [_report(_finding("trk-a")), _report()], extra=("--format", "json"))
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == 0
+    assert board.read_bytes() == original
+    assert "cannot split locked or generated track joined" in result["unrepaired"][0]["detail"]
+
+
 @pytest.mark.parametrize("identity", ["uuid", "tstamp", "anonymous"])
 def test_off_angle_track_introduced_during_refill_is_never_published(
     tmp_path, monkeypatch, capsys, identity
@@ -1009,13 +1022,25 @@ def test_shared_exit_respects_project_clearance_at_the_translated_pad_lead(tmp_p
     assert not repairer.modified
 
 
-def test_shared_exit_leaves_a_generator_owned_lead_in_place(tmp_path):
-    board, _ = _shared_exit_fixture(
-        tmp_path, extra='(generated (uuid "generator") (members "lead-a"))'
-    )
+@pytest.mark.parametrize(
+    ("groups", "expected"),
+    [
+        ('(generated (uuid tuning) (members "lead-a"))', 0),
+        ('(group "leads" (uuid child) (members "lead-a")) (generated (uuid g) (members CHILD))', 0),
+        ('(generated (uuid g) (members child)) (group "exits" (uuid child) (members long))', 0),
+        ('(group "leads" (uuid child) (members "lead-a"))', 1),
+    ],
+    ids=["direct-lead", "nested-lead", "nested-outgoing", "ordinary-group"],
+)
+def test_shared_exit_respects_generator_ownership(tmp_path, groups, expected):
+    board, _ = _shared_exit_fixture(tmp_path, extra=groups)
     repairer = MaskCopperRepairer(board)
-    assert repairer.repair([_pt_finding("short", measured=0.025)], clearance_mm=0.127).repaired == 0
-    assert not repairer.modified
+    original = repairer.doc.to_string()
+    result = repairer.repair([_pt_finding("short", measured=0.025)], clearance_mm=0.127)
+    assert result.repaired == expected
+    assert repairer.modified == bool(expected)
+    if not expected:
+        assert repairer.doc.to_string() == original
 
 
 def _saved_copper(path: Path, uuid: str):

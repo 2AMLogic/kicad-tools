@@ -353,16 +353,6 @@ class MaskCopperRepairer(CopperGapRepairer):
     def off_angle_tracks(self) -> Counter[str]:
         return off_angle_tracks(self.doc)
 
-    @cached_property
-    def _generated_members(self) -> set[str]:
-        """Generator-owned copper keeps the geometry its generator produced."""
-        return {
-            _bare(uid).lower()
-            for group in self.doc.find_children("generated")
-            for members in group.find_children("members")
-            for uid in members.get_atoms()
-        }
-
     def align_moved_tracks(
         self,
         before: MaskCopperRepairer,
@@ -394,7 +384,8 @@ class MaskCopperRepairer(CopperGapRepairer):
             try:
                 if uid not in original or len(owners[uid]) != 1:
                     raise MaskTraceAngleError(f"off-angle track {uid} has no unique original move")
-                if before._locks.is_locked(original[uid]) or uid.lower() in self._generated_members:
+                track = original[uid]
+                if before._locks.is_locked(track) or before._locks.is_generator_owned(track):
                     raise MaskTraceAngleError(f"cannot split locked or generated track {uid}")
                 index = next(iter(owners[uid]))
                 act = result.actions[index]
@@ -403,7 +394,7 @@ class MaskCopperRepairer(CopperGapRepairer):
                 )
                 bend = before._choose_bend(
                     uid,
-                    original[uid],
+                    track,
                     tracks[uid],
                     moving_items[index],
                     pads,
@@ -1516,7 +1507,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             return False
         members.append((seg_uuid, seg, tag))
         moving = {uid for uid, _, _ in members}
-        if moving & touched or any(uid.lower() in self._generated_members for uid in moving):
+        if moving & touched or any(self._locks.is_generator_owned(node) for _, node, _ in members):
             return False
         leads: set[str] = set()
         legs = []
