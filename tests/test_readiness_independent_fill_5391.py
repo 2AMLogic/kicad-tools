@@ -117,22 +117,25 @@ def test_fill_evidence_follows_the_selected_revision_on_rerun(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "uri,in_parent",
+    "uri,in_parent,quoted",
     [
-        ("${KIPRJMOD}/vendor/Shared Parts.pretty", False),
-        ("vendor/Shared Parts.pretty", False),
-        ("${KIPRJMOD}/../vendor/Shared Parts.pretty", True),
+        ("${KIPRJMOD}/vendor/Shared Parts.pretty", False, True),
+        ("vendor/Shared Parts.pretty", False, True),
+        ("${KIPRJMOD}/../vendor/Shared Parts.pretty", True, True),
+        ("${KIPRJMOD}/vendor/Shared.pretty", False, False),
+        ("vendor/Shared.pretty", False, False),
     ],
 )
-def test_fill_snapshots_keep_the_library_at_its_table_uri(tmp_path, uri, in_parent):
+def test_fill_snapshots_keep_the_library_at_its_table_uri(tmp_path, uri, in_parent, quoted):
     opts = options(tmp_path)
     library_root = opts.board_dir if in_parent else opts.pcb.parent
-    member = Path("vendor/Shared Parts.pretty/J1.kicad_mod")
+    member = Path("vendor") / Path(uri).name / "J1.kicad_mod"
     library = library_root / member
     library.parent.mkdir(parents=True)
     library.write_text('(footprint "J1")')
     table = opts.pcb.parent / "fp-lib-table"
-    table.write_text(f'(fp_lib_table (lib (name "shared")(type "KiCad")(uri "{uri}")))')
+    uri_atom = f'"{uri}"' if quoted else uri
+    table.write_text(f'(fp_lib_table (lib (name "shared")(type "KiCad")(uri {uri_atom})))')
     (library_root / "vendor" / "different-board.kicad_pro").write_text("{}")
     if in_parent:
         opts = replace(opts, project_root=library_root)

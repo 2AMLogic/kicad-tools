@@ -63,7 +63,7 @@ from kicad_tools.analysis.routing_quality import (
     off_axis_layer_warning_count,
 )
 from kicad_tools.exceptions import FileFormatError
-from kicad_tools.sexp import ParseError
+from kicad_tools.sexp import ParseError, parse_file
 
 from .board_readiness import read_readiness, readiness_input_hash
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
@@ -2618,7 +2618,11 @@ def _project_libraries(real_root: Path, boundary: Path, explicit_root: bool) -> 
         if not table.is_file():
             continue
         files.add(table)
-        for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text()):
+        for lib in parse_file(table).find_children("lib"):
+            uri_node = lib.find("uri")
+            uri = uri_node.get_string(0) if uri_node is not None else None
+            if not uri:
+                continue
             if "${KIPRJMOD}" in uri:
                 dependency = Path(uri.replace("${KIPRJMOD}", str(real_root)))
             elif not Path(uri).is_absolute() and "$" not in uri:
