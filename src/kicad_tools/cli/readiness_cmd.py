@@ -1323,7 +1323,7 @@ def _fill_measurements(pcb: Path, engines: Engines) -> dict[str, float]:
 
 
 def _copy_fill_context(
-    pcb: Path, destination: Path, project: Path | None = None
+    pcb: Path, destination: Path, project: Path | None = None, *, project_root: Path | None = None
 ) -> tuple[Path, dict[str, Path]]:
     """Stage native sidecars under the PCB stem and retain their source paths."""
     from kicad_tools.sidecars import resolve_project_rules
@@ -1344,15 +1344,23 @@ def _copy_fill_context(
     pcb_rule = pcb.with_suffix(".kicad_dru")
     if pcb_rule.is_file():
         sidecars[pcb_rule.name] = pcb_rule
-    destination.mkdir(parents=True, exist_ok=True)
+    board_dir = pcb.parent.resolve()
+    libraries = _project_libraries(
+        board_dir, (project_root or board_dir).resolve(), project_root is not None
+    )
+    # Keep table URIs and board bytes intact. Only a shared library above the
+    # PCB directory needs a deeper board path inside the private snapshot.
+    common = Path(os.path.commonpath([board_dir, *libraries]))
+    staged_dir = destination / board_dir.relative_to(common)
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(pcb, staged_dir / pcb.name)
     for native_name, source in sidecars.items():
-        shutil.copy2(source, destination / native_name)
-    for source in pcb.parent.iterdir():
-        if source.is_file() and (source == pcb or source.name in {"fp-lib-table", "sym-lib-table"}):
-            shutil.copy2(source, destination / source.name)
-        elif source.is_dir() and (source.name == "footprints" or source.suffix == ".pretty"):
-            shutil.copytree(source, destination / source.name, dirs_exist_ok=True)
-    return destination / pcb.name, sidecars
+        shutil.copy2(source, staged_dir / native_name)
+    for source in libraries:
+        target = destination / source.relative_to(common)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    return staged_dir / pcb.name, sidecars
 
 
 @dataclass(frozen=True)
@@ -1418,6 +1426,7 @@ def saved_vs_refilled(
     *,
     engines: Engines | None = None,
     project: Path | None = None,
+    project_root: Path | None = None,
     snapshot_dir: Path | None = None,
     evidence: dict[str, Any] | None = None,
     label: Callable[[Path], str] = str,
@@ -1446,21 +1455,22 @@ def saved_vs_refilled(
         for name in ("fill-saved", "fill-refilled"):
             if (root / name).exists():
                 shutil.rmtree(root / name)
-        saved, sources = _copy_fill_context(pcb, root / "fill-saved", project)
-        refilled = root / "fill-refilled" / pcb.name
-        shutil.copytree(saved.parent, refilled.parent)
+        saved_root = root / "fill-saved"
+        refilled_root = root / "fill-refilled"
+        saved, sources = _copy_fill_context(pcb, saved_root, project, project_root=project_root)
+        shutil.copytree(saved_root, refilled_root)
+        refilled = refilled_root / saved.relative_to(saved_root)
+        evidence.update(saved_pcb=label(saved), refilled_pcb=label(refilled))
         saved_areas = _fill_measurements(saved, engines)
         evidence.update(
             {
                 "saved_sha256": _sha256_file(saved),
                 "saved_areas_mm2": saved_areas,
-                "saved_pcb": label(saved),
-                "refilled_pcb": label(refilled),
                 "rule_sources": {name: label(source) for name, source in sources.items()},
                 "context_sha256": {
-                    path.relative_to(saved.parent).as_posix(): _sha256_file(path)
-                    for path in sorted(saved.parent.rglob("*"))
-                    if path.is_file() and not _is_transient_local(path.relative_to(saved.parent))
+                    path.relative_to(saved_root).as_posix(): _sha256_file(path)
+                    for path in sorted(saved_root.rglob("*"))
+                    if path.is_file() and not _is_transient_local(path.relative_to(saved_root))
                 },
             }
         )
@@ -1495,7 +1505,9 @@ def require_saved_fill_matches_refill(
     return result
 
 
-def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
+def _gate_refill(
+    options: ReadinessOptions, engines: Engines, *, evidence: dict[str, Any] | None = None
+) -> CheckOutcome:
     """Measure saved copper against an independent native refill without publishing it.
 
     Both snapshots and their native context remain available as evidence. Area
@@ -1505,16 +1517,15 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
     evidence_path = options.evidence_dir / "fill-consistency.json"
     evidence_rel = _rel(options, evidence_path)
     options.evidence_dir.mkdir(parents=True, exist_ok=True)
-    evidence: dict[str, Any] = {
-        "engine": engines.kicad_cli_version(),
-        "tolerance_mm2": options.fill_tolerance_mm2,
-    }
+    evidence = {} if evidence is None else evidence
+    evidence.update(engine=engines.kicad_cli_version(), tolerance_mm2=options.fill_tolerance_mm2)
     try:
         result = saved_vs_refilled(
             options.pcb,
             options.fill_tolerance_mm2,
             engines=engines,
             project=options.project,
+            project_root=options.root,
             snapshot_dir=options.evidence_dir,
             evidence=evidence,
             label=lambda path: _rel(options, path),
@@ -2578,31 +2589,35 @@ def _project_dependencies(
     ``${KIPRJMOD}/../...`` library reference may resolve outside the PCB
     directory only when it stays inside *limit* (Issue #5813).
     """
-    from kicad_tools.export.manufacturing import project_library_members
-
     root = pcb.parent
     boundary = (limit or root).resolve()
     real_root = root.resolve()
     # Only this board's own project files (stem of the PCB); sibling revisions
     # and KiCad ``*_backup_*`` schematics are not its dependencies (#8727).
     # Schematics arrive through ``_schematic_hierarchy``.
-    files = {
-        p
-        for p in root.iterdir()
-        if p.is_file()
-        and (
-            (p.suffix in {".kicad_pro", ".kicad_dru"} and p.stem == pcb.stem)
-            or p.name in {"fp-lib-table", "sym-lib-table"}
-        )
-    }
-    for directory in root.iterdir():
+    files = _project_libraries(real_root, boundary, explicit_root)
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        sidecar = pcb.with_suffix(suffix)
+        if sidecar.is_file():
+            files.add(sidecar)
+    files.update(_kiprjmod_model_bodies(pcb, real_root, boundary, explicit_root))
+    return sorted(files)
+
+
+def _project_libraries(real_root: Path, boundary: Path, explicit_root: bool) -> set[Path]:
+    """Project-local library tables and their members, shared by snapshots and packaging."""
+    from kicad_tools.export.manufacturing import project_library_members
+
+    files: set[Path] = set()
+    for directory in real_root.iterdir():
         if directory.is_dir() and (
             directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
         ):
             files.update(project_library_members(directory, real_root))
-    for table in (root / "fp-lib-table", root / "sym-lib-table"):
-        if not table.exists():
+    for table in (real_root / "fp-lib-table", real_root / "sym-lib-table"):
+        if not table.is_file():
             continue
+        files.add(table)
         for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text()):
             if "${KIPRJMOD}" in uri:
                 dependency = Path(uri.replace("${KIPRJMOD}", str(real_root)))
@@ -2619,12 +2634,16 @@ def _project_dependencies(
             if not dependency.exists():
                 raise ValueError(f"Project dependency is missing: {uri}")
             if dependency.is_dir():
-                if resolved != root.resolve() and root.resolve().is_relative_to(resolved):
+                if resolved != real_root and real_root.is_relative_to(resolved):
                     raise ValueError(
                         f"Project dependency {uri} contains the PCB directory; "
                         "reference a specific library instead. " + _SUPPORTED_LAYOUT
                     )
-                members = [p for p in dependency.rglob("*") if p.is_file()]
+                if resolved == real_root and table.name == "fp-lib-table":
+                    # A footprint library at the project root uses its top-level modules.
+                    members = [p for p in dependency.glob("*.kicad_mod") if p.is_file()]
+                else:
+                    members = [p for p in dependency.rglob("*") if p.is_file()]
             else:
                 members = [dependency]
             for member in members:
@@ -2641,8 +2660,7 @@ def _project_dependencies(
                         "location in the library table instead."
                     )
             files.update(members)
-    files.update(_kiprjmod_model_bodies(pcb, real_root, boundary, explicit_root))
-    return sorted(files)
+    return files
 
 
 def _kiprjmod_model_bodies(
@@ -4590,7 +4608,8 @@ def _run_readiness_candidate(
                 )
             )
 
-    fill = _gate_refill(options, engines)
+    fill_evidence: dict[str, Any] = {}
+    fill = _gate_refill(options, engines, evidence=fill_evidence)
     checks.append(fill)
 
     # Issue #9799 (#9795 phase 3): the default silk legalisation pass runs on
@@ -4621,8 +4640,8 @@ def _run_readiness_candidate(
 
     native, native_report = _gate_native_drc(options, engines)
     checks.append(native)
-    refilled_pcb = options.evidence_dir / "fill-refilled" / options.pcb.name
-    if refilled_pcb.is_file():
+    refilled_path = fill_evidence.get("refilled_pcb")
+    if refilled_path and (refilled_pcb := options.board_dir / refilled_path).is_file():
         refilled_check, _ = _gate_native_drc(
             replace(
                 options, pcb=refilled_pcb, evidence_dir=options.evidence_dir / "refilled-native"

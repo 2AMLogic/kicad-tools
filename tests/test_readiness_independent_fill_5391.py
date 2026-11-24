@@ -116,6 +116,46 @@ def test_fill_evidence_follows_the_selected_revision_on_rerun(tmp_path):
         assert set(evidence["context_sha256"]) == expected
 
 
+@pytest.mark.parametrize(
+    "uri,in_parent",
+    [
+        ("${KIPRJMOD}/vendor/Shared Parts.pretty", False),
+        ("vendor/Shared Parts.pretty", False),
+        ("${KIPRJMOD}/../vendor/Shared Parts.pretty", True),
+    ],
+)
+def test_fill_snapshots_keep_the_library_at_its_table_uri(tmp_path, uri, in_parent):
+    opts = options(tmp_path)
+    library_root = opts.board_dir if in_parent else opts.pcb.parent
+    member = Path("vendor/Shared Parts.pretty/J1.kicad_mod")
+    library = library_root / member
+    library.parent.mkdir(parents=True)
+    library.write_text('(footprint "J1")')
+    table = opts.pcb.parent / "fp-lib-table"
+    table.write_text(f'(fp_lib_table (lib (name "shared")(type "KiCad")(uri "{uri}")))')
+    (library_root / "vendor" / "different-board.kicad_pro").write_text("{}")
+    if in_parent:
+        opts = replace(opts, project_root=library_root)
+    engines = replace(
+        cmd.Engines(),
+        refill=lambda pcb: cmd.EngineRun(True),
+        fill_areas=lambda pcb: json.loads(pcb.read_text()),
+        kicad_cli_version=lambda: "test engine",
+    )
+
+    result = cmd._gate_refill(opts, engines)
+    assert result.status == cmd.PASSED
+    receipt = json.loads((opts.evidence_dir / "fill-consistency.json").read_text())
+    assert receipt["context_sha256"][member.as_posix()] == cmd._sha256_file(library)
+    for name in ("saved_pcb", "refilled_pcb"):
+        staged = opts.board_dir / receipt[name]
+        assert staged.read_bytes() == opts.pcb.read_bytes()
+        assert (staged.parent / table.name).read_bytes() == table.read_bytes()
+        target = staged.parent / uri.removeprefix("${KIPRJMOD}/") / library.name
+        assert target.read_bytes() == library.read_bytes()
+        assert not (target.parent.parent / "different-board.kicad_pro").exists()
+
+
 @pytest.mark.parametrize("routed_project", [False, True])
 def test_routed_fill_snapshot_keeps_the_paired_project(tmp_path, routed_project):
     opts = options(tmp_path)
