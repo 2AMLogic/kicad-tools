@@ -154,6 +154,12 @@ void Pathfinder::set_routable_layers(const std::vector<int>& layers) {
 // runs maybe 100 searches per board, this branch is effectively
 // dead code -- but defending against it makes the invariant explicit.
 void Pathfinder::ensure_search_arrays_sized() {
+    // Issue #8486: fold the previous recorded search's stamps before the
+    // generation advances (or the arrays are reallocated).
+    if (dep_recording_ && dep_search_pending_) {
+        dependency_fold();
+        dep_search_pending_ = false;
+    }
     const int cols = grid_.cols();
     const int rows = grid_.rows();
     const int layers = grid_.layers();
@@ -184,6 +190,60 @@ void Pathfinder::ensure_search_arrays_sized() {
         search_current_gen_ = 0;
     }
     ++search_current_gen_;
+    if (dep_recording_) {
+        dep_search_pending_ = true;
+    }
+}
+
+// Issue #8486: fold the cells stamped in the current generation into the
+// coarse dependency mask.  Skipped (mask left as is) if the stamp arrays
+// no longer match the dimensions recording started with.
+void Pathfinder::dependency_fold() {
+    if (dep_mask_.empty() || search_flat_cols_ != dep_src_cols_ ||
+        search_flat_rows_ != dep_src_rows_ ||
+        search_flat_layers_ != dep_src_layers_) {
+        dep_mask_.clear();
+        return;
+    }
+    const size_t plane = static_cast<size_t>(search_flat_rows_) *
+                         static_cast<size_t>(search_flat_cols_);
+    for (int layer = 0; layer < search_flat_layers_; ++layer) {
+        const uint32_t* gen = search_g_score_gen_.data() +
+                              static_cast<size_t>(layer) * plane;
+        for (int y = 0; y < search_flat_rows_; ++y) {
+            const uint32_t* row = gen + static_cast<size_t>(y) * search_flat_cols_;
+            uint8_t* out = dep_mask_.data() +
+                           static_cast<size_t>(y / dep_block_) * dep_cols_;
+            for (int x = 0; x < search_flat_cols_; ++x) {
+                if (row[x] == search_current_gen_) {
+                    out[x / dep_block_] = 1;
+                }
+            }
+        }
+    }
+}
+
+void Pathfinder::dependency_begin(int block) {
+    dep_block_ = block < 1 ? 1 : block;
+    dep_src_cols_ = grid_.cols();
+    dep_src_rows_ = grid_.rows();
+    dep_src_layers_ = grid_.layers();
+    dep_cols_ = (dep_src_cols_ + dep_block_ - 1) / dep_block_;
+    dep_rows_ = (dep_src_rows_ + dep_block_ - 1) / dep_block_;
+    dep_mask_.assign(static_cast<size_t>(dep_cols_) * dep_rows_, 0);
+    dep_recording_ = true;
+    dep_search_pending_ = false;
+}
+
+std::tuple<int, int, std::vector<uint8_t>> Pathfinder::dependency_collect() {
+    if (dep_recording_ && dep_search_pending_) {
+        dependency_fold();
+    }
+    dep_recording_ = false;
+    dep_search_pending_ = false;
+    std::vector<uint8_t> out;
+    out.swap(dep_mask_);
+    return {dep_rows_, dep_cols_, std::move(out)};
 }
 
 // Issue #5617: see ``via_verdict_`` in pathfinder.hpp.  Same generation-

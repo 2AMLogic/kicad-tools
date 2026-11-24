@@ -674,6 +674,14 @@ class RipupCycleGuard:
     every :data:`KNOWN_FAILURE_REPROBE_EVERY` iterations, even if all the
     copper observed at the first failure remains."""
 
+    streak_dependency: dict[int, Any] = field(default_factory=dict)
+    """``net -> SearchDependency`` (issue #8486): the grid cells the failed
+    searches of its current streak read, unioned.  When present, a foreign
+    shape that was in the witness at the first failure and has since moved
+    away only restarts the streak if its clearance envelope touched those
+    cells; absent (Python fallback ran, stale extension), any such change
+    restarts it."""
+
     last_fail_s: dict[int, float] = field(default_factory=dict)
     """``net -> seconds`` its latest no-path negotiated search took; bounds the
     next cap of a net that fails before reaching it."""
@@ -707,6 +715,7 @@ class RipupCycleGuard:
         self.entry_signature = {int(n): sig for n, sig in failed.items()}
         for memo in (
             self.capped_streak,
+            self.streak_dependency,
             self.futile_rescue,
             self.last_fail_s,
             self.setup_floor_s,
@@ -730,7 +739,15 @@ class RipupCycleGuard:
         if sig is None or rec is None:
             return None
         if _is_copper_key(sig) and _is_copper_key(rec[1]):
-            if rec[0] <= int(iteration) and frozenset(rec[1][1]).issubset(sig[1]):
+            if rec[0] > int(iteration):
+                return None
+            removed = frozenset(rec[1][1]) - frozenset(sig[1])
+            if not removed:
+                return rec
+            # A shape from the first failure is gone.  It can only have opened
+            # a detour if the failed searches read cells near it (#8486).
+            dependency = self.streak_dependency.get(int(net))
+            if dependency is not None and not any(dependency.touches(i) for i in removed):
                 return rec
             return None
         if rec[0] != int(iteration) - 1 or rec[1] != sig:
@@ -790,8 +807,13 @@ class RipupCycleGuard:
         elapsed: float,
         routed: bool,
         setup_stopped: bool = False,
+        dependency: Any = None,
     ) -> None:
         """Feed one negotiated search back (issue #8486).
+
+        ``dependency`` (a ``SearchDependency``) is the grid cells the search
+        read.  It accumulates over a streak; a failure without one clears it,
+        so the streak falls back to the witness-only rule.
 
         ``setup_stopped`` (issue #8644): the search ended in pre-search mask
         setup without expanding A*; the net's next floor then rises above the
@@ -818,6 +840,7 @@ class RipupCycleGuard:
             self.add_known_fail_seconds(iteration, elapsed)
         if routed or cap is None or sig is None:
             self.capped_streak.pop(net, None)
+            self.streak_dependency.pop(net, None)
             self.last_fail_s.pop(net, None)
             self.setup_floor_s.pop(net, None)
             self.full_search_iter.pop(net, None)
@@ -827,6 +850,7 @@ class RipupCycleGuard:
             self.setup_floor_s[net] = float(elapsed) + KNOWN_FAILURE_MIN_SEARCH_SLICE_S
         else:
             self.setup_floor_s.pop(net, None)
+        self._note_dependency(net, dependency, restart=prev is None and not same_iter)
         if same_iter:
             return
         # Anchor to the failure that started the streak. Adding then removing
@@ -835,6 +859,23 @@ class RipupCycleGuard:
             self.capped_streak[net] = (iteration, sig, 1)
         else:
             self.capped_streak[net] = (iteration, prev[1], prev[2] + 1)
+
+    def _note_dependency(self, net: int, dependency: Any, *, restart: bool) -> None:
+        """Fold one failed search's read cells into the streak's record.
+
+        A new streak starts from this search alone.  A continuing one unions
+        in each further search; a search that recorded nothing (or a streak
+        that already lost its record) leaves the streak without one.
+        """
+        if restart:
+            merged = dependency
+        else:
+            known = self.streak_dependency.get(net)
+            merged = None if known is None or dependency is None else known.union(dependency)
+        if merged is None:
+            self.streak_dependency.pop(net, None)
+        else:
+            self.streak_dependency[net] = merged
 
     def add_known_fail_seconds(self, iteration: int, seconds: float) -> None:
         key = int(iteration)
@@ -872,6 +913,7 @@ class RipupCycleGuard:
         for memo in (
             self.futile_rescue,
             self.capped_streak,
+            self.streak_dependency,
             self.no_path_seen,
             self.last_fail_s,
             self.setup_floor_s,

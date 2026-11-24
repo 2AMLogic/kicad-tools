@@ -50,7 +50,8 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -62,7 +63,7 @@ from kicad_tools.analysis.routing_quality import (
     off_axis_layer_warning_count,
 )
 from kicad_tools.exceptions import FileFormatError
-from kicad_tools.sexp import ParseError
+from kicad_tools.sexp import ParseError, parse_file
 
 from .board_readiness import read_readiness, readiness_input_hash
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
@@ -1021,7 +1022,7 @@ def _find_pcb(board_dir: Path) -> Path | None:
 
 
 def _find_sibling(pcb: Path, suffix: str) -> Path | None:
-    """Find a sibling file for *pcb*, preferring the exact stem match."""
+    """Prefer the PCB or original project stem, then an applicable sibling."""
     exact = pcb.with_suffix(suffix)
     if exact.is_file():
         return exact
@@ -1030,6 +1031,17 @@ def _find_sibling(pcb: Path, suffix: str) -> Path | None:
     if trimmed.is_file():
         return trimmed
     candidates = sorted(pcb.parent.glob(f"*{suffix}"))
+    if suffix == ".kicad_pro":
+        # A differently named project can be shared. Projects paired with
+        # other boards, including their routed copies, belong to those boards.
+        available = [
+            project
+            for project in candidates
+            if project.is_file()
+            and not project.with_suffix(".kicad_pcb").is_file()
+            and not project.with_name(f"{project.stem}_routed.kicad_pcb").is_file()
+        ]
+        return available[0] if len(available) == 1 else None
     return candidates[0] if candidates else None
 
 
@@ -1070,8 +1082,9 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
     project = _find_sibling(pcb, ".kicad_pro")
     if project is None:
         return None, (
-            f"{pcb.name} has no paired .kicad_pro; the sign-off tier is not "
-            "trustworthy without project rules (see #4097)"
+            f"{pcb.name} has no unambiguous paired .kicad_pro. "
+            f"Place its intended project beside it as {pcb.with_suffix('.kicad_pro').name} "
+            "so readiness can use its rules."
         )
 
     schematic = (
@@ -1309,19 +1322,45 @@ def _fill_measurements(pcb: Path, engines: Engines) -> dict[str, float]:
     return areas
 
 
-def _copy_fill_context(pcb: Path, destination: Path) -> Path:
-    """Retain saved copper and its local native project/rule/library context."""
-    destination.mkdir(parents=True, exist_ok=True)
-    for source in pcb.parent.iterdir():
-        if source.is_file() and (
-            source == pcb
-            or source.suffix in {".kicad_pro", ".kicad_dru"}
-            or source.name in {"fp-lib-table", "sym-lib-table"}
-        ):
-            shutil.copy2(source, destination / source.name)
-        elif source.is_dir() and (source.name == "footprints" or source.suffix == ".pretty"):
-            shutil.copytree(source, destination / source.name, dirs_exist_ok=True)
-    return destination / pcb.name
+def _copy_fill_context(
+    pcb: Path, destination: Path, project: Path | None = None, *, project_root: Path | None = None
+) -> tuple[Path, dict[str, Path]]:
+    """Stage native sidecars under the PCB stem and retain their source paths."""
+    from kicad_tools.sidecars import resolve_project_rules
+
+    # Standalone board producers can also have a routed PCB and its original
+    # project's sidecars. Readiness supplies the project it already selected.
+    rule_board = pcb
+    if (
+        project is None
+        and pcb.stem.endswith("_routed")
+        and not pcb.with_suffix(".kicad_pro").is_file()
+    ):
+        rule_board = pcb.with_stem(pcb.stem.removesuffix("_routed"))
+    sidecars = {
+        pcb.with_suffix(source.suffix).name: source
+        for source in resolve_project_rules(rule_board, project, allow_default=True)
+    }
+    pcb_rule = pcb.with_suffix(".kicad_dru")
+    if pcb_rule.is_file():
+        sidecars[pcb_rule.name] = pcb_rule
+    board_dir = pcb.parent.resolve()
+    libraries = _project_libraries(
+        board_dir, (project_root or board_dir).resolve(), project_root is not None
+    )
+    # Keep table URIs and board bytes intact. Only a shared library above the
+    # PCB directory needs a deeper board path inside the private snapshot.
+    common = Path(os.path.commonpath([board_dir, *libraries]))
+    staged_dir = destination / board_dir.relative_to(common)
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(pcb, staged_dir / pcb.name)
+    for native_name, source in sidecars.items():
+        shutil.copy2(source, staged_dir / native_name)
+    for source in libraries:
+        target = destination / source.relative_to(common)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    return staged_dir / pcb.name, sidecars
 
 
 @dataclass(frozen=True)
@@ -1386,13 +1425,17 @@ def saved_vs_refilled(
     tolerance: float = DEFAULT_FILL_TOLERANCE_MM2,
     *,
     engines: Engines | None = None,
+    project: Path | None = None,
+    project_root: Path | None = None,
     snapshot_dir: Path | None = None,
     evidence: dict[str, Any] | None = None,
     label: Callable[[Path], str] = str,
 ) -> FillComparison:
     """Compare *pcb*'s saved copper with an independent native refill of a copy.
 
-    *pcb* is never modified.  With *snapshot_dir* the saved and refilled
+    *pcb* is never modified. With *project*, both copies use that project's
+    settings and its rules, with a PCB-specific rule file taking precedence.
+    With *snapshot_dir* the saved and refilled
     copies (and their native context) are kept there as ``fill-saved/`` and
     ``fill-refilled/``; otherwise a temporary directory is used.  *evidence*,
     when given, is filled in step by step (paths rendered through *label*) so a
@@ -1412,19 +1455,22 @@ def saved_vs_refilled(
         for name in ("fill-saved", "fill-refilled"):
             if (root / name).exists():
                 shutil.rmtree(root / name)
-        saved = _copy_fill_context(pcb, root / "fill-saved")
-        refilled = _copy_fill_context(saved, root / "fill-refilled")
+        saved_root = root / "fill-saved"
+        refilled_root = root / "fill-refilled"
+        saved, sources = _copy_fill_context(pcb, saved_root, project, project_root=project_root)
+        shutil.copytree(saved_root, refilled_root)
+        refilled = refilled_root / saved.relative_to(saved_root)
+        evidence.update(saved_pcb=label(saved), refilled_pcb=label(refilled))
         saved_areas = _fill_measurements(saved, engines)
         evidence.update(
             {
                 "saved_sha256": _sha256_file(saved),
                 "saved_areas_mm2": saved_areas,
-                "saved_pcb": label(saved),
-                "refilled_pcb": label(refilled),
+                "rule_sources": {name: label(source) for name, source in sources.items()},
                 "context_sha256": {
-                    path.relative_to(saved.parent).as_posix(): _sha256_file(path)
-                    for path in sorted(saved.parent.rglob("*"))
-                    if path.is_file() and not _is_transient_local(path.relative_to(saved.parent))
+                    path.relative_to(saved_root).as_posix(): _sha256_file(path)
+                    for path in sorted(saved_root.rglob("*"))
+                    if path.is_file() and not _is_transient_local(path.relative_to(saved_root))
                 },
             }
         )
@@ -1459,7 +1505,9 @@ def require_saved_fill_matches_refill(
     return result
 
 
-def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
+def _gate_refill(
+    options: ReadinessOptions, engines: Engines, *, evidence: dict[str, Any] | None = None
+) -> CheckOutcome:
     """Measure saved copper against an independent native refill without publishing it.
 
     Both snapshots and their native context remain available as evidence. Area
@@ -1469,15 +1517,15 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
     evidence_path = options.evidence_dir / "fill-consistency.json"
     evidence_rel = _rel(options, evidence_path)
     options.evidence_dir.mkdir(parents=True, exist_ok=True)
-    evidence: dict[str, Any] = {
-        "engine": engines.kicad_cli_version(),
-        "tolerance_mm2": options.fill_tolerance_mm2,
-    }
+    evidence = {} if evidence is None else evidence
+    evidence.update(engine=engines.kicad_cli_version(), tolerance_mm2=options.fill_tolerance_mm2)
     try:
         result = saved_vs_refilled(
             options.pcb,
             options.fill_tolerance_mm2,
             engines=engines,
+            project=options.project,
+            project_root=options.root,
             snapshot_dir=options.evidence_dir,
             evidence=evidence,
             label=lambda path: _rel(options, path),
@@ -1516,17 +1564,7 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
             blockers=[f"Saved/refilled copper could not be measured: {exc}"],
         )
     finally:
-        # kicad-cli leaves per-user files (e.g. ``<board>.kicad_prl``) beside the
-        # boards it saved; they are not evidence and VCS ignores them (#6076).
-        for name in ("fill-saved", "fill-refilled"):
-            directory = options.evidence_dir / name
-            if directory.is_dir():
-                for path in sorted(directory.rglob("*"), reverse=True):
-                    if _is_transient_local(path.relative_to(directory)):
-                        if path.is_dir():
-                            shutil.rmtree(path, ignore_errors=True)
-                        elif path.exists():
-                            path.unlink()
+        _remove_fill_local_settings(options.evidence_dir)
         evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
 
 
@@ -2551,32 +2589,40 @@ def _project_dependencies(
     ``${KIPRJMOD}/../...`` library reference may resolve outside the PCB
     directory only when it stays inside *limit* (Issue #5813).
     """
-    from kicad_tools.export.manufacturing import project_library_members
-
     root = pcb.parent
     boundary = (limit or root).resolve()
     real_root = root.resolve()
     # Only this board's own project files (stem of the PCB); sibling revisions
     # and KiCad ``*_backup_*`` schematics are not its dependencies (#8727).
     # Schematics arrive through ``_schematic_hierarchy``.
-    files = {
-        p
-        for p in root.iterdir()
-        if p.is_file()
-        and (
-            (p.suffix in {".kicad_pro", ".kicad_dru"} and p.stem == pcb.stem)
-            or p.name in {"fp-lib-table", "sym-lib-table"}
-        )
-    }
-    for directory in root.iterdir():
+    files = _project_libraries(real_root, boundary, explicit_root)
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        sidecar = pcb.with_suffix(suffix)
+        if sidecar.is_file():
+            files.add(sidecar)
+    files.update(_kiprjmod_model_bodies(pcb, real_root, boundary, explicit_root))
+    return sorted(files)
+
+
+def _project_libraries(real_root: Path, boundary: Path, explicit_root: bool) -> set[Path]:
+    """Project-local library tables and their members, shared by snapshots and packaging."""
+    from kicad_tools.export.manufacturing import project_library_members
+
+    files: set[Path] = set()
+    for directory in real_root.iterdir():
         if directory.is_dir() and (
             directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
         ):
             files.update(project_library_members(directory, real_root))
-    for table in (root / "fp-lib-table", root / "sym-lib-table"):
-        if not table.exists():
+    for table in (real_root / "fp-lib-table", real_root / "sym-lib-table"):
+        if not table.is_file():
             continue
-        for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text()):
+        files.add(table)
+        for lib in parse_file(table).find_children("lib"):
+            uri_node = lib.find("uri")
+            uri = uri_node.get_string(0) if uri_node is not None else None
+            if not uri:
+                continue
             if "${KIPRJMOD}" in uri:
                 dependency = Path(uri.replace("${KIPRJMOD}", str(real_root)))
             elif not Path(uri).is_absolute() and "$" not in uri:
@@ -2592,12 +2638,16 @@ def _project_dependencies(
             if not dependency.exists():
                 raise ValueError(f"Project dependency is missing: {uri}")
             if dependency.is_dir():
-                if resolved != root.resolve() and root.resolve().is_relative_to(resolved):
+                if resolved != real_root and real_root.is_relative_to(resolved):
                     raise ValueError(
                         f"Project dependency {uri} contains the PCB directory; "
                         "reference a specific library instead. " + _SUPPORTED_LAYOUT
                     )
-                members = [p for p in dependency.rglob("*") if p.is_file()]
+                if resolved == real_root and table.name == "fp-lib-table":
+                    # A footprint library at the project root uses its top-level modules.
+                    members = [p for p in dependency.glob("*.kicad_mod") if p.is_file()]
+                else:
+                    members = [p for p in dependency.rglob("*") if p.is_file()]
             else:
                 members = [dependency]
             for member in members:
@@ -2614,8 +2664,7 @@ def _project_dependencies(
                         "location in the library table instead."
                     )
             files.update(members)
-    files.update(_kiprjmod_model_bodies(pcb, real_root, boundary, explicit_root))
-    return sorted(files)
+    return files
 
 
 def _kiprjmod_model_bodies(
@@ -4151,23 +4200,33 @@ def _publication_identity(path: Path) -> tuple[Any, ...] | None:
     )
 
 
-def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str]) -> None:
-    """Serialize cooperating publishers and preserve observed external edits.
+class ReadinessPublicationBusy(RuntimeError):
+    """Another process is installing readiness results at this destination."""
 
-    A sibling lock avoids adding files to the release inventory. An abandoned
-    lock fails closed; it must not be removed while another publisher is live.
-    Per-file checks narrow external-editor races, but do not promise atomicity
-    against writers that ignore this lock.
-    """
-    lock = destination.parent / f".{destination.name}.readiness-publish.lock"
+
+@contextmanager
+def _publication_lock(lock: Path) -> Iterator[None]:
+    """Serialize writers. An abandoned lock requires the owner to clear it."""
     try:
         lock.mkdir()
     except FileExistsError as exc:
-        raise RuntimeError("Another readiness publisher holds the release lock") from exc
+        raise ReadinessPublicationBusy(
+            f"Another readiness publisher holds the release lock {lock}"
+        ) from exc
     try:
-        _publish_candidate_locked(candidate, destination, before)
+        yield
     finally:
         lock.rmdir()
+
+
+def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str]) -> None:
+    """Publish a checked release and preserve observed external edits.
+
+    Per-file checks narrow external-editor races but cannot guarantee atomicity
+    against writers that ignore the lock.
+    """
+    with _publication_lock(destination.parent / f".{destination.name}.readiness-publish.lock"):
+        _publish_candidate_locked(candidate, destination, before)
 
 
 def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[str, str]) -> None:
@@ -4261,13 +4320,84 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
             raise
 
 
+def _remove_fill_local_settings(evidence: Path) -> None:
+    """Discard per-user files written beside a snapshot by refill or subsequent DRC."""
+    for name in ("fill-saved", "fill-refilled"):
+        directory = evidence / name
+        for path in sorted(directory.rglob("*"), reverse=True):
+            if _is_transient_local(path.relative_to(directory)):
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+
+
+def _retain_other_diagnostics(previous: Path, staged: Path) -> None:
+    """Keep operator files alongside newly generated diagnostics in shared subdirectories."""
+    for entry in previous.iterdir():
+        target = staged / entry.name
+        if target.is_symlink():
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            if not target.exists():
+                shutil.copytree(entry, target, symlinks=True)
+            elif target.is_dir():
+                _retain_other_diagnostics(entry, target)
+        elif not target.exists():
+            shutil.copy2(entry, target, follow_symlinks=False)
+
+
+def _publish_diagnostics(source: Path | None, destination: Path, report: dict) -> Path:
+    """Publish this run's receipts and complete fill snapshots together."""
+    destination.mkdir(parents=True, exist_ok=True)
+    snapshots = {"fill-saved", "fill-refilled"}
+    with (
+        _publication_lock(destination / ".readiness-publish.lock"),
+        tempfile.TemporaryDirectory(dir=destination) as temp,
+    ):
+        incoming = Path(temp) / "incoming"
+        backup = Path(temp) / "backup"
+        incoming.mkdir()
+        backup.mkdir()
+        if source is not None and source.is_dir():
+            shutil.copytree(source, incoming, dirs_exist_ok=True)
+            for entry in incoming.iterdir():
+                prior = destination / entry.name
+                if (
+                    entry.name not in snapshots
+                    and entry.is_dir()
+                    and prior.is_dir()
+                    and not prior.is_symlink()
+                ):
+                    _retain_other_diagnostics(prior, entry)
+        (incoming / "readiness.json").write_text(json.dumps(report, indent=2) + "\n")
+
+        # Withdraw the old receipts first and install the new ones last. A
+        # missing snapshot or fill receipt removes its previous incarnation.
+        receipts = ["readiness.json", "fill-consistency.json"]
+        names = snapshots | {entry.name for entry in incoming.iterdir()}
+        order = receipts + sorted(names.difference(receipts))
+        with ExitStack() as rollback:
+            for name in order:
+                prior = destination / name
+                if prior.exists() or prior.is_symlink():
+                    os.replace(prior, backup / name)
+                    rollback.callback(os.replace, backup / name, prior)
+            for name in reversed(order):
+                new = incoming / name
+                if new.exists():
+                    os.replace(new, destination / name)
+                    rollback.callback(os.replace, destination / name, new)
+            rollback.pop_all()
+    return destination / "readiness.json"
+
+
 def _preflight_failure(
     options: ReadinessOptions, original: Path, exc: Exception
 ) -> ReadinessResult:
     """Report an unresolvable dependency without touching sources or any release."""
     name = "readiness-verification" if options.operation == "verify" else "readiness-attempt"
     diagnostics = original / "output" / name
-    diagnostics.mkdir(parents=True, exist_ok=True)
     report = {
         "schema_version": 1,
         "status": STATUS_BLOCKED,
@@ -4275,8 +4405,7 @@ def _preflight_failure(
         "blockers": [f"Readiness candidate was not published: {exc}"],
         "checks": [],
     }
-    report_path = diagnostics / "readiness.json"
-    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    report_path = _publish_diagnostics(None, diagnostics, report)
     return ReadinessResult(report, report_path, 1)
 
 
@@ -4350,6 +4479,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 return None
             return candidate_root / path.resolve().relative_to(project_root)
 
+        diagnostic_source = None
         try:
             staged = replace(
                 options,
@@ -4380,7 +4510,18 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                         "Existing package is not a generic readiness package; use --verify and regenerate it with its recipe"
                     )
                 shutil.rmtree(staged.output_dir)
-            result = _run_readiness_candidate(staged, engines)
+            diagnostic_source = staged.evidence_dir
+            # Generation can start with evidence copied from a previous release.
+            # A failure before the fill gate must not publish that older context.
+            if options.operation == "generate":
+                for name in ("fill-saved", "fill-refilled", "fill-consistency.json"):
+                    prior = diagnostic_source / name
+                    if prior.exists():
+                        prior.rename(Path(temporary) / name)
+            try:
+                result = _run_readiness_candidate(staged, engines)
+            finally:
+                _remove_fill_local_settings(diagnostic_source)
             changes = _release_changes(original, before, external_before)
             if changes:
                 raise RuntimeError(
@@ -4391,25 +4532,14 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 return replace(
                     result, report_path=original / result.report_path.relative_to(candidate)
                 )
-            # Preserve diagnostics but never replace the existing release report.
-            if staged.evidence_dir.exists():
-                diagnostics.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(staged.evidence_dir, diagnostics, dirs_exist_ok=True)
             report = result.report
             if options.operation == "generate":
                 report["candidate_not_published"] = True
-            report_path = diagnostics / "readiness.json"
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(json.dumps(report, indent=2) + "\n")
-            return replace(result, report_path=report_path)
         except KiCadEnvironmentError:
             # Issue #6962: the environment, not the board, failed -- write no
             # evidence at all, not even a blocked diagnostic receipt.
             raise
         except Exception as exc:
-            if "staged" in locals() and staged.evidence_dir.exists():
-                shutil.copytree(staged.evidence_dir, diagnostics, dirs_exist_ok=True)
-            diagnostics.mkdir(parents=True, exist_ok=True)
             report = {
                 "schema_version": 1,
                 "status": STATUS_BLOCKED,
@@ -4417,9 +4547,9 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 "blockers": [f"Readiness candidate was not published: {exc}"],
                 "checks": [],
             }
-            report_path = diagnostics / "readiness.json"
-            report_path.write_text(json.dumps(report, indent=2) + "\n")
-            return ReadinessResult(report, report_path, 1)
+            result = ReadinessResult(report, diagnostics / "readiness.json", 1)
+        report_path = _publish_diagnostics(diagnostic_source, diagnostics, report)
+        return replace(result, report_path=report_path)
 
 
 def _run_readiness_candidate(
@@ -4482,7 +4612,8 @@ def _run_readiness_candidate(
                 )
             )
 
-    fill = _gate_refill(options, engines)
+    fill_evidence: dict[str, Any] = {}
+    fill = _gate_refill(options, engines, evidence=fill_evidence)
     checks.append(fill)
 
     # Issue #9799 (#9795 phase 3): the default silk legalisation pass runs on
@@ -4513,8 +4644,8 @@ def _run_readiness_candidate(
 
     native, native_report = _gate_native_drc(options, engines)
     checks.append(native)
-    refilled_pcb = options.evidence_dir / "fill-refilled" / options.pcb.name
-    if refilled_pcb.is_file():
+    refilled_path = fill_evidence.get("refilled_pcb")
+    if refilled_path and (refilled_pcb := options.board_dir / refilled_path).is_file():
         refilled_check, _ = _gate_native_drc(
             replace(
                 options, pcb=refilled_pcb, evidence_dir=options.evidence_dir / "refilled-native"
@@ -5029,20 +5160,25 @@ def run_from_args(args: argparse.Namespace, engines: Engines | None = None) -> i
                     result = run_readiness(options, engines)
             else:
                 result = run_readiness(options, engines)
-    except KiCadEnvironmentError as exc:
-        error = f"KiCad environment refused; no evidence written: {exc}"
+    except (KiCadEnvironmentError, ReadinessPublicationBusy) as exc:
+        if isinstance(exc, KiCadEnvironmentError):
+            error = f"KiCad environment refused; no evidence written: {exc}"
+            failure_status, exit_code = STATUS_UNVERIFIED, 2
+        else:
+            error = str(exc)
+            failure_status, exit_code = STATUS_BLOCKED, 1
         if as_json:
             emit_json(
                 {
                     "command": "readiness",
                     "success": False,
                     "error": error,
-                    "status": STATUS_UNVERIFIED,
+                    "status": failure_status,
                 }
             )
         else:
             print(f"error: {error}", file=sys.stderr)
-        return 2
+        return exit_code
 
     if as_json:
         emit_json(
