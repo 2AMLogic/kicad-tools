@@ -69,7 +69,11 @@ from kicad_tools.router.rules import net_class_map_from_path
 from kicad_tools.schema.pcb import PCB, Segment, Via
 from kicad_tools.sidecars import copy_project_sidecars
 from kicad_tools.validate.connectivity import ConnectivityValidator
-from kicad_tools.validate.copper_contact import CopperContactGraph, build_copper_contact_graph
+from kicad_tools.validate.copper_contact import (
+    CopperContactGraph,
+    build_copper_contact_graph,
+    collect_copper_items,
+)
 from kicad_tools.validate.diffpair_skew import derive_pair_skews
 from kicad_tools.validate.mask_copper import default_request_for_manufacturer
 from kicad_tools.validate.mask_geometry import board_mask_margin, pad_mask_margin, pad_mask_shapes
@@ -712,7 +716,7 @@ def _copper_gap_ok(
                 ),
             )
         )
-    for item in build_copper_contact_graph(ConnectivityValidator(pcb), None).items:
+    for item in collect_copper_items(ConnectivityValidator(pcb), include_all_pads=True):
         # The enclosing producer regenerates and grades all pours after the edit.
         if item.kind == "fill":
             continue

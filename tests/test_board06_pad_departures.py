@@ -3,7 +3,7 @@
 import json
 import sys
 from itertools import pairwise
-from math import dist
+from math import dist, sqrt
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -913,6 +913,38 @@ def test_data_gap_control_passes_at_the_project_minimum(tmp_path, departures):
     board = tmp_path / "data.kicad_pcb"
     _data_pair(board, "foreign-gap", gap=0.151)
     assert departures.clear_pad_departures(board, _rules()) == 3
+
+
+@pytest.mark.parametrize(
+    ("reference", "number", "layer", "gap", "edits"),
+    [
+        ("FID8", "1", "F.Cu", 0.1474, 0),
+        ("FID8", "", "F.Cu", 0.1474, 0),
+        ("#FID8", "", "F.Cu", 0.1474, 0),
+        ("FID8", "", "F.Cu", 0.1510, 3),
+        ("FID8", "", "B.Cu", 0.1474, 3),
+        ("FID8", "", "F.Mask", 0.1474, 3),
+    ],
+)
+def test_data_rejoin_clearance_to_unassigned_pad(
+    tmp_path, departures, reference, number, layer, gap, edits
+):
+    board = tmp_path / "data.kicad_pcb"
+    _data_pair(board)
+    # Place the round pad off the proposed U4.3 diagonal by the copper radii
+    # plus the specified edge clearance. The project requires 0.1500 mm.
+    offset = (0.225 / 2 + 0.15 / 2 + gap) / sqrt(2)
+    x, y = 25.96 + 0.75 * 0.35 + offset, 68.85 + 0.75 * 0.35 - offset
+    fiducial = (
+        f'(footprint "Test:Optical_Target" (layer "F.Cu") (at {x:.8f} {y:.8f})'
+        f' (property "Reference" "{reference}" (at 0 0) (layer "F.SilkS"))'
+        f' (pad "{number}" smd circle (at 0 0) (size 0.15 0.15) (layers "{layer}")))'
+    )
+    board.write_text(board.read_text().rstrip()[:-1] + fiducial + "\n)\n")
+    before = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == edits
+    if edits == 0:
+        assert board.read_bytes() == before
 
 
 def test_data_pair_beyond_its_timing_budget_is_left_alone(tmp_path, departures):
