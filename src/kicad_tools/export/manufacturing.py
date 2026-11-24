@@ -586,7 +586,7 @@ def _create_project_zip(
     written when the checked names differ.
     """
     from kicad_tools.export.project_identity import (
-        VERSION_FILE,
+        ProjectIdentityError,
         archive_layout,
         project_identity,
     )
@@ -627,6 +627,12 @@ def _create_project_zip(
         walked = walk_schematic_hierarchy(root_sch, lambda sheet: sheet.is_relative_to(project_dir))
         project_files.extend(walked.sheets)
         walked_sheets = walked.sheets
+        if schematic_path is not None and root_sch.resolve() not in walked_sheets:
+            raise ProjectIdentityError(
+                f"Cannot pair {root_sch} with {pcb_path}: put the root sheet beside the board "
+                "and preserve its sheet references, or run kct readiness with --sch and "
+                "--project-root pointing to their common project directory"
+            )
         for sheet in walked.outside:
             logger.warning("Sub-sheet outside the project directory not bundled: %s", sheet)
     else:
@@ -641,9 +647,6 @@ def _create_project_zip(
 
     project_files.extend(_project_symbol_files(project_dir))
     project_files.extend(_project_footprint_files(project_dir))
-    version_file = project_dir / VERSION_FILE
-    if version_file.is_file():
-        project_files.append(version_file)
     project_files = sorted(set(project_files))
 
     project_file = pcb_path.with_suffix(".kicad_pro")
@@ -660,9 +663,7 @@ def _create_project_zip(
         for source in project_files:
             real = source.resolve()
             member = layout.names[real]
-            if real == identity.project or (
-                layout.record is not None and real == identity.version_source
-            ):
+            if real == identity.project:
                 zf.writestr(member, layout.member_bytes(real, real.read_bytes()))
             else:
                 zf.write(source, member)
@@ -972,6 +973,8 @@ class ManufacturingPackage:
         # Step 3: KiCad project ZIP (optional)
         if self.config.include_project_zip:
             self._generate_project_zip(out_dir, result)
+            if result.project_zip_path is None:
+                return result
 
         # Step 3.5: README.txt (optional)
         if self.config.include_readme:

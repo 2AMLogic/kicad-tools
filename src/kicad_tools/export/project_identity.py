@@ -199,8 +199,33 @@ def version_record(identity: ProjectIdentity) -> bytes | None:
     lines += [f"| `{identity.file_name(source)}` | `{source.name}` |" for source in members]
     if kept is not None:
         lines += ["", "## Record kept beside the checked board", ""]
-        lines += kept.decode("utf-8", errors="replace").rstrip("\n").split("\n")
-    return ("\n".join(lines) + "\n").encode("utf-8")
+    return ("\n".join(lines) + "\n").encode("utf-8") + (kept or b"")
+
+
+def _relocated_sheets(
+    identity: ProjectIdentity, sources: set[Path], board_directory: PurePosixPath
+) -> dict[Path, str]:
+    """Move a separated root and its hierarchy together, retaining relative sheet paths."""
+    from kicad_tools.report.utils import walk_schematic_hierarchy
+
+    root = identity.root
+    if root is None or root.parent == identity.pcb.parent:
+        return {}
+    hierarchy = walk_schematic_hierarchy(root, sources.__contains__)
+    unavailable = hierarchy.outside + hierarchy.missing
+    moved = {}
+    for sheet in hierarchy.sheets:
+        if not sheet.is_relative_to(root.parent):
+            unavailable.append(sheet)
+        else:
+            moved[sheet] = (board_directory / sheet.relative_to(root.parent)).as_posix()
+    if unavailable:
+        raise ProjectIdentityError(
+            f"Cannot pair {root} with {identity.pcb}: {unavailable[0]} cannot be moved "
+            "with the selected schematic hierarchy. Put the root sheet beside the board "
+            "and keep its relative sheet references valid before exporting"
+        )
+    return moved
 
 
 def archive_layout(
@@ -217,10 +242,12 @@ def archive_layout(
     directories: dict[Path, str] = {}
     names: dict[Path, str] = {}
     holders: dict[str, Path] = {}
-    for source in sources:
-        real = Path(source).resolve()
+    checked = [Path(source).resolve() for source in sources]
+    board_directory = PurePosixPath(directory_of(identity.pcb))
+    sheets = _relocated_sheets(identity, set(checked), board_directory)
+    for real in checked:
         directory = directory_of(real)
-        member = str(PurePosixPath(directory) / identity.file_name(real))
+        member = sheets.get(real, str(PurePosixPath(directory) / identity.file_name(real)))
         previous = holders.setdefault(member, real)
         if previous != real:
             raise ProjectIdentityError(
@@ -236,7 +263,7 @@ def archive_layout(
         directories,
         names,
         version_record(identity),
-        str(PurePosixPath(directory_of(identity.pcb)) / VERSION_FILE),
+        str(board_directory / VERSION_FILE),
     )
 
 

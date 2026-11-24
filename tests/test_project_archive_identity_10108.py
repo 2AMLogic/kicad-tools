@@ -102,14 +102,23 @@ def reseal(options: readiness_cmd.ReadinessOptions, change) -> None:
     readiness_cmd._build_archive(options)
 
 
-def packaged(tmp_path: Path) -> Path:
+def move_sheets(design: Path) -> Path:
+    sheets = design / "sheets"
+    sheets.mkdir()
+    for name in (ROOT, "power.kicad_sch"):
+        (design / name).rename(sheets / name)
+    return sheets
+
+
+def packaged(tmp_path: Path, *, separate_sheets: bool = False) -> Path:
     """The real exporter's archive, normalized and verified as readiness does."""
     board = staged_design(tmp_path)
     design = board / "output"
+    sheets = move_sheets(design) if separate_sheets else design
     bundle = tmp_path / "bundle"
     bundle.mkdir()
-    _create_project_zip(design / CHECKED[0], bundle, schematic_path=design / ROOT)
-    options = options_for(board, "--sch", str(design / ROOT))
+    _create_project_zip(design / CHECKED[0], bundle, schematic_path=sheets / ROOT)
+    options = options_for(board, "--sch", str(sheets / ROOT))
     options.output_dir = bundle
     options.operation = "generate"
     readiness_cmd._normalize_project_archive(options)
@@ -132,7 +141,7 @@ def native_bill_of_materials(directory: Path) -> dict[str, tuple[str, str]]:
             "Reference,Value,Footprint",
             "-o",
             str(target),
-            ROOT,
+            str(directory / ROOT),
         ],
         cwd=directory,
         capture_output=True,
@@ -158,7 +167,7 @@ def native_parity(directory: Path, board: str) -> tuple[dict, str]:
             "--schematic-parity",
             "-o",
             str(report),
-            board,
+            str(directory / board),
         ],
         cwd=directory,
         capture_output=True,
@@ -251,7 +260,7 @@ def test_export_that_picked_another_project_identity_is_corrected(tmp_path):
                 del members[name]
             members["widget.kicad_pcb"] = b"(kicad_pcb stale)\n"
             members["widget.kicad_pro"] = b'{"meta": {"filename": "widget.kicad_pro"}}'
-            members["VERSION.md"] = b"# widget: project revision record\n"
+            members["VERSION.md"] = (pcb.parent / "VERSION.md").read_bytes()
             with zipfile.ZipFile(archive, "w") as zf:
                 for name, data in members.items():
                     zf.writestr(name, data)
@@ -268,14 +277,18 @@ def test_export_that_picked_another_project_identity_is_corrected(tmp_path):
     )
 
 
-def test_exporter_alone_delivers_the_same_project(tmp_path):
+@pytest.mark.parametrize("separate_sheets", [False, True])
+def test_exporter_alone_delivers_the_same_project(tmp_path, separate_sheets):
     design = tmp_path / "design"
     shutil.copytree(FIXTURE, design)
+    sheets = move_sheets(design) if separate_sheets else design
+    record = b"## Recorded revision\nv07\n\n"
+    (design / "VERSION.md").write_bytes(record)
     bundle = tmp_path / "bundle"
     bundle.mkdir()
 
     with zipfile.ZipFile(
-        _create_project_zip(design / CHECKED[0], bundle, schematic_path=design / ROOT)
+        _create_project_zip(design / CHECKED[0], bundle, schematic_path=sheets / ROOT)
     ) as zf:
         names = sorted(zf.namelist())
         members = {name: zf.read(name) for name in names}
@@ -283,7 +296,8 @@ def test_exporter_alone_delivers_the_same_project(tmp_path):
     assert names == sorted(["VERSION.md", "power.kicad_sch", *PROJECT_FILES, *LIBRARIES])
     assert json.loads(members["board.kicad_pro"])["meta"]["filename"] == "board.kicad_pro"
     assert members["board.kicad_pcb"] == (design / CHECKED[0]).read_bytes()
-    assert members["power.kicad_sch"] == (design / "power.kicad_sch").read_bytes()
+    assert members["power.kicad_sch"] == (sheets / "power.kicad_sch").read_bytes()
+    assert members["VERSION.md"].endswith(record)
     assert json.loads((design / CHECKED[1]).read_text())["meta"]["filename"] == "template.kicad_pro"
 
 
@@ -430,6 +444,58 @@ def test_verify_rejects_a_package_that_mixes_the_two_layouts(tmp_path):
         "(board_v07.kicad_pro); regenerate the package"
     ]
     assert verify(board, "--sch", str(output / ROOT)) != 0
+
+
+def test_verify_rejects_an_extra_checked_project_in_the_delivered_layout(tmp_path):
+    board = staged_design(tmp_path)
+    output = board / "output"
+    generate(board, "--sch", str(output / ROOT))
+    options = options_for(board, "--sch", str(output / ROOT))
+    reseal(options, lambda members: members.update({CHECKED[1]: b'{"board": "stale"}'}))
+
+    assert any(
+        CHECKED[1] in problem for problem in readiness_cmd._verify_project_provenance(options)
+    )
+    assert verify(board, "--sch", str(output / ROOT)) != 0
+
+
+@pytest.mark.parametrize("current_last", [False, True])
+def test_normalization_rejects_duplicate_checked_members_in_both_orders(tmp_path, current_last):
+    board = staged_design(tmp_path)
+    output = board / "output"
+    generate(board, "--sch", str(output / ROOT))
+    options = options_for(board, "--sch", str(output / ROOT))
+    archive = options.output_dir / "kicad_project.zip"
+    current = (output / CHECKED[0]).read_bytes()
+    records = (
+        [b"(kicad_pcb older)\n", current] if current_last else [current, b"(kicad_pcb older)\n"]
+    )
+    with zipfile.ZipFile(archive, "w") as zf, pytest.warns(UserWarning, match="Duplicate name"):
+        for data in records:
+            zf.writestr(CHECKED[0], data)
+    before = archive.read_bytes()
+
+    with pytest.raises(
+        ProjectIdentityError, match="duplicate file identities.*board_v07.kicad_pcb"
+    ):
+        readiness_cmd._normalize_project_archive(options)
+    assert archive.read_bytes() == before
+
+
+@pytest.mark.parametrize("matched", [False, True])
+def test_normalization_rejects_stale_authored_revision_before_rewriting(tmp_path, matched):
+    board = staged_design(tmp_path, matched=matched)
+    output = board / "output"
+    (output / "VERSION.md").write_text("# Working revision\nv08\n")
+    generate(board, "--sch", str(output / ROOT))
+    options = options_for(board, "--sch", str(output / ROOT))
+    reseal(options, lambda members: members.update({"VERSION.md": b"# Working revision\nv07\n"}))
+    archive = options.output_dir / "kicad_project.zip"
+    before = archive.read_bytes()
+
+    with pytest.raises(ProjectIdentityError, match="VERSION.md.*checked"):
+        readiness_cmd._normalize_project_archive(options)
+    assert archive.read_bytes() == before
 
 
 @pytest.mark.parametrize(
@@ -579,12 +645,23 @@ def test_project_root_layout_renames_inside_the_re_rooted_archive(tmp_path):
         "pcb/output/board.kicad_pro",
         "pcb/output/board.kicad_dru",
         "pcb/output/VERSION.md",
-        "schematics/board.kicad_sch",
-        "schematics/sub.kicad_sch",
+        "pcb/output/board.kicad_sch",
+        "pcb/output/sub.kicad_sch",
         "symbols/custom.kicad_sym",
     } <= names
     assert not any("board_v07" in name for name in names)
     assert "| `board.kicad_pcb` | `board_v07.kicad_pcb` |" in version
+    options = options_for(
+        out / CHECKED[0],
+        "--sch",
+        str(project / "schematics" / ROOT),
+        "--project-root",
+        str(project),
+    )
+    archive = options.output_dir / "kicad_project.zip"
+    before = archive.read_bytes()
+    readiness_cmd._normalize_project_archive(options)
+    assert archive.read_bytes() == before
 
 
 # ---------------------------------------------------------------------------
@@ -648,8 +725,9 @@ def test_with_project_filename_reserializes_when_no_literal_matches():
 
 @pytest.mark.skipif(find_kicad_cli() is None, reason="Native KiCad CLI is not installed")
 class TestExtractedProjectOpensNatively:
-    def test_paired_names_resolve_the_child_sheet_and_its_rules(self, tmp_path):
-        extracted = packaged(tmp_path)
+    @pytest.mark.parametrize("separate_sheets", [False, True])
+    def test_paired_names_resolve_the_child_sheet_and_its_rules(self, tmp_path, separate_sheets):
+        extracted = packaged(tmp_path, separate_sheets=separate_sheets)
 
         report, stdout = native_parity(extracted, "board.kicad_pcb")
 
@@ -676,8 +754,9 @@ class TestExtractedProjectOpensNatively:
         (extracted / "board.kicad_pro").rename(extracted / "elsewhere.kicad_pro")
         assert custom_rule_findings(native_parity(extracted, "board.kicad_pcb")[0]) == []
 
-    def test_child_sheet_mismatch_is_reported_by_parity(self, tmp_path):
-        extracted = packaged(tmp_path)
+    @pytest.mark.parametrize("separate_sheets", [False, True])
+    def test_child_sheet_mismatch_is_reported_by_parity(self, tmp_path, separate_sheets):
+        extracted = packaged(tmp_path, separate_sheets=separate_sheets)
         child = extracted / "power.kicad_sch"
         child.write_text(child.read_text().replace('"R2"', '"R3"'))
 

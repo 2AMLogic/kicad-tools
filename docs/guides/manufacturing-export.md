@@ -103,6 +103,15 @@ the project's name — the unrouted original's `board.kicad_pro` beside a
 the archive and names both files: keep only the selected board's project
 beside it, or rename one of them.
 
+If the checked root sheet lives in a different directory, the archive puts it
+beside the delivered board and moves its child sheets with it. Their relative
+paths stay intact. The project's library tables and libraries keep their paths
+relative to the delivered project. For a schematic tree outside the PCB
+directory, pass its root with `kct readiness --sch` and select their common
+directory with `--project-root`. If a child cannot travel with the root sheet,
+put the root beside the checked board and update its sheet references before
+exporting.
+
 ## Prerequisites
 
 ```bash

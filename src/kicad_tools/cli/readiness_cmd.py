@@ -2786,12 +2786,35 @@ def _normalize_project_archive(options: ReadinessOptions) -> None:
     layout = _archive_layout(options, _required_sources(options))
     base = options.pcb.parent.resolve()
     rerooted = not all(source.is_relative_to(base) for source in layout.names)
+    members = {}
     with zipfile.ZipFile(archive) as zf:
-        members = {
-            info.filename: zf.read(info.filename) for info in zf.infolist() if not info.is_dir()
-        }
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            if info.filename in members:
+                raise ProjectIdentityError(
+                    f"duplicate file identities in kicad_project.zip: {info.filename}"
+                )
+            members[info.filename] = zf.read(info)
     prefix = base.relative_to(options.root).as_posix() if rerooted else "."
-    rebuilt = {(f"{prefix}/{n}" if prefix != "." else n): d for n, d in members.items()}
+    board = options.pcb.resolve()
+    board_names = {layout.checked(board), layout.names[board]}
+    if prefix != "." and board_names.isdisjoint(members):
+        rebuilt = {f"{prefix}/{name}": data for name, data in members.items()}
+    else:
+        if prefix != "." and any(Path(name).name in members for name in board_names):
+            raise ProjectIdentityError(
+                "kicad_project.zip contains the selected board under both PCB-relative and "
+                "project-root paths; keep only one editable project"
+            )
+        rebuilt = members.copy()
+    version = layout.identity.version_source
+    if version is not None and layout.record_name in rebuilt:
+        if rebuilt[layout.record_name] not in (version.read_bytes(), layout.record):
+            raise ProjectIdentityError(
+                f"{layout.record_name} inside kicad_project.zip differs from the checked "
+                "revision record; regenerate the export with the current VERSION.md"
+            )
     for source, delivered in layout.names.items():
         checked = layout.checked(source)
         if delivered == checked:
@@ -2812,8 +2835,6 @@ def _normalize_project_archive(options: ReadinessOptions) -> None:
         rebuilt[delivered] = layout.member_bytes(source, rebuilt[delivered])
     if layout.record is not None:
         rebuilt[layout.record_name] = layout.record
-    elif layout.identity.version_source is not None:
-        rebuilt[layout.record_name] = layout.identity.version_source.read_bytes()
     else:
         rebuilt.pop(layout.record_name, None)
     delivered_names = set(layout.names.values())
@@ -2823,7 +2844,7 @@ def _normalize_project_archive(options: ReadinessOptions) -> None:
         if name.endswith((".kicad_pcb", ".kicad_pro", ".kicad_dru")) and name not in delivered_names
     ]:
         del rebuilt[name]
-    if not rerooted and rebuilt == members:
+    if rebuilt == members:
         return
     tmp = archive.with_suffix(".zip.tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -2899,6 +2920,20 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
                     "regenerate the package"
                 )
             if delivered_layout:
+                extra = sorted(
+                    layout.checked(source)
+                    for source, delivered in layout.names.items()
+                    if layout.checked(source) != delivered
+                    and layout.checked(source) in names
+                    and delivered in names
+                )
+                if extra:
+                    problems.append(
+                        f"kicad_project.zip also contains checked file names beside the "
+                        f"delivered {layout.identity.name} project ({', '.join(extra)}); "
+                        "regenerate the package"
+                    )
+            if delivered_layout and layout.record is not None:
                 record = layout.record_name
                 if record not in names:
                     problems.append(f"{record} is absent from kicad_project.zip")
