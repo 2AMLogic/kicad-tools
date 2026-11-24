@@ -432,7 +432,7 @@ def test_copper_backoff_reprobes_at_full_cap_every_k_iterations():
     # above: [30, 30, 15, 7.5, 5, 5] with no re-probe).
 
 
-def test_removing_copper_present_at_the_first_failure_restarts_the_streak():
+def test_removing_copper_present_at_the_first_failure_earns_one_full_attempt():
     g = RipupCycleGuard()
     for it in (1, 2):
         _fail_capped(g, it, 30.0, sig=COPPER_A)
@@ -440,10 +440,13 @@ def test_removing_copper_present_at_the_first_failure_restarts_the_streak():
     # Net 3 is still present, but net 2 no longer occupies its original layer.
     changed = ("copper", ((2, "B.Cu"), (3, "F.Cu")))
     assert _fail_capped(g, 3, 30.0, sig=changed) == 30.0
-    assert g.capped_streak[7] == (3, changed, 1)
+    # The removal earned that single full attempt; the streak re-anchored on
+    # the post-change witness and kept its count (#8486) instead of
+    # restarting, so an unchanged iteration after it backs straight off.
+    assert g.capped_streak[7] == (3, changed, 4)
     assert g.known_fail_seconds[3] == 15.0
-    assert _fail_capped(g, 4, 30.0, sig=changed) == 30.0
-    assert _fail_capped(g, 5, 30.0, sig=changed) == 15.0
+    assert _fail_capped(g, 4, 30.0, sig=changed) == KNOWN_FAILURE_BACKOFF_FLOOR_S
+    assert _fail_capped(g, 5, 30.0, sig=changed) == KNOWN_FAILURE_BACKOFF_FLOOR_S
 
 
 def test_both_per_iteration_searches_of_a_copper_net_are_capped():
@@ -1685,6 +1688,25 @@ def test_read_copper_leaving_the_witness_restores_the_full_budget():
     assert not g.backoffs
 
 
+def test_a_change_earned_full_attempt_extends_the_copper_streak():
+    """A touching removal earns ONE full-budget attempt (#8486): the streak
+    re-anchors on the post-change witness but keeps its count, exactly as a
+    periodic re-probe does, so the next change-free iteration backs off
+    instead of running a second unearned full search."""
+    g = RipupCycleGuard()
+    dep = _dependency([(10, 10)])
+    _streak_with(g, dep, (NEAR_ITEM, FAR_ITEM))
+    # NEAR_ITEM (read by both searches) is removed: full budget restored.
+    g.begin_iteration(3, {7: _witness(FAR_ITEM)})
+    assert g.search_cap(7, 3, 30.0) == 30.0
+    g.note_search(7, 3, 30.0, 30.0, routed=False, dependency=dep)
+    assert g.capped_streak[7][2] == 3  # carried, not restarted at 1
+    assert g.capped_streak[7][1] == _witness(FAR_ITEM)  # anchor moved
+    # The changed copper stays put: the following iteration backs off again.
+    g.begin_iteration(4, {7: _witness(FAR_ITEM)})
+    assert g.search_cap(7, 4, 30.0) == 7.5
+
+
 def test_without_a_dependency_any_removal_restores_the_full_budget():
     """Python-fallback or stale-extension searches record nothing: the
     witness-only rule applies, exactly as before."""
@@ -1800,14 +1822,21 @@ def test_churn_the_search_never_read_keeps_the_backoff_while_a_read_change_resto
         guard.begin_iteration(5, {1: None})
         assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 5)
         caps.append(run.call_args.kwargs["per_net_timeout"])
+        # The changed copper then stays put for a whole iteration: the earned
+        # attempt extended the streak (it did not restart it), so the next
+        # search backs off instead of running a second unearned full retry.
+        guard.begin_iteration(6, {1: None})
+        assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 6)
+        caps.append(run.call_args.kwargs["per_net_timeout"])
     assert caps == [
         30.0,
         30.0,
         KNOWN_FAILURE_BACKOFF_FLOOR_S,
         KNOWN_FAILURE_BACKOFF_FLOOR_S,
         30.0,
+        KNOWN_FAILURE_BACKOFF_FLOOR_S,
     ]
-    assert [it for it, net, _cap in guard.backoffs if net == 1] == [3, 4]
+    assert [it for it, net, _cap in guard.backoffs if net == 1] == [3, 4, 6]
 
 
 @pytest.mark.requires_router_cpp
