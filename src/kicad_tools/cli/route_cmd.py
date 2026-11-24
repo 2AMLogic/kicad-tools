@@ -649,9 +649,10 @@ def _post_route_drc_only_failure(
     "post_route_drc"`` means the same thing whether ``--auto-layers``
     escalated or not (#6277 path invariance): the saved board is fully
     connected, every non-DRC gate passed, the verifications actually ran,
-    and the post-route DRC still found errors.  Called directly by the
-    single-attempt JSON emitter and by the three escalation tails, which
-    stash the result on ``args`` for :func:`_emit_route_json_fallback`.
+    and the post-route DRC still found errors. The check precedes repair:
+    fix-drc exit 0 clears those errors, and exit 3 reports a rollback.
+    The single-attempt JSON emitter calls this directly. The three escalation
+    paths store the result on ``args`` for :func:`_emit_route_json_fallback`.
     """
     return bool(
         other_checks_passed
@@ -660,7 +661,7 @@ def _post_route_drc_only_failure(
         and drc_errors > 0
         and not _unverified_checks(args)
         and getattr(args, "_auto_fix_status", None) != "skipped_deadline"
-        and fix_result != 3
+        and fix_result not in (0, 3)
     )
 
 

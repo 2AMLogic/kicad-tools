@@ -239,18 +239,23 @@ def test_recipe_distinguishes_post_route_drc_from_a_failed_repair(
 
 @pytest.mark.timeout(240)
 @pytest.mark.parametrize(
-    ("layer_args", "drc_errors"),
+    ("layer_args", "drc_errors", "fix_result"),
     [
-        pytest.param([], 1, id="default"),
-        pytest.param(["--no-auto-layers"], 1, id="direct"),
-        pytest.param(["--auto-layers", "--adaptive-rules"], 1, id="combined-failure"),
-        pytest.param(["--no-auto-layers", "--adaptive-rules"], 1, id="adaptive-failure"),
-        pytest.param(["--auto-layers", "--adaptive-rules"], 0, id="combined-clean"),
-        pytest.param(["--no-auto-layers", "--adaptive-rules"], 0, id="adaptive-clean"),
+        pytest.param([], 1, None, id="default"),
+        pytest.param(["--no-auto-layers"], 1, None, id="direct"),
+        pytest.param(["--auto-layers", "--adaptive-rules"], 1, None, id="combined-failure"),
+        pytest.param(["--no-auto-layers", "--adaptive-rules"], 1, None, id="adaptive-failure"),
+        pytest.param(["--auto-layers", "--adaptive-rules"], 0, None, id="combined-clean"),
+        pytest.param(["--no-auto-layers", "--adaptive-rules"], 0, None, id="adaptive-clean"),
+        pytest.param([], 1, 0, id="default-repaired"),
+        pytest.param(["--no-auto-layers"], 1, 0, id="direct-repaired"),
+        pytest.param(["--adaptive-rules"], 1, 0, id="combined-repaired"),
+        pytest.param(["--no-auto-layers", "--adaptive-rules"], 1, 0, id="adaptive-repaired"),
+        pytest.param([], 1, 2, id="default-partially-repaired"),
     ],
 )
 def test_route_json_reports_verified_post_route_drc(
-    tmp_path, capsys, monkeypatch, layer_args, drc_errors
+    tmp_path, capsys, monkeypatch, layer_args, drc_errors, fix_result
 ):
     """Report the final DRC verdict for the selected route in every layer/rule mode."""
     from kicad_tools.cli import main, route_cmd
@@ -274,13 +279,17 @@ def test_route_json_reports_verified_post_route_drc(
         "json",
         *layer_args,
     ]
+    if fix_result is not None:
+        monkeypatch.setattr(route_cmd, "_run_auto_fix", lambda **kwargs: fix_result)
+        args.append("--auto-fix")
     rc = main(args)
     doc = json.loads(capsys.readouterr().out)
     assert (tmp_path / "out.kicad_pcb").is_file()
+    errors_remain = drc_errors > 0 and fix_result != 0
     if "--adaptive-rules" in layer_args:
         assert doc["exit_code"] == rc
-        assert doc["verdict"] == ("failed" if drc_errors else "success")
-    if drc_errors == 0:
+        assert doc["verdict"] == ("failed" if errors_remain else "success")
+    if not errors_remain:
         assert rc == 0 and "failure_reason" not in doc.get("summary", {})
         return
     summary = doc["summary"]
