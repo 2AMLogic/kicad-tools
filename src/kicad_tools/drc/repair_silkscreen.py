@@ -43,9 +43,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.atomic_write import SourceChangedError
 from kicad_tools.core.sexp_file import save_pcb
 from kicad_tools.schema.pcb import _find_all_footprints
-from kicad_tools.sexp.parser import SExp, parse_file
+from kicad_tools.sexp.parser import SExp, parse_string
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
@@ -298,9 +299,12 @@ class SilkscreenRepairer:
         repairer.save()
     """
 
-    def __init__(self, pcb_path: str | Path) -> None:
+    def __init__(self, pcb_path: str | Path, *, expected_sha256: str | None = None) -> None:
         self.path = Path(pcb_path)
-        self.doc: SExp = parse_file(self.path)
+        source = self.path.read_bytes()
+        if expected_sha256 is not None and hashlib.sha256(source).hexdigest() != expected_sha256:
+            raise SourceChangedError("PCB changed during manufacturing export")
+        self.doc: SExp = parse_string(source.decode("utf-8"))
 
     # ------------------------------------------------------------------
     # Public API
@@ -1669,6 +1673,7 @@ def legalize_silk(
     *,
     output: str | Path | None = None,
     dry_run: bool = False,
+    expected_sha256: str | None = None,
 ) -> SilkLegalizeReport:
     """Make a board's silkscreen legal for *mfr_profile* in one pass.
 
@@ -1709,6 +1714,8 @@ def legalize_silk(
             silk-to-hole / minimum width and height values are read from it.
         output: Where to write the result (default: overwrite *pcb*).
         dry_run: Report the staged result without writing any file.
+        expected_sha256: Verify the bytes read and guard in-place publication
+            against independent board saves.
 
     Returns:
         A :class:`SilkLegalizeReport` with the repair scope, edits and
@@ -1735,7 +1742,7 @@ def legalize_silk(
     )
 
     pcb_path = Path(pcb)
-    repairer = SilkscreenRepairer(pcb_path)
+    repairer = SilkscreenRepairer(pcb_path, expected_sha256=expected_sha256)
     min_width = mfr_profile.min_silkscreen_width_mm
     min_height = mfr_profile.min_silkscreen_height_mm
 
@@ -1935,8 +1942,15 @@ def legalize_silk(
         changed = report.total_fixed > 0
         if not dry_run and (changed or output is not None):
             destination = Path(output) if output else pcb_path
-            placer.save(destination)
+            # Hash the bytes the writer published, not a later read of the
+            # live file: a save by another process between the write and a
+            # re-read would otherwise be recorded as this pass's own output
+            # (#9990).
+            report.output_sha256 = save_pcb(
+                placer.doc,
+                destination,
+                expected_sha256=expected_sha256 if destination == pcb_path else None,
+            )
             report.output_path = str(destination)
-            report.output_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
 
     return report

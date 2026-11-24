@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.cli.fix_silkscreen_cmd import main as fix_silkscreen
+from kicad_tools.cli.silk_default_pass import run_default_silk_pass
 from kicad_tools.schema.pcb import PCB, Footprint
 from kicad_tools.sexp import SExp, parse_file, serialize_sexp
 
@@ -97,8 +97,8 @@ def _silk_geometry(footprint: SExp) -> list[str]:
     )
 
 
-def _assert_board02_clipped_silk(unrouted: Path, routed: Path, tmp_path: Path) -> None:
-    """Replay the recipe's silk pass on source graphics and the actual routed holes."""
+def _assert_board02_shared_silk(unrouted: Path, routed: Path, tmp_path: Path) -> None:
+    """Replay the board recipe on the original graphics at their routed positions."""
     source = _footprints_by_reference(parse_file(unrouted))
     board = parse_file(routed)
     placed = _footprints_by_reference(board)
@@ -113,9 +113,10 @@ def _assert_board02_clipped_silk(unrouted: Path, routed: Path, tmp_path: Path) -
         for node in _silk_graphic_nodes(original):
             target.append(node)
 
-    replay = tmp_path / "source-silk-on-routed-holes.kicad_pcb"
+    replay = tmp_path / "source-silk-on-routed-board.kicad_pcb"
     replay.write_text(serialize_sexp(board))
-    assert fix_silkscreen([str(replay), "--mfr", "jlcpcb", "--clip-to-holes"]) == 0
+    result = run_default_silk_pass(replay, mfr="jlcpcb")
+    assert result is not None and result["applied"] and not result["unresolved"], result
     for ref, footprint in _footprints_by_reference(parse_file(replay)).items():
         assert actual[ref] == _silk_geometry(footprint), ref
 
@@ -168,7 +169,7 @@ def test_committed_routed_artifact_keeps_footprint_silk_graphics(
 ) -> None:
     """Preserve source graphics through each board's routing and manufacturing steps."""
     if unrouted.parent.parent == BOARD_02:
-        _assert_board02_clipped_silk(unrouted, routed, tmp_path)
+        _assert_board02_shared_silk(unrouted, routed, tmp_path)
         return
 
     unrouted_silk = silk_graphics_per_footprint(unrouted)

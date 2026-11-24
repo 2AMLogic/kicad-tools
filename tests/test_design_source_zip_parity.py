@@ -33,6 +33,11 @@ REFRESH_SCRIPT = REPO_ROOT / "scripts" / "boards" / "refresh_readiness.py"
 # owns the refresh; remove the entry when that lands (strict xfail turns an
 # unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {
+    "02-charlieplex-led/generate_design.py": (
+        "Issue #9800: the live recipe uses the shared silk pass. The registered "
+        "producer keeps the previous design-source.zip until the five via-only "
+        "warnings (#9112/#9033) and the changed artwork's render binding pass."
+    ),
     # Zip last refreshed in 99122e5a1; the live recipe has moved since, and
     # ``refresh_readiness.py`` cannot re-emit the zip while the strict gate
     # refuses on the unaccepted warning flood (#8399 stalemate).
@@ -47,6 +52,11 @@ EXPECTED_STALE: dict[str, str] = {
         "SILK_STROKE_EDITS) landed in redesign/hardware.py after the archive "
         "was last refreshed; the gate-pass rebuild + re-pin (blocked by the "
         "#8399 warning-flood stalemate) re-emits the zip."
+    ),
+    "05-bldc-motor-controller/redesign/routing.py": (
+        "Issue #9921: the published Board 05 archive uses the previous U2 footprint. "
+        "The live recipe also accepts the grounded pad-29 footprint. Remove this entry "
+        "when the manufacturing rebuild publishes the matching source archive."
     ),
 }
 

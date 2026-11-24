@@ -20,6 +20,7 @@ If no output directory is specified, files are written to ./output/
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,9 @@ from kicad_tools.recipes.precondition import require_spec
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
+
+# Staging directory for a not-yet-gated manufacturing export (#9800).
+CANDIDATE_DIRNAME = "manufacturing-candidate"
 
 
 # =============================================================================
@@ -507,24 +511,6 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return finalize_routing(output_path, input_path.with_suffix(".kicad_sch"))
 
 
-def clear_silk_over_holes(routed_path: Path) -> None:
-    """Clip footprint silk off drilled holes and move reference text that sits on one.
-
-    ``fix-silkscreen --clip-to-holes`` handles lines/polygons; text is left for
-    ``place-silk-refs --over-holes`` (#9061).  Both are the generic commands --
-    no board-local silk edit and no acknowledgement of ``silk_hole_overlap``.
-    """
-    for command in (
-        ["fix-silkscreen", "--mfr", "jlcpcb", "--clip-to-holes", "--format", "summary"],
-        ["place-silk-refs", "--over-holes"],
-    ):
-        subprocess.run(
-            [sys.executable, "-m", "kicad_tools.cli", command[0], str(routed_path), *command[1:]],
-            check=True,
-            timeout=120,
-        )
-
-
 def run_drc(pcb_path: Path) -> bool:
     """Run DRC on the PCB.
 
@@ -572,25 +558,18 @@ def run_drc(pcb_path: Path) -> bool:
 
 
 def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
-    """Export the manufacturing bundle (gerbers, BOM, CPL, report, manifest).
+    """Stage Gerbers, drills, BOM, CPL, reports and a manifest for inspection.
 
-    Issue #3147: ``kct fleet status`` flags a board ``ship_ready=false``
-    with the ``"artifacts stale"`` blocker whenever the routed PCB is
-    newer than ``output/manufacturing/manifest.json``.  Re-running this
-    recipe always rewrites the routed PCB, so the recipe must also
-    regenerate the manufacturing bundle to keep the manifest current.
-
-    ``kct export`` runs the standard JLCPCB recipe (gerbers + drill + BOM
-    + CPL + report.{md,pdf} + manifest.json).  ``--skip-preflight`` skips
-    the strict pre-flight DRC/ERC gate so the bundle is produced even for
-    boards that ship with allowlisted tolerances (mirrors boards
-    03/04/05); for clean boards it is harmless.
+    The registered package_release.py workflow publishes the release after
+    checking warning review, artifacts and the other readiness requirements.
     """
     print("\n" + "=" * 60)
     print("Exporting manufacturing bundle...")
     print("=" * 60)
 
-    mfg_dir = output_dir / "manufacturing"
+    mfg_dir = output_dir / CANDIDATE_DIRNAME
+    if mfg_dir.exists():
+        shutil.rmtree(mfg_dir)
     cmd = [
         sys.executable,
         "-m",
@@ -692,10 +671,17 @@ def main() -> int:
         if run_add_board_info(routed_path, auto=True) != 0:
             raise RuntimeError("pcb add-board-info failed")
 
-        # Step 5.7 (#9467 / #9061): clear ``silk_hole_overlap`` through the recipe,
-        # after every copper edit (finalize, cleanup, fiducials) so the drilled
-        # holes it clips against are the shipped ones.  Never acknowledged away.
-        clear_silk_over_holes(routed_path)
+        # Step 5.7 (#9800 / #9795 phase 4): legalise the silkscreen through
+        # the shared default pass -- the same ``legalize_silk`` the route
+        # step already ran, re-applied after every copper edit (finalize,
+        # cleanup, fiducials) so the drilled holes it clips against are the
+        # shipped ones.  Retires the board-local clip/reference commands of
+        # #9467/#9061; nothing is acknowledged away.
+        from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+
+        silk_pass = run_default_silk_pass(routed_path, mfr="jlcpcb")
+        if silk_pass is None or not silk_pass["applied"] or silk_pass["unresolved"]:
+            raise RuntimeError(f"Board02 silk legalisation failed: {silk_pass}")
 
         # Step 5.8 (#9467): ship the release cleanup chain's fixed point --
         # last board-writing step, so the serializers the packaging run will
@@ -724,9 +710,7 @@ def main() -> int:
         )
         lvs_success = copper_clean and label_clean
 
-        # Step 7: Export manufacturing bundle (#3147) so ``kct fleet
-        # status`` reports ``ship_ready=true`` (the bundle's manifest
-        # mtime must be newer than the freshly routed PCB).
+        # Stage a candidate for manufacturing review.
         mfg_success = export_manufacturing_bundle(routed_path, output_dir)
 
         # Issue #3912: derive BOTH the SUMMARY and the exit code from ONE
@@ -775,7 +759,11 @@ def main() -> int:
         # drove the SUMMARY above (route / DRC / LVS legs).  ERC remains an
         # independent gating leg.  (``write_lvs_report`` already raises on a
         # dirty LVS so a False ``lvs_ok`` here would mean LVS short-circuited.)
-        return 0 if erc_success and gate.passed else 1
+        if erc_success and gate.passed:
+            print(f"\nCandidate bundle is in {output_dir / CANDIDATE_DIRNAME}")
+            print("Publish the reviewed board through package_release.py.")
+            return 0
+        return 1
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)

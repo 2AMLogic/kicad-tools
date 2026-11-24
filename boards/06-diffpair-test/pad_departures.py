@@ -10,6 +10,10 @@ appears (the 1.00/1.10 mm negative control in the issue).  U1.12 additionally
 slides its escape via out of the ring dam, keeping the inner connection with
 the relocation stub -- the same shape as the J4.RST repair in ``reset_escape``.
 
+J1's mirrored USB2 data pads B6 and B7 have a different escape. Each has a
+front branch and one inner-layer connection to its barrel. Move both barrels
+to the measured 45-degree exits together so their rings clear the mask (#9891).
+
 Every repair is guarded: the departure is derived from the actual pad and its
 connected copper, and anything locked, branched off the recognized shape, or
 not reconnectable as one physical component is left untouched, file intact.
@@ -18,6 +22,7 @@ not reconnectable as one physical component is left untouched, file intact.
 from __future__ import annotations
 
 from collections import defaultdict
+from itertools import pairwise
 from math import dist
 from pathlib import Path
 
@@ -26,6 +31,7 @@ from shapely.geometry import LineString, Point
 from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
 from kicad_tools.core.pcb_item_locks import BoardItemLocks
 from kicad_tools.manufacturers.base import DesignRules
+from kicad_tools.router.quantize import dogleg_points
 from kicad_tools.schema.pcb import PCB, Segment
 from kicad_tools.validate.connectivity import ConnectivityValidator
 from kicad_tools.validate.copper_contact import CopperContactGraph, build_copper_contact_graph
@@ -381,11 +387,116 @@ def _repair_pad(
     return 1
 
 
-def clear_pad_departures(path: Path, rules: DesignRules) -> int:
-    """Rewrite the five sideband pad escapes the strict mask view flags.
+def _rebuild_usb2_branch(
+    pcb: PCB,
+    pad_number: str,
+    net: str,
+    original_offset: XY,
+    new_offset: XY,
+    layer: str,
+    rules: DesignRules,
+) -> bool:
+    """Reconnect one mirrored J1 pad to its single inner approach in memory."""
+    center = pcb.get_pad_position("J1", pad_number)
+    if center is None:
+        return False
+    locked = _locked_ids(pcb)
+    walk = _walk_chain(pcb, net, _xy(center), locked)
+    if walk is None:
+        return False
+    tracks, old = walk
+    if _xy((old[0] - center[0], old[1] - center[1])) != original_offset:
+        return False
+    vias = [(i, v) for i, v in enumerate(pcb.vias) if v.net_name == net and _xy(v.position) == old]
+    if len(vias) != 1:
+        return False
+    via_index, via = vias[0]
+    node = pcb.via_source_node(via)
+    if node is None or BoardItemLocks(pcb._sexp).is_locked(node):
+        return False
+    size = node.find("size")
+    if size is None:
+        return False
+    # The seed-42 USB branches use a 0.60 mm barrel and a 0.25 mm drill.
+    # The project's 0.45 mm USB2 via preserves the JLCPCB 0.10 mm annulus.
+    diameter = 0.45
+    if (via.size, via.drill) != (0.6, 0.25) or diameter + _EPS < max(
+        rules.min_via_diameter_mm, via.drill + 2 * rules.min_annular_ring_mm
+    ):
+        return False
+    approaches = [
+        s
+        for s in pcb.segments
+        if s not in tracks and s.net_name == net and old in (_xy(s.start), _xy(s.end))
+    ]
+    if len(approaches) != 1:
+        return False
+    approach = approaches[0]
+    if approach.layer != layer or approach.locked or approach.uuid in locked:
+        return False
+    if any(abs(s.width - 0.25) > _EPS for s in [*tracks, approach]):
+        return False
 
-    Each pad is repaired in its own load-mutate-save transaction, so a declined
-    guard leaves the file exactly as it was (the J4 ``reset_escape`` rule).
+    original = list(pcb.segments)
+    edited = [*tracks, approach]
+    validator = ConnectivityValidator(pcb)
+    before = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
+    if len(before.components()) != 1:
+        return False
+    contacts, ends = _external_contacts(before, original, edited, via_index)
+    target = _xy((center[0] + new_offset[0], center[1] + new_offset[1]))
+    joint = _xy(approach.start) if _xy(approach.end) == old else _xy(approach.end)
+    if pcb.remove_segments(edited) != len(edited) or not pcb.relocate_via(via, target):
+        return False
+    size.set_value(0, diameter)
+    via.size = diameter
+    added = pcb.add_trace(center, target, width=approach.width, layer="F.Cu", net=net)
+    points = dogleg_points(*joint, *target)
+    for a, b in pairwise(points):
+        if a != b:
+            added.extend(pcb.add_trace(a, b, width=approach.width, layer=layer, net=net))
+    after = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
+    current, current_ends = _external_contacts(after, pcb.segments, added, via_index)
+    return len(after.components()) == 1 and contacts <= current and ends <= current_ends
+
+
+def _clear_usb2_departures(path: Path, rules: DesignRules) -> int:
+    """Move the two USB-C B-row escape barrels together, before refill and DRC."""
+    pcb = PCB.load(path)
+    fp = pcb.get_footprint("J1")
+    if (
+        fp is None
+        or fp.name != "Connector_USB:USB_C_Receptacle_USB2.0"
+        or fp.rotation
+        or fp.layer != "F.Cu"
+    ):
+        return 0
+    # Opposite 45-degree exits keep both barrels outside their openings.
+    # The A-row branches and the remote ends of both inner approaches stay put.
+    for number, net, old, new, layer in (
+        ("B6", "USB2_D+", (0.15, -0.55), (0.55, -0.55), "In1.Cu"),
+        ("B7", "USB2_D-", (0.30, 0.50), (0.55, 0.55), "In2.Cu"),
+    ):
+        pad = next((p for p in fp.pads if p.number == number), None)
+        if (
+            pad is None
+            or pad.net_name != net
+            or pad.shape != "rect"
+            or pad.rotation
+            or pad.size != (0.3, 0.6)
+        ):
+            return 0
+        if not _rebuild_usb2_branch(pcb, number, net, old, new, layer, rules):
+            return 0
+    pcb.save(path)
+    return 2
+
+
+def clear_pad_departures(path: Path, rules: DesignRules) -> int:
+    """Rewrite the sideband and paired USB pad escapes the strict mask view flags.
+
+    Each sideband pad and the USB pair have separate load-mutate-save
+    transactions. A declined USB partner leaves both branches as they were.
     """
     request = default_request_for_manufacturer("jlcpcb")
     if request is None:
@@ -401,4 +512,4 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
             number,
             move_via,
         )
-    return edits
+    return edits + _clear_usb2_departures(path, rules)
