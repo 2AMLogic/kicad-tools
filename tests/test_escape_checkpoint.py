@@ -125,6 +125,39 @@ def test_throttle_prevents_geometry_copy(tmp_path, monkeypatch):
     _emit_route_checkpoint(callback, [], 0)
 
 
+def test_pending_departure_is_archived_until_verified(tmp_path):
+    from kicad_tools.router.checkpoint import BestCheckpointWriter
+    from kicad_tools.router.core import IterationMetrics, RoutingFailure
+
+    source = tmp_path / "source.kicad_pcb"
+    output = tmp_path / "out.kicad_pcb"
+    best = tmp_path / "best.kicad_pcb"
+    for path in (source, output, best):
+        path.write_text(PCB)
+    router = make_router()
+    router.pending_preserved_departure = RoutingFailure(3, "ESCAPE", ("J1", "1"), ("J2", "1"))
+    callback = _make_checkpoint_callback(
+        source,
+        output,
+        30,
+        quiet=True,
+        router_provider=lambda: router,
+        best_checkpoint=BestCheckpointWriter(best, command="kct route", quiet=True),
+    )
+    metrics = IterationMetrics(iteration=1, routed_count=1, overflow=0)
+
+    callback(router.routes, metrics)
+    callback.checkpoint_completed(router.routes, metrics)
+    assert output.read_text() == best.read_text() == PCB
+    (archive,) = tmp_path.glob("out_completed_unverified_*.kicad_pcb")
+    assert "(net 3)" in archive.read_text()
+
+    router.pending_preserved_departure = None
+    callback(router.routes, metrics)
+    assert "(net 3)" in output.read_text()
+    assert "(net 3)" in best.read_text()
+
+
 def test_snapshot_owns_geometry_and_excludes_grid_only_stale_routes():
     from kicad_tools.router.algorithms.two_phase import TwoPhaseRouter
 
