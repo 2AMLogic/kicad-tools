@@ -214,6 +214,30 @@ class CopperContactGraph:
                 covered.setdefault(narrow.key[1], []).append(carriers)
         return covered
 
+    @cached_property
+    def _straight_segment_geoms(self) -> dict[int, Any]:
+        return {
+            item.key[1]: item.geom
+            for item in self.items
+            if item.kind == TRACK and item.key[0] == "segment"
+        }
+
+    def carriers_cover(self, narrow: int, carriers: frozenset[int] | set[int]) -> bool:
+        """Whether the union of ``carriers`` wholly covers straight segment ``narrow``.
+
+        A covering run from :attr:`split_track_carriers` may include an
+        off-route track whose round cap merely touches the buried stroke;
+        whether the stroke is carried by *declared* copper is decided by the
+        subset of the run that is on the resolved path, so the caller passes
+        that subset here and the union is re-tested without it (#10085).
+        """
+        from shapely.ops import unary_union
+
+        geoms = self._straight_segment_geoms
+        target = geoms.get(narrow)
+        pieces = [geoms[i] for i in carriers if i in geoms]
+        return target is not None and bool(pieces) and unary_union(pieces).covers(target)
+
     def _covered_tracks(self, *, collinear_only: bool) -> dict[int, set[int]]:
         covered: dict[int, set[int]] = {}
         for a, b in self._straight_track_bonds():
