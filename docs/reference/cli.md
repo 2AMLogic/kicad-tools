@@ -2963,8 +2963,7 @@ and `fleet` are not on `gate_exit_code` and keep their own numbering.
 
 ### `kct route` ladder
 
-The router exposes a finer-grained ladder so CI can tell partial routing
-apart from clean routing with DRC issues. Source of truth: the `exit codes:`
+The router reports routing completion and several post-route checks. Source of truth: the `exit codes:`
 epilog in [`src/kicad_tools/cli/route_exit_codes_help.py`](../../src/kicad_tools/cli/route_exit_codes_help.py)
 (the epilog of `route_cmd._route_parser`, the only `kct route` parser, so
 `kct route --help` prints it), expanded by the
@@ -2973,10 +2972,10 @@ epilog in [`src/kicad_tools/cli/route_exit_codes_help.py`](../../src/kicad_tools
 
 | Code | Meaning |
 |------|---------|
-| 0 | All nets routed (or meets `--min-completion`), DRC clean |
+| 0 | Routing met the completion threshold. Default layer escalation can report success for fully routed copper with known post-route DRC errors. For a DRC gate, run `kct check <routed.kicad_pcb> --drc-only` on the saved board. |
 | 1 | Fatal failure — no nets routed |
 | 2 | Partial routing — below `--min-completion`, or requested nets are placement-blocked |
-| 3 | Post-route validation or processing failed: DRC violations remain; `--auto-fix` rolled back on a connectivity regression (issue #2852); the `--voltage-map` HV pairwise audit found violations (issue #4588); selective zone filling failed, including unavailable native capability; or staged repair could not verify preservation of fixed copper and net membership. This code alone does not establish routing completion or a clearance violation. |
+| 3 | Post-route validation or processing failed. Causes include remaining DRC violations, a connectivity rollback under `--auto-fix` (issue #2852), a failed `--voltage-map` HV pairwise audit (issue #4588), failed selective zone filling, unavailable native fill capability, or a staged repair that could not verify fixed copper and net membership. On a direct attempt with all escalation disabled, fully connected copper that fails only post-route DRC sets `summary.failure_reason` to `"post_route_drc"` in JSON. Other causes omit this key. |
 | 4 | Partial routing **and** clearance violations remain — segment-segment (issue #1666) or HV pairwise (issue #4588) |
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
 | 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
