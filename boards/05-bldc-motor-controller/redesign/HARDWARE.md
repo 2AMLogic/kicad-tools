@@ -72,13 +72,36 @@ paste apertures define the stencil. The thermal vias are tented on the back.
 Include the local symbol and footprint libraries when opening the KiCad source
 project.
 
+### U3 land pattern (DGN0008C)
+
+U3's eight signal lands follow the TI example board layout for DGN0008C
+(TPS7A16 datasheet, package drawing 4218838/A, 11/2017): 1.4 mm × 0.45 mm
+lands on 0.65 mm pitch with 4.4 mm row centres and R0.05 typ corners. The
+custom `TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias` footprint in
+`board05_revB.pretty` keeps the stock KiCad exposed pad (1.57 × 1.89 mm),
+its four plated thermal vias, its courtyard and silk unchanged; only the
+signal lands differ from the stock `Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_
+EP1.57x1.89mm_ThermalVias` geometry (1.45 mm × 0.50 mm on 4.3 mm row
+centres). Solder mask and paste are 1:1 with the copper lands, the board's
+standard non-solder-mask-defined opening: the 0.65 mm pitch then leaves
+0.20 mm from each opening to the neighbouring land's copper, which clears
+the JLCPCB `mask_to_copper` advisory that the stock 0.50 mm lands raised at
+0.15 mm. TI's drawing instead allows 0.05 mm mask all around (note 7 defers
+mask tolerancing to the fabrication site); that variant would measure
+0.15 mm again and is not used. Paste is 1:1 on the signal lands as in TI's
+0.125 mm stencil example; the exposed pad keeps the stock four-aperture
+paste split rather than TI's shown 100 % coverage. Electrical connectivity
+is unchanged: pins 1–8 keep their nets (+5V, DNC, RESET, GND, VM, NC,
+PG_DELAY, VM) and pad 9 plus its vias stay grounded.
+
 ## Primary references
 
 - [TI DRV8313 datasheet](https://www.ti.com/lit/ds/symlink/drv8313.pdf), pin table,
   charge-pump capacitors, V3P3 bypass, section 8.2.2.2 current monitor and
   PWP0028C package drawing 4223582/A.
 - [TI TPS7A16 datasheet](https://www.ti.com/lit/ds/symlink/tps7a16.pdf), fixed-5 V
-  DGNR pinout, bypass requirements, power-good reset and thermal guidance.
+  DGNR pinout, bypass requirements, power-good reset, thermal guidance and
+  DGN0008C package drawing 4218838/A.
 - [Microchip ATmega328P](https://www.microchip.com/en-us/product/ATmega328P),
   TQFP32 pinout, internal RC clock, ISP and timers.
 - [TI sensored BLDC reference](https://www.ti.com/tool/TIDA-00827).
@@ -93,7 +116,7 @@ specified identity/package before accepting any substitution.
 |---|---|---|---|
 | U1 | ATmega328P-AU — ATMEGA328P-AU | Package_QFP:TQFP-32_7x7mm_P0.8mm | [C14877](https://www.lcsc.com/product-detail/C14877.html) |
 | U2 | DRV8313PWPR — DRV8313PWPR | board05_revB:TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias | [C92482](https://www.lcsc.com/product-detail/C92482.html) |
-| U3 | TPS7A1650DGNR — TPS7A1650DGNR | Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias | [C468238](https://www.lcsc.com/product-detail/C468238.html) |
+| U3 | TPS7A1650DGNR — TPS7A1650DGNR | board05_revB:TI_DGN0008C_Lands1.4x0.45_EP1.57x1.89_ThermalVias | [C468238](https://www.lcsc.com/product-detail/C468238.html) |
 | J1 | 12-24V INPUT — ZX-PZ2.54-1-2PZZ | Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical | [C7501260](https://www.lcsc.com/product-detail/C7501260.html) |
 | J2 | MOTOR ABC — 2.54-1*3P | Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical | [C49257](https://www.lcsc.com/product-detail/C49257.html) |
 | J3 | HALL — 2.54-1*6P | Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical | [C37208](https://www.lcsc.com/product-detail/C37208.html) |
