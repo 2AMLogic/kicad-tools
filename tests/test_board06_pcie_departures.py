@@ -1,4 +1,4 @@
-"""The seed-42 PCIe receiver exits move as a pair and preserve its length difference."""
+"""Seed-42 PCIe pad repairs preserve the paired exits and their timing."""
 
 import json
 from itertools import pairwise
@@ -268,7 +268,8 @@ def test_ineligible_transmitter_rail_preserves_its_partner(tmp_path, repair, ref
 
 
 @pytest.mark.parametrize("ref", ["U3", "J3"])
-def test_transmitter_uses_authored_spacing(tmp_path, repair, ref):
+@pytest.mark.parametrize("constraint", ["clearance", "physical_clearance"])
+def test_transmitter_uses_authored_spacing(tmp_path, repair, ref, constraint):
     board = tmp_path / "transmitter.kicad_pcb"
     _transmitter(board, ref, "nearby")
     before = board.read_bytes()
@@ -276,8 +277,8 @@ def test_transmitter_uses_authored_spacing(tmp_path, repair, ref):
     assert repair(board, rules) == 2
     board.write_bytes(before)
     board.with_suffix(".kicad_dru").write_text(
-        """(version 1)
-(rule "Foreign clearance" (condition "A.NetName == 'OTHER' || B.NetName == 'OTHER'") (constraint clearance (min 0.45mm)))"""
+        f"""(version 1)
+(rule "Foreign clearance" (condition "A.NetName == 'OTHER' || B.NetName == 'OTHER'") (constraint {constraint} (min 0.45mm)))"""
     )
     assert repair(board, rules) == 0
     assert board.read_bytes() == before
