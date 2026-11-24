@@ -298,9 +298,8 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # errors (122 same-net pass-throughs, 78 same-net own-pad entries; the
     # #9326/#9332 repair path's population) across 22 net signatures.
     # The sideband pad repairs (#9989) retired MIPI_RST, USB_CC1 and USB_CC2,
-    # leaving 76 findings across 19 signatures.  The MIPI clock exit repair
-    # (#10083) retired MIPI_CLK+ (5) and MIPI_CLK- (6), leaving 65 findings
-    # across the 17 signatures below.
+    # leaving 76 findings across 19 signatures at that revision. The clock
+    # exit repair (#10083) retired five MIPI_CLK+ and six MIPI_CLK- findings.
     # Two independent regenerations reproduced every original
     # signature and per-net count exactly, so the entries are keyed by NET
     # SIGNATURE like the #8957 slits (mask_to_copper's items are
