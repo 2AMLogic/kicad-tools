@@ -738,7 +738,13 @@ class RipupCycleGuard:
         return rec
 
     def search_cap(self, net: int, iteration: int, cap: float | None) -> float | None:
-        """Per-net search cap for ``net`` this iteration (issue #8486).
+        """Return the effective wall-clock cap for this search (#8486)."""
+        return self.search_budget(net, iteration, cap)[0]
+
+    def search_budget(
+        self, net: int, iteration: int, cap: float | None
+    ) -> tuple[float | None, bool]:
+        """Return the cap and whether the fallback needs a fresh attempt.
 
         Full ``cap`` until :data:`KNOWN_FAILURE_BACKOFF_AFTER` failures under
         a still-valid witness. The cap then halves per additional failing
@@ -753,17 +759,19 @@ class RipupCycleGuard:
         last full-cap search, including when the observed copper stays in place.
         """
         if cap is None:
-            return None
+            return None, False
         rec = self._known_capped(net, iteration)
         if rec is None or rec[2] < KNOWN_FAILURE_BACKOFF_AFTER:
             self.full_search_iter[int(net)] = int(iteration)
-            return cap
+            previous = self.capped_streak.get(net)
+            changed = previous is not None and previous[1] != self.entry_signature.get(net)
+            return cap, rec is None and changed
         if _is_copper_key(rec[1]) and (
             int(iteration) - self.full_search_iter.get(int(net), int(iteration))
             >= KNOWN_FAILURE_REPROBE_EVERY
         ):
             self.full_search_iter[int(net)] = int(iteration)
-            return cap
+            return cap, True
         shrunk = cap * 0.5 ** (rec[2] - KNOWN_FAILURE_BACKOFF_AFTER + 1)
         last = self.last_fail_s.get(int(net))
         if last is not None:
@@ -772,7 +780,7 @@ class RipupCycleGuard:
         reduced = max(min(cap, floor), shrunk)
         if reduced < cap:
             self.backoffs.append((int(iteration), int(net), reduced))
-        return reduced
+        return reduced, False
 
     def note_search(
         self,

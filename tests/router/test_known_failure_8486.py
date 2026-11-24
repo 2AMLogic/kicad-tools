@@ -494,7 +494,15 @@ def test_seal_copper_regime_change_resets_the_streak():
 # re-benchmark on the reporter's board.
 
 
-def _wall_board(gap: bool = False, *, terminal_y=(6.0, 14.0), gap_y=(9.4, 10.6), rules=None):
+def _wall_board(
+    gap: bool = False,
+    *,
+    terminal_x=(6.0, 24.0),
+    terminal_y=(6.0, 14.0),
+    gap_y=(9.4, 10.6),
+    rules=None,
+    width=30.0,
+):
     from kicad_tools.router.core import Autorouter
 
     def pad(num, x, y, net, w=0.6, h=0.6, th=False):
@@ -510,9 +518,15 @@ def _wall_board(gap: bool = False, *, terminal_y=(6.0, 14.0), gap_y=(9.4, 10.6),
             "drill": 0.4 if th else 0.0,
         }
 
-    router = Autorouter(width=30.0, height=20.0, rules=rules)
+    router = Autorouter(width=width, height=20.0, rules=rules)
     # The victim: net 1, one pad each side of the wall.
-    router.add_component("U1", [pad(1, 6.0, terminal_y[0], 1), pad(2, 24.0, terminal_y[1], 1)])
+    router.add_component(
+        "U1",
+        [
+            pad(1, terminal_x[0], terminal_y[0], 1),
+            pad(2, terminal_x[1], terminal_y[1], 1),
+        ],
+    )
     # A full-height wall of overlapping through-hole pads at x=15 (each its
     # own single-pad net: fixed obstacles no rip-up can move).  ``gap`` opens
     # a corridor -- the negative control's real reachability change.
@@ -608,6 +622,7 @@ def test_reopening_a_live_corridor_restores_the_first_search_budget():
 
 @pytest.mark.requires_router_cpp
 @pytest.mark.parametrize("same_iteration", [False, True])
+@pytest.mark.parametrize("terminal_x", [(6.0, 24.0), (2.0, 28.0)], ids=["interior", "edge"])
 @pytest.mark.parametrize(
     "terminal_y, gap_y, wall_extent, via_y",
     [
@@ -616,12 +631,12 @@ def test_reopening_a_live_corridor_restores_the_first_search_budget():
     ],
 )
 def test_removing_a_replacement_wall_restores_the_first_open_search(
-    same_iteration, terminal_y, gap_y, wall_extent, via_y
+    same_iteration, terminal_x, terminal_y, gap_y, wall_extent, via_y
 ):
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment, Via
 
-    router = _wall_board(gap=True, terminal_y=terminal_y, gap_y=gap_y)
+    router = _wall_board(gap=True, terminal_x=terminal_x, terminal_y=terminal_y, gap_y=gap_y)
     guard = RipupCycleGuard()
     layers = (Layer.F_CU, Layer.B_CU)
     remote = Route(
@@ -656,13 +671,70 @@ def test_removing_a_replacement_wall_restores_the_first_open_search(
             guard.begin_iteration(it, {1: None})
         routes = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
         assert run.call_args.kwargs["per_net_timeout"] == 30.0
-        assert routes and 1 not in guard.capped_streak
+        assert _net_pad_pairs(router, 1, routes) == {frozenset({0, 1})}
+        assert 1 not in guard.capped_streak
 
-    fresh = _wall_board(gap=True, terminal_y=terminal_y, gap_y=gap_y)
+    fresh = _wall_board(gap=True, terminal_x=terminal_x, terminal_y=terminal_y, gap_y=gap_y)
     fresh.routes.append(remote)
     fresh.grid.mark_route(remote)
     expected = fresh._route_net_negotiated(1, 1.0, per_net_timeout=30.0)
     assert [(r.segments, r.vias) for r in routes] == [(r.segments, r.vias) for r in expected]
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize(("width", "height", "angle"), [(5, 0.5, 75), (0.5, 5, -15)])
+def test_rotated_pads_leave_the_first_open_detour_at_full_budget(tmp_path, width, height, angle):
+    from kicad_tools.router.io import load_pcb_for_routing
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    def fixed_pad(pin, x, y, w, h, rotation=0):
+        return (
+            f'(pad "{pin}" thru_hole rect (at {x} {y} {rotation}) (size {w} {h}) '
+            '(drill 0.4) (layers "*.Cu" "*.Mask") (net 2 "FIXED"))'
+        )
+
+    # The vertical pad wall has a gap above the terminals. Six angled pads
+    # below the gap leave the same passage under either KiCad encoding.
+    fixed = []
+    for index in range(24):
+        y = 0.35 + 0.85 * index
+        if y < 19.8 and not 15.15 < y < 17.5:
+            fixed.append(fixed_pad(f"W{index}", 15, y, 1, 1))
+    for index in range(6):
+        fixed.append(fixed_pad(f"F{index}", 2.5 + 5 * index, 14.1, width, height, angle))
+    board = tmp_path / "detour.kicad_pcb"
+    board.write_text(
+        "(kicad_pcb (version 20240108) (generator test)\n"
+        '(net 0 "") (net 1 "SIG") (net 2 "FIXED")\n'
+        '(gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts") (width 0.1))\n'
+        '(footprint "Test" (layer "F.Cu") (at 0 0)\n'
+        '(property "Reference" "J1" (at 0 0) (layer "F.SilkS"))\n'
+        '(pad "1" smd rect (at 2 9) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG"))\n'
+        '(pad "2" smd rect (at 28 11) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG"))\n'
+        + "\n".join(fixed)
+        + "))\n"
+    )
+    router, names = load_pcb_for_routing(str(board), use_pcb_rules=False, validate_drc=False)
+    net = names["SIG"]
+    gate = _corridor_wall(99, (15.45, 17.5), (15.65, 16.55, 17.3))
+    anchor = Route(98, "anchor", segments=[Segment(8, 12, 8.5, 12, 0.2, Layer.F_CU, 98)])
+    for route in (gate, anchor):
+        router.routes.append(route)
+        router.grid.mark_route(route)
+    guard = RipupCycleGuard()
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for iteration in (1, 2, 3):
+            guard.begin_iteration(iteration, {net: None})
+            assert not router._route_net_known_failure_aware(net, 1.0, 30.0, guard, iteration)
+        assert run.call_args.kwargs["per_net_timeout"] == 5.0
+
+        router.grid.unmark_route(gate)
+        router.routes.remove(gate)
+        guard.begin_iteration(4, {net: None})
+        routes = router._route_net_known_failure_aware(net, 1.0, 30.0, guard, 4)
+        assert _net_pad_pairs(router, net, routes) == {frozenset({0, 1})}
+        assert run.call_args.kwargs["per_net_timeout"] == 30.0
 
 
 @pytest.mark.requires_router_cpp
@@ -719,6 +791,91 @@ def test_detour_budget_follows_the_replacement_owners_clearance(
             for s in route.segments
         )
         assert 0 < gap < 2.0
+
+
+def _thin_gate_board(gate_x):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment, Via
+    from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+    rules = DesignRules(trace_width=1.3, trace_clearance=0.1)
+    router = _wall_board(
+        gap=True,
+        terminal_x=(2.0, 28.0),
+        terminal_y=(9.0, 11.0),
+        gap_y=(15.15, 17.5),
+        rules=rules,
+    )
+    router.net_class_map["N1"] = NetClassRouting("narrow", trace_width=0.25, clearance=0.1)
+    layers = (Layer.F_CU, Layer.B_CU)
+    gate = Route(
+        99,
+        "gate",
+        segments=[Segment(gate_x, 15.45, gate_x, 17.5, 0.20, layer, 99) for layer in layers],
+        vias=[Via(gate_x, y, 0.20, 0.45, layers, 99) for y in (15.65, 16.55, 17.30)],
+    )
+    anchor = Route(101, "anchor", segments=[Segment(8, 12, 8.5, 12, 0.20, Layer.F_CU, 101)])
+    for route in (anchor, gate):
+        router.routes.append(route)
+        router.grid.mark_route(route)
+    return router, gate
+
+
+def _assert_full_retry_after_opening_gate(router, gate):
+    guard = RipupCycleGuard()
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for it in (1, 2, 3):
+            guard.begin_iteration(it, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+        assert [c.kwargs["per_net_timeout"] for c in run.call_args_list][:3] == [30.0, 30.0, 5.0]
+
+        router.grid.unmark_route(gate)
+        router.routes.remove(gate)
+        guard.begin_iteration(4, {1: None})
+        previous_reductions = router.router.fallback_stats["python_fallback_reduced_repeats"]
+        routed = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 4)
+        assert run.call_args.kwargs["per_net_timeout"] == 30.0
+        assert _net_pad_pairs(router, 1, routed) == {frozenset({0, 1})}
+        assert (
+            router.router.fallback_stats["python_fallback_reduced_repeats"] == previous_reductions
+        )
+        assert 1 not in guard.capped_streak
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize("gate_x", [15.0, 15.3], ids=["between-centers", "near-center"])
+def test_thin_gate_between_coarse_cell_centers_stays_in_the_witness(gate_x):
+    router, gate = _thin_gate_board(gate_x)
+    _assert_full_retry_after_opening_gate(router, gate)
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize("obstacle", ["tracks", "vias"])
+@pytest.mark.parametrize("shift", [0.0, 0.375], ids=["between-centers", "at-centers"])
+def test_first_retry_reaches_gate_through_subcell_gaps(obstacle, shift):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment, Via
+
+    router, gate = _thin_gate_board(15.0)
+    # Both passages have a 0.70 mm copper-edge gap. With zero shift, every
+    # coarse cell center in this row is inside a foreign clearance envelope.
+    y = 13.875
+    layers = (Layer.F_CU, Layer.B_CU)
+    barrier = Route(98, "crossbar")
+    if obstacle == "tracks":
+        spans = [(0, 9.75 + shift), (11.25 + shift, 20.25 + shift), (21.75 + shift, 30)]
+        barrier.segments = [
+            Segment(left, y, right, y, 0.80, layer, 98) for left, right in spans for layer in layers
+        ]
+    else:
+        barrier.vias = [
+            Via(min(30.0, 0.75 * i + shift), y, 0.20, 0.80, layers, 98)
+            for i in range(41)
+            if i not in (14, 28)
+        ]
+    router.routes.append(barrier)
+    router.grid.mark_route(barrier)
+    _assert_full_retry_after_opening_gate(router, gate)
 
 
 @pytest.mark.parametrize("copper", ["segments", "vias"])
@@ -803,14 +960,14 @@ def test_open_corridor_control_routes_the_victim_and_engages_no_backoff():
 # --- partial nets keep their failure record (November 2026 scope) -------------
 
 
-def _three_pad_board(gap: bool = False):
+def _three_pad_board(gap: bool = False, *, width=30.0):
     """``_wall_board`` plus a third pad on net 1 left of the wall.
 
     The reported residual: a partially connected narrow net.  With the wall
     closed the search connects one of the three pad pairs; with the corridor
     open it connects all three.
     """
-    router = _wall_board(gap=gap)
+    router = _wall_board(gap=gap, width=width)
     router.add_component(
         "AUX",
         [
@@ -1098,6 +1255,198 @@ def test_negotiated_entry_point_backs_off_the_partial_net_and_keeps_its_pads():
     net1 = [r for r in routes if r.net == 1]
     assert net1, "the partial net must keep its copper"
     assert _net_pad_pairs(router, 1, net1), "connected pads were lost"
+
+
+# --- remote copper outside the reachable search space (November 2026) --------
+
+
+def _side_wall(net, x, extent=(0.35, 19.75), via_y=(3.0, 7.0, 11.0, 15.0)):
+    """A second full-height wall at ``x``, sealing the board's far side."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment, Via
+
+    layers = (Layer.F_CU, Layer.B_CU)
+    return Route(
+        net,
+        "wall",
+        segments=[Segment(x, extent[0], x, extent[1], 0.90, layer, net) for layer in layers],
+        vias=[Via(x, y, 0.5, 1.2, layers, net) for y in via_y],
+    )
+
+
+def _compartment_track(y):
+    """A foreign track inside the compartment sealed by ``_side_wall``.
+
+    At ``width=36`` with the wall at x=30 it lies beyond every terminal's
+    3 mm window yet inside the board, so only the reachability fill can
+    exclude it.
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    return Route(
+        121,
+        "n121",
+        segments=[
+            Segment(32.0, y, 34.0, y, 0.20, layer, 121) for layer in (Layer.F_CU, Layer.B_CU)
+        ],
+        vias=[],
+    )
+
+
+def test_search_witness_ignores_copper_sealed_behind_a_full_wall():
+    """The search witness is scoped to the net's reachable search space.
+
+    Pre-fix it listed every foreign shape on the board, so a track shifting
+    inside a compartment the search can never enter restarted the back-off
+    every iteration (the reporter's public control).
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _three_pad_board(gap=False, width=36.0)
+    wall2 = _side_wall(120, 30.0)
+    near = Route(50, "n50", segments=[Segment(6.0, 8.0, 9.0, 8.0, 0.25, Layer.F_CU, 50)], vias=[])
+
+    def snapshot(track_y, with_wall=True):
+        routes = {50: [near], 121: [_compartment_track(track_y)]}
+        if with_wall:
+            routes[120] = [wall2]
+        return router._failure_neighbourhood_print(1, routes, search_geometry=True)
+
+    base = snapshot(10.0)
+    without_track = router._failure_neighbourhood_print(
+        1, {50: [near], 120: [wall2]}, search_geometry=True
+    )
+    assert base and base == without_track  # the sealed track is out of scope
+    assert snapshot(10.4) == base  # its moves are invisible to the witness
+    # Removing the bounding wall opens the compartment: the track enters the
+    # reachable space and the wall's shapes leave the board.
+    assert snapshot(10.0, with_wall=False) != base
+
+
+@pytest.mark.parametrize(("attribute", "value"), [("height", 0), ("origin_x", 10)])
+def test_unknown_or_partial_board_extent_keeps_the_board_wide_witness(
+    monkeypatch, attribute, value
+):
+    router = _three_pad_board(gap=False, width=36.0)
+    wall = _side_wall(120, 30.0)
+
+    def snapshot(y):
+        return router._failure_neighbourhood_print(
+            1, {120: [wall], 121: [_compartment_track(y)]}, search_geometry=True
+        )
+
+    assert snapshot(10.0) == snapshot(10.4)
+    monkeypatch.setattr(router.grid, attribute, value)
+    assert snapshot(10.0) != snapshot(10.4)
+
+
+@pytest.mark.requires_router_cpp
+def test_remote_copper_churn_in_a_sealed_compartment_leaves_the_empty_net_backed_off():
+    """The repeatedly-empty group of the reported six nets: a net with no
+    copper keeps its back-off while only unreachable copper moves."""
+    router = _wall_board(gap=False, width=36.0)
+    wall2 = _side_wall(120, 30.0)
+    _commit_copper(router, [wall2])
+    track = _compartment_track(10.0)
+    _commit_copper(router, [track])
+    guard = RipupCycleGuard()
+    caps = []
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for it in range(1, 6):
+            _rip_copper(router, [track])
+            track = _compartment_track(10.0 + 0.2 * it)
+            _commit_copper(router, [track])
+            guard.begin_iteration(it, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+            caps.append(run.call_args.kwargs["per_net_timeout"])
+    assert caps[:2] == [30.0, 30.0]
+    assert caps[2:4] == [KNOWN_FAILURE_BACKOFF_FLOOR_S, KNOWN_FAILURE_BACKOFF_FLOOR_S]
+    assert caps[4] == 30.0  # periodic full re-probe, wall still in place
+    assert [it for it, net, _cap in guard.backoffs if net == 1] == [3, 4]
+
+
+@pytest.mark.requires_router_cpp
+def test_remote_copper_churn_keeps_the_partial_net_backoff_and_its_pads():
+    """The partially connected group: the same churn must neither restart the
+    streak nor drop the pads the net already connects."""
+    router = _three_pad_board(gap=False, width=36.0)
+    wall2 = _side_wall(120, 30.0)
+    _commit_copper(router, [wall2])
+    track = _compartment_track(10.0)
+    _commit_copper(router, [track])
+    guard = RipupCycleGuard()
+    entry, pairs = _seed_partial_entry(router, guard)
+    caps = []
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        live = list(entry)
+        for it in range(1, 6):
+            guard.begin_iteration(it, {1: None})
+            _rip_copper(router, live)
+            _rip_copper(router, [track])
+            track = _compartment_track(10.0 + 0.2 * it)
+            _commit_copper(router, [track])
+            out = router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+            caps.append(run.call_args.kwargs["per_net_timeout"])
+            assert _net_pad_pairs(router, 1, out) >= pairs
+            _commit_copper(router, out)
+            live = list(out)
+    assert caps[:2] == [30.0, 30.0]
+    assert caps[2:4] == [KNOWN_FAILURE_BACKOFF_FLOOR_S, KNOWN_FAILURE_BACKOFF_FLOOR_S]
+    assert caps[4] == 30.0
+    assert [it for it, net, _cap in guard.backoffs if net == 1] == [3, 4]
+
+
+@pytest.mark.requires_router_cpp
+def test_opening_the_compartment_restores_the_full_budget_immediately():
+    """Removing the bounding wall is a real reachability change: the very next
+    search runs at the full cap, before the periodic re-probe is due."""
+    router = _wall_board(gap=False, width=36.0)
+    wall2 = _side_wall(120, 30.0)
+    _commit_copper(router, [wall2])
+    track = _compartment_track(10.0)
+    _commit_copper(router, [track])
+    guard = RipupCycleGuard()
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for it in (1, 2, 3):
+            _rip_copper(router, [track])
+            track = _compartment_track(10.0 + 0.2 * it)
+            _commit_copper(router, [track])
+            guard.begin_iteration(it, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+        assert run.call_args.kwargs["per_net_timeout"] == KNOWN_FAILURE_BACKOFF_FLOOR_S
+        _rip_copper(router, [wall2])
+        guard.begin_iteration(4, {1: None})
+        assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, 4)
+        assert run.call_args.kwargs["per_net_timeout"] == 30.0
+
+
+@pytest.mark.requires_router_cpp
+def test_a_near_foreign_shape_shifting_still_resets_the_streak():
+    """Negative control against over-scoping: copper near the terminals stays
+    in the witness, so its movement keeps restoring the full budget."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router = _wall_board(gap=False)
+    near = Route(50, "n50", segments=[Segment(8.0, 9.0, 11.0, 9.0, 0.25, Layer.F_CU, 50)], vias=[])
+    _commit_copper(router, [near])
+    guard = RipupCycleGuard()
+    with patch.object(router, "_route_net_negotiated", wraps=router._route_net_negotiated) as run:
+        for it in (1, 2, 3):
+            _rip_copper(router, [near])
+            near = Route(
+                50,
+                "n50",
+                segments=[Segment(8.0, 9.0 + 0.2 * it, 11.0, 9.0 + 0.2 * it, 0.25, Layer.F_CU, 50)],
+                vias=[],
+            )
+            _commit_copper(router, [near])
+            guard.begin_iteration(it, {1: None})
+            assert not router._route_net_known_failure_aware(1, 1.0, 30.0, guard, it)
+            assert run.call_args.kwargs["per_net_timeout"] == 30.0
+    assert not [entry for entry in guard.backoffs if entry[1] == 1]
 
 
 # --- issue #9963: progress over the routing-terminal pads, and the

@@ -1666,7 +1666,7 @@ class CppPathfinder:
         # merely re-presented the same clearance obstruction -- do we
         # short-circuit, because that repeat is the genuine 60-200s/net dead
         # loss the optimization targets.
-        self._resume_clearance_exhaustions: dict[str, int] = {}
+        self._resume_clearance_exhaustions: dict[tuple[int, str], int] = {}
 
         # Issue #5599: per-net record of the MOST RECENT post-route
         # clearance-validation resume loop that had at least one failed
@@ -4750,8 +4750,9 @@ class CppPathfinder:
             # negotiated rip-up loop re-presented the same clearance
             # obstruction that the fresh Python A* already failed to resolve --
             # that is the 60-200s/net dead loss the optimization targets.
-            _seen = self._resume_clearance_exhaustions.get(net_name, 0)
-            self._resume_clearance_exhaustions[net_name] = _seen + 1
+            resume_key = (start.net, net_name)
+            _seen = self._resume_clearance_exhaustions.get(resume_key, 0)
+            self._resume_clearance_exhaustions[resume_key] = _seen + 1
             if _seen >= 1:
                 logger.debug(
                     "Net %s: C++ resumable search exhausted its clearance-validation "
@@ -5119,6 +5120,20 @@ class CppPathfinder:
             detail,
         )
 
+    def reset_fallback_for_net(self, net: int) -> None:
+        """Retry this net after its blocking copper changes or a periodic re-probe.
+
+        The repeat limits describe an earlier search. Exact proofs still carry
+        their own grid fingerprint, and the stage keeps its accumulated spend.
+        """
+        for failures in (
+            self._python_failed_attempts,
+            self._python_drained_nets,
+            self._resume_clearance_exhaustions,
+        ):
+            for key in [pair for pair in failures if pair[0] == net]:
+                del failures[key]
+
     def _python_unreachable_key(
         self,
         start: Pad,
@@ -5139,6 +5154,7 @@ class CppPathfinder:
         reaches.
         """
         return (
+            start.net,
             repr(start),
             repr(end),
             repr(net_class),
