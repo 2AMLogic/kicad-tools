@@ -13,6 +13,8 @@ from ..primitives import Pad, Route, Segment
 if TYPE_CHECKING:
     from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
+    from kicad_tools.schema.pcb import PCB
+
     from ..grid import RoutingGrid
     from ..layers import Layer
 
@@ -151,6 +153,33 @@ def via_exit_doglegs(
             yield legs, [*legs, *segments[2:]]
 
 
+def authored_arc_copper(
+    pcb: PCB, net_map: dict[str, int]
+) -> dict[str, list[tuple[int, BaseGeometry | None]]]:
+    """Collect retained track arcs in the sheet coordinates used by the routing grid."""
+    from shapely.affinity import translate  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.rules.physical_gap import track_arc_copper_geometry
+
+    by_layer: dict[str, list[tuple[int, BaseGeometry | None]]] = {}
+    for node in pcb._sexp.find_children("arc"):
+        layer_node = node.find_child("layer")
+        layer = layer_node.get_string(0) if layer_node else None
+        if not layer:
+            continue
+        net_node = node.find_child("net")
+        value = net_node.get_first_atom() if net_node else 0
+        net = value if isinstance(value, int) else net_map.get(str(value), 0)
+        try:
+            copper = track_arc_copper_geometry(node, pcb.board_origin)
+            copper = translate(copper, *pcb.board_origin)
+        except (TypeError, ValueError):
+            # A curve the fabrication check cannot measure cannot prove this edit safe.
+            copper = None
+        by_layer.setdefault(layer, []).append((net, copper))
+    return by_layer
+
+
 def _band_edge(grid: RoutingGrid | None, attr: str) -> float | None:
     edge = getattr(getattr(grid, "rules", None), attr, None)
     if (
@@ -266,6 +295,11 @@ def covered_via_elbow(
             and (pad.through_hole or pad.layer == run.layer)
         ):
             add(_pad_copper(pad), pad.net, "pad")
+
+    for source_net, shape in getattr(grid, "authored_arc_copper", {}).get(run.layer.kicad_name, ()):
+        if shape is None:
+            return None
+        add(shape, source_net, "arc")
 
     # A third branch can join the protruding arm. Removing its only contact
     # would disconnect it even when both endpoints of this route survive.
