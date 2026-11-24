@@ -1887,8 +1887,8 @@ class MaskCopperRepairer(CopperGapRepairer):
         mirror elbow (the same two legs in the opposite order) joins the same
         anchors. Every leg keeps its length and angle, so legal directions stay
         legal, and the moved corner becomes the strictly-inside end of a
-        straight entry. Only that single shared point moves, so the existing
-        nudge action owns the edit for rollback. Returns ``True`` when applied.
+        straight entry. Both corner ends translate together, preserving any
+        authored offset inside the junction tolerance. Returns ``True`` when applied.
         """
         if required is None or opening in self._pivot_pad_bounds:
             return False
@@ -1924,24 +1924,26 @@ class MaskCopperRepairer(CopperGapRepairer):
                 or self._locks.is_generator_owned(other)
             ):
                 continue
+            other_elbow = self._xy(other.find(other_tag))
             far = self._xy(other.find("end" if other_tag == "start" else "start"))
             other_width_node = other.find("width")
-            if far is None or other_width_node is None:
+            if other_elbow is None or far is None or other_width_node is None:
                 continue
             other_width = _num(other_width_node) or width
-            # The two legs trade places between the same two anchors.
+            # Give the first leg the second leg's vector. Translating both
+            # corner ends by the same delta gives the second leg the first's.
             flipped = (
-                round(anchor[0] + far[0] - elbow[0], 4),
-                round(anchor[1] + far[1] - elbow[1], 4),
+                round(anchor[0] + far[0] - other_elbow[0], 4),
+                round(anchor[1] + far[1] - other_elbow[1], 4),
             )
             dx, dy = flipped[0] - elbow[0], flipped[1] - elbow[1]
+            other_flipped = (round(other_elbow[0] + dx, 4), round(other_elbow[1] + dy, 4))
             displacement = math.hypot(dx, dy)
             if displacement < _TOLERANCE_MM or displacement > max_displacement:
                 continue
-            if math.dist(flipped, anchor) < _MIN_RUN_MM or math.dist(flipped, far) < _MIN_RUN_MM:
+            if min(math.dist(anchor, flipped), math.dist(other_flipped, far)) < _MIN_RUN_MM:
                 continue
-            # The corner must become an end strictly inside the owner pad.
-            if not inside.contains(Point(flipped)):
+            if not (inside.contains(Point(flipped)) and inside.contains(Point(other_flipped))):
                 continue
 
             moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
@@ -1951,14 +1953,14 @@ class MaskCopperRepairer(CopperGapRepairer):
                     layer,
                 ),
                 (
-                    LineString([elbow, far]).buffer(other_width / 2, quad_segs=16),
-                    LineString([flipped, far]).buffer(other_width / 2, quad_segs=16),
+                    LineString([other_elbow, far]).buffer(other_width / 2, quad_segs=16),
+                    LineString([other_flipped, far]).buffer(other_width / 2, quad_segs=16),
                     layer,
                 ),
             ]
             points: list[tuple[str, str, str | None, float, float]] = [
                 ("segment", seg_uuid, tag, *elbow),
-                ("segment", other_uuid, other_tag, *elbow),
+                ("segment", other_uuid, other_tag, *other_elbow),
             ]
             if not self._slide_keeps_connections(points, dx, dy, net):
                 continue
@@ -1967,7 +1969,10 @@ class MaskCopperRepairer(CopperGapRepairer):
             if self._other_opening_reason(
                 [opening],
                 moves,
-                [(elbow, flipped, frozenset({layer}))],
+                [
+                    (elbow, flipped, frozenset({layer})),
+                    (other_elbow, other_flipped, frozenset({layer})),
+                ],
                 pads,
                 required,
                 displacement,

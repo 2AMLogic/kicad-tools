@@ -2493,7 +2493,7 @@ def _overlap_pass_through(conductor: str):
     return finding
 
 
-def _elbow_fixture(tmp_path, *, end=(99.5, 100.1), extra="", lock=""):
+def _elbow_fixture(tmp_path, *, turn_start=(98.9, 99.5), end=(99.5, 100.1), extra="", lock=""):
     """A track along the pad's top edge (y = 99.5) that turns in at the corner.
 
     ``anchor`` (98.5, 99.5) and ``end`` stay put; the two legs trade places, so
@@ -2501,7 +2501,7 @@ def _elbow_fixture(tmp_path, *, end=(99.5, 100.1), extra="", lock=""):
     """
     shapes = {
         "hug": ((98.5, 99.5), (98.9, 99.5)),
-        "turn": ((98.9, 99.5), end),
+        "turn": (turn_start, end),
     }
     tracks = [
         _seg(name, a, b).replace(
@@ -2512,8 +2512,14 @@ def _elbow_fixture(tmp_path, *, end=(99.5, 100.1), extra="", lock=""):
     return _board(tmp_path, "\n".join([*tracks, extra]))
 
 
-def test_elbow_flip_moves_the_corner_into_the_pad_keeping_every_angle_and_undoes(tmp_path):
-    board = _elbow_fixture(tmp_path)
+@pytest.mark.parametrize(
+    "turn_start, hug_end",
+    [((98.9, 99.5), (99.1, 100.1)), ((98.905, 99.505), (99.095, 100.095))],
+)
+def test_elbow_flip_moves_the_corner_into_the_pad_keeping_every_angle_and_undoes(
+    tmp_path, turn_start, hug_end
+):
+    board = _elbow_fixture(tmp_path, turn_start=turn_start)
     before = board.read_bytes()
     original = {n: _end(board, n) for n in ("hug", "turn")}
     repairer = MaskCopperRepairer(board)
@@ -2530,16 +2536,102 @@ def test_elbow_flip_moves_the_corner_into_the_pad_keeping_every_angle_and_undoes
     hug, turn = _end(board, "hug"), _end(board, "turn")
     # Both outer ends stay fixed; the shared corner is now strictly inside the pad.
     assert hug[0] == original["hug"][0] and turn[1] == original["turn"][1]
-    assert hug[1] == turn[0] == (99.1, 100.1)
-    assert _pad_poly(board, "R1/1").buffer(-0.015).contains(Point(hug[1]))
+    assert hug[1] == hug_end and turn[0] == (99.1, 100.1)
+    inside = _pad_poly(board, "R1/1").buffer(-0.015)
+    assert inside.contains(Point(hug[1])) and inside.contains(Point(turn[0]))
     # The legs only traded places: lengths and angles are unchanged.
     assert not repairer.off_angle_tracks()
-    assert math.isclose(math.dist(*hug), 0.6 * math.sqrt(2), abs_tol=1e-6)
-    assert math.isclose(math.dist(*turn), 0.4, abs_tol=1e-6)
+    assert math.dist(*hug) == pytest.approx(math.dist(*original["turn"]))
+    assert math.dist(*turn) == pytest.approx(math.dist(*original["hug"]))
 
     assert repairer.undo_action(action)
     repairer.save(board)
     assert {n: _end(board, n) for n in original} == original
+
+
+def test_elbow_selective_undo_preserves_both_authored_ends_when_other_action_is_saved(
+    tmp_path, monkeypatch, capsys
+):
+    from collections import Counter
+
+    board = _board2(
+        tmp_path,
+        "\n".join(
+            [
+                _seg("hug", (98.5, 99.5), (98.9, 99.5)),
+                _seg("turn", (98.905, 99.505), (99.5, 100.1)),
+                _seg("entry", (115, 100.3), (120.7, 100.3)),
+            ]
+        ),
+        "120 100",
+    )
+    original = {uid: _end(board, uid) for uid in ("hug", "turn")}
+    elbow = _overlap_pass_through("hug")
+    entry = _own_finding("entry", "pad-r2-1", "R2/1")
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    _run(
+        monkeypatch,
+        board,
+        [_report(elbow, entry), _report(elbow)],
+        extra=("--format", "json", "--max-passes", "1"),
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert [a["segment_uuid"] for a in result["actions"]] == ["entry"]
+    assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [
+        ("hug", "finding_not_cleared")
+    ]
+    assert _end(board, "entry")[1] == (120, 100)
+    assert {uid: _end(board, uid) for uid in original} == original
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("pad_clearance, permitted", [(0.32, False), (0.20, True)])
+def test_elbow_keeps_native_clearance_when_pad_connectivity_is_disabled(
+    tmp_path, monkeypatch, capsys, pad_clearance, permitted
+):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    # The flipped Signal track misses the copper-only TP1 pad by 0.2884 mm.
+    fixture = Path(__file__).parent / "fixtures" / "mask_elbow_clearance.kicad_pcb"
+    board = tmp_path / fixture.name
+    board.write_text(
+        fixture.read_text().replace("(clearance 0.32)", f"(clearance {pad_clearance})")
+    )
+    board.with_suffix(".kicad_pro").write_text("{}")
+    original = board.read_bytes()
+
+    def unexpected_pad_check(*args):
+        pytest.fail("--no-connectivity-check requested a pad partition")
+
+    monkeypatch.setattr(fix_drc_cmd, "_mask_pad_islands", unexpected_pad_check)
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", unexpected_pad_check)
+    with evidence_toolchain(mounts=[tmp_path]):
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-displacement",
+                "1",
+                "--max-passes",
+                "1",
+                "--no-connectivity-check",
+                "--format",
+                "json",
+            ]
+        )
+        saved = run_geometric_drc(board, refill_zones=False, all_track_errors=True)
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert saved.ran and all(v.type_str != "clearance" for v in saved.error_violations)
+    assert result["repaired"] == int(permitted)
+    if permitted:
+        assert _end(board, "e1dda6eb-ce7b-52c5-b8ff-623efb07a385")[1] == (52.6, 40.2)
+    else:
+        assert "1 new errors" in result["unrepaired"][0]["detail"]
+        assert board.read_bytes() == original
 
 
 def test_elbow_flip_declines_when_the_mirror_corner_stays_outside_the_pad(tmp_path):
