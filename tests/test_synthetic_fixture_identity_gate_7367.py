@@ -139,13 +139,11 @@ BOARD07_MASK_NETS: tuple[str, ...] = ()
 BOARD06_GAP_NETS: tuple[str, ...] = ()
 
 # The seed-42 fixture originally measured 22 mask error nets (#8858).
-# The sideband and PCIe pad-exit repairs retired seven of those net identities.
+# The sideband, PCIe and MIPI clock repairs retired nine of those net identities.
 BOARD06_MASK_NETS = (
     "+1V2",
     "+3V3",
     "GND",
-    "MIPI_CLK+",
-    "MIPI_CLK-",
     "MIPI_D0+",
     "MIPI_D0-",
     "USB2_D+",
@@ -518,6 +516,27 @@ def test_board06_measured_mask_population_passes_and_drains():
     ]
     stale = gate.stale_allowances(BOARD06_KEY, identities_of(drained))
     assert stale == [("mask_to_copper", last_mask_net, 8858)]
+
+
+def test_board06_unmodified_clock_exits_are_rejected():
+    """Issue #10083: the clock exits' two allowances are gone, so a fixture that
+    still carries the original 11 clock findings (5 on MIPI_CLK+, 6 on
+    MIPI_CLK-) fails the committed gate, while the repaired fixture passes."""
+    gate = load("check_diffpair_coverage")
+    assert not {
+        (rule, net)
+        for rule, net in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+        if net.startswith("MIPI_CLK")
+    }
+    repaired = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, repaired) == []
+    unmodified = repaired + [mask_violation("MIPI_CLK+")] * 5 + [mask_violation("MIPI_CLK-")] * 6
+    assert sorted(gate.unallowed_blocking(BOARD06_KEY, unmodified)) == sorted(
+        [("mask_to_copper", "MIPI_CLK+")] * 5 + [("mask_to_copper", "MIPI_CLK-")] * 6
+    )
+    assert gate.unexpected_baseline_errors(
+        BOARD06_KEY, rule_counts(unmodified), identities_of(unmodified)
+    ) == {"mask_to_copper": 2}  # the two newly unallowed net identities
 
 
 @pytest.mark.parametrize(
