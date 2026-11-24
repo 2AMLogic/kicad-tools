@@ -16,6 +16,8 @@ import re
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -365,6 +367,22 @@ def _saved_zone_fills(pcb_path: Path) -> dict[str, list[tuple]]:
     return fills
 
 
+@contextmanager
+def _zone_fill_copy(pcb_path: Path, board_bytes: bytes | None = None) -> Iterator[Path]:
+    """Stage a saved PCB under its original name alongside its native fill rules."""
+    with tempfile.TemporaryDirectory(prefix="kct-export-zone-refill-") as tmp:
+        scratch = Path(tmp) / pcb_path.name
+        if board_bytes is None:
+            shutil.copy2(pcb_path, scratch)
+        else:
+            scratch.write_bytes(board_bytes)
+        for suffix in (".kicad_dru", ".kicad_pro"):
+            sidecar = pcb_path.with_suffix(suffix)
+            if sidecar.is_file():
+                shutil.copy2(sidecar, scratch.with_suffix(suffix))
+        yield scratch
+
+
 def _saved_zone_fill_matches_native_refill(pcb_path: Path, kicad_cli: Path) -> bool:
     """Whether the saved pours equal what KiCad fills under the rules now present.
 
@@ -383,13 +401,7 @@ def _saved_zone_fill_matches_native_refill(pcb_path: Path, kicad_cli: Path) -> b
     from ..cli.runner import run_fill_zones, run_refill_zones
 
     def native(fill) -> dict[str, list[tuple]] | None:
-        with tempfile.TemporaryDirectory(prefix="kct-export-zone-refill-") as tmp:
-            scratch = Path(tmp) / pcb_path.name
-            shutil.copy2(pcb_path, scratch)
-            for suffix in (".kicad_dru", ".kicad_pro"):
-                sidecar = pcb_path.with_suffix(suffix)
-                if sidecar.is_file():
-                    shutil.copy2(sidecar, scratch.with_suffix(suffix))
+        with _zone_fill_copy(pcb_path) as scratch:
             if not fill(scratch).success:
                 return None
             return _saved_zone_fills(scratch)
@@ -779,15 +791,11 @@ class ManufacturingPackage:
             self._write_drc_constraints(result)
             # KiCad plots the saved copper. Check it under the rules that will
             # ship before plotting, archiving or binding a named stackup (#9987).
-            refilled = self._refresh_zone_fill(result, selected_stackup_source_hash)
-            if refilled is None:
+            refill_digest = self._refresh_zone_fill(result, selected_stackup_source_hash)
+            if not result.success:
                 return result
-            if refilled and self.config.stackup_id:
-                selected_stackup_source_hash = self._stackup_source_hash(
-                    self.config.stackup_id, result
-                )
-                if selected_stackup_source_hash is None:
-                    return result
+            if self.config.stackup_id and refill_digest is not None:
+                selected_stackup_source_hash = refill_digest
 
         # Step 0b (issue #5009): resolve the selected manufacturer profile's
         # declared via-in-pad fabrication process (if any) for this board's
@@ -944,10 +952,9 @@ class ManufacturingPackage:
 
         Runs the same ``stackup_ordering_record`` validation as the start of
         :meth:`export` on the live board and returns its sha256 only when it
-        equals *written_sha256* -- the hash of the bytes an export-internal
-        stage (the silk pass; the #9987 rule refill when it lands) recorded
-        writing.  The equality pins the rebound provenance to the exporter's
-        own transformed bytes, so an external edit during or after that stage
+        equals *written_sha256*, the digest of the bytes the silk pass wrote.
+        The equality pins the rebound provenance to the exporter's own
+        transformed bytes, so an external edit during or after that stage
         still fails the final source-change guard.  On any failure the error
         is recorded on *result* and ``None`` is returned.
         """
@@ -996,8 +1003,8 @@ class ManufacturingPackage:
         self,
         result: ManufacturingResult,
         expected_sha256: str | None = None,
-    ) -> bool | None:
-        """Return whether export rewrote the PCB, or None if it must stop.
+    ) -> str | None:
+        """Return the digest of a newly saved refill. Record blocking failures on result.
 
         A native refill of a scratch copy can certify the existing pours
         under the final rules without KiCad reserializing the source file.
@@ -1005,12 +1012,14 @@ class ManufacturingPackage:
         Reuse that evidence only for the exact PCB bytes and rule sources.
         """
         from ..cli.runner import _board_unchanged, find_kicad_cli, run_refill_zones
+        from ..core.atomic_write import atomic_write_text
         from .gerber import _pcb_has_filled_zones
+        from .stackup import stackup_ordering_record
 
         if not (self.config.include_gerbers or self.config.include_project_zip):
-            return False
+            return None
         if not _pcb_has_filled_zones(self.pcb_path):
-            return False
+            return None
 
         try:
             original = self.pcb_path.read_bytes()
@@ -1028,7 +1037,7 @@ class ManufacturingPackage:
         marker = self.pcb_path.with_name(f".{self.pcb_path.name}.zonefill")
         try:
             if marker.read_text(encoding="ascii").strip() == f"{rule_sha} {board_sha}":
-                return False
+                return None
         except (OSError, UnicodeError):
             pass
 
@@ -1051,18 +1060,42 @@ class ManufacturingPackage:
             return None
 
         if not current:
-            refill = run_refill_zones(self.pcb_path, kicad_cli, require_save=True)
-            if not refill.success or _board_unchanged(self.pcb_path, original, original_mtime_ns):
-                _restore_board(self.pcb_path, original)
-                cannot_refresh(
-                    refill.stderr.strip()
-                    or "kicad-cli wrote a DRC report but did not save the board"
-                )
-                return None
+            stackup_id = self.config.stackup_id
+            target_context = (
+                _zone_fill_copy(self.pcb_path, original)
+                if stackup_id
+                else nullcontext(self.pcb_path)
+            )
             try:
-                board_sha = _sha256_file(self.pcb_path)
-            except OSError as exc:
-                _restore_board(self.pcb_path, original)
+                with target_context as target:
+                    mtime_ns = target.stat().st_mtime_ns
+                    refill = run_refill_zones(target, kicad_cli, require_save=True)
+                    if not refill.success or _board_unchanged(target, original, mtime_ns):
+                        raise ValueError(
+                            refill.stderr.strip()
+                            or "kicad-cli wrote a DRC report but did not save the board"
+                        )
+                    if stackup_id:
+                        # Validate the construction before replacing the source. Both the
+                        # provenance digest and the checked write use the private native output.
+                        record = stackup_ordering_record(target, stackup_id)
+                        native_output = target.read_bytes()
+                        native_digest = hashlib.sha256(native_output).hexdigest()
+                        if native_digest != record["pcb_sha256"]:
+                            raise ValueError("Refilled PCB differs from the validated stackup")
+                        atomic_write_text(
+                            self.pcb_path,
+                            native_output.decode("utf-8"),
+                            encoding="utf-8",
+                            newline="",
+                            expected_sha256=board_sha,
+                        )
+                        board_sha = native_digest
+                    else:
+                        board_sha = _sha256_file(target)
+            except (OSError, ValueError, KiCadToolsError) as exc:
+                if not stackup_id:
+                    _restore_board(self.pcb_path, original)
                 cannot_refresh(str(exc))
                 return None
             note = f"Export refilled the zone fills in {self.pcb_path.name} to match the generated DRC rules."
@@ -1073,7 +1106,7 @@ class ManufacturingPackage:
             marker.write_text(f"{rule_sha} {board_sha}\n", encoding="ascii")
         except OSError as exc:
             logger.warning("Could not record the zone-fill state: %s", exc)
-        return not current
+        return None if current else board_sha
 
     def _reconcile_preflight_lcsc(self, result: ManufacturingResult) -> None:
         """Update the recorded ``bom_fields`` result with post-enrichment LCSC state.
