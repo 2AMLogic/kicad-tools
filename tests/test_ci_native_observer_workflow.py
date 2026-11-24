@@ -18,6 +18,7 @@ WORKFLOW = yaml.safe_load(WORKFLOW_TEXT)
 JOB = WORKFLOW["jobs"]["test"]
 GROUPS = {
     "board05": "Run Board05 manufacturing regression",
+    "board06": "Run Board06 pad-departure regression",
     "mask-copper": "Run native mask-to-copper gate",
     "stitch": "Run native physical-stitch acceptance",
     "zones": "Run native zone acceptance",
@@ -116,6 +117,26 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
     common = ["-o", "addopts=", "--benchmark-disable", "--timeout=60", "-m", "not slow"]
     expected = {
         "board05": ["run", "pytest", "tests/test_board_05_drc_allowlist.py", *common],
+        # Issue #10125: the four real rule-area cases drive the generator's
+        # refill transaction (a `kct zones fill` child whose native-slot
+        # waits are wall time the parent pytest alarm pays with no credit),
+        # so the module runs serially with the conformance lane's 120 s
+        # budget rather than the bulk pool's 60 s.
+        "board06": [
+            "run",
+            "pytest",
+            "tests/test_board06_pad_departures.py",
+            "-o",
+            "addopts=",
+            "--benchmark-disable",
+            "--timeout=120",
+            "-m",
+            "not slow",
+            "--basetemp",
+            str(tmp_path / "board06-native/pytest"),
+            "--junitxml",
+            str(tmp_path / "board06-native/junit.xml"),
+        ],
         "mask-copper": [
             "run",
             "--frozen",
@@ -167,6 +188,11 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
                 "--ignore=tests/" + name
                 for name in [
                     "test_board_05_drc_allowlist.py",
+                    # Issue #10125: the real rule-area cases run in the
+                    # serial board06 lane above; without this the suite runs
+                    # twice and the refill transaction competes with the
+                    # pool for the two native slots again.
+                    "test_board06_pad_departures.py",
                     "test_mask_copper_native.py",
                     "test_stitch_physical_completion.py",
                     "test_zones_cmd.py",

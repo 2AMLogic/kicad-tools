@@ -685,6 +685,33 @@ jobs:
         # Issue #9340: the pytest selection lives in scripts/ci/jobs/test.sh.
         run: python3 scripts/ci/run_observed.py board05 -- bash scripts/ci/jobs/test.sh board05
 
+      - name: Run Board06 pad-departure regression
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
+        # Issue #10125: the four real rule-area cases each drive the
+        # generator's refill transaction (one `kct zones fill` child that
+        # itself launches three gated native checks), and a slot wait inside
+        # that child is wall time the parent pytest alarm pays with no
+        # credit -- the permitted-width case passed a hosted bulk run in
+        # 55.55 s against the pool's 60 s cap. The module runs outside the
+        # xdist pool with a 120 s budget; every other case in it is fast.
+        # Issue #9340: the pytest selection lives in scripts/ci/jobs/test.sh.
+        run: |
+          mkdir -p "$RUNNER_TEMP/board06-native"
+          python3 scripts/ci/run_observed.py board06 -- bash scripts/ci/jobs/test.sh board06 \
+            --basetemp "$RUNNER_TEMP/board06-native/pytest" \
+            --junitxml "$RUNNER_TEMP/board06-native/junit.xml" \
+            2>&1 | tee "$RUNNER_TEMP/board06-native/pytest.log"
+
+      - name: Retain Board06 pad-departure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: board06-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/board06-native/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run native mask-to-copper gate
         env:
           KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}

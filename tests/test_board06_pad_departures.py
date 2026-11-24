@@ -648,6 +648,12 @@ def test_clock_with_unverifiable_rules_keeps_the_original_file(tmp_path, departu
     assert board.read_bytes() == before
 
 
+# The four cases below drive the generator's real refill transaction, whose
+# `kct zones fill` child launches its own gated native checks; a slot wait
+# inside that child is wall time the parent pytest alarm pays with no credit.
+# CI therefore runs this module in its own serial lane with a 120 s budget
+# (scripts/ci/jobs/test.sh board06, Issue #10125) instead of the bulk pool's
+# 60 s cap, which a hosted run sat at 55.55 s already.
 @pytest.mark.parametrize("constraint", ["keepout", "width"])
 @pytest.mark.parametrize("permitted", [False, True], ids=["constrained", "permitted"])
 def test_final_clock_copper_obeys_j4_rule_area(tmp_path, departures, capsys, constraint, permitted):
