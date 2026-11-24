@@ -194,6 +194,13 @@ The board is saved but not verified, so run `kct check` on it before
 manufacturing. It only ever replaces a would-be exit 0 (Issue #6273; see the
 [`kct route` exit-code ladder](cli.md#kct-route-ladder)).
 
+On exit 3, the main routing path adds `"failure_reason": "post_route_drc"` to
+`summary` when all requested nets routed, the saved board passed the
+connectivity check, and post-route DRC violations are the sole failure.
+`summary.verdict` is `"failed"`. A consumer that finishes the copper can run
+DRC again on the final board. All other exit-3 causes omit
+`summary.failure_reason`.
+
 Every default route also builds a report-only `RoutingPlan` (tile-level
 demand/capacity/overflow from the tile-based global-routing pass) written
 as a `<output_stem>.routing_plan.json` sidecar and surfaced under the

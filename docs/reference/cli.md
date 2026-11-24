@@ -2976,7 +2976,7 @@ epilog in [`src/kicad_tools/cli/route_exit_codes_help.py`](../../src/kicad_tools
 | 0 | All nets routed (or meets `--min-completion`), DRC clean |
 | 1 | Fatal failure — no nets routed |
 | 2 | Partial routing — below `--min-completion`, or requested nets are placement-blocked |
-| 3 | Post-route validation or processing failed: DRC violations remain; `--auto-fix` rolled back on a connectivity regression (issue #2852); the `--voltage-map` HV pairwise audit found violations (issue #4588); selective zone filling failed, including unavailable native capability; or staged repair could not verify preservation of fixed copper and net membership. This code alone does not establish routing completion or a clearance violation. |
+| 3 | Post-route validation or processing failed: DRC violations remain; `--auto-fix` rolled back on a connectivity regression (issue #2852); the `--voltage-map` HV pairwise audit found violations (issue #4588); selective zone filling failed, including unavailable native capability; or staged repair could not verify preservation of fixed copper and net membership. This code alone does not establish routing completion or a clearance violation. When fully connected copper fails only post-route DRC, `--format json` adds `"failure_reason": "post_route_drc"` to `summary`. |
 | 4 | Partial routing **and** clearance violations remain — segment-segment (issue #1666) or HV pairwise (issue #4588) |
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
 | 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
