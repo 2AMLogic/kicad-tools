@@ -263,7 +263,7 @@ def test_declared_root_inside_board_dir_publishes_under_it(tmp_path):
 
     code, _ = run(project, "--generate")
 
-    assert code == 0, (project / "kicad" / "output" / "readiness-attempt" / "readiness.json")
+    assert code == 0, project / "kicad" / "output" / "readiness-attempt" / "readiness.json"
     board = project / "kicad"
     assert (board / "output" / "manufacturing" / "manifest.json").is_file()
     assert (board / "output" / "manufacturing.zip").is_file()
