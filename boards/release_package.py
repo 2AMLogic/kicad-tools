@@ -63,19 +63,30 @@ PIN_ANNOTATION_NODES = ("pinfunction", "pintype")
 
 def board_content(data: bytes, *, ignore: tuple[str, ...] = ()) -> str:
     """Canonical content of a KiCad board, independent of item UUIDs, of
-    KiCad's UUID-ordered save and of child-node order within an item.
+    KiCad's UUID-ordered save and of property order within an item.
 
     Every ``(uuid ...)``/``(tstamp ...)`` node is dropped; each node keeps its
-    atoms in order and its sub-lists sorted.  Two boards with equal content
-    have identical copper, footprints, pads and graphics.  Nodes named in
+    atoms in order. Point lists retain their vertex order, and other
+    sub-lists are sorted to tolerate native saves. Nodes named in
     *ignore* (e.g. :data:`PIN_ANNOTATION_NODES`) are dropped too.
     """
     skipped = ("uuid", "tstamp", *ignore)
     from kicad_tools.sexp import parse_string
 
     def canon(node) -> str:  # type: ignore[no-untyped-def]
-        atoms = [repr(c.value) for c in node.children if c.is_atom]
-        lists = sorted(canon(c) for c in node.children if not c.is_atom and c.name not in skipped)
+        atoms = []
+        for atom in (c for c in node.children if c.is_atom):
+            value = atom.value
+            # Native saves write integral numbers without a decimal point
+            # (``1.0`` -> ``1``), in every dimensional field (``thickness``,
+            # ``drill``, ``size``...), not a fixed list of node names. Only the
+            # spelling is normalised: ``1.5`` stays distinct from ``1``.
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
+            atoms.append(repr(value))
+        lists = [canon(c) for c in node.children if not c.is_atom and c.name not in skipped]
+        if node.name != "pts":
+            lists.sort()
         return "(" + " ".join([str(node.name), *atoms, *lists]) + ")"
 
     return canon(parse_string(data.decode()))
@@ -103,8 +114,10 @@ class Release:
     #: (e.g. a hand-written procurement review), each with the package files
     #: whose bytes it vouches for; refused if any of those changed.
     reviewed: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    #: package-relative name -> callable(options) returning the bytes to ship.
-    generated: dict[str, Callable[[ReadinessOptions], bytes]] = field(default_factory=dict)
+    #: package-relative name -> callable(options) returning the bytes to ship,
+    #: or ``None`` to ship nothing under that name this run (e.g. an optional
+    #: provenance sidecar absent from a pure carry-forward, #9800).
+    generated: dict[str, Callable[[ReadinessOptions], bytes | None]] = field(default_factory=dict)
     #: Board-specific checks, run once (lazily) before the package is finished.
     checks: Callable[[ReadinessOptions], list[CheckOutcome]] | None = None
     #: Files (relative to the board dir) hashed into readiness ``inputs``.
@@ -173,9 +186,12 @@ class Release:
         shutil.copyfile(evidence / "kct-check.json", out / "check-report.json")
         shutil.copyfile(evidence / "native-drc.json", out / "native-drc.json")
         for name, produce in self.generated.items():
+            data = produce(options)
+            if data is None:
+                continue
             target = out / name
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(produce(options))
+            target.write_bytes(data)
         for archive in ("kicad_project.zip", "gerbers/gerbers.zip"):
             if (out / archive).is_file():
                 normalize_zip(out / archive)

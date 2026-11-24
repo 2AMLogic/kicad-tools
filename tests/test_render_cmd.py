@@ -15,6 +15,7 @@ import pytest
 from kicad_tools.cli import render_cmd
 from kicad_tools.cli.render_cmd import (
     COVERAGE_FILE,
+    PROVENANCE_FILE,
     RENDER_OUTPUTS,
     _discover_boards,
     _parse_version,
@@ -146,10 +147,19 @@ class TestOutputPathContract:
         renders = board / "output" / "renders"
         for fname in RENDER_OUTPUTS.values():
             assert (renders / fname).exists(), f"missing {fname}"
-        # Exactly the four contracted files, nothing else.
+        # Exactly the contracted files, nothing else.
         assert sorted(p.name for p in renders.iterdir()) == sorted(
-            [*RENDER_OUTPUTS.values(), COVERAGE_FILE]
+            [*RENDER_OUTPUTS.values(), COVERAGE_FILE, PROVENANCE_FILE]
         )
+        # The provenance sidecar binds those artifacts to the rendered PCB (#9800).
+        provenance = json.loads((renders / PROVENANCE_FILE).read_text())
+        import hashlib
+
+        assert (
+            provenance["pcb_sha256"]
+            == hashlib.sha256((board / "output" / "vd.kicad_pcb").read_bytes()).hexdigest()
+        )
+        assert set(provenance["outputs"]) == set(RENDER_OUTPUTS.values())
 
     def test_filenames_are_exactly_the_contract(self):
         assert RENDER_OUTPUTS == {
@@ -488,10 +498,63 @@ class TestFilePathMode:
         for fname in RENDER_OUTPUTS.values():
             assert (renders / fname).exists(), f"missing {fname}"
         assert sorted(p.name for p in renders.iterdir()) == sorted(
-            [*RENDER_OUTPUTS.values(), COVERAGE_FILE]
+            [*RENDER_OUTPUTS.values(), COVERAGE_FILE, PROVENANCE_FILE]
         )
         # The exact PCB file passed was rendered (no discovery).
-        assert {call[0] for call in fake_kicad["svg"]} == {pcb}
+        assert {call[0].name for call in fake_kicad["svg"]} == {pcb.name}
+
+    def test_all_consumers_read_the_same_private_pcb_and_local_models(
+        self, tmp_path, fake_kicad, monkeypatch, capsys
+    ):
+        project = tmp_path / "project"
+        project.mkdir()
+        pcb = project / "selected.kicad_pcb"
+        pcb.write_text(
+            '(kicad_pcb (footprint "Test:One" (property "Reference" "U1")'
+            ' (model "${KIPRJMOD}/local.step") (model "../shared/other.step")))'
+        )
+        pcb.with_suffix(".kicad_pro").write_text("{}")
+        (project / "local.step").write_bytes(b"local shape")
+        (tmp_path / "shared").mkdir()
+        (tmp_path / "shared" / "other.step").write_bytes(b"shared shape")
+        original = pcb.read_bytes()
+        inputs = []
+
+        def observe(function):
+            def wrapped(path, *args, **kwargs):
+                inputs.append((function, path))
+                assert path != pcb and path.name == pcb.name
+                assert path.read_bytes() == original
+                assert path.with_suffix(".kicad_pro").read_text() == "{}"
+                if function == "run_pcb_render":
+                    assert (path.parent / "local.step").read_bytes() == b"local shape"
+                    assert (path.parent / "../shared/other.step").read_bytes() == b"shared shape"
+                return implementation(path, *args, **kwargs)
+
+            implementation = getattr(render_cmd, function)
+            monkeypatch.setattr(render_cmd, function, wrapped)
+
+        for function in (
+            "run_pcb_export_svg",
+            "audit_pcb_models",
+            "inspect_pcb_models",
+            "run_pcb_render",
+            "_write_provenance",
+        ):
+            observe(function)
+        output = tmp_path / "published"
+        assert render_main([str(pcb), "-o", str(output), "--format", "json"]) == 0
+        assert len(inputs) == 7
+        assert len({path for _, path in inputs}) == 1
+        assert not inputs[0][1].exists()
+        result = json.loads(capsys.readouterr().out)["boards"][0]
+        assert result["pcb"] == str(pcb)
+        assert result["model_check"]["checked_models"] == 2
+        import hashlib
+
+        provenance = json.loads((output / PROVENANCE_FILE).read_text())
+        assert provenance["pcb"] == pcb.name
+        assert provenance["pcb_sha256"] == hashlib.sha256(original).hexdigest()
 
     def test_output_flag_overrides_default_dir(self, tmp_path, fake_kicad):
         pcb = self._make_pcb(tmp_path)
@@ -536,6 +599,22 @@ class TestFilePathMode:
         assert not (renders / "3d-front.png").exists()
         assert not (renders / "3d-back.png").exists()
         assert fake_kicad["render"] == []
+
+    def test_incomplete_run_removes_stale_provenance(self, tmp_path, fake_kicad, monkeypatch):
+        """A failed 3D leg must not leave a binding for mixed images (#9800)."""
+        pcb = self._make_pcb(tmp_path)
+        assert render_main([str(pcb)]) == 0
+        renders = tmp_path / "renders"
+        assert (renders / PROVENANCE_FILE).is_file()
+
+        def failing_render(pcb_path, output_path, side="front", **kwargs):
+            from kicad_tools.cli.runner import KiCadCLIResult
+
+            return KiCadCLIResult(success=False, output_path=Path(output_path), stderr="boom")
+
+        monkeypatch.setattr(render_cmd, "run_pcb_render", failing_render)
+        render_main([str(pcb)])  # partial: 2D rewritten, 3D failed
+        assert not (renders / PROVENANCE_FILE).exists()
 
     def test_json_uses_pcb_stem_as_board_name(self, tmp_path, fake_kicad, capsys):
         pcb = self._make_pcb(tmp_path, "softstart_revb.kicad_pcb")

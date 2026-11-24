@@ -975,6 +975,8 @@ class ReadinessOptions:
     # before Gate 1 judges silk; the repaired bytes are what the checks,
     # plots and hashes then consume.  ``--no-silk-fix`` sets this False.
     silk_fix: bool = True
+    # User-selected PCB before candidate preparation, for render receipt verification.
+    source_pcb_bytes: bytes | None = field(default=None, repr=False)
 
     @property
     def root(self) -> Path:
@@ -4503,6 +4505,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                         _inventory_changes(before, copied),
                     )
                 )
+            if engines is not None and engines.package_extras is not None:
+                staged.source_pcb_bytes = staged.pcb.read_bytes()
             if options.operation == "generate" and options.output_dir.exists():
                 manifest = _read_json(options.output_dir / "manifest.json")
                 if manifest.get("producer") != "kct readiness":
