@@ -11,10 +11,19 @@ Rule id ``pour_slot`` (always ``severity="warning"``).  A pair is reported
 when the tracks are parallel, on the same layer as a pour zone, on different
 nets, overlap along their length, and::
 
-    0 < gap < 2 * clearance + min_thickness
+    2 * clearance < gap < 2 * clearance + min_thickness
 
 ``clearance`` is ``max(zone clearance, netclass clearance of either net)``.
-Touching/overlapping tracks (``gap <= 0``) are a DRC matter and not reported.
+Touching/overlapping tracks (``gap <= 0``) are a DRC matter and not reported,
+and so is a *packed* pair (``gap <= 2 * clearance``, Issue #10121): its
+clearance keep-outs already overlap, so no fill strip ever existed between
+the tracks -- the copper-free channel is the unavoidable clearance void any
+two different-net conductors at that spacing produce, and ``min_thickness``
+has no island to drop.  Native-refill controls on pinned KiCad 10.0.6
+(Issue #10121) confirm the split: a 0.55 mm gap over a 0.2/0.3 mm zone leaves
+a dropped-island slot on the film, while a 0.395 mm gap (5 um below packed)
+leaves only the clearance void, inside a pad row whose own 0.250 mm pad-edge
+gap produces the same channel with no tracks at all.
 
 Which fill-gap case the threshold matches (see :meth:`Zone.fill_inflation`):
 that docstring's ``gap <= min_thickness`` row is about when two *fill
@@ -54,6 +63,11 @@ RULE_ID = "pour_slot"
 PARALLEL_SIN_TOL = 0.02
 #: Minimum side-by-side overlap (mm) worth reporting.
 MIN_OVERLAP_MM = 0.01
+#: Packed-pair tolerance (mm): ``gap <= 2 * clearance + PACKED_GAP_TOL_MM``
+#: leaves no fillable strip between the clearance keep-outs (Issue #10121).
+#: Matches the repair pass's own packed-pair cutoff in
+#: :mod:`kicad_tools.optim.pour_slot_cleanup`.
+PACKED_GAP_TOL_MM = 1e-3
 
 
 def _unit(seg: Any) -> tuple[float, float, float] | None:
@@ -92,8 +106,10 @@ class PourSlotRule(DRCRule):
     rule_id = RULE_ID
     name = "Pour Slot"
     description = (
-        "Reports parallel different-net tracks closer than 2 x clearance + "
-        "min_thickness on a poured layer, which leave a slot in the plane (advisory)."
+        "Reports parallel different-net tracks whose gap leaves an unfillable "
+        "strip in a poured layer (2 x clearance < gap < 2 x clearance + "
+        "min_thickness), which KiCad drops and leaves as a slot in the plane "
+        "(advisory)."
     )
 
     def __init__(self, netclass_clearances: Mapping[str, float] | None = None) -> None:
@@ -233,7 +249,12 @@ class PourSlotRule(DRCRule):
         gap = centre_dist - (a.width + b.width) / 2
         clearance, thickness = self._pair_clearance(zlist, a, b)
         threshold = 2 * clearance + thickness
-        if gap <= 1e-6 or gap >= threshold - 1e-6:
+        # A pair packed to (or below) 2 x clearance has no fillable strip
+        # between the keep-outs, so min_thickness has no island to drop: the
+        # void between the tracks is the unavoidable clearance void of any
+        # two different-net conductors at that spacing, not a pour slot
+        # (Issue #10121, native-refill controls).
+        if gap <= 2 * clearance + PACKED_GAP_TOL_MM or gap >= threshold - 1e-6:
             return None
 
         mid_t = (max(0.0, min(tb0, tb1)) + min(la, max(tb0, tb1))) / 2

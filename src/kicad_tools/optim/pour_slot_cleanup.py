@@ -270,9 +270,10 @@ def _no_worse(after: Mapping[str, int], baseline: Mapping[str, int]) -> bool:
 def _slots(pcb: Any, netclass_clearances: Mapping[str, float] | None) -> list[PourSlotPair]:
     """Flagged pairs that still leave an unfillable strip (``gap > 2 x clearance``).
 
-    A pair packed to ``clearance`` is still flagged by the advisory (its gap is
-    below the threshold) but has no strip left between the keep-outs, hence no
-    slot: the pour is simply absent between the tracks.
+    Since Issue #10121 the advisory itself no longer yields packed pairs (the
+    detection path skips ``gap <= 2 x clearance``), so every pair it returns
+    already passes this filter; it stays as a defensive invariant so the
+    cleanup can never act on a pair with no strip between the keep-outs.
     """
     return [
         p for p in iter_pour_slot_pairs(pcb, netclass_clearances) if p.gap > 2 * p.clearance + _TOL

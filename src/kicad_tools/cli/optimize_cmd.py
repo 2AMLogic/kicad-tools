@@ -650,8 +650,8 @@ def add_pour_slot_args(parser: argparse.ArgumentParser) -> None:
         "--pour-slots-pack",
         action="store_true",
         help="With --pour-slots, also pack a pair when spreading it fails. Packing "
-        "reduces the gap to the clearance limit, removes the ground strip between the "
-        "tracks and leaves the pour_slot advisory in place.",
+        "reduces the gap to the clearance limit and removes the ground strip "
+        "between the tracks, so no fillable strip (and no pour slot) remains.",
     )
 
 
