@@ -316,9 +316,12 @@ def test_transmitter_uses_the_declared_pair_rate(tmp_path, repair):
     assert repair(board, rules) == 2
 
 
-def _rule_area_poly(name, pts, *, tracks):
+UUID_AREA = "00000000-0000-0000-0000-0000000009a1"
+
+
+def _rule_area_poly(name, pts, *, tracks, layer="F.Cu", uid=UUID_AREA):
     return (
-        f'(zone (net 0) (net_name "") (layers "F.Cu") (uuid "{UUID_AREA}") (name "{name}") '
+        f'(zone (net 0) (net_name "") (layers "{layer}") (uuid "{uid}") (name "{name}") '
         "(hatch edge 0.5) (connect_pads (clearance 0)) (min_thickness 0.2) "
         f"(keepout (tracks {tracks}) (vias allowed) (pads allowed) (copperpour allowed) "
         "(footprints allowed)) (fill (thermal_gap 0.5) (thermal_bridge_width 0.5)) "
@@ -326,11 +329,9 @@ def _rule_area_poly(name, pts, *, tracks):
     )
 
 
-def _rule_area(name, x0, y0, x1, y1, *, tracks):
-    return _rule_area_poly(name, [(x0, y0), (x1, y0), (x1, y1), (x0, y1)], tracks=tracks)
-
-
-UUID_AREA = "00000000-0000-0000-0000-0000000009a1"
+def _rule_area(name, x0, y0, x1, y1, *, tracks, layer="F.Cu", uid=UUID_AREA):
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    return _rule_area_poly(name, corners, tracks=tracks, layer=layer, uid=uid)
 
 
 def _add_area(board, area):
@@ -465,6 +466,35 @@ def test_receiver_checks_active_width_expression_after_ignored_rule(
 (rule "Active width" (layer "{layer}")
   (condition "A.NetName == '{net}' && {area}")
   (constraint track_width ({bound} "{limit}")))
+"""
+    )
+    before = board.read_bytes()
+    assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
+    if expected == 0:
+        assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("near_first", [True, False], ids=["near-first", "near-last"])
+@pytest.mark.parametrize(("near_layer", "expected"), [("F.Cu", 0), ("B.Cu", 2)])
+def test_receiver_checks_every_rule_area_with_the_same_name(
+    tmp_path, repair, near_first, near_layer, expected
+):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    name = "J3 connector exit"
+    near = _rule_area(name, 9.3, 9.8, 9.4, 9.9, tracks="allowed", layer=near_layer)
+    far = _rule_area(
+        name, 9.3, 10.8, 9.4, 10.9, tracks="allowed", uid="00000000-0000-0000-0000-0000000009a2"
+    )
+    for area in (near, far) if near_first else (far, near):
+        _add_area(board, area)
+    board.with_suffix(".kicad_dru").write_text(
+        """(version 1)
+(rule "Legacy RX width" (severity ignore) (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+'") (constraint track_width (max 0.2mm)))
+(rule "Active width in connector exits" (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+' && A.intersectsArea('J3 connector exit')")
+  (constraint track_width (max "0.1mm + 0.1mm")))
 """
     )
     before = board.read_bytes()

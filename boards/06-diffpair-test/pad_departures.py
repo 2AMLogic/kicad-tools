@@ -736,11 +736,14 @@ def _pcie_taper_authored_rules_ok(pcb: PCB, path: Path, added: list[Segment]) ->
         return True  # no design-rules file: nothing authored to violate
     except Exception:
         return False
-    named = {
-        zone.name: _zone_shape(zone)
-        for zone in (*pcb.zones, *getattr(pcb, "footprint_rule_areas", ()))
-        if zone.name
-    }
+    # Names can repeat. Keep back-only names with an empty list so a known
+    # off-layer area is distinct from a reference we cannot resolve.
+    named = {}
+    for zone in (*pcb.zones, *getattr(pcb, "footprint_rule_areas", ())):
+        if zone.name:
+            shapes = named.setdefault(zone.name, [])
+            if _zone_covers_f_cu(zone):
+                shapes.append(_zone_shape(zone))
     for rule in tree.find_all("rule"):
         severity_node = rule.find_child("severity")
         if severity_node is not None and str(severity_node.get_first_atom()).casefold() == "ignore":
@@ -786,10 +789,14 @@ def _dru_rule_applies(condition, track, copper, areas, project) -> bool:
         return True
 
     def area_test(match) -> str:
-        shape = areas.get(match.group(1))
-        if shape is None:
-            return match.group(0)  # unknown area: stays undecided
-        return "(1 == 1)" if shape.intersects(copper) else "(1 == 0)"
+        shapes = areas.get(match.group(1))
+        if shapes is None:
+            return match.group(0)
+        if any(shape is not None and shape.intersects(copper) for shape in shapes):
+            return "(1 == 1)"
+        if None in shapes:
+            return match.group(0)  # An invalid outline leaves the condition undecided.
+        return "(1 == 0)"
 
     condition = re.sub(r"\bA\.intersectsArea\(\s*'([^']*)'\s*\)", area_test, condition)
     props = item_props_for_type(
