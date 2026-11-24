@@ -696,6 +696,13 @@ class Pad:
     Routing, clearance and grid code ignore it.
     """
 
+    chamfered_outline: tuple[tuple[float, float], ...] = ()
+    """Copper boundary of an authored chamfered pad, in board-axis offsets from its centre."""
+
+    terminal_layers: tuple[Layer, ...] | None = field(default=None, kw_only=True)
+    copper_offset: tuple[float, float] = field(default=(0.0, 0.0), kw_only=True)
+    """Board-axis displacement from the pad anchor to its copper centre, in mm."""
+
     @property
     def component_key(self) -> str:
         """Physical component key used for grouping and geometric exemptions."""

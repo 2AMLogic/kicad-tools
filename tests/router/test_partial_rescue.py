@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -243,9 +245,15 @@ def test_partially_connected_signal_nets_classification(tmp_path: Path, monkeypa
         stderr = ""
         returncode = 1
 
+    captured_argv: list[list[str]] = []
+
+    def _fake_run(*a, **k):
+        captured_argv.append(list(a[0]))
+        return _Result()
+
     monkeypatch.setattr(
         "kicad_tools.router.partial_rescue.subprocess.run",
-        lambda *a, **k: _Result(),
+        _fake_run,
     )
 
     # Default: partial only, pour nets and single-pad NC nets excluded.
@@ -257,6 +265,14 @@ def test_partially_connected_signal_nets_classification(tmp_path: Path, monkeypa
         pcb, excluded_nets=frozenset({"GNDD"}), include_unrouted=True
     )
     assert both == ["NRST", "SDA"]
+
+    # Issue #10110: the child check is scoped to connectivity only -- a full
+    # check would run the fabrication categories (native Gerber export and
+    # pcbnew geometry) whose findings this probe never reads.
+    assert captured_argv, "probe did not run"
+    for argv in captured_argv:
+        assert argv[argv.index("--only") + 1] == "connectivity", argv
+        assert "--mfr" in argv, argv
 
 
 def test_partially_connected_signal_nets_bad_json(tmp_path: Path, monkeypatch) -> None:
@@ -317,6 +333,81 @@ def test_partially_connected_signal_nets_strict_accepts_valid_report(tmp_path, m
     assert partially_connected_signal_nets(
         pcb, excluded_nets=frozenset({"GNDD"}), include_unrouted=True, strict=True
     ) == ["NRST", "SDA"]
+
+
+#: The saved partial board from the route entry-path goldens (Issue #10110
+#: traced the probe on exactly this file): four two-pad nets, each with one
+#: pad stranded -- real connectivity findings without any test fabrication.
+_SAVED_PARTIAL_BOARD = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "route_entry_paths" / "partial.kicad_pcb"
+)
+
+#: A UUID-complete routed board (committed readiness output).  Issue #10110's
+#: native control needs plotted-source UUIDs on every copper/mask object --
+#: on a UUID-incomplete board the mask assessment stops BEFORE any native
+#: export, so a fabricated kicad-cli would record nothing and the control
+#: below could not fire.
+_UUID_COMPLETE_ROUTED_BOARD = (
+    Path(__file__).resolve().parents[2]
+    / "boards"
+    / "00-simple-led"
+    / "output"
+    / "readiness"
+    / "fill-saved"
+    / "simple_led_routed.kicad_pcb"
+)
+
+
+def test_partially_connected_signal_nets_probe_spawns_no_native_kicad(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Issue #10110: this probe is a real CHILD ``kct check`` process, so an
+    in-process "hide KiCad" mock (the route entry-path goldens' pattern)
+    cannot contain it -- the child rediscovers the host kicad-cli and a FULL
+    check runs fabrication work (Gerber mask export, pcbnew zone-fill
+    geometry) whose findings the probe never reads.  With KiCad "installed"
+    (a PATH-first kicad-cli recorder logging every invocation, answering as
+    a qualified 10.0.8 build), the production probe must spawn no kicad-cli
+    beyond the discovery ``version`` probes, and must still classify nets
+    from the scoped report of a real child run.
+    """
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    calls_log = tmp_path / "kicad_cli_calls.log"
+    fake = fakebin / "kicad-cli"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{calls_log}"\n'
+        'if [ "$1" = "version" ] || [ "$1" = "--version" ]; then\n'
+        '  printf "kicad-cli 10.0.8\\n"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fakebin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    def _native_calls() -> list[str]:
+        calls = calls_log.read_text().splitlines() if calls_log.exists() else []
+        return [c for c in calls if c.split(" ")[0] not in ("version", "--version")]
+
+    # Partial nets still classify through the real child's scoped report.
+    pcb = tmp_path / "partial.kicad_pcb"
+    shutil.copyfile(_SAVED_PARTIAL_BOARD, pcb)
+    assert partially_connected_signal_nets(pcb) == ["/A", "/B", "/C", "/D"]
+    assert not _native_calls(), _native_calls()
+
+    # A UUID-complete board is the one a FULL check would actually export
+    # Gerbers from (the failing control on the unmodified probe); scoped, the
+    # probe reads its complete connectivity and spawns nothing native.
+    routed = tmp_path / "simple_led_routed.kicad_pcb"
+    shutil.copyfile(_UUID_COMPLETE_ROUTED_BOARD, routed)
+    assert partially_connected_signal_nets(routed) == []
+    native = _native_calls()
+    assert not native, (
+        "partial-net probe invoked native kicad-cli beyond the discovery probes "
+        f"(a connectivity-only probe must not run Gerber export or pcbnew "
+        f"geometry, Issue #10110): {native}"
+    )
 
 
 def test_build_rescue_command_pins_single_net_recipe(tmp_path: Path) -> None:

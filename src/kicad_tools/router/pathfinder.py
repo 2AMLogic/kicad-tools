@@ -918,6 +918,21 @@ class Router:
         self._waypoint_world_coords[key] = (pad.x, pad.y)
         return key
 
+    def _pad_routable_layers(self, pad: Pad, routable_layers: list[int]) -> list[int]:
+        """Grid layer indices on which ``pad`` may start or finish a route."""
+        if pad.through_hole or pad.layer_agnostic:
+            return list(routable_layers)
+        terminal_layers = getattr(pad, "terminal_layers", None)
+        if terminal_layers is not None:
+            routable_set = set(routable_layers)
+            indices: list[int] = []
+            for layer in terminal_layers:
+                idx = self.grid._layer_to_index.get(layer.value)
+                if idx is not None and idx in routable_set and idx not in indices:
+                    indices.append(idx)
+            return indices
+        return [self.grid.layer_to_index(pad.layer.value)]
+
     def _waypoint_grid_edges(
         self,
         wp_key: tuple[int, int],
@@ -944,6 +959,7 @@ class Router:
         # Precompute pad metal bounds for same-net passability check.
         metal_bounds = self._get_pad_metal_bounds(pad)
         mgx1, mgy1, mgx2, mgy2 = metal_bounds
+        check_layers = self._pad_routable_layers(pad, self.grid.get_routable_indices())
 
         for dy in range(-radius, radius + 1):
             for dx in range(-radius, radius + 1):
@@ -951,12 +967,6 @@ class Router:
                 gy = center_gy + dy
                 if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
                     continue
-
-                # Check accessibility on any layer the pad can use
-                if pad.through_hole:
-                    check_layers = self.grid.get_routable_indices()
-                else:
-                    check_layers = [self.grid.layer_to_index(pad.layer.value)]
 
                 accessible = False
                 for li in check_layers:
@@ -5089,14 +5099,11 @@ class Router:
         # Convert Layer enum values to grid indices
         # For PTH pads, we can start/end on any routable layer
         routable_layers = self.grid.get_routable_indices()
-        start_layer = self.grid.layer_to_index(start.layer.value)
-        end_layer = self.grid.layer_to_index(end.layer.value)
-
-        # Get all valid start/end layers for this pad type
-        start_layers = (
-            routable_layers if (start.through_hole or start.layer_agnostic) else [start_layer]
-        )
-        end_layers = routable_layers if (end.through_hole or end.layer_agnostic) else [end_layer]
+        start_layers = self._pad_routable_layers(start, routable_layers)
+        end_layers = self._pad_routable_layers(end, routable_layers)
+        if not start_layers or not end_layers:
+            return None
+        end_layer = end_layers[0]
 
         # Issue #956/#977: Calculate pad metal area bounds for expanded start/goal regions
         # When pads don't align with the routing grid, we accept reaching any cell
@@ -7081,12 +7088,12 @@ class Router:
 
         # Get valid layers for each pad
         routable_layers = self.grid.get_routable_indices()
-        start_layer = self.grid.layer_to_index(start.layer.value)
-        end_layer = self.grid.layer_to_index(end.layer.value)
-        start_layers = (
-            routable_layers if (start.through_hole or start.layer_agnostic) else [start_layer]
-        )
-        end_layers = routable_layers if (end.through_hole or end.layer_agnostic) else [end_layer]
+        start_layers = self._pad_routable_layers(start, routable_layers)
+        end_layers = self._pad_routable_layers(end, routable_layers)
+        if not start_layers or not end_layers:
+            return None
+        start_layer = start_layers[0]
+        end_layer = end_layers[0]
 
         # Apply layer constraints
         if self.rules.allowed_layers is not None:

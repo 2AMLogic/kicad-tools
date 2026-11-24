@@ -66,6 +66,114 @@ def test_file_backed_shape_and_absolute_orientation(tmp_path, loader, shape, ang
     assert (pad.width, pad.height) == (dims[::-1] if angle == 90 else dims)
 
 
+@pytest.mark.parametrize("loader", ["analysis", "routing", "schema"])
+@pytest.mark.parametrize("angle", [0, 45, 90, 180])
+def test_contact_honours_only_the_authored_chamfer(tmp_path, loader, angle):
+    from shapely.geometry import Point
+
+    from kicad_tools.core.geometry import rotate_pad_offset
+    from kicad_tools.router.io import _schema_pad_shape_fields
+    from kicad_tools.router.terminal_connectivity import _contact_outline
+
+    path = tmp_path / "chamfer.kicad_pcb"
+    path.write_text(
+        board_text(
+            "roundrect",
+            angle,
+            "4 2",
+            "(roundrect_rratio 0.05) (chamfer_ratio 0.5) (chamfer bottom_right)",
+        )
+    )
+    if loader == "schema":
+        src = PCB.load(path).footprints[0].pads[0]
+        pad = Pad(
+            10,
+            10,
+            *src.size,
+            1,
+            "SIGNAL",
+            rotation=src.rotation,
+            **_schema_pad_shape_fields(src, "J1"),
+        )
+    else:
+        pad = load(path, loader)
+    outline = _contact_outline(pad)
+    for x, expected in ((1.9, False), (-1.9, True)):
+        dx, dy = rotate_pad_offset(x, 0.9, angle)
+        assert outline.covers(Point(pad.x + dx, pad.y + dy)) == expected
+
+
+@pytest.mark.parametrize("loader", ["analysis", "routing", "schema"])
+@pytest.mark.parametrize("angle", [0, 90, -45])
+@pytest.mark.parametrize("offset, connects", [(0.45, False), (0.0, True), (-0.45, True)])
+def test_escape_via_must_touch_offset_pad_copper(tmp_path, loader, angle, offset, connects):
+    from kicad_tools.core.geometry import rotate_pad_offset
+    from kicad_tools.router.escape import EscapeDirection, EscapeRoute, escape_endpoint_pad
+    from kicad_tools.router.io import _schema_pad_shape_fields
+    from kicad_tools.router.primitives import Via
+
+    path = tmp_path / "offset.kicad_pcb"
+    path.write_text(board_text("rect", angle, "2 1.4", f"(drill 0 (offset {offset} 0))"))
+    if loader == "schema":
+        source = PCB.load(path).footprints[0].pads[0]
+        pad = Pad(
+            10,
+            10,
+            *source.size,
+            1,
+            "SIGNAL",
+            rotation=source.rotation,
+            **_schema_pad_shape_fields(source, "J1"),
+        )
+    else:
+        pad = load(path, loader)
+    # The near edge is 1 mm from the shape centre. A centred pad overlaps
+    # the 0.30 mm radius barrel by 0.15 mm. Shifting away opens a 0.30 mm gap.
+    dx, dy = rotate_pad_offset(-1.15, 0, angle)
+    centre = (pad.x + dx, pad.y + dy)
+    barrel = Via(*centre, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 1, "SIGNAL")
+    escape = EscapeRoute(pad, EscapeDirection.VIA_DOWN, centre, Layer.F_CU, via=barrel)
+    if connects:
+        terminal = escape_endpoint_pad(pad, escape, fallback_width=0.25)
+        assert Layer.B_CU in terminal.terminal_layers
+    else:
+        with pytest.raises(ValueError, match="no committed copper"):
+            escape_endpoint_pad(pad, escape, fallback_width=0.25)
+
+
+def test_offset_pad_anchor_only_waives_copper_around_the_endpoint(tmp_path):
+    from kicad_tools.router.escape import escape_endpoint_pad
+
+    path = tmp_path / "offset.kicad_pcb"
+    path.write_text(board_text("rect", 0, "2 1.4", "(drill 0 (offset 0.8 0))"))
+    pad = load(path, "routing")
+    escape = SimpleNamespace(escape_point=(pad.x, pad.y), escape_layer=pad.layer)
+    terminal = escape_endpoint_pad(pad, escape, fallback_width=0.25)
+    assert terminal.escape_terminal
+    assert (terminal.width, terminal.height) == pytest.approx((0.4 / math.sqrt(2),) * 2)
+    assert terminal.terminal_layers == (Layer.F_CU,)
+
+
+def test_shallow_chamfer_replaces_a_large_round_only_at_the_selected_corner(tmp_path):
+    from shapely.geometry import Point
+
+    from kicad_tools.router.terminal_connectivity import _contact_outline
+
+    path = tmp_path / "shallow-cut.kicad_pcb"
+    path.write_text(
+        board_text(
+            "roundrect",
+            0,
+            "2 2",
+            "(roundrect_rratio 0.5) (chamfer_ratio 0.05) (chamfer bottom_right)",
+        )
+    )
+    pad = load(path, "routing")
+    outline = _contact_outline(pad)
+    assert outline.covers(Point(pad.x + 0.9, pad.y + 0.9))
+    assert not outline.covers(Point(pad.x - 0.9, pad.y - 0.9))
+
+
 UNSUPPORTED_COPPER = [
     (
         "custom",
@@ -269,7 +377,9 @@ def test_escape_virtual_pad_sizes_moved_endpoint_to_conductor(monkeypatch, metho
     blocked/clearance checks inside a terminal's metal area.
     """
     router = Autorouter(20, 20, force_python=True)
-    pad = Pad(5, 5, 2, 2, 1, "SIGNAL", ref="J1", pin="1", rotation=45, shape=shape)
+    pad = Pad(
+        5, 5, 2, 2, 1, "SIGNAL", layer=Layer.B_CU, ref="J1", pin="1", rotation=45, shape=shape
+    )
     router.pads[("J1", "1")] = pad
     stub = Segment(5, 5, 8, 9, 0.25, Layer.B_CU, 1, "SIGNAL")
     escape = SimpleNamespace(
