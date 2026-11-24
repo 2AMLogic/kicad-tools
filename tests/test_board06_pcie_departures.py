@@ -373,8 +373,7 @@ def test_receiver_declines_a_keepout_whose_ring_is_degenerate(tmp_path, repair):
     before = board.read_bytes()
     assert repair(board, rules) == 0
     assert board.read_bytes() == before
-    # Control: a self-intersecting ring still recovers via buffer(0), so a
-    # keepout clear of both rails does not fail closed on its own shape.
+    # Control: both lobes of this self-intersecting keepout clear the rails.
     _taper_board(board, "J3", pair="RX")
     _add_area(
         board,
@@ -383,6 +382,21 @@ def test_receiver_declines_a_keepout_whose_ring_is_degenerate(tmp_path, repair):
         ),
     )
     assert repair(board, rules) == 2
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["forward", "reversed"])
+def test_receiver_respects_both_lobes_of_a_self_crossing_keepout(tmp_path, repair, reverse):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    # Only the lower lobe reaches the proposed 0.225 mm rail. The original
+    # copper clears it in either winding.
+    ring = [(9.30, 9.94), (9.40, 10.01), (9.30, 10.01), (9.40, 9.94)]
+    if reverse:
+        ring.reverse()
+    _add_area(board, _rule_area_poly("keep", ring, tracks="not_allowed"))
+    before = board.read_bytes()
+    assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == 0
+    assert board.read_bytes() == before
 
 
 def test_receiver_declines_both_rails_over_an_authored_maximum_width(tmp_path, repair):

@@ -34,6 +34,7 @@ from itertools import pairwise
 from math import dist
 from pathlib import Path
 
+from shapely import make_valid
 from shapely.geometry import LineString, Point, Polygon
 
 from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
@@ -706,9 +707,8 @@ def _zone_shape(zone):
         return None
     shape = Polygon(rings[0], holes=rings[1:])
     if not shape.is_valid:
-        shape = shape.buffer(0)
-    # A ring shapely cannot repair (collinear/zero-area) has no interior left
-    # to keep copper out of; report it as degenerate so callers fail closed.
+        # A self-crossing keepout can protect copper in both lobes.
+        shape = make_valid(shape)
     return shape if not shape.is_empty and shape.area > 0 else None
 
 
