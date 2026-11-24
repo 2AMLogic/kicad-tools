@@ -501,11 +501,21 @@ def test_unrunnable_silk_pass_plain_export_keeps_warning(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
-def test_export_cli_named_stackup_refuses_unrepairable_silk(tmp_path, capsys, monkeypatch):
-    _break_hard_link_support(monkeypatch)
+@pytest.mark.parametrize("failure", ["hard-link", "layer-detection"])
+def test_export_cli_named_stackup_refuses_unrepairable_silk(tmp_path, capsys, monkeypatch, failure):
     from kicad_tools.cli.export_cmd import main
 
+    if failure == "hard-link":
+        _break_hard_link_support(monkeypatch)
+    else:
+
+        def unreadable_layers(_board_text):
+            raise OSError("cannot detect the board's copper layers")
+
+        monkeypatch.setattr("kicad_tools.router.io.detect_layer_stack", unreadable_layers)
+
     path = _silk_defect_stackup_board(tmp_path)
+    before = path.read_bytes()
     output = tmp_path / "must-not-exist"
     assert (
         main(
@@ -518,10 +528,12 @@ def test_export_cli_named_stackup_refuses_unrepairable_silk(tmp_path, capsys, mo
                 "--bom-source",
                 "pcb",
                 "--skip-preflight",
+                "--no-auto-lcsc",
             ]
         )
         == 1
     )
+    assert path.read_bytes() == before
     assert not output.exists()
     err = capsys.readouterr().err.lower()
     assert "silk legalisation pass could not run" in err

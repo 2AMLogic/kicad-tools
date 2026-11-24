@@ -90,15 +90,11 @@ def run_default_silk_pass(
 ) -> dict[str, Any] | None:
     """Run the shared silk-legalisation pass in place on *board* (#9799).
 
-    Never fatal in itself: a board the pass cannot process (no profile,
-    shapely missing, a placer rejection) is reported as a warning and
-    returned as a document with ``"applied": False`` so the caller's own
-    work -- routed copper, placement, the export bundle -- still ships.
-    The named-stackup manufacturing export is the exception (#10051,
-    maintainer decision 2026-11-24): it requested the repair, so it stops
-    before publishing when this function returns ``"applied": False``.
-    A caller that wants the original artwork passes ``--no-silk-fix``,
-    which skips this pass entirely.
+    An unresolved manufacturer profile returns ``None``. If the repair
+    starts and fails, its report has ``"applied": False``. A named-stackup
+    export requires a report confirming that the requested pass ran,
+    including a completed pass that made zero edits. A caller can select
+    ``--no-silk-fix`` to export the original artwork.
 
     Args:
         board: The finished board to legalise (modified in place only when

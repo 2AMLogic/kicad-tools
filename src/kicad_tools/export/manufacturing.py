@@ -825,6 +825,12 @@ class ManufacturingPackage:
             except SourceChangedError as exc:
                 result.errors.append(f"Stackup ordering validation failed: {exc}")
                 return result
+            if self.config.stackup_id and result.silk_fix is None:
+                result.silk_fix = {
+                    "applied": False,
+                    "manufacturer": self.manufacturer,
+                    "error": "could not resolve the manufacturer's silk rules for this board",
+                }
             if result.silk_fix is not None and not result.silk_fix.get("applied"):
                 message = "Silk legalisation pass could not run: " + str(
                     result.silk_fix.get("error", "unknown reason")
