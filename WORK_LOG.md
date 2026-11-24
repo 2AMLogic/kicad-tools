@@ -16,6 +16,24 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-24
 
+- **PR #10059**: perf(router): restore the retry budget only when copper the failed search read changes
+- **PR #10066**: fix(board06): clear both PCIe receiver pad exits and preserve trace-length skew
+- **Issue #5509** (closed): Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
+- **Issue #10048** (closed): Preserve KiCad rule sidecars in the conformance oracle and cover the group 14 high-voltage matrix
+- **PR #10055**: test(conformance): preserve rule sidecars and calibrate the high-voltage pair matrix
+- **Issue #10050** (closed): Zone-refill stage still binds named-stackup provenance by re-reading the live board after kicad-cli saves it
+- **PR #10065**: fix(export): bind named stackups to the native refill output
+- **Issue #10049** (closed): Document the new `summary.failure_reason` key in the `kct route --format json` contract
+- **PR #10052**: docs: explain the post-route DRC failure reason in routing JSON
+- **Issue #10063** (closed): Board 06 nightly preservation test stops at an obsolete 64-segment input count
+- **PR #10064**: test(router): verify every pre-routed Board 06 LVDS segment
+- **PR #10058**: fix(board05): bind the U2 thermal mask opening to grounded pad 29
+- **PR #10062**: fix(router): find legal BGA exits on preserved copper
+- **PR #10060**: fix(board06): move the mirrored USB2 escape barrels together
+- **PR #10053**: fix(router): preserve same-net pad clearance in trace shortcuts
+- **Issue #9990** (closed): fix: a named-stackup export fails with 'PCB changed during manufacturing export' when the silk pass edits the board
+- **PR #10039**: fix: bind the silk pass's named-stackup provenance to the bytes it reads and publishes
+- **PR #10001**: chore(board02): legalize silk through the shared default pass
 - **Issue #10046** (closed): Document the measured Board 06 seed-42 backend results in the fixture README
 - **Issue #10036** (closed): readiness: publish-time and pre-candidate concurrency guards still raise path-less blockers
 - **Issue #10035** (closed): Search-path via-relocate test asserts nothing about added connections (vacuous loop)
@@ -4035,26 +4053,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #5720** (closed): router: the coupled Python via predicate's raster sweeps dominate what is left after #5696's memo
 - **Issue #5708** (closed): Flaky perf gate (recurrence): test_dormant_partner_optimized_not_slower fails at 1.33x on shared CI runners (threshold 1.25, #3581 closed)
 - **Issue #5685** (closed): cleanup(router/mesh): retire the three helpers Epic #5509 Phase 3e left without a production caller
-
-### 2026-09-24
-
-- **PR #5725**: test(mfr): gate native SMD Pad Clearance on a measured availability probe
-- **PR #5723**: test(drc): match native DRC findings on the bare rule name
-- **PR #5722**: test: converge kicad-cli discovery on find_kicad_cli()
-- **Issue #5721** (closed): Native SMD Pad Clearance rule does not fire on kicad-cli 10.0.1 (undeclared minimum version)
-- **PR #5719**: perf(router): memoise the coupled diff-pair halo via refinement on the pure-Python fallback
-- **PR #5718**: fix(validate): stop classifying KiCad's instance-lock warning as a failed export
-- **PR #5717**: test(perf): replace the dormant-partner timing gate with a structural assertion
-- **PR #5716**: test(mfr): scope ampacity DRU fallback to what it actually guards
-- **PR #5715**: fix(router): apply the diff-pair partner clearance waiver in the coupled halo refinement (#5711), and rerun the #5410 DQ3 prefix on current main
-- **Issue #5714** (closed): test: converge kicad-cli discovery on find_kicad_cli() — 14 shutil.which sites across 12 modules
-- **Issue #5713** (closed): test(mfr): SMD Pad Clearance rule silently absent on KiCad 10.0.1 — plus a negative assertion that passes vacuously when it is
-- **Issue #5711** (closed): Coupled halo refinement: C++ arm omits the diff-pair partner-clearance waiver the Python arm applies (212-cell over-block)
-- **Issue #5707** (closed): Flaky CI: test_native_advanced_layer_matches_independent_gerber fails on kicad-cli 'Invalid lock file' (native export returned 0)
-- **Issue #5703** (closed): Native DRC assertions match on a KiCad-version-dependent description prefix (rule '...')
-- **Issue #5702** (closed): test_mfr: ampacity DRU fallback pins a stale rule-name set, fails whenever kicad-cli is off PATH
-- **PR #5698**: perf(router): read collision-grid planes directly in the optimizer's obstacle scan
-- **Issue #5696** (closed): router: memoise the coupled diff-pair halo refinement on the pure-Python fallback
 
 ### 2026-07-20 (evening)
 
