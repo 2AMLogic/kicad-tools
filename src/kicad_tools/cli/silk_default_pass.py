@@ -9,6 +9,12 @@ defect.  The pass names its result and anything it could not fix in the
 command output; it never waives anything and never gates the exit code (the
 independent ``kct check`` and native DRC gates stay authoritative).  Each
 command takes ``--no-silk-fix`` to leave authored silk byte-identical.
+
+One exception (#10051, maintainer decision 2026-11-24): a named-stackup
+manufacturing export requires the requested repair.  When the pass returns
+``applied: False`` there (e.g. the filesystem has no hard-link support for
+the checked publication path), the exporter stops before publishing
+anything; ``--no-silk-fix`` keeps the original artwork exportable.
 """
 
 from __future__ import annotations
@@ -84,10 +90,15 @@ def run_default_silk_pass(
 ) -> dict[str, Any] | None:
     """Run the shared silk-legalisation pass in place on *board* (#9799).
 
-    Never fatal: a board the pass cannot process (no profile, shapely
-    missing, a placer rejection) is reported as a warning and returned as a
-    document with ``"applied": False`` so the caller's own work -- routed
-    copper, placement, the export bundle -- still ships.
+    Never fatal in itself: a board the pass cannot process (no profile,
+    shapely missing, a placer rejection) is reported as a warning and
+    returned as a document with ``"applied": False`` so the caller's own
+    work -- routed copper, placement, the export bundle -- still ships.
+    The named-stackup manufacturing export is the exception (#10051,
+    maintainer decision 2026-11-24): it requested the repair, so it stops
+    before publishing when this function returns ``"applied": False``.
+    A caller that wants the original artwork passes ``--no-silk-fix``,
+    which skips this pass entirely.
 
     Args:
         board: The finished board to legalise (modified in place only when

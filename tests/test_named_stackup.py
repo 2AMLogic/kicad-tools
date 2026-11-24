@@ -390,6 +390,144 @@ def test_silk_preserves_concurrent_drawing_save(tmp_path, monkeypatch, when):
     assert not (out / "manifest.json").exists()
 
 
+def _break_hard_link_support(monkeypatch):
+    """Simulate a filesystem without hard-link support (issue #10051).
+
+    ``_publish_checked`` probes ``os.link`` before displacing the board;
+    vfat/exFAT-style volumes answer that probe with an unsupported-operation
+    error.  The injection lands on the real probe call only.
+    """
+    import errno
+
+    from kicad_tools.core import atomic_write
+
+    real_link = atomic_write.os.link
+
+    def linkless(source, target, **kwargs):
+        if Path(target).name == "link-test":
+            raise OSError(errno.EOPNOTSUPP, "link() not supported on this filesystem")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(atomic_write.os, "link", linkless)
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_linkless_filesystem_fails_named_stackup_export_before_publishing(tmp_path, monkeypatch):
+    """Issue #10051: a named-stackup export must not ship unrepaired silk.
+
+    The filesystem cannot support the checked publication the requested
+    repair needs, so the export stops with an error before anything is
+    written.  The probe runs before the board is displaced, so the board
+    and its directory are left exactly as they were.
+    """
+    _break_hard_link_support(monkeypatch)
+    path = _silk_defect_stackup_board(tmp_path)
+    before = path.read_bytes()
+    out = tmp_path / "out"
+    result = _stackup_package(path).export(out)
+
+    assert not result.success
+    assert "Silk legalisation pass could not run" in result.errors[-1]
+    assert "--no-silk-fix" in result.errors[-1]
+    assert result.stackup_path is None and result.manifest_path is None
+    assert not out.exists()
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob(f".{path.name}.*"))  # staging cleaned up
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_linkless_filesystem_silk_optout_exports_original_artwork(tmp_path, monkeypatch):
+    """Issue #10051: ``--no-silk-fix`` keeps the original artwork exportable.
+
+    With the pass skipped, nothing on this volume needs hard links: the
+    export succeeds with zero silk warnings, and the ordering record,
+    project ZIP and manifest all describe the untouched board bytes.
+    """
+    import hashlib
+    import zipfile
+
+    from kicad_tools.export.manufacturing import verify_manifest
+
+    _break_hard_link_support(monkeypatch)
+    path = _silk_defect_stackup_board(tmp_path)
+    before_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    result = _stackup_package(path, silk_fix=False).export(tmp_path / "out")
+
+    assert result.success, result.errors
+    assert result.silk_fix is None
+    assert not [w for w in result.warnings if "silk" in w.lower()]
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before_hash
+    record = json.loads(result.stackup_path.read_text())
+    assert record["pcb_sha256"] == before_hash
+    with zipfile.ZipFile(result.project_zip_path) as zf:
+        assert hashlib.sha256(zf.read(path.name)).hexdigest() == before_hash
+    assert verify_manifest(result.manifest_path) == []
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_unrunnable_silk_pass_plain_export_keeps_warning(tmp_path, monkeypatch):
+    """Issue #10051 boundary: only the named-stackup export escalates.
+
+    Without ``stackup_id`` a pass that cannot run stays a warning and the
+    export still ships (#9799's never-fatal default pass).
+    """
+    import errno
+
+    from kicad_tools.drc import repair_silkscreen
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig
+
+    def unavailable(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "link() not supported on this filesystem")
+
+    monkeypatch.setattr(repair_silkscreen, "legalize_silk", unavailable)
+
+    path = _silk_defect_stackup_board(tmp_path)
+    config = ManufacturingConfig(
+        bom_source="pcb",
+        include_bom=False,
+        include_pnp=False,
+        include_gerbers=False,
+        include_report=False,
+        include_project_zip=False,
+        preflight=PreflightConfig(skip_all=True),
+    )
+    result = ManufacturingPackage(path, manufacturer="jlcpcb", config=config).export(
+        tmp_path / "out"
+    )
+
+    assert result.success, result.errors
+    assert any("Silk legalisation pass could not run" in w for w in result.warnings)
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_export_cli_named_stackup_refuses_unrepairable_silk(tmp_path, capsys, monkeypatch):
+    _break_hard_link_support(monkeypatch)
+    from kicad_tools.cli.export_cmd import main
+
+    path = _silk_defect_stackup_board(tmp_path)
+    output = tmp_path / "must-not-exist"
+    assert (
+        main(
+            [
+                str(path),
+                "--stackup-id",
+                "JLC04161H-3313",
+                "-o",
+                str(output),
+                "--bom-source",
+                "pcb",
+                "--skip-preflight",
+            ]
+        )
+        == 1
+    )
+    assert not output.exists()
+    err = capsys.readouterr().err.lower()
+    assert "silk legalisation pass could not run" in err
+    assert "--no-silk-fix" in err
+
+
 def test_save_pcb_returns_hash_of_published_bytes(tmp_path):
     import hashlib
 
