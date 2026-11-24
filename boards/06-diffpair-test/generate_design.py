@@ -3437,7 +3437,7 @@ def _resolve_quantize_treatment(
 
 
 def _clear_pad_departures(pcb_path: Path) -> int:
-    """Repair the sideband and mirrored USB2 escapes flagged by the mask check.
+    """Repair the sideband, USB2 and PCIe escapes flagged by the mask check.
 
     Runs inside the step-13 transaction, so the refill, pour audit and
     clearance gates below grade the rebuilt escapes like any other repair.
