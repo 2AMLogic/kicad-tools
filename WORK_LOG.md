@@ -16,6 +16,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-24
 
+- **PR #10084**: fix(board06): clear the MIPI clock pad exits within the skew budget
+- **Issue #10083** (closed): Board 06: clear the MIPI clock pad exits while meeting the project skew limit
+- **Issue #8610** (closed): route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4)
+- **PR #10090**: fix(router): keep fabrication clearance around a route’s own via
+- **PR #10089**: fix(current-paths): bury a split-feeder stroke whose cover is all on-path
+- **PR #10087**: fix(drc): slide a jog between parallel runs out of a pad opening
+- **PR #10081**: fix(board06): widen both PCIe receiver exits at J3
+- **PR #10075**: fix(router): verify off-pad breakouts against preserved pours
+- **Issue #10085** (closed): Current-path audit warns about a buried stroke near a T-junction when the feeder is split
+- **Issue #10078** (closed): Board 06: clear the PCIe receiver exits at J3 pads 8 and 9 on the seed-42 fixture
+- **Issue #10067** (closed): Board 06 Python routing: clear the RX1− departure at J1.B10 on the two-open board
+- **Issue #8640** (closed): Live-verify tapeout cleanup (dedupe/prune/optimize-traces) on the mains board
 - **PR #10030**: fix(current-paths): measure shared copper once and locate off-route loops
 - **PR #10071**: fix(router): preserve trace clearance beside same-net branch vias
 - **PR #10068**: fix(drc): clear shared pad exits without bending their tracks
