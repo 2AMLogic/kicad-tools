@@ -29,10 +29,16 @@ def test_release_copper_clears_the_d9_via_slit_and_c1_mask_opening():
     gaps = check_physical_copper_gap(pcb, 0.127)
     assert not [v for v in gaps.violations if v.severity == "error"]
 
-    # Check the native mask measurements taken on the fully optimized PCB.
+    # A refused release keeps the previous package and records the new
+    # board's native measurements in the producer's readiness-attempt report.
+    board_sha = hashlib.sha256(path.read_bytes()).hexdigest()
     report = json.loads((output / "manufacturing/kct-check.json").read_text())
+    if report["pcb_sha256"] != board_sha:
+        report = json.loads((output / "readiness-attempt/kct-check.json").read_text())
+    assert report["pcb_sha256"] == board_sha
     (mask,) = report["mask_copper_assessments"]
-    assert mask["binding"]["source_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert mask["binding"]["source_sha256"] == board_sha
+    assert mask["geometry_provenance"]["export"]["source_sha256"] == board_sha
     assert mask["coverage"] == "complete" and mask["passed"]
     c1 = [sample for sample in mask["measurements"] if sample["owner_ref"] == "C1/1"]
     assert any(sample["own_pad_entry"] and sample["conductor_net"] == "VCC" for sample in c1)
