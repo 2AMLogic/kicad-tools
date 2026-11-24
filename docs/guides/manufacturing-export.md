@@ -596,6 +596,14 @@ directory named
 saves into it after the export published, that save stays recoverable in
 the retained copy rather than being lost.
 
+If the exporter rolls back after the repaired board appeared at the live
+filename, the recovery directory also contains `provisional`, the file an
+editor could have opened during that interval. `withdrawn`, when present,
+is the file found at the live name during rollback. It can be another hard
+link to `provisional` or a separate file saved by an editor. Compare these
+files with the live PCB before discarding a recovery. Close any editors
+still writing those versions before cleanup.
+
 Inspect the retained versions with any diff tool:
 
 ```bash
@@ -614,7 +622,8 @@ kct clean boards/04-stm32-devboard/04-stm32-devboard.kicad_pro --force
 deletes them with `--force` while the board exists. The writer reserves
 the `complete` marker before moving the board. The copy becomes eligible
 for cleanup once the writer verifies the new board and removes its working
-link, `repaired`. Interrupted writes remain available for manual recovery.
+link, `repaired`. A completed rollback renames that link to `provisional`
+after restoring the live name. Interrupted writes remain available for manual recovery.
 
 ## Next Steps
 

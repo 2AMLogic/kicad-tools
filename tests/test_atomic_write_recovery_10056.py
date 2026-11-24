@@ -14,6 +14,7 @@ import errno
 import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 from threading import Event
 
@@ -351,14 +352,110 @@ def test_failed_recovery_finalization_preserves_newest_board(tmp_path, monkeypat
         _checked_rewrite(board, b"new board")
 
     assert attempted
-    assert recovery_copies(board) == []
-    if editor_save:
-        assert board.read_bytes() == b"editor save"
-        (original,) = tmp_path.glob(".*.recovery-*/original")
-        assert original.read_bytes() == b"original board"
+    (record,) = recovery_copies(board)
+    assert board.read_bytes() == (b"editor save" if editor_save else b"original board")
+    assert (record / "original").read_bytes() == b"original board"
+    provisional = b"editor save" if editor_save == "in-place" else b"new board"
+    assert (record / "provisional").read_bytes() == provisional
+    assert (record / "withdrawn").read_bytes() == (b"editor save" if editor_save else provisional)
+
+
+@pytest.mark.parametrize("trigger", ["source_change", "final_unlink"])
+def test_rollback_keeps_both_editor_handles_after_withdrawal_read(tmp_path, monkeypatch, trigger):
+    from kicad_tools.cli.clean_cmd import delete_files, find_cleanable_files
+
+    board = tmp_path / "board.kicad_pcb"
+    project = board.with_suffix(".kicad_pro")
+    project.write_text(MINIMAL_PROJECT)
+    board.write_bytes(b"previous board")
+    _checked_rewrite(board, b"original")
+    (older,) = recovery_copies(board)
+    real_link, real_unlink, real_read = os.link, Path.unlink, Path.read_bytes
+    second = None
+    saved_after_read = False
+
+    def open_published(source, target, **kwargs):
+        nonlocal second
+        result = real_link(source, target, **kwargs)
+        if source.name == "repaired" and target == board:
+            second = handles.enter_context(board.open("r+b"))
+            if trigger == "source_change":
+                _save_through_open_handle(first.fileno(), b"first editor")
+        return result
+
+    def fail_final_unlink(path, *args, **kwargs):
+        if trigger == "final_unlink" and path.name == "repaired" and second is not None:
+            _save_through_open_handle(first.fileno(), b"first editor")
+            raise OSError(errno.EIO, "final unlink failed")
+        return real_unlink(path, *args, **kwargs)
+
+    def save_after_read(path):
+        nonlocal saved_after_read
+        data = real_read(path)
+        if path.name == "withdrawn" and not saved_after_read:
+            assert second is not None and data == b"provisional"
+            _save_through_open_handle(second.fileno(), b"second editor")
+            saved_after_read = True
+        return data
+
+    with ExitStack() as handles, monkeypatch.context() as patch:
+        first = handles.enter_context(board.open("r+b"))
+        patch.setattr(os, "link", open_published)
+        patch.setattr(Path, "unlink", fail_final_unlink)
+        patch.setattr(Path, "read_bytes", save_after_read)
+        error = SourceChangedError if trigger == "source_change" else OSError
+        with pytest.raises(error):
+            _checked_rewrite(board, b"provisional")
+        assert saved_after_read and second is not None
+        assert board.read_bytes() == b"first editor"
+        (record,) = set(recovery_copies(board)) - {older}
+        assert os.path.samestat(os.fstat(second.fileno()), (record / "provisional").stat())
+        assert (record / "provisional").read_bytes() == b"second editor"
+        _save_through_open_handle(second.fileno(), b"save after rollback")
+
+    assert (older / "original").read_bytes() == b"previous board"
+    assert (record / "provisional").read_bytes() == b"save after rollback"
+    preview = find_cleanable_files(project)
+    sizes = {row.path: row.size_bytes for row in preview.by_category("recovery_copy")}
+    assert sizes == {older: len(b"previous board"), record: len(b"save after rollback")}
+    assert delete_files(preview) == (2, sum(sizes.values()))
+    assert not recovery_copies(board) and board.read_bytes() == b"first editor"
+
+
+@pytest.mark.parametrize("completion", ["concurrent_cleanup", "rename_failure"])
+def test_rollback_completion_preserves_the_live_board(tmp_path, monkeypatch, completion):
+    board = tmp_path / "board.kicad_pcb"
+    board.write_bytes(b"original")
+    real_link, real_rename = os.link, Path.rename
+    cleaned = []
+
+    def edit_original(source, target, **kwargs):
+        real_link(source, target, **kwargs)
+        if source.name == "repaired" and target == board:
+            (source.parent / "original").write_bytes(b"editor save")
+
+    def clean_completed_rollback(path, target):
+        finishing = path.name == "repaired" and target.name == "provisional"
+        if finishing and completion == "rename_failure":
+            raise OSError(errno.EIO, "cannot complete rollback record")
+        result = real_rename(path, target)
+        if finishing:
+            cleaned.extend(clear_recovery_copies(board))
+        return result
+
+    monkeypatch.setattr(os, "link", edit_original)
+    monkeypatch.setattr(Path, "rename", clean_completed_rollback)
+    error = SourceChangedError if completion == "concurrent_cleanup" else OSError
+    with pytest.raises(error):
+        _checked_rewrite(board, b"briefly published")
+    assert board.read_bytes() == b"editor save"
+    assert clear_recovery_copies(board) == []
+    if completion == "concurrent_cleanup":
+        assert len(cleaned) == 1 and list(tmp_path.iterdir()) == [board]
     else:
-        assert board.read_bytes() == b"original board"
-        assert list(tmp_path.iterdir()) == [board]
+        (working,) = tmp_path.glob(".*.recovery-*")
+        assert (working / "original").read_bytes() == b"editor save"
+        assert (working / "repaired").read_bytes() == b"briefly published"
 
 
 def test_cleanup_at_commit_cannot_invalidate_publication(tmp_path, monkeypatch):

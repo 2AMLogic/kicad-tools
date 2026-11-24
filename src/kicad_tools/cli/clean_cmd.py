@@ -175,6 +175,19 @@ def get_project_schematic_name(project_path: Path) -> str | None:
     return project_path.stem + ".kicad_sch"
 
 
+def _recovery_size(directory: Path) -> int:
+    """Count file bytes whose last directory entry would be removed by cleanup."""
+    links: dict[tuple[int, int], int] = {}
+    size = 0
+    for entry in directory.iterdir():
+        stat = entry.lstat()
+        key = (stat.st_dev, stat.st_ino)
+        links[key] = links.get(key, 0) + 1
+        if links[key] == stat.st_nlink:
+            size += stat.st_size
+    return size
+
+
 def find_cleanable_files(
     project_path: Path,
     deep: bool = False,
@@ -231,14 +244,14 @@ def find_cleanable_files(
             recovery = retained_copy_board(file_path)
             if recovery is not None:
                 try:
-                    size = (file_path / "original").stat().st_size
+                    size = _recovery_size(file_path)
                 except OSError:
                     size = 0
                 result.to_delete.append(
                     CleanableFile(
                         path=file_path,
                         category="recovery_copy",
-                        reason=f"retained previous copy of {recovery.name}",
+                        reason=f"retained PCB recovery for {recovery.name}",
                         size_bytes=size,
                     )
                 )
