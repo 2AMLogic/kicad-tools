@@ -269,9 +269,7 @@ def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
     return extent if extent > 0.0 else None
 
 
-def _escape_endpoint_connected_extents(
-    pad: Pad, escape: EscapeRoute
-) -> tuple[dict[Layer, float], bool]:
+def _escape_endpoint_connected_extents(pad: Pad, escape: EscapeRoute) -> dict[Layer, float]:
     """Per-layer copper disc diameters at ``escape_point`` electrically joined to ``pad``."""
     from .connectivity import _UnionFind
     from .terminal_connectivity import _net_copper_shapes
@@ -280,7 +278,7 @@ def _escape_endpoint_connected_extents(
     raw_via = getattr(escape, "via", None)
     vias = [raw_via] if raw_via is not None and raw_via.net == pad.net else []
     if not segs and not vias:
-        return {}, False
+        return {}
 
     shapes, masks = _net_copper_shapes([pad], segs, vias)
     uf = _UnionFind()
@@ -302,9 +300,7 @@ def _escape_endpoint_connected_extents(
         if cap > 0.0:
             extents[seg.layer] = max(extents.get(seg.layer, 0.0), cap)
 
-    via_connected = False
     if vias and uf.find(1 + len(segs)) == pad_root:
-        via_connected = True
         via = vias[0]
         via_cap = float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey)
         if via_cap > 0.0:
@@ -312,7 +308,7 @@ def _escape_endpoint_connected_extents(
             for layer in copper_layers_in_span(via_lo, via_hi):
                 extents[layer] = max(extents.get(layer, 0.0), via_cap)
 
-    return extents, via_connected
+    return extents
 
 
 def escape_endpoint_pad(
@@ -354,7 +350,7 @@ def escape_endpoint_pad(
     but neither proves committed copper and neither enlarges metal.
     """
     ex, ey = escape.escape_point
-    connected_extents, via_connected = _escape_endpoint_connected_extents(pad, escape)
+    connected_extents = _escape_endpoint_connected_extents(pad, escape)
     preferred = escape.escape_layer
     terminal_layers: tuple[Layer, ...] | None = None
     terminal_layer = preferred
@@ -366,12 +362,8 @@ def escape_endpoint_pad(
         terminal_layers = tuple(ordered)
         terminal_layer = ordered[0]
         extent: float | None = min(connected_extents[lyr] for lyr in ordered)
-    elif getattr(escape, "via", None) is not None and not via_connected:
-        extent = None
     else:
-        extent = escape_endpoint_copper_extent(escape)
-        if extent is not None:
-            terminal_layers = (preferred,)
+        extent = None
 
     on_layer = pad.through_hole or preferred == pad.layer
     unchanged = ex == pad.x and ey == pad.y and on_layer
@@ -392,11 +384,18 @@ def escape_endpoint_pad(
                     radius = min(hw - x, hh - y)
                 elif pad.shape == "circle":
                     radius = min(hw, hh) - math.hypot(x, y)
-                elif pad.shape in ("oval", "roundrect"):
-                    # This capsule is contained in every rounded rectangle
-                    # with these dimensions, even with unknown corner radii.
+                elif pad.shape == "oval":
                     r = min(hw, hh)
                     radius = r - math.hypot(max(0.0, x - (hw - r)), max(0.0, y - (hh - r)))
+                elif pad.shape == "roundrect":
+                    from shapely.geometry import Point  # type: ignore[import-untyped]
+
+                    from .terminal_connectivity import _contact_outline
+
+                    outline = _contact_outline(pad)
+                    point = Point(ex, ey)
+                    if outline.covers(point):
+                        radius = outline.boundary.distance(point)
             extent = 2 * max(0.0, radius)
             if extent > 0:
                 terminal_layers = (
@@ -438,6 +437,7 @@ def escape_endpoint_pad(
         shape=shape,
         # Issue #6718: an unchanged terminal keeps its authored roundrect corners.
         roundrect_rratio=pad.roundrect_rratio if shape == pad.shape else None,
+        chamfered_outline=pad.chamfered_outline if shape == pad.shape else (),
         escape_terminal=not (unchanged and extent is None),
         terminal_layers=terminal_layers,
     )
@@ -9340,6 +9340,17 @@ class EscapeRouter:
             # PR #2999's single-pass loop left open (Issue #3013).
             current_net = escape.pad.net
             if escape.segments:
+                # A proposed surface stub must reach its own pad. Dropping
+                # only the virtual terminal would still write an open island.
+                if escape.via is None and not _escape_endpoint_connected_extents(
+                    escape.pad, escape
+                ):
+                    logger.info(
+                        "Deferring isolated surface escape for %s.%s",
+                        escape.pad.ref,
+                        escape.pad.pin,
+                    )
+                    continue
                 violation = False
                 for seg in escape.segments:
                     # HARD-INTERSECTION threshold: only flag copper
@@ -9417,8 +9428,9 @@ class EscapeRouter:
         # essential -- a stale override would redirect the main router to
         # a non-existent escape endpoint and leave the original pad
         # unconnected, regressing completion.
-        if skipped_seg_vs_via or skipped_authored:
+        if len(committed_escapes) != len(escapes):
             escapes[:] = committed_escapes
+        if skipped_seg_vs_via or skipped_authored:
             logger.info(
                 "Escape commit: %d escape(s) deferred to main router due to "
                 "hard intersection with foreign-net via (Issue #2998)",

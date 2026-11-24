@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from kicad_tools.core.board_outline import OutlineSegments
     from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
+    from kicad_tools.sexp import SExp
 
     from .board_clearance_rules import BoardClearanceRules
     from .clearance_shapes import KPad, KShape
@@ -2856,6 +2857,7 @@ def load_pads_for_analysis(
                     rotation=pad_rotation,
                     shape=pad_shape,
                     roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
+                    chamfered_outline=_pad_chamfered_outline(pad_block),
                 )
             )
 
@@ -4995,6 +4997,7 @@ def route_pcb(
                     "width": pad.get("width", 0.5),
                     "shape": pad.get("shape", "rect"),
                     "roundrect_rratio": pad.get("roundrect_rratio"),
+                    "chamfered_outline": pad.get("chamfered_outline", ()),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
                     "net_name": net_name,
@@ -5135,6 +5138,62 @@ def _schema_pad_shape(pad, ref: str) -> str:
         pin=pad.number,
         has_padstack=node is not None and node.find("padstack") is not None,
     )
+
+
+def _pad_chamfered_outline(source: str | SExp | None) -> tuple[tuple[float, float], ...]:
+    """Copper of a mixed chamfered/rounded pad, relative to its centre in board axes."""
+    from kicad_tools.core.geometry import rotate_pad_offset
+    from kicad_tools.sexp import parse_string
+
+    if isinstance(source, str):
+        if "(chamfer" not in source:
+            return ()
+        source = parse_string(source)
+    if source is None or (corners := source.find_child("chamfer")) is None:
+        return ()
+    ratio = source.find_child("chamfer_ratio")
+    size = source.find_child("size")
+    if ratio is None or size is None:
+        return ()
+    width, height = size.get_float(0) or 0.0, size.get_float(1) or 0.0
+    short = min(width, height)
+    cut = min(0.5, ratio.get_float(0) or 0.0) * short
+    if cut <= 0:
+        return ()
+    rounding = source.find_child("roundrect_rratio")
+    rratio = rounding.get_float(0) if rounding is not None else None
+    rounded = (0.5 if rratio is None else max(0.0, min(0.5, rratio))) * short
+    at = source.find_child("at")
+    rotation = (at.get_float(2) or 0.0) if at is not None else 0.0
+    selected = {item.value for item in corners.children}
+    vertices: list[tuple[float, float]] = []
+    for name, sx, sy, angle in (
+        ("top_left", -1, -1, 180),
+        ("top_right", 1, -1, 270),
+        ("bottom_right", 1, 1, 0),
+        ("bottom_left", -1, 1, 90),
+    ):
+        # A chamfer replaces the round on that corner. Its two tangent
+        # points describe one straight cut. Uncut corners retain the same
+        # inscribed arc resolution as pad_gate_polygon.
+        chamfered = name in selected
+        radius = cut if chamfered else rounded
+        steps = 1 if chamfered or radius == 0 else 32
+        cx, cy = sx * (width / 2 - radius), sy * (height / 2 - radius)
+        for i in range(steps + 1):
+            theta = math.radians(angle + 90 * i / steps)
+            x, y = cx + radius * math.cos(theta), cy + radius * math.sin(theta)
+            vertices.append(rotate_pad_offset(x, y, rotation))
+    return tuple(vertices)
+
+
+def _schema_pad_shape_fields(pad, ref: str) -> dict:
+    """Geometry shared by the schema-based router entry points."""
+    return {
+        "shape": _schema_pad_shape(pad, ref),
+        "roundrect_rratio": _schema_pad_rratio(pad),
+        "chamfered_outline": _pad_chamfered_outline(getattr(pad, "_sexp_node", None)),
+    }
 
 
 def _resolve_pad_dims_and_rotation(
@@ -5328,6 +5387,7 @@ def _install_fine_pitch_regions_from_components(
                         rotation=float(pad_info.get("rotation", 0.0)),
                         shape=pad_info.get("shape", "rect"),
                         roundrect_rratio=pad_info.get("roundrect_rratio"),
+                        chamfered_outline=pad_info.get("chamfered_outline", ()),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -5917,6 +5977,7 @@ def load_pcb_for_routing(
                     "rotation": pad_rotation,
                     "shape": pad_shape,
                     "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),
+                    "chamfered_outline": _pad_chamfered_outline(pad_block),
                 }
             )
 

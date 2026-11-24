@@ -697,6 +697,9 @@ class Pad:
     Routing, clearance and grid code ignore it.
     """
 
+    chamfered_outline: tuple[tuple[float, float], ...] = ()
+    """Copper boundary of an authored chamfered pad, in board-axis offsets from its centre."""
+
     @property
     def component_key(self) -> str:
         """Physical component key used for grouping and geometric exemptions."""

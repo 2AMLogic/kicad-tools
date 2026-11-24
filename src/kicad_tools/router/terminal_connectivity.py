@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import shapely  # type: ignore[import-untyped]
-from shapely import affinity
 from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
 from kicad_tools.core.types import copper_layers_in_span
+from kicad_tools.geometry.copper import pad_gate_polygon
 
 from .connectivity import _UnionFind
 from .kelvin_obstacles import _pad_outline
@@ -25,28 +25,17 @@ if TYPE_CHECKING:
 def _contact_outline(pad: Pad):
     """Copper a conductor may touch to connect ``pad``, never larger than the pad.
 
-    Rounded rectangles lack corner-radius metadata on :class:`Pad`, and
-    ``_pad_outline(contact=True)`` models them as the inscribed *circle* --
-    safe for Kelvin contact selection, but far too small for connectivity:
-    board 03's U1.3 (0.55 x 1.475 mm) is fed by a trace ending 0.51 mm from
-    its centre, inside the copper yet outside that circle (Issue #6371).
-    KiCad caps ``roundrect_rratio`` at 0.5, and every such roundrect contains
-    the stadium inscribed in its bounding box (the box minus the radius-r
-    corners contains the box minus radius-min(w,h)/2 corners), so the stadium
-    is still a lower bound on the real copper.
+    Use the authored corner radius for a roundrect. When the radius is
+    missing, KiCad's maximum ratio of 0.5 gives the stadium contained in
+    every roundrect of those dimensions (issue #6371).
     """
     if pad.shape != "roundrect":
         return _pad_outline(pad, contact=True)
-    w, h = pad.width, pad.height
-    radius = min(w, h) / 2
-    delta = abs(w - h) / 2
-    if delta <= 0:
-        shape = Point(0, 0).buffer(radius)
-    else:
-        ends = [(-delta, 0), (delta, 0)] if w >= h else [(0, -delta), (0, delta)]
-        shape = LineString(ends).buffer(radius)
-    # Same rotation convention as ``_pad_outline``.
-    return affinity.translate(affinity.rotate(shape, -pad.rotation), pad.x, pad.y)
+    if pad.chamfered_outline:
+        return shapely.Polygon([(pad.x + dx, pad.y + dy) for dx, dy in pad.chamfered_outline])
+    ratio = pad.roundrect_rratio if pad.roundrect_rratio is not None else 0.5
+    shape = pad_gate_polygon(pad.x, pad.y, pad.width, pad.height, pad.shape, pad.rotation, ratio)
+    return shape if shape is not None else shapely.Polygon()
 
 
 def physical_pad_components(pads: list[Pad], routes: list[Route]) -> list[int]:

@@ -6195,6 +6195,7 @@ class DiffPairRouter:
             rotation=template.rotation,
             shape=template.shape,
             roundrect_rratio=template.roundrect_rratio,
+            chamfered_outline=template.chamfered_outline,
         )
 
     def _segment_cells_clear(

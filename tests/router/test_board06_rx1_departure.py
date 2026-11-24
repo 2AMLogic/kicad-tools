@@ -388,6 +388,50 @@ def test_disconnected_escape_barrel_is_rejected():
         escape_endpoint_pad(bga_ball, escape, fallback_width=0.275)
 
 
+@pytest.mark.parametrize(
+    ("shape", "ratio", "connected"),
+    [
+        ("rect", None, True),
+        ("roundrect", 0.05, True),
+        ("roundrect", None, False),
+        ("circle", None, False),
+    ],
+)
+def test_escape_barrel_contact_at_a_pad_corner(shape, ratio, connected):
+    pad = Pad(6, 4, 2, 2, 1, "SIG", shape=shape, roundrect_rratio=ratio)
+    via = Via(6.96, 4.96, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 1, "SIG")
+    escape = EscapeRoute(pad, EscapeDirection.VIA_DOWN, (via.x, via.y), Layer.B_CU, via=via)
+    if connected:
+        terminal = escape_endpoint_pad(pad, escape, fallback_width=0.18)
+        assert terminal.layer == Layer.B_CU
+        assert Layer.F_CU in terminal.terminal_layers
+    else:
+        with pytest.raises(ValueError, match="no committed copper"):
+            escape_endpoint_pad(pad, escape, fallback_width=0.18)
+
+
+@pytest.mark.parametrize("connected", [True, False], ids=["pad-connected", "floating-stub"])
+def test_surface_escape_requires_a_connection_to_the_physical_pad(connected):
+    pad = Pad(8, 2, 1, 1, 1, "SIG")
+    start = (pad.x, pad.y) if connected else (7.5, 5)
+    segment = Segment(*start, 8, 5, 0.25, Layer.F_CU, 1, "SIG")
+    escape = EscapeRoute(pad, EscapeDirection.NORTH, (8, 5), Layer.F_CU, segments=[segment])
+    rules = DesignRules(grid_resolution=0.1)
+    grid = RoutingGrid(12, 9, rules, layer_stack=LayerStack.two_layer())
+    candidates = [escape]
+    committed = EscapeRouter(grid, rules).apply_escape_routes(candidates)
+    assert candidates == ([escape] if connected else [])
+    assert [seg for route in committed for seg in route.segments] == (
+        [segment] if connected else []
+    )
+    if connected:
+        terminal = escape_endpoint_pad(pad, escape, fallback_width=0.25)
+        assert terminal.terminal_layers == (Layer.F_CU,)
+    else:
+        with pytest.raises(ValueError, match="no committed copper"):
+            escape_endpoint_pad(pad, escape, fallback_width=0.25)
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_retry_preserved_departure_accepts_far_layer_of_through_barrel_and_edges(reverse):
     """retry_preserved_departure also admits arrival on the far face of a through barrel."""
