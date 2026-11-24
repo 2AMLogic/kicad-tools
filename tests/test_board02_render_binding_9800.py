@@ -160,6 +160,45 @@ def test_repeat_equivalent_saves_preserve_the_original_render_binding(tmp_path):
 # -- the changed-artwork branch ------------------------------------------
 
 
+def test_polygon_render_binding_across_staging(tmp_path):
+    module = _load_release_module()
+    _, _, images, options = _fixture_board(tmp_path, silk_changed=True, provenance=None)
+    # A freshly rendered board, followed by the native save in readiness.
+    source = (
+        b"(kicad_pcb (gr_poly (pts (xy 126.50 91.0) (xy 132.5 91) (xy 129.5 94) "
+        b"(xy 132.5 97) (xy 126.5 97)) (stroke (width 0.15) (type solid)) "
+        b'(fill yes) (layer "F.SilkS")))'
+    )
+    options.source_pcb_bytes = source
+    staged = source.replace(b"126.50 91.0", b"126.5 91").replace(b"(pts ", b"(pts\n ")
+    options.pcb.write_bytes(staged)
+    renders = options.board_dir / "output" / "renders"
+    receipt = json.dumps(_bind(options, source, images)).encode()
+    (renders / PROVENANCE).write_bytes(receipt)
+    _snapshot_old(module, options)
+    assert module._render_provenance(options) == receipt
+
+    # The next publication retains that receipt, but moves the notch to a
+    # different edge. Neither staging nor archived carry-forward may accept it.
+    package = options.board_dir / "output" / "manufacturing"
+    with zipfile.ZipFile(package / "kicad_project.zip", "w") as archive:
+        archive.write(options.pcb, options.pcb.name)
+    (package / "renders" / PROVENANCE).write_bytes(receipt)
+    for name, data in images.items():
+        (package / "renders" / name).write_bytes(data)
+    _snapshot_old(module, options)
+    changed = staged.replace(b"(xy 132.5 91) (xy 129.5 94)", b"(xy 129.5 94) (xy 132.5 91)")
+    options.pcb.write_bytes(changed)
+    with pytest.raises(RuntimeError, match="does not bind"):
+        module._render_provenance(options)
+    options.source_pcb_bytes = changed
+    with pytest.raises(RuntimeError, match="does not bind"):
+        module._render_provenance(options)
+    (renders / PROVENANCE).write_text(json.dumps(_bind(options, changed, images)))
+    for name in RENDERS:
+        assert module._renders(name)(options) == images[name]
+
+
 def test_changed_artwork_ships_provenance_bound_renders(tmp_path):
     module = _load_release_module()
     board, old, fresh, options = _fixture_board(
@@ -292,6 +331,8 @@ def test_refused_render_binding_keeps_the_previous_package(tmp_path):
     (sentinel / "pcb-front.svg").write_text("previous render\n")
 
     def refuse_renders(options):
+        assert options.source_pcb_bytes == b"(kicad_pcb original)\n"
+        assert options.pcb.read_bytes() != options.source_pcb_bytes
         raise RuntimeError("board content changed since renders/ was made; re-render it")
 
     engines = dataclasses.replace(

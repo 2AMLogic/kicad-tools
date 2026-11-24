@@ -314,9 +314,12 @@ def _render_provenance(options: ReadinessOptions) -> bytes | None:
     with zipfile.ZipFile(io.BytesIO(RELEASE.old("kicad_project.zip"))) as archive:
         archived_pcb = archive.read(options.pcb.name)
     current_pcb = options.pcb.read_bytes()
-    unchanged = archived_pcb == current_pcb or board_content(
-        archived_pcb, ignore=PIN_ANNOTATION_NODES
-    ) == board_content(current_pcb, ignore=PIN_ANNOTATION_NODES)
+
+    def artwork(pcb: bytes) -> str:
+        return board_content(pcb, ignore=PIN_ANNOTATION_NODES)
+
+    checked_artwork = artwork(current_pcb)
+    unchanged = archived_pcb == current_pcb or artwork(archived_pcb) == checked_artwork
     if unchanged and not path.exists():
         return None
     try:
@@ -348,6 +351,15 @@ def _render_provenance(options: ReadinessOptions) -> bytes | None:
                 )
             except KeyError:
                 bound = False
+        if not bound and options.source_pcb_bytes is not None:
+            # Readiness may have reserialized the board after it was rendered.
+            # Verify the receipt against the selected bytes and the artwork
+            # against the actual checked candidate, including any staged edits.
+            source = options.source_pcb_bytes
+            bound = (
+                bound_pcb == hashlib.sha256(source).hexdigest()
+                and artwork(source) == checked_artwork
+            )
         if not bound:
             problems.append(f"{RENDER_PROVENANCE} does not bind the checked PCB")
     for name in RENDERS:

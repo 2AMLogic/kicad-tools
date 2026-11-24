@@ -63,19 +63,28 @@ PIN_ANNOTATION_NODES = ("pinfunction", "pintype")
 
 def board_content(data: bytes, *, ignore: tuple[str, ...] = ()) -> str:
     """Canonical content of a KiCad board, independent of item UUIDs, of
-    KiCad's UUID-ordered save and of child-node order within an item.
+    KiCad's UUID-ordered save and of property order within an item.
 
     Every ``(uuid ...)``/``(tstamp ...)`` node is dropped; each node keeps its
-    atoms in order and its sub-lists sorted.  Two boards with equal content
-    have identical copper, footprints, pads and graphics.  Nodes named in
+    atoms in order. Point lists retain their vertex order, and other
+    sub-lists are sorted to tolerate native saves. Nodes named in
     *ignore* (e.g. :data:`PIN_ANNOTATION_NODES`) are dropped too.
     """
     skipped = ("uuid", "tstamp", *ignore)
     from kicad_tools.sexp import parse_string
 
     def canon(node) -> str:  # type: ignore[no-untyped-def]
-        atoms = [repr(c.value) for c in node.children if c.is_atom]
-        lists = sorted(canon(c) for c in node.children if not c.is_atom and c.name not in skipped)
+        atoms = []
+        for atom in (c for c in node.children if c.is_atom):
+            value = atom.value
+            # Native saves write integral coordinates without a decimal point.
+            if node.name in ("xy", "xyz", "at", "start", "mid", "end", "size", "width"):
+                if isinstance(value, float) and value.is_integer():
+                    value = int(value)
+            atoms.append(repr(value))
+        lists = [canon(c) for c in node.children if not c.is_atom and c.name not in skipped]
+        if node.name != "pts":
+            lists.sort()
         return "(" + " ".join([str(node.name), *atoms, *lists]) + ")"
 
     return canon(parse_string(data.decode()))
