@@ -92,7 +92,7 @@ def restore(backend):
     return router, ids, committed, snapshot["cost"]
 
 
-def save_state(router, output):
+def save_state(router, output, *, all_nets=False):
     output.write_text(merge_routes_into_pcb(BOARD.read_text(), router.to_sexp(skip_cleanup=True)))
     for suffix in (".kicad_pro", ".kicad_dru"):
         shutil.copyfile(HERE / ("routed" + suffix), output.with_suffix(suffix))
@@ -107,14 +107,14 @@ def save_state(router, output):
             ("via", pcb.nets[v.net_number].name, tuple(v.layers), v.position, v.size, v.drill)
         ] += 1
     nets = NetStatusAnalyzer(output, strict=True).analyze().nets
-    return tracked, {s.net_name: s.island_count for s in nets if s.net_name in PAIR}
+    return tracked, {s.net_name: s.island_count for s in nets if all_nets or s.net_name in PAIR}
 
 
 def run(backend, order, dest):
     dest.mkdir(parents=True, exist_ok=False)
     router, ids, committed, cost = restore(backend)
     pads = {k: [router.pads[p] for p in pins] for k, pins in router.nets.items() if k}
-    previous = None
+    previous, prior_islands = save_state(router, dest / "before.kicad_pcb", all_nets=True)
     outcomes = []
     searches = []
     for index, target in enumerate(order, start=1):
@@ -123,12 +123,19 @@ def run(backend, order, dest):
         router._update_router_segment_foreign_context(net)
         pathfinder = router.router
         original = pathfinder.route
+        entry_nets = {n for n, routes in committed.items() if routes}
+        displaced = set()
 
         def observed(start, end, *args, **kwargs):
             began = time.monotonic()
             result = original(start, end, *args, **kwargs)
             event = {
                 "outer": target,
+                "from": [start.ref, start.pin],
+                "to": [end.ref, end.pin],
+                "protected_partner_drills": list(getattr(pathfinder, "relief_partner_drills", ())),
+                "candidate_drills": [(v.x, v.y, v.drill) for v in result.vias] if result else [],
+                "exit": "reached" if result else router._relief_search_exit_reason(),
                 "search": router.net_names[start.net],
                 "relief": getattr(
                     pathfinder, "relief_mode", getattr(pathfinder, "_relief_mode", None)
@@ -149,6 +156,13 @@ def run(backend, order, dest):
         pathfinder.route = observed
         try:
             worker = NegotiatedRouter(router.grid, pathfinder, router.rules, router.net_class_map)
+            rip = worker.rip_up_nets
+
+            def observed_rip(nets, net_routes, routes):
+                displaced.update(n for n in nets if n in entry_nets and net_routes.get(n))
+                return rip(nets, net_routes, routes)
+
+            worker.rip_up_nets = observed_rip
             accepted = router._relief_rescue(
                 net,
                 worker,
@@ -163,13 +177,30 @@ def run(backend, order, dest):
             )
         finally:
             pathfinder.route = original
-        copper, islands = save_state(router, dest / f"after-{index}.kicad_pcb")
-        outcome = {"outer": target, "accepted": accepted, "islands": islands}
-        if previous is not None:
-            outcome.update(
-                added=sum((copper - previous).values()), removed=sum((previous - copper).values())
-            )
-        previous = copper
+        copper, islands = save_state(router, dest / f"after-{index}.kicad_pcb", all_nets=True)
+        added, removed = sum((copper - previous).values()), sum((previous - copper).values())
+        victims = {}
+        for victim in sorted(displaced - {net}):
+            name = router.net_names[victim]
+            before, after = prior_islands[name], islands[name]
+            disposition = "re-landed" if accepted else "rolled back"
+            victims[name] = {
+                "before_islands": before,
+                "after_islands": after,
+                "disposition": "lost" if after > before else disposition,
+            }
+        outcome = {
+            "outer": target,
+            "accepted": accepted,
+            "islands": {name: islands[name] for name in PAIR},
+            "added": added,
+            "removed": removed,
+            "displaced_victims": victims,
+        }
+        if not accepted:
+            assert copper == previous and islands == prior_islands, outcome
+        assert all(v["disposition"] != "lost" for v in victims.values()), outcome
+        previous, prior_islands = copper, islands
         outcomes.append(outcome)
         print(json.dumps(outcome), flush=True)
     (dest / "results.json").write_text(
