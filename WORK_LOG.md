@@ -16,6 +16,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-24
 
+- **PR #10074**: perf(router): count a change-earned full retry against the copper back-off streak
 - **PR #10073**: fix(board06): widen PCIe transmitter exits on their routed centerlines
 - **PR #10061**: feat(render): bind rendered artifacts to the PCB they depict
 - **PR #10017**: fix: scope fill evidence to the selected board revision
