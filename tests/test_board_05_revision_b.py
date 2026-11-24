@@ -40,6 +40,20 @@ def test_driver_thermal_mask_opening_belongs_to_grounded_pad_29(tmp_path, hardwa
     assert all(not pad.number and not pad.net_name for pad in stencil)
 
 
+def test_u3_library_keeps_stock_silkscreen_with_ti_signal_lands(hardware):
+    from kicad_tools.sexp import parse_file
+
+    _, name = hardware.LDO_FP.split(":")
+    footprint = parse_file(SOURCE / "board05_revB.pretty" / f"{name}.kicad_mod")
+    outline = [
+        (shape.name, shape.find_child("stroke").find_child("width").get_float(0))
+        for shape in footprint.children
+        if shape.name in {"fp_line", "fp_poly", "fp_arc", "fp_rect", "fp_circle"}
+        and shape.find_child("layer").get_string(0) == "F.SilkS"
+    ]
+    assert sorted(outline) == [("fp_line", 0.12)] * 6 + [("fp_poly", 0.12)]
+
+
 def test_real_driver_current_comparator_and_power(hardware):
     parts = {part.ref: part for part in hardware.parts()}
     assert parts["U2"].mpn == "DRV8313PWPR"

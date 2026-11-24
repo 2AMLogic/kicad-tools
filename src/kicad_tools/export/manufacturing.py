@@ -862,11 +862,30 @@ class ManufacturingPackage:
             except SourceChangedError as exc:
                 result.errors.append(f"Stackup ordering validation failed: {exc}")
                 return result
+            if self.config.stackup_id and result.silk_fix is None:
+                result.silk_fix = {
+                    "applied": False,
+                    "manufacturer": self.manufacturer,
+                    "error": "could not resolve the manufacturer's silk rules for this board",
+                }
             if result.silk_fix is not None and not result.silk_fix.get("applied"):
-                result.warnings.append(
-                    "Silk legalisation pass could not run: "
-                    + str(result.silk_fix.get("error", "unknown reason"))
+                message = "Silk legalisation pass could not run: " + str(
+                    result.silk_fix.get("error", "unknown reason")
                 )
+                if self.config.stackup_id:
+                    # Issue #10051 (maintainer decision, 2026-11-24): a
+                    # named-stackup export must not publish unrepaired silk.
+                    # The requested repair could not run -- e.g. the
+                    # filesystem lacks the hard-link support the checked
+                    # publication path probes for -- so stop here, before
+                    # any output is written.  ``--no-silk-fix`` is the
+                    # explicit way to ship the original artwork instead.
+                    result.errors.append(
+                        message + " (a named-stackup export requires the requested silk "
+                        "repair; pass --no-silk-fix to ship the original artwork)"
+                    )
+                    return result
+                result.warnings.append(message)
             # Issue #9990: the pass is export's own edit of the source board.
             # Re-bind the named-stackup provenance to the bytes the pass
             # itself wrote (its report carries their sha256), through the
