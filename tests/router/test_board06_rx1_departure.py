@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from kicad_tools.router.escape import EscapeRouter
+from kicad_tools.router.escape import (
+    EscapeDirection,
+    EscapeRoute,
+    EscapeRouter,
+    escape_endpoint_pad,
+)
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
@@ -195,3 +200,240 @@ def test_speculative_refill_requires_a_verified_save(tmp_path, monkeypatch, save
     monkeypatch.setattr(runner, "_run_fill_zones_via_drc", native)
     route_cmd._fill_zones_after_route(board, quiet=True, args=args)
     assert args._zone_fill_verified is saved
+
+
+def _surround_box_on_layer(
+    grid: RoutingGrid,
+    layer: Layer,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    net: int = 30,
+) -> None:
+    """Enclose ``(x1, y1)..(x2, y2)`` with foreign copper on ``layer``."""
+    ring = Route(
+        net,
+        f"BARRIER_{layer.name}",
+        [
+            Segment(x1, y1, x2, y1, 0.2, layer, net),
+            Segment(x2, y1, x2, y2, 0.2, layer, net),
+            Segment(x2, y2, x1, y2, 0.2, layer, net),
+            Segment(x1, y2, x1, y1, 0.2, layer, net),
+        ],
+    )
+    grid.mark_route(ring)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("bidirectional", [False, True])
+def test_even_ring_escape_barrel_accepts_far_layer_arrival(reverse, bidirectional):
+    """Issue #10088: an off-grid even-ring BGA through barrel accepts B.Cu arrival."""
+    rules = DesignRules(
+        trace_width=0.275,
+        trace_clearance=0.2,
+        via_diameter=0.6,
+        via_drill=0.3,
+        via_clearance=0.2,
+        min_hole_to_hole=0.5,
+        manufacturer="jlcpcb",
+        grid_resolution=0.075,
+        allowed_layers=["F.Cu", "B.Cu"],
+    )
+    grid = RoutingGrid(
+        width=10.0,
+        height=8.0,
+        rules=rules,
+        layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+    )
+    source = Pad(1.5, 4.05, 0.4, 0.6, 15, "USB3_RX2-", ref="J1", pin="A10", layer=Layer.F_CU)
+    bga_ball = Pad(6.15, 4.20, 0.4, 0.4, 15, "USB3_RX2-", ref="U2", pin="F6", layer=Layer.F_CU)
+    approach = Segment(6.15, 4.20, 6.6056, 4.6556, 0.275, Layer.F_CU, 15, "USB3_RX2-")
+    barrel = Via(6.6056, 4.6556, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 15, "USB3_RX2-")
+    grid.mark_route(Route(15, "USB3_RX2-", [approach], [barrel], is_escape=True))
+    # Tightly enclose the ball+barrel on F.Cu so no second via fits inside;
+    # B.Cu remains open directly to the barrel.
+    _surround_box_on_layer(grid, Layer.F_CU, 5.60, 3.65, 7.26, 5.31)
+
+    escape = EscapeRoute(
+        pad=bga_ball,
+        direction=EscapeDirection.SOUTH,
+        escape_point=(barrel.x, barrel.y),
+        escape_layer=Layer.F_CU,
+        via_pos=(barrel.x, barrel.y),
+        segments=[approach],
+        via=barrel,
+        ring_index=2,
+        requires_main_route=True,
+    )
+    target = escape_endpoint_pad(bga_ball, escape, fallback_width=0.275)
+    router = Router(grid, rules)
+    ends = (target, source) if reverse else (source, target)
+    route = (
+        router.route_bidirectional(*ends, per_net_timeout=5.0)
+        if bidirectional
+        else router.route(*ends, per_net_timeout=5.0)
+    )
+    assert route is not None
+    barrel_seg = route.segments[0] if reverse else route.segments[-1]
+    assert barrel_seg.layer == Layer.B_CU
+    barrel_xy = (barrel_seg.x1, barrel_seg.y1) if reverse else (barrel_seg.x2, barrel_seg.y2)
+    assert barrel_xy == pytest.approx((barrel.x, barrel.y), abs=1e-4)
+
+
+@pytest.mark.parametrize(
+    "case,via_layers,span_type,is_micro,open_layer,expect_connected",
+    [
+        ("blind_in_span", (Layer.F_CU, Layer.IN1_CU), "blind", False, Layer.IN1_CU, True),
+        ("blind_outside_span", (Layer.F_CU, Layer.IN1_CU), "blind", False, Layer.B_CU, False),
+        ("micro_in_span", (Layer.F_CU, Layer.IN1_CU), None, True, Layer.IN1_CU, True),
+        ("micro_outside_span", (Layer.F_CU, Layer.IN1_CU), None, True, Layer.B_CU, False),
+        ("buried_unconnected", (Layer.IN1_CU, Layer.IN2_CU), "buried", False, Layer.IN1_CU, False),
+        ("surface_only", None, None, False, Layer.B_CU, False),
+        ("surface_tail_beyond_via", (Layer.F_CU, Layer.B_CU), None, False, Layer.F_CU, False),
+    ],
+)
+def test_escape_endpoint_preserves_restricted_spans_and_rejects_unconnected_layers(
+    case, via_layers, span_type, is_micro, open_layer, expect_connected
+):
+    """Issue #10088: only layers connected through escape copper to the pad may arrive."""
+    rules = DesignRules(
+        trace_width=0.275,
+        trace_clearance=0.2,
+        via_diameter=0.6,
+        via_drill=0.3,
+        via_clearance=0.2,
+        min_hole_to_hole=0.5,
+        manufacturer="jlcpcb",
+        grid_resolution=0.075,
+    )
+    stack = LayerStack.four_layer_all_signal()
+    grid = RoutingGrid(width=10.0, height=8.0, rules=rules, layer_stack=stack)
+    source = Pad(1.5, 4.65, 0.4, 0.6, 15, "SIG", ref="J1", pin="A10", layer=Layer.F_CU)
+    bga_ball = Pad(6.15, 4.65, 0.4, 0.4, 15, "SIG", ref="U2", pin="F6", layer=Layer.F_CU)
+    approach = Segment(6.15, 4.65, 6.75, 4.65, 0.275, Layer.F_CU, 15, "SIG")
+    segments = [approach]
+    barrel = (
+        None
+        if via_layers is None
+        else Via(
+            6.75,
+            4.65,
+            0.3,
+            0.6,
+            via_layers,
+            15,
+            "SIG",
+            is_micro=is_micro,
+            span_type=span_type,
+        )
+    )
+    escape_pt = (6.75, 4.65)
+    escape_layer = Layer.F_CU
+    box_x2 = 7.35
+    if case == "surface_tail_beyond_via":
+        tail = Segment(6.75, 4.65, 7.35, 4.65, 0.275, Layer.B_CU, 15, "SIG")
+        segments.append(tail)
+        escape_pt = (7.35, 4.65)
+        escape_layer = Layer.B_CU
+        box_x2 = 7.80
+
+    grid.mark_route(
+        Route(15, "SIG", segments, [barrel] if barrel is not None else [], is_escape=True)
+    )
+    if case != "surface_tail_beyond_via":
+        under_layer = Layer.B_CU if case == "buried_unconnected" else Layer.IN2_CU
+        if under_layer != open_layer:
+            grid.mark_route(
+                Route(50, "UNDER_BARREL", [Segment(6.75, 3.0, 6.75, 6.0, 0.25, under_layer, 50)])
+            )
+    for idx, layer in enumerate((Layer.F_CU, Layer.IN1_CU, Layer.IN2_CU, Layer.B_CU)):
+        if layer != open_layer:
+            _surround_box_on_layer(grid, layer, 5.65, 4.04, box_x2, 5.26, net=40 + idx)
+
+    escape = EscapeRoute(
+        pad=bga_ball,
+        direction=EscapeDirection.SOUTH,
+        escape_point=escape_pt,
+        escape_layer=escape_layer,
+        via_pos=(barrel.x, barrel.y) if barrel is not None else None,
+        segments=segments,
+        via=barrel,
+        ring_index=2,
+        requires_main_route=case != "surface_tail_beyond_via",
+    )
+    target = escape_endpoint_pad(bga_ball, escape, fallback_width=0.275)
+    route = Router(grid, rules).route(source, target, per_net_timeout=5.0)
+    assert (route is not None) == expect_connected
+    if route is not None:
+        assert route.segments[-1].layer == open_layer
+
+
+def test_disconnected_escape_barrel_is_rejected():
+    """An off-pad barrel with no conductor tying it to its pad grants no endpoint."""
+    bga_ball = Pad(6.0, 4.05, 0.4, 0.4, 15, "SIG", ref="U2", pin="F6", layer=Layer.F_CU)
+    floating_barrel = Via(7.2, 5.25, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 15, "SIG")
+    escape = EscapeRoute(
+        pad=bga_ball,
+        direction=EscapeDirection.SOUTH,
+        escape_point=(floating_barrel.x, floating_barrel.y),
+        escape_layer=Layer.B_CU,
+        via_pos=(floating_barrel.x, floating_barrel.y),
+        segments=[],
+        via=floating_barrel,
+        ring_index=2,
+        requires_main_route=True,
+    )
+    with pytest.raises(ValueError, match="no committed copper"):
+        escape_endpoint_pad(bga_ball, escape, fallback_width=0.275)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_retry_preserved_departure_accepts_far_layer_of_through_barrel_and_edges(reverse):
+    """retry_preserved_departure also admits arrival on the far face of a through barrel."""
+    import time
+
+    grid, escape, source, pads = departure_fixture()
+    router = Router(grid, grid.rules)
+    router.last_route_all_vias_blocked = True
+    target = Pad(
+        6.45,
+        5.1,
+        0.4,
+        0.4,
+        source.net,
+        source.net_name,
+        layer=Layer.B_CU,
+        ref="U2",
+        pin="B6",
+        escape_terminal=True,
+    )
+    target_via = Via(target.x, target.y, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), source.net)
+    grid.mark_route(Route(source.net, source.net_name, vias=[target_via]))
+    # Enclose the target on B.Cu so the retry route from B.Cu must transition
+    # back to F.Cu before landing on the through barrel.
+    _surround_box_on_layer(grid, Layer.B_CU, 5.4, 4.2, 7.5, 6.2, net=35)
+
+    owner = SimpleNamespace(
+        router=router,
+        grid=grid,
+        _escape=escape,
+        all_pads=pads,
+        _edge_segments=(),
+        _edge_clearance=0.0,
+    )
+    ends = (target, source) if reverse else (source, target)
+
+    # Expired deadline returns None without mutating routes.
+    assert retry_preserved_departure(owner, *ends, time.monotonic() - 1.0) is None
+
+    # Disallowed landing layer returns None cleanly.
+    grid.rules.allowed_layers = ["F.Cu"]
+    assert retry_preserved_departure(owner, *ends, None) is None
+    grid.rules.allowed_layers = None
+
+    candidate = retry_preserved_departure(owner, *ends, None)
+    assert candidate is not None
+    assert candidate.segments[0].layer == Layer.F_CU
+    assert candidate.segments[-1].layer == Layer.F_CU
+    assert len(candidate.vias) >= 2

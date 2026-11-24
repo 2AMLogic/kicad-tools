@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from .rules import DesignRules, NetClassRouting
 
 from kicad_tools.core.geometry import point_to_segment_distance
-from kicad_tools.core.types import copper_span_contains
+from kicad_tools.core.types import copper_layers_in_span, copper_span_contains
 
 from .layers import Layer, LayerType
 from .pad_geometry import pad_point_distance
@@ -269,6 +269,52 @@ def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
     return extent if extent > 0.0 else None
 
 
+def _escape_endpoint_connected_extents(
+    pad: Pad, escape: EscapeRoute
+) -> tuple[dict[Layer, float], bool]:
+    """Per-layer copper disc diameters at ``escape_point`` electrically joined to ``pad``."""
+    from .connectivity import _UnionFind
+    from .terminal_connectivity import _net_copper_shapes
+
+    segs = [s for s in (getattr(escape, "segments", None) or ()) if s.net == pad.net]
+    raw_via = getattr(escape, "via", None)
+    vias = [raw_via] if raw_via is not None and raw_via.net == pad.net else []
+    if not segs and not vias:
+        return {}, False
+
+    shapes, masks = _net_copper_shapes([pad], segs, vias)
+    uf = _UnionFind()
+    count = len(shapes)
+    for i in range(count):
+        for j in range(i + 1, count):
+            if (masks[i] & masks[j]) != 0 and shapes[i].distance(shapes[j]) <= 1e-6:
+                uf.union(i, j)
+
+    pad_root = uf.find(0)
+    ex, ey = escape.escape_point
+    extents: dict[Layer, float] = {}
+    for idx, seg in enumerate(segs, start=1):
+        if uf.find(idx) != pad_root:
+            continue
+        cap = float(seg.width) - 2 * point_to_segment_distance(
+            ex, ey, seg.x1, seg.y1, seg.x2, seg.y2
+        )
+        if cap > 0.0:
+            extents[seg.layer] = max(extents.get(seg.layer, 0.0), cap)
+
+    via_connected = False
+    if vias and uf.find(1 + len(segs)) == pad_root:
+        via_connected = True
+        via = vias[0]
+        via_cap = float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey)
+        if via_cap > 0.0:
+            via_lo, via_hi = getattr(via, "drilled_layers", via.layers)
+            for layer in copper_layers_in_span(via_lo, via_hi):
+                extents[layer] = max(extents.get(layer, 0.0), via_cap)
+
+    return extents, via_connected
+
+
 def escape_endpoint_pad(
     pad: Pad,
     escape: EscapeRoute,
@@ -308,8 +354,26 @@ def escape_endpoint_pad(
     but neither proves committed copper and neither enlarges metal.
     """
     ex, ey = escape.escape_point
-    extent = escape_endpoint_copper_extent(escape)
-    on_layer = pad.through_hole or escape.escape_layer == pad.layer
+    connected_extents, via_connected = _escape_endpoint_connected_extents(pad, escape)
+    preferred = escape.escape_layer
+    terminal_layers: tuple[Layer, ...] | None = None
+    terminal_layer = preferred
+    if connected_extents:
+        ordered = ([preferred] if preferred in connected_extents else []) + sorted(
+            (lyr for lyr in connected_extents if lyr != preferred),
+            key=lambda lyr: lyr.stack_order,
+        )
+        terminal_layers = tuple(ordered)
+        terminal_layer = ordered[0]
+        extent: float | None = min(connected_extents[lyr] for lyr in ordered)
+    elif getattr(escape, "via", None) is not None and not via_connected:
+        extent = None
+    else:
+        extent = escape_endpoint_copper_extent(escape)
+        if extent is not None:
+            terminal_layers = (preferred,)
+
+    on_layer = pad.through_hole or preferred == pad.layer
     unchanged = ex == pad.x and ey == pad.y and on_layer
     if extent is None and unchanged:
         width, height = pad.width, pad.height
@@ -334,6 +398,18 @@ def escape_endpoint_pad(
                     r = min(hw, hh)
                     radius = r - math.hypot(max(0.0, x - (hw - r)), max(0.0, y - (hh - r)))
             extent = 2 * max(0.0, radius)
+            if extent > 0:
+                terminal_layers = (
+                    (
+                        preferred,
+                        *sorted(
+                            (lyr for lyr in Layer if lyr != preferred),
+                            key=lambda lyr: lyr.stack_order,
+                        ),
+                    )
+                    if pad.through_hole
+                    else (pad.layer,)
+                )
         if extent <= 0:
             raise ValueError("Escape endpoint has no committed copper on its routing layer")
         # Both pathfinders consume rectangular metal bounds, even for a
@@ -350,7 +426,7 @@ def escape_endpoint_pad(
         height=height,
         net=pad.net,
         net_name=pad.net_name,
-        layer=escape.escape_layer,
+        layer=terminal_layer,
         ref=pad.ref,
         component_id=pad.component_id,
         terminal_id=pad.terminal_id,
@@ -363,6 +439,7 @@ def escape_endpoint_pad(
         # Issue #6718: an unchanged terminal keeps its authored roundrect corners.
         roundrect_rratio=pad.roundrect_rratio if shape == pad.shape else None,
         escape_terminal=not (unchanged and extent is None),
+        terminal_layers=terminal_layers,
     )
 
 
