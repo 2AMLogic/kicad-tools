@@ -31,6 +31,7 @@ import pytest
 from kicad_tools.cli import runner
 from kicad_tools.cli.export_cmd import main as export_main
 from kicad_tools.cli.runner import KiCadCLIResult, find_kicad_cli, run_refill_zones
+from kicad_tools.core.atomic_write import SourceChangedError
 from kicad_tools.export import manufacturing
 from kicad_tools.export.gerber import GerberExporter, _pcb_has_filled_zones
 from kicad_tools.export.manufacturing import (
@@ -457,9 +458,14 @@ def test_named_stackup_refuses_a_pcb_edited_during_saved_fill_check(tmp_path, mo
 # ---------------------------------------------------------------------------
 
 
-def test_failed_required_fill_publishes_nothing_and_restores_the_board(tmp_path, monkeypatch):
-    board = _with_saved_fill_text(_stale_rules_board(tmp_path))
+@pytest.mark.parametrize("stackup_id", [None, "JLC04161H-3313"])
+def test_failed_required_fill_publishes_nothing_and_restores_the_board(
+    tmp_path, monkeypatch, stackup_id
+):
+    source = authored_pcb(tmp_path, stackup_id) if stackup_id else _stale_rules_board(tmp_path)
+    board = _with_saved_fill_text(source)
     original = board.read_bytes()
+    before_mtime = board.stat().st_mtime_ns
     monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/fake/kicad-cli"))
     monkeypatch.setattr(manufacturing, "_saved_zone_fill_matches_native_refill", lambda *_: False)
 
@@ -470,12 +476,17 @@ def test_failed_required_fill_publishes_nothing_and_restores_the_board(tmp_path,
 
     monkeypatch.setattr(runner, "run_refill_zones", dying_refill)
     out = tmp_path / "mfg"
-    result = ManufacturingPackage(board, manufacturer="jlcpcb", config=_config(out)).export()
+    result = ManufacturingPackage(
+        board, manufacturer="jlcpcb", config=_config(out, stackup_id=stackup_id)
+    ).export()
 
     assert not result.success
     assert any("zone fill" in error and "kicad-cli was killed" in error for error in result.errors)
     assert not out.exists()
     assert board.read_bytes() == original
+    if stackup_id:
+        assert board.stat().st_mtime_ns == before_mtime
+        assert not board.with_name(f".{board.name}.zonefill").exists()
 
 
 def test_a_refill_that_saves_nothing_is_a_failed_required_fill(tmp_path, monkeypatch):
@@ -591,17 +602,62 @@ def test_unchanged_rules_needs_no_refill(tmp_path, monkeypatch):
 
 
 def test_named_stackup_export_binds_its_record_to_the_refilled_board(tmp_path, monkeypatch):
-    """Export's own refill must not read as ``PCB changed during export``."""
     board = _with_saved_fill_text(authored_pcb(tmp_path, "JLC04161H-3313"))
-    calls = _fake_refill(monkeypatch)
-    config = _config(tmp_path / "mfg", stackup_id="JLC04161H-3313")
+    original = board.read_bytes()
+    native_output = original + b"\r\n"
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/fake/kicad-cli"))
+    monkeypatch.setattr(manufacturing, "_saved_zone_fill_matches_native_refill", lambda *_: False)
 
+    def refill(staged, kicad_cli=None, *, require_save=False):
+        assert require_save
+        assert staged.name == board.name
+        assert staged.parent != board.parent
+        assert staged.read_bytes() == original
+        for suffix in (".kicad_pro", ".kicad_dru"):
+            assert staged.with_suffix(suffix).read_bytes() == board.with_suffix(suffix).read_bytes()
+        staged.write_bytes(native_output)
+        return KiCadCLIResult(success=True, output_path=staged)
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    out = tmp_path / "mfg"
+    config = _config(out, stackup_id="JLC04161H-3313")
     result = ManufacturingPackage(board, manufacturer="jlcpcb", config=config).export()
 
     assert result.success, result.errors
-    assert calls == [board]
-    record = json.loads(result.stackup_path.read_text())
-    assert record["pcb_sha256"] == hashlib.sha256(board.read_bytes()).hexdigest()
+    assert board.read_bytes() == native_output
+    digest = hashlib.sha256(native_output).hexdigest()
+    assert json.loads(result.stackup_path.read_text())["pcb_sha256"] == digest
+    assert board.with_name(f".{board.name}.zonefill").read_text().split()[1] == digest
+    with zipfile.ZipFile(out / "kicad_project.zip") as archive:
+        assert archive.read(board.name) == native_output
+
+
+@pytest.mark.parametrize(
+    "error_type", [SourceChangedError, OSError], ids=["stale-source", "filesystem"]
+)
+def test_named_refill_requires_checked_publication(tmp_path, monkeypatch, error_type):
+    from kicad_tools.core import atomic_write
+
+    board = _with_saved_fill_text(authored_pcb(tmp_path, "JLC04161H-3313"))
+    original = board.read_bytes()
+    _fake_refill(monkeypatch)
+
+    def refuse(path, content, *, expected_sha256, encoding, newline):
+        assert path == board
+        assert expected_sha256 == hashlib.sha256(original).hexdigest()
+        assert content.encode(encoding) == original + b"\n"
+        assert newline == ""
+        raise error_type("checked publication refused")
+
+    monkeypatch.setattr(atomic_write, "atomic_write_text", refuse)
+    out = tmp_path / "mfg"
+    config = _config(out, stackup_id="JLC04161H-3313")
+    result = ManufacturingPackage(board, manufacturer="jlcpcb", config=config).export()
+
+    assert any("checked publication refused" in error for error in result.errors)
+    assert board.read_bytes() == original
+    assert not out.exists()
+    assert not board.with_name(f".{board.name}.zonefill").exists()
 
 
 # ---------------------------------------------------------------------------
