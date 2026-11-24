@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import os
 import re
 import shutil
@@ -200,7 +201,15 @@ def _publish_checked(
                 # rollback, even if the public name had been replaced before
                 # withdrawal. Renaming the working link also makes this record
                 # eligible for explicit cleanup after the live name is settled.
-                repaired.rename(staging / "provisional")
+                try:
+                    repaired.rename(staging / "provisional")
+                except OSError as recovery_error:
+                    # The working link still preserves the inode for manual
+                    # recovery. Propagate the publication failure below so
+                    # callers still distinguish a concurrent save from an I/O error.
+                    logging.getLogger(__name__).warning(
+                        "Could not finalize rollback recovery at %s: %s", staging, recovery_error
+                    )
             if not restored_original:
                 # Another save owns the live name. Keep the displaced version
                 # available too, including when it was itself an editor save.

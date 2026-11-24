@@ -423,7 +423,7 @@ def test_rollback_keeps_both_editor_handles_after_withdrawal_read(tmp_path, monk
 
 
 @pytest.mark.parametrize("completion", ["concurrent_cleanup", "rename_failure"])
-def test_rollback_completion_preserves_the_live_board(tmp_path, monkeypatch, completion):
+def test_rollback_completion_preserves_the_live_board(tmp_path, monkeypatch, caplog, completion):
     board = tmp_path / "board.kicad_pcb"
     board.write_bytes(b"original")
     real_link, real_rename = os.link, Path.rename
@@ -445,8 +445,7 @@ def test_rollback_completion_preserves_the_live_board(tmp_path, monkeypatch, com
 
     monkeypatch.setattr(os, "link", edit_original)
     monkeypatch.setattr(Path, "rename", clean_completed_rollback)
-    error = SourceChangedError if completion == "concurrent_cleanup" else OSError
-    with pytest.raises(error):
+    with pytest.raises(SourceChangedError):
         _checked_rewrite(board, b"briefly published")
     assert board.read_bytes() == b"editor save"
     assert clear_recovery_copies(board) == []
@@ -454,6 +453,7 @@ def test_rollback_completion_preserves_the_live_board(tmp_path, monkeypatch, com
         assert len(cleaned) == 1 and list(tmp_path.iterdir()) == [board]
     else:
         (working,) = tmp_path.glob(".*.recovery-*")
+        assert str(working) in caplog.text
         assert (working / "original").read_bytes() == b"editor save"
         assert (working / "repaired").read_bytes() == b"briefly published"
 
