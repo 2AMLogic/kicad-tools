@@ -132,6 +132,32 @@ ENGINE_KICAD_CLI = "kicad-cli"
 ENGINE_KCT_CHECK = "kct-check"
 
 
+# A completed assessment with no repairable moves uses exit 1.
+_MASK_ASSESSMENT_FAILED = 4
+
+
+class _MaskBatchRejected(RuntimeError):
+    """A measured regression disqualifies the verified batch of copper moves."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+
+
+class _MaskAssessmentFailed(RuntimeError):
+    """The guarded repair could not assess the board it would publish."""
+
+
+def _guard_mask(args: argparse.Namespace) -> bool:
+    return args.only == "mask-copper" and bool(getattr(args, "no_new_warnings", False))
+
+
+def _mask_assessment_missing(report: DRCReport | None) -> bool:
+    return report is None or any(
+        v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in report.violations
+    )
+
+
 def _mask_in_scope(args: argparse.Namespace) -> bool:
     """Whether re-checks must engage ``mask_to_copper`` (Issue #9334).
 
@@ -143,7 +169,11 @@ def _mask_in_scope(args: argparse.Namespace) -> bool:
 
 def _mask_kwargs(args: argparse.Namespace) -> dict:
     """``_run_python_drc`` keyword for the mask assessment, only when in scope."""
-    return {"mask_copper": True} if _mask_in_scope(args) else {}
+    if not _mask_in_scope(args):
+        return {}
+    if getattr(args, "no_new_warnings", False):
+        return {"mask_copper": True, "guard_warnings": True}
+    return {"mask_copper": True}
 
 
 def _copper_gap_in_scope(args: argparse.Namespace) -> bool:
@@ -432,7 +462,8 @@ Examples:
         help=(
             "Snapshot the output file before repairing and roll it back "
             "byte-identical if the run fails (exception, Ctrl-C, no-progress "
-            "exit 1, or connectivity-rollback exit 3); the failed attempt is "
+            "exit 1, connectivity-rollback exit 3, or failed mask assessment "
+            "exit 4); the failed attempt is "
             "preserved as a <file>.failed-<timestamp> sidecar. Exit 2 "
             "(partial repair) keeps the applied repairs."
         ),
@@ -449,11 +480,11 @@ Examples:
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
         print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _MASK_ASSESSMENT_FAILED if _guard_mask(args) else 1
 
     if pcb_path.suffix.lower() != ".kicad_pcb":
         print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
-        return 1
+        return _MASK_ASSESSMENT_FAILED if _guard_mask(args) else 1
 
     # Validate max_passes
     if args.max_passes < 1:
@@ -484,14 +515,14 @@ Examples:
             args.drc_report, pcb_path, manufacturer=args.mfr, layers=args.layers
         )
         args.engine = _detection_engine(args.drc_report)
+    if _guard_mask(args) and _mask_assessment_missing(report):
+        print("Error: could not complete the initial mask assessment", file=sys.stderr)
+        return _MASK_ASSESSMENT_FAILED
     if report is None:
         return 1
 
     # Determine output path used for saving
     output_path = Path(args.output) if args.output else pcb_path
-
-    if not getattr(args, "transactional", False):
-        return _execute_repair(args, pcb_path, output_path, report)
 
     # --transactional (issue #4541): wrap the whole multi-pass run in a
     # file-scoped snapshot/rollback transaction.  Exceptions and Ctrl-C roll
@@ -504,13 +535,19 @@ Examples:
     # inside _execute_repair is unchanged; it serves semantic regression
     # rollback mid-run, while this transaction provides whole-command
     # failure safety.
-    with board_transaction(output_path) as txn:
-        exit_code = _execute_repair(args, pcb_path, output_path, report)
-        if exit_code in (1, 3):
-            txn.rollback()
-            for line in txn.report_lines():
-                print(line, file=sys.stderr)
-        return exit_code
+    try:
+        if not args.transactional:
+            return _execute_repair(args, pcb_path, output_path, report)
+        with board_transaction(output_path) as txn:
+            exit_code = _execute_repair(args, pcb_path, output_path, report)
+            if exit_code in (1, 3):
+                txn.rollback()
+                for line in txn.report_lines():
+                    print(line, file=sys.stderr)
+            return exit_code
+    except _MaskAssessmentFailed as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return _MASK_ASSESSMENT_FAILED
 
 
 def _board_layer_count(pcb_path: Path) -> int:
@@ -677,6 +714,8 @@ def _final_recheck(
         **_mask_kwargs(args),
         **_copper_gap_kwargs(args),
     )
+    if _guard_mask(args) and _mask_assessment_missing(python_report):
+        raise _MaskAssessmentFailed("could not complete the final mask assessment")
     recheck.engines.append(_engine_verdict(ENGINE_KCT_CHECK, python_report, args.only))
 
     if args.engine == ENGINE_KICAD_CLI:
@@ -1012,6 +1051,8 @@ def _execute_repair(
         # with the same engine and the input's project rules (Issue #6431).
         if pass_num < effective_max_passes:
             next_report = _detect(output_path, pcb_path, args)
+            if _guard_mask(args) and _mask_assessment_missing(next_report):
+                raise _MaskAssessmentFailed("could not complete mask detection for the next pass")
             if next_report is None:
                 break
             report = next_report
@@ -1087,7 +1128,8 @@ def _execute_repair(
     #            1 = no violations found/no progress,
     #            2 = violations remain (unrepaired, non-repairable, or the
     #                re-check could not run),
-    #            3 = connectivity rollback
+    #            3 = connectivity rollback (a failed guarded mask assessment is
+    #                reported separately as exit 4 by the command entry point).
     if connectivity_rollback_occurred:
         return 3
     final_pass = pass_results[-1] if pass_results else None
@@ -1331,18 +1373,19 @@ def _new_errors(
     for v in baseline:
         remaining.setdefault(_error_class(v), []).append(v)
     new: list[DRCViolation] = []
-    for v in after:
+    # Match errors first so a warning cannot consume the only baseline error.
+    for v in sorted(after, key=lambda finding: not finding.is_error):
         bucket = remaining.get(_error_class(v), [])
-        index = None
+        eligible = ((i, b) for i, b in enumerate(bucket) if not v.is_error or b.is_error)
         if not v.locations:
             # Unlocatable: only an equally unlocatable baseline error of the
             # same class can be it.
-            index = next((i for i, b in enumerate(bucket) if not b.locations), None)
+            index = next((i for i, b in eligible if not b.locations), None)
         else:
             index = next(
                 (
                     i
-                    for i, b in enumerate(bucket)
+                    for i, b in eligible
                     if b.locations
                     and any(
                         math.hypot(a.x_mm - c.x_mm, a.y_mm - c.y_mm) <= tolerance_mm
@@ -1380,14 +1423,15 @@ def _moves_with_new_errors(
     output_path: Path,
     pcb_path: Path,
     args: argparse.Namespace,
+    baseline: DRCReport | None = None,
 ) -> set[str]:
     """Segment uuids of mask moves that a new non-mask error sits next to.
 
     The mask repairer gates a move on the manufacturer's clearance floor, which
     is below a net class's clearance, so a move can land between the two and
-    only ``kct check`` sees it (Issue #9365).  The baseline is ``kct check`` on
-    the board with this pass's moves undone, so both sides come from the same
-    engine.  A pre-existing error is recognised by class (rule + net pair) and
+    only ``kct check`` sees it (Issue #9365). The guarded run supplies its
+    pre-edit report. Other runs recheck a copy with this pass's moves undone.
+    A pre-existing error is recognised by class (rule + net pair) and
     a location within the moves' displacement of its baseline counterpart; an
     error without such a counterpart is attributed to the moves whose copper
     is within reach of its location, or to every move when it has no location.
@@ -1405,23 +1449,24 @@ def _moves_with_new_errors(
     if not candidates or not actions:
         return set()
 
-    baseline_errors: list[DRCViolation] = []
-    with tempfile.TemporaryDirectory() as tmp:
-        undo = MaskCopperRepairer(output_path)
-        # Reverse application order: a grouped edit that dragged a shared
-        # endpoint after an earlier action only rolls back last-applied-first
-        # (issue #9958).
-        if all(undo.undo_action(act) for act in reversed(actions)):
-            base_path = Path(tmp) / output_path.name
-            undo.save(base_path)
-            baseline = _run_python_drc(
-                base_path,
-                manufacturer=args.mfr,
-                layers=args.layers,
-                project_pcb_path=pcb_path,
-            )
-            if baseline is not None:
-                baseline_errors = [v for v in baseline.violations if _blocks_repair(v, args)]
+    if baseline is None:
+        with tempfile.TemporaryDirectory() as tmp:
+            undo = MaskCopperRepairer(output_path)
+            # Reverse application order: a grouped edit that dragged a shared
+            # endpoint after an earlier action only rolls back last-applied-first
+            # (issue #9958).
+            if all(undo.undo_action(act) for act in reversed(actions)):
+                base_path = Path(tmp) / output_path.name
+                undo.save(base_path)
+                baseline = _run_python_drc(
+                    base_path,
+                    manufacturer=args.mfr,
+                    layers=args.layers,
+                    project_pcb_path=pcb_path,
+                )
+    baseline_errors = (
+        [v for v in baseline.violations if _blocks_repair(v, args)] if baseline is not None else []
+    )
     # A pre-existing error's closest-approach point shifts by at most the
     # copper's own displacement (plus the engine's rounding); anything farther
     # from every baseline counterpart of its class is new.  A failed baseline
@@ -1451,13 +1496,38 @@ def _moves_with_new_errors(
         # tracks' segment-to-via errors report at the via centre, ~0.3 mm
         # inside its annulus).
         reach = max(v.required_value_mm or 0.0, 0.25) + 0.1 + max(v.actual_value_mm or 0.0, 0.0)
-        flagged |= {
+        nearby = {
             uuid
             for uuid, geom in geometry.items()
             if geom is None
             or any(geom.distance(Point(loc.x_mm, loc.y_mm)) <= reach for loc in v.locations)
         }
+        if not nearby and getattr(args, "no_new_warnings", False):
+            return set(geometry)
+        flagged.update(nearby)
     return flagged
+
+
+def _new_mask_keys(
+    before: DRCReport, after: DRCReport, *, guard_warnings: bool
+) -> set[tuple[str, ...]]:
+    """Compare unwaived findings by copper identity, severity and multiplicity."""
+
+    def counts(report: DRCReport, include_warnings: bool) -> Counter:
+        return Counter(
+            finding_key(v)
+            for v in report.violations
+            if v.type == ViolationType.MASK_TO_COPPER
+            and not v.waived
+            and (v.is_error or (include_warnings and v.severity == Severity.WARNING))
+        )
+
+    after_errors, before_errors = counts(after, False), counts(before, False)
+    if not guard_warnings:
+        return set(after_errors) - set(before_errors)
+    # The combined count admits an error-to-warning downgrade. Checking
+    # errors separately prevents an earlier warning from covering an error.
+    return set(after_errors - before_errors) | set(counts(after, True) - counts(before, True))
 
 
 def _mask_action_touches(action: MaskRepairAction | MaskNudgeAction, touched: set[str]) -> bool:
@@ -1632,6 +1702,24 @@ def _run_mask_pass(
                 if before_native is not None and not args.no_connectivity_check
                 else []
             )
+            # For a targeted live run, detection already checked this pass's
+            # unedited board with the same project rules. A supplied report, or
+            # copper saved by another repair earlier in this pass, cannot stand
+            # in for that comparison.
+            guard_baseline = None
+            if getattr(args, "no_new_warnings", False):
+                guard_baseline = report
+                if args.only != "mask-copper" or args.drc_report or earlier_saved:
+                    guard_baseline = _run_python_drc(
+                        candidate,
+                        manufacturer=args.mfr,
+                        layers=args.layers,
+                        project_pcb_path=pcb_path,
+                        mask_copper=True,
+                        guard_warnings=True,
+                    )
+                if _mask_assessment_missing(guard_baseline):
+                    raise _MaskAssessmentFailed("could not complete the pre-edit mask assessment")
             proposed = len(result.actions)
             repairer.save(candidate)
             _verify_mask_actions(
@@ -1642,6 +1730,7 @@ def _run_mask_pass(
                 candidate,
                 pad_islands,
                 lost_contacts=repairer.disconnected_bends(before, result.actions),
+                guard_baseline=guard_baseline,
             )
             if has_bends and result.repaired < proposed:
                 lost = MaskCopperRepairer(candidate).disconnected_bends(before, result.actions)
@@ -1660,9 +1749,10 @@ def _run_mask_pass(
                 new_errors = (errors - before_native[0]).total()
                 check_opens = has_zones or not args.no_connectivity_check
                 if new_errors or (check_opens and opens > before_native[1]):
-                    raise RuntimeError(
+                    raise _MaskBatchRejected(
+                        "new_drc_error",
                         "saved mask repair introduced native errors or opens "
-                        f"({new_errors} new errors, native opens {before_native[1]} to {opens})"
+                        f"({new_errors} new errors, native opens {before_native[1]} to {opens})",
                     )
                 if native_groups:
                     membership = {
@@ -1688,16 +1778,20 @@ def _run_mask_pass(
                     manufacturer=args.mfr,
                     layers=args.layers,
                     project_pcb_path=pcb_path,
-                    mask_copper=True,
+                    **_mask_kwargs(args),
                     elbow_gaps=final_gaps,
                 )
-                if final is None or any(
-                    v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in final.violations
-                ):
+                if final is None or _mask_assessment_missing(final):
                     raise RuntimeError("could not verify mask openings on the final saved board")
                 remaining = {finding_key(v) for v in mask_copper_violations(final.violations)}
-                previous = {finding_key(v) for v in mask_copper_violations(report.violations)}
-                touched = {uid for key in remaining - previous for uid in key}
+                new_keys = _new_mask_keys(
+                    guard_baseline or report, final, guard_warnings=guard_baseline is not None
+                )
+                if guard_baseline is not None and new_keys:
+                    raise _MaskBatchRejected(
+                        "new_mask_finding", "final saved mask repair introduced new mask findings"
+                    )
+                touched = {uid for key in new_keys for uid in key}
                 persisting = {key[-1] for key in remaining if key}
                 if (
                     any(
@@ -1706,15 +1800,21 @@ def _run_mask_pass(
                     )
                     or final_gaps.missed
                 ):
-                    raise RuntimeError("mask openings failed verification on the final saved board")
+                    raise _MaskBatchRejected(
+                        "finding_not_cleared",
+                        "mask openings failed verification on the final saved board",
+                    )
                 if _moves_with_new_errors(
                     after=final,
                     actions=result.actions,
                     output_path=candidate,
                     pcb_path=pcb_path,
                     args=args,
+                    baseline=guard_baseline,
                 ):
-                    raise RuntimeError("final saved mask repair introduced clearance errors")
+                    raise _MaskBatchRejected(
+                        "new_drc_error", "final saved mask repair introduced new DRC findings"
+                    )
             if result.actions:
                 skewed = (
                     MaskCopperRepairer(candidate).off_angle_tracks() - before.off_angle_tracks()
@@ -1726,6 +1826,8 @@ def _run_mask_pass(
                 atomic_write_text(output_path, candidate.read_text())
             elif output_path != load_path and not output_path.exists():
                 atomic_write_text(output_path, load_path.read_text())
+    except _MaskAssessmentFailed:
+        raise
     except Exception as e:
         print(f"Error during mask-to-copper repair: {e}", file=sys.stderr)
         reason = "recheck_unavailable"
@@ -1733,6 +1835,11 @@ def _run_mask_pass(
             reason = "pad_connection_lost"
         elif isinstance(e, MaskTraceAngleError):
             reason = "would_bend_trace"
+        elif isinstance(e, _MaskBatchRejected):
+            if getattr(args, "no_new_warnings", False):
+                reason = e.reason
+        elif _guard_mask(args):
+            raise _MaskAssessmentFailed(f"could not verify mask repair: {e}") from e
         # Actions the selective rollback already disposed of keep their
         # specific reason; the fallback must not report an action under a
         # second reason (issue #9958).
@@ -1796,6 +1903,7 @@ def _verify_mask_actions(
     pad_islands: dict[str, list[frozenset]],
     *,
     lost_contacts: set[str] | None = None,
+    guard_baseline: DRCReport | None = None,
 ) -> None:
     """Undo a grouped move if its saved geometry fails the mask, clearance or pad checks."""
     gaps = _ElbowGapCheck(result)
@@ -1804,31 +1912,24 @@ def _verify_mask_actions(
         manufacturer=args.mfr,
         layers=args.layers,
         project_pcb_path=pcb_path,
-        mask_copper=True,
+        **_mask_kwargs(args),
         elbow_gaps=gaps,
     )
-    if after is not None and any(
-        v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in after.violations
-    ):
-        # The mask assessment could not complete (e.g. an unqualified
-        # KiCad): it proves nothing about the moves, so none are kept.
+    if _mask_assessment_missing(after):
+        if guard_baseline is not None:
+            raise _MaskAssessmentFailed(
+                "could not complete the mask assessment of the proposed board"
+            )
         after = None
-    before_keys = {finding_key(v) for v in mask_copper_violations(report.violations)}
     after_errors = mask_copper_violations(after.violations) if after is not None else []
-    new_keys = {finding_key(v) for v in after_errors} - before_keys
-    if after is not None and getattr(args, "no_new_warnings", False):
-        # A finding that was an error and is now a warning is progress; a
-        # warning on a pair the board did not flag at all is new (issue #9424).
-        known = before_keys | {
-            finding_key(v) for v in report.violations if v.type == ViolationType.MASK_TO_COPPER
-        }
-        new_keys |= {
-            finding_key(v)
-            for v in after.violations
-            if v.type == ViolationType.MASK_TO_COPPER
-            and v.severity == Severity.WARNING
-            and not v.waived
-        } - known
+    new_keys = (
+        _new_mask_keys(guard_baseline or report, after, guard_warnings=guard_baseline is not None)
+        if after is not None
+        else set()
+    )
+    unattributed = guard_baseline is not None and any(
+        not any(_mask_action_touches(act, set(key)) for act in result.actions) for key in new_keys
+    )
     touched = {u for key in new_keys for u in key}
     persisting = {key[-1] for key in (finding_key(v) for v in after_errors) if key}
     regressed = (
@@ -1838,6 +1939,7 @@ def _verify_mask_actions(
             output_path=candidate,
             pcb_path=pcb_path,
             args=args,
+            baseline=guard_baseline,
         )
         if after is not None
         else set()
@@ -1854,7 +1956,7 @@ def _verify_mask_actions(
             revert.append((act, "pad_connection_lost"))
         elif act.uuid in persisting:
             revert.append((act, "finding_not_cleared"))
-        elif _mask_action_touches(act, touched):
+        elif unattributed or _mask_action_touches(act, touched):
             revert.append((act, "new_mask_finding"))
         elif act.uuid in gaps.missed:
             revert.append((act, "mask_margin_not_met"))
@@ -2186,6 +2288,7 @@ def _run_python_drc(
     mask_copper: bool = False,
     copper_gap: bool = False,
     elbow_gaps: _ElbowGapCheck | None = None,
+    guard_warnings: bool = False,
 ) -> DRCReport | None:
     """Run ``kct check``'s rule set and convert the results into a DRCReport.
 
@@ -2197,9 +2300,8 @@ def _run_python_drc(
     (:func:`kicad_tools.cli.check_cmd.build_check_rule_set`) and runs it
     through the CLI's own dispatch.
 
-    Unrepairable advisories (topology findings, declaration gaps) and waived
-    findings are dropped from the converted report -- see
-    :data:`_UNREPAIRABLE_TOPOLOGY_RULE_IDS`.
+    Waived findings are dropped. Unrepairable advisories (topology findings,
+    declaration gaps) are retained only for the guarded comparison.
 
     Args:
         pcb_path: The board whose copper is checked.
@@ -2213,6 +2315,8 @@ def _run_python_drc(
             policy, as ``kct check --mfr`` does (Issue #9334).  Off by default:
             the assessment runs kicad-cli twice and fix-drc only needs it when
             mask findings are in scope.
+        guard_warnings: Include topology advisories and graded fab-view gaps in
+            the before/after population used by the guarded mask repair.
         copper_gap: Resolve the stackup's fab-view gap bands onto the checker
             so ``physical_copper_gap`` is severity-graded, as ``kct check``
             does (Issue #9332).  Off by default: without bands the gap pass
@@ -2245,7 +2349,7 @@ def _run_python_drc(
                         request, policy=replace(policy, warning_clearance_mm=measure_mask_gap_mm)
                     )
             rule_set.checker.mask_copper_request = request
-        if copper_gap:
+        if copper_gap or guard_warnings:
             from kicad_tools.cli.check_cmd import _resolve_fab_gap_policy, stackup_copper_oz
 
             outer, inner = stackup_copper_oz(pcb)
@@ -2268,10 +2372,13 @@ def _run_python_drc(
         if elbow_gaps and elbow_gaps.required:
             # Use the physical observations before waiver and severity filtering.
             elbow_gaps.check(results.mask_copper_assessments)
+        # The ordinary repairer only needs repairable rules. The guarded
+        # comparison also needs topology and fab-gap findings the nightly grades.
         results.violations = [
             v
             for v in results.violations
-            if v.rule_id not in _UNREPAIRABLE_TOPOLOGY_RULE_IDS and not getattr(v, "waived", False)
+            if (guard_warnings or v.rule_id not in _UNREPAIRABLE_TOPOLOGY_RULE_IDS)
+            and not getattr(v, "waived", False)
         ]
 
         return drc_results_to_report(results, pcb_path)

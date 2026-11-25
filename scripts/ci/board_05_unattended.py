@@ -231,7 +231,8 @@ def route_flags(seed: int) -> list[str]:
 
 
 #: ``kct fix-drc`` exits 0 (all repaired), 1 (nothing it could repair) and 2
-#: (partly repaired); 3 is a connectivity rollback and is a failure here.
+#: (partly repaired). Connectivity rollback (3) and failed mask assessment
+#: (4) fail preparation before the nightly grades its mask-skipped checks.
 MASK_REPAIR_OK_EXITS = (0, 1, 2)
 
 
@@ -255,6 +256,7 @@ def repair_mask_copper(routed: Path) -> None:
         "--max-passes",
         "3",
         "--no-new-warnings",
+        "--transactional",
         "--quiet",
     ]
     code = fix_drc(argv)

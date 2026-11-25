@@ -538,11 +538,10 @@ def test_a_new_warning_reverts_the_move_only_under_no_new_warnings(tmp_path, mon
 
 def test_a_preexisting_warning_keeps_the_move_under_no_new_warnings(tmp_path, monkeypatch):
     board = _board(tmp_path, ENTRY)
-    before = _report(_finding("trk-a"))
-    # The same warning class on both sides of the move, its point shifted by it.
+    # The live detection report is the pre-edit baseline for the guarded pass.
+    before = _report(_finding("trk-a"), _pour_slot_warning(x=99.1, y=100.35))
     after = _report(_pour_slot_warning(x=99.0, y=100.3))
-    baseline = _report(_pour_slot_warning(x=99.1, y=100.35))
-    _run(monkeypatch, board, [before, after, baseline, after], extra=["--no-new-warnings"])
+    _run(monkeypatch, board, [before, after, after], extra=["--no-new-warnings"])
     assert _end(board, "trk-a")[1] == (100.0, 100.0)
 
 
@@ -568,6 +567,149 @@ def test_a_new_mask_warning_on_the_moved_conductor_reverts_the_move(tmp_path, mo
     again = _board(tmp_path / "again", ENTRY)
     _run(monkeypatch, again, [before, after, after], extra=["--no-new-warnings"])
     assert _end(again, "trk-a")[1] == (100.0, 100.0)
+
+
+@pytest.mark.parametrize(
+    ("before_level", "after_level", "kept"),
+    [(Severity.WARNING, Severity.ERROR, False), (Severity.ERROR, Severity.WARNING, True)],
+)
+def test_guard_preserves_non_mask_severity(tmp_path, monkeypatch, before_level, after_level, kept):
+    from dataclasses import replace
+
+    board = _board(tmp_path, ENTRY)
+    before_other = replace(
+        _pour_slot_warning(),
+        type=ViolationType.from_string("physical_copper_gap"),
+        type_str="physical_copper_gap",
+        severity=before_level,
+    )
+    after = _report(replace(before_other, severity=after_level))
+    baseline = _report(_finding("trk-a"), before_other)
+    _run(monkeypatch, board, [baseline, after, baseline, after], extra=["--no-new-warnings"])
+    assert _end(board, "trk-a")[1] == ((100, 100) if kept else (100.7, 100.3))
+
+
+@pytest.mark.parametrize("refill_only", [False, True])
+@pytest.mark.parametrize("finding", ["unattributed_mask", "unattributed_non_mask", "promoted_mask"])
+def test_guard_checks_unattributed_and_post_refill_findings(
+    tmp_path, monkeypatch, refill_only, finding
+):
+    from collections import Counter
+    from dataclasses import replace
+
+    from kicad_tools.cli import runner
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(tmp_path, ENTRY + zone)
+    original = board.read_bytes()
+    target = _finding("trk-a")
+    warning = replace(_finding("trk-a"), items=["other-pad", "trk-a"], severity=Severity.WARNING)
+    before = _report(target)
+    if finding == "promoted_mask":
+        before.violations.append(replace(warning, severity=Severity.INFO))
+    elif finding == "unattributed_mask":
+        warning = replace(warning, items=["unrelated-opening", "zone-uuid"])
+    else:
+        warning = _pour_slot_warning(x=180, y=190)
+    refilled = False
+
+    def refill(path, *, require_save):
+        nonlocal refilled
+        refilled = True
+        return runner.KiCadCLIResult(success=True)
+
+    def assess(path, **kwargs):
+        if _end(path, "trk-a")[1] != (100.0, 100.0):
+            return before
+        return _report(warning) if refilled or not refill_only else _report()
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--no-connectivity-check",
+            "--max-displacement",
+            "1.0",
+        ]
+    )
+    assert board.read_bytes() == original
+
+
+def test_guard_rechecks_geometry_left_by_selective_undo(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    other = _seg("trk-b", (105, 100.3), (110.7, 100.3))
+    board = _board2(tmp_path, ENTRY + other, r2_at="110 100")
+    original = board.read_bytes()
+    second = replace(_finding("trk-b"), items=["pad-r2-1", "trk-b"])
+    baseline = _report(_finding("trk-a"), second)
+    partial_seen = False
+
+    def assess(path, **kwargs):
+        nonlocal partial_seen
+        if _end(path, "trk-a")[1] != (100, 100):
+            return baseline
+        if _end(path, "trk-b")[1] == (110, 100):
+            return _report(second)  # retain the first move, undo the second
+        partial_seen = True
+        return _report(second, _pour_slot_warning(x=180, y=190))
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--no-connectivity-check",
+            "--max-displacement",
+            "1.0",
+        ]
+    )
+    assert partial_seen
+    assert board.read_bytes() == original
+
+
+def test_later_mask_detection_failure_rolls_back_saved_pass(tmp_path, monkeypatch):
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    seen_saved = False
+
+    def assess(path, **kwargs):
+        nonlocal seen_saved
+        if path != board:
+            # A real provisional move passed its assessment.
+            assert _end(path, "trk-a")[1] == (100, 100)
+            return _report()
+        if board.read_bytes() == original:
+            return _report(_finding("trk-a"))
+        seen_saved = True
+        assert _end(board, "trk-a")[1] == (100, 100)
+        return None
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    code = fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--transactional",
+            "--max-passes",
+            "3",
+            "--no-connectivity-check",
+            "--max-displacement",
+            "1.0",
+        ]
+    )
+    assert code == 4
+    assert seen_saved
+    assert board.read_bytes() == original
 
 
 def test_fix_drc_keeps_a_move_when_the_error_was_already_there(tmp_path, monkeypatch):
