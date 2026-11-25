@@ -36,7 +36,9 @@ OPTIONS = {
 # Exact pad/net/placement contract; copper and UUIDs are checked separately.
 # Re-pinned for Issue #7204: Y1 moved 1 mm east (x=+22 -> +23) so its stock
 # HC49-4H courtyard clears C2's; no other pad, net or footprint changed.
-PHYSICAL_SHA256 = "bddb9aeb5d4c6ac1f78fa0daf2980fef796994e5b70cb03ca18bdcc93cc87f4f"
+# Re-pinned for Issue #10194: C15/C16 moved beside U2 pin 1 (rotated 180 deg)
+# and C11 moved 0.9 mm north; no other pad, net or footprint changed.
+PHYSICAL_SHA256 = "fb00604879edc49a0032a13104c1f7db120e74c42527d7a63d067ea8e4072400"
 # ref.pad, net, reviewed original via center, reviewed off-pad center (board relative).
 MOVES = [
     ("U1.2", "GND", (10.24, 11.61), (10.24, 12.55)),

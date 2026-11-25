@@ -1,14 +1,14 @@
 {
   "file": "output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "6438f7438a2e9c1453d612421cbfd63d032f1b5f11b0377c096c435870cdbf09",
+  "pcb_sha256": "247942b69b6e79153b3ab0e0b47d1b7cfa5ef82cfb0979c38d448cc04a479edb",
   "layers": 0,
   "summary": {
     "errors": 0,
-    "warnings": 8,
-    "infos": 0,
+    "warnings": 7,
+    "infos": 6,
     "waived": 0,
-    "rules_checked": 78,
+    "rules_checked": 81,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -54,34 +54,34 @@
       "rule_id": "pour_slot",
       "type": "unknown",
       "severity": "warning",
-      "message": "Pour slot: [GND] and [OSC_IN] run parallel on F.Cu for 0.10 mm with 0.649 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "message": "Pour slot: [OSC_IN] and [OSC_OUT] run parallel on F.Cu for 0.20 mm with 0.386 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
       "location": [
-        137.815,
-        83.115
+        144.5,
+        88.7
       ],
       "layer": "F.Cu",
-      "actual_value": 0.6485281374238592,
+      "actual_value": 0.3864999999999972,
       "required_value": 0.85,
       "items": [],
       "nets": [
-        "GND",
-        "OSC_IN"
+        "OSC_IN",
+        "OSC_OUT"
       ],
       "same_net": null,
       "fab_band": null,
       "corner_class": null,
       "status": "warning",
       "waived": false,
-      "key": "pour_slot||GND,OSC_IN|F.Cu",
+      "key": "pour_slot||OSC_IN,OSC_OUT|F.Cu",
       "evidence_hash": null
     },
     {
       "rule_id": "pour_slot",
       "type": "unknown",
       "severity": "warning",
-      "message": "Pour slot: [OSC_IN] and [OSC_OUT] run parallel on F.Cu for 0.89 mm with 0.337 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "message": "Pour slot: [OSC_IN] and [OSC_OUT] run parallel on F.Cu for 0.70 mm with 0.337 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
       "location": [
-        144.894,
+        144.988,
         88.75
       ],
       "layer": "F.Cu",
@@ -123,31 +123,6 @@
       "status": "warning",
       "waived": false,
       "key": "pour_slot||NRST,OSC_IN|F.Cu",
-      "evidence_hash": null
-    },
-    {
-      "rule_id": "pour_slot",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "Pour slot: [OSC_IN] and [OSC_OUT] run parallel on F.Cu for 1.20 mm with 0.825 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
-      "location": [
-        143.65,
-        87.95
-      ],
-      "layer": "F.Cu",
-      "actual_value": 0.8253048327204857,
-      "required_value": 0.85,
-      "items": [],
-      "nets": [
-        "OSC_IN",
-        "OSC_OUT"
-      ],
-      "same_net": null,
-      "fab_band": null,
-      "corner_class": null,
-      "status": "warning",
-      "waived": false,
-      "key": "pour_slot||OSC_IN,OSC_OUT|F.Cu",
       "evidence_hash": null
     },
     {
@@ -249,6 +224,162 @@
       "waived": false,
       "key": "pour_slot||GND,SWDIO|F.Cu",
       "evidence_hash": null
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C1 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        121.5,
+        85.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C1"
+      ],
+      "nets": [
+        "+5V"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C1|+5V|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C12 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        143.5,
+        99.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C12"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C12|+3.3V|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C13 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        148.5,
+        99.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C13"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C13|+3.3V|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C14 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        153.5,
+        99.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C14"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C14|+3.3V|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C2 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        132.5,
+        77.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C2"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C2|+3.3V|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "bypass_distance_unassociated",
+      "type": "unknown",
+      "severity": "info",
+      "message": "C3 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "location": [
+        132.5,
+        83.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C3"
+      ],
+      "nets": [
+        "+3.3V"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "info",
+      "waived": false,
+      "key": "bypass_distance_unassociated|C3|+3.3V|",
+      "evidence_hash": null
     }
   ],
   "mask_copper_assessments": [],
@@ -258,16 +389,16 @@
       "schema_version": 1,
       "rule_id": "pour_slot",
       "severity": "warning",
-      "message": "Pour slot: [GND] and [OSC_IN] run parallel on F.Cu for 0.10 mm with 0.649 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "message": "Pour slot: [OSC_IN] and [OSC_OUT] run parallel on F.Cu for 0.20 mm with 0.386 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
       "refs": [],
       "pads": [],
       "nets": [
-        "GND",
-        "OSC_IN"
+        "OSC_IN",
+        "OSC_OUT"
       ],
       "point": [
-        137.815,
-        83.115
+        144.5,
+        88.7
       ],
       "bbox": null,
       "layer": "F.Cu",
@@ -277,7 +408,7 @@
       "schema_version": 1,
       "rule_id": "pour_slot",
       "severity": "warning",
-      "message": "Pour slot: [OSC_IN] and [OSC_OUT] run parallel on F.Cu for 0.89 mm with 0.337 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "message": "Pour slot: [OSC_IN] and [OSC_OUT] run parallel on F.Cu for 0.70 mm with 0.337 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
       "refs": [],
       "pads": [],
       "nets": [
@@ -285,7 +416,7 @@
         "OSC_OUT"
       ],
       "point": [
-        144.894,
+        144.988,
         88.75
       ],
       "bbox": null,
@@ -306,25 +437,6 @@
       "point": [
         144.988,
         88.75
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "pour_slot",
-      "severity": "warning",
-      "message": "Pour slot: [OSC_IN] and [OSC_OUT] run parallel on F.Cu for 1.20 mm with 0.825 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "OSC_IN",
-        "OSC_OUT"
-      ],
-      "point": [
-        143.65,
-        87.95
       ],
       "bbox": null,
       "layer": "F.Cu",
@@ -405,12 +517,132 @@
       "bbox": null,
       "layer": "F.Cu",
       "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "bypass_distance_unassociated",
+      "severity": "info",
+      "message": "C1 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "refs": [
+        "C1"
+      ],
+      "pads": [],
+      "nets": [
+        "+5V"
+      ],
+      "point": [
+        121.5,
+        85.5
+      ],
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "bypass_distance_unassociated",
+      "severity": "info",
+      "message": "C12 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "refs": [
+        "C12"
+      ],
+      "pads": [],
+      "nets": [
+        "+3.3V"
+      ],
+      "point": [
+        143.5,
+        99.5
+      ],
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "bypass_distance_unassociated",
+      "severity": "info",
+      "message": "C13 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "refs": [
+        "C13"
+      ],
+      "pads": [],
+      "nets": [
+        "+3.3V"
+      ],
+      "point": [
+        148.5,
+        99.5
+      ],
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "bypass_distance_unassociated",
+      "severity": "info",
+      "message": "C14 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "refs": [
+        "C14"
+      ],
+      "pads": [],
+      "nets": [
+        "+3.3V"
+      ],
+      "point": [
+        153.5,
+        99.5
+      ],
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "bypass_distance_unassociated",
+      "severity": "info",
+      "message": "C2 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "refs": [
+        "C2"
+      ],
+      "pads": [],
+      "nets": [
+        "+3.3V"
+      ],
+      "point": [
+        132.5,
+        77.5
+      ],
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "bypass_distance_unassociated",
+      "severity": "info",
+      "message": "C3 has no supply pin its schematic designates (No nearby same-sheet supply pin on this net); its distance was NOT checked -- draw it beside its supply pin, or name one with the KCT_Decouples symbol field",
+      "refs": [
+        "C3"
+      ],
+      "pads": [],
+      "nets": [
+        "+3.3V"
+      ],
+      "point": [
+        132.5,
+        83.5
+      ],
+      "bbox": null,
+      "layer": null,
+      "waived": false
     }
   ],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "0 errors, 8 warnings"
+      "detail": "0 errors, 7 warnings"
     },
     "erc": {
       "status": "PASSED",
@@ -433,7 +665,7 @@
     "schematic_missing": false,
     "incomplete_categories": [],
     "schematic": {
-      "path": "stm32_devboard.kicad_sch",
+      "path": "output/stm32_devboard.kicad_sch",
       "source": "--schematic"
     }
   },

@@ -2,7 +2,7 @@
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.29.0"
-date: "Rev 1 | 2026-11-19 | jlcpcb-tier1"
+date: "Rev 1 | 2026-11-25 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 20 (18 SMD, 2 THT, 0 other) |
 | Nets | 12 |
-| Traces | 93 segments |
-| Vias | 34 |
+| Traces | 100 segments |
+| Vias | 32 |
 | Board Size | 60.0 x 40.0 mm |
 
 ## Design Overview
@@ -125,7 +125,7 @@ Demonstrates circuit blocks API
 | Errors | 0 |
 | Errors: kct (reviewed process rules, not stock `--mfr jlcpcb-tier1`) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 8 |
+| Warnings | 7 |
 | Blocking | 0 |
 
 **Status**: PASS
@@ -134,7 +134,7 @@ Demonstrates circuit blocks API
 
 | Violation Type | Count |
 |----------------|-------|
-| pour_slot | 8 |
+| pour_slot | 7 |
 
 
 
@@ -147,7 +147,7 @@ Demonstrates circuit blocks API
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 3 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 8 DRC warnings
+- **[OPTIONAL]** Review 7 DRC warnings
 
 
 \newpage
