@@ -11,7 +11,12 @@ def uid(name):
 
 
 def make_sheet(path, parts, wires=(), *, children=(), global_rail=False):
-    """Each part has its supply contact at (x, y) and return at (x, y+5.08)."""
+    """Each part has its supply contact at (x, y) and return at (x, y+5.08).
+
+    ``C*`` refs draw a ``Device:C``, ``X*`` refs an ``Oscillator:`` part with a
+    ``power_in`` supply pin (its reference deliberately does not look like an
+    IC, so only its lib id admits it), anything else a ``Test:IC``.
+    """
 
     def lib(name, kind, first, second):
         return f'''(symbol "{name}" (in_bom yes) (on_board yes)
@@ -26,8 +31,9 @@ def make_sheet(path, parts, wires=(), *, children=(), global_rail=False):
     body = []
     for ref, x, y, rail, override in parts:
         is_cap = ref.startswith("C")
-        lib_id = "Device:C" if is_cap else "Test:IC"
-        value = "100nF" if is_cap else "IC"
+        is_osc = ref.startswith("X")
+        lib_id = "Device:C" if is_cap else "Oscillator:Osc" if is_osc else "Test:IC"
+        value = "100nF" if is_cap else "25MHz" if is_osc else "IC"
         field = f'(property "KCT_Decouples" "{override}" (at {x} {y} 0))' if override else ""
         body.extend(
             (
@@ -49,7 +55,8 @@ def make_sheet(path, parts, wires=(), *, children=(), global_rail=False):
           (property "Sheetfile" "{filename}" (at 152.4 63.5 0)))''')
     path.write_text(f"""(kicad_sch (version 20250114) (generator eeschema)
       (uuid {uid(path.stem)}) (paper "A4")
-      (lib_symbols {lib("Device:C", "passive", "~", "~")} {lib("Test:IC", "power_in", "VDD", "GND")})
+      (lib_symbols {lib("Device:C", "passive", "~", "~")} {lib("Test:IC", "power_in", "VDD", "GND")}
+      {lib("Oscillator:Osc", "power_in", "VDD", "GND")})
       {" ".join(body)})""")
     return path
 
@@ -114,6 +121,21 @@ def test_lookalike_on_other_sheet_and_distant_pin_are_not_guessed(tmp_path):
     )
     row = associations(path)["C1"]
     assert row.pin is None and row.source == "unassociated" and row.reason
+
+
+def test_oscillator_pin_is_a_valid_supply_target(tmp_path):
+    """Issue #5995: an ``Oscillator:`` part is an association target, not only ``U*``."""
+    path = make_sheet(
+        tmp_path / "osc.kicad_sch",
+        [
+            ("C1", 55.88, 50.8, "+3V3", None),
+            ("X1", 50.8, 50.8, "+3V3", None),
+        ],
+        [(50.8, 50.8, 55.88, 50.8)],
+    )
+    row = associations(path)["C1"]
+    assert target(row) == ("X1", "1")
+    assert row.source == "derived"
 
 
 def test_near_label_can_associate_and_a_wired_pin_has_priority(tmp_path):

@@ -168,16 +168,36 @@ def test_is_ic_footprint(ref: str, name: str, pads: int, expected: bool) -> None
 def test_board03_bypass_findings_name_only_ics() -> None:
     """On board 03 every bypass finding's IC is a ``U*`` part.
 
-    Pairing now comes from the board's own schematic (issue #10141); caps the
-    schematic ties to no supply pin are not guessed at, so this may be empty.
+    Pairing now comes from the board's own schematic (issue #10141): its caps
+    are drawn beside no supply pin, so the check yields *no* distance findings
+    and the 7 caps below stay ``unassociated`` (``bypass_distance_unassociated``
+    in ``kct check``).  Pinning that set keeps this test from passing vacuously
+    over an empty list (issue #10208): if the association starts resolving
+    these caps, this fails and the expectation must be revisited on purpose.
     """
+    from kicad_tools.sync.discover import resolve_schematic_for_pcb
+    from kicad_tools.validate.rules.bypass_distance import measure_bypass_pairs
+
     path = _REPO / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
-    if not path.exists():
-        pytest.skip("board 03 routed output not present")
-    mistakes = BypassCapDistanceCheck().check(PCB.load(str(path)))
+    assert path.exists(), "board 03's routed output is committed; it must not go missing"
+    pcb = PCB.load(str(path))
+    mistakes = BypassCapDistanceCheck().check(pcb)
     assert all(m.components[1].startswith("U") for m in mistakes), sorted(
         {m.components[1] for m in mistakes}
     )
+    schematic = resolve_schematic_for_pcb(path)
+    assert schematic is not None, "board 03 ships a schematic next to its PCB"
+    rows = measure_bypass_pairs(pcb, schematic)
+    assert sorted((r.cap, r.status) for r in rows) == [
+        ("C1", "unassociated"),
+        ("C12", "unassociated"),
+        ("C13", "unassociated"),
+        ("C2", "unassociated"),
+        ("C3", "unassociated"),
+        ("C4", "unassociated"),
+        ("C5", "unassociated"),
+    ]
+    assert mistakes == []
 
 
 # --- Issue #5995: non-``U`` active parts ------------------------------------
