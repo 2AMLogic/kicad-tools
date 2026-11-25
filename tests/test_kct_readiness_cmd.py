@@ -350,6 +350,8 @@ def test_clean_assembly_board_is_ready_and_round_trips(tmp_path):
     assert report["status"] == "ready"
     assert report["blockers"] == []
     assert report["mode"] == "assembly"
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "JLCPCB placement preview" in readme
     # The four checks read_readiness() demands by name are all present + passed.
     for name in ("kct_check", "native_drc", "artifacts", "bom"):
         assert check_status(report, name) == "passed", name
@@ -370,6 +372,8 @@ def test_pcb_only_mode_makes_no_assembly_claim(tmp_path):
     assert "assembly not included" in bom["detail"]
     # No BOM/CPL were produced, and none were demanded.
     assert not list((board / "output" / "manufacturing").glob("bom*.csv"))
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "JLCPCB placement preview" not in readme
     assert read_readiness(board)["status"] == "ready"
 
 

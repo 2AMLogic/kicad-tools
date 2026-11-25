@@ -50,6 +50,19 @@ SOURCE_LCSC = "by_lcsc"
 SOURCE_GLOB = "footprint_glob"
 
 
+def placement_preview_instructions(manufacturer: str) -> tuple[str, ...]:
+    """Ordering instructions for a package containing a placement file."""
+    from ..manufacturers import get_fab_family
+
+    if get_fab_family(manufacturer) != "jlcpcb":
+        return ()
+    return (
+        "CPL rotations start with the KiCad angle and use offsets from the footprint table",
+        f"or project overrides in {SIDECAR_NAME}. Before ordering, open the JLCPCB placement preview.",
+        "Check each part's leads against its pads and verify pin 1 or polarity against the board markings.",
+    )
+
+
 class RotationOverridesError(ConfigurationError):
     """The rotation sidecar is missing, unparsable or invalid."""
 

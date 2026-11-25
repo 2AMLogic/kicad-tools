@@ -3025,7 +3025,10 @@ def _write_readme(
         "",
     ]
     if options.assembly:
+        from kicad_tools.export.rotation_overrides import placement_preview_instructions
+
         lines.append("Assembly package: BOM and CPL are included.")
+        lines.extend(placement_preview_instructions(options.manufacturer))
     else:
         lines.append("Bare-board package: BOM and CPL are intentionally absent.")
     lines.extend(["", "Contents", "--------"])
