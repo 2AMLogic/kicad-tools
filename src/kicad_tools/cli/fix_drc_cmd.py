@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kicad_tools.core.atomic_write import atomic_write_text
+from kicad_tools.core.types import Severity
 from kicad_tools.drc.mask_trace_angles import MaskTraceAngleError
 from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
 from kicad_tools.drc.repair_copper_gap import (
@@ -414,6 +415,16 @@ Examples:
         "--quiet",
         action="store_true",
         help="Suppress progress output (for scripting)",
+    )
+    parser.add_argument(
+        "--no-new-warnings",
+        action="store_true",
+        help=(
+            "With --only mask-copper: also revert a move whose re-check shows "
+            "a warning the board did not have (pour_slot, redundant_copper_*, "
+            "a new mask_to_copper warning), not only a new error. A finding "
+            "that drops from error to warning still counts as repaired."
+        ),
     )
     parser.add_argument(
         "--transactional",
@@ -1348,6 +1359,20 @@ def _new_errors(
     return new
 
 
+def _blocks_repair(v: DRCViolation, args: argparse.Namespace) -> bool:
+    """Whether a non-mask finding may veto a mask move: an error, or a warning
+    under ``--no-new-warnings`` (issue #9424)."""
+    if v.type in _MASK_RULE_TYPES:
+        return False
+    if v.is_error:
+        return True
+    return (
+        bool(getattr(args, "no_new_warnings", False))
+        and v.severity == Severity.WARNING
+        and not v.waived
+    )
+
+
 def _moves_with_new_errors(
     *,
     after: DRCReport,
@@ -1367,12 +1392,16 @@ def _moves_with_new_errors(
     error without such a counterpart is attributed to the moves whose copper
     is within reach of its location, or to every move when it has no location.
 
+    With ``--no-new-warnings`` the same comparison also covers non-mask
+    warnings (``pour_slot``, ``redundant_copper_*``), so a move that trades a
+    mask error for a new warning is reverted (issue #9424).
+
     Cost: one extra pure-Python rule-set run per mask pass whose re-check
     reports any non-mask error (the common case on a board being repaired);
     cheaper than the re-check, which also runs kicad-cli twice for the mask
     assessment.
     """
-    candidates = [v for v in after.violations if v.is_error and v.type not in _MASK_RULE_TYPES]
+    candidates = [v for v in after.violations if _blocks_repair(v, args)]
     if not candidates or not actions:
         return set()
 
@@ -1392,9 +1421,7 @@ def _moves_with_new_errors(
                 project_pcb_path=pcb_path,
             )
             if baseline is not None:
-                baseline_errors = [
-                    v for v in baseline.violations if v.is_error and v.type not in _MASK_RULE_TYPES
-                ]
+                baseline_errors = [v for v in baseline.violations if _blocks_repair(v, args)]
     # A pre-existing error's closest-approach point shifts by at most the
     # copper's own displacement (plus the engine's rounding); anything farther
     # from every baseline counterpart of its class is new.  A failed baseline
@@ -1789,6 +1816,19 @@ def _verify_mask_actions(
     before_keys = {finding_key(v) for v in mask_copper_violations(report.violations)}
     after_errors = mask_copper_violations(after.violations) if after is not None else []
     new_keys = {finding_key(v) for v in after_errors} - before_keys
+    if after is not None and getattr(args, "no_new_warnings", False):
+        # A finding that was an error and is now a warning is progress; a
+        # warning on a pair the board did not flag at all is new (issue #9424).
+        known = before_keys | {
+            finding_key(v) for v in report.violations if v.type == ViolationType.MASK_TO_COPPER
+        }
+        new_keys |= {
+            finding_key(v)
+            for v in after.violations
+            if v.type == ViolationType.MASK_TO_COPPER
+            and v.severity == Severity.WARNING
+            and not v.waived
+        } - known
     touched = {u for key in new_keys for u in key}
     persisting = {key[-1] for key in (finding_key(v) for v in after_errors) if key}
     regressed = (

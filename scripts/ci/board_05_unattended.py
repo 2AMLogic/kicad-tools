@@ -15,6 +15,8 @@ that proof. It leaves the shipping path alone:
    ``--complete`` lattice pass itself; ``--reserve-pour-only-passives`` has
    been on by default since #7835, so it is not passed.
 3. The routed board gets the shipping recipe's fiducials and board ID (#8532).
+   ``fix-drc --only mask-copper --no-new-warnings`` slides same-net copper off
+   its own pad openings and reverts any move that adds a warning (#9424).
    ``place-silk-refs --over-holes`` moves references that cross drills in this
    routing result (#9424). The prepared board is graded with the pinned toolchain
    (:func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain`, so
@@ -228,8 +230,40 @@ def route_flags(seed: int) -> list[str]:
     return [*PROTOCOL_FLAGS, "--seed", str(seed)]
 
 
+#: ``kct fix-drc`` exits 0 (all repaired), 1 (nothing it could repair) and 2
+#: (partly repaired); 3 is a connectivity rollback and is a failure here.
+MASK_REPAIR_OK_EXITS = (0, 1, 2)
+
+
+def repair_mask_copper(routed: Path) -> None:
+    """Slide same-net copper clear of its own pad openings, never trading for a warning (#9424).
+
+    ``--no-new-warnings`` reverts any move whose re-check shows a warning the
+    board did not have, so the repair cannot raise the no-warning count the
+    gate grades. Findings it cannot clear stay on the board for the gate.
+    """
+    from kicad_tools.cli.fix_drc_cmd import main as fix_drc
+
+    argv = [
+        str(routed),
+        "--only",
+        "mask-copper",
+        "--mfr",
+        MANUFACTURER,
+        "--layers",
+        "4",
+        "--max-passes",
+        "3",
+        "--no-new-warnings",
+        "--quiet",
+    ]
+    code = fix_drc(argv)
+    if code not in MASK_REPAIR_OK_EXITS:
+        raise RuntimeError(f"fix-drc --only mask-copper failed (exit {code})")
+
+
 def prepare_for_grading(routed: Path) -> dict[str, list[str]]:
-    """Add assembly markings and move reference text clear of the routed drill pattern."""
+    """Add assembly markings, repair mask exposure and move reference text clear of the drills."""
     from kicad_tools.cli.pcb_add_board_info import run_add_board_info
     from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
     from kicad_tools.cli.place_silk_refs_cmd import main as place_silk_refs
@@ -238,9 +272,12 @@ def prepare_for_grading(routed: Path) -> dict[str, list[str]]:
         raise RuntimeError("pcb add-fiducials failed")
     if run_add_board_info(routed, auto=True) != 0:
         raise RuntimeError("pcb add-board-info failed")
+    # Before the silkscreen pass: a repair can move a via, and the references
+    # must clear the drills the graded board actually has.
+    repair_mask_copper(routed)
     if place_silk_refs([str(routed), "--mfr", MANUFACTURER, "--layers", "4", "--over-holes"]) != 0:
         raise RuntimeError("place-silk-refs --over-holes failed")
-    return {"prep": ["fiducials", "board_info", "silk_refs_over_holes"]}
+    return {"prep": ["fiducials", "board_info", "mask_copper_repair", "silk_refs_over_holes"]}
 
 
 def run_kicad_drc(routed: Path, evidence: Path) -> dict:

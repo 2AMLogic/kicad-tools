@@ -60,6 +60,7 @@ OWN_ENTRY = "same-net own-pad entry"
 
 
 def _board(tmp_path: Path, copper: str) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "b.kicad_pcb"
     path.write_text(BOARD % copper)
     return path
@@ -503,6 +504,68 @@ def test_fix_drc_reverts_a_move_that_creates_a_new_clearance_error(tmp_path, mon
     _run(monkeypatch, board, [before, after, clean, after])
     assert _end(board, "trk-a")[1] == (100.7, 100.3)  # reverted
     assert "new_drc_error" in capsys.readouterr().out
+
+
+def _pour_slot_warning(x: float = 99.0, y: float = 100.3) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.from_string("pour_slot"),
+        type_str="pour_slot",
+        severity=Severity.WARNING,
+        message="Pour slot beside the move",
+        locations=[Location(x_mm=x, y_mm=y, layer="F.Cu")],
+        items=["Trace@F.Cu:w0.2:95/100.3~100/100"],
+        nets=["N1", "N2"],
+    )
+
+
+def test_a_new_warning_reverts_the_move_only_under_no_new_warnings(tmp_path, monkeypatch, capsys):
+    """Issue #9424: a mask repair must not trade an error for a warning on request."""
+    before = _report(_finding("trk-a"))
+    after = _report(_pour_slot_warning())
+    clean = _report()
+    # calls: detection, mask verification, baseline with the move undone, final re-check
+    guarded = _board(tmp_path / "guarded", ENTRY)
+    _run(monkeypatch, guarded, [before, after, clean, after], extra=["--no-new-warnings"])
+    assert _end(guarded, "trk-a")[1] == (100.7, 100.3)  # reverted
+    assert "new_drc_error" in capsys.readouterr().out
+
+    default = _board(tmp_path / "default", ENTRY)
+    _run(monkeypatch, default, [before, after, after])
+    assert _end(default, "trk-a")[1] == (100.0, 100.0)  # a warning never vetoed a move
+
+
+def test_a_preexisting_warning_keeps_the_move_under_no_new_warnings(tmp_path, monkeypatch):
+    board = _board(tmp_path, ENTRY)
+    before = _report(_finding("trk-a"))
+    # The same warning class on both sides of the move, its point shifted by it.
+    after = _report(_pour_slot_warning(x=99.0, y=100.3))
+    baseline = _report(_pour_slot_warning(x=99.1, y=100.35))
+    _run(monkeypatch, board, [before, after, baseline, after], extra=["--no-new-warnings"])
+    assert _end(board, "trk-a")[1] == (100.0, 100.0)
+
+
+def test_a_new_mask_warning_on_the_moved_conductor_reverts_the_move(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, ENTRY)
+    before = _report(_finding("trk-a"))
+    after = _report(_finding("trk-a", severity=Severity.WARNING))  # same pair, now a warning
+    new_pair = _report(
+        DRCViolation(
+            type=ViolationType.MASK_TO_COPPER,
+            type_str="mask_to_copper",
+            severity=Severity.WARNING,
+            message="Mask-to-copper disjoint: warning",
+            locations=[Location(x_mm=100.0, y_mm=100.3, layer="F.Cu")],
+            items=["other-pad", "trk-a"],
+        )
+    )
+    _run(monkeypatch, board, [before, new_pair, new_pair], extra=["--no-new-warnings"])
+    assert _end(board, "trk-a")[1] == (100.7, 100.3)  # reverted
+    assert "new_mask_finding" in capsys.readouterr().out
+
+    # An error that only drops to a warning on the same pair is still progress.
+    again = _board(tmp_path / "again", ENTRY)
+    _run(monkeypatch, again, [before, after, after], extra=["--no-new-warnings"])
+    assert _end(again, "trk-a")[1] == (100.0, 100.0)
 
 
 def test_fix_drc_keeps_a_move_when_the_error_was_already_there(tmp_path, monkeypatch):

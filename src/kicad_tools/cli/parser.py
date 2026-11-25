@@ -5834,6 +5834,16 @@ def _add_fix_drc_parser(subparsers) -> None:
         help="Output format (default: text)",
     )
     fix_drc_parser.add_argument(
+        "--no-new-warnings",
+        action="store_true",
+        help=(
+            "With --only mask-copper: also revert a move whose re-check shows "
+            "a warning the board did not have (pour_slot, redundant_copper_*, "
+            "a new mask_to_copper warning), not only a new error. A finding "
+            "that drops from error to warning still counts as repaired."
+        ),
+    )
+    fix_drc_parser.add_argument(
         "--transactional",
         action="store_true",
         help=(

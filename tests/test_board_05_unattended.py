@@ -189,22 +189,31 @@ def test_post_route_prep_runs_on_the_finished_board(mod, monkeypatch, tmp_path):
         lambda routed, auto: (calls.append(("board_info", routed, auto)), 0)[1],
     )
     monkeypatch.setattr(
+        "kicad_tools.cli.fix_drc_cmd.main",
+        lambda argv: (calls.append(("mask_copper_repair", argv)), 2)[1],
+    )
+    monkeypatch.setattr(
         "kicad_tools.cli.place_silk_refs_cmd.main",
         lambda argv: (calls.append(("silk_refs_over_holes", argv)), 0)[1],
     )
     board = tmp_path / "routed.kicad_pcb"
     board.write_text("(kicad_pcb)")
     row = mod.prepare_for_grading(board)
-    assert row["prep"] == ["fiducials", "board_info", "silk_refs_over_holes"]
+    assert row["prep"] == ["fiducials", "board_info", "mask_copper_repair", "silk_refs_over_holes"]
     assert [c[0] for c in calls] == row["prep"]
     assert calls[0][2] == "populated"  # build.py's sides, verbatim
-    assert calls[2][1] == [str(board), "--mfr", "jlcpcb", "--layers", "4", "--over-holes"]
+    # The repair runs before the silkscreen pass (it can move a via) and may
+    # never trade a mask error for a warning the no-warning gate would count.
+    assert calls[2][1][0] == str(board)
+    assert "--no-new-warnings" in calls[2][1]
+    assert calls[2][1][calls[2][1].index("--only") + 1] == "mask-copper"
+    assert calls[3][1] == [str(board), "--mfr", "jlcpcb", "--layers", "4", "--over-holes"]
     # run_seed wires the prep in before grading, and its failure is fatal.
     code = SCRIPT.read_text()
     assert "prepare_for_grading(artifact)" in code
 
 
-def test_post_route_prep_clears_only_references_over_the_seed_42_vias(mod, tmp_path):
+def test_post_route_prep_clears_only_references_over_the_seed_42_vias(mod, monkeypatch, tmp_path):
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
 
@@ -231,6 +240,7 @@ def test_post_route_prep_clears_only_references_over_the_seed_42_vias(mod, tmp_p
         "R11 (reference)",
         "R11 (reference)",
     ]
+    monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd.main", lambda argv: 1)
     mod.prepare_for_grading(path)
     prepared = PCB.load(path)
     assert not check_silk_hole_overlap(prepared).violations
@@ -239,6 +249,20 @@ def test_post_route_prep_clears_only_references_over_the_seed_42_vias(mod, tmp_p
     assert [(v.position, v.drill) for v in prepared.vias] == [
         (v.position, v.drill) for v in board.vias
     ]
+
+
+@pytest.mark.parametrize("code", [0, 1, 2])
+def test_mask_repair_accepts_repaired_unrepaired_and_partial_exits(
+    mod, monkeypatch, tmp_path, code
+):
+    monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd.main", lambda argv: code)
+    mod.repair_mask_copper(tmp_path / "routed.kicad_pcb")
+
+
+def test_mask_repair_rollback_is_fatal(mod, monkeypatch, tmp_path):
+    monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd.main", lambda argv: 3)
+    with pytest.raises(RuntimeError, match="mask-copper failed"):
+        mod.repair_mask_copper(tmp_path / "routed.kicad_pcb")
 
 
 def test_post_route_prep_failure_is_fatal(mod, monkeypatch, tmp_path):

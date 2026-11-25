@@ -239,6 +239,8 @@ def run_fix_drc_command(args) -> int:
         sub_argv.append("--no-connectivity-check")
     if getattr(args, "verify", False):
         sub_argv.append("--verify")
+    if getattr(args, "no_new_warnings", False):
+        sub_argv.append("--no-new-warnings")
     if getattr(args, "transactional", False):
         sub_argv.append("--transactional")
     if args.format != "text":
