@@ -633,6 +633,19 @@ def _create_project_zip(
                 "and preserve its sheet references, or run kct readiness with --sch and "
                 "--project-root pointing to their common project directory"
             )
+        incomplete = [*walked.outside, *walked.missing]
+        if schematic_path is not None and incomplete:
+            # A ZIP missing part of the selected hierarchy opens in KiCad with
+            # an empty/partial BOM and parity gaps, so never report it as a
+            # successful export (Issue #10108).  An auto-discovered root keeps
+            # the Issue #8752 behaviour: skip with a warning below.
+            listed = ", ".join(str(sheet) for sheet in incomplete)
+            raise ProjectIdentityError(
+                f"Cannot bundle the full schematic hierarchy of {root_sch} with {pcb_path}: "
+                f"sheet(s) outside the board directory or missing: {listed}. Keep every "
+                "sheet beside the board, or run kct readiness with --sch and --project-root "
+                "pointing to their common project directory"
+            )
         for sheet in walked.outside:
             logger.warning("Sub-sheet outside the project directory not bundled: %s", sheet)
     else:

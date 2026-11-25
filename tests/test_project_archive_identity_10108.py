@@ -799,3 +799,25 @@ class TestExtractedProjectOpensNatively:
 
         assert "schematic parity issues" not in stdout
         assert report["schematic_parity"] == []
+
+
+@pytest.mark.parametrize("child_state", ["outside", "missing"])
+def test_exporter_refuses_when_a_child_sheet_is_not_bundled(tmp_path, child_state):
+    """Adjacent root + out-of-directory/missing child must not yield a partial ZIP."""
+    design = tmp_path / "design"
+    shutil.copytree(FIXTURE, design)
+    child = design / "power.kicad_sch"
+    if child_state == "outside":
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        child.rename(shared / "power.kicad_sch")
+        root = design / ROOT
+        root.write_text(root.read_text().replace("power.kicad_sch", "../shared/power.kicad_sch"))
+    else:
+        child.unlink()
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+
+    with pytest.raises(ProjectIdentityError, match="--project-root"):
+        _create_project_zip(design / CHECKED[0], bundle, schematic_path=design / ROOT)
+    assert not (bundle / "kicad_project.zip").exists()
