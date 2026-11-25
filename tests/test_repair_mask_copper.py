@@ -2480,6 +2480,106 @@ def test_jog_slide_vetoed_by_other_net_copper_or_a_split_restores_everything(tmp
 
 
 # ---------------------------------------------------------------------------
+# Issue #9939: a chamfer between perpendicular runs slides along both
+# ---------------------------------------------------------------------------
+
+
+def _chamfer_fixture(tmp_path, *, run_end=(101.4, 102.0), copies=1, extra="", lock=""):
+    """The pad lead runs out through the pad's right edge (x = 101).
+
+    The 45 degree chamfer leaves the edge exactly at (101, 100) and turns into
+    a downstream run along x = 101.4, like the TQFP escapes on Board 03.
+    """
+    shapes = {
+        "lead": ((100.0, 100.0), (101.0, 100.0)),
+        "chamfer": ((101.0, 100.0), (101.4, 100.4)),
+        "run": ((101.4, 100.4), run_end),
+    }
+    tracks = [
+        _seg(f"{name}-{i}", a, b).replace(
+            "(segment ", f"(segment {lock} " if (name, i) == ("run", 0) else "(segment "
+        )
+        for name, (a, b) in shapes.items()
+        for i in range(copies)
+    ]
+    return _board(tmp_path, "\n".join([*tracks, extra])), shapes
+
+
+# Other-net copper above the pad that a plain recentre of the chamfer's pad end
+# (to the pad centre) would crowd, the way Board 03's U1/33 entry is declined.
+_CROWD_RECENTRE = _seg("crowd", (100.3, 100.45), (100.8, 100.45), net=2)
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_chamfer_between_perpendicular_runs_slides_each_end_along_its_run(tmp_path, copies):
+    board, shapes = _chamfer_fixture(tmp_path, copies=copies, extra=_CROWD_RECENTRE)
+    before = board.read_bytes()
+    original = {f"{n}-{i}": _end(board, f"{n}-{i}") for n in shapes for i in range(copies)}
+    repairer = MaskCopperRepairer(board)
+    findings = [_entry_finding(f"chamfer-{i}") for i in range(copies)]
+    assert repairer.repair(findings, dry_run=True, **_JOG_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair(findings, **_JOG_OPTS)
+    assert result.repaired == 1
+    (action,) = result.actions
+    assert action.action == "nudge_clear" and "chamfer" in action.detail
+    assert len(action.points) == 4 * copies and len(action.shifts) == len(action.points)
+    repairer.save(board)
+    assert not repairer.off_angle_tracks()
+    for i in range(copies):
+        lead, chamfer, run = (_end(board, f"{n}-{i}") for n in ("lead", "chamfer", "run"))
+        # The pad centre and the downstream anchor never move.
+        assert lead[0] == original[f"lead-{i}"][0]
+        assert run[1] == original[f"run-{i}"][1]
+        # The joints stay connected, each on its own line.
+        assert lead[1] == chamfer[0] and chamfer[1] == run[0]
+        assert lead[1][1] == 100.0 and run[0][0] == 101.4
+        # Still a 45 degree chamfer, now clear of the pad opening.
+        assert lead[1][0] > 101.0
+        assert math.isclose(
+            abs(chamfer[1][0] - chamfer[0][0]), abs(chamfer[1][1] - chamfer[0][1]), abs_tol=1e-9
+        )
+        copper, _ = _saved_copper(board, f"chamfer-{i}")
+        assert copper.distance(_pad_poly(board, "R1/1")) >= 0.15
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert {k: _end(board, k) for k in original} == original
+
+
+def test_chamfer_slide_declines_and_leaves_the_board_alone_when_vetoed(tmp_path):
+    # Every case also crowds the plain recentre, so only the slide's own veto is tested.
+    cases = {
+        # Other-net copper beside the chamfer's new position.
+        "foreign-copper": (
+            _seg("beside", (101.55, 99.8), (101.55, 100.15), net=2),
+            "",
+            (101.4, 102.0),
+        ),
+        "locked-run": ("", "locked", (101.4, 102.0)),
+        # A via at the chamfer's far end cannot be dragged, as at Board 03's U1/17.
+        "via-at-far-end": (
+            '  (via (at 101.4 100.4) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(net 1) (uuid "via-far"))',
+            "",
+            (101.4, 102.0),
+        ),
+    }
+    for name, (extra, lock, run_end) in cases.items():
+        sub = tmp_path / name
+        sub.mkdir()
+        board, _ = _chamfer_fixture(
+            sub, extra=f"{_CROWD_RECENTRE}\n{extra}", lock=lock, run_end=run_end
+        )
+        repairer = MaskCopperRepairer(board)
+        before = repairer.doc.to_string()
+        result = repairer.repair([_entry_finding("chamfer-0")], dry_run=True, **_JOG_OPTS)
+        assert not result.actions and not result.repaired, name
+        assert repairer.doc.to_string() == before, name
+
+
+# ---------------------------------------------------------------------------
 # Issue #9939: an elbow that hugs the pad edge takes its mirror elbow
 # ---------------------------------------------------------------------------
 
