@@ -74,9 +74,21 @@ def require_native_refill():
         pytest.skip("requires native KiCad refill and save support")
 
 
-def findings(path):
-    result = DRCChecker(PCB.load(path), manufacturer="jlcpcb", layers=4).check_redundant_copper()
+def findings(path, prove=True):
+    result = DRCChecker(
+        PCB.load(path), manufacturer="jlcpcb", layers=4, prove_pour_stubs=prove
+    ).check_redundant_copper()
     return [v for v in result.violations if v.rule_id == RULE]
+
+
+def test_proof_is_opt_in_and_skips_refill_by_default(tmp_path, monkeypatch):
+    path = fixture_board(tmp_path, "connected")
+
+    def boom(*_a, **_k):
+        raise AssertionError("kicad-cli refill must not run without --prove-pour-stubs")
+
+    monkeypatch.setattr(runner, "run_refill_zones", boom)
+    assert findings(path, prove=False) == []
 
 
 @pytest.mark.parametrize("via", [True, False])
@@ -143,6 +155,7 @@ def test_public_check_and_tapeout_acknowledgement(tmp_path, capsys):
                 "redundant_copper",
                 "--mfr",
                 "jlcpcb",
+                "--prove-pour-stubs",
                 "--format",
                 "json",
             ]

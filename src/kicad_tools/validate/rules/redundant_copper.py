@@ -62,6 +62,8 @@ error), each with a location:
     A track leaving a pad and its optional terminal via are redundant when
     a private native refill preserves direct pad-to-pour contact, the
     physical terminal groups and the plane connections (Issue #10137).
+    Opt-in (``kct check --prove-pour-stubs``): the proof runs one kicad-cli
+    refill per candidate branch, so it is skipped by default.
 
 ``redundant_copper_covered``
     A segment whose both ends lie on the centreline of a strictly longer,
@@ -186,8 +188,13 @@ class RedundantCopperRule(DRCRule):
         mask_clearance_mm: float = 0.0,
         physical_copper_gap_mm: float | None = None,
         fab_view_gap_policy: Any | None = None,
+        prove_pour_stubs: bool = False,
     ) -> None:
-        """``mask_clearance_mm``: the mask-to-copper policy clearance (mm).
+        """``prove_pour_stubs``: run the native-refill proof for
+        ``redundant_copper_pour_stub`` (Issue #10137).  Off by default: it
+        costs one kicad-cli refill per candidate branch plus a baseline.
+
+        ``mask_clearance_mm``: the mask-to-copper policy clearance (mm).
 
         A staircase shortcut may put no new copper within this distance of a
         pad's mask opening (Issue #9817).  ``0`` still keeps new copper out of
@@ -201,6 +208,7 @@ class RedundantCopperRule(DRCRule):
         neither is given (no active physical-gap pass) the gate is off.
         """
         self.mask_clearance_mm = max(0.0, float(mask_clearance_mm))
+        self._prove_pour_stubs = prove_pour_stubs
         self._gap_mm = physical_copper_gap_mm
         self._gap_policy = fab_view_gap_policy
         self._gap_oracle: Any | None = None
@@ -241,7 +249,7 @@ class RedundantCopperRule(DRCRule):
             self._check_covered(segs, results)
 
         self._check_via_offcentre(pcb, segments, results)
-        if getattr(pcb, "path", None) and pcb.zones:
+        if self._prove_pour_stubs and getattr(pcb, "path", None) and pcb.zones:
             from kicad_tools.validate.pour_stub import verified_pour_stubs
 
             for stub, evidence in verified_pour_stubs(pcb):
