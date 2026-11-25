@@ -789,7 +789,19 @@ def _dru_rule_applies(condition, track, copper, areas, project) -> bool:
         return True
 
     def area_test(match) -> str:
-        shapes = areas.get(match.group(1))
+        pattern = match.group(1)
+        if "*" in pattern or "?" in pattern:
+            # KiCad matches the argument as a wildcard pattern, so every
+            # on-layer area whose name fits it counts. Case-insensitive is the
+            # safe superset; no fitting name leaves the condition undecided.
+            regex = re.compile(
+                re.escape(pattern.casefold()).replace(r"\*", ".*").replace(r"\?", "."),
+                re.DOTALL,
+            )
+            hits = [shapes for name, shapes in areas.items() if regex.fullmatch(name.casefold())]
+            shapes = [shape for group in hits for shape in group] if hits else None
+        else:
+            shapes = areas.get(pattern)
         if shapes is None:
             return match.group(0)
         if any(shape is not None and shape.intersects(copper) for shape in shapes):

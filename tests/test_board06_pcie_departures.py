@@ -501,3 +501,46 @@ def test_receiver_checks_every_rule_area_with_the_same_name(
     assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
     if expected == 0:
         assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("literal_first", [True, False], ids=["literal-first", "literal-last"])
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("J3 *", 0),
+        ("J3 conn??? exit", 0),
+        ("J3 connector exit", 0),
+        ("Q9 *", 0),
+    ],  # a pattern naming no area is undecided: preserve
+)
+def test_receiver_treats_intersects_area_argument_as_a_wildcard(
+    tmp_path, repair, literal_first, pattern, expected
+):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    # The literal "J3 *" area is on B.Cu; the distinct F.Cu area is what the
+    # wildcard pattern actually reaches.
+    literal = _rule_area(
+        "J3 *",
+        9.3,
+        9.8,
+        9.4,
+        9.9,
+        tracks="allowed",
+        layer="B.Cu",
+        uid="00000000-0000-0000-0000-0000000009b1",
+    )
+    front = _rule_area("J3 connector exit", 9.3, 9.8, 9.4, 9.9, tracks="allowed")
+    for area in (literal, front) if literal_first else (front, literal):
+        _add_area(board, area)
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "Enforced width" (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+' && A.intersectsArea('{pattern}')")
+  (constraint track_width (max 0.2mm)))
+"""
+    )
+    before = board.read_bytes()
+    assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
+    if expected == 0:
+        assert board.read_bytes() == before
