@@ -19,7 +19,7 @@ import sys
 import tempfile
 import zipfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, nullcontext
 from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,7 +28,11 @@ from typing import Any
 
 import kicad_tools
 from kicad_tools.core.atomic_write import SourceChangedError, checked_write_text
-from kicad_tools.core.package_publication import publication_lock, publish_directory_locked
+from kicad_tools.core.package_publication import (
+    PublicationRegion,
+    is_publication_hold,
+    publish_regions,
+)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.parts.lcsc import LCSCDependencyMissingError
@@ -322,16 +326,18 @@ class _PackageOutputs:
                 entries.add(name)
             if path.is_dir():
                 for item in path.rglob("*"):
+                    if is_publication_hold(item.relative_to(path)):
+                        continue
                     if item.is_dir() and item.is_symlink():
                         raise OSError(f"Cannot stage package directory symlink: {item}")
                     entries.add(name / item.relative_to(path))
         return entries
 
-    def inventory(self, root: Path) -> dict[str, str]:
+    def inventory(self, root: Path, held_dirs: set[Path] | None = None) -> dict[str, str]:
         snapshot = {}
         for key in self.paths(root):
             path = self.live_path(key) if root == self.out_dir else root / key
-            if path.is_file():
+            if (not held_dirs or path.parent not in held_dirs) and path.is_file():
                 snapshot[key.as_posix()] = _sha256_file(path)
         return snapshot
 
@@ -355,22 +361,16 @@ class _PackageOutputs:
         return existing, before
 
     def publish(self, candidate: Path, existing: set[Path], before: dict[str, str]) -> None:
-        live_bundle = self.out_dir.resolve()
-        with publication_lock(live_bundle.parent / f".{live_bundle.name}.readiness-publish.lock"):
-            publish_directory_locked(
-                candidate,
-                self.out_dir,
-                before,
-                self.inventory,
-                publish_last=os.path.normpath(self.bundle_key / self.config.manifest_name),
-                destination_path=self.live_path,
-            )
-            # The publisher installs files. Apply the writer's report
-            # directory cleanup only to folders that are now empty.
-            for name in sorted(existing - self.paths(candidate), key=lambda p: -len(p.parts)):
-                if self.live_path(name).is_dir():
-                    with suppress(OSError):
-                        self.live_path(name).rmdir()
+        manifest = os.path.normpath(self.bundle_key / self.config.manifest_name)
+        obsolete = sorted(existing - self.paths(candidate), key=lambda p: -len(p.parts))
+        publish_regions(
+            [PublicationRegion(candidate, self.out_dir, before, self.live_path)],
+            self.inventory,
+            publish_last=self.live_path(manifest),
+            remove_empty_directories=[
+                self.live_path(name) for name in obsolete if self.live_path(name).is_dir()
+            ],
+        )
 
 
 def _now_utc() -> datetime:

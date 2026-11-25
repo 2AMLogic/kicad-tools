@@ -897,7 +897,7 @@ def test_refused_standalone_reexport_preserves_the_verified_package(
             replace = os.replace
 
             def refuse_zip(source, target):
-                if Path(target) == bundle / "kicad_project.zip":
+                if Path(source) == bundle / "kicad_project.zip":
                     raise PermissionError("archive held open for inspection")
                 return replace(source, target)
 
@@ -964,3 +964,65 @@ def test_project_package_keeps_custom_output_paths_and_manual_bom_on_retry(tmp_p
     assert "C12345" in bom.read_text()
     assert str(bom) in second.assembly_result.lcsc_merge_source
     assert all(path.is_file() for path in second.all_files)
+
+
+def test_standalone_reexport_preserves_save_through_open_project_archive(tmp_path, monkeypatch):
+    import io
+    import os
+
+    from kicad_tools.export.manufacturing import _PackageOutputs
+
+    design = staged_design(tmp_path) / "output"
+    bundle = tmp_path / "manufacturing"
+    writer = ManufacturingPackage(
+        design / CHECKED[0],
+        design / ROOT,
+        config=ManufacturingConfig(
+            output_dir=bundle,
+            include_gerbers=False,
+            include_report=False,
+            silk_fix=False,
+            emit_drc_constraints=False,
+            auto_lcsc=False,
+            preflight=PreflightConfig(skip_all=True),
+        ),
+    )
+    first = writer.export()
+    assert first.success, first.errors
+    archive = bundle / "kicad_project.zip"
+    original = {p.name: p.read_bytes() for p in bundle.iterdir() if p.is_file()}
+    edited = io.BytesIO(original[archive.name])
+    with zipfile.ZipFile(edited, "a") as project:
+        project.writestr("assembly-note.txt", "Retain the assembly inspector's notes.")
+    child = design / "power.kicad_sch"
+    child.write_text(child.read_text().replace("SENSE_1K", "SENSE_2K"))
+
+    real_inventory = _PackageOutputs.inventory
+    saved = False
+    with archive.open("r+b", buffering=0) as editor:
+
+        def save():
+            nonlocal saved
+            editor.seek(0)
+            assert editor.write(edited.getvalue()) == len(edited.getvalue())
+            editor.truncate()
+            os.fsync(editor.fileno())
+            saved = True
+
+        def inventory(layout, root, *args):
+            if not saved and root == bundle and archive.read_bytes() != original[archive.name]:
+                save()
+            return real_inventory(layout, root, *args)
+
+        monkeypatch.setattr(_PackageOutputs, "inventory", inventory)
+        second = writer.export()
+        assert not second.success, second.errors
+        if not saved:
+            # Windows may refuse to move the open archive before any file is installed.
+            assert os.name == "nt" and archive.read_bytes() == original[archive.name]
+            save()
+
+    assert archive.read_bytes() == edited.getvalue()
+    for name, data in original.items():
+        if name != archive.name:
+            assert (bundle / name).read_bytes() == data

@@ -1666,6 +1666,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--prove-pour-stubs",
+        action="store_true",
+        help=(
+            "Prove redundant_copper_pour_stub findings with a native kicad-cli "
+            "zone refill per candidate branch (Issue #10137; slow, off by default)"
+        ),
+    )
+    parser.add_argument(
         "--errors-only",
         action="store_true",
         help="Show only errors, not warnings",
@@ -2786,6 +2794,7 @@ def main(argv: list[str] | None = None) -> int:
             # graceful no-op (AC5).
             emit_measurements=True,
             physical_copper_gap_mm=getattr(args, "physical_copper_gap", None),
+            prove_pour_stubs=getattr(args, "prove_pour_stubs", False),
             # Issue #8843: net-agnostic fab view is default-on under jlcpcb.
             fab_view=effective_mfr == "jlcpcb",
             fab_view_copper_oz=resolved_copper_outer,
