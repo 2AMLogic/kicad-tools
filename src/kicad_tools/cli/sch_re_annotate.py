@@ -526,8 +526,8 @@ def run_re_annotate(
     format: str = "text",
     unannotated_only: bool = False,
     include_power: bool = False,
-    pcb_path: Path | None = None,
     check: bool = False,
+    pcb_path: Path | None = None,
 ) -> int:
     """Run the re-annotate operation.
 
@@ -543,13 +543,13 @@ def run_re_annotate(
             references, leaving already-assigned references unchanged.
         include_power: If True, also annotate ``#PWR?`` and ``#FLG?`` power
             symbols (excluded by default).
-        pcb_path: If set, apply the reference mapping to this board's footprints.
-            A paired write prepares any requested backups, then saves the board
-            followed by the schematics. A failed write triggers rollback.
         check: If True, report reference numbers out of schematic position
             order and reversed reference ordering between electrical partners.
             Either finding returns exit code 1.
             Files are never modified under ``--check``.
+        pcb_path: If set, apply the reference mapping to this board's footprints.
+            A paired write prepares any requested backups, then saves the board
+            followed by the schematics. A failed write triggers rollback.
 
     Returns:
         0 on success, 1 on error.
@@ -558,9 +558,18 @@ def run_re_annotate(
         print(f"Error: File not found: {schematic_path}", file=sys.stderr)
         return 1
 
-    if pcb_path is not None and not pcb_path.exists():
-        print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
-        return 1
+    pcb_board = None
+    if pcb_path is not None:
+        from kicad_tools.schema.pcb import PCB
+
+        if not pcb_path.exists():
+            print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
+            return 1
+        try:
+            pcb_board = PCB.load(pcb_path)
+        except Exception as e:
+            print(f"Error loading PCB {pcb_path}: {e}", file=sys.stderr)
+            return 1
 
     # Collect all schematic files in hierarchy order
     all_files = _collect_schematic_files(schematic_path)
@@ -693,25 +702,17 @@ def run_re_annotate(
             print("All references are already sequential. No changes needed.")
         return 0
 
-    # Phase 2b: prepare the board-side rename plan in memory. A failed load
-    # or plan leaves both inputs intact. Phase 5 writes the prepared board
+    # Phase 2b: prepare the board-side rename plan in memory. A failed
+    # plan leaves both inputs intact. Phase 5 writes the prepared board
     # and schematics under the same rollback handling.
-    pcb_board = None
     board_mapping: dict[str, str] = {}
     pcb_warnings: list[str] = []
 
-    if pcb_path is not None:
+    if pcb_board is not None:
         from kicad_tools.cli.commands.pcb import (
             _build_rename_plan,
             _update_footprint_reference,
         )
-        from kicad_tools.schema.pcb import PCB
-
-        try:
-            pcb_board = PCB.load(pcb_path)
-        except Exception as e:
-            print(f"Error loading PCB {pcb_path}: {e}", file=sys.stderr)
-            return 1
 
         existing_refs = {fp.reference for fp in pcb_board.footprints}
 

@@ -1338,6 +1338,18 @@ class TestPartnerOrder:
 
 
 class TestCheckMode:
+    def test_existing_positional_check_argument_keeps_the_schematic_read_only(
+        self, tmp_path, capsys
+    ):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        before = sch.read_bytes()
+
+        assert run_re_annotate(sch, False, False, ["R"], 1, False, "json", False, False, True) == 0
+
+        report = json.loads(capsys.readouterr().out)
+        assert report["check"] is True and report["out_of_order"] == []
+        assert sch.read_bytes() == before
+
     def test_check_swapped_exits_nonzero_and_lists_mapping(self, tmp_path, capsys):
         sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
         ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
@@ -2975,6 +2987,21 @@ class TestPcbSync:
         ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
         assert ret == 1
         assert sch.read_text() == sch_before
+
+    @pytest.mark.parametrize("options", [{}, {"dry_run": True}, {"check": True}])
+    def test_invalid_pcb_is_rejected_when_refs_are_already_sequential(
+        self, tmp_path, capsys, options
+    ):
+        sch = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, "(this-is-not-a-kicad-board)")
+        before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+
+        assert run_re_annotate(sch, pcb_path=pcb, format="json", **options) == 1
+
+        captured = capsys.readouterr()
+        assert str(pcb) in captured.err
+        assert captured.out == ""
+        assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
 
     def test_unannotated_entry_skipped_on_board_with_warning(self, tmp_path, capsys):
         # UNANNOTATED_SCHEMATIC: R1 stays, R? -> R2 (schematic-only change).
