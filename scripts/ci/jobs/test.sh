@@ -9,17 +9,17 @@
 #
 # Usage:
 #   test.sh                      # everything (local-gate invocation)
-#   test.sh conformance|board05|mask-copper|stitch|zones|bulk [extra args...]
+#   test.sh conformance|board05|board06|mask-copper|stitch|zones|bulk [extra args...]
 #
 # Extra arguments are forwarded verbatim to the underlying command, which is
 # how CI adds artifact plumbing (--basetemp/--junitxml/--artifacts) without
 # duplicating the test selection here.
 #
-# Module partitioning (Issues #5509/#5417/#5452/#5501): every item in the
-# conformance corpus, the board-05 DRC regression and the native
-# mask/stitch/zones acceptance modules launches its own kicad-cli, so they
-# run serially OUTSIDE the xdist bulk pool; the bulk selection's matching
-# --ignore flags below keep the suite from running twice.
+# Module partitioning (Issues #5509/#5417/#5452/#5501/#10125): every item in
+# the conformance corpus, the board-05 DRC regression, the board-06 rule-area
+# cases and the native mask/stitch/zones acceptance modules launches its own
+# kicad-cli, so they run serially OUTSIDE the xdist bulk pool; the bulk
+# selection's matching --ignore flags below keep the suite from running twice.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 
@@ -48,6 +48,16 @@ run_board05() {
   # subprocess cap and every manufacturing assertion.
   step "Run Board05 manufacturing regression"
   uv run pytest tests/test_board_05_drc_allowlist.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" "$@"
+}
+
+run_board06() {
+  # Issue #10125: both constrained clock cases stop after the parent DRC.
+  # Each permitted clock case launches a fill child with three native checks.
+  # Child slot waits consume the parent's deadline. Permitted clock width
+  # reached the 60 s bulk cap, and both permitted data cases also took
+  # about 20 s in the hosted serial lane.
+  step "Run Board06 pad-departure regression"
+  uv run pytest tests/test_board06_pad_departures.py -o addopts= --benchmark-disable --timeout=120 -m "not slow" "$@"
 }
 
 run_mask_copper() {
@@ -81,6 +91,10 @@ run_bulk() {
   step "Run tests"
   test_args=(
     --ignore=tests/test_board_05_drc_allowlist.py
+    # Issue #10125: the real rule-area cases run in the serial board06 lane
+    # above; without this the refill transaction would run twice and compete
+    # with the pool's workers for the two native slots again.
+    --ignore=tests/test_board06_pad_departures.py
     --ignore=tests/test_mask_copper_native.py
     --ignore=tests/test_stitch_physical_completion.py
     --ignore=tests/test_zones_cmd.py
@@ -102,9 +116,10 @@ run_bulk() {
 }
 
 case "${1:-}" in
-  "") ensure_native_backend; run_conformance; run_board05; run_mask_copper; run_stitch; run_zones; run_bulk ;;
+  "") ensure_native_backend; run_conformance; run_board05; run_board06; run_mask_copper; run_stitch; run_zones; run_bulk ;;
   conformance) shift; ensure_native_backend; run_conformance "$@" ;;
   board05) shift; ensure_native_backend; run_board05 "$@" ;;
+  board06) shift; ensure_native_backend; run_board06 "$@" ;;
   mask-copper) shift; ensure_native_backend; run_mask_copper "$@" ;;
   stitch) shift; ensure_native_backend; run_stitch "$@" ;;
   zones) shift; ensure_native_backend; run_zones "$@" ;;
