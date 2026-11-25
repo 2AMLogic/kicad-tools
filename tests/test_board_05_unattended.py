@@ -10,7 +10,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import runpy
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -125,6 +127,28 @@ def test_grade_only_row_without_route_fields_can_pass(mod):
     assert mod.gate_failures(row) == []
 
 
+def test_grade_only_passes_the_supplied_board_directly_to_the_checker(mod, tmp_path, monkeypatch):
+    board = tmp_path / "routed.kicad_pcb"
+    original = b"(kicad_pcb)"
+    board.write_bytes(original)
+    checked = []
+
+    def grade(path, sch):
+        checked.append((path, path.read_bytes()))
+        return clean_row()
+
+    monkeypatch.setattr(
+        "kicad_tools.cli.kicad_toolchain.evidence_toolchain", lambda _: nullcontext()
+    )
+    monkeypatch.setattr(mod, "grade", grade)
+    monkeypatch.setattr(
+        mod, "prepare_for_grading", lambda _: pytest.fail("preparing in grade-only mode")
+    )
+    assert mod.main(["--work-dir", str(tmp_path / "work"), "--grade-only", str(board)]) == 0
+    assert checked == [(board, original)]
+    assert board.read_bytes() == original
+
+
 def test_no_allowlist_machinery(mod):
     text = SCRIPT.read_text()
     # No identity allowance, no accepted-warnings table, no tolerated-net list.
@@ -154,9 +178,8 @@ def test_never_reads_routing_json(mod):
     assert "from routing import" not in code
 
 
-def test_post_route_prep_mirrors_the_recipe_8532(mod, monkeypatch, tmp_path):
-    """Grading follows the #8532 prep the shipping recipe applies (#9424)."""
-    calls: list[tuple[str, object]] = []
+def test_post_route_prep_runs_on_the_finished_board(mod, monkeypatch, tmp_path):
+    calls = []
     monkeypatch.setattr(
         "kicad_tools.cli.pcb_add_fiducials.run_add_fiducials",
         lambda routed, sides: (calls.append(("fiducials", routed, sides)), 0)[1],
@@ -165,15 +188,57 @@ def test_post_route_prep_mirrors_the_recipe_8532(mod, monkeypatch, tmp_path):
         "kicad_tools.cli.pcb_add_board_info.run_add_board_info",
         lambda routed, auto: (calls.append(("board_info", routed, auto)), 0)[1],
     )
+    monkeypatch.setattr(
+        "kicad_tools.cli.place_silk_refs_cmd.main",
+        lambda argv: (calls.append(("silk_refs_over_holes", argv)), 0)[1],
+    )
     board = tmp_path / "routed.kicad_pcb"
     board.write_text("(kicad_pcb)")
     row = mod.prepare_for_grading(board)
-    assert row["prep"] == ["fiducials", "board_info"]
-    assert [c[0] for c in calls] == ["fiducials", "board_info"]
+    assert row["prep"] == ["fiducials", "board_info", "silk_refs_over_holes"]
+    assert [c[0] for c in calls] == row["prep"]
     assert calls[0][2] == "populated"  # build.py's sides, verbatim
+    assert calls[2][1] == [str(board), "--mfr", "jlcpcb", "--layers", "4", "--over-holes"]
     # run_seed wires the prep in before grading, and its failure is fatal.
     code = SCRIPT.read_text()
     assert "prepare_for_grading(artifact)" in code
+
+
+def test_post_route_prep_clears_only_references_over_the_seed_42_vias(mod, tmp_path):
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
+
+    path = tmp_path / "bldc_controller_routed.kicad_pcb"
+    runpy.run_path(str(mod.REDESIGN / "hardware.py"))["build_pcb"]().save(path)
+    board = PCB.load(path)
+    ox, oy = board.board_origin
+    for x, y in [(131.360, 102.475), (172.245, 95.455), (174.130, 95.715)]:
+        board.add_via(x - ox, y - oy, size=0.6, drill=0.3)
+    board.save(path)
+
+    def positions(pcb):
+        return {
+            fp.reference: text.position
+            for fp in pcb.footprints
+            for text in fp.texts
+            if text.text_type == "reference"
+        }
+
+    before = positions(board)
+    findings = check_silk_hole_overlap(board).violations
+    assert sorted(v.items[0] for v in findings) == [
+        "C3 (reference)",
+        "R11 (reference)",
+        "R11 (reference)",
+    ]
+    mod.prepare_for_grading(path)
+    prepared = PCB.load(path)
+    assert not check_silk_hole_overlap(prepared).violations
+    after = positions(prepared)
+    assert {ref for ref in before if before[ref] != after[ref]} == {"C3", "R11"}
+    assert [(v.position, v.drill) for v in prepared.vias] == [
+        (v.position, v.drill) for v in board.vias
+    ]
 
 
 def test_post_route_prep_failure_is_fatal(mod, monkeypatch, tmp_path):

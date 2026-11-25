@@ -1136,6 +1136,15 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument(
+        "--prove-pour-stubs",
+        dest="prove_pour_stubs",
+        action="store_true",
+        help=(
+            "Prove redundant_copper_pour_stub findings with a native kicad-cli "
+            "zone refill per candidate branch (Issue #10137; slow, off by default)"
+        ),
+    )
+    check_parser.add_argument(
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
@@ -1398,6 +1407,20 @@ def _add_check_parser(subparsers) -> None:
             "Override the pad_grid L2 tolerance with an explicit value "
             "in mm (e.g. ``--pad-grid-tolerance 0.02``).  Disables "
             "auto-derivation."
+        ),
+    )
+    # Issue #10141: bypass_distance maximum cap-to-designated-pin distance.
+    # Declared on BOTH parsers + forwarded by the shim (parser-drift guard).
+    check_parser.add_argument(
+        "--bypass-max-distance",
+        dest="bypass_max_distance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Maximum distance in mm between a decoupling capacitor's supply "
+            "pad and the pad of the supply pin its schematic designates "
+            "before bypass_distance warns (default 3.0; issue #10141)."
         ),
     )
     # Issue #4595: sch_fields schematic field-geometry lint threshold.
@@ -2452,8 +2475,8 @@ def _add_sch_parser(subparsers) -> None:
     sch_reannotate.add_argument(
         "--check",
         action="store_true",
-        help="Report parts whose reference number order disagrees with schematic "
-        "position order; exit 1 if any disagree (files are never modified)",
+        help="Check reference numbers in schematic position order and across electrical "
+        "partners. Exit 1 on either disagreement. Files are read-only.",
     )
     sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
 
@@ -6573,7 +6596,10 @@ def _add_optimize_placement_parser(subparsers) -> None:
             'Custom cost weights as JSON, e.g. \'{"wirelength": 2.0, "overlap": 1e6}\'. '
             "Keys: overlap, drc, boundary, wirelength, area, creepage, cohesion, "
             "decoupling (default 2.0: pull each decoupling cap onto the IC supply pin "
-            "it serves, then snap it beside that pin; 0 turns both off)"
+            "it serves, then snap it beside that pin; 0 turns both off), "
+            "group_cohesion and group_order (default 1.0 each: keep same-sheet "
+            "parts together and in schematic order on multi-sheet designs; 0 "
+            "turns both off)"
         ),
     )
     op_parser.add_argument(
@@ -6763,6 +6789,18 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "Skip the default silk legalisation pass (legalize_silk) on the "
             "written board, and the snap reference repair it supersedes "
             "(Issue #9799). With this flag authored silk is byte-identical."
+        ),
+    )
+    op_parser.add_argument(
+        "--decoupling-radius",
+        dest="decoupling_radius",
+        type=float,
+        default=6.0,
+        metavar="MM",
+        help=(
+            "Furthest a decoupling capacitor's supply pad may sit from the IC "
+            "pin it serves in the post-optimize snap (default: 6.0 mm; "
+            "Issue #10142)."
         ),
     )
     op_parser.add_argument("-v", "--verbose", action="store_true")

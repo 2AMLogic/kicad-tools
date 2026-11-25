@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -2205,3 +2206,146 @@ class TestDerivedTapAutoExempt:
         assert result == 0
         # No per-net voltages -> detector never runs -> exempt stays None/empty.
         assert not captured["exempt_pairs"]
+
+
+class TestSheetGroupWeights:
+    """The schematic-group weight keys (issue #10146)."""
+
+    def test_group_cohesion_default(self):
+        assert _parse_weights(None).group_cohesion_weight == 1.0
+
+    def test_group_cohesion_override(self):
+        config = _parse_weights('{"group_cohesion": 4.0}')
+        assert config.group_cohesion_weight == 4.0
+
+    def test_group_order_default(self):
+        assert _parse_weights(None).group_order_weight == 1.0
+
+    def test_group_order_override(self):
+        config = _parse_weights('{"group_order": 0}')
+        assert config.group_order_weight == 0.0
+
+
+_MULTI_SHEET_NETLIST = """\
+(export (version "E1")
+  (design
+    (source "t.kicad_sch")
+    (tool "kicad")
+    (date "2026-11-24")
+    (sheet (number "1") (name "/") (tstamps "/")
+      (title_block (title "root")))
+    (sheet (number "2") (name "/power/") (tstamps "/power/")
+      (title_block (title "power"))))
+  (components
+    (comp (ref "R1") (value "10k") (footprint "R")
+      (libsource (lib "Device") (part "R")) (sheetpath (names "/") (tstamps "/")))
+    (comp (ref "R2") (value "10k") (footprint "R")
+      (libsource (lib "Device") (part "R")) (sheetpath (names "/") (tstamps "/")))
+    (comp (ref "R3") (value "10k") (footprint "R")
+      (libsource (lib "Device") (part "R")) (sheetpath (names "/") (tstamps "/")))
+    (comp (ref "U1") (value "7805") (footprint "U")
+      (libsource (lib "Regulator") (part "7805"))
+      (sheetpath (names "/power/") (tstamps "/power/"))))
+  (nets))
+"""
+
+_SINGLE_SHEET_NETLIST = _MULTI_SHEET_NETLIST.replace(
+    '(sheetpath (names "/power/") (tstamps "/power/"))', '(sheetpath (names "/") (tstamps "/"))'
+)
+
+
+class TestBuildSheetMap:
+    """The ref -> sheet_path loader behind the schematic-group terms (#10146)."""
+
+    @pytest.fixture
+    def export_netlist_from(self, tmp_path):
+        """Patch the netlist export to copy a fixture instead of running kicad-cli."""
+        fixture = tmp_path / "fixture.net"
+        fixture.write_text(_MULTI_SHEET_NETLIST)
+        import kicad_tools.cli.export_netlist as export_mod
+
+        def fake_export(sch_path, output_path, kicad_cli, format="kicadsexpr"):
+            shutil.copyfile(fixture, output_path)
+            return True, ""
+
+        return fake_export, export_mod
+
+    def _patch_discovery(self, monkeypatch, schematic):
+        import kicad_tools.sync.discover as discover
+
+        monkeypatch.setattr(discover, "resolve_schematic_for_pcb", lambda pcb: schematic)
+
+    def _patch_kicad_cli(self, monkeypatch):
+        import kicad_tools.cli.runner as runner
+
+        monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/fake/kicad-cli"))
+
+    def test_no_schematic_returns_none(self, monkeypatch):
+        from kicad_tools.cli.optimize_placement_cmd import _build_sheet_map
+
+        self._patch_discovery(monkeypatch, None)
+        assert _build_sheet_map("board.kicad_pcb") is None
+
+    def test_multi_sheet_netlist_builds_map(self, monkeypatch, export_netlist_from, capsys):
+        from kicad_tools.cli.optimize_placement_cmd import _build_sheet_map
+
+        fake_export, export_mod = export_netlist_from
+        self._patch_discovery(monkeypatch, Path("/fake/board.kicad_sch"))
+        self._patch_kicad_cli(monkeypatch)
+        monkeypatch.setattr(export_mod, "export_netlist", fake_export)
+
+        got = _build_sheet_map("board.kicad_pcb")
+        assert got == {"R1": "/", "R2": "/", "R3": "/", "U1": "/power/"}
+        assert "Schematic sheets: 2 sheet(s) over 4 refs" in capsys.readouterr().out
+
+    def test_single_sheet_netlist_returns_none(self, monkeypatch, tmp_path):
+        from kicad_tools.cli.optimize_placement_cmd import _build_sheet_map
+
+        fixture = tmp_path / "single.net"
+        fixture.write_text(_SINGLE_SHEET_NETLIST)
+        import kicad_tools.cli.export_netlist as export_mod
+
+        def fake_export(sch_path, output_path, kicad_cli, format="kicadsexpr"):
+            shutil.copyfile(fixture, output_path)
+            return True, ""
+
+        self._patch_discovery(monkeypatch, Path("/fake/board.kicad_sch"))
+        self._patch_kicad_cli(monkeypatch)
+        monkeypatch.setattr(export_mod, "export_netlist", fake_export)
+
+        assert _build_sheet_map("board.kicad_pcb") is None
+
+    def test_export_failure_returns_none(self, monkeypatch, capsys):
+        import kicad_tools.cli.export_netlist as export_mod
+        from kicad_tools.cli.optimize_placement_cmd import _build_sheet_map
+
+        def failing_export(sch_path, output_path, kicad_cli, format="kicadsexpr"):
+            return False, "kicad-cli exited 1"
+
+        self._patch_discovery(monkeypatch, Path("/fake/board.kicad_sch"))
+        self._patch_kicad_cli(monkeypatch)
+        monkeypatch.setattr(export_mod, "export_netlist", failing_export)
+
+        assert _build_sheet_map("board.kicad_pcb") is None
+        assert "netlist export failed" in capsys.readouterr().out
+
+    def test_no_kicad_cli_returns_none(self, monkeypatch):
+        import kicad_tools.cli.runner as runner
+        from kicad_tools.cli.optimize_placement_cmd import _build_sheet_map
+
+        self._patch_discovery(monkeypatch, Path("/fake/board.kicad_sch"))
+        monkeypatch.setattr(runner, "find_kicad_cli", lambda: None)
+
+        assert _build_sheet_map("board.kicad_pcb") is None
+
+    def test_sheet_map_from_netlist_components_skips_sheetless(self):
+        from kicad_tools.cli.export_netlist import Component
+        from kicad_tools.cli.optimize_placement_cmd import _sheet_map_from_netlist_components
+
+        comps = [
+            Component(reference="R1", value="", footprint="", lib_id="", sheet_path="/"),
+            Component(reference="R2", value="", footprint="", lib_id="", sheet_path=""),
+            Component(reference="U1", value="", footprint="", lib_id="", sheet_path="/p/"),
+        ]
+        assert _sheet_map_from_netlist_components(comps) == {"R1": "/", "U1": "/p/"}
+        assert _sheet_map_from_netlist_components(comps[:1]) is None
