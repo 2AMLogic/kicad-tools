@@ -30,8 +30,8 @@ user reroutes, so this is a consistency audit, waivable through
 
 Pad-escape neck-downs: the router may legally narrow a pad-escape leg to the
 class's ``neck_trace_width`` (Issue #4293).  When the sidecar declares one for
-a net, copper down to that width is not reported, so a freshly routed board
-does not warn on its own escapes.
+a net, it applies to short copper leaving a same-net pad on the track's layer.
+The rest of the net is audited against the project width.
 
 Carve-outs, all silent passes (never a crash): no ``pcb_path``, no sidecar map,
 no ``.kicad_pro`` (or unreadable / non-object JSON), no non-``Default`` class
@@ -42,6 +42,8 @@ sorted by (rule id, net) so repeated runs are byte-identical for CI.
 
 from __future__ import annotations
 
+import math
+from collections import defaultdict
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -50,7 +52,7 @@ from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE
 
 if TYPE_CHECKING:
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.pcb import PCB, Segment
 
 RULE_SIDECAR_MISMATCH = "netclass_sidecar_mismatch"
 RULE_TRACK_WIDTH_MISMATCH = "netclass_track_width_mismatch"
@@ -67,6 +69,89 @@ def _number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+def _pad_necks(pcb: PCB, tracks: list[Segment], class_width: float, clearance: float) -> set[int]:
+    """Identify a pad entry and its optional second leg in saved copper."""
+    from shapely import Point, STRtree  # type: ignore[import-untyped]
+
+    from kicad_tools.core.layers import via_spans_layer
+    from kicad_tools.router.lattice.geometry import DEFAULT_FINE_PITCH_MM, pad_stub_radius
+    from kicad_tools.schema.pcb import Arc, iter_copper_pads
+
+    from .clearance import _pad_on_layer, _pad_polygon
+
+    incident: dict[tuple[str, tuple[float, float]], list[int]] = defaultdict(list)
+    lengths: dict[int, float] = {}
+    for i, track in enumerate(tracks):
+        for point in (track.start, track.end):
+            incident[track.layer, point].append(i)
+        if track.width + DRC_TOLERANCE >= class_width:
+            continue
+        try:
+            length = track.length if isinstance(track, Arc) else math.dist(track.start, track.end)
+        except ValueError:  # An invalid arc cannot establish a pad escape.
+            continue
+        if length > 0:
+            lengths[i] = length
+    if not lengths:
+        return set()
+
+    nodes = list({(tracks[i].layer, p) for i in lengths for p in (tracks[i].start, tracks[i].end)})
+    index = STRtree([Point(point) for _, point in nodes])
+    starts: dict[tuple[str, tuple[float, float]], float] = {}
+    for footprint, pad in iter_copper_pads(pcb):
+        if pad.net_number != tracks[0].net_number:
+            continue
+        copper = _pad_polygon(pad, footprint)
+        if copper is None:
+            continue
+        # kct route refines at or below its fine pitch, and subtracts the
+        # base agent radius from the class's width/clearance expansion.
+        # The saved board lacks that lattice. Use its conservative reach.
+        reach = pad_stub_radius(DEFAULT_FINE_PITCH_MM, *pad.size) + class_width / 2 + clearance
+        for k in index.query(copper, predicate="covers"):
+            node = nodes[k]
+            if _pad_on_layer(pad, node[0]):
+                starts[node] = max(starts.get(node, 0.0), reach + DRC_TOLERANCE)
+
+    # A lattice escape is a pad-to-node dogleg with at most one bend. Stop at
+    # a branch, via or width change. The landing radius is measured from
+    # the actual pad attachment, which can lie off-centre on a crowded pad.
+    layers = {layer for layer, _ in nodes}
+    via_nodes = {
+        (layer, via.position)
+        for via in pcb.vias
+        if via.net_number == tracks[0].net_number
+        for layer in layers
+        if via_spans_layer(via.layers, layer)
+    }
+    necks = set()
+    for (layer, start), reach in starts.items():
+        for i in incident[layer, start]:
+            if i not in lengths or lengths[i] > reach:
+                continue
+            necks.add(i)
+            track = tracks[i]
+            tip = track.end if track.start == start else track.start
+            adjacent = incident[layer, tip]
+            if len(adjacent) != 2 or (layer, tip) in via_nodes:
+                continue
+            other = adjacent[0] if adjacent[1] == i else adjacent[1]
+            next_track = tracks[other]
+            if other not in lengths or abs(next_track.width - track.width) > DRC_TOLERANCE:
+                continue
+            finish = next_track.end if next_track.start == tip else next_track.start
+            # A 45-degree pad dogleg moves monotonically towards the landing:
+            # its path length is max(dx,dy) + (sqrt(2) - 1) * min(dx,dy).
+            dx, dy = abs(finish[0] - start[0]), abs(finish[1] - start[1])
+            dogleg = max(dx, dy) + (math.sqrt(2) - 1) * min(dx, dy)
+            if (
+                math.hypot(dx, dy) <= reach
+                and abs(lengths[i] + lengths[other] - dogleg) <= DRC_TOLERANCE
+            ):
+                necks.add(other)
+    return necks
 
 
 def check_netclass_agreement(
@@ -96,7 +181,10 @@ def check_netclass_agreement(
     if pcb_path is None or not net_class_map:
         return results
 
-    from kicad_tools.core.project_clearance import authored_netclass_widths
+    from kicad_tools.core.project_clearance import (
+        authored_netclass_clearances,
+        authored_netclass_widths,
+    )
 
     from .netclass_clearance_copper import load_project
 
@@ -107,6 +195,7 @@ def check_netclass_agreement(
     net_names = {num: net.name for num, net in pcb.nets.items() if net.name}
     try:
         authored = authored_netclass_widths(project, list(net_names.values()))
+        clearances = authored_netclass_clearances(project, net_names.values())
     except Exception:  # noqa: BLE001 - a project the resolver can't model is a silent pass
         return results
     if not authored:
@@ -149,7 +238,7 @@ def check_netclass_agreement(
         )
 
     # --- copper vs project class width -------------------------------------
-    by_net: dict[str, list[Any]] = {}
+    by_net: dict[str, list[Segment]] = {}
     for seg in (*pcb.segments, *pcb.arcs):
         name = net_names.get(seg.net_number)
         if name is not None and name in authored:
@@ -157,16 +246,27 @@ def check_netclass_agreement(
 
     for net, segs in by_net.items():
         resolved = authored[net]
-        required = resolved.width
         entry = net_class_map.get(net)
         neck = _number(getattr(entry, "neck_trace_width", None)) if entry is not None else None
-        if neck is not None and neck < required:
-            required = neck
-        narrow = [s for s in segs if s.width + DRC_TOLERANCE < required]
+        necks = set()
+        if neck is not None and 0 < neck < resolved.width:
+            electrical = clearances.get(net)
+            clearance = max(
+                _number(getattr(entry, "clearance", None)) or 0.0,
+                electrical.clearance if electrical else 0.0,
+            )
+            necks = _pad_necks(pcb, segs, resolved.width, clearance)
+        narrow = []
+        for i, segment in enumerate(segs):
+            floor = neck if i in necks and neck is not None else resolved.width
+            if segment.width + DRC_TOLERANCE < floor:
+                narrow.append((segment, floor))
         if not narrow:
             continue
-        worst = min(narrow, key=lambda s: (s.width, s.layer, s.start))
-        neck_note = f" (sidecar neck-down floor {neck:.3f}mm)" if required != resolved.width else ""
+        worst, required = min(narrow, key=lambda hit: (hit[0].width, hit[0].layer, hit[0].start))
+        neck_note = (
+            f" (sidecar neck-down floor {required:.3f}mm)" if required != resolved.width else ""
+        )
         findings.append(
             (
                 (RULE_TRACK_WIDTH_MISMATCH, net),

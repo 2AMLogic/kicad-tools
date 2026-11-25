@@ -63,6 +63,13 @@ def _arc(width: float, net: int) -> str:
     )
 
 
+def _vcc_pad(x: float, y: float, layer: str = "F.Cu") -> str:
+    return (
+        f'  (footprint "Test:Pad" (layer "{layer}") (at {x} {y})'
+        f' (pad "1" smd rect (at 0 0) (size 0.6 0.8) (layers "{layer}") (net 1 "VCC")))\n'
+    )
+
+
 def _write_pcb(tmp_path: Path, body: str = "", name: str = "board") -> Path:
     pcb_path = tmp_path / f"{name}.kicad_pcb"
     pcb_path.write_text(_HEADER + body + _FOOTER, encoding="utf-8")
@@ -192,16 +199,49 @@ class TestAgreement:
         assert results.violations[0].nets == ("VBUS_A",)
 
     def test_sidecar_neck_floor_tolerates_pad_escape_necks(self, tmp_path: Path):
-        pcb = _write_pcb(tmp_path, _seg(100, 110, 0.5, 1) + _seg(110, 112, 0.3, 1))
+        pad = _vcc_pad(112, 110)
+        pcb = _write_pcb(tmp_path, pad + _seg(100, 110, 0.5, 1) + _seg(110, 112, 0.3, 1))
         _write_project(pcb, _project())
         ncm = _ncm(VCC=NetClassRouting(name="Power", trace_width=0.5, neck_trace_width=0.3))
         assert _run(pcb, ncm).violations == []
         thinner = _seg(100, 110, 0.5, 1) + _seg(110, 112, 0.2, 1)
-        pcb2 = _write_pcb(tmp_path, thinner, name="thin")
+        pcb2 = _write_pcb(tmp_path, pad + thinner, name="thin")
         _write_project(pcb2, _project())
         results = _run(pcb2, ncm)
         assert _ids(results) == [RULE_TRACK_WIDTH_MISMATCH]
         assert "neck-down floor" in results.violations[0].message
+        assert results.violations[0].required_value == pytest.approx(0.3)
+
+    def test_two_leg_neck_can_reach_full_width_from_a_pad(self, tmp_path: Path):
+        corner = (
+            '  (segment (start 112 110) (end 111.5 110.5) (width 0.3) (layer "F.Cu") (net 1))\n'
+        )
+        board = _vcc_pad(112, 110) + corner + _seg(111.5, 111, 0.3, 1, 110.5)
+        pcb = _write_pcb(tmp_path, board + _seg(111, 105, 0.5, 1, 110.5))
+        _write_project(pcb, _project())
+        ncm = _ncm(VCC=NetClassRouting(name="Power", trace_width=0.5, neck_trace_width=0.3))
+        assert _run(pcb, ncm).violations == []
+
+    def test_wide_class_escape_uses_the_router_landing_radius(self, tmp_path: Path):
+        # The lattice's dense-field control emits a 2.8 mm leg after a short
+        # diagonal. The stock 2.6 mm body needs the expanded landing search.
+        pad = _vcc_pad(108, 110)
+        corner = (
+            '  (segment (start 108 110) (end 107.6 109.6) (width 0.2) (layer "F.Cu") (net 1))\n'
+        )
+        body = pad + corner + _seg(107.6, 104.8, 0.2, 1, 109.6) + _seg(104.8, 103, 2.6, 1, 109.6)
+        pcb = _write_pcb(tmp_path, body)
+        _write_project(pcb, _project(power_width=2.6))
+        ncm = _ncm(
+            VCC=NetClassRouting(name="Power", trace_width=2.6, neck_trace_width=0.2, clearance=0.3)
+        )
+        assert _run(pcb, ncm).violations == []
+
+        # Extending just that leg across the board ceases to be a local escape.
+        long_leg = _write_pcb(tmp_path, pad + corner + _seg(107.6, 125, 0.2, 1, 109.6), name="long")
+        _write_project(long_leg, _project(power_width=2.6))
+        (finding,) = _run(long_leg, ncm).violations
+        assert finding.required_value == pytest.approx(2.6)
 
     def test_net_absent_from_sidecar_still_gets_copper_check(self, tmp_path: Path):
         pcb = _write_pcb(tmp_path, _seg(100, 110, 0.3, 1))
@@ -281,6 +321,30 @@ class TestSilentPasses:
 
 
 class TestWiring:
+    @pytest.mark.parametrize("pad_layer", ["F.Cu", "B.Cu"])
+    def test_cli_neck_floor_is_local_to_a_same_layer_pad(self, tmp_path: Path, capsys, pad_layer):
+        # The same board has a short pad entry and, between two full-width
+        # sections of VCC, a second section at exactly the same width.
+        copper = (
+            _vcc_pad(110, 110, pad_layer)
+            + _seg(110, 111, 0.35, 1)
+            + _seg(111, 116, 0.5, 1)
+            + _seg(116, 117, 0.35, 1)
+            + _seg(117, 121, 0.5, 1)
+        )
+        pcb = _write_pcb(tmp_path, copper)
+        _write_project(pcb, _project())
+        (tmp_path / "board.net_class_map.json").write_text(
+            json.dumps({"VCC": {"name": "Power", "trace_width": 0.5, "neck_trace_width": 0.3}})
+        )
+        code, report = self._check(pcb, tmp_path, capsys)
+        assert code == 0
+        (finding,) = report["violations"]
+        assert finding["rule_id"] == RULE_TRACK_WIDTH_MISMATCH
+        assert finding["required_value"] == pytest.approx(0.5)
+        count = 1 if pad_layer == "F.Cu" else 2
+        assert f"{count} copper segment(s)" in finding["message"]
+
     def test_advisory_category_and_registration(self):
         from kicad_tools.cli.check_categories import CHECK_CATEGORIES
 
