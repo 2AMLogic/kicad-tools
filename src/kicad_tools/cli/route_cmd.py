@@ -8407,7 +8407,7 @@ def _canonicalize_routed_uuids(output_path: Path, *, args=None) -> None:
 
 
 def _fill_zones_after_route(
-    output_path: Path, quiet: bool = False, *, router=None, args=None
+    output_path: Path, quiet: bool = False, *, router=None, args=None, require_saved: bool = False
 ) -> None:
     """Fill copper-pour zones after routing completes.
 
@@ -8435,6 +8435,7 @@ def _fill_zones_after_route(
     Args:
         output_path: Path to the routed PCB file (modified in place).
         quiet: Suppress informational output.
+        require_saved: A DRC report without a confirmed native save cannot verify the fill.
     """
     record_stage("native-zone-fill")
     if args is not None:
@@ -8476,6 +8477,16 @@ def _fill_zones_after_route(
 
                 write_native_zone_clearance_rules(output_path)
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
+            if require_saved:
+                # Selective filling intentionally leaves protected pours fixed.
+                # A new through via must still clear them in the saved board.
+                from kicad_tools.cli.runner import find_kicad_cli
+                from kicad_tools.export.manufacturing import _saved_zone_fill_matches_native_refill
+
+                cli = find_kicad_cli()
+                args._zone_fill_verified = (
+                    cli is not None and _saved_zone_fill_matches_native_refill(output_path, cli)
+                )
             if not quiet:
                 print("  Zone fill: complete; placement-excluded copper preserved")
         except Exception as exc:
@@ -8612,7 +8623,7 @@ def _fill_zones_after_route(
     # Validate net format after zone fill -- kicad-cli may corrupt nets.
     report = validate_net_format(output_path)
     if args is not None:
-        args._zone_fill_verified = report.valid
+        args._zone_fill_verified = report.valid and (not require_saved or result.refill_saved)
     if not report.valid:
         logger.warning(
             "Net format corruption detected after zone fill: "
@@ -11217,15 +11228,19 @@ def _publish_preserved_departure(pcb_path, output_path, route_sexp, args, router
         trial._preserved_departure_trial = True
         _fill_zones_after_route(staged, quiet=quiet, router=router, args=trial)
         _complete_pour_nets_with_oracle(staged, args=trial, quiet=quiet, router=router)
-        _run_post_save_stitching(trial, staged, router=router, pour_pass_ran=True, quiet=quiet)
-        if not (
-            getattr(trial, "_zone_fill_verified", False)
-            and getattr(trial, "_pour_connectivity_verified", False)
-        ):
-            # Keep the input's saved fills. The declined signal and its
-            # temporary cut through the original power pour stay together.
-            relocate({staged: None})
-            _write_routed_pcb(source, output_path, "", guard_copper_loss=True)
+        verified = False
+        try:
+            _run_post_save_stitching(trial, staged, router=router, pour_pass_ran=True, quiet=quiet)
+            verified = getattr(trial, "_zone_fill_verified", False) and getattr(
+                trial, "_pour_connectivity_verified", False
+            )
+        finally:
+            if not verified:
+                # Retain the source even if the post-stitch refill raised
+                # before this speculative departure could be published.
+                relocate({staged: None})
+                _write_routed_pcb(source, output_path, "", guard_copper_loss=True)
+        if not verified:
             return False
 
         moves: list[tuple[Path, Path | None]] = [
@@ -19487,6 +19502,10 @@ def _warn_bus_flags_ignored_early(args, router, multi_res_plan=None) -> None:
         _warn_bus_flags_ignored(args, reason)
 
 
+class _PostStitchRefillError(RuntimeError):
+    """KiCad did not save a verified fill around the proposed stitch copper."""
+
+
 def _run_post_save_stitching(
     args, output_path: Path, *, router, pour_pass_ran: bool, quiet: bool = False
 ):
@@ -19502,6 +19521,9 @@ def _run_post_save_stitching(
 
     from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
     from kicad_tools.core.sexp_file import load_pcb as load_stitch_pcb
+    from kicad_tools.sidecars import PROJECT_SIDECAR_SUFFIXES, copy_project_sidecars
+
+    from .route_receipt import relocate
 
     if not quiet:
         print("\n--- Stitching Power Planes ---")
@@ -19521,18 +19543,37 @@ def _run_post_save_stitching(
     if not quiet:
         print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
 
-    stitch_result = run_stitch(
-        pcb_path=output_path,
-        net_names=net_names,
-        via_size=args.via_diameter,  # Use same via size as routing
-        drill=args.via_drill,
-        clearance=args.clearance,
-        dry_run=False,
-    )
-
-    if stitch_result.vias_added or stitch_result.traces_added:
-        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
-        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+    # Keep the published board and project together while the new via or
+    # trace still crosses the previous fill. Only promote the refilled copy.
+    with tempfile.TemporaryDirectory(prefix=".kct-stitch-", dir=output_path.parent) as directory:
+        staged = Path(directory) / output_path.name
+        shutil.copy2(output_path, staged)
+        copy_project_sidecars(output_path, staged)
+        stitch_result = run_stitch(
+            pcb_path=staged,
+            net_names=net_names,
+            via_size=args.via_diameter,
+            drill=args.via_drill,
+            clearance=args.clearance,
+            dry_run=False,
+        )
+        if stitch_result.vias_added or stitch_result.traces_added:
+            _fill_zones_after_route(
+                staged, quiet=quiet, router=router, args=args, require_saved=True
+            )
+            if not args._zone_fill_verified:
+                relocate({staged: None})
+                raise _PostStitchRefillError(
+                    "Post-stitch zone refill could not be verified. Discarded the proposed stitch."
+                )
+            moves: list[tuple[Path, Path | None]] = [
+                (output_path.with_suffix(ext), staged.with_suffix(ext))
+                for ext in PROJECT_SIDECAR_SUFFIXES
+                if staged.with_suffix(ext).is_file()
+            ]
+            _publish_transaction([*moves, (output_path, staged)])
+            relocate({staged: output_path})
+            _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
 
     if not quiet:
         if stitch_result.vias_added:
@@ -25318,6 +25359,9 @@ def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = fr
                         # completion pass a no-op.
                         result = _chain_budget_coarser_pass(args, argv, result)
                         result = _chain_complete_pass(args, argv, result)
+                    except _PostStitchRefillError as exc:
+                        print(f"Error: {exc}", file=sys.stderr)
+                        result = EXIT_UNVERIFIED
                     except BaseException:
                         if gate is not None:
                             # Never leave an unjudged board at --output.

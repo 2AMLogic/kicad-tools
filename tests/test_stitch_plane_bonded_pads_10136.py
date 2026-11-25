@@ -208,17 +208,31 @@ def test_stale_fill_with_pad_connection_disabled_earns_no_skip(tmp_path, native_
     assert stitched_pads(result) == {"C1.1"}
 
 
+def route_args(board: Path, *route_options: str, stitch_planes: bool = True) -> list[str]:
+    return (
+        [str(board)]
+        + (["--stitch-power-planes"] if stitch_planes else [])
+        + list(route_options)
+        + ["--layers", "4", "--via-diameter", "0.6"]
+        + [
+            "--via-drill",
+            "0.3",
+            "--clearance",
+            "0.2",
+            "-o",
+            str(board.with_name("routed.kicad_pcb")),
+        ]
+    )
+
+
 def route_and_refill(
     board: Path, native_cli: str, *route_options: str, stitch_planes: bool = True
 ) -> PCB:
     routed = board.with_name("routed.kicad_pcb")
     original = board.read_bytes()
     subprocess.run(
-        [sys.executable, "-m", "kicad_tools.cli", "route", str(board)]
-        + (["--stitch-power-planes"] if stitch_planes else [])
-        + list(route_options)
-        + ["--layers", "4", "--via-diameter", "0.6"]
-        + ["--via-drill", "0.3", "--clearance", "0.2", "-o", str(routed)],
+        [sys.executable, "-m", "kicad_tools.cli", "route"]
+        + route_args(board, *route_options, stitch_planes=stitch_planes),
         capture_output=True,
         text=True,
         timeout=240,
@@ -279,9 +293,8 @@ def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
     }
 
 
-def test_zero_signal_stitch_saves_the_hole_in_a_foreign_plane(tmp_path, native_cli):
-    from shapely.geometry import Point, Polygon
-
+@pytest.fixture
+def board_with_shield(tmp_path):
     board = make_board(tmp_path, right_edge=115)
     # A through via must clear this floating shield even when no SIG net routed.
     shield = """
@@ -291,6 +304,13 @@ def test_zero_signal_stitch_saves_the_hole_in_a_foreign_plane(tmp_path, native_c
       (polygon (pts (xy 105 105) (xy 135 105) (xy 135 115) (xy 105 115))))
     """
     board.write_text(board.read_text().rstrip()[:-1] + shield + ")\n")
+    return board
+
+
+def test_zero_signal_stitch_saves_the_hole_in_a_foreign_plane(board_with_shield, native_cli):
+    from shapely.geometry import Point, Polygon
+
+    board = board_with_shield
     before_path = board.with_name("before.kicad_pcb")
     shutil.copyfile(board, before_path)
     assert len(refill(before_path, native_cli)["unconnected_items"]) == 1
@@ -313,6 +333,48 @@ def test_zero_signal_stitch_saves_the_hole_in_a_foreign_plane(tmp_path, native_c
     assert saved.equals(shield_polygon(PCB.load(board.with_name("after.kicad_pcb"))))
 
 
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("reports_success", [False, True], ids=["refused", "report-without-save"])
+def test_route_discards_stitch_without_a_saved_refill(
+    board_with_shield, native_cli, monkeypatch, capsys, reports_success
+):
+    from kicad_tools.cli import route_cmd, runner
+
+    board = board_with_shield
+    original = board.read_bytes()
+    routed = board.with_name("routed.kicad_pcb")
+    native_fill = runner.run_fill_zones
+    fills = []
+
+    def refuse_added_copper(path, **kwargs):
+        vias = len(PCB.load(path).vias)
+        if vias == 3:
+            result = runner.KiCadCLIResult(
+                success=reports_success, stderr="refused post-stitch refill"
+            )
+        else:
+            result = native_fill(path, **kwargs)
+        fills.append((vias, result.success))
+        return result
+
+    monkeypatch.setattr(runner, "run_fill_zones", refuse_added_copper)
+    options = ["--oracle-rounds", "0", "--native-zone-clearance"]
+    if reports_success:
+        options += ["--format", "json"]
+    result = route_cmd.main(route_args(board, *options))
+    assert (2, True) in fills and fills[-1] == (3, reports_success)
+    assert result == route_cmd.EXIT_UNVERIFIED
+    assert json.loads(routed.with_suffix(".route.json").read_text())["route_exit_code"] == result
+    captured = capsys.readouterr()
+    assert "post-stitch" in captured.err.lower()
+    if reports_success:
+        document = json.loads(captured.out)
+        assert document.get("summary", document)["verdict"] == "unverified"
+    assert board.read_bytes() == original
+    assert ground_copper(PCB.load(routed)) == (2, 2)
+
+
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("refill_first", [False, True], ids=["stale", "refilled"])
 def test_board_cutout_cannot_hide_a_required_stitch(tmp_path, native_cli, refill_first):
     board = make_board(tmp_path)
@@ -335,7 +397,8 @@ def test_board_cutout_cannot_hide_a_required_stitch(tmp_path, native_cli, refill
     if refill_first:
         shutil.copyfile(probe, board)
     original = board.read_bytes()
-    assert ground_copper(route_and_refill(board, native_cli)) == (3, 3)
+    assert ground_copper(route_and_refill(board, native_cli, "--oracle-rounds", "0")) == (3, 3)
+    assert ground_copper(PCB.load(board.with_name("after.kicad_pcb"))) == (3, 3)
     assert board.read_bytes() == original
 
 
