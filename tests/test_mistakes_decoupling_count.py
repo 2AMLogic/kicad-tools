@@ -118,7 +118,9 @@ def test_inventory_includes_clean_pins_with_distances(tmp_path: Path) -> None:
     pcb = _pcb(tmp_path, _ic("U1", 10, 10), _cap("C1", "100nF", 8, 11))
     (pin,) = DecouplingCountCheck().pin_inventory(pcb)
     assert [(c.reference, c.value, c.distance_mm) for c in pin.caps] == [("C1", "100nF", 1.0)]
-    assert pin.to_dict()["caps"] == [{"ref": "C1", "value": "100nF", "distance_mm": 1.0}]
+    assert pin.to_dict()["caps"] == [
+        {"ref": "C1", "value": "100nF", "distance_mm": 1.0, "source": "geometric"}
+    ]
 
 
 def test_equidistant_cap_assigned_deterministically(tmp_path: Path) -> None:
@@ -330,3 +332,112 @@ def test_board07_public_report_describes_actual_cap_assignments(
     assert "assigned to U1.33" in by_key[("U1", "+3V3_A")]["explanation"]
     assert "C26 (10uF)" in by_key[("U3", "+5V")]["explanation"]
     assert "assigned to U3.3" in by_key[("U3", "+5V")]["explanation"]
+
+
+# ---------------------------------------------------------------------------
+# Schematic association (issue #10134, consuming #10140).  The PCB is the same
+# in every row: U1.1 at 0 mm and U2.1 at 20 mm on VCC, C1 at 1 mm (beside U1)
+# and C2 at 19 mm (beside U2).  Only the schematic designation changes.
+# ---------------------------------------------------------------------------
+
+
+def _two_ic_board(tmp_path: Path, c1_target: str | None, c2_target: str | None) -> Path:
+    from .test_decoupling_association import make_sheet
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(
+        _HEADER
+        + _ic("U1", 2, 10)
+        + _ic("U2", 22, 10)
+        + _cap("C1", "100nF", 1, 10)
+        + _cap("C2", "100nF", 19, 10)
+        + ")\n"
+    )
+    make_sheet(
+        tmp_path / "board.kicad_sch",
+        [
+            ("U1", 50.8, 50.8, "+3V3", None),
+            ("U2", 101.6, 50.8, "+3V3", None),
+            ("C1", 55.88, 50.8, "+3V3", c1_target),
+            ("C2", 106.68, 50.8, "+3V3", c2_target),
+        ],
+        [(50.8, 50.8, 55.88, 50.8), (101.6, 50.8, 106.68, 50.8)],
+    )
+    return board
+
+
+def _rows(board: Path) -> dict[tuple[str, str], list[tuple[str, float, str]]]:
+    inv = DecouplingCountCheck().pin_inventory(PCB.load(str(board)))
+    return {
+        (p.ic_reference, p.pad_number): [(c.reference, c.distance_mm, c.source) for c in p.caps]
+        for p in inv
+        if p.net_name == "VCC"
+    }
+
+
+def test_schematic_designation_matching_geometry(tmp_path: Path) -> None:
+    board = _two_ic_board(tmp_path, None, None)  # C1 -> U1.1, C2 -> U2.1 as drawn
+    assert _rows(board) == {
+        ("U1", "1"): [("C1", 1.0, "schematic")],
+        ("U2", "1"): [("C2", 1.0, "schematic")],
+    }
+    assert DecouplingCountCheck().check(PCB.load(str(board))) == []
+
+
+def test_both_caps_designated_for_u1_is_duplicate_and_leaves_u2_empty(tmp_path: Path) -> None:
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    assert _rows(board) == {
+        ("U1", "1"): [("C1", 1.0, "schematic"), ("C2", 19.0, "schematic")],
+        ("U2", "1"): [],
+    }
+    found = DecouplingCountCheck().check(PCB.load(str(board)))
+    redundant = [m for m in found if m.title.startswith("Redundant")]
+    assert len(redundant) == 1
+    assert "C1 (100nF, 1.0mm)" in redundant[0].explanation
+    assert "C2 (100nF, 19.0mm)" in redundant[0].explanation
+    assert any(m.components[0] == "U2" for m in found if not m.title.startswith("Redundant"))
+
+
+def test_crossed_designation_shows_both_caps_at_19mm(tmp_path: Path) -> None:
+    board = _two_ic_board(tmp_path, "U2.1", "U1.1")
+    assert _rows(board) == {
+        ("U1", "1"): [("C2", 19.0, "schematic")],
+        ("U2", "1"): [("C1", 19.0, "schematic")],
+    }
+    titles = {m.title for m in DecouplingCountCheck().check(PCB.load(str(board)))}
+    assert titles == {"Power pin has no decoupling capacitor nearby"}
+
+
+def test_without_schematic_the_geometric_rule_is_used(tmp_path: Path) -> None:
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    board.with_suffix(".kicad_sch").unlink()
+    assert _rows(board) == {
+        ("U1", "1"): [("C1", 1.0, "geometric")],
+        ("U2", "1"): [("C2", 1.0, "geometric")],
+    }
+
+
+def test_unreadable_schematic_falls_back_to_geometry(tmp_path: Path) -> None:
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    board.with_suffix(".kicad_sch").write_text("not a schematic")
+    assert {k: [c[2] for c in v] for k, v in _rows(board).items()} == {
+        ("U1", "1"): ["geometric"],
+        ("U2", "1"): ["geometric"],
+    }
+
+
+def test_json_report_lists_every_pin_with_caps_and_distances(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    assert mistakes_cmd.main([str(board), "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {(r["ic"], r["pin"]): r for r in payload["decoupling_inventory"] if r["net"] == "VCC"}
+    assert [(c["ref"], c["distance_mm"], c["source"]) for c in rows[("U1", "1")]["caps"]] == [
+        ("C1", 1.0, "schematic"),
+        ("C2", 19.0, "schematic"),
+    ]
+    assert rows[("U2", "1")]["caps"] == []  # empty pins are listed too
+    # Other categories do not carry the inventory.
+    assert mistakes_cmd.main([str(board), "--category", "bom_health", "--format", "json"]) == 0
+    assert "decoupling_inventory" not in json.loads(capsys.readouterr().out)

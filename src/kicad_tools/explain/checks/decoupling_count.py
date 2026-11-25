@@ -8,16 +8,19 @@ Neither counts capacitors **per IC power pin**, so a second or third 100 nF
 beside a pin that already has one, or a pin with no capacitor nearby on a rail
 that has capacitors elsewhere, is invisible.
 
-:class:`DecouplingCountCheck` closes that gap.  The cap-to-pin association is
-**PCB-geometric and local to this check**: each decoupling capacitor on a power
-net is assigned to the nearest power pad of an IC on the same net, if that pad
-is within :data:`DEFAULT_RADIUS_MM`.  When a pin is left with no assigned
+:class:`DecouplingCountCheck` closes that gap.  The cap-to-pin association
+prefers the **schematic designation**
+(:func:`kicad_tools.placement.decoupling.schematic_cap_associations`, issue
+#10140) when a schematic sits next to the PCB (``<board>.kicad_sch``) or is
+passed as ``schematic_path``: a cap is inventoried against the pin its drawing
+(or ``KCT_Decouples`` override) names, at its **PCB distance**, however far that
+is.  A cap the schematic does not designate -- or no schematic at all -- falls
+back to the **PCB-geometric rule**: the nearest power pad of an IC on the same
+net, if that pad is within :data:`DEFAULT_RADIUS_MM`.  When a pin is left with no assigned
 capacitor on an otherwise-decoupled rail, the finding distinguishes a nearby
 same-rail capacitor that was assigned to another closer (or tie-broken) pin
 from a pin whose nearest same-rail capacitor really sits outside
-:data:`DEFAULT_RADIUS_MM`.  Schematic-based association (issue #10131 / #10140)
-is deliberately not built here; when it lands it replaces
-:meth:`DecouplingCountCheck.pin_inventory`'s assignment step.
+:data:`DEFAULT_RADIUS_MM`.  The gateable ``kct check`` rule is issue #10131.
 
 The full per-pin tally -- including pins that are clean, pins with no capacitor,
 and pins on a rail with no decoupling at all -- is available from
@@ -27,9 +30,11 @@ turns only the problem pins into advisory findings.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Mapping
 
 from ..mistakes import (
     Mistake,
@@ -44,7 +49,10 @@ from .bypass import BYPASS_WARNING_DISTANCE_MM
 from .decoupling import _capacitance_farads, _is_decoupling_cap
 
 if TYPE_CHECKING:
+    from ...placement.decoupling import SchematicCapAssociation
     from ...schema.pcb import PCB, Footprint, Pad
+
+logger = logging.getLogger(__name__)
 
 #: A capacitor is only associated with a pin within this distance (mm).
 DEFAULT_RADIUS_MM = BYPASS_WARNING_DISTANCE_MM
@@ -60,6 +68,8 @@ class AssignedCap:
     reference: str
     value: str
     distance_mm: float
+    #: ``"schematic"`` when the schematic designates this pin, else ``"geometric"``.
+    source: str = "geometric"
 
 
 @dataclass
@@ -105,7 +115,12 @@ class PinDecoupling:
             "location": list(self.position),
             "rail_has_caps": self.rail_has_caps,
             "caps": [
-                {"ref": c.reference, "value": c.value, "distance_mm": c.distance_mm}
+                {
+                    "ref": c.reference,
+                    "value": c.value,
+                    "distance_mm": c.distance_mm,
+                    "source": c.source,
+                }
                 for c in self.caps
             ],
             "nearest_rail_cap": nearest,
@@ -156,7 +171,11 @@ class DecouplingCountCheck:
     Args:
         max_same_value: Report a pin with more than this many capacitors of
             the same value (default 1).
-        radius_mm: Association radius from a capacitor to a power pad.
+        radius_mm: Association radius from a capacitor to a power pad (the
+            geometric fallback only; a schematic-designated cap is inventoried
+            at any distance).
+        schematic_path: Schematic whose cap designations to use.  Defaults to
+            the ``.kicad_sch`` next to the PCB file, when one exists.
     """
 
     category = MistakeCategory.DECOUPLING
@@ -165,16 +184,68 @@ class DecouplingCountCheck:
         self,
         max_same_value: int = DEFAULT_MAX_SAME_VALUE,
         radius_mm: float = DEFAULT_RADIUS_MM,
+        schematic_path: str | Path | None = None,
     ) -> None:
         self.max_same_value = max_same_value
         self.radius_mm = radius_mm
+        self.schematic_path = Path(schematic_path) if schematic_path else None
+        self._association_cache: tuple[PCB, dict[str, SchematicCapAssociation] | None] | None = None
+
+    # ------------------------------------------------------------------
+    # Schematic association
+    # ------------------------------------------------------------------
+
+    def _resolve_schematic(self, pcb: PCB) -> Path | None:
+        if self.schematic_path is not None:
+            return self.schematic_path
+        board_path = getattr(pcb, "_path", None)
+        if board_path is None:
+            return None
+        sibling = Path(board_path).with_suffix(".kicad_sch")
+        return sibling if sibling.is_file() else None
+
+    def schematic_associations(self, pcb: PCB) -> dict[str, SchematicCapAssociation] | None:
+        """Schematic designations by cap reference, or None when unavailable.
+
+        None (no schematic, or one that cannot be read) means every cap uses
+        the geometric rule.
+        """
+        if self._association_cache is not None and self._association_cache[0] is pcb:
+            return self._association_cache[1]
+        rows: dict[str, SchematicCapAssociation] | None = None
+        schematic = self._resolve_schematic(pcb)
+        if schematic is not None:
+            try:
+                from ...placement.decoupling import schematic_cap_associations
+
+                rows = {r.cap.reference: r for r in schematic_cap_associations(schematic)}
+            except Exception as exc:  # unreadable schematic must not break detect-mistakes
+                logger.warning(
+                    "decoupling count: cannot read schematic %s (%s); using PCB geometry",
+                    schematic,
+                    exc,
+                )
+        self._association_cache = (pcb, rows)
+        return rows
 
     # ------------------------------------------------------------------
     # Inventory
     # ------------------------------------------------------------------
 
-    def pin_inventory(self, pcb: PCB) -> list[PinDecoupling]:
-        """Return one row per IC power pad, including clean and empty pins."""
+    def pin_inventory(
+        self,
+        pcb: PCB,
+        associations: Mapping[str, SchematicCapAssociation] | None = None,
+    ) -> list[PinDecoupling]:
+        """Return one row per IC power pad, including clean and empty pins.
+
+        Args:
+            pcb: The board.
+            associations: Schematic designations by cap reference.  Defaults
+                to :meth:`schematic_associations`.
+        """
+        if associations is None:
+            associations = self.schematic_associations(pcb)
         evidence = power_pin_nets(pcb)
 
         pins: list[PinDecoupling] = []
@@ -211,10 +282,25 @@ class DecouplingCountCheck:
         for cap, net in caps:
             rail_caps.setdefault(net, []).append(cap)
 
-        # Assign each cap to its nearest power pad on the same net; ties break
-        # on (IC reference, pad number) so the result is deterministic.
+        # A cap goes to the pin its schematic designates (at its PCB distance),
+        # else to its nearest power pad on the same net within radius; ties
+        # break on (IC reference, pad number) so the result is deterministic.
         cap_owner: dict[int, tuple[str, str]] = {}
         for cap, net in caps:
+            row = associations.get(cap.reference) if associations else None
+            if row is not None and row.pin is not None:
+                designated = [
+                    (distance(cap.position, pin.position), pin)
+                    for pin, _ in by_net.get(net, [])
+                    if (pin.ic_reference, pin.pad_number) == (row.pin.reference, row.pin.pad)
+                ]
+                if designated:
+                    d, owner = min(designated, key=lambda e: (e[0], e[1].pad_number))
+                    owner.caps.append(
+                        AssignedCap(cap.reference, cap.value, round(d, 2), "schematic")
+                    )
+                    cap_owner[id(cap)] = (owner.ic_reference, owner.pad_number)
+                    continue
             best: tuple[float, str, str, PinDecoupling] | None = None
             for pin, _ in by_net.get(net, []):
                 d = distance(cap.position, pin.position)
@@ -270,9 +356,12 @@ class DecouplingCountCheck:
         unassigned_nearby: dict[tuple[str, str], list[PinDecoupling]] = {}
         none_within_radius: dict[tuple[str, str], list[PinDecoupling]] = {}
         for pin in inventory:
-            if pin.caps or not pin.rail_has_caps:
+            if not pin.rail_has_caps or any(c.distance_mm <= self.radius_mm for c in pin.caps):
                 continue
-            if pin.nearest_rail_cap_mm is not None and pin.nearest_rail_cap_mm <= self.radius_mm:
+            if pin.caps:
+                # Schematic-designated caps, all farther than the radius.
+                none_within_radius.setdefault((pin.ic_reference, pin.net_name), []).append(pin)
+            elif pin.nearest_rail_cap_mm is not None and pin.nearest_rail_cap_mm <= self.radius_mm:
                 unassigned_nearby.setdefault((pin.ic_reference, pin.net_name), []).append(pin)
             else:
                 none_within_radius.setdefault((pin.ic_reference, pin.net_name), []).append(pin)
