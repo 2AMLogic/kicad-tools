@@ -302,6 +302,22 @@ def _neck_candidate(
     return None
 
 
+def _departure_mask_shapes(pcb: PCB, fp, pad):
+    """Resolve the pad copper and opening under this board's mask settings."""
+    base_margin, declared = board_mask_margin(pcb)
+    if base_margin is None:
+        return None
+    version_node = pcb._sexp.find("version")
+    version = version_node.get_int() if version_node else 0
+    margin, _ = pad_mask_margin(pad, fp, base_margin, declared, board_version=version or 0)
+    if margin is None or margin < 0:
+        return None
+    try:
+        return pad_mask_shapes(pad, fp, margin)
+    except ValueError:
+        return None
+
+
 def _repair_pad(
     path: Path,
     rules: DesignRules,
@@ -316,18 +332,10 @@ def _repair_pad(
     pad = next((p for p in fp.pads if p.number == number), None) if fp else None
     if pad is None or not pad.net_name:
         return 0
-    base_margin, declared = board_mask_margin(pcb)
-    if base_margin is None:
+    shapes = _departure_mask_shapes(pcb, fp, pad)
+    if shapes is None:
         return 0
-    version_node = pcb._sexp.find("version")
-    version = version_node.get_int() if version_node else 0
-    margin, _ = pad_mask_margin(pad, fp, base_margin, declared, board_version=version or 0)
-    if margin is None or margin < 0:
-        return 0
-    try:
-        pad_copper, opening = pad_mask_shapes(pad, fp, margin)
-    except ValueError:
-        return 0
+    pad_copper, opening = shapes
     center = pcb.get_pad_position(ref, number)
     if center is None:
         return 0
@@ -1426,6 +1434,88 @@ def _clear_data_pair(path: Path, rules: DesignRules) -> int:
     return len(_DATA_EXITS)
 
 
+def _center_u1_ground_entry(path: Path, rules: DesignRules, mask_clearance: float) -> int:
+    """Reconnect the seed-42 U1.32 ground branch from the pad center to its original via."""
+    pcb = PCB.load(path)
+    fp = pcb.get_footprint("U1")
+    if (
+        fp is None
+        or fp.name != "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm"
+        or fp.layer != "F.Cu"
+        or fp.rotation
+    ):
+        return 0
+    pad = next((p for p in fp.pads if p.number == "32"), None)
+    center = pcb.get_pad_position("U1", "32")
+    if (
+        pad is None
+        or pad.type != "smd"
+        or pad.net_name != "GND"
+        or center is None
+        or pad.rotation
+        or pad.shape != "rect"
+        or pad.size != (0.3, 0.7)
+        or "F.Mask" not in pad.layers
+    ):
+        return 0
+
+    x, y = center
+    branch = _xy((x - 0.70, y + 0.15))
+    tip = _xy((x - 0.20, y + 0.15))
+    seat = _xy((x - 0.75, y + 0.15))
+    turn = _xy((x - 0.60, y))
+    # Both original runs extend into the pad opening from the same side.
+    # Match their endpoints and widths, including files with reversed segments.
+    old = [
+        s
+        for s in pcb.segments
+        if s.net_name == "GND" and s.layer == "F.Cu" and tip in (_xy(s.start), _xy(s.end))
+    ]
+    if len(old) != 2 or {
+        (_xy(s.end) if _xy(s.start) == tip else _xy(s.start), s.width) for s in old
+    } != {(branch, 0.20), (seat, 0.15)}:
+        return 0
+    protected = _protected_ids(pcb)
+    if any(s.locked or (s.uuid or "").lower() in protected for s in old):
+        return 0
+    barrels = [
+        i
+        for i, via in enumerate(pcb.vias)
+        if via.net_name == "GND" and _xy(via.position) == seat and "F.Cu" in via.layers
+    ]
+    shapes = _departure_mask_shapes(pcb, fp, pad)
+    if len(barrels) != 1 or shapes is None:
+        return 0
+    barrel = barrels[0]
+    _, opening = shapes
+    if (
+        LineString([turn, seat]).distance(opening) < 0.20 / 2 + mask_clearance
+        or Point(seat).distance(opening) < pcb.vias[barrel].size / 2 + mask_clearance
+    ):
+        return 0
+
+    validator = ConnectivityValidator(pcb)
+    before = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    if len(before.components()) != 1:
+        return 0
+    contacts, ends = _external_contacts(before, pcb.segments, old, barrel)
+    if pcb.remove_segments(old) != len(old):
+        return 0
+    tracks = []
+    for start, end in pairwise((center, turn, seat)):
+        tracks.extend(pcb.add_trace(start, end, width=0.20, layer="F.Cu", net="GND"))
+    after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    new_contacts, new_ends = _external_contacts(after, pcb.segments, tracks, barrel)
+    if len(after.components()) != 1 or not contacts <= new_contacts or not ends <= new_ends:
+        return 0
+    if not _copper_gap_ok(pcb, path, tracks, [], rules):
+        return 0
+    if not _authored_rules_ok(pcb, path, tracks, [], "U1.32 ground entry"):
+        return 0
+    pcb.save(path)
+    return 1
+
+
 def clear_pad_departures(path: Path, rules: DesignRules) -> int:
     """Rewrite the sideband and paired data escapes the strict mask view flags.
 
@@ -1503,4 +1593,5 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
         ),
     )
     edits += _clear_clock_pair(path, rules)
-    return edits + _clear_data_pair(path, rules)
+    edits += _clear_data_pair(path, rules)
+    return edits + _center_u1_ground_entry(path, rules, request.policy.warning_clearance_mm)

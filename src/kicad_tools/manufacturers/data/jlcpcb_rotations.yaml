@@ -12,6 +12,14 @@
 #   - JLCPCB SMT assembly documentation
 #   - Community-validated corrections
 
+# Total offsets from KiCad, confirmed in the JLCPCB placement preview (#10198).
+# A catalog model can have a different zero on a differently drawn footprint.
+catalog_rotation_corrections:
+  C51118:    {"SOT-23-5*": 270.0}  # Diodes Incorporated AP2112K-3.3TRG1
+  C19829593: {"SOT-23-5*": 270.0}  # TECH PUBLIC 74LVC1G17GV
+  C2286:     {"LED_0603*": 0.0}    # Hubei KENTO KT-0603R
+  C12624:    {"LED_0603*": 0.0}    # Hubei KENTO KT-0603G
+
 rotation_corrections:
   # --- SOT packages ---
   "SOT-23*": 180.0
