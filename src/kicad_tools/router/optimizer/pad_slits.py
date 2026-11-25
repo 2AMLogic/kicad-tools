@@ -13,6 +13,8 @@ from ..primitives import Pad, Route, Segment
 if TYPE_CHECKING:
     from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
+    from kicad_tools.schema.pcb import PCB
+
     from ..grid import RoutingGrid
     from ..layers import Layer
 
@@ -149,6 +151,189 @@ def via_exit_doglegs(
             yield legs, [*segments[:-2], *legs]
         else:
             yield legs, [*legs, *segments[2:]]
+
+
+def authored_arc_copper(
+    pcb: PCB, net_map: dict[str, int]
+) -> dict[str, list[tuple[int, BaseGeometry | None]]]:
+    """Collect retained track arcs in the sheet coordinates used by the routing grid."""
+    from shapely.affinity import translate  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.rules.physical_gap import track_arc_copper_geometry
+
+    by_layer: dict[str, list[tuple[int, BaseGeometry | None]]] = {}
+    for node in pcb._sexp.find_children("arc"):
+        layer_node = node.find_child("layer")
+        layer = layer_node.get_string(0) if layer_node else None
+        if not layer:
+            continue
+        net_node = node.find_child("net")
+        value = net_node.get_first_atom() if net_node else 0
+        net = value if isinstance(value, int) else net_map.get(str(value), 0)
+        try:
+            copper = track_arc_copper_geometry(node, pcb.board_origin)
+            copper = translate(copper, *pcb.board_origin)
+        except (TypeError, ValueError):
+            # A curve the fabrication check cannot measure cannot prove this edit safe.
+            copper = None
+        by_layer.setdefault(layer, []).append((net, copper))
+    return by_layer
+
+
+def _band_edge(grid: RoutingGrid | None, attr: str) -> float | None:
+    edge = getattr(getattr(grid, "rules", None), attr, None)
+    if (
+        isinstance(edge, bool)
+        or not isinstance(edge, (int, float))
+        or not math.isfinite(edge)
+        or edge <= 0
+    ):
+        return None
+    return float(edge)
+
+
+def covered_via_elbow(
+    segments: list[Segment], route: Route, grid: RoutingGrid | None
+) -> list[Segment] | None:
+    """Retract a slitted diagonal onto a trunk and via that already carry the elbow."""
+    if grid is None or len(segments) != 2 or not route.vias:
+        return None
+    trace_edge = _band_edge(grid, "same_net_trace_gap_band_edge_mm")
+    pad_edge = _band_edge(grid, "same_net_pad_gap_band_edge_mm")
+    active_edges = [edge for edge in (trace_edge, pad_edge) if edge is not None]
+    first, second = segments
+    if (
+        not active_edges
+        or first.end != second.start
+        or (first.width, first.layer, first.net) != (second.width, second.layer, second.net)
+    ):
+        return None
+
+    from shapely.geometry import LineString, Point
+
+    from kicad_tools.core.types import copper_span_contains
+    from kicad_tools.validate.rules.physical_gap import CopperSource, iter_source_gaps
+
+    from .algorithms import _reverse_path
+
+    reverse = first.x1 != first.x2 and first.y1 != first.y2
+    run, arm = _reverse_path(segments) if reverse else segments
+    dx, dy = abs(arm.x2 - arm.x1), abs(arm.y2 - arm.y1)
+    if dx == 0 or not math.isclose(dx, dy, abs_tol=1e-8):
+        return None
+    via = next(
+        (
+            v
+            for v in route.vias
+            if v.net == run.net
+            and (v.x, v.y) == arm.end
+            and copper_span_contains(*v.drilled_layers, run.layer)
+        ),
+        None,
+    )
+    if via is None:
+        return None
+    if run.x1 == run.x2:
+        bend = (run.x1, via.y)
+    elif run.y1 == run.y2:
+        bend = (via.x, run.y1)
+    else:
+        return None
+    if bend == run.start or not 0 < math.dist(bend, arm.end) < (via.diameter + run.width) / 2:
+        return None
+
+    other_routes = [other for other in grid.routes if other is not route]
+    siblings = [other for other in other_routes if other.net == route.net]
+    tracks = [s for other in siblings for s in other.segments if s.layer == run.layer]
+    # The long leg must follow a stationary trace across its full length. The
+    # short transverse leg must fit entirely inside that same trace and barrel.
+    line = LineString([run.start, bend])
+    if not line.covers(LineString([run.start, run.end])):
+        return None
+    spine = next(
+        (s for s in tracks if s.width >= run.width and LineString([s.start, s.end]).covers(line)),
+        None,
+    )
+    if spine is None:
+        return None
+
+    def copper(s: Segment):
+        return LineString([s.start, s.end]).buffer(s.width / 2, quad_segs=64)
+
+    candidate = [
+        Segment(*a, *b, run.width, run.layer, run.net, run.net_name)
+        for a, b in pairwise([run.start, bend, arm.end])
+    ]
+    barrel = Point(arm.end).buffer(via.diameter / 2, quad_segs=64)
+    stationary = copper(spine).union(barrel)
+    if not stationary.covers(copper(candidate[1])):
+        return None
+
+    scan_edge = max(active_edges)
+    diagonal = copper(arm)
+    window = diagonal.envelope.buffer(scan_edge)
+    search_window = window.buffer(scan_edge)
+    layer, net = run.layer.name, str(run.net)
+    local: list[CopperSource] = []
+
+    def add(shape, source_net: int, kind: str) -> None:
+        if shape is not None and shape.intersects(search_window):
+            local.append(CopperSource(shape, layer, str(source_net), f"{kind}:{len(local)}", kind))
+
+    for other in other_routes:
+        for s in other.segments:
+            if s.layer == run.layer:
+                add(copper(s), s.net, "track")
+    for other in [route, *other_routes]:
+        for v in other.vias:
+            if copper_span_contains(*v.drilled_layers, run.layer):
+                add(Point(v.x, v.y).buffer(v.diameter / 2, quad_segs=64), v.net, "via")
+    for pad in grid.pads:
+        if (
+            not pad.steiner_point
+            and not (not pad.through_hole and getattr(pad, "drill", 0.0) > 0)
+            and (pad.through_hole or pad.layer == run.layer)
+        ):
+            add(_pad_copper(pad), pad.net, "pad")
+
+    for source_net, shape in getattr(grid, "authored_arc_copper", {}).get(run.layer.kicad_name, ()):
+        if shape is None:
+            return None
+        add(shape, source_net, "arc")
+
+    # A third branch can join the protruding arm. Removing its only contact
+    # would disconnect it even when both endpoints of this route survive.
+    if any(
+        s.net == net and s.geometry.intersects(diagonal) and not s.geometry.intersects(stationary)
+        for s in local
+    ):
+        return None
+
+    def violates_policy(gap) -> bool:
+        limit = pad_edge if "pad" in gap.kinds else trace_edge
+        return limit is not None and gap.distance < limit
+
+    previous = [*local, CopperSource(diagonal, layer, net, "diagonal", "track")]
+    previous_gaps = list(iter_source_gaps(previous, scan_edge))
+    if not any(
+        "diagonal" in gap.ids and gap.nets == (net,) and violates_policy(gap)
+        for gap in previous_gaps
+    ):
+        return None
+    prior_worst: dict[tuple[str, ...], float] = {}
+    for gap in previous_gaps:
+        if "diagonal" not in gap.ids and violates_policy(gap):
+            prior_worst[gap.ids] = min(prior_worst.get(gap.ids, math.inf), gap.distance)
+    # The replacement is wholly covered. Its copper union equals the stationary
+    # copper alone; check any newly exposed facing edges around the removed arm.
+    if any(
+        violates_policy(gap)
+        and (window.intersects(Point(gap.a)) or window.intersects(Point(gap.b)))
+        and gap.distance < prior_worst.get(gap.ids, math.inf) - 1e-6
+        for gap in iter_source_gaps(local, scan_edge)
+    ):
+        return None
+    return _reverse_path(candidate) if reverse else candidate
 
 
 def _copper_gap_check(
