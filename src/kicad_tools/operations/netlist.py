@@ -674,9 +674,9 @@ def _collect_hierarchy_components(
     for entry in _get_sheet_entries(sch_path):
         child_bindings = {}
         for pin_name, pin_pos in zip(entry.pin_names, entry.pin_positions, strict=False):
-            name = net_at(pin_pos)
-            if name:
-                child_bindings[pin_name] = parent_names.get(name, name)
+            parent_net = net_at(pin_pos)
+            if parent_net:
+                child_bindings[pin_name] = parent_names.get(parent_net, parent_net)
         sub_components, sub_nets = _collect_hierarchy_components(
             sch_path.parent / entry.filename,
             f"{sheet_path}{entry.filename}/",
