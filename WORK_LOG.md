@@ -14,8 +14,37 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-25
+
+- **PR #10103**: fix(router): clear exposed gaps where a branch enters a via beside its trunk
+- **PR #10126**: fix: evaluate punctuated netclass patterns in copper clearance checks
+- **PR #10094**: fix(route): fail and report post-route DRC on the default --auto-layers path
+- **Issue #10122** (closed): Verify copper clearance for KiCad net-class patterns containing common power and generated net names
+- **Issue #10057** (closed): kct route --format json omits summary.failure_reason on the default --auto-layers path
+
 ### 2026-11-24
 
+- **PR #10127**: test: pin the escape-fence pair's search-budget controls
+- **Issue #10135** (closed): circuit-review: a value that contradicts an explicit datasheet statement must not end as a note nobody acts on
+- **PR #10147**: feat: grade explicit datasheet contradictions at warning and gate tapeout on open review decisions
+- **Issue #10056** (closed): Checked PCB publication can still lose a save that lands between its post-link re-check and the unlink
+- **PR #10092**: fix: retain a recoverable copy of the previous PCB after each checked rewrite
+- **PR #10123**: fix(board05): increase clearance beside the U2 thermal mask opening
+- **Issue #10117** (closed): test flake: test_without_an_interrupt_the_run_saves_normally times out on Test
+- **PR #10104**: fix(drc): flip a pad-edge elbow so its corner enters the pad
+- **Issue #9850** (closed): Board 06 seed 42: trace the nine remaining pure-Python routing failures
+- **Issue #10110** (closed): Route connectivity probe launches native fabrication checks inside the partial-route golden
+- **PR #10114**: fix: scope partial-net probe to kct check --only connectivity
+- **Issue #10088** (closed): Allow Board 06 USB3_RX2− to reach the generated U2.F6 through via on B.Cu
+- **PR #10099**: fix: admit escape endpoint arrival on pad-connected barrel layers
+- **PR #10111**: perf: skip escape-fence searches whose goal is provably fence-covered
+- **Issue #10119** (closed): Open the #10108 packaged project in the KiCad 10 GUI and confirm both editors load it
+- **Issue #8979** (closed): CI red on main: Routed PCB DRC Check fails on boards 01/02 physical_copper_gap (2 + 14 blocking errors)
+- **Issue #10051** (closed): Named-stackup silk repair now needs hard-link support; on a filesystem without it the pass degrades to a warning
+- **PR #10093**: fix: stop named-stackup export when its requested silk repair cannot run
+- **PR #10095**: fix(board05): adopt TI DGN0008C land pattern for the U3 regulator
+- **Issue #9058** (closed): Board 01: re-pin readiness evidence after PR #8848 on a host where mask_to_copper completes
+- **PR #10098**: chore(board01): refresh the verified manufacturing package and grouped BOM
 - **PR #10084**: fix(board06): clear the MIPI clock pad exits within the skew budget
 - **Issue #10083** (closed): Board 06: clear the MIPI clock pad exits while meeting the project skew limit
 - **Issue #8610** (closed): route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4)

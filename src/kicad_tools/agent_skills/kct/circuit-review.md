@@ -76,6 +76,16 @@ For every logic input driven through a clamp (a diode to ground or to a supply, 
 - **Never fabricate datasheet contents.** If a table cannot be read, say so and mark the IC unreviewed or the pin unverified.
 - **Read-only.** Write exactly one findings document (or post it as one issue comment) and nothing else.
 
+## Grading rules
+
+- **The basis sets the severity floor.** Tag every finding that compares the fitted design against the datasheet with which kind of statement it rests on:
+  - `[basis: explicit]` — the datasheet states it explicitly for that pin or component: pin-table text, "must" / "should" wording, or a stated range. A component value (or connection) that **contradicts an explicit statement** is graded **at least `warning`** — never `note`.
+  - `[basis: typical]` — the only disagreement is with a typical-application figure (a value, network or corner the "typical application" circuit shows). This may stay `note`.
+- **Grade is independent of confidence.** Confidence records how sure the review is of its reading; basis records what kind of datasheet statement the finding contradicts. A `med`-confidence explicit contradiction (pin mapping inferred, scanned-but-readable table) is still `warning` — never average the two into a softer grade, and never let a "should" where the datasheet could have said "must" downgrade it.
+- **Never merge the two bases into one finding.** An explicit contradiction and a typical-application difference on the same IC are separate findings, each graded on its own basis, so the explicit one cannot hide inside a `note`.
+
+*Worked example (the escape this rule closes):* the pin table says the internal LDO output "should be used with a 0.1-uF decoupling cap"; the board fits 10 uF there — 100x the stated value. That is `[basis: explicit]`, graded **at least `warning`** even at `med` confidence. The charge-pump flying and reservoir caps (1 uF and 10 uF fitted where the typical application shows 2.2 uF) contradict no explicit statement — `[basis: typical]`, may stay `note`, recorded as their own findings.
+
 ## Output
 
 Write `<project>/CIRCUIT_REVIEW.md` (or post it as a single issue comment when the invoker names an issue) with these sections in order:
@@ -84,6 +94,11 @@ Write `<project>/CIRCUIT_REVIEW.md` (or post it as a single issue comment when t
 ## Circuit review — <project> (YYYY-MM-DD)
 
 **Confidence: [high|med|low]** | Schematic: <path> @ <commit or file hash> | Datasheets: <n of m ICs obtained>
+
+### Open decisions
+| Finding | Decision | Owner action |
+|---------|----------|--------------|
+| F1      | open     | fix / accept (reason) |
 
 ### ICs reviewed
 | Ref | MPN | Datasheet (rev, source) | Result |
@@ -95,7 +110,7 @@ Write `<project>/CIRCUIT_REVIEW.md` (or post it as a single issue comment when t
 |-----|-----|--------|
 
 ### Findings
-#### F1 — <short title>  [severity: blocker|warning|note] [confidence: high|med|low]
+#### F1 — <short title>  [severity: blocker|warning|note] [confidence: high|med|low] [basis: explicit|typical]
 - Where: <ref.pin>, net <NAME> [netlist]
 - Datasheet says: <quote or paraphrase> — <MPN> rev X, Table/Fig N, p. N [datasheet]
 - Computed: <arithmetic, if any>
@@ -111,6 +126,8 @@ Write `<project>/CIRCUIT_REVIEW.md` (or post it as a single issue comment when t
 
 An IC whose datasheet could not be obtained goes in **ICs NOT reviewed**. It is never silently passed.
 
+**Open decisions are the hand-off.** Every `blocker` or `warning` finding gets one row in `### Open decisions`, written by the review with its Decision cell `open`. **The review itself never fills in a decision** — not `accepted`, not `fixed`, however obvious the call looks; deciding is the owner's act, and a review that decides for the owner is invalid. The owner edits the cell from `open` to `fixed` or to `accepted: <reason>`. `{{skill:tapeout}}` (Gate 4c) prints this table and refuses a tapeout while any row's Decision cell is still `open`. A review with no `blocker`/`warning` findings keeps the section, holding a single `none — no blocker or warning findings` line.
+
 ## What this cannot check
 
 State these in every output, specialised to the project:
@@ -124,7 +141,7 @@ State these in every output, specialised to the project:
 ## Limitations
 
 - **Single reviewer.** No automatic datasheet parsing; the reviewer reads the converted datasheet and reasons over it. There is no `kct` subcommand and no rule engine behind this skill — the three escapes are checklist items, not automated checks.
-- **Not a tapeout gate.** `{{skill:tapeout}}` does not require or record a circuit review. Run this skill before layout and keep the findings document alongside the schematic.
+- **Decisions gate tapeout; the review itself never decides.** `{{skill:tapeout}}` (Gate 4c) reads a `CIRCUIT_REVIEW.md` sitting beside the board, prints its Open-decisions table, and **refuses while any decision is still `open`** — so a datasheet contradiction cannot silently ride to fab the way a `note` finding once could. A board with no review document is unaffected: the review is advisory and never required. Run this skill before layout and keep the findings document beside the board so the gate can see it.
 - **Advisory only.** The output is a proposal for the owner to ratify.
 
 ## References

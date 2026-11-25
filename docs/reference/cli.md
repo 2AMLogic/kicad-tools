@@ -2972,10 +2972,10 @@ epilog in [`src/kicad_tools/cli/route_exit_codes_help.py`](../../src/kicad_tools
 
 | Code | Meaning |
 |------|---------|
-| 0 | Routing met the completion threshold. Default layer escalation can report success for fully routed copper with known post-route DRC errors. For a DRC gate, run `kct check <routed.kicad_pcb> --drc-only` on the saved board. |
+| 0 | Routing met the completion threshold and no gated check failed. Fully connected copper with post-route DRC errors exits 3 on every path (issue #10057). For a DRC gate, run `kct check <routed.kicad_pcb> --drc-only` on the saved board. |
 | 1 | Fatal failure — no nets routed |
 | 2 | Partial routing — below `--min-completion`, or requested nets are placement-blocked |
-| 3 | Post-route validation or processing failed. Causes include remaining DRC violations, a connectivity rollback under `--auto-fix` (issue #2852), a failed `--voltage-map` HV pairwise audit (issue #4588), failed selective zone filling, unavailable native fill capability, or a staged repair that could not verify fixed copper and net membership. On a direct attempt with all escalation disabled, fully connected copper that fails only post-route DRC sets `summary.failure_reason` to `"post_route_drc"` in JSON. Other causes omit this key. |
+| 3 | Post-route validation or processing failed. Causes include remaining DRC violations, a connectivity rollback under `--auto-fix` (issue #2852), a failed `--voltage-map` HV pairwise audit (issue #4588), failed selective zone filling, unavailable native fill capability, or a staged repair that could not verify fixed copper and net membership. On any finishing path — direct or escalated — fully connected copper that fails only post-route DRC sets `summary.failure_reason` to `"post_route_drc"` in JSON (issues #10049, #10057). Other causes omit this key. |
 | 4 | Partial routing **and** clearance violations remain — segment-segment (issue #1666) or HV pairwise (issue #4588) |
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
 | 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
