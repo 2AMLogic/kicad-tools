@@ -531,7 +531,9 @@ also run this gate; it does not depend on changed-file detection.
 The selection covers source citations in guarded Markdown globs, diff-pair and
 match-group guide contracts, shipped command contracts and installation, board06
 and board07 README tolerance markers, and the board07 inventory in
-`boards/README.md`. An initial local run passed all 102 tests in 8.43 seconds,
+`boards/README.md`. It compares the vendored Claude commands with their packaged
+sources byte for byte and checks packaged skill text for demo-board paths.
+An initial local run passed all 102 tests in 8.43 seconds,
 without skips (test execution only; dependency setup is additional).
 
 New documents matching the citation globs are checked automatically. Deleting or

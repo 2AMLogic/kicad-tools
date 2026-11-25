@@ -1473,94 +1473,152 @@ class MaskCopperRepairer(CopperGapRepairer):
             push = self._shift_junction_clear(
                 fixed, reference, [entry[0] for entry in entries], required + margin_mm + width / 2
             )
-        if push is None:
-            return "infeasible", ""
-        dx, dy = push
-        displacement = math.hypot(dx, dy)
-        if displacement < _TOLERANCE_MM / 2:
-            return "already_cleared", ""
-        if displacement > max_displacement:
-            return "exceeds_max_displacement", f"needs {displacement:.4f}mm"
-        moving_uuids = {seg_uuid, *(member[0] for member in joined)}
 
-        new_start = start if start == fixed else (start[0] + dx, start[1] + dy)
-        new_end = end if end == fixed else (end[0] + dx, end[1] + dy)
-        moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
-            (
-                copper,
-                LineString([new_start, new_end]).buffer(width / 2, quad_segs=16),
-                layer,
-            )
-        ]
-        points: list[tuple[str, str, str | None, float, float]] = [
-            ("segment", seg_uuid, tag, point[0], point[1])
-            for tag, point in (("start", start), ("end", end))
-            if point != fixed
-        ]
-        for join_uuid, join_node, join_tag in joined:
-            join_width_node = join_node.find("width")
-            join_end = self._xy(join_node.find(join_tag)) if join_tag else None
-            join_other = self._xy(join_node.find("end" if join_tag == "start" else "start"))
-            if join_width_node is None or join_end is None or join_other is None:
-                return "malformed_segment", ""
-            join_width = _num(join_width_node) or width
-            moves.append(
+        def try_push(dx: float, dy: float, floor: float | None) -> tuple[str, str] | None:
+            displacement = math.hypot(dx, dy)
+            if displacement < _TOLERANCE_MM / 2:
+                return "already_cleared", ""
+            if displacement > max_displacement:
+                return "exceeds_max_displacement", f"needs {displacement:.4f}mm"
+            moving_uuids = {seg_uuid, *(member[0] for member in joined)}
+
+            new_start = start if start == fixed else (start[0] + dx, start[1] + dy)
+            new_end = end if end == fixed else (end[0] + dx, end[1] + dy)
+            moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
                 (
-                    LineString([join_other, join_end]).buffer(join_width / 2, quad_segs=16),
-                    LineString(
-                        [
-                            join_other,
-                            (join_end[0] + dx, join_end[1] + dy),
-                        ]
-                    ).buffer(join_width / 2, quad_segs=16),
+                    copper,
+                    LineString([new_start, new_end]).buffer(width / 2, quad_segs=16),
                     layer,
                 )
+            ]
+            points: list[tuple[str, str, str | None, float, float]] = [
+                ("segment", seg_uuid, tag, point[0], point[1])
+                for tag, point in (("start", start), ("end", end))
+                if point != fixed
+            ]
+            for join_uuid, join_node, join_tag in joined:
+                join_width_node = join_node.find("width")
+                join_end = self._xy(join_node.find(join_tag)) if join_tag else None
+                join_other = self._xy(join_node.find("end" if join_tag == "start" else "start"))
+                if join_width_node is None or join_end is None or join_other is None:
+                    return "malformed_segment", ""
+                join_width = _num(join_width_node) or width
+                moves.append(
+                    (
+                        LineString([join_other, join_end]).buffer(join_width / 2, quad_segs=16),
+                        LineString(
+                            [
+                                join_other,
+                                (join_end[0] + dx, join_end[1] + dy),
+                            ]
+                        ).buffer(join_width / 2, quad_segs=16),
+                        layer,
+                    )
+                )
+                points.append(("segment", join_uuid, join_tag, join_end[0], join_end[1]))
+
+            if fixed is not None and self._loses_same_net_contact(
+                moves, layer, net_name, moving_uuids, pads
+            ):
+                return "would_break_same_net_contact", ""
+            refusal = self._copper_floor_reason(moves, layer, net_name, seg_uuid, pads, floor)
+            if refusal is not None:
+                return refusal
+            refusal = self._other_opening_reason(
+                openings,
+                moves,
+                [(start, new_start, frozenset({layer})), (end, new_end, frozenset({layer}))],
+                pads,
+                required,
+                displacement,
             )
-            points.append(("segment", join_uuid, join_tag, join_end[0], join_end[1]))
+            if refusal is not None:
+                return refusal
 
-        if fixed is not None and self._loses_same_net_contact(
-            moves, layer, net_name, moving_uuids, pads
+            first = pads[openings[0]]
+            refs = ", ".join(pads[o][4] for o in openings)
+            action = MaskNudgeAction(
+                action="nudge_clear",
+                uuid=seg_uuid,
+                kind="segment",
+                pad_uuid=openings[0],
+                pad_ref=first[4],
+                net_name=net_name,
+                layer=layer,
+                old_x=reference[0],
+                old_y=reference[1],
+                new_x=reference[0] + dx,
+                new_y=reference[1] + dy,
+                dx=dx,
+                dy=dy,
+                displacement_mm=displacement,
+                detail=(
+                    f"moved {displacement:.4f}mm clear of {refs}"
+                    + (f", dragging {len(joined)} joined end(s)" if joined else "")
+                ),
+                openings=list(openings),
+                points=points,
+            )
+            return self._apply_nudge(action, result, dry_run)
+
+        # Keep the line entering the pad and take the shortest perpendicular
+        # lead from the fixed via to its extension. The original pivot remains
+        # available if this corner fails a clearance or contact check.
+        if fixed is not None and len(joined) == 1 and len(openings) == 1:
+            uid, neighbour, tag = joined[0]
+            far = self._xy(neighbour.find("end" if tag == "start" else "start"))
+            opening = entries[0][0]
+            if (
+                far is not None
+                and self._xy(neighbour.find(tag)) == reference
+                and opening.buffer(-_INSIDE_EPS_MM).contains(Point(far))
+                and openings[0] not in self._pivot_pad_bounds
+                and uid not in touched_by_action
+                and not self._locks.is_generator_owned(neighbour)
+                and not self._locks.is_generator_owned(seg)
+                and not self._board_rules.dru_error
+            ):
+                shift = self._extend_pad_entry(
+                    far, reference, fixed, opening, width / 2 + required + margin_mm
+                )
+                if shift is not None:
+                    floor = max(
+                        clearance_mm or 0.0,
+                        self._board_rules.net_requirement(net_name, self.net_names),
+                    )
+                    if try_push(*shift, floor) is None:
+                        return None
+        if push is None:
+            return "infeasible", ""
+        return try_push(*push, clearance_mm)
+
+    @staticmethod
+    def _extend_pad_entry(
+        pad_end: tuple[float, float],
+        corner: tuple[float, float],
+        via: tuple[float, float],
+        opening: BaseGeometry,
+        centreline_gap: float,
+    ) -> tuple[float, float] | None:
+        """Project the via onto the continuation of the entry beyond its corner."""
+        from kicad_tools.router.quantize import is_45_aligned
+
+        vx, vy = corner[0] - pad_end[0], corner[1] - pad_end[1]
+        length = math.hypot(vx, vy)
+        if length < _MIN_RUN_MM:
+            return None
+        scale = ((via[0] - corner[0]) * vx + (via[1] - corner[1]) * vy) / length**2
+        if scale <= 0:
+            return None
+        new = round(corner[0] + scale * vx, 4), round(corner[1] + scale * vy, 4)
+        if (
+            math.dist(via, new) < _MIN_RUN_MM
+            or LineString([via, new]).distance(opening) < centreline_gap
         ):
-            return "would_break_same_net_contact", ""
-        refusal = self._copper_floor_reason(moves, layer, net_name, seg_uuid, pads, clearance_mm)
-        if refusal is not None:
-            return refusal
-        refusal = self._other_opening_reason(
-            openings,
-            moves,
-            [(start, new_start, frozenset({layer})), (end, new_end, frozenset({layer}))],
-            pads,
-            required,
-            displacement,
-        )
-        if refusal is not None:
-            return refusal
-
-        first = pads[openings[0]]
-        refs = ", ".join(pads[o][4] for o in openings)
-        action = MaskNudgeAction(
-            action="nudge_clear",
-            uuid=seg_uuid,
-            kind="segment",
-            pad_uuid=openings[0],
-            pad_ref=first[4],
-            net_name=net_name,
-            layer=layer,
-            old_x=reference[0],
-            old_y=reference[1],
-            new_x=reference[0] + dx,
-            new_y=reference[1] + dy,
-            dx=dx,
-            dy=dy,
-            displacement_mm=displacement,
-            detail=(
-                f"moved {displacement:.4f}mm clear of {refs}"
-                + (f", dragging {len(joined)} joined end(s)" if joined else "")
-            ),
-            openings=list(openings),
-            points=points,
-        )
-        return self._apply_nudge(action, result, dry_run)
+            return None
+        if not all(is_45_aligned(new[0] - x, new[1] - y) for x, y in (pad_end, via)):
+            return None
+        return new[0] - corner[0], new[1] - corner[1]
 
     def _slide_shared_pad_exit(
         self,
