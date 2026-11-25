@@ -319,7 +319,8 @@ def test_foreign_save_at_silk_write_boundary_still_fails_named_stackup(tmp_path,
 
     def write_then_foreign_save(target, content, **kwargs):
         real_write(target, content, **kwargs)
-        if Path(target) == path:
+        # The silk pass writes the exporter's private staged copy (#10091).
+        if Path(target).name == path.name:
             Path(target).write_text(Path(target).read_text() + "\n")
 
     monkeypatch.setattr(sexp_file, "atomic_write_text", write_then_foreign_save)
@@ -462,6 +463,377 @@ def test_linkless_filesystem_silk_optout_exports_original_artwork(tmp_path, monk
     with zipfile.ZipFile(result.project_zip_path) as zf:
         assert hashlib.sha256(zf.read(path.name)).hexdigest() == before_hash
     assert verify_manifest(result.manifest_path) == []
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_linkless_refusal_leaves_missing_sidecars_absent(tmp_path, monkeypatch):
+    """Issue #10091: the refused repair must not conjure the sidecars.
+
+    The live FAT32 run of the merged refusal left a generated 1,732-byte
+    ``.kicad_pro`` and a 2,106-byte ``.kicad_dru`` beside a bare input PCB.
+    A sibling that was absent before the export must still be absent after
+    the refusal.
+    """
+    _break_hard_link_support(monkeypatch)
+    path = _silk_defect_stackup_board(tmp_path)
+    pcb_before = path.read_bytes()
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert not result.success
+    assert "Silk legalisation pass could not run" in result.errors[-1]
+    assert path.read_bytes() == pcb_before
+    assert not path.with_name(f".{path.name}.zonefill").exists()
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".")) == []
+    assert not path.with_suffix(".kicad_pro").exists()
+    assert not path.with_suffix(".kicad_dru").exists()
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_linkless_refusal_restores_authored_sidecars(tmp_path, monkeypatch):
+    """Issue #10091: authored project and rules bytes survive the refusal.
+
+    The same live run showed both siblings of an authored project change
+    before the refusal fired. Existing files must be preserved byte for
+    byte -- here an authored text variable and a named custom rule.
+    """
+    _break_hard_link_support(monkeypatch)
+    path = _silk_defect_stackup_board(tmp_path)
+    pro = path.with_suffix(".kicad_pro")
+    dru = path.with_suffix(".kicad_dru")
+    pro.write_text(
+        json.dumps({"meta": {"variables": {"my_text_variable": "authored"}}}, indent=2),
+        encoding="utf-8",
+    )
+    dru.write_text('(rule "my authored rule" (constraint clearance (min 0.5mm)))\n')
+    pro_before, dru_before = pro.read_bytes(), dru.read_bytes()
+
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert not result.success
+    assert "Silk legalisation pass could not run" in result.errors[-1]
+    assert pro.read_bytes() == pro_before
+    assert dru.read_bytes() == dru_before
+
+
+@pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
+def test_linkless_refusal_preserves_editor_save_during_export(tmp_path, monkeypatch):
+    """Issue #10091: an editor save landing mid-export is not clobbered.
+
+    The rollback may only undo the bytes this export itself wrote: a newer
+    save that arrives between the sidecar write and the refusal keeps the
+    live name, so restoring a stale pre-export snapshot must not happen.
+    """
+    from kicad_tools.cli import silk_default_pass
+
+    _break_hard_link_support(monkeypatch)
+    path = _silk_defect_stackup_board(tmp_path)
+    dru = path.with_suffix(".kicad_dru")
+    dru.write_text('(rule "authored" (constraint clearance (min 0.4mm)))\n')
+    editor_save = '(rule "editor mid-export save" (constraint clearance (min 0.6mm)))\n'
+
+    real_pass = silk_default_pass.run_default_silk_pass
+
+    def save_then_run_pass(pcb, **kwargs):
+        dru.write_text(editor_save)  # the editor saves while export runs
+        return real_pass(pcb, **kwargs)
+
+    monkeypatch.setattr(silk_default_pass, "run_default_silk_pass", save_then_run_pass)
+    result = _stackup_package(path).export(tmp_path / "out")
+
+    assert not result.success
+    assert "Silk legalisation pass could not run" in result.errors[-1]
+    assert dru.read_text() == editor_save
+
+
+@pytest.mark.parametrize(
+    "blocked",
+    ["board.kicad_pcb", "board.kicad_pro", "board.kicad_dru", ".board.kicad_pcb.zonefill"],
+)
+@pytest.mark.parametrize("missing_others", [False, True])
+def test_publication_refusal_restores_every_source_file(
+    tmp_path, monkeypatch, blocked, missing_others
+):
+    import os
+
+    from kicad_tools.export.manufacturing import _StagedSource
+
+    board = tmp_path / "board.kicad_pcb"
+    paths = [
+        board,
+        board.with_suffix(".kicad_pro"),
+        board.with_suffix(".kicad_dru"),
+        tmp_path / ".board.kicad_pcb.zonefill",
+    ]
+    for path in paths:
+        if not missing_others or path == board or path.name == blocked:
+            path.write_bytes(f"authored {path.name}\n".encode())
+    before = {path: path.read_bytes() if path.exists() else None for path in paths}
+    staged = _StagedSource(board)
+    for path in paths:
+        (staged.dir / path.name).write_bytes(f"produced {path.name}\n".encode())
+
+    def immutable_at_boundary(operation):
+        def wrapped(src, dst, *args, **kwargs):
+            if tmp_path / blocked in (Path(src), Path(dst)):
+                raise PermissionError("immutable authored source")
+            return operation(src, dst, *args, **kwargs)
+
+        return wrapped
+
+    for name in ("rename", "replace"):
+        monkeypatch.setattr(os, name, immutable_at_boundary(getattr(os, name)))
+    try:
+        with pytest.raises(PermissionError, match="immutable"):
+            staged.publish()
+    finally:
+        staged.close()
+    assert {p.name for p in tmp_path.iterdir()} == {
+        p.name for p, data in before.items() if data is not None
+    }
+    assert all(p.read_bytes() == data for p, data in before.items() if data is not None)
+
+
+@pytest.mark.parametrize(
+    "name", ["board.kicad_pro", "board.kicad_dru", ".board.kicad_pcb.zonefill"]
+)
+def test_publication_preserves_an_editor_save_at_the_final_rename(tmp_path, monkeypatch, name):
+    import os
+
+    from kicad_tools.core.atomic_write import SourceChangedError
+    from kicad_tools.export.manufacturing import _StagedSource
+
+    board = tmp_path / "board.kicad_pcb"
+    paths = [
+        board,
+        board.with_suffix(".kicad_pro"),
+        board.with_suffix(".kicad_dru"),
+        tmp_path / ".board.kicad_pcb.zonefill",
+    ]
+    for path in paths:
+        path.write_bytes(b"authored\n")
+    staged = _StagedSource(board)
+    for path in paths:
+        (staged.dir / path.name).write_bytes(b"generated\n")
+    target = tmp_path / name
+    replace = os.replace
+    edited = False
+
+    def save_at_boundary(operation):
+        def wrapped(src, dst, *args, **kwargs):
+            nonlocal edited
+            if not edited and target in (Path(src), Path(dst)):
+                edited = True
+                file = tmp_path / "editor-save"
+                file.write_bytes(b"editor\n")
+                replace(file, target)
+            return operation(src, dst, *args, **kwargs)
+
+        return wrapped
+
+    for method in ("rename", "replace"):
+        monkeypatch.setattr(os, method, save_at_boundary(getattr(os, method)))
+    try:
+        with pytest.raises(SourceChangedError, match="changed"):
+            staged.publish()
+    finally:
+        staged.close()
+    assert edited
+    assert target.read_bytes() == b"editor\n"
+    assert all(p.read_bytes() == b"authored\n" for p in paths if p != target)
+
+
+@pytest.mark.parametrize(
+    "editor_target", ["original-handle", "published-project", "published-board"]
+)
+def test_editor_save_during_board_commit_rolls_back_the_group(tmp_path, monkeypatch, editor_target):
+    import os
+
+    from kicad_tools.core.atomic_write import SourceChangedError
+    from kicad_tools.export.manufacturing import _StagedSource
+
+    board = tmp_path / "board.kicad_pcb"
+    project = board.with_suffix(".kicad_pro")
+    rules = board.with_suffix(".kicad_dru")
+    for path in (board, project, rules):
+        path.write_bytes(b"authored")
+    staged = _StagedSource(board)
+    for path in (board, project, rules):
+        (staged.dir / path.name).write_bytes(b"generated")
+
+    link = os.link
+    with project.open("r+b", buffering=0) as old_project:
+
+        def edit_while_board_is_provisional(src, dst, **kwargs):
+            result = link(src, dst, **kwargs)
+            if Path(dst) == board and Path(src).name == "repaired":
+                if editor_target == "original-handle":
+                    old_project.seek(0)
+                    old_project.write(b"editor")
+                    old_project.truncate()
+                else:
+                    path = project if editor_target == "published-project" else board
+                    saved = tmp_path / "editor-save"
+                    saved.write_bytes(b"editor")
+                    os.replace(saved, path)
+            return result
+
+        monkeypatch.setattr(os, "link", edit_while_board_is_provisional)
+        try:
+            with pytest.raises(SourceChangedError, match="changed"):
+                staged.publish()
+        finally:
+            staged.close()
+    assert board.read_bytes() == (b"editor" if editor_target == "published-board" else b"authored")
+    assert project.read_bytes() == (
+        b"authored" if editor_target == "published-board" else b"editor"
+    )
+    assert rules.read_bytes() == b"authored"
+
+
+def test_racing_save_during_rollback_still_restores_other_files(tmp_path, monkeypatch):
+    import os
+
+    from kicad_tools.core.atomic_write import SourceChangedError
+    from kicad_tools.export import manufacturing
+
+    board = tmp_path / "board.kicad_pcb"
+    project, rules = board.with_suffix(".kicad_pro"), board.with_suffix(".kicad_dru")
+    for path in (board, project, rules):
+        path.write_bytes(b"authored")
+    stage = manufacturing._StagedSource(board)
+    for path in (board, project, rules):
+        (stage.dir / path.name).write_bytes(b"generated")
+
+    rename = os.rename
+    install = manufacturing._install_unoccupied
+
+    def refuse_board(src, dst, *args, **kwargs):
+        if Path(src) == board and Path(dst).name == "original":
+            raise PermissionError("immutable board")
+        return rename(src, dst, *args, **kwargs)
+
+    def edit_when_restoring(source, destination):
+        if source.name == "board.kicad_dru.original" and destination == rules:
+            rules.write_bytes(b"new editor save")
+            raise SourceChangedError("rules changed during rollback")
+        return install(source, destination)
+
+    monkeypatch.setattr(os, "rename", refuse_board)
+    monkeypatch.setattr(manufacturing, "_install_unoccupied", edit_when_restoring)
+    try:
+        with pytest.raises(OSError, match="rules changed during rollback"):
+            stage.publish()
+    finally:
+        stage.close()
+    assert board.read_bytes() == project.read_bytes() == b"authored"
+    assert rules.read_bytes() == b"new editor save"
+    assert (stage.dir / "board.kicad_dru.original").read_bytes() == b"authored"
+
+
+@pytest.mark.parametrize("fault", ["none", "editor", "two-editors", "short-write"])
+def test_linkless_sidecar_publication_for_an_unchanged_board(tmp_path, monkeypatch, fault):
+    import os
+
+    from kicad_tools.core.atomic_write import SourceChangedError
+    from kicad_tools.export import manufacturing
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_bytes(b"unchanged")
+    project, rules = board.with_suffix(".kicad_pro"), board.with_suffix(".kicad_dru")
+    project.write_bytes(b"authored")
+    stage = manufacturing._StagedSource(board)
+    stage.pcb.with_suffix(".kicad_pro").write_bytes(b"new project")
+    stage.pcb.with_suffix(".kicad_dru").write_bytes(b"new rules")
+    # macOS FAT32 supports exclusive creation but neither hard links nor
+    # exclusive rename. Exercise that last publication method on every CI host.
+    monkeypatch.setattr(manufacturing, "_install_unoccupied", manufacturing._copy_unoccupied)
+    opened = os.open
+    write = os.write
+    target_fd = None
+
+    def reserve(path, flags, *args, **kwargs):
+        nonlocal target_fd
+        fd = opened(path, flags, *args, **kwargs)
+        if target_fd is None and Path(path) == rules and flags & os.O_EXCL:
+            target_fd = fd
+            if fault in ("editor", "two-editors"):
+                rules.write_bytes(b"editor")
+        return fd
+
+    def write_part(fd, data):
+        if fault == "short-write" and fd == target_fd and data == b"new rules":
+            return write(fd, data[:2])
+        return write(fd, data)
+
+    rename = os.rename
+
+    def save_again(src, dst, *args, **kwargs):
+        result = rename(src, dst, *args, **kwargs)
+        if fault == "two-editors" and Path(src) == rules and Path(dst).name == "captured":
+            rules.write_bytes(b"second save")
+        return result
+
+    monkeypatch.setattr(os, "open", reserve)
+    monkeypatch.setattr(os, "write", write_part)
+    monkeypatch.setattr(os, "rename", save_again)
+    try:
+        if fault == "none":
+            stage.publish()
+        else:
+            with pytest.raises(SourceChangedError if fault == "editor" else OSError):
+                stage.publish()
+    finally:
+        stage.close()
+    assert board.read_bytes() == b"unchanged"
+    assert project.read_bytes() == (b"new project" if fault == "none" else b"authored")
+    if fault == "two-editors":
+        assert rules.read_bytes() == b"second save"
+        assert [p.read_bytes() for p in stage.dir.rglob("editor")] == [b"editor"]
+    elif fault == "short-write":
+        assert not rules.exists()
+    else:
+        assert rules.read_bytes() == (b"editor" if fault == "editor" else b"new rules")
+
+
+def test_strict_preflight_failure_still_emits_drc_constraints(tmp_path, monkeypatch):
+    """Issue #10091 regression guard: only the silk refusal undoes the writes.
+
+    Step 0a writes the sidecars before preflight on purpose -- a
+    strict-preflight failure still leaves the emitted rules beside the
+    board -- so the refusal rollback must not leak into that path.
+    """
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig, PreflightResult
+
+    path = authored_pcb(tmp_path, "JLC04161H-3313")
+    pkg = ManufacturingPackage(
+        path,
+        manufacturer="jlcpcb",
+        config=ManufacturingConfig(
+            stackup_id="JLC04161H-3313",
+            bom_source="pcb",
+            include_bom=False,
+            include_pnp=False,
+            include_gerbers=False,
+            include_report=False,
+            include_project_zip=True,
+            preflight=PreflightConfig(),
+            strict_preflight=True,
+            silk_fix=False,
+        ),
+    )
+
+    def failing_preflight():
+        return [PreflightResult(name="drc", status="FAIL", message="simulated failure")]
+
+    monkeypatch.setattr(pkg, "_run_preflight", failing_preflight)
+    result = pkg.export(tmp_path / "out")
+
+    assert not result.success
+    assert any("Preflight FAIL [drc]" in e for e in result.errors)
+    assert result.drc_constraint_paths
+    assert path.with_suffix(".kicad_pro").exists()
+    assert path.with_suffix(".kicad_dru").exists()
 
 
 @pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
