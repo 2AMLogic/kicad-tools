@@ -333,13 +333,6 @@ class DesignRules:
     # behaviour driven by ``min_silk_to_pad_clearance_mm``.
     silk_to_pad_danger_mm: float | None = None
     silk_to_pad_warning_mm: float | None = None
-    # Outer-layer track width below which the fab's DFM tool grades the track
-    # Danger although the published capability (``min_trace_width_mm``) allows
-    # it (Issue #10173).  Set only by :meth:`ManufacturerProfile.apply_dfm_floors`
-    # from a stackup's optional ``trace_width`` DFM threshold; ``None`` (the
-    # default) means no recorded evidence, so no finding.  Drives a *warning*,
-    # never an error.
-    trace_width_warning_mm: float | None = None
     # Operator ruling 2026-11-20 (#9795, Issue #9798): under the jlcpcb
     # profiles these silk categories grade as errors instead of warnings.
     # Each flag is independent and defaults to off, so every other profile
@@ -436,6 +429,14 @@ class DesignRules:
     # preserve the public constructor's positional arguments.
     tht_smd_danger_mm: float | None = None
     tht_smd_warning_mm: float | None = None
+    # Appended last to preserve positional constructor order.
+    # Outer-layer track width below which the fab's DFM tool grades the track
+    # Danger although the published capability (``min_trace_width_mm``) allows
+    # it (Issue #10173).  Set only by :meth:`ManufacturerProfile.apply_dfm_floors`
+    # from a stackup's optional ``trace_width`` DFM threshold; ``None`` (the
+    # default) means no recorded evidence, so no finding.  Drives a *warning*,
+    # never an error.
+    trace_width_warning_mm: float | None = None
 
     def __post_init__(self) -> None:
         """Enforce ``min_inner_clearance_mm <= min_clearance_mm`` (Issue #9113).
