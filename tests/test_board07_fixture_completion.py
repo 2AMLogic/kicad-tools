@@ -235,3 +235,104 @@ def test_recipe_distinguishes_post_route_drc_from_a_failed_repair(
         generate_design_mod._route_completed(subprocess.CompletedProcess(args, rc, stdout))
         is not rollback
     )
+
+
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize(
+    ("layer_args", "drc_errors", "fix_result"),
+    [
+        pytest.param([], 1, None, id="default"),
+        pytest.param(["--no-auto-layers"], 1, None, id="direct"),
+        pytest.param(["--auto-layers", "--adaptive-rules"], 1, None, id="combined-failure"),
+        pytest.param(["--no-auto-layers", "--adaptive-rules"], 1, None, id="adaptive-failure"),
+        pytest.param(["--auto-layers", "--adaptive-rules"], 0, None, id="combined-clean"),
+        pytest.param(["--no-auto-layers", "--adaptive-rules"], 0, None, id="adaptive-clean"),
+        pytest.param([], 1, 0, id="default-repaired"),
+        pytest.param(["--no-auto-layers"], 1, 0, id="direct-repaired"),
+        pytest.param(["--adaptive-rules"], 1, 0, id="combined-repaired"),
+        pytest.param(["--no-auto-layers", "--adaptive-rules"], 1, 0, id="adaptive-repaired"),
+        pytest.param([], 1, 2, id="default-partially-repaired"),
+    ],
+)
+def test_route_json_reports_verified_post_route_drc(
+    tmp_path, capsys, monkeypatch, layer_args, drc_errors, fix_result
+):
+    """Report the final DRC verdict for the selected route in every layer/rule mode."""
+    from kicad_tools.cli import main, route_cmd
+
+    pcb = tmp_path / "input.kicad_pcb"
+    shutil.copyfile(Path(__file__).parent / "fixtures/projects/test_project.kicad_pcb", pcb)
+    monkeypatch.setattr(route_cmd, "run_post_route_drc", lambda *a, **kw: (drc_errors, 0))
+    args = [
+        "route",
+        str(pcb),
+        "-o",
+        str(tmp_path / "out.kicad_pcb"),
+        "--no-optimize",
+        "--no-sync-check",
+        "--no-auto-pour",
+        "--no-placement-feedback",
+        "--oracle-rounds",
+        "0",
+        "--no-current-paths",
+        "--format",
+        "json",
+        *layer_args,
+    ]
+    if fix_result is not None:
+        monkeypatch.setattr(route_cmd, "_run_auto_fix", lambda **kwargs: fix_result)
+        args.append("--auto-fix")
+    rc = main(args)
+    doc = json.loads(capsys.readouterr().out)
+    assert (tmp_path / "out.kicad_pcb").is_file()
+    errors_remain = drc_errors > 0 and fix_result != 0
+    if "--adaptive-rules" in layer_args:
+        assert doc["exit_code"] == rc
+        assert doc["verdict"] == ("failed" if errors_remain else "success")
+    if not errors_remain:
+        assert rc == 0 and "failure_reason" not in doc.get("summary", {})
+        return
+    summary = doc["summary"]
+    assert rc == 3 and summary["verdict"] == "failed"
+    assert summary["failure_reason"] == "post_route_drc"
+    assert summary["nets_requested"] == summary["nets_routed"] > 0
+    assert not summary["has_disconnected_islands"]
+
+
+@pytest.mark.timeout(240)
+def test_route_json_default_path_other_exit3_cause_omits_failure_reason(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #10057: an ``--auto-fix`` rollback exits 3 on the default path without the key.
+
+    ``summary.failure_reason = "post_route_drc"`` must stay exclusive to the
+    DRC-only failure; the rollback exit 3 (issue #2852) is another cause, on
+    the escalation path too.
+    """
+    from kicad_tools.cli import main, route_cmd
+
+    pcb = tmp_path / "input.kicad_pcb"
+    shutil.copyfile(Path(__file__).parent / "fixtures/projects/test_project.kicad_pcb", pcb)
+    monkeypatch.setattr(route_cmd, "run_post_route_drc", lambda *a, **kw: (1, 0))
+    monkeypatch.setattr(route_cmd, "_run_auto_fix", lambda *a, **kw: 3)
+    args = [
+        "route",
+        str(pcb),
+        "-o",
+        str(tmp_path / "out.kicad_pcb"),
+        "--no-optimize",
+        "--no-sync-check",
+        "--no-auto-pour",
+        "--no-placement-feedback",
+        "--oracle-rounds",
+        "0",
+        "--no-current-paths",
+        "--auto-fix",
+        "--format",
+        "json",
+    ]
+    rc = main(args)
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert rc == 3
+    assert summary["verdict"] == "failed"
+    assert summary.get("failure_reason") is None

@@ -1,6 +1,6 @@
 """Read-only inspection of project netclasses, separate from writer-oriented APIs.
 
-See ``docs/guides/netclass-diagnostics.md`` for the KiCad 10.0.5 matching
+See ``docs/guides/netclass-diagnostics.md`` for the KiCad 10.0.6 matching
 contract and native oracle. Results describe independent memberships, not
 assignment precedence, composite classes, or effective electrical constraints.
 """
@@ -13,11 +13,64 @@ from typing import Any
 # interpretations: the native oracle's ``/USB/`` row matches only ``/USB/``.
 _LITERAL = frozenset(ascii_letters + digits + "_ -:/")
 
+# Punctuation the native oracle pins under BOTH interpretations (issue
+# #10122): ``.`` is any one character to the regex interpretation, newline
+# included (oracle row ``USB.X`` -> ``USB\nX``), and literal to the wildcard
+# one; ``X+`` is one-or-more ``X`` to the regex one and a literal ``+`` to the
+# wildcard one; a single-level ``(...)`` group is transparent to the regex
+# one while its parentheses stay literal to the wildcard one -- which is how
+# ``Net-(U5-CAPP)`` also covers KiCad's unparenthesized spelling.
+_REGEX_PUNCTUATION = frozenset(".+()")
+
+_QUANTIFIERS = frozenset("*?+")
+
+_ALLOWED = _LITERAL | _REGEX_PUNCTUATION | _QUANTIFIERS
+
 
 def _supported(pattern: str) -> bool:
-    return all(c in _LITERAL or c in "*?" for c in pattern) and not any(
-        a in "*?" and b in "*?" for a, b in zip(pattern, pattern[1:], strict=False)
-    )
+    if not all(c in _ALLOWED for c in pattern):
+        return False
+    if any(
+        a in _QUANTIFIERS and b in _QUANTIFIERS for a, b in zip(pattern, pattern[1:], strict=False)
+    ):
+        return False
+    # Groups: balanced, single-level, non-empty and unquantified. Nested,
+    # empty, quantified or misplaced parentheses stay unsupported.
+    depth = 0
+    for index, char in enumerate(pattern):
+        following = pattern[index + 1 : index + 2]
+        if char == "(":
+            depth += 1
+            if depth > 1 or following in ("", ")") or following in _QUANTIFIERS:
+                return False
+        elif char == ")":
+            if following in _QUANTIFIERS:
+                return False
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _regex_tokens(pattern: str) -> list[tuple[str, str, str]]:
+    """The regex interpretation's ``(kind, char, quantifier)`` atom list.
+
+    Verified-group parentheses are dropped: an unquantified group only
+    sequences its contents, so transparency preserves the anchored match.
+    """
+    tokens: list[tuple[str, str, str]] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char in "()":
+            index += 1
+            continue
+        quantifier = pattern[index + 1 : index + 2]
+        if quantifier not in _QUANTIFIERS:
+            quantifier = ""
+        tokens.append(("any" if char == "." else "lit", char, quantifier))
+        index += 2 if quantifier else 1
+    return tokens
 
 
 def _matches(pattern: str, net: str) -> bool:
@@ -39,27 +92,30 @@ def _matches(pattern: str, net: str) -> bool:
     if ends & positions:
         return True
     # A leading quantifier is invalid regex; the wildcard branch still applies.
-    if pattern.startswith(("*", "?")):
+    if pattern[:1] in _QUANTIFIERS:
         return False
     positions = {0}
-    index = 0
-    while index < len(pattern):
-        char = pattern[index]
-        quantifier = pattern[index + 1 : index + 2]
-        if quantifier in ("*", "?"):
-            next_positions = set(positions)
+    for kind, char, quantifier in _regex_tokens(pattern):
+        if quantifier == "":
+            positions = {
+                i + 1 for i in positions if i < len(net) and (kind == "any" or net[i] == char)
+            }
+        elif quantifier == "?":
+            extended = set(positions)
+            for i in positions:
+                if i < len(net) and (kind == "any" or net[i] == char):
+                    extended.add(i + 1)
+            positions = extended
+        else:
+            extended = set() if quantifier == "+" else set(positions)
             for start in positions:
                 end = start
-                while end < len(net) and net[end] == char:
+                while end < len(net) and (kind == "any" or net[end] == char):
                     end += 1
-                    next_positions.add(end)
-                    if quantifier == "?":
-                        break
-            positions = next_positions
-            index += 2
-        else:
-            positions = {i + 1 for i in positions if i < len(net) and net[i] == char}
-            index += 1
+                    extended.add(end)
+            positions = extended
+        if not positions:
+            return False
     return bool(ends & positions)
 
 
