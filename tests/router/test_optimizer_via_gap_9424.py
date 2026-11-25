@@ -246,18 +246,23 @@ def test_via_exit_at_either_end_uses_only_its_drilled_layers():
 
 
 @pytest.mark.parametrize(
-    ("nearby", "extra_pad", "arc_layer", "arc_net"),
+    ("nearby", "extra_pad", "arc_layer", "arc_net", "poly_layer"),
     [
-        pytest.param(True, False, None, "20", id="exposed-slit"),
-        pytest.param(False, False, None, "20", id="clear-diagonal"),
-        pytest.param(True, True, None, "20", id="exposed-pad-gap"),
-        pytest.param(True, False, "F.Cu", "20", id="exposed-arc-gap"),
-        pytest.param(True, False, "F.Cu", '"RESET"', id="named-arc-net"),
-        pytest.param(True, False, "B.Cu", "20", id="arc-on-other-layer"),
+        pytest.param(True, False, None, "20", None, id="exposed-slit"),
+        pytest.param(False, False, None, "20", None, id="clear-diagonal"),
+        pytest.param(True, True, None, "20", None, id="exposed-pad-gap"),
+        pytest.param(True, False, "F.Cu", "20", None, id="exposed-arc-gap"),
+        pytest.param(True, False, "F.Cu", '"RESET"', None, id="named-arc-net"),
+        pytest.param(True, False, "B.Cu", "20", None, id="arc-on-other-layer"),
+        # Issue #10164: a footprint copper polygon (a net tie's pad-joining
+        # copper) is graded by the fab check, so the elbow guard must see it.
+        pytest.param(True, False, None, "20", "F.Cu", id="exposed-footprint-poly-gap"),
+        pytest.param(True, False, None, "20", "B.Cu", id="footprint-poly-on-other-layer"),
+        pytest.param(True, False, None, "20", "F.SilkS", id="footprint-poly-not-copper"),
     ],
 )
 def test_reset_branch_enters_via_from_its_existing_trunk(
-    tmp_path, nearby, extra_pad, arc_layer, arc_net
+    tmp_path, nearby, extra_pad, arc_layer, arc_net, poly_layer
 ):
     """Check the saved elbow against Board 05's adjacent pads, branches and curved track."""
     from kicad_tools.cli.route_cmd import _write_routed_pcb
@@ -288,6 +293,15 @@ def test_reset_branch_enters_via_from_its_existing_trunk(
             "(arc (start 160.1 94.46) (mid 160.0705 94.4955) (end 160.035 94.525) "
             f'(width 0.2) (layer "{arc_layer}") (net {arc_net}) '
             '(uuid "0369116f-c7e0-49b6-a2b3-99cd87a50d6b"))'
+        )
+    if poly_layer:
+        # An unfilled, 0.2 mm-stroked polygon that prints the same copper as the arc above.
+        board_items.append(
+            '(footprint "NT1" (layer "F.Cu") (at 0 0) (property "Reference" "NT1") '
+            "(fp_poly (pts (xy 160.1 94.46) (xy 160.035 94.525) (xy 160.0351 94.5251) "
+            "(xy 160.1001 94.4601)) "
+            f'(stroke (width 0.2) (type solid)) (fill no) (layer "{poly_layer}") '
+            '(uuid "poly-NT1")) (uuid "fp-NT1"))'
         )
     source = tmp_path / "input.kicad_pcb"
     source.write_text(
@@ -331,26 +345,36 @@ def test_reset_branch_enters_via_from_its_existing_trunk(
     (saved,) = router.routes
     assert saved.vias == [via]
     actual = [s for s in saved.segments if s.layer == Layer.F_CU]
-    blocks_repair = extra_pad or arc_layer == "F.Cu"
-    corner = (160.1, 94.35) if nearby and not blocks_repair else (160.1, 94.685)
-    assert [(s.start, s.end) for s in actual] == [(start, corner), (corner, barrel)]
-
-    output = tmp_path / "saved.kicad_pcb"
-    _write_routed_pcb(source, output, saved.to_sexp() + "\n" + sibling.to_sexp(), layer_count=4)
-    pcb = PCB.load(output)
-    assert len(pcb.arcs) == int(arc_layer is not None)
-    findings = [
-        v
-        for v in check_physical_copper_gap_fab_view(pcb, policy).violations
-        if v.rule_id == "physical_copper_gap"
-    ]
-    pad_findings = [v for v in findings if v.fab_band == "pad"]
-    trace_findings = [v for v in findings if v.fab_band == "trace"]
-    assert pad_findings == []
-    if blocks_repair:
-        assert [v.actual_value for v in trace_findings] == pytest.approx([0.029810], abs=1e-6)
+    blocks_repair = extra_pad or arc_layer == "F.Cu" or poly_layer == "F.Cu"
+    if nearby and blocks_repair:
+        # The polygon/pad/arc vetoes the retraction and the optimized corner would
+        # open a trace-to-trace slit to the sibling: the clean incoming chain stays.
+        assert [(s.start, s.end) for s in actual] == [(s.start, s.end) for s in front]
     else:
-        assert trace_findings == []
+        corner = (160.1, 94.35) if nearby else (160.1, 94.685)
+        assert [(s.start, s.end) for s in actual] == [(start, corner), (corner, barrel)]
+
+    def grade(route, name):
+        output = tmp_path / name
+        _write_routed_pcb(source, output, route.to_sexp() + "\n" + sibling.to_sexp(), layer_count=4)
+        pcb = PCB.load(output)
+        assert len(pcb.arcs) == int(arc_layer is not None)
+        return [
+            v
+            for v in check_physical_copper_gap_fab_view(pcb, policy).violations
+            if v.rule_id == "physical_copper_gap"
+        ]
+
+    # The route the optimizer started with is clean; the saved result must be too.
+    if nearby:
+        assert (
+            grade(
+                Route(net=20, net_name="RESET", segments=[*front, *back], vias=[via]),
+                "in.kicad_pcb",
+            )
+            == []
+        )
+    assert grade(saved, "saved.kicad_pcb") == []
 
 
 @pytest.mark.parametrize(
@@ -451,3 +475,61 @@ def test_via_elbow_preserves_existing_copper_and_branch_contacts(case, expected)
         assert result == _segments([point(points[0]), point(bend), point(points[-1])], Layer.F_CU)
     else:
         assert result is None
+
+
+def test_via_elbow_fails_closed_on_unmeasurable_footprint_poly():
+    """Issue #10164: a copper fp_poly the fab check cannot measure cannot prove the edit safe."""
+    from kicad_tools.router.optimizer.pad_slits import covered_via_elbow
+
+    start, corner, barrel = (160.1, 95.8375), (160.1, 94.685), (159.765, 94.35)
+    chain = _segments([start, corner, barrel], Layer.F_CU)
+    via = Via(*barrel, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 26, "VM")
+    original = Route(net=26, net_name="VM", segments=chain, vias=[via])
+    trunk = Segment(*start, 160.1, 92.41, 0.2, Layer.F_CU, 26, "spine")
+    neighbour = _segments([(159.7, 91.165), (159.7, 94.61), (159.96, 94.87)], Layer.F_CU)
+
+    def grid(polys):
+        return SimpleNamespace(
+            rules=DesignRules(
+                same_net_trace_gap_band_edge_mm=0.1016, same_net_pad_gap_band_edge_mm=0.15
+            ),
+            pads=[],
+            routes=[
+                original,
+                Route(net=26, net_name="spine", segments=[trunk]),
+                Route(net=26, net_name="VM", segments=neighbour),
+            ],
+            authored_footprint_poly_copper=polys,
+        )
+
+    assert covered_via_elbow(chain, original, grid({})) is not None
+    assert covered_via_elbow(chain, original, grid({"F.Cu": [None]})) is None
+    assert covered_via_elbow(chain, original, grid({"B.Cu": [None]})) is not None
+
+
+def test_authored_footprint_poly_copper_keeps_only_measurable_copper_layers(tmp_path):
+    from kicad_tools.router.optimizer.pad_slits import authored_footprint_poly_copper
+    from kicad_tools.schema.pcb import PCB
+
+    def poly(layer, width="0.2", fill="no"):
+        return (
+            "(fp_poly (pts (xy 0 0) (xy 1 0) (xy 1 1)) "
+            f'(stroke (width {width}) (type solid)) (fill {fill}) (layer "{layer}"))'
+        )
+
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(
+        "(kicad_pcb (version 20240108) (generator pcbnew) (general (thickness 1.6))\n"
+        '(layers (0 "F.Cu" signal) (31 "B.Cu" signal))\n(net 0 "")\n'
+        "(gr_rect (start 100 50) (end 120 70) (stroke (width 0.05) (type default)) "
+        '(fill none) (layer "Edge.Cuts"))\n'
+        '(footprint "NT" (layer "F.Cu") (at 110 60) (property "Reference" "NT1") '
+        f'{poly("F.Cu")} {poly("F.SilkS")} {poly("B.Cu", width="0")}  (uuid "fp"))\n)'
+    )
+    copper = authored_footprint_poly_copper(PCB.load(path))
+    assert set(copper) == {"F.Cu", "B.Cu"}
+    (front,) = copper["F.Cu"]
+    # Sheet frame: footprint at (110, 60) with a 0.1 mm stroke half-width.
+    assert front.bounds == pytest.approx((109.9, 59.9, 111.1, 61.1), abs=1e-3)
+    # An unfilled, unstroked polygon prints nothing measurable: fail closed.
+    assert copper["B.Cu"] == [None]
