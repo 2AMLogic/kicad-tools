@@ -2896,3 +2896,124 @@ def test_via_entry_recheck_veto_preserves_board_bytes(tmp_path, monkeypatch, cap
         ("lead", "new_mask_finding")
     ]
     assert board.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Issue #9939: a disjoint pass-through jog slides along its runs (Board 03 C7/1)
+# ---------------------------------------------------------------------------
+
+
+def _disjoint_jog_fixture(tmp_path, *, extra="", lock=""):
+    """A jog between two vertical runs whose lower end stops 0.05 mm short of the pad.
+
+    The pad's top edge is y = 99.5 and the lower run enters it at x = 100.6, so
+    the jog's near end (100.6, 99.35) sits 0.05 mm from the opening: a disjoint
+    pass-through finding, not an own-pad entry.
+    """
+    shapes = {
+        "run": ((100.2, 96.0), (100.2, 98.95)),
+        "jog": ((100.2, 98.95), (100.6, 99.35)),
+        "lead": ((100.6, 99.35), (100.6, 100.0)),
+    }
+    tracks = [
+        _seg(name, a, b).replace("(segment ", f"(segment {lock} " if name == "run" else "(segment ")
+        for name, (a, b) in shapes.items()
+    ]
+    return _board(tmp_path, "\n".join([*tracks, extra])), shapes
+
+
+def test_disjoint_pass_through_jog_slides_along_its_runs_without_changing_an_angle(tmp_path):
+    board, shapes = _disjoint_jog_fixture(tmp_path)
+    before = board.read_bytes()
+    original = {name: _end(board, name) for name in shapes}
+    repairer = MaskCopperRepairer(board)
+    finding = _pt_finding("jog", measured=0.05)
+    assert repairer.repair([finding], dry_run=True, **_JOG_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair([finding], **_JOG_OPTS)
+    assert result.repaired == 1
+    (action,) = result.actions
+    assert "jog" in action.detail and action.dx == 0 and action.dy < 0
+    # A disjoint finding needs only the last few hundredths of a millimetre.
+    assert abs(action.dy) <= 0.25
+    repairer.save(board)
+    assert not repairer.off_angle_tracks()
+    run, jog, lead = (_end(board, name) for name in ("run", "jog", "lead"))
+    # The downstream anchor and the pad end never move; the joints follow the jog.
+    assert run[0] == original["run"][0] and lead[1] == original["lead"][1]
+    assert run[1] == jog[0] and jog[1] == lead[0]
+    assert jog[1][0] - jog[0][0] == pytest.approx(0.4) and jog[1][1] - jog[0][1] == pytest.approx(
+        0.4
+    )
+    copper, _ = _saved_copper(board, "jog")
+    assert copper.distance(_pad_poly(board, "R1/1")) >= 0.09
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert {name: _end(board, name) for name in shapes} == original
+
+
+def test_disjoint_jog_slide_is_not_tried_beyond_its_bound(tmp_path):
+    # The slide bound, not the geometry, declines: the jog needs 0.04 mm and gets 0.01 mm.
+    board, _ = _disjoint_jog_fixture(tmp_path)
+    repairer = MaskCopperRepairer(board)
+    pads = repairer._openings()
+    slid = repairer._slide_jog_along_runs(
+        repairer._segment_nodes()["jog"],
+        "jog",
+        PAD,
+        pads,
+        MaskRepairResult(),
+        0.01,
+        False,
+        0.127,
+        0.09,
+        0.02,
+        0.15,
+        set(),
+    )
+    assert slid is False and not repairer.modified
+
+
+def test_disjoint_jog_slide_vetoed_by_foreign_copper_or_a_lock_leaves_the_slide_unapplied(tmp_path):
+    cases = {
+        # Other-net copper where the jog's near end would land.
+        "foreign-copper": (_seg("foreign", (100.6, 99.0), (100.9, 99.0), net=2), ""),
+        "locked-run": ("", "locked"),
+    }
+    for name, (extra, lock) in cases.items():
+        sub = tmp_path / name
+        sub.mkdir()
+        board, _ = _disjoint_jog_fixture(sub, extra=extra, lock=lock)
+        repairer = MaskCopperRepairer(board)
+        before = repairer.doc.to_string()
+        slid = repairer._slide_jog_along_runs(
+            repairer._segment_nodes()["jog"],
+            "jog",
+            PAD,
+            repairer._openings(),
+            MaskRepairResult(),
+            0.25,
+            True,
+            0.127,
+            0.09,
+            0.02,
+            0.15,
+            set(),
+        )
+        assert slid is False, name
+        assert repairer.doc.to_string() == before, name
+
+
+def test_verified_disjoint_jog_slide_that_creates_a_finding_restores_every_end(
+    tmp_path, monkeypatch, capsys
+):
+    board, shapes = _disjoint_jog_fixture(tmp_path)
+    before = board.read_bytes()
+    reported = _pt_finding("jog", measured=0.05)
+    neighbour = _finding("lead")  # the slide creates a new finding on a joined run
+    _run(monkeypatch, board, [_report(reported), _report(neighbour)], extra=("--format", "json"))
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [("jog", "new_mask_finding")]
+    assert board.read_bytes() == before
