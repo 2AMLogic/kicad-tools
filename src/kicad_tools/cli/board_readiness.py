@@ -47,6 +47,45 @@ class ReadinessLayout:
                 "Readiness receipt does not match the declared project and output root"
             )
 
+    def checked_schematic_root(self, data: dict) -> Path:
+        """Verify the released sheet hierarchy and identify the root used for its BOM."""
+        from kicad_tools.report.utils import walk_schematic_hierarchy
+
+        inputs = data.get("inputs")
+        if not isinstance(inputs, dict):
+            raise ValueError("The readiness receipt has no schematic input hashes")
+        sheet_names = {name for name in inputs if name.endswith(".kicad_sch")}
+        recorded = data.get("schematic_root")
+        if "schematic_root" in data and (
+            not isinstance(recorded, str) or recorded not in sheet_names
+        ):
+            raise ValueError("The selected schematic root is missing from readiness inputs")
+        base = self.input_base.resolve()
+        roots: list[Path] = []
+        # Older receipts recorded file hashes without recording which sheet was
+        # the root. Accept one complete hierarchy that accounts for every sheet.
+        for name in [recorded] if recorded is not None else sorted(sheet_names):
+            root = (base / name).resolve()
+            if not root.is_relative_to(base) or root.relative_to(base).as_posix() != name:
+                raise ValueError(f"Invalid schematic path in readiness inputs: {name}")
+            walked = walk_schematic_hierarchy(root, lambda sheet: sheet.is_relative_to(base))
+            unavailable = walked.missing + walked.outside
+            if unavailable:
+                raise ValueError(f"Schematic hierarchy is incomplete at {unavailable[0]}")
+            reachable = set()
+            for sheet in walked.sheets:
+                relative = sheet.relative_to(base).as_posix()
+                if inputs.get(relative) != hashlib.sha256(sheet.read_bytes()).hexdigest():
+                    raise ValueError(
+                        f"Readiness receipt does not cover schematic sheet {relative} at its current sha256"
+                    )
+                reachable.add(relative)
+            if recorded is not None or reachable == sheet_names:
+                roots.append(root)
+        if len(roots) != 1:
+            raise ValueError("The readiness receipt does not identify one complete schematic root")
+        return roots[0]
+
 
 def board_directory_for_pcb(pcb: Path) -> Path:
     """Locate a board's directory for either an editable PCB or a board under output/."""
@@ -262,17 +301,20 @@ def read_readiness(board_dir: Path, *, layout: ReadinessLayout | None = None) ->
         # released BOM and drawings, so a child edit must not read as ready.
         from kicad_tools.report.utils import walk_schematic_hierarchy
 
-        for name in list(inputs):
-            if not name.endswith(".kicad_sch") or not (root / name).is_file():
-                continue
-            walked = walk_schematic_hierarchy(
-                (root / name).resolve(), lambda sheet: sheet.is_relative_to(root)
-            )
-            required.update(
-                sheet.resolve().relative_to(root).as_posix()
-                for sheet in walked.sheets
-                if sheet.resolve().is_relative_to(root)
-            )
+        if layout is not None and data["status"] == "ready":
+            layout.checked_schematic_root(data)
+        else:
+            for name in list(inputs):
+                if not name.endswith(".kicad_sch") or not (root / name).is_file():
+                    continue
+                walked = walk_schematic_hierarchy(
+                    (root / name).resolve(), lambda sheet: sheet.is_relative_to(root)
+                )
+                required.update(
+                    sheet.resolve().relative_to(root).as_posix()
+                    for sheet in walked.sheets
+                    if sheet.resolve().is_relative_to(root)
+                )
         if not required.issubset(inputs):
             raise ValueError("Evidence omits current project or rule files")
         if "manufacturer" in data and (

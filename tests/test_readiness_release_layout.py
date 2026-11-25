@@ -28,7 +28,15 @@ class HandoffEngines(FakeEngines):
         return EngineRun(ok=True)
 
     def export(self, pcb, mfr, output_dir, *args, **kwargs):
+        from kicad_tools.export.manufacturing import _create_project_zip
+
         result = super().export(pcb, mfr, output_dir, *args, **kwargs)
+        _create_project_zip(
+            pcb,
+            output_dir,
+            schematic_path=kwargs.get("schematic"),
+            project_root=kwargs.get("project_root"),
+        )
         (output_dir / f"bom_{mfr}.csv").write_text(
             "Comment,Designator,Footprint,LCSC Part #\n1k,R1,Package,C17630\n"
         )
@@ -272,3 +280,76 @@ def test_render_and_receipt_refuse_an_output_root_outside_the_project(project):
     assert render([str(pcb), "--no-3d"]) == 1
     assert not (moved / "renders").exists()
     assert (moved / "manufacturing/manifest.json").read_bytes() == before
+
+
+@pytest.fixture
+def hierarchy(project):
+    root = project / "schematics/board.kicad_sch"
+    child = root.with_name("notes.kicad_sch")
+    child.write_text("(kicad_sch)\n")
+    root.write_text('(kicad_sch (sheet (property "Sheetfile" "notes.kicad_sch")))\n')
+    engines = HandoffEngines(
+        project / "kicad", part_numbers={"R1": "C17630"}, tht_refs=(), cpl_refs=("R1",)
+    )
+    assert run(project, "--generate", fake=engines)[0] == 0
+    assert run(project, "--verify", fake=engines)[0] == 0
+    return project, root, child
+
+
+def test_generic_project_archive_carries_the_selected_sibling_root(hierarchy, tmp_path):
+    from zipfile import ZipFile
+
+    from kicad_tools.export.manufacturing import _create_project_zip
+
+    project, root, child = hierarchy
+    board = project / "kicad/board.kicad_pcb"
+    archive = _create_project_zip(board, tmp_path, schematic_path=root, project_root=project)
+    with ZipFile(archive) as zf:
+        assert zf.read("kicad/board.kicad_sch") == root.read_bytes()
+        assert zf.read("kicad/notes.kicad_sch") == child.read_bytes()
+        assert zf.read("kicad/board.kicad_pcb") == board.read_bytes()
+
+
+@pytest.mark.parametrize("location", ["readiness.json", "readiness-verification/readiness.json"])
+@pytest.mark.parametrize("legacy", [False, True], ids=["recorded-root", "legacy"])
+def test_release_uses_one_complete_schematic_hierarchy(hierarchy, location, legacy, monkeypatch):
+    project, root, child = hierarchy
+    board = project / "kicad/board.kicad_pcb"
+    bundle = project / "fabrication/manufacturing"
+    receipt = project / "fabrication" / location
+    data = json.loads(receipt.read_bytes())
+    if legacy:
+        data.pop("schematic_root", None)
+        receipt.write_text(json.dumps(data))
+    else:
+        assert data["schematic_root"] == root.relative_to(project).as_posix()
+
+    _no_browser(monkeypatch)
+    _stock(monkeypatch, {"C17630": 100})
+    sign_off_bundle(bundle, board, "local test", readiness=receipt)
+    assert _submission_preview(bundle, board, root, project.parent / "complete-preview") == 0
+    refused = project.parent / "refused-preview"
+    assert _submission_preview(bundle, board, child, refused) == 2
+    child.unlink()
+    assert _submission_preview(bundle, board, root, refused) == 2
+    assert not refused.exists()
+    assert read_readiness(board)["status"] == "unverified"
+    with pytest.raises(WorkflowError):
+        sign_off_bundle(bundle, board, "local test", readiness=receipt)
+
+
+def test_legacy_receipt_with_only_the_parent_requires_fresh_verification(hierarchy):
+    project, root, child = hierarchy
+    board = project / "kicad/board.kicad_pcb"
+    output = project / "fabrication"
+    receipt = output / "readiness.json"
+    data = json.loads(receipt.read_bytes())
+    data.pop("schematic_root", None)
+    del data["inputs"][child.relative_to(project).as_posix()]
+    receipt.write_text(json.dumps(data))
+    for missing in (False, True):
+        if missing:
+            child.unlink()
+        assert read_readiness(board)["status"] == "unverified"
+        with pytest.raises(WorkflowError):
+            sign_off_bundle(output / "manufacturing", board, "local test", readiness=receipt)

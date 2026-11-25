@@ -457,6 +457,7 @@ def _run_export(
     quantity: int | None = None,
     inventory_covered: frozenset[str] | None = None,
     schematic: Path | None = None,
+    project_root: Path | None = None,
 ) -> EngineRun:
     """Generate a generic bundle without changing the already-checked project rules.
 
@@ -472,6 +473,7 @@ def _run_export(
             include_bom=assembly,
             include_pnp=assembly,
             emit_drc_constraints=False,
+            project_root=project_root,
             merge_lcsc_from=merge_lcsc_from,
             gerber_source_date_epoch=_readiness_gerber_epoch(),
             preflight=PreflightConfig(
@@ -492,12 +494,13 @@ def _run_export(
         sidecars = {pcb.with_suffix(".kicad_pro"), pcb.with_suffix(".kicad_dru")}
         with zipfile.ZipFile(archive, "a", zipfile.ZIP_DEFLATED) as zf:
             present = set(zf.namelist())
-            for source in _project_dependencies(pcb, Path(pcb.anchor)):  # bounded upstream
+            (board_member,) = [Path(name) for name in present if name.endswith(".kicad_pcb")]
+            for source in _project_dependencies(pcb, project_root or pcb.parent):
                 if not source.is_relative_to(pcb.parent):
                     continue  # Collected later by _normalize_project_archive (#5813).
                 if source in sidecars:
                     continue  # Already archived under the project identity's name.
-                relative = source.relative_to(pcb.parent).as_posix()
+                relative = (board_member.parent / source.relative_to(pcb.parent)).as_posix()
                 if relative not in present:
                     zf.write(source, relative)
         return EngineRun(True)
@@ -2947,7 +2950,13 @@ def _normalize_project_archive(options: ReadinessOptions) -> None:
     board = options.pcb.resolve()
     board_names = {layout.checked(board), layout.names[board]}
     if prefix != "." and board_names.isdisjoint(members):
-        rebuilt = {f"{prefix}/{name}": data for name, data in members.items()}
+        # The generic ZIP may already be rooted at a narrower --project-root.
+        # Prefix only the part between that boundary and the declaring project.
+        local_board_dir = base.relative_to(options.root)
+        local_names = {(local_board_dir / Path(name).name).as_posix() for name in board_names}
+        if local_board_dir != Path(".") and not local_names.isdisjoint(members):
+            prefix = options.root.relative_to(options.project_base).as_posix()
+        rebuilt = {(Path(prefix) / name).as_posix(): data for name, data in members.items()}
     else:
         if prefix != "." and any(Path(name).name in members for name in board_names):
             raise ProjectIdentityError(
@@ -3541,6 +3550,8 @@ def _gate_artifacts(
         export_kwargs["inventory_covered"] = options.inventory_covered
     if options.schematic is not None and options.schematic.is_file():
         export_kwargs["schematic"] = options.schematic
+    if options.root != options.pcb.parent.resolve():
+        export_kwargs["project_root"] = options.root
     run = engines.export(*export_args, **export_kwargs)
     if not run.ok:
         return CheckOutcome(
@@ -4484,6 +4495,8 @@ def build_report(
         # declared output root explicitly, so a moved project still verifies.
         report["project_root"] = Path(os.path.relpath(root, options.board_dir.resolve())).as_posix()
         report["output_root"] = options.output_root.resolve().relative_to(root).as_posix()
+        if options.schematic is not None and options.schematic.is_file():
+            report["schematic_root"] = options.schematic.resolve().relative_to(root).as_posix()
     else:
         external = _external_dependencies(options)
         if external:

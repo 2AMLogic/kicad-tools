@@ -365,6 +365,10 @@ def _load_readiness(
             "Readiness receipt was not produced for this --board (path or sha256 differs)"
         )
     if layout is not None:
+        try:
+            layout.checked_schematic_root(data)
+        except (OSError, ValueError) as exc:
+            raise WorkflowError(str(exc)) from exc
         bundle = bundle_root.resolve()
         if bundle.name != "manufacturing" or not bundle.is_relative_to(generated.parent):
             raise WorkflowError("The selected bundle is outside the declared manufacturing output")
@@ -416,17 +420,12 @@ def _check_declared_submission_sources(
             raise WorkflowError(
                 f"The signed readiness receipt does not cover the selected {role} path and sha256"
             )
-    from kicad_tools.report.utils import walk_schematic_hierarchy
-
-    walked = walk_schematic_hierarchy(
-        schematic, lambda sheet: sheet.is_relative_to(layout.input_base)
-    )
-    for sheet in walked.sheets:
-        rel = sheet.resolve().relative_to(layout.input_base).as_posix()
-        if rel not in inputs or inputs[rel] != _file_sha(sheet):
-            raise WorkflowError(
-                f"The signed readiness receipt does not cover schematic sheet {rel} at its current sha256"
-            )
+    try:
+        root = layout.checked_schematic_root(record)
+    except (OSError, ValueError) as exc:
+        raise WorkflowError(str(exc)) from exc
+    if schematic != root:
+        raise WorkflowError("The selected schematic differs from the signed root schematic")
 
 
 SIGNOFF_STAGES = ("release", "fab-review", "fab-dfm")
