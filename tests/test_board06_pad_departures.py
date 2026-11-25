@@ -1084,3 +1084,175 @@ def test_final_data_copper_obeys_j4_rule_area(tmp_path, departures, capsys, cons
     else:
         assert board.read_bytes() == before
         assert ("Items not allowed" if constraint == "keepout" else "Data exit width") in output
+
+
+_POWER_MEASUREMENTS = {
+    ("U2", "D3"): (
+        "+1V2",
+        ((-1.27, 0), (-0.32, 0), (0.33, 0.65)),
+        (((-1.27, 0), (0, 0)), ((0, 0.65), (0.33, 0.65))),
+    ),
+    ("U3", "25"): (
+        "+3V3",
+        (
+            (0, 0),
+            (-0.25, 0),
+            (-0.30, -0.05),
+            (-0.35, -0.05),
+            (-0.40, -0.10),
+            (-0.45, -0.10),
+            (-0.70, -0.35),
+        ),
+        (((0, -0.05), (-0.65, -0.05), (-0.70, -0.10), (-0.70, -0.35)),),
+    ),
+    ("U3", "36"): (
+        "+1V2",
+        ((0, 0), (0.35, 0), (0.80, -0.45)),
+        (((0, 0), (0.27, 0), (0.72, -0.45), (0.80, -0.45)),),
+    ),
+}
+
+
+def _write_power_board(board, ref, pin, control=None):
+    net, old, new = _POWER_MEASUREMENTS[ref, pin]
+
+    def absolute(p):
+        return round(10 + p[0], 6), round(10 + p[1], 6)
+
+    via = absolute(old[-1])
+    fp = (
+        "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"
+        if ref == "U2"
+        else "Package_QFP:LQFP-48_7x7mm_P0.5mm"
+    )
+    routes = [("F.Cu", absolute(a), absolute(b), 0.2) for a, b in pairwise(old)]
+    routes.append(("In1.Cu", via, (via[0], 12), 0.20))
+    if ref == "U2" and control != "missing vertical":
+        top = 0.20 if control == "short vertical" else 1.395
+        routes.append(("F.Cu", absolute((0, top)), absolute((0, -0.125)), 0.20))
+    if control == "same-net slit":
+        routes.append(("F.Cu", via, absolute((-0.25, -0.35)), 0.20))
+    if control == "tap":
+        routes.append(("F.Cu", absolute((0.20, 0.34)), absolute((0.52, 0.34)), 0.10))
+    if control == "changed width":
+        routes[0] = (*routes[0][:3], 0.22)
+    extra = (
+        f'(group "protected" (uuid grp) (members "{_uid("seg", 0)}"))' if control == "group" else ""
+    )
+    _write_board(
+        board,
+        pad_ref=ref,
+        pad_number=pin,
+        footprint=fp,
+        pad_size=(0.45, 0.45) if ref == "U2" else (0.7, 0.3),
+        net_name=net,
+        segments=routes,
+        vias=[via],
+        far_at=(via[0], 12),
+        neighbor=False,
+        extra=extra,
+        locked_index=0 if control == "locked" else None,
+    )
+    text = board.read_text().replace("(size 0.6) (drill 0.25)", "(size 0.5) (drill 0.3)")
+    if ref == "U2":
+        text = text.replace(
+            '(pad "D3"',
+            '(pad "D2" smd rect (at -1.27 0) (size 0.45 0.45) (layers "F.Cu" "F.Mask") (net 1 "+1V2")) (pad "D3"',
+        )
+    if control == "expanded mask":
+        text = text.replace("(pad_to_mask_clearance 0)", "(pad_to_mask_clearance 0.20)")
+    if control == "project clearance":
+        text = (
+            text.rstrip()[:-1]
+            + '(net 2 "OTHER") (segment (start 10.1 10.39) (end 10.32 10.39) (width 0.1) (layer "F.Cu") (net 2)))'
+        )
+        board.with_suffix(".kicad_pro").write_text(
+            json.dumps({"board": {"design_settings": {"rules": {"min_clearance": 0.4}}}})
+        )
+    board.write_text(text)
+    return {frozenset((absolute(a), absolute(b))) for path in new for a, b in pairwise(path)}
+
+
+@pytest.mark.parametrize("ref,pin", _POWER_MEASUREMENTS)
+def test_power_pad_departure_keeps_barrel_and_reaches_pad(tmp_path, departures, ref, pin):
+    board = tmp_path / "power.kicad_pcb"
+    expected = _write_power_board(board, ref, pin)
+    before = PCB.load(board)
+    old_edges = len(_POWER_MEASUREMENTS[ref, pin][1]) - 1
+    retained = {s.uuid for s in before.segments} - {_uid("seg", i) for i in range(old_edges)}
+    assert departures.clear_pad_departures(board, _rules()) == 1
+    pcb = PCB.load(board)
+    assert [(v.uuid, v.position) for v in pcb.vias] == [(v.uuid, v.position) for v in before.vias]
+    assert retained <= {s.uuid for s in pcb.segments}
+    actual = set()
+    for s in pcb.segments:
+        if s.uuid not in retained:
+            assert (
+                s.layer == "F.Cu"
+                and s.net_name == _POWER_MEASUREMENTS[ref, pin][0]
+                and s.width == 0.2
+            )
+            actual.add(
+                frozenset(
+                    tuple(round(a + b, 6) for a, b in zip(end, pcb.board_origin, strict=True))
+                    for end in (s.start, s.end)
+                )
+            )
+    assert actual == expected
+    saved = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0 and board.read_bytes() == saved
+
+
+@pytest.mark.parametrize(
+    "ref,pin,control",
+    [
+        ("U2", "D3", "missing vertical"),
+        ("U2", "D3", "short vertical"),
+        ("U3", "25", "same-net slit"),
+        ("U2", "D3", "tap"),
+        ("U3", "25", "group"),
+        ("U3", "36", "locked"),
+        ("U3", "25", "expanded mask"),
+        ("U3", "36", "project clearance"),
+        ("U3", "25", "changed width"),
+    ],
+)
+def test_power_pad_departure_veto_preserves_input(tmp_path, departures, ref, pin, control):
+    board = tmp_path / "power.kicad_pcb"
+    _write_power_board(board, ref, pin, control)
+    original = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0 and board.read_bytes() == original
+
+
+def test_power_u3_36_center_segment_keeps_all_thirteen_pads_on_the_pour(tmp_path, departures):
+    from tests.test_board_06_pour_audit_fixtures import _load_module
+
+    recipe = _load_module("board_06_power_pour_control", BOARD06 / "generate_design.py")
+    board = tmp_path / "pour.kicad_pcb"
+    _write_power_board(board, "U3", "36")
+    # Twelve ground-truth +1V2 pads share the far inner track. U3/36 reaches
+    # them only through its front departure and barrel.
+    trunk = '(segment (start 10.8 12) (end 15.2 12) (width 0.2) (layer "In1.Cu") (net 1))'
+    peers = [
+        f'(footprint "contact" (layer "F.Cu") (at {11 + i * 0.4} 12) (property "Reference" "P{i}") '
+        '(pad "1" thru_hole circle (at 0 0) (size 0.3 0.3) (drill 0.15) (layers "*.Cu" "*.Mask") (net 1 "+1V2")))'
+        for i in range(11)
+    ]
+    board.write_text(board.read_text().rstrip()[:-1] + "\n" + "\n".join([trunk, *peers]) + "\n)")
+
+    def groups():
+        return sorted(
+            len(g) for g in recipe._audit_pour_nets(board, ["+1V2"])["+1V2"]["pad_groups"]
+        )
+
+    assert groups() == [13]
+    assert departures.clear_pad_departures(board, _rules()) == 1
+    assert groups() == [13]
+    pcb = PCB.load(board)
+    center = pcb.get_pad_position("U3", "36")
+    short = [
+        s for s in pcb.segments if s.layer == "F.Cu" and (s.start == center or s.end == center)
+    ]
+    assert len(short) == 1 and pcb.remove_segments(short) == 1
+    pcb.save(board)
+    assert groups() == [1, 12]
