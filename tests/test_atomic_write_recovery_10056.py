@@ -476,3 +476,213 @@ def test_cleanup_at_commit_cannot_invalidate_publication(tmp_path, monkeypatch):
     assert len(cleaned) == 1
     assert board.read_bytes() == b"new board"
     assert list(tmp_path.iterdir()) == [board]
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_checked_alias_retains_previous_bytes_and_editor_handle(tmp_path, absolute):
+    target = tmp_path / "source.kicad_pcb"
+    target.write_bytes(b"original")
+    board = tmp_path / "proj.kicad_pcb"
+    board.symlink_to(target if absolute else target.name)
+    project = board.with_suffix(".kicad_pro")
+    project.write_text(MINIMAL_PROJECT)
+    from kicad_tools.cli.clean_cmd import find_cleanable_files
+    from kicad_tools.cli.clean_cmd import main as clean
+
+    with target.open("r+b") as editor:
+        _checked_rewrite(board, b"repaired")
+        assert not board.is_symlink() and board.read_bytes() == b"repaired"
+        (record,) = recovery_copies(board)
+        assert (record / "original").read_bytes() == target.read_bytes() == b"original"
+        _save_through_open_handle(editor.fileno(), b"later save")
+        assert (record / "original").read_bytes() == b"later save"
+        preview = find_cleanable_files(project)
+        assert [row.path for row in preview.to_delete] == [record]
+        assert clean([str(project), "--force"]) == 0
+    assert not record.exists()
+    assert target.read_bytes() == b"later save"
+    assert board.read_bytes() == b"repaired"
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_clean_uses_the_selected_project_for_a_resolved_board(tmp_path, external):
+    from kicad_tools.cli.clean_cmd import main as clean
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    source_dir = (tmp_path if external else project_dir) / "sources"
+    source_dir.mkdir()
+    source = source_dir / "actual.kicad_pcb"
+    source.write_bytes(b"before")
+    source_project = source.with_suffix(".kicad_pro")
+    source_project.write_text(MINIMAL_PROJECT)
+    board = project_dir / "proj.kicad_pcb"
+    board.symlink_to(os.path.relpath(source, project_dir))
+    project = board.with_suffix(".kicad_pro")
+    project.write_text(MINIMAL_PROJECT)
+
+    _checked_rewrite(source, b"after")  # The public exporter writes the resolved board.
+    (record,) = recovery_copies(source)
+    peer = source_dir / "other.kicad_pcb"
+    peer.write_bytes(b"peer before")
+    _checked_rewrite(peer, b"peer after")
+    (unrelated,) = recovery_copies(peer)
+    assert recovery_copies(board) == ([] if external else [record])
+    assert clean([str(project), "--dry-run"]) == 0
+    assert record.is_dir()
+    assert clean([str(project), "--force"]) == 0
+    assert record.exists() is external
+    assert unrelated.is_dir() and board.is_symlink() and board.read_bytes() == b"after"
+    if external:
+        assert clear_recovery_copies(source) == [record]
+
+
+def test_recovery_order_uses_marker_time_inside_the_same_second(tmp_path):
+    from kicad_tools.cli.clean_cmd import find_cleanable_files
+
+    board = tmp_path / "proj.kicad_pcb"
+    board.write_bytes(b"v3")
+    project = board.with_suffix(".kicad_pro")
+    project.write_text(MINIMAL_PROJECT)
+    first = tmp_path / ".proj.kicad_pcb.recovery-20261124T160000Z-zzzz"
+    second = tmp_path / ".proj.kicad_pcb.recovery-20261124T160000Z-aaaa"
+    for sequence, record in enumerate((first, second)):
+        record.mkdir()
+        (record / "original").write_bytes(b"earlier")
+        marker = record / "complete"
+        marker.touch()
+        stamp = 1_795_536_000_000_000_000 + sequence * 100_000_000
+        os.utime(marker, ns=(stamp, stamp))
+    assert recovery_copies(board) == [first, second]
+    assert [row.path for row in find_cleanable_files(project).by_category("recovery_copy")] == [
+        first,
+        second,
+    ]
+    tied = (second / "complete").stat().st_mtime_ns
+    os.utime(first / "complete", ns=(tied, tied))
+    assert clear_recovery_copies(board) == [second, first]
+
+
+def test_legacy_displaced_relative_link_is_discoverable_and_cleanable(tmp_path):
+    from kicad_tools.cli.clean_cmd import delete_files, find_cleanable_files
+
+    project = tmp_path / "board.kicad_pro"
+    project.write_text(MINIMAL_PROJECT)
+    board = project.with_suffix(".kicad_pcb")
+    board.write_bytes(b"repaired")
+    source = tmp_path / "source.kicad_pcb"
+    source.write_bytes(b"old")
+    record = tmp_path / ".board.kicad_pcb.recovery-20261124T160000Z-old"
+    record.mkdir()
+    (record / "complete").touch()
+    (record / "original").symlink_to(source.name)
+    assert not (record / "original").exists()
+
+    assert recovery_copies(board) == [record]
+    preview = find_cleanable_files(project)
+    assert [row.path for row in preview.to_delete] == [record]
+    assert delete_files(preview)[0] == 1
+    assert source.read_bytes() == b"old" and board.read_bytes() == b"repaired"
+
+
+def test_cleanup_preview_cannot_follow_a_retargeted_board(tmp_path):
+    from kicad_tools.cli.clean_cmd import delete_files, find_cleanable_files
+
+    project = tmp_path / "proj.kicad_pro"
+    project.write_text(MINIMAL_PROJECT)
+    board = project.with_suffix(".kicad_pcb")
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    source = sources / "board.kicad_pcb"
+    source.write_bytes(b"first")
+    _checked_rewrite(source, b"second")
+    (record,) = recovery_copies(source)
+    board.symlink_to(source.relative_to(tmp_path))
+    preview = find_cleanable_files(project)
+    assert [row.path for row in preview.to_delete] == [record]
+    replacement = tmp_path / "new.kicad_pcb"
+    replacement.write_bytes(b"other project")
+    board.unlink()
+    board.symlink_to(replacement.name)
+    assert delete_files(preview) == (0, 0)
+    assert (record / "original").read_bytes() == b"first"
+    assert board.read_bytes() == b"other project"
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_symlink_rewrite_refusal_restores_the_exact_entry(tmp_path, relative):
+    source = tmp_path / "source.kicad_pcb"
+    source.write_bytes(b"old")
+    board = tmp_path / "alias.kicad_pcb"
+    target = Path(source.name) if relative else source
+    board.symlink_to(target)
+    old_alias = board.lstat()
+    with pytest.raises(SourceChangedError):
+        atomic_write_text(board, "new", expected_sha256="0" * 64)
+    assert board.readlink() == target and os.path.samestat(old_alias, board.lstat())
+    assert board.read_bytes() == b"old" and not list(tmp_path.glob(".*.recovery-*"))
+
+
+def test_target_on_another_filesystem_keeps_editor_bytes(tmp_path, monkeypatch):
+    source = tmp_path / "source.kicad_pcb"
+    source.write_bytes(b"old")
+    board = tmp_path / "alias.kicad_pcb"
+    board.symlink_to(source.name)
+    real_link = os.link
+
+    def cross_device_link(src, dst, **kwargs):
+        if src == source:
+            raise OSError(errno.EXDEV, "different devices")
+        return real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "link", cross_device_link)
+    with source.open("r+b") as editor:
+        _checked_rewrite(board, b"repaired")
+        (record,) = recovery_copies(board)
+        assert (record / "original").read_bytes() == b"old"
+        _save_through_open_handle(editor.fileno(), b"late")
+        assert (record / "original").read_bytes() == b"late"
+        assert clear_recovery_copies(board) == [record]
+    assert source.read_bytes() == b"late" and board.read_bytes() == b"repaired"
+
+
+def test_recovery_remains_on_editor_inode_when_source_name_is_replaced(tmp_path):
+    source = tmp_path / "source.kicad_pcb"
+    source.write_bytes(b"original")
+    board = tmp_path / "alias.kicad_pcb"
+    board.symlink_to(source.name)
+    with source.open("r+b") as editor:
+        _checked_rewrite(board, b"repaired")
+        (record,) = recovery_copies(board)
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"replacement")
+        replacement.replace(source)
+        _save_through_open_handle(editor.fileno(), b"late editor")
+        assert (record / "original").read_bytes() == b"late editor"
+    assert source.read_bytes() == b"replacement" and board.read_bytes() == b"repaired"
+
+
+def test_same_directory_alias_chain_and_peer_recovery_survive_project_clean(tmp_path):
+    from kicad_tools.cli.clean_cmd import delete_files, find_cleanable_files
+
+    project = tmp_path / "proj.kicad_pro"
+    project.write_text(MINIMAL_PROJECT)
+    board = project.with_suffix(".kicad_pcb")
+    source = tmp_path / "source.kicad_pcb"
+    intermediary = tmp_path / "link.kicad_pcb"
+    source.write_bytes(b"old")
+    intermediary.symlink_to(source.name)
+    board.symlink_to(intermediary.name)
+    _checked_rewrite(source, b"new")
+    (record,) = recovery_copies(board)
+    other = tmp_path / "other.kicad_pcb"
+    other.write_bytes(b"peer")
+    _checked_rewrite(other, b"edited peer")
+    (peer_record,) = recovery_copies(other)
+    preview = find_cleanable_files(project)
+    assert [r.path for r in preview.to_delete] == [record]
+    kept = {p.path: p.reason for p in preview.to_keep}
+    assert kept[peer_record] == "recovery copy of other.kicad_pcb - clean that board's project"
+    assert delete_files(preview)[0] == 1
+    assert board.is_symlink() and intermediary.is_symlink() and board.read_bytes() == b"new"
+    assert peer_record.is_dir() and other.read_bytes() == b"edited peer"

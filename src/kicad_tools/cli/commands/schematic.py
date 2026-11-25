@@ -11,7 +11,7 @@ def run_sch_command(args) -> int:
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
         print(
-            "Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins, pin-map,"
+            "Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins, pin-map, decoupling,"
         )
         print(
             "          connections, unconnected, set-footprint, suggest-footprint,"
@@ -136,6 +136,36 @@ def run_sch_command(args) -> int:
         if args.format != "table":
             sub_argv.extend(["--format", args.format])
         return pins_main(sub_argv) or 0
+
+    elif args.sch_command == "decoupling":
+        import json
+
+        from kicad_tools.placement.decoupling import schematic_cap_associations
+
+        rows = []
+        for entry in schematic_cap_associations(schematic_path):
+            rows.append(
+                {
+                    "cap": entry.cap.reference,
+                    "supply_pad": entry.cap.supply_pad,
+                    "ground_pad": entry.cap.ground_pad,
+                    "sheet": entry.sheet,
+                    "net": entry.net,
+                    "pin": f"{entry.pin.reference}.{entry.pin.pad}" if entry.pin else None,
+                    "source": entry.source,
+                    "reason": entry.reason,
+                }
+            )
+        if args.format == "json":
+            print(json.dumps({"associations": rows}, indent=2))
+        else:
+            print("Capacitor\tSheet\tNet\tIC pin\tSource\tReason")
+            for row in rows:
+                print(
+                    f"{row['cap']}\t{row['sheet']}\t{row['net']}\t{row['pin'] or '—'}\t"
+                    f"{row['source']}\t{row['reason']}"
+                )
+        return 0
 
     elif args.sch_command == "pin-map":
         from ..sch_pin_map import main as pin_map_main
@@ -696,6 +726,7 @@ def run_sch_command(args) -> int:
             per_sheet=getattr(args, "per_sheet", False),
             format=getattr(args, "format", "text"),
             unannotated_only=getattr(args, "unannotated_only", False),
+            check=getattr(args, "check", False),
         )
 
     elif args.sch_command == "fix-annotation":

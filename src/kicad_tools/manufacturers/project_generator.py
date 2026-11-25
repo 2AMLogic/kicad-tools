@@ -853,9 +853,15 @@ def apply_router_coupled_pairs(
 
 
 def _remove_router_netclasses(project_data: dict) -> None:
-    """Drop the classes / assignments a previous kct pass declared (#6390)."""
+    """Drop the classes / assignments a previous kct pass declared (#6390).
+
+    When ``meta.kct_netclass_assignments`` (#10133) also records the class kct
+    assigned each net to, an entry whose target class the user has since
+    changed in KiCad is authored intent and is left intact.
+    """
     classes, nets = router_netclass_provenance(project_data)
     meta = project_data.get("meta")
+    recorded_classes = meta.get("kct_netclass_assignments") if isinstance(meta, dict) else None
     if isinstance(meta, dict):
         meta.pop(ROUTER_NETCLASSES_META_KEY, None)
     settings = project_data.get("net_settings")
@@ -868,6 +874,17 @@ def _remove_router_netclasses(project_data: dict) -> None:
     assignments = settings.get("netclass_assignments")
     if nets and isinstance(assignments, dict):
         for net in nets:
+            if isinstance(recorded_classes, dict) and isinstance(recorded_classes.get(net), str):
+                cur = assignments.get(net)
+                norm = (
+                    [cur]
+                    if isinstance(cur, str) and cur
+                    else cur
+                    if isinstance(cur, list)
+                    else None
+                )
+                if norm != [recorded_classes[net]]:
+                    continue
             assignments.pop(net, None)
 
 
