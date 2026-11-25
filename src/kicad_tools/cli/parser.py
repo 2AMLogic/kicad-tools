@@ -2475,8 +2475,8 @@ def _add_sch_parser(subparsers) -> None:
     sch_reannotate.add_argument(
         "--check",
         action="store_true",
-        help="Report parts whose reference number order disagrees with schematic "
-        "position order; exit 1 if any disagree (files are never modified)",
+        help="Check reference numbers in schematic position order and across electrical "
+        "partners. Exit 1 on either disagreement. Files are read-only.",
     )
     sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
 
