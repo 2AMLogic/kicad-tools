@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING, Mapping
 from ..mistakes import (
     Mistake,
     MistakeCategory,
-    distance,
     is_ground_net,
     is_ic_footprint,
     is_power_net,
@@ -59,6 +58,8 @@ DEFAULT_RADIUS_MM = BYPASS_WARNING_DISTANCE_MM
 
 #: More than this many caps of one value on a single pin is reported.
 DEFAULT_MAX_SAME_VALUE = 1
+
+_NM_PER_MM = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,13 @@ def _pad_position(fp: Footprint, pad: Pad) -> tuple[float, float]:
     return (fp.position[0] + px, fp.position[1] + py)
 
 
+def _board_distance_mm(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Measure between KiCad's nanometre-grid coordinates before converting to mm."""
+    dx_nm = round(a[0] * _NM_PER_MM) - round(b[0] * _NM_PER_MM)
+    dy_nm = round(a[1] * _NM_PER_MM) - round(b[1] * _NM_PER_MM)
+    return math.hypot(dx_nm, dy_nm) / _NM_PER_MM
+
+
 class DecouplingCountCheck:
     """Flag IC power pins with redundant or no associated decoupling caps.
 
@@ -189,7 +197,6 @@ class DecouplingCountCheck:
         self.max_same_value = max_same_value
         self.radius_mm = radius_mm
         self.schematic_path = Path(schematic_path) if schematic_path else None
-        self._association_cache: tuple[PCB, dict[str, SchematicCapAssociation] | None] | None = None
 
     # ------------------------------------------------------------------
     # Schematic association
@@ -217,23 +224,20 @@ class DecouplingCountCheck:
         None (no schematic, or one that cannot be read) means every cap uses
         the geometric rule.
         """
-        if self._association_cache is not None and self._association_cache[0] is pcb:
-            return self._association_cache[1]
-        rows: dict[str, SchematicCapAssociation] | None = None
         schematic = self._resolve_schematic(pcb)
-        if schematic is not None:
-            try:
-                from ...placement.decoupling import schematic_cap_associations
+        if schematic is None:
+            return None
+        try:
+            from ...placement.decoupling import schematic_cap_associations
 
-                rows = {r.cap.reference: r for r in schematic_cap_associations(schematic)}
-            except Exception as exc:  # unreadable schematic must not break detect-mistakes
-                logger.warning(
-                    "decoupling count: cannot read schematic %s (%s); using PCB geometry",
-                    schematic,
-                    exc,
-                )
-        self._association_cache = (pcb, rows)
-        return rows
+            return {r.cap.reference: r for r in schematic_cap_associations(schematic)}
+        except Exception as exc:  # unreadable schematic must not break detect-mistakes
+            logger.warning(
+                "decoupling count: cannot read schematic %s (%s); using PCB geometry",
+                schematic,
+                exc,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Inventory
@@ -298,7 +302,7 @@ class DecouplingCountCheck:
             row = associations.get(cap.reference) if associations else None
             if row is not None and row.pin is not None:
                 designated = [
-                    (distance(cap.position, pin.position), pin)
+                    (_board_distance_mm(cap.position, pin.position), pin)
                     for pin, _ in by_net.get(net, [])
                     if (pin.ic_reference, pin.pad_number) == (row.pin.reference, row.pin.pad)
                 ]
@@ -309,7 +313,7 @@ class DecouplingCountCheck:
                     continue
             best: tuple[float, str, str, PinDecoupling] | None = None
             for pin, _ in by_net.get(net, []):
-                d = distance(cap.position, pin.position)
+                d = _board_distance_mm(cap.position, pin.position)
                 cand = (d, pin.ic_reference, pin.pad_number, pin)
                 if best is None or cand[:3] < best[:3]:
                     best = cand
@@ -323,7 +327,7 @@ class DecouplingCountCheck:
                 continue
             for pin, _ in entries:
                 nearest_d, _, nearest_cap = min(
-                    (distance(cap.position, pin.position), cap.reference, cap)
+                    (_board_distance_mm(cap.position, pin.position), cap.reference, cap)
                     for cap in rail_caps[net]
                 )
                 pin.rail_has_caps = True

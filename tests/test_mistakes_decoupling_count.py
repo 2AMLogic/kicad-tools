@@ -341,16 +341,23 @@ def test_board07_public_report_describes_actual_cap_assignments(
 # ---------------------------------------------------------------------------
 
 
-def _two_ic_board(tmp_path: Path, c1_target: str | None, c2_target: str | None) -> Path:
+def _two_ic_board(
+    tmp_path: Path,
+    c1_target: str | None,
+    c2_target: str | None,
+    *,
+    origin_x: float = 0,
+    c1_offset: float = 1,
+) -> Path:
     from .test_decoupling_association import make_sheet
 
     board = tmp_path / "board.kicad_pcb"
     board.write_text(
         _HEADER
-        + _ic("U1", 2, 10)
-        + _ic("U2", 22, 10)
-        + _cap("C1", "100nF", 1, 10)
-        + _cap("C2", "100nF", 19, 10)
+        + _ic("U1", origin_x + 2, 10)
+        + _ic("U2", origin_x + 22, 10)
+        + _cap("C1", "100nF", origin_x + c1_offset, 10)
+        + _cap("C2", "100nF", origin_x + 19, 10)
         + ")\n"
     )
     make_sheet(
@@ -416,19 +423,50 @@ def test_crossed_designation_shows_both_caps_at_19mm(tmp_path: Path) -> None:
         assert finding.measurements["nearest_rail_cap_mm"] == 1.0
 
 
-@pytest.mark.parametrize("distance,warn", [(5.0, False), (5.004, True), (5.006, True)])
-def test_designated_cap_uses_measured_distance_at_radius(tmp_path: Path, capsys, distance, warn):
-    board = _two_ic_board(tmp_path, "U1.1", "U2.1")
-    board.write_text(board.read_text().replace("(at 1 10)", f"(at {distance} 10)"))
+@pytest.mark.parametrize("origin_x", [0, 4.8])
+@pytest.mark.parametrize("gap", [4.999999, 5.0, 5.000001, 5.004, 5.006])
+@pytest.mark.parametrize("schematic", [True, False])
+def test_cap_uses_measured_distance_at_radius(tmp_path: Path, capsys, origin_x, gap, schematic):
+    board = _two_ic_board(tmp_path, "U1.1", "U2.1", origin_x=origin_x, c1_offset=gap)
+    if not schematic:
+        board.with_suffix(".kicad_sch").unlink()
     assert mistakes_cmd.main([str(board), "--category", "decoupling", "--format", "json"]) == 0
     result = json.loads(capsys.readouterr().out)
     findings = [m for m in result["mistakes"] if m["rule_id"] == "mistake.decoupling_count"]
-    assert len(findings) == int(warn)
+    outside = gap > 5.0
+    assert len(findings) == int(outside)
     pin = next(p for p in result["decoupling_inventory"] if (p["ic"], p["pin"]) == ("U1", "1"))
-    assert pin["caps"][0]["ref"] == "C1"
-    assert (pin["caps"][0]["distance_mm"] > 5.0) == warn
-    if warn:
+    assert [cap["ref"] for cap in pin["caps"]] == (["C1"] if schematic or not outside else [])
+    measured = pin["nearest_rail_cap"]["distance_mm"]
+    assert (measured > 5.0) == outside
+    if gap == 5.0:
+        assert measured == 5.0
+    if pin["caps"]:
+        assert pin["caps"][0]["distance_mm"] == measured
+    if outside:
         assert findings[0]["measurements"]["nearest_rail_cap_mm"] > 5.0
+
+
+def test_reused_detector_reads_changed_schematic_on_same_board(tmp_path: Path) -> None:
+    board = _two_ic_board(tmp_path, "U1.1", "U2.1")
+    pcb = PCB.load(board)
+    check = DecouplingCountCheck()
+    detector = MistakeDetector([check])
+    assert detector.detect(pcb) == []
+
+    schematic = board.with_suffix(".kicad_sch")
+    before = schematic.read_text()
+    override = '"KCT_Decouples" "U2.1"'
+    assert before.count(override) == 1
+    schematic.write_text(before.replace(override, '"KCT_Decouples" "U1.1"'))
+
+    findings = detector.detect(pcb)
+    assert any({"C1", "C2"} <= set(finding.components) for finding in findings)
+    by_ic = {pin.ic_reference: [c.reference for c in pin.caps] for pin in check.pin_inventory(pcb)}
+    assert by_ic == {"U1": ["C1", "C2"], "U2": []}
+
+    schematic.unlink()
+    assert detector.detect(pcb) == []
 
 
 def test_without_schematic_the_geometric_rule_is_used(tmp_path: Path) -> None:
