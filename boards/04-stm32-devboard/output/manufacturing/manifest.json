@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.29.0",
-  "generated_at": "2026-11-19T00:00:00+00:00",
+  "generated_at": "2026-11-25T17:38:40+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -13,24 +13,24 @@
       "size": 1057
     },
     "assembly-back.pdf": {
-      "sha256": "be18f194c5002f92699c348fa8129e00a6884b97e1a74fdaf3c5a26acb7f095e",
-      "size": 23086
+      "sha256": "f880eaf509fe33c9eb3deb9692d7ab376f17ef6b364f8583b9dcf52b9ead6d92",
+      "size": 22379
     },
     "assembly-front.pdf": {
-      "sha256": "ff020299cb684c557d02a883c7e2e3a139848a972922da294d609d93b24fd9b4",
-      "size": 66778
+      "sha256": "7f22502114ab3b7dcabd353a509d77eabd0d6e7682caec2067fc1aa46ea7e56b",
+      "size": 66837
     },
     "bom_jlcpcb.csv": {
       "sha256": "22f4f6e0ae921146268a6a0c94e0267283a7a8d64f24d90be807bb449873b27f",
       "size": 640
     },
     "check-report.json": {
-      "sha256": "5a28b9cc5d5e4aa91508cb109d786974e7082210abe2eda5ff154b25b2df72a6",
-      "size": 13022
+      "sha256": "1a8fac393c29e841d5ed0d908f2d24a4eff5b2a6bbb617b01820e24a1a6b3b3a",
+      "size": 17256
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "5b6854e3efb25a771146c01fdf51dfff148bf7fc6079d582842f14bcfd2bda20",
-      "size": 1310
+      "sha256": "5eaab518a18c6cfa01acf43562ca01b76b1649f2d60ec3db735d6aecebd529b2",
+      "size": 1312
     },
     "design-source/DESIGN_REVIEW.md": {
       "sha256": "08076e07ddfe0d9ee014e870c1d21d0fd0b756a9df27947f47336e2222dbe6b4",
@@ -45,56 +45,56 @@
       "size": 3393
     },
     "design-source/generate_design.py": {
-      "sha256": "efb3cdbeabc22894f68f8cd2bd263f7c0b4e0ad56919012551fbd3f6a33e2ddd",
-      "size": 170456
+      "sha256": "a3329c7970aa22cac5f4af9651a9d6390f8f3c45dbd712b2d17dee0d3574e17e",
+      "size": 172233
     },
     "design-source/manufacturing_process.py": {
-      "sha256": "0ca581ce5153e9923c3853d3e4a81212f4edc4943931f2083145ff0045674998",
-      "size": 28165
+      "sha256": "f7934cb7248d2618d6432d6b3b71c7b8e1936f080cd990d71acb08aa6a443f30",
+      "size": 32235
     },
     "design-source/project.kct": {
       "sha256": "50012fb1eaf5ee3be5ece7c15c6a8833a3c42871a96c05aafcfdb483a96f9603",
       "size": 4989
     },
     "fill-consistency.json": {
-      "sha256": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
-      "size": 33
+      "sha256": "78a59ed15dac781f5cbcb9e8f6a8fa0eb3c84155dd8f86997fa1bfc071db6dd9",
+      "size": 45
     },
     "gerbers/gerbers.zip": {
-      "sha256": "1e12c71b0d833127be0091e5549598ec1d9e04fc6e19239de82f7125214d9d4b",
-      "size": 55485
+      "sha256": "447ea6461039dd528fe564b57696f1f6c7c1a44d67fe83df9f46a96040e56973",
+      "size": 56435
     },
     "images/assembly.png": {
-      "sha256": "a5db94fb615c52966bae1ec2fbf8a9c569b8e41a5fd2d4f1fb03cecdbb4a0ed9",
-      "size": 213944
+      "sha256": "0ef062207b87becd911981fc0cb1d2901e61682bc38de6f5400d4d3d0f67b937",
+      "size": 212073
     },
     "images/layer_B_Cu.png": {
-      "sha256": "4a624101978f380762251daa1551880e6a97b02102c96b5bc450edabfbb2d2d7",
-      "size": 106034
+      "sha256": "79d53395602cff88d5ba27b37e1283b0edc2699a81e26c6931fdb9cc7b37a293",
+      "size": 101560
     },
     "images/layer_F_Cu.png": {
-      "sha256": "6735364c236b4443b3e6200b988ac6d1a11b68b87d17f1b389d1a0cb2445d433",
-      "size": 176123
+      "sha256": "36e00cd538b4c5d049b2297739cc538219895d173a8e474df59027c61eedde7b",
+      "size": 177022
     },
     "images/pcb_back.png": {
-      "sha256": "b688b2be329c41d5a6d54c6a668bb0b0dbef8bef69969a48a8e1671a5b0707a6",
-      "size": 108488
+      "sha256": "9f30852a8cb32aead4e0c9e80de3e07383662385fcca638dd06d8727212bd983",
+      "size": 103635
     },
     "images/pcb_copper.png": {
-      "sha256": "23ca6fd3824668d3fdc88d196f1e9071228a2e7b38ef587e18da45919b02a4a5",
-      "size": 124684
+      "sha256": "7c1ef16d948b7871905982ce99b1ca6bb5b02d86c799b66366e0944d82475e43",
+      "size": 120637
     },
     "images/pcb_front.png": {
-      "sha256": "664cca6f63541f0bcf3af259a583cdccf809e9a57b20deaab78cd0a4cfd46417",
-      "size": 280022
+      "sha256": "5103e1b410ffa85cd80d6a1aa1dfc99bb2a65775ef5e73f4f4b4c8ad66f88eeb",
+      "size": 282276
     },
     "images/schematic_stm32_devboard.png": {
-      "sha256": "e0d58863c7071f9ef5fb2ba4940807a5fbb2a8df6f5321a377cd2f1f2c2f87ba",
-      "size": 279454
+      "sha256": "4f216d5bc7746731f20242e856b427db660b8ea8c35623abeaab1770f49a1b2b",
+      "size": 279460
     },
     "kicad_project.zip": {
-      "sha256": "9c10246bbaf249c069a12dd0a775b29a2757e49e399e0bd5a5f904df1c4d1681",
-      "size": 72558
+      "sha256": "56d2c1977bd8d6534bceb294bfb6a3c98bc38434ef949786c3ba4f624ea46082",
+      "size": 73430
     },
     "manufacturing-requirements.json": {
       "sha256": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
@@ -117,12 +117,12 @@
       "size": 3329
     },
     "report.md": {
-      "sha256": "1ec6d386304980c71140cc43de580f43bf8a1e2c7df0f600834d4c2ec50da4fa",
+      "sha256": "5ac63031b3e7814a71b80ef397ab516d372f0190dcb9ace18ebb4a7879412ec8",
       "size": 3490
     },
     "report.pdf": {
-      "sha256": "aa2a893b7764fcb60dd125f4e30b39ceffd72223afb59ba3a406de3ff438fa46",
-      "size": 1392418
+      "sha256": "958ea921cd0d4c51890eb4d3ac5d3b7337f14e77baecadd4e39c5191a3cffe1c",
+      "size": 1363146
     }
   },
   "board": {
@@ -164,7 +164,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (34 vias, 8 TH pads)"
+      "message": "Drill holes present (32 vias, 8 TH pads)"
     },
     {
       "name": "stackup_copper",
@@ -196,19 +196,52 @@
     },
     {
       "name": "bom_lcsc_values",
-      "status": "WARN",
-      "message": "7 of 17 assigned item(s) verified (parts cache); 10 unverifiable (not in parts cache or offline catalog)",
-      "details": "unverified: U1 -> C148031, U2 -> C8734, C16 -> C1779, Y1 -> C114147, C10 -> C1798, C11 -> C1798, J1 -> C37208, R2 -> C17414 (and 2 more)"
+      "status": "OK",
+      "message": "17 of 17 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches"
     },
     {
       "name": "bom_lcsc_stock",
-      "status": "OK",
-      "message": "2 LCSC part(s) have recorded stock for 5 board(s)",
+      "status": "WARN",
+      "message": "1 LCSC part(s) show insufficient stock for 5 board(s) on unverified data (stale cache/offline catalog)",
+      "details": "D1 -> C131244: needs 5, stock 0 (unverified offline_catalog)",
       "data": {
         "order_boards": 5,
         "inventory_covered": [],
         "strict": false,
         "parts": [
+          {
+            "lcsc": "C114147",
+            "refs": [
+              "Y1"
+            ],
+            "per_board": 1,
+            "stock": 9725,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C131244",
+            "refs": [
+              "D1"
+            ],
+            "per_board": 1,
+            "stock": 0,
+            "verified": false,
+            "source": "offline_catalog",
+            "age_days": null
+          },
+          {
+            "lcsc": "C148031",
+            "refs": [
+              "U1"
+            ],
+            "per_board": 1,
+            "stock": 4204,
+            "verified": false,
+            "source": "offline_catalog",
+            "age_days": null
+          },
           {
             "lcsc": "C15850",
             "refs": [
@@ -216,10 +249,66 @@
               "C2"
             ],
             "per_board": 2,
-            "stock": 6481916,
-            "verified": false,
+            "stock": 9380166,
+            "verified": true,
             "source": "live",
-            "age_days": 32
+            "age_days": 0
+          },
+          {
+            "lcsc": "C17414",
+            "refs": [
+              "R2"
+            ],
+            "per_board": 1,
+            "stock": 43943854,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C17630",
+            "refs": [
+              "R1"
+            ],
+            "per_board": 1,
+            "stock": 1874003,
+            "verified": false,
+            "source": "offline_catalog",
+            "age_days": null
+          },
+          {
+            "lcsc": "C1779",
+            "refs": [
+              "C16"
+            ],
+            "per_board": 1,
+            "stock": 2633391,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C1798",
+            "refs": [
+              "C10",
+              "C11"
+            ],
+            "per_board": 2,
+            "stock": 83432,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C37208",
+            "refs": [
+              "J1"
+            ],
+            "per_board": 1,
+            "stock": 279306,
+            "verified": false,
+            "source": "offline_catalog",
+            "age_days": null
           },
           {
             "lcsc": "C49678",
@@ -231,23 +320,24 @@
               "C3"
             ],
             "per_board": 5,
-            "stock": 23314203,
-            "verified": false,
+            "stock": 20226430,
+            "verified": true,
             "source": "live",
-            "age_days": 1
+            "age_days": 0
+          },
+          {
+            "lcsc": "C8734",
+            "refs": [
+              "U2"
+            ],
+            "per_board": 1,
+            "stock": 255710,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
           }
         ],
-        "unresolved": [
-          "C114147",
-          "C131244",
-          "C148031",
-          "C17414",
-          "C17630",
-          "C1779",
-          "C1798",
-          "C37208",
-          "C8734"
-        ]
+        "unresolved": []
       }
     },
     {
@@ -263,7 +353,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 8 warning(s)"
+      "message": "DRC passed with 11 warning(s)"
     },
     {
       "name": "erc",

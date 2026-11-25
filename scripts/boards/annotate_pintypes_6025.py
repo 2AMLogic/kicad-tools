@@ -270,7 +270,12 @@ def stage_board04_evidence(board: Path) -> None:
     sys.path.insert(0, str(board))
 
     regen.refresh_design_source(board)
-    changed = refresh_tools.rebuild_archive(mfg / "kicad_project.zip", [out, board])
+    derived, replaces = refresh_tools.delivered_project_members(
+        routed, out / "stm32_devboard.kicad_sch"
+    )
+    changed = refresh_tools.rebuild_archive(
+        mfg / "kicad_project.zip", [out, board], derived=derived or None, replaces=replaces
+    )
     log(f"  kicad_project.zip rebuilt; changed members {changed}")
     refresh_tools.refresh_manifest_files(mfg)
 

@@ -262,7 +262,13 @@ def _analyze_pcb(args) -> int:
     if args.format == "json":
         from kicad_tools.explain.mistake_waivers import board_origin
 
-        _output_json(mistakes, coverage, advisories, board_origin(pcb))
+        _output_json(
+            mistakes,
+            coverage,
+            advisories,
+            board_origin(pcb),
+            decoupling_inventory=_decoupling_inventory(pcb, args.category),
+        )
     elif args.format == "sarif":
         from kicad_tools.explain.mistake_waivers import board_origin
 
@@ -499,11 +505,24 @@ def _summary(mistakes: list, advisories: list) -> dict:
     }
 
 
+def _decoupling_inventory(pcb, category: str | None) -> list[dict] | None:
+    """Issue #10134: per-pin decoupling inventory (clean and empty pins too).
+
+    None when the decoupling check is not part of this run.
+    """
+    if category not in (None, "decoupling"):
+        return None
+    from kicad_tools.explain.checks import DecouplingCountCheck
+
+    return [row.to_dict() for row in DecouplingCountCheck().pin_inventory(pcb)]
+
+
 def _output_json(
     mistakes: list,
     coverage: list | None = None,
     advisories: list | None = None,
     origin: tuple[float, float] = (0.0, 0.0),
+    decoupling_inventory: list[dict] | None = None,
 ) -> None:
     """Output mistakes (and coverage, issue #4899) as JSON."""
     coverage = coverage or []
@@ -521,6 +540,8 @@ def _output_json(
         "coverage": [c.to_dict() for c in coverage],
         "coverage_complete": all(c.status == "ran" for c in coverage),
     }
+    if decoupling_inventory is not None:
+        data["decoupling_inventory"] = decoupling_inventory
     print(json.dumps(data, indent=2))
 
 
