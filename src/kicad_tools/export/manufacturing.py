@@ -18,8 +18,9 @@ import shutil
 import sys
 import tempfile
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,11 @@ from typing import Any
 
 import kicad_tools
 from kicad_tools.core.atomic_write import SourceChangedError, checked_write_text
+from kicad_tools.core.package_publication import (
+    PublicationRegion,
+    is_publication_hold,
+    publish_regions,
+)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.parts.lcsc import LCSCDependencyMissingError
@@ -230,6 +236,142 @@ class ManufacturingResult:
             for err in self.errors:
                 lines.append(f"    - {err}")
         return "\n".join(lines)
+
+
+class _PackageOutputs:
+    """Map this export's generated files between a private candidate and their public paths."""
+
+    bundle_key = Path("package")
+
+    def __init__(self, out_dir: Path, config: ManufacturingConfig, manufacturer: str) -> None:
+        from kicad_tools.manufacturers import get_fab_family
+
+        config = copy(config)
+        family = get_fab_family(manufacturer)
+        bom = config.bom_filename.format(manufacturer=family)
+        configured = {"project_zip_name": config.project_zip_name}
+        if config.include_bom:
+            configured["bom_filename"] = bom
+        if config.include_pnp:
+            configured["pnp_filename"] = config.pnp_filename.format(manufacturer=family)
+        if config.include_gerbers:
+            configured["gerbers_subdir"] = config.gerbers_subdir
+        if config.include_manifest:
+            configured["manifest_name"] = config.manifest_name
+        # CLI paths live in the bundle. The Python API also allows a member on
+        # another volume. Give each root a directory in the private candidate.
+        bundle_key = self.bundle_key
+        live_bundle = out_dir.resolve()
+        roots = {bundle_key.name: live_bundle}
+        targets = {}
+        for field_name, name in configured.items():
+            path = live_bundle / name
+            targets[field_name] = path.parent.resolve() / path.name
+        # Nested external outputs share one staging subtree, just as they do
+        # on disk. Package paths always retain their bundle-relative names.
+        parents = sorted(
+            {p.parent for p in targets.values() if not p.is_relative_to(live_bundle)},
+            key=lambda p: (len(p.parts), str(p)),
+        )
+        for parent in parents:
+            if not any(parent.is_relative_to(previous) for previous in roots.values()):
+                roots[f"external-{len(roots)}"] = parent
+        members: set[Path] = set()
+        for field_name, target in targets.items():
+            root_name, parent = next(
+                (n, path) for n, path in roots.items() if target.is_relative_to(path)
+            )
+            key = Path(root_name) / target.relative_to(parent)
+            members.add(key)
+            # Keep ordinary templates and the existing bundle-relative path spelling.
+            relative = os.path.relpath(key, bundle_key)
+            if Path(relative) != Path(configured[field_name]):
+                setattr(config, field_name, relative)
+        if config.include_readme:
+            members.add(bundle_key / "README.txt")
+        if config.stackup_id:
+            members.add(bundle_key / "stackup-ordering.json")
+        if config.include_report:
+            members.update(
+                bundle_key / name
+                for name in ("report.pdf", "report.md", "report", "images", ".build/report")
+            )
+
+        self.out_dir = out_dir
+        self.members = members
+        self.roots = roots
+        # A previous BOM supplies the user's LCSC assignments. Its real path
+        # is also recorded in the README and in the returned merge report.
+        if config.merge_lcsc and config.merge_lcsc_from is None and (out_dir / bom).is_file():
+            config.merge_lcsc_from = out_dir / bom
+        self.config = config
+
+    def live_path(self, key: str | Path) -> Path:
+        top, *rest = Path(key).parts
+        root = self.out_dir if top == self.bundle_key.name else self.roots[top]
+        return root.joinpath(*rest)
+
+    def paths(self, root: Path) -> set[Path]:
+        entries: set[Path] = set()
+        bundle = self.out_dir if root == self.out_dir else root / self.bundle_key
+        versions = {
+            self.bundle_key / p.name
+            for p in bundle.glob("v[0-9]*")
+            if self.config.include_report and p.is_dir() and p.name[1:].isdigit()
+        }
+        for name in self.members | versions:
+            path = self.live_path(name) if root == self.out_dir else root / name
+            if path.is_dir() and path.is_symlink():
+                raise OSError(f"Cannot stage package directory symlink: {path}")
+            if path.exists():
+                entries.add(name)
+            if path.is_dir():
+                for item in path.rglob("*"):
+                    if is_publication_hold(item.relative_to(path)):
+                        continue
+                    if item.is_dir() and item.is_symlink():
+                        raise OSError(f"Cannot stage package directory symlink: {item}")
+                    entries.add(name / item.relative_to(path))
+        return entries
+
+    def inventory(self, root: Path, held_dirs: set[Path] | None = None) -> dict[str, str]:
+        snapshot = {}
+        for key in self.paths(root):
+            path = self.live_path(key) if root == self.out_dir else root / key
+            if (not held_dirs or path.parent not in held_dirs) and path.is_file():
+                snapshot[key.as_posix()] = _sha256_file(path)
+        return snapshot
+
+    def seed(self, candidate: Path) -> tuple[set[Path], dict[str, str]]:
+        """Copy existing export inputs and report versions without following directory links."""
+        for member in self.members:
+            if self.live_path(member).parent.is_dir():
+                (candidate / member).parent.mkdir(parents=True, exist_ok=True)
+        existing = self.paths(self.out_dir)
+        before = self.inventory(self.out_dir)
+        for name in existing:
+            source, target = self.live_path(name), candidate / name
+            if source.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+        if self.inventory(candidate) != before:
+            raise RuntimeError("Package changed while preparing the export candidate")
+
+        return existing, before
+
+    def publish(self, candidate: Path, existing: set[Path], before: dict[str, str]) -> None:
+        manifest = os.path.normpath(self.bundle_key / self.config.manifest_name)
+        obsolete = sorted(existing - self.paths(candidate), key=lambda p: -len(p.parts))
+        publish_regions(
+            [PublicationRegion(candidate, self.out_dir, before, self.live_path)],
+            self.inventory,
+            publish_last=self.live_path(manifest),
+            remove_empty_directories=[
+                self.live_path(name) for name in obsolete if self.live_path(name).is_dir()
+            ],
+        )
 
 
 def _now_utc() -> datetime:
@@ -589,7 +731,19 @@ def _create_project_zip(
     Other .kicad_pcb variants (intermediate builds,
     working copies, etc.) and backup files are excluded to keep the
     manufacturing package clean.
+
+    The board, its rules, the project file and the root sheet are delivered
+    under one basename -- the one :mod:`kicad_tools.export.project_identity`
+    picks -- so KiCad opens them as one project (Issue #10108). The ``VERSION.md``
+    kept beside the board travels too, and one describing any renaming is
+    written when the checked names differ.
     """
+    from kicad_tools.export.project_identity import (
+        ProjectIdentityError,
+        archive_layout,
+        project_identity,
+    )
+
     # Resolve once: table-derived members are built from the resolved root, so
     # every member (and its archive name) must share that spelling.  An
     # unresolved/relative/symlinked project_dir (e.g. macOS /var -> /private/var
@@ -621,9 +775,30 @@ def _create_project_zip(
     from kicad_tools.report.utils import find_schematic, walk_schematic_hierarchy
 
     root_sch = Path(schematic_path) if schematic_path else find_schematic(pcb_path)
+    walked_sheets: list[Path] = []
     if root_sch is not None and root_sch.is_file():
         walked = walk_schematic_hierarchy(root_sch, lambda sheet: sheet.is_relative_to(project_dir))
         project_files.extend(walked.sheets)
+        walked_sheets = walked.sheets
+        if schematic_path is not None and root_sch.resolve() not in walked_sheets:
+            raise ProjectIdentityError(
+                f"Cannot pair {root_sch} with {pcb_path}: put the root sheet beside the board "
+                "and preserve its sheet references, or run kct readiness with --sch and "
+                "--project-root pointing to their common project directory"
+            )
+        incomplete = [*walked.outside, *walked.missing]
+        if schematic_path is not None and incomplete:
+            # A ZIP missing part of the selected hierarchy opens in KiCad with
+            # an empty/partial BOM and parity gaps, so never report it as a
+            # successful export (Issue #10108).  An auto-discovered root keeps
+            # the Issue #8752 behaviour: skip with a warning below.
+            listed = ", ".join(str(sheet) for sheet in incomplete)
+            raise ProjectIdentityError(
+                f"Cannot bundle the full schematic hierarchy of {root_sch} with {pcb_path}: "
+                f"sheet(s) outside the board directory or missing: {listed}. Keep every "
+                "sheet beside the board, or run kct readiness with --sch and --project-root "
+                "pointing to their common project directory"
+            )
         for sheet in walked.outside:
             logger.warning("Sub-sheet outside the project directory not bundled: %s", sheet)
     else:
@@ -639,9 +814,27 @@ def _create_project_zip(
     project_files.extend(_project_symbol_files(project_dir))
     project_files.extend(_project_footprint_files(project_dir))
     project_files = sorted(set(project_files))
+
+    project_file = pcb_path.with_suffix(".kicad_pro")
+    archived_root = root_sch.resolve() if root_sch is not None else None
+    identity = project_identity(
+        pcb_path,
+        project_file if project_file in project_files else None,
+        archived_root if archived_root in walked_sheets else None,
+    )
+    layout = archive_layout(
+        identity, project_files, lambda source: source.parent.relative_to(project_dir).as_posix()
+    )
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in project_files:
-            zf.write(f, f.relative_to(project_dir).as_posix())
+        for source in project_files:
+            real = source.resolve()
+            member = layout.names[real]
+            if real == identity.project:
+                zf.writestr(member, layout.member_bytes(real, real.read_bytes()))
+            else:
+                zf.write(source, member)
+        if layout.record is not None:
+            zf.writestr(layout.record_name, layout.record)
 
     logger.info(f"Created project ZIP: {zip_path} ({len(project_files)} files)")
     return zip_path
@@ -1201,6 +1394,69 @@ class ManufacturingPackage:
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        if self.config.include_project_zip:
+            return self._publish_package(out_dir, result, selected_stackup_source_hash)
+        return self._write_package(out_dir, result, selected_stackup_source_hash)
+
+    def _publish_package(
+        self, out_dir: Path, result: ManufacturingResult, source_hash: str | None
+    ) -> ManufacturingResult:
+        """Generate the editable project and its manufacturing files as one candidate."""
+        try:
+            layout = _PackageOutputs(out_dir, self.config, self.manufacturer)
+            with tempfile.TemporaryDirectory(prefix="kct-export-") as tmp:
+                candidate = Path(tmp)
+                work_bundle = candidate / layout.bundle_key
+                work_bundle.mkdir()
+                existing, before = layout.seed(candidate)
+                writer = copy(self)
+                writer.config = layout.config
+                result.output_dir = work_bundle
+                writer._write_package(work_bundle, result, source_hash)
+                if result.success:
+                    layout.publish(candidate, existing, before)
+        except (OSError, RuntimeError) as exc:
+            result.errors.append(f"Manufacturing package publication failed: {exc}")
+
+        if result.output_dir != out_dir:
+            self._relocate_package_result(result, out_dir, layout.live_path)
+        return result
+
+    @staticmethod
+    def _relocate_package_result(
+        result: ManufacturingResult, out_dir: Path, live_path: Callable[[str | Path], Path]
+    ) -> None:
+        """Expose published artifact paths, keeping source-side diagnostics on a refusal."""
+        staging = result.output_dir.parent
+
+        def published(path: Path | None) -> Path | None:
+            return (
+                live_path(Path(os.path.abspath(path)).relative_to(staging))
+                if result.success and path is not None
+                else None
+            )
+
+        result.output_dir = out_dir
+        result.project_zip_path = published(result.project_zip_path)
+        result.stackup_path = published(result.stackup_path)
+        result.manifest_path = published(result.manifest_path)
+        result.readme_path = published(result.readme_path)
+        result.report_path = published(result.report_path)
+        result.report_md_path = published(result.report_md_path)
+        result.image_paths = (
+            [live_path(Path(os.path.abspath(p)).relative_to(staging)) for p in result.image_paths]
+            if result.success
+            else []
+        )
+        if (assembly := result.assembly_result) is not None:
+            assembly.output_dir = out_dir
+            assembly.bom_path = published(assembly.bom_path)
+            assembly.pnp_path = published(assembly.pnp_path)
+            assembly.gerber_path = published(assembly.gerber_path)
+
+    def _write_package(
+        self, out_dir: Path, result: ManufacturingResult, selected_stackup_source_hash: str | None
+    ) -> ManufacturingResult:
         # Step 1: BOM + CPL + Gerbers via AssemblyPackage.  When this
         # returns False the stage aborted before writing any artefacts
         # (e.g. schematic missing for a schematic-sourced BOM), so we
@@ -1228,6 +1484,8 @@ class ManufacturingPackage:
         # Step 3: KiCad project ZIP (optional)
         if self.config.include_project_zip:
             self._generate_project_zip(out_dir, result)
+            if result.project_zip_path is None:
+                return result
 
         # Step 3.5: README.txt (optional)
         if self.config.include_readme:

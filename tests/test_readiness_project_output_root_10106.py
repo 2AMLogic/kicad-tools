@@ -23,6 +23,7 @@ import pytest
 from kicad_tools.cli import readiness_cmd
 from kicad_tools.cli.board_readiness import read_readiness, readiness_input_hash
 from kicad_tools.cli.readiness_cmd import ReadinessLayout
+from kicad_tools.core import package_publication
 from tests.test_kct_readiness_cmd import FakeEngines
 
 DECLARATION = '[readiness]\noutput_root = "output"\n'
@@ -595,10 +596,12 @@ def test_publication_preserves_save_through_preopened_descriptor(
     project = make_project(tmp_path)
     board_dir = project / "kicad"
     target = project / name
-    if use_links and not readiness_cmd._supports_publication_links(board_dir):
+    if use_links and not package_publication._supports_publication_links(board_dir):
         pytest.skip("this volume cannot exercise the hard-link installation")
     if not use_links:
-        monkeypatch.setattr(readiness_cmd, "_supports_publication_links", lambda directory: False)
+        monkeypatch.setattr(
+            package_publication, "_supports_publication_links", lambda directory: False
+        )
     assert run(project, "--generate")[0] == 0
     assert read_readiness(board_dir, layout=layout_for(project))["status"] == "ready"
     before = _live_files(project)
@@ -702,7 +705,7 @@ def test_failed_claim_restores_captured_file(tmp_path, monkeypatch, fault):
     live, candidate = tmp_path / "live", tmp_path / "candidate"
     live.mkdir()
     candidate.mkdir()
-    if not readiness_cmd._supports_publication_links(live):
+    if not package_publication._supports_publication_links(live):
         pytest.skip("the move-aside installation path requires a hard-link-capable volume")
     target = live / "board.kicad_pcb"
     target.write_bytes(b"original")

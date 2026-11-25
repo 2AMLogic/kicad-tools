@@ -281,6 +281,25 @@ def test_changed_artwork_refuses_provenance_bound_to_older_pcb(tmp_path):
         module._renders("pcb-front.svg")(options)
 
 
+def test_previous_package_filed_under_the_project_name_is_read(tmp_path):
+    """A package delivered under the root sheet's basename still yields its board (#10108)."""
+    module = _load_release_module()
+    _, _old, _fresh, options = _fixture_board(tmp_path, silk_changed=False, provenance=None)
+    package = options.board_dir / "output" / "manufacturing"
+    delivered = options.pcb.name.replace("_routed", "")
+    with zipfile.ZipFile(package / "kicad_project.zip", "w") as archive:
+        archive.writestr(delivered, options.pcb.read_bytes())
+        archive.writestr(delivered.replace(".kicad_pcb", ".kicad_pro"), "{}")
+    _snapshot_old(module, options)
+    assert module._render_provenance(options) is None
+
+    with zipfile.ZipFile(package / "kicad_project.zip", "w") as archive:
+        archive.writestr("other.kicad_pcb", options.pcb.read_bytes())
+    _snapshot_old(module, options)
+    with pytest.raises(RuntimeError, match=f"does not contain {options.pcb.name}"):
+        module._render_provenance(options)
+
+
 def test_changed_artwork_refuses_tampered_render(tmp_path):
     module = _load_release_module()
     board, _old, fresh, options = _fixture_board(tmp_path, silk_changed=True, provenance=None)

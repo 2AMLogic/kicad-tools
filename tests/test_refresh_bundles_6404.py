@@ -473,9 +473,7 @@ def _board07_release_board(
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(
-        mod.rr, "rebuild_archive", lambda archive, search, *, additional_members=(): []
-    )
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda archive, search, **kwargs: [])
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"refilled": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
@@ -625,9 +623,7 @@ def test_bundle_unpacks_gate_native_drc_tuple(mod, tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(
-        mod.rr, "rebuild_archive", lambda archive, search, *, additional_members=(): []
-    )
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda archive, search, **kwargs: [])
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"native": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
@@ -684,9 +680,7 @@ def _repin_board(mod, tmp_path, monkeypatch, *, warnings: int | None = None) -> 
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(
-        mod.rr, "rebuild_archive", lambda archive, search, *, additional_members=(): []
-    )
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda archive, search, **kwargs: [])
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"refilled": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
