@@ -4117,6 +4117,22 @@ def run_selected_checks(
             copper_layers=effective_layers,
         )
 
+    # Issue #10139: sidecar vs project vs copper agreement on net classes.
+    # CLI-level closure (like ``netclass_floor``) because it needs the PCB
+    # *path* to locate the sibling ``.kicad_pro``.  The sidecar is the map
+    # ``kct check`` already discovered (stem-keyed probe, #4601/#4634) and
+    # resolved onto board net names -- ``--no-net-class-map`` therefore
+    # disables it too.  No map -> silent no-op.
+    def _netclass_agreement_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.rules.netclass_agreement import check_netclass_agreement
+
+        # Board-relative -> sheet-absolute like every ``checker.check_*`` (#8493).
+        return checker._absolutize(
+            check_netclass_agreement(pcb_path, checker.pcb, checker.net_class_map)
+        )
+
     # Issue #6249: authored ``.kicad_pro`` netclass clearances on routed copper
     # (parity with ``kicad-cli pcb drc`` after #6243).  CLI-level closure for
     # the same reason as ``netclass_floor``: it needs the PCB *path*.
@@ -4262,6 +4278,7 @@ def run_selected_checks(
         "match_group_length_skew": checker.check_match_group_length_skew,
         "model_coverage": _model_coverage_check,
         "routing_policy": checker.check_routing_policy,
+        "netclass_agreement": _netclass_agreement_check,
         "netclass_clearance_copper": _netclass_clearance_copper_check,
         "netclass_floor": _netclass_floor_check,
         "netlist": checker.check_netlist,
