@@ -1634,6 +1634,84 @@ def test_pass_through_via_refused_by_drill_clearance_at_the_destination(tmp_path
     assert _pad_poly(board, "R1/1").distance(Point(moved).buffer(0.3)) >= 0.11 - 1e-6
 
 
+def _board_with_reported_approach(tmp_path):
+    # The front trace already overlaps the same opening. Bending it would
+    # transfer its visible overlap to a new segment when the bend is split.
+    centre = (101.05, 99.15)
+    copper = "\n".join(
+        [
+            _via("via-p", centre),
+            _seg("approach", (101.05, 99.7), centre),
+            _seg("back", centre, (102.05, 99.15), layer="B.Cu"),
+        ]
+    )
+    board = _board(tmp_path, copper)
+    findings = [
+        _finding("approach", "same-net pass-through"),
+        _pt_finding("via-p", measured=math.hypot(0.05, 0.35) - 0.30),
+    ]
+    return board, findings
+
+
+@pytest.mark.parametrize(
+    ("bound", "expected_gap"), [(0.5, 0.17), (0.09, 0.11)], ids=["preferred", "required"]
+)
+def test_via_with_reported_approach_preserves_its_line_and_undoes(tmp_path, bound, expected_gap):
+    board, findings = _board_with_reported_approach(tmp_path)
+    original = board.read_bytes()
+    centre = _saved_copper(board, "via-p")[1]
+    repairer = MaskCopperRepairer(board)
+    assert not repairer.repair(findings, max_displacement=0.02).actions
+    assert board.read_bytes() == original
+
+    result = repairer.repair(findings, max_displacement=bound, warning_clearance_mm=0.15)
+    (action,) = result.actions
+    assert action.action == "relocate_clear"
+    repairer.save(board)
+    assert _end(board, "approach")[0] == (101.05, 99.7)
+    assert _end(board, "approach")[1][0] == 101.05
+    assert _end(board, "back")[0][1] == 99.15
+    pad = repairer._openings()[PAD][0]
+    assert Point(action.new_x, action.new_y).distance(pad) - 0.30 >= expected_gap - 1e-6
+    assert action.displacement_mm <= bound + 1e-6
+    reloaded = MaskCopperRepairer(board)
+    assert reloaded.undo_action(action)
+    reloaded.save(board)
+    assert _saved_copper(board, "via-p")[1] == centre
+    assert _end(board, "approach") == [(101.05, 99.7), centre]
+    assert _end(board, "back") == [centre, (102.05, 99.15)]
+    assert len(parse_file(board).find_all("segment")) == 2
+
+
+def test_public_via_repair_with_reported_approach_restores_input_on_native_veto(
+    tmp_path, monkeypatch, capsys
+):
+    from collections import Counter
+
+    board, findings = _board_with_reported_approach(tmp_path)
+    original = board.read_bytes()
+    centre = _saved_copper(board, "via-p")[1]
+
+    def native_state(candidate):
+        if _saved_copper(candidate, "via-p")[1] == centre:
+            return Counter(), 0
+        assert _end(candidate, "approach")[1][0] == 101.05
+        return Counter({("items_not_allowed", "via rule", ("via-p",)): 1}), 0
+
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", native_state)
+    _run(
+        monkeypatch,
+        board,
+        [_report(*findings), _report(findings[0])],
+        extra=("--max-displacement", "0.5", "--max-passes", "1", "--verify", "--format", "json"),
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == 0
+    via = next(u for u in result["unrepaired"] if u["uuid"] == "via-p")
+    assert "1 new errors, native opens 0 to 0" in via["detail"]
+    assert board.read_bytes() == original
+
+
 def test_via_alternate_move_keeps_approach_lines_and_adds_aligned_tails(tmp_path):
     """Issue #9939: a vetoed first choice is worked around, not forced.
 

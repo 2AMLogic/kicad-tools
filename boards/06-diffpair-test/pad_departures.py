@@ -26,6 +26,8 @@ The MIPI data pair's three offending exits (J4.4, U4.3, U4.4, #10113) are staged
 the same way: each rebuilt as one straight axis piece whose corner sits inside the
 pad copper plus one 45-degree rejoin, with the trunk extended along its own line
 so both rails shorten equally and the pair keeps its measured skew.
+U1's USB2 pair uses two different straight exits to clear its mask openings
+while meeting the fixture's coupling, delay and impedance limits (#10235).
 
 Every repair is guarded: the departure is derived from the actual pad and its
 connected copper, and anything locked, branched off the recognized shape, or
@@ -69,6 +71,7 @@ from kicad_tools.router.rule_area_resolve import all_rule_area_zones
 from kicad_tools.router.rules import net_class_map_from_path
 from kicad_tools.schema.pcb import PCB, Segment, Via
 from kicad_tools.sidecars import copy_project_sidecars
+from kicad_tools.validate import DRCChecker
 from kicad_tools.validate.connectivity import ConnectivityValidator
 from kicad_tools.validate.copper_contact import (
     CopperContactGraph,
@@ -1262,16 +1265,10 @@ _DATA_WIDTH = 0.225
 
 @dataclass(frozen=True)
 class _DataExit:
-    """One MIPI data pad exit as measured on seed 42, and its replacement.
+    """Seed-42 F.Cu corners relative to the pad centre, up to the trunk junction.
 
-    Offsets are from the pad centre.  ``old`` is the corner list of today's
-    trunk-width run, pad to the trunk junction; ``new`` replaces it with one
-    straight axis piece whose corner sits inside the pad copper, plus one
-    45-degree rejoin, so both pieces enter the land and neither runs beside
-    the opening (#10113).  Where the rejoin lands short of the old junction,
-    ``trunk_shift`` extends the trunk endpoint along its own line to meet it;
-    the two rails' length changes then cancel, keeping the pair's measured
-    skew (3.6 ps against the 20.1 ps budget).
+    MIPI trunks stay in place or extend to the new junction. USB2 instead
+    shortens a measured trunk, retaining its original far endpoint.
     """
 
     ref: str
@@ -1281,7 +1278,7 @@ class _DataExit:
     net: str
     old: tuple[XY, ...]
     new: tuple[XY, ...]
-    trunk_shift: XY = (0.0, 0.0)
+    trunk_end: XY | None = None
 
 
 _DATA_EXITS = (
@@ -1308,7 +1305,6 @@ _DATA_EXITS = (
         "MIPI_D0+",
         old=((0, 0), (-0.2, 0.2), (-0.1672, 0.2), (-1.1172, -0.75)),
         new=((0, 0), (-0.29, 0), (-1.04, -0.75)),
-        trunk_shift=(0.0772, 0.0),
     ),
     # U4.4: same shape on the negative rail, its corner at (-0.095, 0) inside
     # the land and the trunk growing 0.0378 mm.
@@ -1320,13 +1316,38 @@ _DATA_EXITS = (
         "MIPI_D0-",
         old=((0, 0), (-0.2, -0.2), (-0.3328, -0.2), (-1.2828, -1.15)),
         new=((0, 0), (-0.095, 0), (-1.245, -1.15)),
-        trunk_shift=(0.0378, 0.0),
+    ),
+)
+
+
+_USB2_NETS = ("USB2_D+", "USB2_D-")
+_U1_QFN = "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm"
+_USB2_EXITS = (
+    _DataExit(
+        "U1",
+        _U1_QFN,
+        "10",
+        (0.3, 0.7),
+        "USB2_D+",
+        old=((0, 0), (0, -0.0025), (0.1975, -0.2), (0.1975, -0.3339), (0.9975, -1.1339)),
+        new=((0, 0), (0, -0.650), (0.9975, -1.6475)),
+        trunk_end=(0.9975, -8.8839),
+    ),
+    _DataExit(
+        "U1",
+        _U1_QFN,
+        "11",
+        (0.3, 0.7),
+        "USB2_D-",
+        old=((0, 0), (0, -0.0025), (-0.1975, -0.2), (-0.1975, -0.1661), (0.6025, -0.9661)),
+        new=((0, 0), (0, -0.875), (0.6025, -1.4775)),
+        trunk_end=(0.6025, -8.7161),
     ),
 )
 
 
 def _data_run(
-    pcb: PCB, ex: _DataExit, center: XY, junction: XY, protected: set[str]
+    pcb: PCB, ex: _DataExit, center: XY, junction: XY, protected: set[str], width: float
 ) -> tuple[list[Segment], Segment] | None:
     """The measured escape run and its trunk, or ``None`` to decline.
 
@@ -1359,11 +1380,7 @@ def _data_run(
         if len(choices) != 1:
             return None
         seg = next(iter(choices.values()))
-        if (
-            seg.locked
-            or (seg.uuid or "").lower() in protected
-            or abs(seg.width - _DATA_WIDTH) > _EPS
-        ):
+        if seg.locked or (seg.uuid or "").lower() in protected or abs(seg.width - width) > _EPS:
             return None
         far = _xy(seg.end) if _xy(seg.start) == point else _xy(seg.start)
         if far != junction and (far in landings or far in points):
@@ -1376,21 +1393,18 @@ def _data_run(
     if not _matches_measured(points, center, ex.old):
         return None
     consumed = {id(s) for s in chain}
-    trunk = {
-        id(s): s
-        for s in at.get(junction, [])
-        if id(s) not in consumed
-        and s.layer == "F.Cu"
-        and s.net_name == ex.net
-        and not s.locked
-        and (s.uuid or "").lower() not in protected
-    }
-    if len(trunk) != 1 or abs(next(iter(trunk.values())).width - _DATA_WIDTH) > _EPS:
+    remaining = [s for s in at.get(junction, []) if id(s) not in consumed]
+    if len(remaining) != 1:
         return None
-    return chain, next(iter(trunk.values()))
+    trunk = remaining[0]
+    if trunk.locked or (trunk.uuid or "").lower() in protected or abs(trunk.width - width) > _EPS:
+        return None
+    return chain, trunk
 
 
-def _stage_data_exit(pcb: PCB, ex: _DataExit, protected: set[str]) -> list[Segment] | None:
+def _stage_data_exit(
+    pcb: PCB, ex: _DataExit, protected: set[str], width: float
+) -> list[Segment] | None:
     """Rebuild one data exit in memory; ``None`` leaves the caller to abandon the pair."""
     fp = pcb.get_footprint(ex.ref)
     if fp is None or fp.name != ex.footprint or fp.rotation or fp.layer != "F.Cu":
@@ -1406,20 +1420,31 @@ def _stage_data_exit(pcb: PCB, ex: _DataExit, protected: set[str]) -> list[Segme
         or pad.size != ex.pad_size
     ):
         return None
+    if ex.trunk_end is not None:
+        # These two measured USB2 openings have the same outlines as the SMD lands.
+        if pad.type != "smd" or not {"F.Cu", "F.Mask"} <= set(pad.layers):
+            return None
+        shapes = _departure_mask_shapes(pcb, fp, pad)
+        if shapes is None or not shapes[0].equals(shapes[1]):
+            return None
     center = _xy(position)
     junction = _xy((center[0] + ex.old[-1][0], center[1] + ex.old[-1][1]))
-    walked = _data_run(pcb, ex, center, junction, protected)
+    walked = _data_run(pcb, ex, center, junction, protected, width)
     if walked is None:
         return None
     chain, trunk = walked
     target = _xy((center[0] + ex.new[-1][0], center[1] + ex.new[-1][1]))
     far = _xy(trunk.end) if _xy(trunk.start) == junction else _xy(trunk.start)
-    # The trunk only ever stays or grows along its own line to meet the rejoin.
     if not _on_line(far, junction, target):
         return None
-    if dist(far, target) < dist(far, junction) - _EPS:
-        return None
-    if abs(dist(far, target) - dist(far, junction) - dist(junction, target)) > _CLK_TOL:
+    old_length, new_length = dist(far, junction), dist(far, target)
+    moved = dist(junction, target)
+    if ex.trunk_end is not None:
+        expected_far = _xy((center[0] + ex.trunk_end[0], center[1] + ex.trunk_end[1]))
+        # Only shorten the measured trunk. Never cross or consume its far endpoint.
+        if far != expected_far or target == far or abs(moved + new_length - old_length) > _EPS:
+            return None
+    elif new_length < old_length - _EPS or abs(new_length - old_length - moved) > _CLK_TOL:
         return None
     edited = [*chain, trunk]
     original = list(pcb.segments)
@@ -1433,8 +1458,8 @@ def _stage_data_exit(pcb: PCB, ex: _DataExit, protected: set[str]) -> list[Segme
     added: list[Segment] = []
     for a, b in pairwise(_xy((center[0] + o[0], center[1] + o[1])) for o in ex.new):
         if a != b:
-            added.extend(pcb.add_trace(a, b, width=_DATA_WIDTH, layer="F.Cu", net=ex.net))
-    added.extend(pcb.add_trace(far, target, width=_DATA_WIDTH, layer="F.Cu", net=ex.net))
+            added.extend(pcb.add_trace(a, b, width=width, layer="F.Cu", net=ex.net))
+    added.extend(pcb.add_trace(far, target, width=width, layer="F.Cu", net=ex.net))
     after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
     current, current_ends = _external_contacts(after, pcb.segments, added, None)
     if len(after.components()) != 1 or not contacts <= current or not ends <= current_ends:
@@ -1442,42 +1467,64 @@ def _stage_data_exit(pcb: PCB, ex: _DataExit, protected: set[str]) -> list[Segme
     return added
 
 
-def _clear_data_pair(path: Path, rules: DesignRules) -> int:
-    """Publish the MIPI data exits together, or leave the file untouched.
+def _usb2_electrical_limits_ok(pcb: PCB, path: Path) -> bool:
+    """Require measured coupling and compliant impedance for the two changed rails."""
+    classes = net_class_map_from_path(path.with_name("net_class_map.json"), pcb_path=path)
+    if any(net not in classes or not classes[net].target_diff_impedance for net in _USB2_NETS):
+        return False
+    # Only this pair is declared for the staged check. The continuity rule emits
+    # below-threshold pairs even without verbose passing measurements, using the
+    # full-precision fractions before rounding their report values.
+    checker = DRCChecker(
+        pcb, layers=len(pcb.copper_layers), net_class_map={net: classes[net] for net in _USB2_NETS}
+    )
+    continuity = checker.check_diffpair_routing_continuity()
+    if (
+        continuity.rules_checked_by_rule.get("diffpair_routing_continuity") != 1
+        or continuity.violations
+    ):
+        return False
+    impedance = checker.check_impedance()
+    return _USB2_NETS not in checker.impedance_unmeasured_pairs and not any(
+        not v.items or set(v.items).intersection(_USB2_NETS) for v in impedance.violations
+    )
 
-    Both rails are staged in memory, then must keep the pair inside its skew
-    budget, clear other copper under the project rules and survive the
-    authored-rules DRC before anything is written.
-    """
+
+def _clear_data_pair(
+    path: Path,
+    rules: DesignRules,
+    exits: tuple[_DataExit, ...],
+    nets: tuple[str, str],
+    width: float,
+    label: str,
+) -> int:
+    """Stage all the exits, verify their contacts, clearances and timing, then save once."""
     pcb = PCB.load(path)
     protected = _protected_ids(pcb)
     tracks: list[Segment] = []
-    for ex in _DATA_EXITS:
-        staged = _stage_data_exit(pcb, ex, protected)
+    for ex in exits:
+        staged = _stage_data_exit(pcb, ex, protected, width)
         if staged is None:
             return 0
         tracks.extend(staged)
-    if not _within_project_skew_budget(pcb, path, _DATA_NETS):
+    if not _within_project_skew_budget(pcb, path, nets):
+        return 0
+    if nets == _USB2_NETS and not _usb2_electrical_limits_ok(pcb, path):
         return 0
     if not _copper_gap_ok(pcb, path, tracks, [], rules):
         return 0
-    if not _authored_rules_ok(pcb, path, tracks, [], "MIPI data exits"):
+    if not _authored_rules_ok(pcb, path, tracks, [], label + " exits"):
         return 0
     pcb.save(path)
-    print(f"   pad departure MIPI data pair: {len(_DATA_EXITS)} exits rebuilt at {_DATA_WIDTH} mm")
-    return len(_DATA_EXITS)
+    print(f"   pad departure {label} pair: {len(exits)} exits rebuilt at {width} mm")
+    return len(exits)
 
 
 def _center_u1_ground_entry(path: Path, rules: DesignRules, mask_clearance: float) -> int:
     """Reconnect the seed-42 U1.32 ground branch from the pad center to its original via."""
     pcb = PCB.load(path)
     fp = pcb.get_footprint("U1")
-    if (
-        fp is None
-        or fp.name != "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm"
-        or fp.layer != "F.Cu"
-        or fp.rotation
-    ):
+    if fp is None or fp.name != _U1_QFN or fp.layer != "F.Cu" or fp.rotation:
         return 0
     pad = next((p for p in fp.pads if p.number == "32"), None)
     center = pcb.get_pad_position("U1", "32")
@@ -1627,5 +1674,6 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
         ),
     )
     edits += _clear_clock_pair(path, rules)
-    edits += _clear_data_pair(path, rules)
+    edits += _clear_data_pair(path, rules, _DATA_EXITS, _DATA_NETS, _DATA_WIDTH, "MIPI data")
+    edits += _clear_data_pair(path, rules, _USB2_EXITS, _USB2_NETS, 0.25, "USB2")
     return edits + _center_u1_ground_entry(path, rules, request.policy.warning_clearance_mm)
