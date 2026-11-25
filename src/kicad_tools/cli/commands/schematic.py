@@ -696,6 +696,7 @@ def run_sch_command(args) -> int:
             per_sheet=getattr(args, "per_sheet", False),
             format=getattr(args, "format", "text"),
             unannotated_only=getattr(args, "unannotated_only", False),
+            check=getattr(args, "check", False),
         )
 
     elif args.sch_command == "fix-annotation":

@@ -634,6 +634,37 @@ def _record_post_route_drc(args, drc_errors: int) -> None:
         args._drc_skipped_for_time = drc_errors == DRC_SKIPPED_FOR_TIME[0]
 
 
+def _post_route_drc_only_failure(
+    args,
+    *,
+    drc_errors: int,
+    fix_result: int | None,
+    all_nets_routed: bool,
+    has_disconnected: bool,
+    other_checks_passed: bool,
+) -> bool:
+    """Whether verified post-route DRC is the run's sole failure (Issue #10057).
+
+    One definition for every finishing path, so ``summary.failure_reason =
+    "post_route_drc"`` means the same thing whether ``--auto-layers``
+    escalated or not (#6277 path invariance): the saved board is fully
+    connected, every non-DRC gate passed, the verifications actually ran,
+    and the post-route DRC still found errors. The check precedes repair:
+    fix-drc exit 0 clears those errors, and exit 3 reports a rollback.
+    The single-attempt JSON emitter calls this directly. The three escalation
+    paths store the result on ``args`` for :func:`_emit_route_json_fallback`.
+    """
+    return bool(
+        other_checks_passed
+        and all_nets_routed
+        and not has_disconnected
+        and drc_errors > 0
+        and not _unverified_checks(args)
+        and getattr(args, "_auto_fix_status", None) != "skipped_deadline"
+        and fix_result not in (0, 3)
+    )
+
+
 def _unverified_checks(args) -> list[str]:
     """Post-route checks this run skipped for ``--timeout`` (issue #6273).
 
@@ -14807,6 +14838,9 @@ def route_with_layer_escalation(
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
+    # Issue #10057: stays 0 when DRC was skipped or nothing routed, so the
+    # DRC-only failure reason cannot apply to a board nobody checked.
+    drc_errors = 0
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -14886,9 +14920,35 @@ def route_with_layer_escalation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
+
+    # Issue #10057: fail on verified DRC errors, the way the single-attempt
+    # path always has (maintainer decision).  When post-route DRC is the
+    # sole failure on a fully connected board this tail exits 3, and the
+    # stash below lets _emit_route_json_fallback attach the same
+    # ``summary.failure_reason = "post_route_drc"`` the direct emitter
+    # would -- computed once here so the key and the exit code cannot
+    # disagree.
+    _drc_only_failure = _post_route_drc_only_failure(
+        args,
+        drc_errors=drc_errors,
+        fix_result=fix_result,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        has_disconnected=_output_verification.has_disconnected,
+        other_checks_passed=(
+            not _new_layer_intent_violations(_layer_intent)
+            and not _pairwise
+            and not _shorts
+            and _stranded_pour_escalation_exit(0, args) == 0
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and not _output_verification.regressed
+        ),
+    )
+    with contextlib.suppress(AttributeError, TypeError):
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -14933,6 +14993,20 @@ def route_with_layer_escalation(
                 args,
                 output_path,
                 f"Design requires minimum {final_result.layer_count} layers",
+            )
+        elif final_result.success and _drc_only_failure:
+            # Issue #10057: SUCCESS must be unreachable while verified
+            # post-route DRC errors are the run's sole failure (exit 3,
+            # JSON verdict "failed"), mirroring the single-attempt path's
+            # "ROUTING FAILED" banner for the same condition.
+            print("ROUTING FAILED: DRC violations detected")
+            print(
+                f"  All signal nets routed on {final_result.layer_count} layers, but "
+                f"post-route DRC found {drc_errors} error(s); manufacturing is blocked."
+            )
+            print(
+                f"  Run 'kct check {output_path} --mfr "
+                f"{getattr(args, 'manufacturer', 'jlcpcb')}' for full details (exit code 3)."
             )
         elif final_result.success:
             print(f"SUCCESS: Design requires minimum {final_result.layer_count} layers")
@@ -15005,6 +15079,11 @@ def route_with_layer_escalation(
         # documented exit-3 contract ("meets threshold but DRC violations
         # detected") already covers this case semantically.
         if fix_result == 3:
+            return 3
+        # Issue #10057: a fully connected board whose verified post-route DRC
+        # failed exits 3 here too (see the banner branch above); the JSON
+        # fallback reports failure_reason="post_route_drc" for it.
+        if _drc_only_failure:
             return 3
         # Issue #6273: a clean result whose DRC / stranded-pour check was
         # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
@@ -15810,6 +15889,9 @@ def route_with_rule_relaxation(
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
+    # Issue #10057: stays 0 when DRC was skipped or nothing routed, so the
+    # DRC-only failure reason cannot apply to a board nobody checked.
+    drc_errors = 0
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -15889,9 +15971,35 @@ def route_with_rule_relaxation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
+
+    # Issue #10057: fail on verified DRC errors, the way the single-attempt
+    # path always has (maintainer decision).  When post-route DRC is the
+    # sole failure on a fully connected board this tail exits 3, and the
+    # stash below lets _emit_route_json_fallback attach the same
+    # ``summary.failure_reason = "post_route_drc"`` the direct emitter
+    # would -- computed once here so the key and the exit code cannot
+    # disagree.
+    _drc_only_failure = _post_route_drc_only_failure(
+        args,
+        drc_errors=drc_errors,
+        fix_result=fix_result,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        has_disconnected=_output_verification.has_disconnected,
+        other_checks_passed=(
+            not _new_layer_intent_violations(_layer_intent)
+            and not _pairwise
+            and not _shorts
+            and _stranded_pour_escalation_exit(0, args) == 0
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and not _output_verification.regressed
+        ),
+    )
+    with contextlib.suppress(AttributeError, TypeError):
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -15931,6 +16039,20 @@ def route_with_rule_relaxation(
         elif final_result.success and _unverified_checks(args):
             # Issue #6273: never "SUCCESS" for a board nobody verified.
             _print_unverified_banner(args, output_path, "Routing complete with adaptive rules")
+        elif final_result.success and _drc_only_failure:
+            # Issue #10057: SUCCESS must be unreachable while verified
+            # post-route DRC errors are the run's sole failure (exit 3,
+            # JSON verdict "failed"), mirroring the single-attempt path's
+            # "ROUTING FAILED" banner for the same condition.
+            print("ROUTING FAILED: DRC violations detected")
+            print(
+                f"  All signal nets routed (tier {final_result.tier} rules), but "
+                f"post-route DRC found {drc_errors} error(s); manufacturing is blocked."
+            )
+            print(
+                f"  Run 'kct check {output_path} --mfr "
+                f"{getattr(args, 'manufacturer', 'jlcpcb')}' for full details (exit code 3)."
+            )
         elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
             if final_result.tier > 0:
@@ -15988,6 +16110,11 @@ def route_with_rule_relaxation(
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
+            return 3
+        # Issue #10057: a fully connected board whose verified post-route DRC
+        # failed exits 3 here too (see the banner branch above); the JSON
+        # fallback reports failure_reason="post_route_drc" for it.
+        if _drc_only_failure:
             return 3
         # Issue #6273: a clean result whose DRC / stranded-pour check was
         # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
@@ -18374,6 +18501,9 @@ def route_with_combined_escalation(
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
+    # Issue #10057: stays 0 when DRC was skipped or nothing routed, so the
+    # DRC-only failure reason cannot apply to a board nobody checked.
+    drc_errors = 0
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -18453,9 +18583,35 @@ def route_with_combined_escalation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
+
+    # Issue #10057: fail on verified DRC errors, the way the single-attempt
+    # path always has (maintainer decision).  When post-route DRC is the
+    # sole failure on a fully connected board this tail exits 3, and the
+    # stash below lets _emit_route_json_fallback attach the same
+    # ``summary.failure_reason = "post_route_drc"`` the direct emitter
+    # would -- computed once here so the key and the exit code cannot
+    # disagree.
+    _drc_only_failure = _post_route_drc_only_failure(
+        args,
+        drc_errors=drc_errors,
+        fix_result=fix_result,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        has_disconnected=_output_verification.has_disconnected,
+        other_checks_passed=(
+            not _new_layer_intent_violations(_layer_intent)
+            and not _pairwise
+            and not _shorts
+            and _stranded_pour_escalation_exit(0, args) == 0
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and not _output_verification.regressed
+        ),
+    )
+    with contextlib.suppress(AttributeError, TypeError):
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -18499,6 +18655,21 @@ def route_with_combined_escalation(
                 output_path,
                 f"Minimum viable config = {final_result.layer_count} layers + "
                 f"tier {final_result.tier} rules",
+            )
+        elif final_result.success and _drc_only_failure:
+            # Issue #10057: SUCCESS must be unreachable while verified
+            # post-route DRC errors are the run's sole failure (exit 3,
+            # JSON verdict "failed"), mirroring the single-attempt path's
+            # "ROUTING FAILED" banner for the same condition.
+            print("ROUTING FAILED: DRC violations detected")
+            print(
+                f"  All signal nets routed ({final_result.layer_count} layers + "
+                f"tier {final_result.tier} rules), but post-route DRC found "
+                f"{drc_errors} error(s); manufacturing is blocked."
+            )
+            print(
+                f"  Run 'kct check {output_path} --mfr "
+                f"{getattr(args, 'manufacturer', 'jlcpcb')}' for full details (exit code 3)."
             )
         elif final_result.success:
             print(
@@ -18559,6 +18730,11 @@ def route_with_combined_escalation(
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
+            return 3
+        # Issue #10057: a fully connected board whose verified post-route DRC
+        # failed exits 3 here too (see the banner branch above); the JSON
+        # fallback reports failure_reason="post_route_drc" for it.
+        if _drc_only_failure:
             return 3
         # Issue #6273: a clean result whose DRC / stranded-pour check was
         # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
@@ -24730,18 +24906,14 @@ def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = fr
                         )
                         json_stream.flush()
                     return 1
+            # Placement is diagnosed inside the route. Hold JSON until finish()
+            # has inspected the board that was actually written.
             capture = (
-                json_stream.capture()
-                if json_stream is not None
-                and (
-                    gate is not None
-                    or _route_json_capture is not None
-                    or _budget_retry_static_eligible(args)
-                    or _plane_retry_eligible(args)
-                )
-                else contextlib.nullcontext(None)
+                json_stream.capture() if json_stream is not None else contextlib.nullcontext(None)
             )
+            placement_fields: dict = {}
             handed_off = False
+            document = ""
             with capture as held:
                 try:
                     try:
@@ -24778,40 +24950,38 @@ def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = fr
                         finally:
                             _lint_gate_unstage_args(args, gate, requested_output)
                         result = outcome.exit_code(result)
-                    exit_code = finish(args, result)
+                    exit_code = finish(args, result, json_fields=placement_fields)
                     if json_stream is not None and not json_stream.written:
                         # The layer/rule-escalation paths (the default) never reached
                         # the direct-route JSON emitter; publish the same document
                         # for the final router so --format json always yields one.
                         _emit_route_json_fallback(args, exit_code)
                 finally:
-                    if _route_json_capture is not None and held is not None:
-                        # Issue #9620 review: an inner (retry) run hands its
-                        # JSON document to the requesting outer run -- consumed
-                        # exactly once there; the inner never also writes it
-                        # locally (its nested json guard would land the
-                        # document on stderr).
-                        _route_json_capture.append(held.getvalue())
-                        handed_off = True
-            retry_json = getattr(args, "_budget_retry_json_document", None)
-            if held is not None and json_stream is not None and not handed_off:
+                    if held is not None:
+                        # A promoted retry's diagnostics describe the published
+                        # board. Its final placement report comes from finish().
+                        document = (
+                            getattr(args, "_budget_retry_json_document", None) or held.getvalue()
+                        )
+                        if placement_fields:
+                            import json
+
+                            payload = json.loads(document) if document.strip() else {}
+                            payload.update(placement_fields)
+                            document = json.dumps(payload, indent=2) + "\n"
+                        if _route_json_capture is not None:
+                            # The requesting outer run publishes the inner retry
+                            # exactly once, after it decides which board to keep.
+                            _route_json_capture.append(document)
+                            handed_off = True
+            if json_stream is not None and not handed_off:
                 if gate is not None and outcome is not None:
                     from .route_lint_gate import merge_into_json_document
 
-                    json_stream.write(
-                        merge_into_json_document(
-                            retry_json if retry_json else held.getvalue(),
-                            outcome,
-                            exit_code,
-                            relocate=gate.relocate,
-                        )
+                    document = merge_into_json_document(
+                        document, outcome, exit_code, relocate=gate.relocate
                     )
-                elif retry_json:
-                    # The coarser retry promoted its board (Issue #9620): its
-                    # document, not the first pass's, describes -o now.
-                    json_stream.write(retry_json)
-                else:
-                    json_stream.write(held.getvalue())
+                json_stream.write(document)
                 json_stream.flush()
             return exit_code
     except DRCConstraintPropagationError as exc:
@@ -24868,20 +25038,20 @@ def _lint_gate_unstage_args(args, gate, requested_output) -> None:
 def _emit_route_json_fallback(args, exit_code: int) -> None:
     """Emit the routing-diagnostics JSON for runs that bypassed it (issue #5938).
 
-    ``route_with_layer_escalation`` (the default path) prints only a prose
-    summary, so ``kct route --format json`` used to put no JSON on stdout at
-    all.  The escalation wrappers stash their final result on
-    ``args._last_layer_result``; reuse :func:`print_routing_diagnostics_json`
-    on it so both paths share one document shape.  Runs that never built a
-    router (dry runs, early validation exits) get a minimal ``exit_code``
-    document instead.
+    Layer escalation retains its selected result for diagnostics. All three
+    escalation paths also retain the result whose verified DRC alone failed.
+    Adaptive paths preserve the top-level exit code and verdict that callers
+    receive on their other outcomes.
     """
     import json
 
     from kicad_tools.json_stdout import json_stdout
 
     silk_fix = getattr(args, "_route_silk_fix", None)
-    last = getattr(args, "_last_layer_result", None)
+    layer_result = getattr(args, "_last_layer_result", None)
+    drc_result = getattr(args, "_post_route_drc_result", None) if exit_code == 3 else None
+    last = drc_result if drc_result is not None else layer_result
+    verdict = _verdict_for_exit(exit_code)
     if last is not None:
         from kicad_tools.router import print_routing_diagnostics_json
 
@@ -24895,14 +25065,19 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 nets_to_route_ids=multi_pad_ids,
                 single_pad_count=getattr(last, "single_pad_count", 0),
                 # Issue #6239: the exit code is the run's single final verdict.
-                verdict=_verdict_for_exit(exit_code),
+                verdict=verdict,
                 grid_selection=getattr(args, "_grid_selection", None),
                 silk_fix=silk_fix,
+                post_route_drc_only=drc_result is not None,
+                exit_code=exit_code if layer_result is None else None,
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
-    document = {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)}
+    document = {"exit_code": exit_code, "verdict": verdict}
+    if drc_result is not None:
+        # The verified failure still matters if rich diagnostic formatting fails.
+        document["summary"] = {"verdict": verdict, "failure_reason": "post_route_drc"}
     if silk_fix is not None:
         document["silk_fix"] = silk_fix
     print(json.dumps(document, indent=2), file=json_stdout())
@@ -28119,15 +28294,18 @@ def _run_main_impl(args, parser, argv) -> int:
             silk_fix=args._route_silk_fix,
             # Consumers that finish the copper can recheck DRC on the final board.
             # Every other exit-3 cause keeps its original failure verdict.
-            post_route_drc_only=(
-                other_checks_passed
-                and all_nets_routed
-                and not output_verification.has_disconnected
-                and drc_errors > 0
-                and not _unverified
-                and seg_seg_violation_count == 0
-                and getattr(args, "_auto_fix_status", None) != "skipped_deadline"
-                and fix_result != 3
+            # Issue #10057: the condition lives in the shared
+            # _post_route_drc_only_failure helper so the escalation paths
+            # (via _emit_route_json_fallback) report the identical key.
+            post_route_drc_only=_post_route_drc_only_failure(
+                args,
+                drc_errors=drc_errors,
+                fix_result=fix_result,
+                all_nets_routed=all_nets_routed,
+                has_disconnected=output_verification.has_disconnected,
+                # The pre-save seg-seg gate runs on this path only; a seg-seg
+                # violation is another exit-3 cause, not a DRC-only failure.
+                other_checks_passed=other_checks_passed and seg_seg_violation_count == 0,
             ),
         )
 
@@ -28189,6 +28367,10 @@ def _run_main_impl(args, parser, argv) -> int:
     # 1 = Fatal failure — no nets routed, no useful output
     # 2 = Partial routing — some nets routed but below --min-completion threshold
     # 3 = Meets threshold but DRC violations detected (includes seg-seg violations).
+    #     Issue #10057: the escalation tails (layer / rule-relaxation /
+    #     combined -- the default ``--auto-layers`` path among them) return 3
+    #     for the same fully-connected-DRC-only condition, so every finishing
+    #     path agrees on the code and on ``summary.failure_reason``.
     #     Issue #2852: also returned when --auto-fix rolled back due to a
     #     connectivity regression (fix-drc exit 3) — semantically the same
     #     contract ("routing succeeded but DRC is dirty"); callers cannot

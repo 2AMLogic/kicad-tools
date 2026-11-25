@@ -412,6 +412,9 @@ CONTRACT_ARGV: dict[str, list[str]] = {
 # issue #6006) is run as given.
 FLAG_VARIANT_ARGV: dict[str, list[str]] = {
     "check --diff": ["check", "--diff", "{pcb}", "{pcb}"],
+    # Issue #10132: --check must keep stdout a single JSON document even
+    # when it exits 1 on reference order disagreements.
+    "sch re-annotate --check": ["sch", "re-annotate", "{sch}", "--check"],
     "check --format sarif": ["check", "{pcb}", "--format", "sarif"],
     "check --diff --format sarif": ["check", "--diff", "{pcb}", "{pcb}", "--format", "sarif"],
     "detect-mistakes --format sarif": [

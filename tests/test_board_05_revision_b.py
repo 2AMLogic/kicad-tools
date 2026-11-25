@@ -39,6 +39,21 @@ def test_driver_thermal_mask_opening_belongs_to_grounded_pad_29(tmp_path, hardwa
     assert len(stencil) == 4
     assert all(not pad.number and not pad.net_name for pad in stencil)
 
+    # Compare the copper edge of each grounded barrel outside the exposed mask
+    # opening with the nearest edge of that opening, in footprint coordinates.
+    barrels = [pad for pad in driver.pads if pad.type == "thru_hole" and pad.number == "29"]
+    assert len(barrels) == 24
+    assert all(pad.net_name == "GND" and pad.drill == 0.2 for pad in barrels)
+    half_width, half_height = (dimension / 2 for dimension in opening.size)
+    assert all(abs(pad.position[0]) <= half_width for pad in barrels)
+    webs = sorted(
+        abs(pad.position[1]) - half_height - pad.size[1] / 2
+        for pad in barrels
+        if abs(pad.position[1]) > half_height
+    )
+    assert len(webs) == 12
+    assert webs[:6] == pytest.approx([0.26] * 6)
+
 
 def test_u3_library_keeps_stock_silkscreen_with_ti_signal_lands(hardware):
     from kicad_tools.sexp import parse_file
