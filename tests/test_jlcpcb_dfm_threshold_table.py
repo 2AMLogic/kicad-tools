@@ -71,8 +71,11 @@ def _checker(n_layers=4):
 
 def test_apply_table_missing_stackup_is_incomplete(capsys):
     cw: dict = {}
-    assert _apply_dfm_table(_checker(), "jlcpcb", 4, 3.0, 0.5, 1.0, cw) is True
+    checker = _checker()
+    assert checker.design_rules.trace_width_warning_mm is not None
+    assert _apply_dfm_table(checker, "jlcpcb", 4, 3.0, 0.5, 1.0, cw) is True
     assert cw["dfm_table"]["entry"] is None
+    assert checker.design_rules.trace_width_warning_mm is None
     assert "INCOMPLETE" in capsys.readouterr().err
 
 

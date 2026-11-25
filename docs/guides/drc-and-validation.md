@@ -641,9 +641,10 @@ Note: 2-layer boards typically have slightly relaxed via constraints compared to
 
 The JLCPCB profile's 4-layer 1 oz minimum trace width is 0.1016 mm (4 mil), the
 published capability, and `kct check` still reports it as an **error** only below
-that floor. JLCPCB's own DFM tool (JLCDFM) is stricter: on one 4-layer 1 oz board
-it rated every 0.1016 mm outer-layer track **Danger** (listed as "0.1 mm") and
-every 0.1524 mm (6 mil) track Good. `kct check --mfr jlcpcb` therefore adds a
+that floor. On the reported four-layer board, JLCDFM rated every 0.1016 mm
+outer-layer track **Danger** (listed as "0.1 mm") and every 0.1524 mm (6 mil)
+track Good. The report did not specify copper weights. The profile applies this
+advisory to the four-layer 1 oz outer / 0.5 oz inner stackup. `kct check --mfr jlcpcb` therefore adds a
 **warning** (`dimension_trace_width`) for outer-layer tracks (`F.Cu` / `B.Cu`)
 narrower than 0.1524 mm on that stackup, so the finding is visible before upload.
 

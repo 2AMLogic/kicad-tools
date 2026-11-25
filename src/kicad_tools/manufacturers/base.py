@@ -8,7 +8,7 @@ manufacturer profiles that can be used across different fabrication houses.
 from __future__ import annotations
 
 import fnmatch
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -430,12 +430,9 @@ class DesignRules:
     tht_smd_danger_mm: float | None = None
     tht_smd_warning_mm: float | None = None
     # Appended last to preserve positional constructor order.
-    # Outer-layer track width below which the fab's DFM tool grades the track
-    # Danger although the published capability (``min_trace_width_mm``) allows
-    # it (Issue #10173).  Set only by :meth:`ManufacturerProfile.apply_dfm_floors`
-    # from a stackup's optional ``trace_width`` DFM threshold; ``None`` (the
-    # default) means no recorded evidence, so no finding.  Drives a *warning*,
-    # never an error.
+    # Advisory below the outer-track width graded Good on the reported board
+    # (Issue #10173). The exact stackup's optional ``trace_width`` threshold
+    # supplies this value. Without one, only the published width floor applies.
     trace_width_warning_mm: float | None = None
 
     def __post_init__(self) -> None:
@@ -486,6 +483,14 @@ class DesignRules:
         """Clearance in mils."""
         return self.min_clearance_mm / 0.0254
 
+    def with_trace_width_advisory(self, entry: DfmEntry | None) -> DesignRules:
+        """Bind the optional outer-track warning to this exact DFM stackup."""
+        threshold = entry.thresholds.get("trace_width") if entry is not None else None
+        warning = threshold.warning_mm if threshold is not None else None
+        if self.trace_width_warning_mm == warning:
+            return self
+        return replace(self, trace_width_warning_mm=warning)
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         return {
@@ -516,6 +521,7 @@ class DesignRules:
             "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,
             "tht_smd_danger_mm": self.tht_smd_danger_mm,
             "tht_smd_warning_mm": self.tht_smd_warning_mm,
+            "trace_width_warning_mm": self.trace_width_warning_mm,
             "min_inner_clearance_mm": self.min_inner_clearance_mm,
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
@@ -745,12 +751,11 @@ class ManufacturerProfile:
         and inner spacing stay separate: only ``min_clearance_mm`` (outer) is
         touched, never ``min_inner_clearance_mm``.
         """
+        rules = rules.with_trace_width_advisory(entry)
         if entry is None:
             return rules
-        from dataclasses import replace
 
         t = entry.thresholds
-        tw = t.get("trace_width")
         tht_smd = t["tht_smd_spacing"]
         tht_smd_danger_mm = max(rules.tht_smd_danger_mm or 0.0, tht_smd.danger_mm)
         tht_smd_warning_mm = rules.tht_smd_warning_mm
@@ -758,7 +763,6 @@ class ManufacturerProfile:
             tht_smd_warning_mm = max(tht_smd_warning_mm or 0.0, tht_smd.warning_mm)
         return replace(
             rules,
-            trace_width_warning_mm=tw.warning_mm if tw is not None else None,
             min_clearance_mm=max(rules.min_clearance_mm, t["trace_spacing"].danger_mm),
             min_smd_pad_clearance_mm=max(
                 rules.min_smd_pad_clearance_mm or 0.0, t["pad_spacing"].danger_mm
@@ -788,7 +792,14 @@ class ManufacturerProfile:
             return rules
         inner = float(rules.inner_copper_oz) if layers > 2 else 0.0
         entry = self.get_dfm_entry(layers, float(rules.outer_copper_oz), inner)
-        return self.apply_dfm_floors(rules, entry)
+        effective = self.apply_dfm_floors(rules, entry)
+        if copper_oz != rules.outer_copper_oz:
+            # A fallback preset keeps its established capability floors. Its
+            # measured advisory only applies if the requested weight has evidence.
+            effective = effective.with_trace_width_advisory(
+                self.get_dfm_entry(layers, copper_oz, inner)
+            )
+        return effective
 
     def copper_options(self, layers: int) -> list[tuple[float, float]]:
         """Distinct ``(outer_oz, inner_oz)`` builds the profile offers for a layer count.

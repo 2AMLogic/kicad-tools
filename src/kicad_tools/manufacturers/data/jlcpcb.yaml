@@ -324,8 +324,8 @@ dfm_thresholds:
         # floor and is NOT applied by apply_dfm_floors (the error floor stays
         # design_rules min_trace_width_mm).  warning_mm is what kct warns below:
         # JLCDFM rated 0.1016 mm outer tracks Danger (listed as 0.1 mm) and 0.1524 mm
-        # Good on one 4-layer 1 oz board.  Only those two points are observed; the
-        # exact Danger/Warning/Good edges between them are unknown.
+        # Good on a 4-layer board. Its copper weight was not reported. The
+        # advisory is scoped to this stackup; grades between those widths are unknown.
         trace_width: {danger_mm: 0.1016, warning_mm: 0.1524, warning_basis: observed_jlcdfm, basis: capability_page, source_url: https://github.com/2AMLogic/kicad-tools/issues/10173, retrieved: '2026-11-25'}
         tht_smd_spacing: {danger_mm: 2.032, warning_mm: 3.05, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/9421, retrieved: '2026-11-18'}
     4layer_1oz_inner1oz:

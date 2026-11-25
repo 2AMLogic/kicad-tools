@@ -220,16 +220,16 @@ class DRCChecker:
                 into the legacy tolerance model.  Strict mode requires
                 shapely (a core dependency since #3824) and fails loud if it
                 is missing.
-            copper_oz_outer: Optional override for the *ampacity* gate's
-                outer-layer (F.Cu / B.Cu) copper weight in oz (Issue #4326).
+            copper_oz_outer: Optional outer-layer (F.Cu / B.Cu) copper weight
+                in oz for ampacity and stackup-specific trace-width advisories.
                 When provided, replaces ``design_rules.outer_copper_oz``
                 after the manufacturer preset is loaded, letting the CLI
                 honor the board's declared ``(setup (stackup ...))`` copper
                 weight (or an explicit keyed ``--copper outer=..``) without
                 repointing the preset's min-trace-width / clearance rules.
-                ``None`` leaves the preset default in place.
-            copper_oz_inner: Optional override for the *ampacity* gate's
-                inner-layer (In*.Cu) copper weight in oz (Issue #4326).
+                With ``None``, ampacity retains the preset default and the
+                advisory uses the board's declared weight when available.
+            copper_oz_inner: Optional inner-layer (In*.Cu) copper weight in oz.
                 Same semantics as ``copper_oz_outer`` for
                 ``design_rules.inner_copper_oz``.
             current_path_specs: Optional declared branch-specific
@@ -373,7 +373,27 @@ class DRCChecker:
             layers, copper_oz, strict=strict_copper
         )
 
-        # Issue #4326: override the ampacity copper weights ONLY.
+        if self.design_rules.trace_width_warning_mm is not None:
+            # A preset can carry a measured advisory even when the actual board
+            # has a different layer count or inner copper weight.
+            from kicad_tools.physics.stackup import stackup_copper_oz
+
+            declared_outer = declared_inner = None
+            if copper_oz_outer is None or copper_oz_inner is None:
+                declared_outer, declared_inner = stackup_copper_oz(pcb)
+            outer = copper_oz_outer if copper_oz_outer is not None else declared_outer
+            inner = copper_oz_inner if copper_oz_inner is not None else declared_inner
+            board_layers = len(getattr(pcb, "copper_layers", ())) or layers
+            if board_layers <= 2:
+                inner = 0.0
+            entry = profile.get_dfm_entry(
+                board_layers,
+                copper_oz if outer is None else outer,
+                self.design_rules.inner_copper_oz if inner is None else inner,
+            )
+            self.design_rules = self.design_rules.with_trace_width_advisory(entry)
+
+        # Issue #4326: set the ampacity copper weights on a copy of the preset.
         #
         # ``copper_oz_outer`` / ``copper_oz_inner`` let the CLI repoint the
         # IPC-2221 ampacity gate at the board's declared ``(setup (stackup

@@ -149,3 +149,88 @@ def test_arc_track_controls_match_straight_tracks(tmp_path):
         tmp_path, [(0.1016, "In1.Cu"), (0.1016, "In2.Cu"), (0.1524, "F.Cu"), (0.09, "In1.Cu")]
     )
     assert [v.severity for v in findings] == ["error"]
+
+
+@pytest.mark.parametrize(
+    ("inner_thickness", "override", "expected_entry", "warns"),
+    [
+        (0.0175, None, "4layer_1oz", True),
+        (0.035, None, "4layer_1oz_inner1oz", False),
+        (0.07, None, None, False),
+        (0.0175, 2, None, False),
+        (0.07, 0.5, "4layer_1oz", True),
+    ],
+)
+def test_declared_stackup_drives_python_and_cli_warnings(
+    tmp_path, capsys, inner_thickness, override, expected_entry, warns
+):
+    import json
+
+    from kicad_tools.cli.check_cmd import main as check
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    copper = " ".join(
+        f'(layer "{layer}" (type "copper") (thickness {thickness}))'
+        for layer, thickness in (
+            ("F.Cu", 0.035),
+            ("In1.Cu", inner_thickness),
+            ("In2.Cu", inner_thickness),
+            ("B.Cu", 0.035),
+        )
+    )
+    board = tmp_path / "controller.kicad_pcb"
+    board.write_text(
+        _ARC_PCB.format(
+            arcs=f"(setup (stackup {copper}))\n"
+            '(segment (start 0 0) (end 2 0) (width 0.15) (layer "F.Cu") (net 1))'
+        )
+    )
+    checker = DRCChecker(PCB.load(board), manufacturer="jlcpcb", copper_oz_inner=override)
+    python_rows = checker.check_dimensions().violations
+    assert any(v.rule_id == "dimension_trace_width" for v in python_rows) is warns
+
+    args = [str(board), "--mfr", "jlcpcb", "--only", "dimensions", "--drc-only", "--format", "json"]
+    if override is not None:
+        args.extend(["--copper", f"outer=1,inner={override}"])
+    check(args)
+    report = json.loads(capsys.readouterr().out)
+    assert report["copper_weights"]["dfm_table"]["entry"] == expected_entry
+    assert (report["verdict"] == "incomplete") is (expected_entry is None)
+    assert any(v["rule_id"] == "dimension_trace_width" for v in report["violations"]) is warns
+
+
+def test_default_checker_uses_the_boards_layer_count(tmp_path):
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    board = tmp_path / "two-layer.kicad_pcb"
+    board.write_text(
+        _ARC_PCB.format(arcs="").replace(' (1 "In1.Cu" signal) (2 "In2.Cu" signal)', "")
+    )
+    assert DRCChecker(PCB.load(board)).design_rules.trace_width_warning_mm is None
+
+
+def test_exported_profile_keeps_its_measured_warning(capsys):
+    import json
+
+    from kicad_tools.cli.mfr import main as mfr
+    from kicad_tools.manufacturers import DesignRules
+
+    rules = get_profile("jlcpcb").get_design_rules(4, 1)
+    mfr(["rules", "jlcpcb", "--layers", "4", "--copper", "1", "--format", "json"])
+    cli_rules = json.loads(capsys.readouterr().out)["rules"]
+    board = _PCB([_Seg(0.15, "F.Cu")])
+    for exported in (rules.to_dict(), cli_rules):
+        restored = DesignRules(**exported)
+        (finding,) = DimensionRules().check(board, restored).violations
+        assert restored.trace_width_warning_mm == pytest.approx(0.1524)
+        assert finding.severity == "warning"
+        assert "0.1016 mm Danger" in finding.message
+        assert "0.1524 mm Good" in finding.message
+
+
+def test_uncovered_outer_weight_preserves_preset_floors_without_the_advisory():
+    rules = get_profile("jlcpcb").get_design_rules(4, 3)
+    assert rules.min_clearance_mm == pytest.approx(0.1016)
+    assert rules.trace_width_warning_mm is None

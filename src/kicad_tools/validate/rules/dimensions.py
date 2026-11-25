@@ -79,8 +79,8 @@ class DimensionRules(DRCRule):
 
         Below ``min_trace_width_mm`` is an error.  Separately (Issue #10173), an
         *outer-layer* track at or above that floor but narrower than the
-        stackup's recorded ``trace_width_warning_mm`` is a warning: the fab's DFM
-        tool grades it Danger although the published capability allows it.
+        stackup's recorded ``trace_width_warning_mm`` receives an advisory.
+        The threshold is the measured Good width on the reported board.
         Inner layers are never flagged by the warning (no evidence for them).
         """
         min_width = design_rules.min_trace_width_mm
@@ -101,9 +101,9 @@ class DimensionRules(DRCRule):
                         rule_id="dimension_trace_width",
                         severity="warning",
                         message=(
-                            f"Trace width {segment.width:.3f}mm is within the fab minimum "
-                            f"{min_width:.3f}mm but below {warn_width:.4f}mm, where JLCDFM "
-                            f"reports Danger for outer-layer tracks"
+                            f"Outer trace width {segment.width:.4f} mm is below the "
+                            f"{warn_width:.4f} mm advisory threshold. JLCDFM graded "
+                            "0.1016 mm Danger and 0.1524 mm Good on the reported board."
                         ),
                         location=segment.start,
                         layer=segment.layer,
