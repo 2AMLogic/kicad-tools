@@ -46,4 +46,6 @@ def run_optimize_placement_command(args) -> int:
         route_check_budget=getattr(args, "route_check_budget", DEFAULT_ROUTE_CHECK_BUDGET),
         # Issue #9799: the default silk legalisation pass and its opt-out.
         silk_fix=not getattr(args, "no_silk_fix", False),
+        # Issue #10142: furthest a decoupling cap may sit from its pin.
+        decoupling_radius_mm=getattr(args, "decoupling_radius", 6.0),
     )

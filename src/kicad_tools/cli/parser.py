@@ -2475,8 +2475,8 @@ def _add_sch_parser(subparsers) -> None:
     sch_reannotate.add_argument(
         "--check",
         action="store_true",
-        help="Report parts whose reference number order disagrees with schematic "
-        "position order; exit 1 if any disagree (files are never modified)",
+        help="Check reference numbers in schematic position order and across electrical "
+        "partners. Exit 1 on either disagreement. Files are read-only.",
     )
     sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
 
@@ -6789,6 +6789,18 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "Skip the default silk legalisation pass (legalize_silk) on the "
             "written board, and the snap reference repair it supersedes "
             "(Issue #9799). With this flag authored silk is byte-identical."
+        ),
+    )
+    op_parser.add_argument(
+        "--decoupling-radius",
+        dest="decoupling_radius",
+        type=float,
+        default=6.0,
+        metavar="MM",
+        help=(
+            "Furthest a decoupling capacitor's supply pad may sit from the IC "
+            "pin it serves in the post-optimize snap (default: 6.0 mm; "
+            "Issue #10142)."
         ),
     )
     op_parser.add_argument("-v", "--verbose", action="store_true")

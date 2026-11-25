@@ -59,6 +59,7 @@ KNOWN_KEYS = {
         "resistor",
         "inductor",
     },
+    "readiness": {"output_root"},
 }
 
 
@@ -150,6 +151,20 @@ class FootprintSelectionConfig:
 
 
 @dataclass
+class ReadinessConfig:
+    """Manufacturing-readiness producer configuration (Issue #10106).
+
+    ``output_root`` is the project-relative directory (for example
+    ``"output"``) where ``kct readiness`` publishes the bundle, receipts and
+    evidence for projects whose editable board lives in a sibling directory
+    (``kicad/``).  Only a project-local TOML declaration authorizes a sibling
+    destination; the user-wide config never does.
+    """
+
+    output_root: str | None = None
+
+
+@dataclass
 class Config:
     """Merged configuration from all sources."""
 
@@ -163,6 +178,7 @@ class Config:
         default_factory=FootprintValidationConfig
     )
     footprint_selection: FootprintSelectionConfig = field(default_factory=FootprintSelectionConfig)
+    readiness: ReadinessConfig = field(default_factory=ReadinessConfig)
 
     # Track which file each setting came from (for --show)
     _sources: dict = field(default_factory=dict, repr=False)
@@ -421,12 +437,56 @@ def _merge_config(
             config.footprint_selection.inductor = fps_data["inductor"]
             sources["footprint_selection.inductor"] = source
 
+    # Merge readiness section
+    if "readiness" in data:
+        readiness_data = data["readiness"]
+        _warn_unknown_keys(readiness_data, KNOWN_KEYS["readiness"], "readiness", source)
+
+        if "output_root" in readiness_data:
+            config.readiness.output_root = readiness_data["output_root"]
+            sources["readiness.output_root"] = source
+
 
 def _warn_unknown_keys(data: dict[str, Any], known: set[str], section: str, source: str) -> None:
     """Warn about unknown keys in a config section."""
     for key in data:
         if key not in known:
             warnings.warn(f"Unknown config key '{section}.{key}' in {source}", stacklevel=4)
+
+
+def find_readiness_output_root(start_dir: Path) -> tuple[Path, Path] | None:
+    """Resolve a project-local ``[readiness] output_root`` declaration (Issue #10106).
+
+    Discovery starts at *start_dir* (the selected PCB's directory) and uses the
+    project TOML lookup (:func:`_find_project_config`), so a declaration is
+    always project-local — the user-wide config never authorizes one.  The
+    value is resolved against the declaring TOML's directory, following
+    symlinks so a root that escapes the project is visible to the caller.
+
+    Returns ``(resolved_output_root, declaring_toml)``, or ``None`` when the
+    project declares no ``[readiness] output_root``.  Raises
+    :class:`ConfigError` for a malformed or non-relative value.
+    """
+    config_path = _find_project_config(start_dir)
+    if config_path is None:
+        return None
+    data = _load_toml_file(config_path) or {}
+    section = data.get("readiness")
+    if not isinstance(section, dict) or "output_root" not in section:
+        return None
+    raw = section["output_root"]
+    if not isinstance(raw, str) or not raw.strip():
+        raise ConfigError(
+            f"[readiness] output_root in {config_path} must be a non-empty relative path"
+        )
+    declared = Path(raw.strip())
+    if declared.is_absolute() or ".." in declared.parts:
+        raise ConfigError(
+            f"[readiness] output_root in {config_path} must be a relative path inside the "
+            f"project; got {raw!r}"
+        )
+    project_dir = config_path.parent.resolve()
+    return (project_dir / declared).resolve(), config_path
 
 
 def generate_template() -> str:
@@ -540,6 +600,13 @@ def generate_template() -> str:
 # [footprint_selection.inductor]
 # "0-10uH" = "Inductor_SMD:L_0603_1608Metric"
 # "10uH+" = "Inductor_SMD:L_0805_2012Metric"
+
+[readiness]
+# Project-relative directory where `kct readiness` publishes the bundle,
+# receipts and evidence (Issue #10106). Declare it when the editable board
+# lives in a sibling directory such as kicad/ and the generated release
+# belongs beside it (output/manufacturing/, output/readiness.json, ...).
+# output_root = "output"
 """
 
 
