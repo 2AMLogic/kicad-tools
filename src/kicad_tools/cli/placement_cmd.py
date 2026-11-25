@@ -1296,6 +1296,7 @@ def cmd_optimize(args) -> int:
     """Optimize component placement for routability."""
     from kicad_tools.cli.optimize_placement_cmd import designated_decoupling_groups
     from kicad_tools.cli.progress import spinner
+    from kicad_tools.core.pcb_item_locks import BoardItemLocks
     from kicad_tools.optim import (
         OptimizationWorkflow,
         WorkflowConfig,
@@ -1362,9 +1363,12 @@ def cmd_optimize(args) -> int:
         with spinner("Loading PCB...", quiet=quiet):
             pcb = PCB.load(str(pcb_path))
             groups = designated_decoupling_groups(pcb_path, pcb, quiet=quiet)
-        fixed_refs.extend(
-            fp.reference for fp in pcb.footprints if fp.locked and fp.reference not in fixed_refs
-        )
+        locks = BoardItemLocks(pcb._sexp)
+        for fp in pcb.footprints:
+            node = fp._sexp_node
+            locked = locks.is_locked(node) if node is not None else fp.locked
+            if locked and fp.reference not in fixed_refs:
+                fixed_refs.append(fp.reference)
         if routing_aware:
             # The routing fixer's iterations and checkpoints can write to its input.
             with TemporaryDirectory(dir=None if args.dry_run else output_path.parent) as staging:

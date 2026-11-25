@@ -364,9 +364,22 @@ def test_optimize_writes_only_a_feasible_designated_cap(tmp_path, capsys, radius
 def swapped_board(tmp_path):
     from tests.test_bypass_distance_rule import _board
 
-    def make(*, c1=61.5, c2=21.5, c1_layer="B.Cu", **kwargs):
+    def make(*, c1=61.5, c2=21.5, c1_layer="B.Cu", c1_group_locked=None, u1_pad1=None, **kwargs):
         path = _board(tmp_path, c1=c1, c2=c2, c1_layer=c1_layer, **kwargs)
         board = path.read_text().rstrip()[:-1]
+        if u1_pad1 is not None:
+            start = board.index('(pad "1"', board.index('(property "Reference" "U1")'))
+            end = board.index('(pad "2"', start)
+            board = board[:start] + f'(pad "1" {u1_pad1} (net 1 "+3V3"))\n    ' + board[end:]
+        if c1_group_locked is not None:
+            cap = "00000000-0000-4000-8000-000000000001"
+            inner = "00000000-0000-4000-8000-000000000002"
+            outer = "00000000-0000-4000-8000-000000000003"
+            ref = '(property "Reference" "C1")'
+            board = board.replace(ref, f'(uuid "{cap}") {ref}', 1)
+            lock = "(locked yes)" if c1_group_locked else ""
+            board += f'\n(group "inner" (uuid "{inner}") (members "{cap}"))'
+            board += f'\n(group "outer" (uuid "{outer}") {lock} (members "{inner}"))'
         # Keep U1 locked at a non-cardinal angle and U2 explicitly fixed.
         board = board.replace("(at 20 10)", "(locked yes) (at 20 10 17)")
         board = board.replace("(at 60 10)", "(at 60 10 -23)")
@@ -466,22 +479,50 @@ def test_placement_optimize_saves_designated_pads(
 
 
 @pytest.mark.parametrize("in_place,dry_run", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("constraint", ["fixed-cap", "locked-group", "back-only-pin"])
 def test_placement_optimize_infeasible_preserves_files(
-    swapped_board, placement_mode, tmp_path, capsys, in_place, dry_run
+    swapped_board, placement_mode, tmp_path, capsys, in_place, dry_run, constraint
 ):
-    source = swapped_board()
+    fixed = "C1,U2"
+    if constraint == "locked-group":
+        source = swapped_board(c1_group_locked=True)
+        fixed = "U2"
+    elif constraint == "back-only-pin":
+        source = swapped_board(
+            c1=23, c1_layer="F.Cu", u1_pad1='smd rect (at 0 0) (size 1 1) (layers "B.Cu")'
+        )
+    else:
+        source = swapped_board()
     original = source.read_bytes()
     output = tmp_path / "previous.kicad_pcb"
     output.write_bytes(b"previous destination")
     options = [] if in_place else ["-o", str(output)]
     if dry_run:
         options.append("--dry-run")
-    rc, result = _placement_result(capsys, source, placement_mode, *options, fixed="C1,U2")
+    rc, result = _placement_result(capsys, source, placement_mode, *options, fixed=fixed)
     assert rc == 1 and not result["success"]
     assert any("C1" in error and "U1.1" in error for error in result["constraint_violations"])
     assert result["output_path"] is None
     assert source.read_bytes() == original
     assert output.read_bytes() == b"previous destination"
+
+
+def test_placement_optimize_moves_unlocked_group_member_to_through_pin(
+    swapped_board, placement_mode, tmp_path, capsys
+):
+    from kicad_tools.schema.pcb import PCB
+
+    source = swapped_board(
+        c1_group_locked=False,
+        u1_pad1='thru_hole circle (at 0 0) (size 1 1) (drill 0.4) (layers "*.Cu" "*.Mask")',
+    )
+    original = PCB.load(str(source)).get_footprint("C1").position
+    output = tmp_path / "placed.kicad_pcb"
+    rc, result = _placement_result(capsys, source, placement_mode, "-o", str(output))
+    assert rc == 0 and result["success"], result
+    placed = PCB.load(str(output))
+    assert placed.get_footprint("C1").position != original
+    assert math.dist(placed.get_pad_position("C1", "1"), placed.get_pad_position("U1", "1")) <= 6
 
 
 def test_placement_optimize_feasible_dry_run(swapped_board, placement_mode, tmp_path, capsys):

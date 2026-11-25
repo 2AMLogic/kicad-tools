@@ -905,8 +905,12 @@ def _designated_cap_violations(
                     f"{ref} is on {cap.layer} but its designated pin {name} is on {ic.layer}"
                 )
             supply = next(pad for pad in cap.pads if pad.number == caps[ref].supply_pad)
-            if not {ic.layer, "*.Cu", "F&B.Cu"}.intersection(supply.layers):
+            target = next(pad for pad in ic.pads if pad.number == pin.pad)
+            side_layers = {ic.layer, "*.Cu", "F&B.Cu"}
+            if side_layers.isdisjoint(supply.layers):
                 errors.append(f"{ref}.{supply.number} has no copper on {ic.layer} for {name}")
+            if side_layers.isdisjoint(target.layers):
+                errors.append(f"{name} has no copper on {ic.layer} for {ref}.{supply.number}")
             distance = math.dist(cap_pad, ic_pad)
             if distance > radius_mm + 1e-9:
                 errors.append(f"{ref} is {distance:.3f} mm from {name}, limit {radius_mm:g} mm")
