@@ -344,11 +344,6 @@ class DesignRules:
     min_smd_pad_clearance_mm: float | None = None
     min_pth_hole_to_track_mm: float | None = None
     min_inner_pth_hole_to_copper_mm: float | None = None
-    # Two-tier THT/anchor-via to SMD-pad spacing bands (Issues #8843, #9421, #10172):
-    # error strictly below ``danger``, warning strictly below ``warning``.
-    # None falls back to the rule module's calibrated defaults.
-    tht_smd_danger_mm: float | None = None
-    tht_smd_warning_mm: float | None = None
 
     # Inner-layer copper clearance floor (Issue #8836).  ``min_clearance_mm`` is
     # the OUTER-layer floor (it scales with outer copper weight); when inner
@@ -418,6 +413,13 @@ class DesignRules:
     # Plated component pads can require wider rings than vias. None keeps
     # existing profiles' shared annular-ring behavior.
     min_pth_annular_ring_mm: float | None = None
+
+    # Two-tier THT/anchor-via to SMD-pad spacing bands (Issues #8843, #9421, #10172):
+    # error strictly below ``danger``, warning strictly below ``warning``.
+    # None uses the rule's calibrated defaults. New fields go at the end to
+    # preserve the public constructor's positional arguments.
+    tht_smd_danger_mm: float | None = None
+    tht_smd_warning_mm: float | None = None
 
     def __post_init__(self) -> None:
         """Enforce ``min_inner_clearance_mm <= min_clearance_mm`` (Issue #9113).
