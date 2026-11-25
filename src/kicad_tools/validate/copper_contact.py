@@ -364,7 +364,18 @@ def _edge_contact(a: Any, b: Any) -> bool:
     return bool(a.distance(b) <= _TOUCH)
 
 
-def _collect_items(cv: ConnectivityValidator, net_number: int | None) -> list[CopperItem]:
+def collect_copper_items(
+    cv: ConnectivityValidator,
+    net_number: int | None = None,
+    *,
+    include_all_pads: bool = False,
+) -> list[CopperItem]:
+    """Collect copper geometry with the pad selection used by connectivity.
+
+    For clearance checks, ``include_all_pads`` also includes pads omitted from
+    connectivity by their footprint reference or pad number, such as fiducials.
+    Each item's layer set identifies the copper layers on which it is present.
+    """
     from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
     pcb = cv.pcb
@@ -374,12 +385,12 @@ def _collect_items(cv: ConnectivityValidator, net_number: int | None) -> list[Co
         return net_number is None or net == net_number
 
     for fi, fp in enumerate(pcb.footprints):
-        if not fp.reference or fp.reference.startswith("#"):
+        if not include_all_pads and (not fp.reference or fp.reference.startswith("#")):
             continue
         for pi, pad in enumerate(fp.pads):
             if not wanted(pad.net_number):
                 continue
-            if net_number is None and (pad.number is None or pad.number == ""):
+            if not include_all_pads and net_number is None and pad.number in (None, ""):
                 continue
             geom = pad_copper_outline(pad, fp.position, fp.rotation)
             if geom is None:
@@ -585,7 +596,7 @@ def build_copper_contact_graph(
     """
     from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
-    items = _collect_items(cv, net_number)
+    items = collect_copper_items(cv, net_number)
     parent = list(range(len(items)))
 
     def find(index: int) -> int:
@@ -701,7 +712,7 @@ def _current_fill_indices(
 
     foreign = [
         item
-        for item in _collect_items(cv, None)
+        for item in collect_copper_items(cv, None)
         if item.kind in (PAD, VIA, TRACK) and item.net != net_number
     ]
     tree = STRtree([item.geom for item in foreign]) if foreign else None
@@ -831,6 +842,7 @@ __all__ = [
     "CopperContactGraph",
     "CopperItem",
     "build_copper_contact_graph",
+    "collect_copper_items",
     "describe_item",
     "pad_items_by_key",
     "pads_bonded_to_plane",

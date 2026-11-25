@@ -460,6 +460,11 @@ class StitchResult:
     # same_net_pad_gap_mm).  Dropped at the commit chokepoint; the pad is
     # recorded in ``pads_skipped`` with a ``same_net_pad_gap`` reason.
     same_net_pad_gap_filtered: int = 0
+    # Issue #9019: placements whose via annulus or emitted stub leg sat
+    # inside the fab-view slit band against same-net TRACK/VIA copper
+    # (same_net_trace_gap_mm).  Dropped at the commit chokepoint; the pad is
+    # recorded in ``pads_skipped`` with a ``same_net_trace_gap`` reason.
+    same_net_trace_gap_filtered: int = 0
     # Issue #4432: pads whose only reachable via site lands OFF the same-net
     # refilled fill (inside a keepout void / clearance pullback where the
     # pour has retreated).  A local via there would dangle (``via_dangling``)
@@ -2565,6 +2570,9 @@ def calculate_via_stub(
     same_net_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
     same_net_pad_gap_mm: float = 0.0,
     same_net_stub_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
+    same_net_tracks: list[TrackSegment] | None = None,
+    same_net_vias: list[tuple[float, float, float, int]] | None = None,
+    same_net_trace_gap_mm: float = 0.0,
 ) -> tuple[float, float, tuple[float, float] | None] | None:
     """Calculate a valid via placement position near the pad.
 
@@ -2654,6 +2662,17 @@ def calculate_via_stub(
             own pad is a copper union; a gap at/beyond the edge is not a
             finding.  ``None``/empty (or ``same_net_pad_gap_mm <= 0``)
             disables the check.
+        same_net_tracks: Issue #9019 -- same-net track segments on the
+            via's spanned layers (pre-existing plus already-placed stitch
+            legs), for the trace-population slit band of the annulus seat.
+        same_net_vias: Issue #9019 -- same-net vias as ``(x, y, size,
+            net)`` for the emitted legs' slit-band check (the annulus
+            check above seats the via only).
+        same_net_trace_gap_mm: Issue #9019 -- the ``trace_spacing`` dfm
+            detection edge (see ``_resolve_mfr_trace_gap_edge``); with the
+            #9208 two-region rule (overlap / tangent = union, gap at or
+            beyond the edge acceptable) applied to every same-net
+            track/via pair the placement can put in band.  ``<= 0`` off.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -2829,6 +2848,20 @@ def calculate_via_stub(
             ):
                 continue
 
+            # Issue #9019: fab-view slit band vs same-net TRACKS (#9208
+            # trace population).  The #8957/#9846 guards bound the pad
+            # population; nothing bounded a seat whose annulus parks a
+            # hair off a same-net track -- on board 06 seed-42 the stitch
+            # step seated a GND via 0.0290 mm from a GND escape stub
+            # ((151.29, 72.03), workflow 45193223262), neither a copper
+            # union nor clear of the 0.1016 mm detection edge.  Overlap /
+            # tangent is one copper union (the trace population's
+            # contract), a gap at/beyond the edge is not a finding.
+            if not _via_same_net_track_band_ok(
+                via_x, via_y, via_size, same_net_tracks, same_net_trace_gap_mm
+            ):
+                continue
+
             # Issue #3855: drill hole-to-hole guard.  The checks above use
             # COPPER geometry; they do not enforce the fab's drill-to-drill
             # minimum.  A stitch via dropped within ``min_hole_to_hole``
@@ -2889,6 +2922,18 @@ def calculate_via_stub(
                 # finding the annulus check never sees.
                 if trace_width > 0 and not _stub_legs_same_net_band_ok(
                     stub_path, trace_half_width, same_net_stub_pad_bboxes, same_net_pad_gap_mm
+                ):
+                    continue
+                # Issue #9019: the emitted legs also keep out of the
+                # trace-population band beside same-net tracks and vias
+                # (the pad check above sees pads only).
+                if trace_width > 0 and not _stub_legs_same_net_copper_band_ok(
+                    stub_path,
+                    trace_half_width,
+                    same_net_tracks,
+                    same_net_vias,
+                    same_net_trace_gap_mm,
+                    leg_layer=pad.layer,
                 ):
                     continue
                 corner = stub_path[1] if len(stub_path) == 3 else None
@@ -3076,6 +3121,124 @@ def _stub_legs_same_net_band_ok(
     return True
 
 
+def _same_net_trace_gap_in_band(gap: float, min_gap_mm: float) -> bool:
+    """True iff a same-net copper gap is inside the trace slit band.
+
+    Issue #9208's trace population (the Python mirror of the C++
+    ``same_net_segment_gap_in_band`` band): unlike the pad population, a
+    TANGENT seat (``gap == 0``) is one copper union, so the band's lower
+    edge is open at ``1e-9``; the upper edge is the stackup's
+    ``trace_spacing`` detection edge, at which a gap stops being a fab
+    ``physical_copper_gap`` finding.
+    """
+    return 1e-9 < gap < min_gap_mm - 1e-9
+
+
+def _via_same_net_track_band_ok(
+    via_x: float,
+    via_y: float,
+    via_size: float,
+    same_net_tracks: list[TrackSegment] | None,
+    min_gap_mm: float,
+) -> bool:
+    """True iff a via seat keeps its annulus gap to same-net tracks
+    out of the slit band (Issue #9019).
+
+    The #8957 annulus guard bounds the PAD population; this bounds the
+    TRACE population: a seat a hair off a same-net track is neither a
+    copper union nor a clear gap (board 06 seed-42: a GND stitch via at
+    (151.29, 72.03) leaving 0.0290 mm of air to the 0.2 mm GND escape
+    stub at x=150.96, on the saved Python board while the C++ board's
+    ``slits.json`` is empty).  The gap is exact point-to-segment
+    centreline distance minus both copper radii; the caller filters the
+    track pool to the via's spanned layers.  ``min_gap_mm <= 0`` or an
+    empty list disables the test.
+    """
+    if min_gap_mm <= 0 or not same_net_tracks:
+        return True
+    via_radius = via_size / 2
+    for track in same_net_tracks:
+        # Bbox screen: skip tracks whose copper cannot reach the band.
+        reach = via_radius + track.width / 2 + min_gap_mm
+        if (
+            via_x < min(track.start_x, track.end_x) - reach
+            or via_x > max(track.start_x, track.end_x) + reach
+            or via_y < min(track.start_y, track.end_y) - reach
+            or via_y > max(track.start_y, track.end_y) + reach
+        ):
+            continue
+        distance = point_to_segment_distance(
+            via_x, via_y, track.start_x, track.start_y, track.end_x, track.end_y
+        )
+        if _same_net_trace_gap_in_band(distance - via_radius - track.width / 2, min_gap_mm):
+            return False
+    return True
+
+
+def _stub_legs_same_net_copper_band_ok(
+    points: Sequence[tuple[float, float]],
+    half_width: float,
+    same_net_tracks: list[TrackSegment] | None,
+    same_net_vias: list[tuple[float, float, float, int]] | None,
+    min_gap_mm: float,
+    leg_layer: str | None = None,
+) -> bool:
+    """True iff every leg of a stub polyline keeps its copper gap to
+    same-net tracks and vias out of the slit band (Issue #9019).
+
+    The #9846 leg check bounds the pad population; this bounds the trace
+    population for the EMITTED legs: a 0.2 mm leg skirting a same-net
+    track or via inside the detection edge leaves the same
+    ``physical_copper_gap`` slit the fab reports for the annulus seat.
+    ``points`` must be the WRITTEN vertices (:func:`legalize_stub_path` /
+    :func:`trace_points`).  A leg terminating on its own via is a full
+    copper union (``gap <= 0``) and stays acceptable, as does a tangent
+    seat (#9208).  ``min_gap_mm <= 0`` or empty pools disable the test.
+
+    ``leg_layer`` is the copper layer the legs are written on: only
+    same-net tracks on that layer can form a slit against them (the pool
+    is otherwise the via's whole span, which is for the annulus).  Vias
+    carry no layer records and stay unfiltered.
+    """
+    if leg_layer is not None and same_net_tracks:
+        same_net_tracks = [t for t in same_net_tracks if t.layer == leg_layer]
+    if min_gap_mm <= 0 or not (same_net_tracks or same_net_vias):
+        return True
+    for (ax, ay), (bx, by) in zip(points, points[1:], strict=False):
+        leg_reach_lo_x = min(ax, bx) - half_width - min_gap_mm
+        leg_reach_hi_x = max(ax, bx) + half_width + min_gap_mm
+        leg_reach_lo_y = min(ay, by) - half_width - min_gap_mm
+        leg_reach_hi_y = max(ay, by) + half_width + min_gap_mm
+        for track in same_net_tracks or ():
+            # Bbox screen: skip tracks whose copper cannot reach the band.
+            if (
+                max(track.start_x, track.end_x) + track.width / 2 < leg_reach_lo_x
+                or min(track.start_x, track.end_x) - track.width / 2 > leg_reach_hi_x
+                or max(track.start_y, track.end_y) + track.width / 2 < leg_reach_lo_y
+                or min(track.start_y, track.end_y) - track.width / 2 > leg_reach_hi_y
+            ):
+                continue
+            distance = segment_to_segment_distance(
+                ax, ay, bx, by, track.start_x, track.start_y, track.end_x, track.end_y
+            )
+            if _same_net_trace_gap_in_band(distance - half_width - track.width / 2, min_gap_mm):
+                return False
+        for vx, vy, vsize, _vnet in same_net_vias or ():
+            # Bbox screen around the via's annulus.
+            reach = vsize / 2 + half_width + min_gap_mm
+            if (
+                vx + reach < leg_reach_lo_x
+                or vx - reach > leg_reach_hi_x
+                or vy + reach < leg_reach_lo_y
+                or vy - reach > leg_reach_hi_y
+            ):
+                continue
+            distance = point_to_segment_distance(vx, vy, ax, ay, bx, by)
+            if _same_net_trace_gap_in_band(distance - vsize / 2 - half_width, min_gap_mm):
+                return False
+    return True
+
+
 def calculate_dogleg_via_position(
     pad: PadInfo,
     offset: float,
@@ -3098,6 +3261,9 @@ def calculate_dogleg_via_position(
     same_net_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
     same_net_pad_gap_mm: float = 0.0,
     same_net_stub_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
+    same_net_tracks: list[TrackSegment] | None = None,
+    same_net_vias: list[tuple[float, float, float, int]] | None = None,
+    same_net_trace_gap_mm: float = 0.0,
 ) -> tuple[float, float, float, float] | None:
     """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
 
@@ -3347,6 +3513,13 @@ def calculate_dogleg_via_position(
                     ):
                         continue
 
+                    # Issue #9019: same-net TRACE slit band (see
+                    # calculate_via_stub) -- the trace population.
+                    if not _via_same_net_track_band_ok(
+                        via_x, via_y, via_size, same_net_tracks, same_net_trace_gap_mm
+                    ):
+                        continue
+
                     # Check other-net filled polygon clearance at via position
                     if other_net_filled_polygons:
                         if not _check_point_filled_polygon_clearance(
@@ -3422,6 +3595,18 @@ def calculate_dogleg_via_position(
                             same_net_pad_gap_mm,
                         ):
                             continue
+
+                    # Issue #9019: the dog-leg legs also keep out of the
+                    # trace-population band beside same-net tracks / vias.
+                    if not _stub_legs_same_net_copper_band_ok(
+                        stub_path,
+                        trace_half_width,
+                        same_net_tracks,
+                        same_net_vias,
+                        same_net_trace_gap_mm,
+                        leg_layer=pad.layer,
+                    ):
+                        continue
 
                     return (via_x, via_y, stub_path[1][0], stub_path[1][1])
 
@@ -3623,6 +3808,9 @@ def calculate_extended_escape_position(
     same_net_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
     same_net_pad_gap_mm: float = 0.0,
     same_net_stub_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
+    same_net_tracks: list[TrackSegment] | None = None,
+    same_net_vias: list[tuple[float, float, float, int]] | None = None,
+    same_net_trace_gap_mm: float = 0.0,
 ) -> tuple[float, float, list[tuple[float, float]]] | None:
     """Calculate an extended escape route for pads in dense IC pin fields.
 
@@ -3811,6 +3999,15 @@ def calculate_extended_escape_position(
         ):
             return False
 
+        # Issue #9019: same-net TRACE slit band (see calculate_via_stub)
+        # -- the trace population.  Extended escape is the strategy that
+        # seated the board 06 witness (a 1.3/1.6 mm axial leg ending in a
+        # via 0.0290 mm off a neighbouring GND escape stub).
+        if not _via_same_net_track_band_ok(
+            vx, vy, via_size, same_net_tracks, same_net_trace_gap_mm
+        ):
+            return False
+
         # Issue #4177: drill hole-to-hole guard.  The checks above use
         # COPPER geometry; a via dropped within ``min_hole_to_hole`` (drill
         # edge-to-edge) of an other-net through-hole pad / via drill trips
@@ -3900,6 +4097,17 @@ def calculate_extended_escape_position(
                             same_net_pad_gap_mm,
                         ):
                             continue
+                        # Issue #9019: the emitted legs also keep out of the
+                        # trace-population band beside same-net tracks / vias.
+                        if not _stub_legs_same_net_copper_band_ok(
+                            path_points,
+                            trace_half_width,
+                            same_net_tracks,
+                            same_net_vias,
+                            same_net_trace_gap_mm,
+                            leg_layer=pad.layer,
+                        ):
+                            continue
 
                     waypoints = [(waypoint_x, waypoint_y)]
                     return (via_x, via_y, waypoints)
@@ -3957,6 +4165,17 @@ def calculate_extended_escape_position(
                             trace_half_width,
                             same_net_stub_pad_bboxes,
                             same_net_pad_gap_mm,
+                        ):
+                            continue
+                        # Issue #9019: the emitted legs also keep out of the
+                        # trace-population band beside same-net tracks / vias.
+                        if not _stub_legs_same_net_copper_band_ok(
+                            path_points,
+                            trace_half_width,
+                            same_net_tracks,
+                            same_net_vias,
+                            same_net_trace_gap_mm,
+                            leg_layer=pad.layer,
                         ):
                             continue
 
@@ -4026,6 +4245,17 @@ def calculate_extended_escape_position(
                                 trace_half_width,
                                 same_net_stub_pad_bboxes,
                                 same_net_pad_gap_mm,
+                            ):
+                                continue
+                            # Issue #9019: the emitted legs also keep out of the
+                            # trace-population band beside same-net tracks / vias.
+                            if not _stub_legs_same_net_copper_band_ok(
+                                path_points,
+                                trace_half_width,
+                                same_net_tracks,
+                                same_net_vias,
+                                same_net_trace_gap_mm,
+                                leg_layer=pad.layer,
                             ):
                                 continue
 
@@ -4159,6 +4389,17 @@ def calculate_extended_escape_position(
                     trace_half_width,
                     same_net_stub_pad_bboxes,
                     same_net_pad_gap_mm,
+                ):
+                    continue
+                # Issue #9019: the emitted legs also keep out of the
+                # trace-population band beside same-net tracks / vias.
+                if not _stub_legs_same_net_copper_band_ok(
+                    path_points,
+                    trace_half_width,
+                    same_net_tracks,
+                    same_net_vias,
+                    same_net_trace_gap_mm,
+                    leg_layer=pad.layer,
                 ):
                     continue
                 return (via_x, via_y, path_points[1:-1])
@@ -6360,6 +6601,7 @@ def run_stitch(
     min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
     pad_edge_gap: float = 0.0,
     same_net_pad_gap_mm: float = 0.0,
+    same_net_trace_gap_mm: float = 0.0,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -6438,6 +6680,20 @@ def run_stitch(
             commit chokepoint.  A placement no acceptable strategy can seat is
             dropped with an explicit ``same_net_pad_gap`` skip reason and
             counted in ``StitchResult.same_net_pad_gap_filtered``.
+        same_net_trace_gap_mm: Issue #9019 -- the fab-view
+            trace-population detection edge (mm, ``trace_spacing`` dfm
+            entry; ``_resolve_mfr_trace_gap_edge``) applied to the
+            same-net copper the placement itself can put in a slit band:
+            the via annulus against same-net tracks (board 06 seed-42
+            witness: a GND stitch via 0.0290 mm off a GND escape stub),
+            and every emitted leg against same-net tracks and vias.  The
+            #9208 two-region rule (overlap / tangent = one copper union;
+            gap at or beyond the edge acceptable) governs; the pools cover
+            pre-existing copper plus stitch geometry placed earlier in
+            the same pass, filtered to the via's spanned layers.  A
+            placement no strategy can seat legally is dropped at the
+            commit chokepoint with an explicit ``same_net_trace_gap``
+            skip reason.  ``0.0`` (default) disables the guard.
 
     Returns:
         StitchResult with details of what was done
@@ -6588,6 +6844,56 @@ def run_stitch(
     for _net in net_numbers:
         base_index_by_net[_net] = build_track_index(base_tracks_by_net[_net])
 
+    # Issue #9019: the SAME-net pools the trace-population slit band needs
+    # (they are the complement of the obstacle pools above -- own-net
+    # copper must never block its own escape, but it DOES bound the slit
+    # band): pre-existing tracks / vias of each target net, with sizes for
+    # the vias.  Stitch geometry placed earlier in the pad loop is added
+    # per pad (see ``_attempt_placement``) so two placements of one pass
+    # co-check too -- the board 06 witness is exactly that: one pad's
+    # extended escape seated its via 0.0290 mm off another pad's
+    # already-emitted GND escape stub.
+    same_net_base_tracks: dict[int, list[TrackSegment]] = {}
+    same_net_base_vias: dict[int, list[tuple[float, float, float, int]]] = {}
+    if same_net_trace_gap_mm > 0:
+        for _net in net_numbers:
+            same_net_base_tracks[_net] = [
+                t for t in find_all_track_segments(sexp) if t.net_number == _net
+            ]
+            same_net_base_vias[_net] = [v for v in find_all_board_vias(sexp) if v[3] == _net]
+    # Copper-layer order, for slicing each via's spanned layers.
+    copper_layer_order = get_copper_layers(sexp)
+
+    def _same_net_trace_pools(
+        pad: PadInfo, via_layers: Sequence[str] | None = None
+    ) -> tuple[list[TrackSegment], list[tuple[float, float, float, int]]]:
+        """Same-net tracks on the via's PHYSICAL span + same-net vias.
+
+        The via annulus exists on every layer the barrel spans, so a
+        same-net track on any of them can form a slit against it.  A
+        standard via is written F.Cu -> B.Cu whatever plane it targets
+        (``ViaPlacement`` normalizes it), so ``via_layers=None`` means the
+        whole stack; pass an explicit ``(first, last)`` span for a micro /
+        blind via.  The leg checks narrow the track pool to the leg's own
+        layer themselves.  The vias carry no layer records
+        (``find_all_board_vias`` drops them), so the leg check sees them
+        unfiltered -- over-rejection there only walks the ladder.
+        """
+        vias_pool = same_net_base_vias.get(pad.net_number, []) + [
+            v for v in placed_stitch_vias if v[3] == pad.net_number
+        ]
+        tracks = same_net_base_tracks.get(pad.net_number, []) + [
+            t for t in placed_stitch_tracks if t.net_number == pad.net_number
+        ]
+        if via_layers is None:
+            return tracks, vias_pool
+        try:
+            idx = [copper_layer_order.index(layer) for layer in via_layers]
+        except ValueError:
+            return tracks, vias_pool
+        span = set(copper_layer_order[min(idx) : max(idx) + 1])
+        return [t for t in tracks if t.layer in span], vias_pool
+
     def _sibling_pools(
         pad: PadInfo,
     ) -> tuple[
@@ -6717,6 +7023,11 @@ def run_stitch(
         _, terminus_layer = get_via_layers(pad.layer, net_target_layers.get(pad.net_name))
         fill_gate = own_net_fill if enforce_fill_gate else []
 
+        # Issue #9019: same-net trace-population pools (pre-existing copper
+        # plus stitch geometry placed earlier in this pass, tracks filtered
+        # to the via's spanned layers).
+        pad_same_net_tracks, pad_same_net_vias = _same_net_trace_pools(pad)
+
         # Calculate via position with clearance checking against all copper,
         # including the connecting trace path from pad to via
         via_stub = calculate_via_stub(
@@ -6742,6 +7053,10 @@ def run_stitch(
             same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
             same_net_pad_gap_mm=pad_band_edge_mm,
             same_net_stub_pad_bboxes=stub_band_bboxes,
+            # Issue #9019: same-net trace slit band.
+            same_net_tracks=pad_same_net_tracks,
+            same_net_vias=pad_same_net_vias,
+            same_net_trace_gap_mm=trace_band_edge_mm,
             # Issue #6401: the site ``kct route`` reserved for this pad.
             preferred_positions=(preferred_sites or {}).get(
                 f"{pad.reference}.{pad.pad_number}", ()
@@ -6782,6 +7097,9 @@ def run_stitch(
                 same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                 same_net_pad_gap_mm=pad_band_edge_mm,
                 same_net_stub_pad_bboxes=stub_band_bboxes,
+                same_net_tracks=pad_same_net_tracks,
+                same_net_vias=pad_same_net_vias,
+                same_net_trace_gap_mm=trace_band_edge_mm,
             )
 
             if dogleg_pos is None:
@@ -6811,6 +7129,9 @@ def run_stitch(
                     same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                     same_net_pad_gap_mm=pad_band_edge_mm,
                     same_net_stub_pad_bboxes=stub_band_bboxes,
+                    same_net_tracks=pad_same_net_tracks,
+                    same_net_vias=pad_same_net_vias,
+                    same_net_trace_gap_mm=trace_band_edge_mm,
                 )
 
                 if extended_pos is None:
@@ -6839,6 +7160,9 @@ def run_stitch(
                             same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                             same_net_pad_gap_mm=pad_band_edge_mm,
                             same_net_stub_pad_bboxes=stub_band_bboxes,
+                            same_net_tracks=pad_same_net_tracks,
+                            same_net_vias=pad_same_net_vias,
+                            same_net_trace_gap_mm=trace_band_edge_mm,
                         )
                         micro_pos, micro_corner_pos = _split_via_stub(micro_stub)
                         if micro_corner_pos is not None:
@@ -6867,6 +7191,9 @@ def run_stitch(
                                 same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                                 same_net_pad_gap_mm=pad_band_edge_mm,
                                 same_net_stub_pad_bboxes=stub_band_bboxes,
+                                same_net_tracks=pad_same_net_tracks,
+                                same_net_vias=pad_same_net_vias,
+                                same_net_trace_gap_mm=trace_band_edge_mm,
                             )
                             if micro_dogleg is not None:
                                 # Use micro dogleg
@@ -6897,6 +7224,9 @@ def run_stitch(
                                 same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                                 same_net_pad_gap_mm=pad_band_edge_mm,
                                 same_net_stub_pad_bboxes=stub_band_bboxes,
+                                same_net_tracks=pad_same_net_tracks,
+                                same_net_vias=pad_same_net_vias,
+                                same_net_trace_gap_mm=trace_band_edge_mm,
                             )
                             if micro_extended is not None:
                                 return (None, None, micro_extended, True)
@@ -6954,6 +7284,10 @@ def run_stitch(
     # via landing in its own pad is a copper union (no slit) and the band has
     # nothing to reject.  ``same_net_pad_gap_mm <= 0`` stays off regardless.
     pad_band_edge_mm = same_net_pad_gap_mm if avoid_pad_overlap else 0.0
+    # Issue #9019: the trace-population band edge is independent of
+    # ``avoid_pad_overlap`` (that flag governs the via-in-pad guard); it is
+    # resolved from the ``trace_spacing`` dfm entry by the CLI.
+    trace_band_edge_mm = same_net_trace_gap_mm
 
     # #3855: the per-strategy ``calculate_via_position`` guard catches
     # straight-line placements at candidate selection, but the dog-leg /
@@ -7080,6 +7414,42 @@ def run_stitch(
                     "same_net_pad_gap: stitch stub track passes within the "
                     f"{pad_band_edge_mm:.2f}mm fab-view slit band of a "
                     "same-net SMD pad (#9846); pad relies on the plane pour "
+                    "for connectivity"
+                )
+
+        # Issue #9019: trace-population backstop.  The per-strategy checks
+        # reject band candidates so the ladder can walk to a legal
+        # alternative; this chokepoint guarantees no committed placement
+        # (micro / connectivity-fallback paths included) leaves its via
+        # annulus or an emitted leg inside the ``trace_spacing`` band
+        # beside same-net copper -- pre-existing tracks/vias plus stitch
+        # geometry placed earlier in this same pass, tracks filtered to
+        # the via's spanned layers.
+        if trace_band_edge_mm > 0:
+            chk_tracks, chk_vias = _same_net_trace_pools(placement.pad, placement.layers)
+            if not _via_same_net_track_band_ok(
+                placement.via_x, placement.via_y, placement.size, chk_tracks, trace_band_edge_mm
+            ):
+                result.same_net_trace_gap_filtered += 1
+                return (
+                    "same_net_trace_gap: stitch via annulus sits within the "
+                    f"{trace_band_edge_mm:.2f}mm fab-view slit band of a "
+                    "same-net track (#9019); pad relies on the plane pour "
+                    "for connectivity"
+                )
+            if trace is not None and not _stub_legs_same_net_copper_band_ok(
+                trace_points(trace),
+                trace.width / 2,
+                chk_tracks,
+                chk_vias,
+                trace_band_edge_mm,
+                leg_layer=placement.pad.layer,
+            ):
+                result.same_net_trace_gap_filtered += 1
+                return (
+                    "same_net_trace_gap: stitch stub track passes within the "
+                    f"{trace_band_edge_mm:.2f}mm fab-view slit band of "
+                    "same-net copper (#9019); pad relies on the plane pour "
                     "for connectivity"
                 )
         return None
@@ -7857,6 +8227,15 @@ def output_result(
             "whose annulus sat in the fab-view slit band of a same-net SMD pad "
             "(--avoid-pad-overlap; pads rely on the plane pour for connectivity)"
         )
+    if result.same_net_trace_gap_filtered:
+        # Issue #9019: the trace-population analogue -- the annulus or an
+        # emitted leg would have sat inside the fab-view error band of
+        # same-net track/via copper.
+        print(
+            f"  ~ Filtered {result.same_net_trace_gap_filtered} via placement(s) "
+            "whose copper sat in the fab-view slit band of same-net track/via "
+            "copper (pads rely on the plane pour for connectivity)"
+        )
     if result.connectivity_fallback:
         # Issue #3633: pour pads rescued by the connectivity fallback -- the
         # cross-net co-check found no clearing placement, so we placed the
@@ -7976,6 +8355,7 @@ def result_document(
         "hole_to_hole_rejected": result.hole_to_hole_rejected,
         "same_net_pad_gap_filtered": result.same_net_pad_gap_filtered,
         "pour_bonded": [{**_pad_ref(pad), "reason": reason} for pad, reason in result.pour_bonded],
+        "same_net_trace_gap_filtered": result.same_net_trace_gap_filtered,
         "connectivity_fallback": [
             {**_pad_ref(pad), "reason": reason} for pad, reason in result.connectivity_fallback
         ],
@@ -8321,11 +8701,15 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
     # keeps every via annulus out of the same-net pad slit band; None (off)
     # without ``--mfr`` or when the fab ships no table/entry for the stackup.
     pad_gap_edge: float | None = None
+    trace_gap_edge: float | None = None
     if args.mfr is not None:
         try:
             detected_layers = _count_copper_layers(pcb_path)
             min_h2h = _resolve_mfr_min_hole_to_hole(args.mfr, detected_layers, args.copper)
             pad_gap_edge = _resolve_mfr_pad_gap_edge(args.mfr, detected_layers, args.copper)
+            # Issue #9019: the trace-population detection edge for the
+            # same-net track/via slit band (0.1016 mm on jlcpcb 4layer_1oz).
+            trace_gap_edge = _resolve_mfr_trace_gap_edge(args.mfr, detected_layers, args.copper)
             pad_edge_gap = float(
                 _resolve_mfr_rules(args.mfr, detected_layers, args.copper).min_solder_mask_dam_mm
             )
@@ -8464,6 +8848,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 min_hole_to_hole=min_h2h,
                 pad_edge_gap=pad_edge_gap,
                 same_net_pad_gap_mm=pad_gap_edge or 0.0,
+                same_net_trace_gap_mm=trace_gap_edge or 0.0,
             )
 
         if not as_json:
