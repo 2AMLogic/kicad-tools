@@ -574,19 +574,7 @@ def _make_grid_synced_optimize_fn(
     grid = router.grid
     base_optimize = optimizer.optimize_segments
     by_name = {r.net_name: i for i, r in enumerate(router.existing_routes) if r.net > 0}
-    cfg = optimizer.config
-    any_pass_enabled = any(
-        (
-            cfg.merge_collinear,
-            cfg.eliminate_zigzags,
-            cfg.convert_45_corners,
-            cfg.remove_jogs,
-            cfg.compress_staircase,
-            cfg.pull_tight,
-            cfg.shorten_detours,
-        )
-    )
-    effective_widths = project_widths if (project_widths and any_pass_enabled) else None
+    effective_widths = project_widths if optimizer.config.track_pass_enabled else None
 
     def _apply_width(items, target_w: float, exclude_net: int):
         updated = []
@@ -1237,6 +1225,22 @@ def _run_optimization(args: argparse.Namespace, files: contextlib.ExitStack) -> 
         ],
         danger_clearance=mask_clearance,
     )
+
+    if project_widths and config.track_pass_enabled and zone_pcb.arcs:
+        from kicad_tools.router.optimizer.arc_widths import project_arc_width_edits
+
+        def plan_arc_widths(board_text, locked_nets):
+            return project_arc_width_edits(
+                board_text,
+                router,
+                checker,
+                project_widths,
+                net_filter=args.net,
+                net_pattern=args.net_pattern,
+                protected_nets=locked_nets | kelvin_names if kelvin is not None else locked_nets,
+            )
+
+        config.plan_arc_widths = plan_arc_widths
 
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
     # through the grid-synced wrapper (see its docstring).  optimize_pcb has no

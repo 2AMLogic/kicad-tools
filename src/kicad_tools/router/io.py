@@ -6318,11 +6318,13 @@ def load_pcb_for_routing(
         adaptive_grid=False,
     )
 
-    # The writer keeps authored track arcs even when it regenerates the straight routes.
+    # The pad-gap check must see the same retained arcs the writer will emit.
     if identity_document.arcs:
         from .optimizer.pad_slits import authored_arc_copper
 
-        router.grid.authored_arc_copper = authored_arc_copper(identity_document, net_map)
+        router.grid.authored_arc_copper = authored_arc_copper(
+            identity_document, net_map, frozenset(ignore_existing_nets or ()) - preserve_placement
+        )
 
     # Issue #10164: the fabrication gap check also grades footprint copper polygons.
     from .optimizer.pad_slits import authored_footprint_poly_copper

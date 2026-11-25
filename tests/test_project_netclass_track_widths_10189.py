@@ -253,8 +253,11 @@ class TestRouteHonoursProjectNetclassWidths:
         _route_board(pcb, ["--trace-width", "0.18", "--skip-drc"])
         assert _geometry_signature(pcb, "+5V") == before
 
+    @pytest.mark.parametrize("command", ["route", "optimize-traces"])
     @pytest.mark.parametrize("lock", ["via", "group-track", "nested-group-via"])
-    def test_reroute_preserves_locked_copper_on_stale_net(self, tmp_path: Path, lock: str) -> None:
+    def test_reroute_preserves_locked_copper_on_stale_net(
+        self, tmp_path: Path, lock: str, command: str
+    ) -> None:
         from kicad_tools.core.pcb_item_locks import BoardItemLocks
         from kicad_tools.schema.pcb import PCB
 
@@ -288,7 +291,10 @@ class TestRouteHonoursProjectNetclassWidths:
         project.write_text(json.dumps(settings))
         original = _geometry_signature(pcb, "NET_A")
 
-        _route_board(pcb, ["--skip-drc"])
+        if command == "route":
+            _route_board(pcb, ["--skip-drc"])
+        else:
+            assert optimize_cmd.main([str(pcb), "--format", "json"]) == 0
 
         saved = PCB.load(pcb)
         assert _geometry_signature(pcb, "NET_A") == original
@@ -649,3 +655,127 @@ def test_default_auto_layers_reroute_updates_edited_class_only(tmp_path: Path) -
         assert widths["Power"] == 0.34 and widths["Sense"] == 0.25
         sidecar = json.loads(pcb.with_suffix(".net_class_map.json").read_text())
         assert sidecar["VOUT"]["name"] == "Sense"
+
+
+def _arc_fixture_ids(text: str) -> str:
+    for short in ("a1", "a2", "b1"):
+        text = text.replace(f'(uuid "{short}")', f'(uuid "00000000-0000-4000-8000-{short:0>12}")')
+    return text
+
+
+def _arc_geometry(arc):
+    return arc.net_name, arc.uuid, arc.start, arc.mid, arc.end, arc.width, arc.layer
+
+
+@pytest.mark.parametrize("command", ["route", "optimize-traces"])
+@pytest.mark.parametrize("dialect", ["numeric", "name-only", "name-with-no-net"])
+def test_class_edit_on_arcs_preserves_other_copper(tmp_path, command, dialect):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+    text = _arc_fixture_ids(pcb.read_text())
+    text = text.replace("(segment (start 4 6)", "(arc (start 4 6) (mid 8 6.2)")
+    text = text.replace("(segment (start 4 18)", "(arc (start 4 18) (mid 12 18.2)")
+    if dialect != "numeric":
+        if dialect == "name-only":
+            text = text.replace('  (net 0 "")\n', "")
+        for number, name in [(1, "NET_A"), (2, "NET_B")]:
+            text = text.replace(f'  (net {number} "{name}")\n', "").replace(
+                f"(net {number})", f'(net "{name}")'
+            )
+            text = text.replace(f'(net {number} "{name}")', f'(net "{name}")')
+    pcb.write_text(text)
+    before = {arc.net_name: arc for arc in PCB.load(pcb).arcs}
+    settings = json.loads(project.read_text())
+    next(c for c in settings["net_settings"]["classes"] if c["name"] == "ClassA")["track_width"] = (
+        0.37
+    )
+    project.write_text(json.dumps(settings))
+    if command == "route":
+        _route_board(pcb, ["--skip-drc"])
+    else:
+        assert optimize_cmd.main([str(pcb), "--format", "json"]) == 0
+    board = PCB.load(pcb)
+    assert {a.width for a in [*board.arcs, *board.segments] if a.net_name == "NET_A"} == {0.37}
+    assert [_arc_geometry(a) for a in board.arcs if a.net_name == "NET_B"] == [
+        _arc_geometry(before["NET_B"])
+    ]
+    if command == "optimize-traces":
+        (arc,) = (a for a in board.arcs if a.net_name == "NET_A")
+        assert (arc.uuid, arc.start, arc.mid, arc.end) == (
+            before["NET_A"].uuid,
+            before["NET_A"].start,
+            before["NET_A"].mid,
+            before["NET_A"].end,
+        )
+
+
+@pytest.mark.parametrize("obstacle", ["pad", "arc"])
+def test_curved_width_uses_swept_copper_and_filter(tmp_path, obstacle):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+    text = _arc_fixture_ids(pcb.read_text()).replace(
+        "(segment (start 4 6)", "(arc (start 4 6) (mid 8 8)"
+    )
+    text = text.replace("(segment (start 4 18)", "(arc (start 4 18) (mid 12 18.2)")
+    if obstacle == "pad":
+        extra = (
+            '(footprint "test" (layer "F.Cu") (at 8 8.45) (fp_text reference "U5" (at 0 0)'
+            ' (layer "F.SilkS")) (pad "1" smd rect (at 0 0) (size 0.2 0.2)'
+            ' (layers "F.Cu") (net 2 "NET_B")))'
+        )
+    else:
+        # At the apex the gap is legal at .25 mm and too narrow at .8 mm.
+        extra = (
+            "(arc (start 7 8.65) (mid 8 8.45) (end 9 8.65) (width 0.2)"
+            ' (layer "F.Cu") (net 2) (uuid "00000000-0000-4000-8000-0000000000b2"))'
+        )
+    pcb.write_text(text.rstrip().removesuffix(")") + extra + ")")
+    settings = json.loads(project.read_text())
+    for cls in settings["net_settings"]["classes"]:
+        if cls["name"] in {"ClassA", "ClassB"}:
+            cls["track_width"] = 0.8
+    project.write_text(json.dumps(settings))
+    before = {_arc_geometry(arc) for arc in PCB.load(pcb).arcs}
+    assert optimize_cmd.main([str(pcb), "--net", "NET_A", "--format", "json"]) == 0
+    after = {_arc_geometry(arc) for arc in PCB.load(pcb).arcs}
+    assert after == before
+
+
+def test_arc_only_width_edit_obeys_dry_run_and_output_verifier(tmp_path, capsys):
+    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+    from kicad_tools.router.optimizer.arc_widths import ArcWidthEdit
+
+    pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+    board = _arc_fixture_ids(pcb.read_text()).replace(
+        "(segment (start 4 18)", "(arc (start 4 18) (mid 12 18.2)"
+    )
+    pcb.write_text(board)
+    settings = json.loads(project.read_text())
+    next(c for c in settings["net_settings"]["classes"] if c["name"] == "ClassB")["track_width"] = (
+        0.55
+    )
+    project.write_text(json.dumps(settings))
+    assert optimize_cmd.main([str(pcb), "--net", "NET_B", "--dry-run", "--format", "json"]) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert dry["stats"]["nets_touched"] == ["NET_B"]
+    assert pcb.read_text() == board
+
+    def plan_width(text, locked_nets):
+        start = text.index("0.4", text.index("(arc "))
+        return {"NET_B": [ArcWidthEdit(start, start + 3, 0.55)]}
+
+    config = OptimizationConfig(plan_arc_widths=plan_width)
+    seen = []
+
+    def count_findings(text):
+        widened = "(width 0.55)" in text
+        seen.append(widened)
+        return {"clearance": int(widened)}
+
+    config.output_verifiers["drc"] = count_findings
+    stats = TraceOptimizer(config).optimize_pcb(str(pcb), net_filter="NET_B")
+    assert True in seen and False in seen
+    assert stats.output_verify_rolled_back["drc"] == ["NET_B"]
+    assert pcb.read_text() == board

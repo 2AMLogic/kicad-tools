@@ -8,13 +8,14 @@ import math
 import re
 import tempfile
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from ...core.layers import kicad_read_via_layers, warn_normalised_vias
 from ..layers import Layer
 from ..primitives import Segment, Via, segment_45_enforcement_disabled
+from .arc_widths import ArcWidthEdit, apply_arc_width_edits
 from .config import NetOptimizationStats, OptimizationConfig, OptimizationStats
 from .geometry import count_corners, total_length
 
@@ -183,32 +184,14 @@ def _is_unresolvable_numeric_ref(
 resolve_block_net = _resolve_block_net
 
 
-_RE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
-_RE_LOCKED = re.compile(r"\(locked\s+yes\s*\)|\(locked\s*\)|(?<=[\s)])locked(?=[\s)])")
-
-
 def locked_segment_nets(pcb_text: str) -> set[str]:
-    """Names of nets that carry at least one locked track segment (Issue #9640).
+    """Nets whose routed copper is directly locked or belongs to a locked group."""
+    if "locked" not in pcb_text:
+        return set()
+    from kicad_tools.core.pcb_item_locks import locked_copper_nets
+    from kicad_tools.sexp import parse_string
 
-    A track locked in KiCad (``(locked yes)``, or the bare ``locked`` token of
-    older files) is how a designer marks a run as shaped on purpose.  The
-    optimizer rewrites whole chains, so it leaves every net that owns one
-    untouched rather than guessing which neighbouring segments may move.
-    """
-    net_names = parse_net_names(pcb_text)
-    name_to_id = {name: nid for nid, name in net_names.items()}
-    locked: set[str] = set()
-    # Straight tracks and copper arcs both carry the lock field.
-    for kind in ("segment", "arc"):
-        for _start, _end, block in _extract_balanced_blocks(pcb_text, kind):
-            # Quoted strings (net names, uuids) are data, never lock tokens:
-            # a net called "sense locked rail" does not lock its track.
-            if not _RE_LOCKED.search(_RE_QUOTED.sub('""', block)):
-                continue
-            resolved = _resolve_block_net(block, net_names, name_to_id)
-            if resolved and resolved[1]:
-                locked.add(resolved[1])
-    return locked
+    return locked_copper_nets(parse_string(pcb_text), parse_net_names(pcb_text))
 
 
 def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
@@ -433,7 +416,8 @@ def replace_segments(
     name_to_id = {name: nid for nid, name in net_names.items()}
     name_only = bool(_RE_NET_NAME.search(pcb_text))
 
-    # Collect net names whose segments should be replaced.
+    # Keep unchanged track blocks verbatim, including locks and KiCad metadata.
+    optimized = {net: segs for net, segs in optimized.items() if segs != original.get(net)}
     net_names_to_remove = {
         net_name for net_name, segs in original.items() if net_name in optimized and segs
     }
@@ -1102,10 +1086,19 @@ def keep_safe_regions(
     return current, kept, len(regions)
 
 
+@dataclass
+class _NetCopper:
+    """A net is accepted or rolled back with both its straight and curved copper."""
+
+    segments: list[Segment]
+    arc_edits: list[ArcWidthEdit] = field(default_factory=list)
+
+
 def _arbitrate_changed_nets(
     pcb_text: str,
-    segments_by_net: dict[str, list[Segment]],
-    optimized_segments: dict[str, list[Segment]],
+    original: dict[str, _NetCopper],
+    proposed: dict[str, _NetCopper],
+    render: Callable[[dict[str, _NetCopper]], str],
     changed_nets: list[str],
     arbiter: Callable[[str], int | None],
 ) -> set[str]:
@@ -1124,11 +1117,8 @@ def _arbitrate_changed_nets(
     kept: set[str] = set()
 
     def count(nets: list[str]) -> int | None:
-        trial = {
-            n: (optimized_segments[n] if (n in kept or n in nets) else segments_by_net[n])
-            for n in optimized_segments
-        }
-        return arbiter(replace_segments(pcb_text, segments_by_net, trial, scratch=True))
+        trial = {n: (proposed[n] if (n in kept or n in nets) else original[n]) for n in proposed}
+        return arbiter(render(trial))
 
     def solve(nets: list[str]) -> bool:
         c = count(nets)
@@ -1149,8 +1139,9 @@ def _arbitrate_changed_nets(
 
 def _verify_outputs(
     pcb_text: str,
-    segments_by_net: dict[str, list[Segment]],
-    optimized_segments: dict[str, list[Segment]],
+    original: dict[str, _NetCopper],
+    proposed: dict[str, _NetCopper],
+    render: Callable[[dict[str, _NetCopper]], str],
     verifiers: dict[str, Callable[[str], dict[str, int] | None]],
     stats: OptimizationStats,
     rolled_back_nets: set[str],
@@ -1168,16 +1159,13 @@ def _verify_outputs(
     def excess_of(counts: dict[str, int], base: dict[str, int]) -> dict[str, int]:
         return {k: n - base.get(k, 0) for k, n in counts.items() if n > base.get(k, 0)}
 
-    def text_of(segs: dict[str, list[Segment]]) -> str:
-        return replace_segments(pcb_text, segments_by_net, segs, scratch=True)
-
     for name, verify in verifiers.items():
-        changed = [n for n in optimized_segments if optimized_segments[n] != segments_by_net[n]]
+        changed = [n for n in proposed if proposed[n] != original[n]]
         if not changed:
             stats.output_checks[name] = "unchanged"
             continue
         base = verify(pcb_text)
-        cur = verify(text_of(optimized_segments)) if base is not None else None
+        cur = verify(render(proposed)) if base is not None else None
         if base is None or cur is None:
             stats.output_checks[name] = "unavailable"
             continue
@@ -1187,14 +1175,14 @@ def _verify_outputs(
             continue
 
         reverted: list[str] = []
-        final = dict(optimized_segments)
+        final = dict(proposed)
         mentioned = [n for n in changed if any(n in k for k in excess)]
         for net in mentioned + [n for n in changed if n not in mentioned]:
             if not excess:
                 break
             trial = dict(final)
-            trial[net] = segments_by_net[net]
-            t = verify(text_of(trial))
+            trial[net] = original[net]
+            t = verify(render(trial))
             if t is None:
                 continue
             t_excess = excess_of(t, base)
@@ -1210,11 +1198,11 @@ def _verify_outputs(
             # Interacting nets: rebuild from the input, admitting one changed
             # net at a time and keeping it only while the board stays clean.
             reverted = []
-            final = {n: segments_by_net[n] for n in optimized_segments}
+            final = {n: original[n] for n in proposed}
             for net in changed:
                 trial = dict(final)
-                trial[net] = optimized_segments[net]
-                t = verify(text_of(trial))
+                trial[net] = proposed[net]
+                t = verify(render(trial))
                 t_excess = excess_of(t, base) if t is not None else {"unverifiable": 1}
                 if t_excess:
                     reverted.append(net)
@@ -1224,7 +1212,7 @@ def _verify_outputs(
                 else:
                     final = trial
 
-        optimized_segments.update(final)
+        proposed.update(final)
         for net in reverted:
             if net not in rolled_back_nets:
                 stats.nets_rolled_back += 1
@@ -1299,6 +1287,8 @@ def optimize_pcb(
 
     # Parse existing segments
     segments_by_net = parse_segments(pcb_text)
+    locked_nets = locked_segment_nets(pcb_text)
+    arc_edits = config.plan_arc_widths(pcb_text, locked_nets) if config.plan_arc_widths else {}
 
     # Filter nets if requested
     if net_filter and net_pattern:
@@ -1311,6 +1301,13 @@ def optimize_pcb(
             for net, segs in segments_by_net.items()
             if fnmatch.fnmatchcase(net, net_pattern)
         }
+
+    # An arc-only net still participates in the same filters and rollback gates.
+    for net in arc_edits:
+        if (not net_filter or net == net_filter) and (
+            not net_pattern or fnmatch.fnmatchcase(net, net_pattern)
+        ):
+            segments_by_net.setdefault(net, [])
 
     # Calculate before stats
     for net, segs in segments_by_net.items():
@@ -1354,9 +1351,6 @@ def optimize_pcb(
     kelvin = KelvinBoardGate.from_pcb_text(pcb_text)
 
     vias_by_net = parse_vias(pcb_text) if net_anchors_by_name else {}
-
-    # Issue #9640: a net owning a locked track was shaped on purpose; leave it.
-    locked_nets = locked_segment_nets(pcb_text)
 
     # Optimize each net
     optimized_segments: dict[str, list[Segment]] = {}
@@ -1424,15 +1418,28 @@ def optimize_pcb(
         stats.kelvin_vetoes = kelvin.gate.vetoes
         kelvin.gate.report()
 
+    original = {net: _NetCopper(segs) for net, segs in segments_by_net.items()}
+    proposed = {
+        net: _NetCopper(segs, arc_edits.get(net, []) if net not in locked_nets else [])
+        for net, segs in optimized_segments.items()
+    }
+
+    def render(nets: dict[str, _NetCopper], *, scratch: bool = True) -> str:
+        # Arc offsets refer to the input, before straight-track serialization.
+        text = apply_arc_width_edits(
+            pcb_text, (edit for copper in nets.values() for edit in copper.arc_edits)
+        )
+        return replace_segments(
+            text, segments_by_net, {n: c.segments for n, c in nets.items()}, scratch=scratch
+        )
+
     rolled_back_nets: set[str] = set()
     net_violations: dict[str, dict[str, int]] = {}
 
     # DRC-aware per-net rollback
     if config.drc_aware and config.drc_manufacturer:
         # Build fully-optimized text and check DRC
-        full_optimized_text = replace_segments(
-            pcb_text, segments_by_net, optimized_segments, scratch=True
-        )
+        full_optimized_text = render(proposed)
         full_counts = _run_drc_error_count_by_category(
             full_optimized_text,
             manufacturer=config.drc_manufacturer,
@@ -1461,18 +1468,18 @@ def optimize_pcb(
             # For each net, test keeping its original segments while all
             # other nets remain optimized.  If reverting a net reduces errors
             # back to (or below) baseline, mark it as rolled back.
-            final_segments: dict[str, list[Segment]] = dict(optimized_segments)
+            final: dict[str, _NetCopper] = dict(proposed)
             current_counts = dict(full_counts)
 
-            for net in list(optimized_segments.keys()):
+            for net in list(proposed.keys()):
                 # Skip nets whose optimization did not change the segments
-                if optimized_segments[net] == segments_by_net[net]:
+                if proposed[net] == original[net]:
                     continue
 
                 # Try reverting this single net
-                trial = dict(final_segments)
-                trial[net] = segments_by_net[net]
-                trial_text = replace_segments(pcb_text, segments_by_net, trial, scratch=True)
+                trial = dict(final)
+                trial[net] = original[net]
+                trial_text = render(trial)
                 trial_counts = _run_drc_error_count_by_category(
                     trial_text,
                     manufacturer=config.drc_manufacturer,
@@ -1494,7 +1501,7 @@ def optimize_pcb(
                 )
                 if trial_total < full_errors or pad_shrunk:
                     # Reverting this net helped -- keep original segments
-                    final_segments[net] = segments_by_net[net]
+                    final[net] = original[net]
                     stats.nets_rolled_back += 1
                     rolled_back_nets.add(net)
                     # Issue #8207: what disappeared by reverting this net is
@@ -1530,17 +1537,15 @@ def optimize_pcb(
                     for c, n in current_counts.items()
                     if c != "__total__" and n > baseline_counts.get(c, 0)
                 }
-                changed_nets = [
-                    n for n in optimized_segments if optimized_segments[n] != segments_by_net[n]
-                ]
+                changed_nets = [n for n in proposed if proposed[n] != original[n]]
                 prev_rolled = set(rolled_back_nets)
-                final_segments = {n: segments_by_net[n] for n in optimized_segments}
+                final = {n: original[n] for n in proposed}
                 kept_counts = dict(baseline_counts)
                 for net in changed_nets:
-                    trial = dict(final_segments)
-                    trial[net] = optimized_segments[net]
+                    trial = dict(final)
+                    trial[net] = proposed[net]
                     trial_counts = _run_drc_error_count_by_category(
-                        replace_segments(pcb_text, segments_by_net, trial, scratch=True),
+                        render(trial),
                         manufacturer=config.drc_manufacturer,
                         layers=config.drc_layers,
                         copper_oz=config.drc_copper_oz,
@@ -1551,7 +1556,7 @@ def optimize_pcb(
                     if trial_counts["__total__"] <= baseline_errors and not _pad_violations_grew(
                         baseline_counts, trial_counts
                     ):
-                        final_segments[net] = optimized_segments[net]
+                        final[net] = proposed[net]
                         kept_counts = trial_counts
                         rolled_back_nets.discard(net)
                         net_violations.pop(net, None)
@@ -1571,7 +1576,7 @@ def optimize_pcb(
                 if (
                     config.drc_arbiter is not None
                     and changed_nets
-                    and not any(final_segments[n] != segments_by_net[n] for n in final_segments)
+                    and not any(final[n] != original[n] for n in final)
                 ):
                     # Issue #8367: the in-process referee rejected every
                     # changed net, which is the signature of a rule-model gap
@@ -1579,8 +1584,9 @@ def optimize_pcb(
                     # Arbitrate with the external checker instead.
                     arb_kept = _arbitrate_changed_nets(
                         pcb_text,
-                        segments_by_net,
-                        optimized_segments,
+                        original,
+                        proposed,
+                        render,
                         changed_nets,
                         config.drc_arbiter,
                     )
@@ -1588,15 +1594,13 @@ def optimize_pcb(
                         before_arb = set(rolled_back_nets)
                         for n in changed_nets:
                             if n in arb_kept:
-                                final_segments[n] = optimized_segments[n]
+                                final[n] = proposed[n]
                                 rolled_back_nets.discard(n)
                                 net_violations.pop(n, None)
                         stats.nets_rolled_back -= len(before_arb - rolled_back_nets)
                         # Report the in-process count of what is actually kept.
                         full_errors = _run_drc_error_count_by_category(
-                            replace_segments(
-                                pcb_text, segments_by_net, final_segments, scratch=True
-                            ),
+                            render(final),
                             manufacturer=config.drc_manufacturer,
                             layers=config.drc_layers,
                             copper_oz=config.drc_copper_oz,
@@ -1604,14 +1608,14 @@ def optimize_pcb(
                             project_path=config.drc_project_path,
                             mask_screen=mask_screen,
                         )["__total__"]
-                if not any(final_segments[n] != segments_by_net[n] for n in final_segments):
+                if not any(final[n] != original[n] for n in final):
                     stats.drc_failsafe_reverted = True
                     stats.drc_failsafe_rules = above_rules
                     # Output is the untouched input text (see below), so the
                     # count *is* the baseline.
                     full_errors = baseline_errors
 
-            optimized_segments = final_segments
+            proposed = final
 
         stats.drc_errors_after = full_errors
 
@@ -1619,8 +1623,9 @@ def optimize_pcb(
     if config.output_verifiers:
         _verify_outputs(
             pcb_text,
-            segments_by_net,
-            optimized_segments,
+            original,
+            proposed,
+            render,
             config.output_verifiers,
             stats,
             rolled_back_nets,
@@ -1631,14 +1636,16 @@ def optimize_pcb(
     stats.segments_after = 0
     stats.corners_after = 0
     stats.length_after = 0.0
-    for net, segs in optimized_segments.items():
+    for net, copper in proposed.items():
+        segs = copper.segments
         stats.segments_after += len(segs)
         stats.corners_after += count_corners(segs, config.tolerance)
         stats.length_after += total_length(segs)
 
     # Issue #7065: per-net rows, built from the final (post-rollback) dict.
     for net, before_segs in segments_by_net.items():
-        after_segs = optimized_segments.get(net, before_segs)
+        after = proposed[net]
+        after_segs = after.segments
         stats.per_net.append(
             NetOptimizationStats(
                 net=net,
@@ -1648,20 +1655,20 @@ def optimize_pcb(
                 length_after=total_length(after_segs),
                 rolled_back=net in rolled_back_nets,
                 new_violations=net_violations.get(net, {}),
-                changed=not _same_segments(after_segs, before_segs),
+                changed=bool(after.arc_edits) or not _same_segments(after_segs, before_segs),
             )
         )
-        if net not in rolled_back_nets and after_segs != before_segs:
+        if net not in rolled_back_nets and after != original[net]:
             stats.nets_kept += 1
 
     # Generate output (only if not dry run)
     if not dry_run:
-        if all(optimized_segments.get(n) == segs for n, segs in segments_by_net.items()):
+        if proposed == original:
             # Nothing changed (e.g. the failsafe reverted everything): write
             # the input verbatim instead of re-serialising every segment.
             output_text = pcb_text
         else:
-            output_text = replace_segments(pcb_text, segments_by_net, optimized_segments)
+            output_text = render(proposed, scratch=False)
         out_path = output_path or pcb_path
         Path(out_path).write_text(output_text)
 
