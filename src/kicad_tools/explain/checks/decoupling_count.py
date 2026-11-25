@@ -11,8 +11,12 @@ that has capacitors elsewhere, is invisible.
 :class:`DecouplingCountCheck` closes that gap.  The cap-to-pin association is
 **PCB-geometric and local to this check**: each decoupling capacitor on a power
 net is assigned to the nearest power pad of an IC on the same net, if that pad
-is within :data:`DEFAULT_RADIUS_MM`.  Schematic-based association (issue
-#10131 / #10140) is deliberately not built here; when it lands it replaces
+is within :data:`DEFAULT_RADIUS_MM`.  When a pin is left with no assigned
+capacitor on an otherwise-decoupled rail, the finding distinguishes a nearby
+same-rail capacitor that was assigned to another closer (or tie-broken) pin
+from a pin whose nearest same-rail capacitor really sits outside
+:data:`DEFAULT_RADIUS_MM`.  Schematic-based association (issue #10131 / #10140)
+is deliberately not built here; when it lands it replaces
 :meth:`DecouplingCountCheck.pin_inventory`'s assignment step.
 
 The full per-pin tally -- including pins that are clean, pins with no capacitor,
@@ -73,9 +77,27 @@ class PinDecoupling:
     #: Distance (mm) to the nearest decoupling cap on the net, whether or not
     #: it is associated with this pin; None when the rail has none.
     nearest_rail_cap_mm: float | None = None
+    #: Reference designator and value of the nearest decoupling cap on the net,
+    #: and the ``(ic_reference, pad_number)`` it was assigned to (None if
+    #: unassigned because no power pad was within radius).
+    nearest_rail_cap_ref: str | None = None
+    nearest_rail_cap_value: str | None = None
+    nearest_rail_cap_assigned_to: tuple[str, str] | None = None
 
     def to_dict(self) -> dict[str, object]:
         """JSON-serialisable form of the inventory row."""
+        nearest: dict[str, object] | None = None
+        if self.nearest_rail_cap_ref is not None and self.nearest_rail_cap_mm is not None:
+            nearest = {
+                "ref": self.nearest_rail_cap_ref,
+                "value": self.nearest_rail_cap_value,
+                "distance_mm": round(self.nearest_rail_cap_mm, 2),
+                "assigned_to": (
+                    _format_owner(self.nearest_rail_cap_assigned_to)
+                    if self.nearest_rail_cap_assigned_to is not None
+                    else None
+                ),
+            }
         return {
             "ic": self.ic_reference,
             "pin": self.pad_number,
@@ -86,6 +108,7 @@ class PinDecoupling:
                 {"ref": c.reference, "value": c.value, "distance_mm": c.distance_mm}
                 for c in self.caps
             ],
+            "nearest_rail_cap": nearest,
         }
 
     def same_value_groups(self) -> dict[str, list[AssignedCap]]:
@@ -96,6 +119,25 @@ class PinDecoupling:
             key = f"{farads:.4g}F" if farads is not None else cap.value.strip().lower()
             groups.setdefault(key, []).append(cap)
         return groups
+
+
+def _format_owner(owner: tuple[str, str] | None) -> str:
+    """Format an ``(ic_reference, pad_number)`` owner tuple as ``IC.PAD``."""
+    if owner is None:
+        return "another pin"
+    return f"{owner[0]}.{owner[1]}"
+
+
+def _format_distance(distance_mm: float, radius_mm: float) -> tuple[str, float]:
+    """Format a measured distance so a value just above ``radius_mm`` never rounds onto it."""
+    rounded_1 = round(distance_mm, 1)
+    if distance_mm > radius_mm and rounded_1 <= radius_mm:
+        rounded_2 = round(distance_mm, 2)
+        if rounded_2 > radius_mm:
+            return f"{rounded_2:.2f}", rounded_2
+        rounded_3 = round(distance_mm, 3)
+        return f"{rounded_3:.3f}", rounded_3
+    return f"{rounded_1:.1f}", rounded_1
 
 
 def _pad_position(fp: Footprint, pad: Pad) -> tuple[float, float]:
@@ -169,16 +211,9 @@ class DecouplingCountCheck:
         for cap, net in caps:
             rail_caps.setdefault(net, []).append(cap)
 
-        for net, entries in by_net.items():
-            for pin, _ in entries:
-                if net in rail_caps:
-                    pin.rail_has_caps = True
-                    pin.nearest_rail_cap_mm = min(
-                        distance(cap.position, pin.position) for cap in rail_caps[net]
-                    )
-
         # Assign each cap to its nearest power pad on the same net; ties break
         # on (IC reference, pad number) so the result is deterministic.
+        cap_owner: dict[int, tuple[str, str]] = {}
         for cap, net in caps:
             best: tuple[float, str, str, PinDecoupling] | None = None
             for pin, _ in by_net.get(net, []):
@@ -187,7 +222,23 @@ class DecouplingCountCheck:
                 if best is None or cand[:3] < best[:3]:
                     best = cand
             if best is not None and best[0] <= self.radius_mm:
-                best[3].caps.append(AssignedCap(cap.reference, cap.value, round(best[0], 2)))
+                owner = best[3]
+                owner.caps.append(AssignedCap(cap.reference, cap.value, round(best[0], 2)))
+                cap_owner[id(cap)] = (owner.ic_reference, owner.pad_number)
+
+        for net, entries in by_net.items():
+            if net not in rail_caps:
+                continue
+            for pin, _ in entries:
+                nearest_d, _, nearest_cap = min(
+                    (distance(cap.position, pin.position), cap.reference, cap)
+                    for cap in rail_caps[net]
+                )
+                pin.rail_has_caps = True
+                pin.nearest_rail_cap_mm = nearest_d
+                pin.nearest_rail_cap_ref = nearest_cap.reference
+                pin.nearest_rail_cap_value = nearest_cap.value
+                pin.nearest_rail_cap_assigned_to = cap_owner.get(id(nearest_cap))
 
         for pin in pins:
             pin.caps.sort(key=lambda c: (c.distance_mm, c.reference))
@@ -203,17 +254,140 @@ class DecouplingCountCheck:
         mistakes: list[Mistake] = []
         inventory = self.pin_inventory(pcb)
 
-        # One "none nearby" finding per (IC, net) listing every uncovered pin:
-        # the waiver key is built from the components and nets, so per-pin
-        # findings on one IC and rail would share a key.  A rail with no
-        # decoupling at all is MissingDecouplingCapCheck's, not reported here.
-        uncovered: dict[tuple[str, str], list[PinDecoupling]] = {}
+        # Uncovered pins on an otherwise-decoupled rail fall into two distinct
+        # situations:
+        # 1. A same-rail capacitor sits within ``radius_mm`` of the pin, but
+        #    the geometric rule assigned it to another closer (or tie-broken)
+        #    power pin.  Saying "no decoupling capacitor within 5mm" here
+        #    contradicts the measured distance.
+        # 2. Every decoupling capacitor on the rail really is outside
+        #    ``radius_mm``.
+        # Each situation is grouped once per (IC, net) so per-pin findings do
+        # not collide on the waiver key; the nearby-cap case includes the
+        # nearby capacitor reference(s) in ``components`` so the two shapes
+        # stay distinct even when one IC has both on the same rail.  A rail
+        # with no decoupling at all is MissingDecouplingCapCheck's.
+        unassigned_nearby: dict[tuple[str, str], list[PinDecoupling]] = {}
+        none_within_radius: dict[tuple[str, str], list[PinDecoupling]] = {}
         for pin in inventory:
-            if not pin.caps and pin.rail_has_caps:
-                uncovered.setdefault((pin.ic_reference, pin.net_name), []).append(pin)
-        for (ic_ref, net), pins in uncovered.items():
+            if pin.caps or not pin.rail_has_caps:
+                continue
+            if pin.nearest_rail_cap_mm is not None and pin.nearest_rail_cap_mm <= self.radius_mm:
+                unassigned_nearby.setdefault((pin.ic_reference, pin.net_name), []).append(pin)
+            else:
+                none_within_radius.setdefault((pin.ic_reference, pin.net_name), []).append(pin)
+
+        for (ic_ref, net), pins in unassigned_nearby.items():
             pin_list = ", ".join(p.pad_number for p in pins)
-            nearest = min(p.nearest_rail_cap_mm or 0.0 for p in pins)
+            noun = "pin" if len(pins) == 1 else "pins"
+            verb = "has" if len(pins) == 1 else "have"
+            nearest = min(p.nearest_rail_cap_mm for p in pins if p.nearest_rail_cap_mm is not None)
+            nearest_str, nearest_val = _format_distance(nearest, self.radius_mm)
+            nearby_cap_refs = list(
+                dict.fromkeys(p.nearest_rail_cap_ref for p in pins if p.nearest_rail_cap_ref)
+            )
+            distinct_pairs = list(
+                dict.fromkeys(
+                    (
+                        p.nearest_rail_cap_ref,
+                        p.nearest_rail_cap_value,
+                        p.nearest_rail_cap_assigned_to,
+                    )
+                    for p in pins
+                )
+            )
+            if len(distinct_pairs) == 1:
+                cap_ref, cap_val, owner = distinct_pairs[0]
+                owner_str = _format_owner(owner)
+                explanation = (
+                    f"{ic_ref} {noun} {pin_list} ({net}) {verb} no separately "
+                    f"assigned decoupling capacitor: {cap_ref} ({cap_val}) is "
+                    f"{nearest_str}mm away on {net} (within {self.radius_mm:g}mm), "
+                    f"but was assigned to {owner_str}. Each supply pin should "
+                    "have its own dedicated bypass capacitor unless nearby pins "
+                    "intentionally share one."
+                )
+                cap_article = (
+                    "a dedicated decoupling capacitor"
+                    if len(pins) == 1
+                    else "dedicated decoupling capacitors"
+                )
+                fix_suggestion = (
+                    f"Add {cap_article} (typically 100nF, or per the datasheet) "
+                    f"for {ic_ref} {noun} {pin_list} rather than relying solely "
+                    f"on {cap_ref} (assigned to {owner_str}), or waive this "
+                    f"advisory if sharing {cap_ref} is intentional."
+                )
+            else:
+                per_pin = "; ".join(
+                    f"pin {p.pad_number}: {p.nearest_rail_cap_ref} "
+                    f"({p.nearest_rail_cap_value}, "
+                    f"{_format_distance(p.nearest_rail_cap_mm or 0.0, self.radius_mm)[0]}mm "
+                    f"away, assigned to {_format_owner(p.nearest_rail_cap_assigned_to)})"
+                    for p in pins
+                )
+                owners_summary = ", ".join(
+                    dict.fromkeys(
+                        f"{p.nearest_rail_cap_ref} assigned to "
+                        f"{_format_owner(p.nearest_rail_cap_assigned_to)}"
+                        for p in pins
+                        if p.nearest_rail_cap_ref
+                    )
+                )
+                explanation = (
+                    f"{ic_ref} {noun} {pin_list} ({net}) {verb} no separately "
+                    f"assigned decoupling capacitor: nearby {net} capacitors "
+                    f"within {self.radius_mm:g}mm were assigned to other pins "
+                    f"({per_pin}). Each supply pin should have its own dedicated "
+                    "bypass capacitor unless nearby pins intentionally share one."
+                )
+                fix_suggestion = (
+                    "Add dedicated decoupling capacitors (typically 100nF, or "
+                    f"per the datasheet) for {ic_ref} {noun} {pin_list} rather "
+                    f"than relying solely on capacitors assigned to other pins "
+                    f"({owners_summary}), or waive this advisory if sharing "
+                    "those capacitors is intentional."
+                )
+            mistakes.append(
+                Mistake(
+                    category=MistakeCategory.DECOUPLING,
+                    severity="warning",
+                    title="Power pin has no separately assigned decoupling capacitor",
+                    components=[ic_ref, net, *nearby_cap_refs],
+                    location=pins[0].position,
+                    explanation=explanation,
+                    fix_suggestion=fix_suggestion,
+                    learn_more_url="docs/mistakes/bypass-cap-placement.md",
+                    measurements={
+                        "pin_count": float(len(pins)),
+                        "nearest_rail_cap_mm": nearest_val,
+                    },
+                )
+            )
+
+        for (ic_ref, net), pins in none_within_radius.items():
+            pin_list = ", ".join(p.pad_number for p in pins)
+            nearest_pin = min(
+                pins,
+                key=lambda p: (
+                    p.nearest_rail_cap_mm if p.nearest_rail_cap_mm is not None else float("inf"),
+                    p.pad_number,
+                ),
+            )
+            nearest = nearest_pin.nearest_rail_cap_mm or 0.0
+            nearest_str, nearest_val = _format_distance(nearest, self.radius_mm)
+            nearest_cap_note = (
+                f"nearest is {nearest_pin.nearest_rail_cap_ref} at {nearest_str}mm away"
+                if nearest_pin.nearest_rail_cap_ref
+                else f"nearest is {nearest_str}mm away"
+            )
+            if (
+                nearest_pin.nearest_rail_cap_ref
+                and nearest_pin.nearest_rail_cap_assigned_to is not None
+            ):
+                nearest_cap_note += (
+                    f", assigned to {_format_owner(nearest_pin.nearest_rail_cap_assigned_to)}"
+                )
             noun = "pin" if len(pins) == 1 else "pins"
             mistakes.append(
                 Mistake(
@@ -226,20 +400,18 @@ class DecouplingCountCheck:
                         f"{ic_ref} {noun} {pin_list} ({net}) "
                         f"{'has' if len(pins) == 1 else 'have'} no decoupling "
                         f"capacitor within {self.radius_mm:g}mm, although other "
-                        f"capacitors decouple {net} (nearest is {nearest:.1f}mm "
-                        "away). Each supply pin should have its own local bypass "
-                        "capacitor."
+                        f"capacitors decouple {net} ({nearest_cap_note}). Each "
+                        "supply pin should have its own local bypass capacitor."
                     ),
                     fix_suggestion=(
                         f"Place a decoupling capacitor (typically 100nF, or per "
                         f"the datasheet) within {self.radius_mm:g}mm of "
-                        f"{ic_ref} {noun} {pin_list}, or confirm the {noun} "
-                        "intentionally share a nearby pin's capacitor."
+                        f"{ic_ref} {noun} {pin_list}."
                     ),
                     learn_more_url="docs/mistakes/bypass-cap-placement.md",
                     measurements={
                         "pin_count": float(len(pins)),
-                        "nearest_rail_cap_mm": round(nearest, 1),
+                        "nearest_rail_cap_mm": nearest_val,
                     },
                 )
             )
@@ -274,7 +446,7 @@ class DecouplingCountCheck:
                         learn_more_url="docs/mistakes/bypass-cap-placement.md",
                         measurements={
                             "cap_count": float(len(caps)),
-                            "nearest_mm": min(c.distance_mm for c in caps),
+                            "nearest_mm": round(min(c.distance_mm for c in caps), 1),
                         },
                     )
                 )
