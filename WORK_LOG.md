@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-25
 
+- **PR #10186**: feat(check): add bypass_distance rule using the schematic cap-to-pin association
+- **Issue #10141** (closed): check: bypass_distance rule using schematic cap-pin association
 - **PR #10182**: fix: name THT/SMD pads, load JLCPCB limits, gate assembly warnings
 - **PR #10196**: fix(drc): extend a pad entry to clear its fixed via lead
 - **Issue #10172** (closed): Name both pads in JLCPCB THT-to-SMD findings, source limits from the profile, and gate assembly warnings
