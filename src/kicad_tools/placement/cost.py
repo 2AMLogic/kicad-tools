@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Sequence
@@ -69,6 +70,21 @@ class PlacementCostConfig:
             pulls caps onto their pins but never gates feasibility. Only fires
             when decoupling groups are passed to :func:`evaluate_placement`;
             ``0.0`` disables it.
+        group_cohesion_weight: Weight for the schematic-sheet cohesion term
+            (issue #10146): per-sheet spread around the centroid, reusing the
+            :func:`compute_domain_cohesion` formulation. Soft, like cohesion:
+            it packs the footprints a schematic draws on one sheet into a
+            compact zone but never gates feasibility. Only fires when a
+            ``ref -> sheet_path`` map with more than one distinct sheet is
+            passed to :func:`evaluate_placement` (sheets with fewer than three
+            members are skipped); ``0.0`` disables it. Default ``1.0``, kept
+            small relative to the hard-constraint weights like
+            ``cohesion_weight``.
+        group_order_weight: Weight for the schematic-order term (issue
+            #10146): within a sheet, same-prefix parts are penalised when
+            their order along the group's dominant axis disagrees with their
+            schematic (reference/annotation) order. Soft like
+            ``group_cohesion``; same map/no-op contract. Default ``1.0``.
         mode: Scoring mode (weighted_sum or lexicographic).
     """
 
@@ -82,6 +98,8 @@ class PlacementCostConfig:
     creepage_weight: float = 1e5
     cohesion_weight: float = 1.0
     decoupling_weight: float = 2.0
+    group_cohesion_weight: float = 1.0
+    group_order_weight: float = 1.0
     mode: CostMode = CostMode.WEIGHTED_SUM
 
 
@@ -126,6 +144,16 @@ class CostBreakdown:
         decoupling: Raw decoupling-affinity cost (mm) -- the summed distance
             from each decoupling cap's supply pad to its assigned IC supply
             pin (issue #6020). Zero when no decoupling groups were supplied.
+        group_cohesion: Raw schematic-sheet cohesion penalty (mm) -- the sum,
+            across every sheet with three or more placed members, of each
+            member's distance to its sheet centroid (issue #10146). Zero when
+            no ``ref -> sheet_path`` map was supplied or the design has a
+            single sheet.
+        group_order: Raw schematic-order penalty (mm) -- the summed depth of
+            the order inversions between same-prefix parts of a sheet along
+            the group's dominant axis, relative to their schematic
+            (reference/annotation) order (issue #10146). Zero when no map was
+            supplied or the design has a single sheet.
     """
 
     wirelength: float = 0.0
@@ -138,6 +166,8 @@ class CostBreakdown:
     creepage: float = 0.0
     cohesion: float = 0.0
     decoupling: float = 0.0
+    group_cohesion: float = 0.0
+    group_order: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -700,6 +730,23 @@ def compute_creepage_violation(
     return total
 
 
+def _centroid_spread(positions: Sequence[tuple[float, float]], start: float = 0.0) -> float:
+    """Sum of member distances to the centroid of *positions* (mm), added to *start*.
+
+    *start* lets a caller keep one running accumulator across several groups,
+    preserving the original float summation order.
+
+    The radius-of-gyration-style spread shared by the domain-cohesion and
+    sheet-cohesion terms (issue #10146). Fewer than two members yield ``0.0``.
+    """
+    n = len(positions)
+    if n < 2:
+        return start
+    cx = sum(x for x, _ in positions) / n
+    cy = sum(y for _, y in positions) / n
+    return float(sum((((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 for x, y in positions), start))
+
+
 def compute_domain_cohesion(
     placements: Sequence[ComponentPlacement],
     ref_domains: dict[str, str] | None,
@@ -756,14 +803,182 @@ def compute_domain_cohesion(
 
     total = 0.0
     for positions in by_domain.values():
-        n = len(positions)
-        if n < 2:
-            continue
-        cx = sum(x for x, _ in positions) / n
-        cy = sum(y for _, y in positions) / n
-        for x, y in positions:
-            total += ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+        total = _centroid_spread(positions, total)
+    return total
 
+
+# Minimum members for a schematic sheet to count as a group (issue #10146):
+# a two-part "group" carries no layout information, and a whole-board group
+# (single-sheet design) must leave the objective untouched.
+_SHEET_GROUP_MIN_MEMBERS = 3
+
+_REF_SPLIT_RE = re.compile(r"^([A-Za-z]+)(\d*)(.*)$")
+
+
+def _ref_prefix(reference: str) -> str:
+    """The reference's leading alpha prefix (``"R10"`` -> ``"R"``)."""
+    match = _REF_SPLIT_RE.match(reference)
+    return match.group(1) if match else reference
+
+
+def _ref_order_key(reference: str) -> tuple[str, int, str]:
+    """Natural (schematic/annotation) order key for a reference.
+
+    ``R2`` sorts before ``R10`` (numeric suffix compared as an integer); a
+    missing suffix sorts first; the trailing remainder (e.g. gate letters)
+    breaks any remaining tie.
+    """
+    match = _REF_SPLIT_RE.match(reference)
+    if not match:
+        return (reference, -1, "")
+    prefix, digits, rest = match.groups()
+    return (prefix, int(digits) if digits else -1, rest)
+
+
+def _sheet_members(
+    placements: Sequence[ComponentPlacement],
+    ref_sheets: dict[str, str] | None,
+) -> dict[str, list[ComponentPlacement]] | None:
+    """Group *placements* by sheet, or ``None`` when the term must not fire.
+
+    Returns ``None`` when *ref_sheets* is empty or the map spans fewer than
+    two distinct sheets (a single-sheet design is one whole-board group and
+    carries no ordering/clustering information). Components absent from the
+    map are domain-less analogues: skipped.
+    """
+    if not ref_sheets:
+        return None
+    if len(set(ref_sheets.values())) < 2:
+        return None
+    by_sheet: dict[str, list[ComponentPlacement]] = {}
+    for p in placements:
+        sheet = ref_sheets.get(p.reference)
+        if sheet is None:
+            continue
+        by_sheet.setdefault(sheet, []).append(p)
+    return by_sheet
+
+
+def compute_sheet_cohesion(
+    placements: Sequence[ComponentPlacement],
+    ref_sheets: dict[str, str] | None,
+    footprint_sizes: dict[str, tuple[float, float]] | None = None,
+) -> float:
+    """Compute the schematic-sheet cohesion penalty (issue #10146).
+
+    The schematic-group *attraction* term. A group is the set of footprints
+    whose symbols sit on the same schematic sheet (*ref_sheets*, from the
+    netlist's ``sheetpath`` node). For each sheet with
+    ``_SHEET_GROUP_MIN_MEMBERS`` or more placed members, the centroid of the
+    member positions is computed and each member's Euclidean distance to that
+    centroid is summed -- the same :func:`_centroid_spread` formulation as
+    :func:`compute_domain_cohesion`, partitioned by sheet instead of voltage
+    domain. Minimizing it packs each sheet's circuit into a compact zone.
+
+    Single-sheet designs (one whole-board group) are a no-op, and so are an
+    empty or ``None`` map -- keeping the sheet-blind objective byte-identical
+    (regression-safe opt-in, mirroring the HV terms). Sheets with fewer than
+    three members and components absent from the map contribute zero.
+
+    .. note::
+        This is a **soft** preference, not a feasibility gate. Like cohesion
+        it is deliberately excluded from the ``is_feasible`` conjunction in
+        :func:`evaluate_placement` and from the infeasible branch of the
+        lexicographic score.
+
+    Args:
+        placements: Current component positions.
+        ref_sheets: Map from component reference to its schematic sheet path.
+            ``None`` or empty disables the term.
+        footprint_sizes: Accepted for signature parity with the other cost
+            terms; unused (cohesion is centroid-of-positions based).
+
+    Returns:
+        Sum of per-sheet spread penalties (mm). Zero when the term is dormant.
+    """
+    del footprint_sizes  # unused: cohesion is measured between footprint centres
+    by_sheet = _sheet_members(placements, ref_sheets)
+    if by_sheet is None:
+        return 0.0
+
+    return sum(
+        _centroid_spread([(p.x, p.y) for p in members])
+        for members in by_sheet.values()
+        if len(members) >= _SHEET_GROUP_MIN_MEMBERS
+    )
+
+
+def compute_sheet_order(
+    placements: Sequence[ComponentPlacement],
+    ref_sheets: dict[str, str] | None,
+    footprint_sizes: dict[str, tuple[float, float]] | None = None,
+) -> float:
+    """Compute the schematic-order penalty within sheets (issue #10146).
+
+    Within each sheet (see :func:`compute_sheet_cohesion` for the group
+    definition), parts sharing a reference prefix are ordered by their
+    schematic (reference/annotation) order -- ``R2`` before ``R10`` -- and
+    their positions are read along that prefix group's **dominant axis** (the
+    axis of the *prefix group's* larger bounding-box extent, not the sheet's). Every pair placed in the
+    opposite order along that axis contributes the depth of the inversion
+    (mm): a piecewise-linear penalty (continuous for a fixed axis; the axis pick
+    flips when a prefix group's x-extent crosses its y-extent, so it is not
+    continuous overall -- tolerable for derivative-free CMA-ES) that is zero for a correctly
+    ordered group however far apart it is spread, and grows with how badly
+    the placement disagrees with the schematic's reading order.
+
+    The same no-op contract as :func:`compute_sheet_cohesion`: ``None``/empty
+    map, a single sheet, sheets with fewer than three members, and components
+    absent from the map all contribute zero. Prefix groups with a single
+    member carry no order and contribute nothing.
+
+    .. note::
+        Soft preference only: never part of ``is_feasible`` nor of the
+        infeasible branch of the lexicographic score.
+
+    Args:
+        placements: Current component positions.
+        ref_sheets: Map from component reference to its schematic sheet path.
+            ``None`` or empty disables the term.
+        footprint_sizes: Accepted for signature parity with the other cost
+            terms; unused (order is read between footprint centres).
+
+    Returns:
+        Sum over prefix groups of the mean pairwise inversion depth (mm). Zero
+        when the term is dormant.
+    """
+    del footprint_sizes  # unused: order is read between footprint centres
+    by_sheet = _sheet_members(placements, ref_sheets)
+    if by_sheet is None:
+        return 0.0
+
+    total = 0.0
+    for members in by_sheet.values():
+        if len(members) < _SHEET_GROUP_MIN_MEMBERS:
+            continue
+        by_prefix: dict[str, list[tuple[tuple[str, int, str], float, float]]] = {}
+        for p in members:
+            by_prefix.setdefault(_ref_prefix(p.reference), []).append(
+                (_ref_order_key(p.reference), p.x, p.y)
+            )
+        for group in by_prefix.values():
+            if len(group) < 2:
+                continue
+            group.sort(key=lambda m: m[0])
+            xs = [x for _, x, _ in group]
+            ys = [y for _, _, y in group]
+            axis_is_x = (max(xs) - min(xs)) >= (max(ys) - min(ys))
+            coords = [x if axis_is_x else y for _, x, y in group]
+            group_total = 0.0
+            for i in range(len(coords)):
+                for j in range(i + 1, len(coords)):
+                    inversion = coords[i] - coords[j]
+                    if inversion > 0.0:
+                        group_total += inversion
+            # Mean over the group's pairs, so the term is O(mm) in the bucket
+            # size like the other soft terms instead of O(k^2 * mm).
+            n = len(coords)
+            total += group_total / (n * (n - 1) / 2)
     return total
 
 
@@ -782,6 +997,7 @@ def evaluate_placement(
     pad_positions: Mapping[tuple[str, str], tuple[float, float]] | None = None,
     decoupling_groups: Sequence[DecouplingGroup] | None = None,
     decoupling_pad_positions: Mapping[tuple[str, str], tuple[float, float]] | None = None,
+    ref_sheets: dict[str, str] | None = None,
 ) -> PlacementScore:
     """Evaluate a placement configuration and return a composite score.
 
@@ -837,6 +1053,14 @@ def evaluate_placement(
             Kept separate from *pad_positions* so the decoupling term can be
             pad-accurate while wirelength stays centre-anchored. Falls back to
             *pad_positions*, then to component centres.
+        ref_sheets: Optional map from component reference to its schematic
+            sheet path (from the netlist's ``sheetpath`` node). Enables the
+            soft schematic-group terms (issue #10146): per-sheet cohesion
+            (:func:`compute_sheet_cohesion`) and within-sheet schematic order
+            (:func:`compute_sheet_order`), weighted by
+            ``config.group_cohesion_weight`` / ``config.group_order_weight``.
+            ``None`` (the default), an empty map, and a single-sheet design
+            all keep the objective byte-identical to today.
 
     Returns:
         PlacementScore with total score, per-component breakdown, and
@@ -895,6 +1119,18 @@ def evaluate_placement(
             decoupling_pad_positions if decoupling_pad_positions is not None else pad_positions,
         )
 
+    # Schematic-sheet grouping (issue #10146): keep the parts a sheet draws
+    # together and in schematic order where constraints allow. Both terms are
+    # SOFT preferences like cohesion -- computed here and added to the score,
+    # but deliberately absent from the is_feasible gate below -- and both are
+    # dormant without a multi-sheet ref -> sheet_path map, keeping the
+    # sheet-blind objective byte-identical.
+    group_cohesion = 0.0
+    group_order = 0.0
+    if ref_sheets:
+        group_cohesion = compute_sheet_cohesion(placements, ref_sheets)
+        group_order = compute_sheet_order(placements, ref_sheets)
+
     breakdown = CostBreakdown(
         wirelength=wirelength,
         overlap=overlap,
@@ -906,11 +1142,14 @@ def evaluate_placement(
         creepage=creepage,
         cohesion=cohesion,
         decoupling=decoupling,
+        group_cohesion=group_cohesion,
+        group_order=group_order,
     )
 
-    # NOTE: cohesion (and decoupling) is intentionally NOT part of this conjunction. It is an
-    # optimization preference (pack same-domain refs), not a feasibility
-    # constraint -- a spread-out domain is suboptimal, never infeasible.
+    # NOTE: cohesion, decoupling and the schematic-group terms are
+    # intentionally NOT part of this conjunction. They are optimization
+    # preferences (pack same-domain refs / sheet members), not feasibility
+    # constraints -- a spread-out group is suboptimal, never infeasible.
     is_feasible = (
         overlap == 0.0
         and drc == 0.0
@@ -944,6 +1183,8 @@ def _weighted_sum_score(breakdown: CostBreakdown, config: PlacementCostConfig) -
         + config.creepage_weight * breakdown.creepage
         + config.cohesion_weight * breakdown.cohesion
         + config.decoupling_weight * breakdown.decoupling
+        + config.group_cohesion_weight * breakdown.group_cohesion
+        + config.group_order_weight * breakdown.group_order
     )
 
 
@@ -960,10 +1201,11 @@ def _lexicographic_score(
     large constant offset.
 
     Feasible placements are scored by the weighted sum of wirelength, area,
-    and the soft same-domain cohesion and decoupling-affinity terms. Those two
-    shape the layout only once a placement is already feasible -- they are
-    absent from the infeasible offset branch so they can never make one
-    infeasible placement outrank another on preference alone.
+    and the soft same-domain cohesion, decoupling-affinity and
+    schematic-group (cohesion/order, issue #10146) terms. Those shape the
+    layout only once a placement is already feasible -- they are absent from
+    the infeasible offset branch so they can never make one infeasible
+    placement outrank another on preference alone.
     """
     if not is_feasible:
         # Large offset ensures any infeasible score > any feasible score.
@@ -981,4 +1223,6 @@ def _lexicographic_score(
             + config.area_weight * breakdown.area
             + config.cohesion_weight * breakdown.cohesion
             + config.decoupling_weight * breakdown.decoupling
+            + config.group_cohesion_weight * breakdown.group_cohesion
+            + config.group_order_weight * breakdown.group_order
         )

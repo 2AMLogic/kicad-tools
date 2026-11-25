@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 from kicad_tools.cli.optimize_placement_cmd import (
     _board_pins,
     _build_decoupling_context,
+    _build_sheet_map,
     _compute_net_anchor_weight,  # noqa: F401  (re-exported)
     _decoupling_report,
     _evaluate,
@@ -128,10 +129,28 @@ def _evaluate_vector(
     board: BoardOutline,
     cost_config: PlacementCostConfig,
     footprint_sizes: dict[str, tuple[float, float]],
+    ref_sheets: dict[str, str] | None = None,
 ) -> PlacementScore:
     """Evaluate a single placement vector and return its score."""
     placements = _vector_to_placements(vector, components)
-    return cost_evaluate_placement(placements, nets, rules, board, cost_config, footprint_sizes)
+    return cost_evaluate_placement(
+        placements, nets, rules, board, cost_config, footprint_sizes, ref_sheets=ref_sheets
+    )
+
+
+def _resolve_sheet_map(pcb_path: str, cost_config: PlacementCostConfig) -> dict[str, str] | None:
+    """``ref -> sheet`` map for the schematic-group terms, or ``None``.
+
+    Mirrors the CLI's gate: skipped (no netlist export) when both group weights
+    are zero, and any failure degrades to ``None`` (issue #10146).
+    """
+    if not (cost_config.group_cohesion_weight or cost_config.group_order_weight):
+        return None
+    try:
+        return _build_sheet_map(pcb_path, quiet=True)
+    except Exception:  # defensive: never break a run
+        logger.debug("schematic-sheet grouping unavailable", exc_info=True)
+        return None
 
 
 def _build_footprint_sizes(
@@ -187,6 +206,8 @@ def _breakdown_to_dict(breakdown: CostBreakdown) -> dict[str, float]:
         "drc": round(breakdown.drc, 4),
         "area": round(breakdown.area, 4),
         "decoupling": round(breakdown.decoupling, 4),
+        "group_cohesion": round(breakdown.group_cohesion, 4),
+        "group_order": round(breakdown.group_order, 4),
     }
 
 
@@ -200,6 +221,8 @@ def _parse_weights(weights: dict[str, float] | None) -> PlacementCostConfig:
         boundary_weight=weights.get("boundary", 1e5),
         wirelength_weight=weights.get("wirelength", 1.0),
         area_weight=weights.get("area", 0.1),
+        group_cohesion_weight=weights.get("group_cohesion", 1.0),
+        group_order_weight=weights.get("group_order", 1.0),
     )
 
 
@@ -233,7 +256,8 @@ def optimize_placement(
         max_iterations: Maximum number of optimization iterations.
         weights: Optional cost function weight overrides. Keys:
             overlap, drc, boundary, wirelength, area, creepage, cohesion,
-            decoupling, plus ``mode`` ("lexicographic" or "weighted_sum").
+            decoupling, group_cohesion, group_order, plus ``mode``
+            ("lexicographic" or "weighted_sum").
             Same keys and defaults as ``kct optimize-placement --weights``.
             The decoupling-capacitor affinity term (default weight 2.0)
             pulls each decoupling cap onto the IC supply pin it serves, and
@@ -329,6 +353,9 @@ def optimize_placement(
     fixed_sides = _board_pins(_read_current_vector(pcb_path, components), components, locked_refs)
     locked_indices = sorted(fixed_sides.poses)
     decoupling_groups = _build_decoupling_context(pcb_path, nets, cost_config, quiet=True)
+    # Schematic-sheet grouping (issue #10146): same map, same weight gate as the
+    # CLI, so ``group_cohesion`` / ``group_order`` are not inert here.
+    sheet_map = _resolve_sheet_map(pcb_path, cost_config)
 
     def _score(vec: PlacementVector) -> PlacementScore:
         return _evaluate(
@@ -341,6 +368,7 @@ def optimize_placement(
             footprint_sizes,
             decoupling_groups=decoupling_groups,
             fixed_sides=fixed_sides,
+            ref_sheets=sheet_map,
         )
 
     # Create strategy.  Annotated with the concrete union (not the abstract
@@ -493,6 +521,7 @@ def optimize_placement(
             footprint_sizes,
             _without_caps(decoupling_groups, locked_refs),
             fixed_sides=fixed_sides,
+            ref_sheets=sheet_map,
         )
 
     route_check_report: RouteCheckReport | None = None
@@ -628,14 +657,15 @@ def evaluate_placement(
     Args:
         pcb_path: Absolute path to .kicad_pcb file.
         weights: Optional cost function weight overrides. Keys:
-            overlap, drc, boundary, wirelength, area.
+            overlap, drc, boundary, wirelength, area, group_cohesion, group_order.
+            Set both sheet weights to zero to skip schematic discovery.
 
     Returns:
         Dictionary with placement evaluation results:
         - success: Whether evaluation completed.
         - score: Total placement score (lower is better).
         - feasible: Whether placement is feasible (no overlaps/violations).
-        - breakdown: Per-component score breakdown (wirelength, overlap, DRC, area).
+        - breakdown: Raw cost terms, including sheet cohesion and order in mm.
         - wirelength_estimators: The centre-anchored and pad-anchored
           wirelength of this same layout side by side, with their delta and
           which one ``score`` was computed from (issue #4831 M5). Report-only:
@@ -696,7 +726,13 @@ def evaluate_placement(
 
     # Evaluate placement
     score = cost_evaluate_placement(
-        current_placements, nets, rules, board_outline, cost_config, footprint_sizes
+        current_placements,
+        nets,
+        rules,
+        board_outline,
+        cost_config,
+        footprint_sizes,
+        ref_sheets=_resolve_sheet_map(pcb_path, cost_config),
     )
 
     # Compute per-footprint ratsnest distances

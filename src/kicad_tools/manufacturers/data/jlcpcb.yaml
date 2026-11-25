@@ -275,8 +275,18 @@ design_rules:
 # gets no trace-width warning.
 # A stackup with NO entry here fails closed: ``kct check`` reports verdict
 # ``incomplete`` instead of falling back to another copper weight.
+#
+# THT-to-SMD spacing (Issues #8843, #9421, #10172): observed in JLCDFM's Alert
+# value panel (read 2026-11-17/18 on a 4-layer, 2 oz outer copper board;
+# https://github.com/2AMLogic/kicad-tools/issues/9421).  The fab rated pairs at
+# 2.00 and 2.025 mm as danger while displaying "2.03" in the panel; 2.032 mm
+# (80 mil) is the inferred imperial cutoff (consistent with the 2-decimal
+# "2.03" display, not officially confirmed by JLCPCB docs), and 3.05 mm is the
+# warning upper bound.  Independent 4-layer JLCDFM rows in Issue #10172
+# (1.26-1.85 mm danger, ~2.06 mm warning, >= 3.05 mm good) corroborate both
+# bands.
 dfm_thresholds:
-  version: 3
+  version: 4
   entries:
     2layer_1oz:
       layers: 2
@@ -288,6 +298,7 @@ dfm_thresholds:
         annular_ring_via: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
         annular_ring_pth: {danger_mm: 0.18, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
         mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        tht_smd_spacing: {danger_mm: 2.032, warning_mm: 3.05, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/9421, retrieved: '2026-11-18'}
     2layer_2oz:
       layers: 2
       outer_oz: 2.0
@@ -298,6 +309,7 @@ dfm_thresholds:
         annular_ring_via: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
         annular_ring_pth: {danger_mm: 0.254, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
         mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        tht_smd_spacing: {danger_mm: 2.032, warning_mm: 3.05, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/9421, retrieved: '2026-11-18'}
     4layer_1oz:
       layers: 4
       outer_oz: 1.0
@@ -315,6 +327,7 @@ dfm_thresholds:
         # Good on one 4-layer 1 oz board.  Only those two points are observed; the
         # exact Danger/Warning/Good edges between them are unknown.
         trace_width: {danger_mm: 0.1016, warning_mm: 0.1524, warning_basis: observed_jlcdfm, basis: capability_page, source_url: https://github.com/2AMLogic/kicad-tools/issues/10173, retrieved: '2026-11-25'}
+        tht_smd_spacing: {danger_mm: 2.032, warning_mm: 3.05, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/9421, retrieved: '2026-11-18'}
     4layer_1oz_inner1oz:
       layers: 4
       outer_oz: 1.0
@@ -325,6 +338,7 @@ dfm_thresholds:
         annular_ring_via: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
         annular_ring_pth: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
         mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        tht_smd_spacing: {danger_mm: 2.032, warning_mm: 3.05, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/9421, retrieved: '2026-11-18'}
     4layer_2oz:
       layers: 4
       outer_oz: 2.0
@@ -335,6 +349,7 @@ dfm_thresholds:
         annular_ring_via: {danger_mm: 0.1, warning_mm: 0.15, warning_basis: observed_jlcdfm, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
         annular_ring_pth: {danger_mm: 0.254, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
         mask_bridge: {danger_mm: 0.2, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/8838, retrieved: '2026-11-12'}
+        tht_smd_spacing: {danger_mm: 2.032, warning_mm: 3.05, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/9421, retrieved: '2026-11-18'}
     6layer_1oz:
       layers: 6
       outer_oz: 1.0
@@ -345,6 +360,7 @@ dfm_thresholds:
         annular_ring_via: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
         annular_ring_pth: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
         mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        tht_smd_spacing: {danger_mm: 2.032, warning_mm: 3.05, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/9421, retrieved: '2026-11-18'}
     6layer_1oz_inner1oz:
       layers: 6
       outer_oz: 1.0
@@ -355,3 +371,4 @@ dfm_thresholds:
         annular_ring_via: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
         annular_ring_pth: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
         mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        tht_smd_spacing: {danger_mm: 2.032, warning_mm: 3.05, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/9421, retrieved: '2026-11-18'}

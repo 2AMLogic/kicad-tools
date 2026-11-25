@@ -24,6 +24,7 @@ from kicad_tools.cli import fix_drc_cmd
 from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer, MaskRepairResult
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
+from kicad_tools.router.quantize import _is_quantum_aligned
 from kicad_tools.sexp import parse_file
 
 PAD = "pad-r1-1"
@@ -2580,6 +2581,78 @@ def test_chamfer_slide_declines_and_leaves_the_board_alone_when_vetoed(tmp_path)
 
 
 # ---------------------------------------------------------------------------
+# Issue #10183: 4 dp rounding of the slid ends never trips the angle census
+# ---------------------------------------------------------------------------
+
+
+def _rounding_chamfer_fixture(tmp_path, *, diagonal, signs, offset, reach, chamfer):
+    """A chamfer between runs whose coordinates sit off the 4 dp grid.
+
+    Axis-aligned runs (``diagonal=False``) give a 45 degree chamfer; 45 degree
+    runs give a horizontal one. ``offset`` shifts every point by a 6 dp amount
+    so the slid ends round to 4 dp by different amounts, and ``signs`` mirrors
+    the layout about the pad centre.
+    """
+    if diagonal:
+        joints = ((reach, reach), (reach + chamfer, reach), (reach + chamfer + 1.0, reach - 1.0))
+    else:
+        joints = ((reach, 0.0), (reach + chamfer, chamfer), (reach + chamfer, chamfer + 1.0))
+
+    def at(dx, dy):
+        return (
+            round(100 + signs[0] * dx + offset[0], 6),
+            round(100 + signs[1] * dy + offset[1], 6),
+        )
+
+    points = [at(0.0, 0.0), *(at(*joint) for joint in joints)]
+    shapes = dict(
+        zip(("lead", "chamfer", "run"), zip(points, points[1:], strict=False), strict=True)
+    )
+    copper = [_seg(name, a, b) for name, (a, b) in shapes.items()]
+    # Other-net copper that makes a plain recentre of the pad end decline.
+    copper.append(_seg("crowd", at(0.3, 0.9), at(0.9, 0.9), net=2))
+    return _board(tmp_path, "\n".join(copper)), shapes
+
+
+@pytest.mark.parametrize("signs", [(1, 1), (-1, 1), (1, -1), (-1, -1)])
+@pytest.mark.parametrize("diagonal", [False, True], ids=["axis-runs", "diagonal-runs"])
+@pytest.mark.parametrize("offset", [(0.0, 0.0), (3.7e-05, 1.9e-05), (8.7e-05, 5e-05)])
+@pytest.mark.parametrize("reach, chamfer", [(0.7, 0.8), (1.2, 0.8), (1.2, 0.4)])
+def test_chamfer_slide_rounding_keeps_the_angle_census_clean(
+    tmp_path, signs, diagonal, offset, reach, chamfer
+):
+    """Measured refutation of the #10183 hypothesis, kept as a regression guard.
+
+    ``moved`` supplies candidate geometry and action metadata. When writing the
+    board, ``_apply_nudge`` adds each point's shift to its original endpoint
+    and rounds each coordinate to four decimals. Independent endpoint rounding
+    can put the chamfer one 0.1 um quantum off its exact angle. The census
+    accepts that difference, so these slides preserve the angle on disk.
+    """
+    board, shapes = _rounding_chamfer_fixture(
+        tmp_path, diagonal=diagonal, signs=signs, offset=offset, reach=reach, chamfer=chamfer
+    )
+    original = {name: _end(board, name) for name in shapes}
+    assert not MaskCopperRepairer(board).off_angle_tracks()
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_entry_finding("chamfer")], **_JOG_OPTS)
+    (action,) = result.actions
+    assert action.action == "nudge_clear" and "chamfer" in action.detail
+    repairer.save(board)
+
+    lead, chamfer_seg, run = (_end(board, name) for name in shapes)
+    # The slide moved both joints, and neither anchor.
+    assert lead[1] != original["lead"][1] and run[0] != original["run"][0]
+    assert lead[0] == original["lead"][0] and run[1] == original["run"][1]
+    assert lead[1] == chamfer_seg[0] and chamfer_seg[1] == run[0]
+    assert not repairer.off_angle_tracks()
+    for name, (start, end) in zip(shapes, (lead, chamfer_seg, run), strict=True):
+        assert _is_quantum_aligned(end[0] - start[0], end[1] - start[1]), name
+    copper, _ = _saved_copper(board, "chamfer")
+    assert copper.distance(_pad_poly(board, "R1/1")) >= 0.09 - 1e-3
+
+
+# ---------------------------------------------------------------------------
 # Issue #9939: an elbow that hugs the pad edge takes its mirror elbow
 # ---------------------------------------------------------------------------
 
@@ -2775,3 +2848,51 @@ def test_via_waits_a_pass_when_an_elbow_flip_already_moved_a_track_that_reaches_
     assert [(u.uuid, u.reason) for u in result.unrepaired] == [
         ("anchor-via", "segment_end_already_moved")
     ]
+
+
+def _via_pad_entry(tmp_path, *, locked=False):
+    via, corner, inside = (100.4, 98.975), (100.4, 99.375), (100.0, 99.775)
+    entry = _seg("entry", corner, inside)
+    if locked:
+        entry = entry.replace("(segment ", "(segment locked ")
+    return _board(tmp_path, "\n".join([_via("fixed", via), _seg("lead", via, corner), entry]))
+
+
+def test_disjoint_via_approach_turns_outside_pad_and_undoes(tmp_path):
+    # The lead from a fixed via ends 0.025 mm from the mask. Its diagonal
+    # neighbour already enters the pad. Extend that diagonal to a perpendicular via lead.
+    board = _via_pad_entry(tmp_path)
+    repairer = MaskCopperRepairer(board)
+    original = {uid: _end(board, uid) for uid in ("lead", "entry")}
+    via, inside = original["lead"][0], original["entry"][1]
+    result = repairer.repair([_pt_finding("lead", measured=0.025)], **_ELBOW_OPTS)
+    assert result.repaired == 1
+    repairer.save(board)
+    assert _end(board, "lead") == [via, (100.6, 99.175)]
+    assert _end(board, "entry") == [(100.6, 99.175), inside]
+    assert _saved_copper(board, "fixed")[1] == via
+    assert not repairer.off_angle_tracks()
+    assert repairer.undo_action(result.actions[0])
+    repairer.save(board)
+    assert {uid: _end(board, uid) for uid in original} == original
+
+
+def test_locked_via_entry_corner_leaves_all_copper_untouched(tmp_path):
+    repairer = MaskCopperRepairer(_via_pad_entry(tmp_path, locked=True))
+    before = repairer.doc.to_string()
+    result = repairer.repair([_pt_finding("lead", measured=0.025)], **_ELBOW_OPTS)
+    assert result.repaired == 0 and result.unrepaired[0].reason == "junction_at_moved_end"
+    assert repairer.doc.to_string() == before
+
+
+def test_via_entry_recheck_veto_preserves_board_bytes(tmp_path, monkeypatch, capsys):
+    board = _via_pad_entry(tmp_path)
+    before = board.read_bytes()
+    reported = _pt_finding("lead", measured=0.025)
+    neighbour = _finding("entry")
+    _run(monkeypatch, board, [_report(reported), _report(neighbour)], extra=("--format", "json"))
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [
+        ("lead", "new_mask_finding")
+    ]
+    assert board.read_bytes() == before

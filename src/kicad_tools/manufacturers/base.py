@@ -64,6 +64,7 @@ DFM_THRESHOLD_NAMES: tuple[str, ...] = (
     "annular_ring_via",
     "annular_ring_pth",
     "mask_bridge",
+    "tht_smd_spacing",
 )
 
 
@@ -429,6 +430,13 @@ class DesignRules:
     # existing profiles' shared annular-ring behavior.
     min_pth_annular_ring_mm: float | None = None
 
+    # Two-tier THT/anchor-via to SMD-pad spacing bands (Issues #8843, #9421, #10172):
+    # error strictly below ``danger``, warning strictly below ``warning``.
+    # None uses the rule's calibrated defaults. New fields go at the end to
+    # preserve the public constructor's positional arguments.
+    tht_smd_danger_mm: float | None = None
+    tht_smd_warning_mm: float | None = None
+
     def __post_init__(self) -> None:
         """Enforce ``min_inner_clearance_mm <= min_clearance_mm`` (Issue #9113).
 
@@ -505,6 +513,8 @@ class DesignRules:
             "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
             "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
             "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,
+            "tht_smd_danger_mm": self.tht_smd_danger_mm,
+            "tht_smd_warning_mm": self.tht_smd_warning_mm,
             "min_inner_clearance_mm": self.min_inner_clearance_mm,
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
@@ -740,6 +750,11 @@ class ManufacturerProfile:
 
         t = entry.thresholds
         tw = t.get("trace_width")
+        tht_smd = t["tht_smd_spacing"]
+        tht_smd_danger_mm = max(rules.tht_smd_danger_mm or 0.0, tht_smd.danger_mm)
+        tht_smd_warning_mm = rules.tht_smd_warning_mm
+        if tht_smd.warning_mm is not None:
+            tht_smd_warning_mm = max(tht_smd_warning_mm or 0.0, tht_smd.warning_mm)
         return replace(
             rules,
             trace_width_warning_mm=tw.warning_mm if tw is not None else None,
@@ -752,6 +767,8 @@ class ManufacturerProfile:
                 rules.min_pth_annular_ring_mm or 0.0, t["annular_ring_pth"].danger_mm
             ),
             min_solder_mask_dam_mm=max(rules.min_solder_mask_dam_mm, t["mask_bridge"].danger_mm),
+            tht_smd_danger_mm=tht_smd_danger_mm,
+            tht_smd_warning_mm=tht_smd_warning_mm,
         )
 
     def get_design_rules(

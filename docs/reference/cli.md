@@ -1074,6 +1074,16 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | `--fill-tolerance MM2` | Per-layer filled-copper tolerance for the saved-vs-refilled equivalence check |
 | `--format {text,json}` | Output format (default: `text`) |
 
+**Reproducible `gerbers/gerbers.zip`** (Issue #10174): kicad-cli stamps the plot
+time into every Gerber, drill and job file, so `--generate` pins that creation
+date. With `SOURCE_DATE_EPOCH` unset it uses the fixed constant
+`READINESS_GERBER_EPOCH` (1980-01-01T00:00:00Z); a valid `SOURCE_DATE_EPOCH`
+overrides it. ZIP members are sorted with fixed metadata, so two generations of
+an unchanged board produce byte-identical archives and the manifest SHA-256 of
+`gerbers.zip` can be re-checked by regenerating. Only the Gerber plot is pinned:
+sign-off timestamps and other bundle files keep their real times, and standalone
+`kct export` Gerbers are unchanged.
+
 Gate order is load-bearing: the copper pours are refilled and **saved to the
 canonical PCB before both** the native cross-gate and the export, so the bytes
 the checkers judged are the bytes the Gerbers come from. Every gate is judged
@@ -2293,7 +2303,7 @@ kct optimize-placement <pcb_file> [options]
 | `--max-iterations N` | Maximum optimizer iterations (default: 1000) |
 | `-o`, `--output PATH` | Output PCB (default: overwrite input) |
 | `--seed {force-directed,random,current}` | Seed placement method. `current` warm-starts from the board's own footprint positions; its slide-off passes only move parts that overlap or break the 0.2 mm clearance rule, on a 0.05 mm grid (Issue #6250) |
-| `--weights JSON` | Custom cost weights: `overlap`, `drc`, `boundary`, `wirelength`, `area`, `creepage`, `cohesion`, `decoupling` (default 2.0; `{"decoupling": 0}` turns off the decoupling-cap affinity term and its snap pass) |
+| `--weights JSON` | Custom cost weights: `overlap`, `drc`, `boundary`, `wirelength`, `area`, `creepage`, `cohesion`, `decoupling` (default 2.0; `{"decoupling": 0}` turns off the decoupling-cap affinity term and its snap pass), `group_cohesion` and `group_order` (default 1.0 each; keep same-sheet parts together and in schematic order on multi-sheet designs, `0` turns both off — see [placement-scoring.md](../placement-scoring.md)) |
 | `--dry-run` | Evaluate current placement without optimizing |
 | `--progress N` | Print score every N iterations (0 disables) |
 | `--checkpoint DIR` | Directory for checkpoint save/resume |

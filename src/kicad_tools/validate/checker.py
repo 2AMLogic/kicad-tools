@@ -918,14 +918,35 @@ class DRCChecker:
         Before Issue #8914 this method called the rule with no arguments at
         all, which pinned the old ``include_vias=False`` default on every
         ``kct check`` run and made the via arm unreachable.
+
+        Issue #10172: when the resolved manufacturer profile supplies
+        ``tht_smd_danger_mm`` / ``tht_smd_warning_mm``, those bands are passed
+        through instead of relying solely on the rule module's defaults.
         """
         if not self.fab_view:
             return DRCResults()
-        from .rules.tht_smd_spacing import ANCHOR_DRILL_MM, check_tht_smd_spacing
+        from .rules.tht_smd_spacing import (
+            ANCHOR_DRILL_MM,
+            DANGER_MM,
+            WARNING_MM,
+            check_tht_smd_spacing,
+        )
 
+        danger_mm = (
+            self.design_rules.tht_smd_danger_mm
+            if self.design_rules.tht_smd_danger_mm is not None
+            else DANGER_MM
+        )
+        warning_mm = (
+            self.design_rules.tht_smd_warning_mm
+            if self.design_rules.tht_smd_warning_mm is not None
+            else WARNING_MM
+        )
         return self._absolutize(
             check_tht_smd_spacing(
                 self.pcb,
+                danger_mm=danger_mm,
+                warning_mm=warning_mm,
                 via_drill_mm=ANCHOR_DRILL_MM if via_drill_mm is None else via_drill_mm,
             )
         )
