@@ -86,7 +86,8 @@ class DimensionRules(DRCRule):
         min_width = design_rules.min_trace_width_mm
         warn_width = getattr(design_rules, "trace_width_warning_mm", None)
 
-        for segment in pcb.segments:
+        # Straight tracks and circular track arcs share the same width rules.
+        for segment in [*pcb.segments, *getattr(pcb, "arcs", [])]:
             if (
                 warn_width is not None
                 and segment.layer in _OUTER_COPPER_LAYERS

@@ -112,3 +112,40 @@ def test_cli_dfm_table_path_carries_the_warning_width():
     assert checker.design_rules.trace_width_warning_mm == pytest.approx(0.1524)
     assert cw["dfm_table"]["thresholds"]["trace_width"]["warning_mm"] == pytest.approx(0.1524)
     assert cw["dfm_table"]["thresholds"]["trace_width"]["warning_basis"] == "observed_jlcdfm"
+
+
+_ARC_PCB = """(kicad_pcb (version 20240108) (generator "pcbnew")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "N1")
+{arcs})
+"""
+
+
+def _arc_findings(tmp_path, specs):
+    """Parse real KiCad ``(arc ...)`` tracks and run the width rule on them."""
+    from kicad_tools.schema.pcb import PCB
+
+    arcs = "".join(
+        f'  (arc (start 0 0) (mid 1 0.5) (end 2 0) (width {w}) (layer "{layer}") (net 1))\n'
+        for w, layer in specs
+    )
+    path = tmp_path / "arc.kicad_pcb"
+    path.write_text(_ARC_PCB.format(arcs=arcs))
+    pcb = PCB.load(path)
+    assert len(pcb.arcs) == len(specs)
+    rules = get_profile("jlcpcb").get_design_rules(4, 1.0)
+    results = DimensionRules().check(pcb, rules)
+    return [v for v in results.violations if v.rule_id == "dimension_trace_width"]
+
+
+def test_outer_layer_arc_track_warns(tmp_path):
+    findings = _arc_findings(tmp_path, [(0.1016, "F.Cu"), (0.1016, "B.Cu")])
+    assert [v.severity for v in findings] == ["warning", "warning"]
+
+
+def test_arc_track_controls_match_straight_tracks(tmp_path):
+    findings = _arc_findings(
+        tmp_path, [(0.1016, "In1.Cu"), (0.1016, "In2.Cu"), (0.1524, "F.Cu"), (0.09, "In1.Cu")]
+    )
+    assert [v.severity for v in findings] == ["error"]
