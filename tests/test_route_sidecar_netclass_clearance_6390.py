@@ -280,6 +280,17 @@ def test_previous_router_classes_are_replaced_not_accumulated():
     assert project["net_settings"]["netclass_assignments"] == {"B": "Warm"}
 
 
+def test_in_memory_pattern_edit_becomes_authored():
+    project = {"net_settings": {"classes": [{"name": "Default", "clearance": 0.1}]}}
+    router_map = {"A": NetClassRouting(name="Hot", clearance=0.3)}
+    apply_router_netclasses(project, router_map)
+    pattern = project["net_settings"]["netclass_patterns"][0]
+    pattern["pattern"] = "A*"
+    apply_router_netclasses(project, router_map)
+    assert project["net_settings"]["netclass_patterns"] == [{"netclass": "Hot", "pattern": "A*"}]
+    assert project["net_settings"]["netclass_assignments"] == {}
+
+
 # --------------------------------------------------------------------- AC4
 
 

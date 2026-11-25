@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.core.netclass_diagnostics import diagnose_netclasses
+from kicad_tools.core.netclass_diagnostics import diagnose_netclasses, exact_netclass_pattern
 
 
 def project(patterns=None):
@@ -204,3 +204,17 @@ def test_invalid_pattern_and_target_entries_are_retained(patterns):
     assert [p["entry"] for p in r["patterns"]] == patterns
     assert "invalid_target" in codes(r)
     assert data == before
+
+
+def test_encoded_spelling_is_also_a_native_wildcard_match():
+    net = "USB*"
+    spelling = r"\AUSB\x2a\z"
+    inventory = {net, "USB1", spelling, spelling + "\n"}
+
+    def matches(pattern):
+        return diagnose_netclasses(project([{"netclass": "Power", "pattern": pattern}]), inventory)[
+            "patterns"
+        ][0]["matches"]
+
+    assert matches(spelling) == sorted({net, spelling, spelling + "\n"})
+    assert matches(exact_netclass_pattern(net, inventory)) == [net]

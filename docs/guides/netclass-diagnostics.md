@@ -70,7 +70,14 @@ one or more `X`, and a group only sequences its contents. Supply names such as
 an invalid leading quantifier, so only the wildcard interpretation applies --
 while `Net-(U5-CAPP)` matches both that spelling (wildcard) and KiCad's
 unparenthesized spelling `Net-U5-CAPP` (regex), and `A.B`/`C+P` also match
-`AXB`/`CCP`. Other syntax is explicitly `unsupported_pattern`, including
+`AXB`/`CCP`. For router-generated per-net assignments, diagnostics also recognize a
+literal-only regular expression bounded by `\A` and `\z`, with ASCII
+punctuation encoded as two-digit hex escapes. For example, `\AA\x2eB\z`
+classifies `A.B`. KiCad’s wildcard interpretation can also match the encoded
+spelling itself. The writer checks the board inventory and appends another
+`\z` if needed to distinguish those names (issue #10277).
+
+Outside this form, other syntax is explicitly `unsupported_pattern`, including
 backslashes/escaping, brackets, braces, alternation, regex anchors, quantified
 or nested groups, and Unicode **in patterns**. It is not silently
 interpreted as a glob. The supported subset evaluates both interpretations;

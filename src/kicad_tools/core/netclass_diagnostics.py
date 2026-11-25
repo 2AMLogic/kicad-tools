@@ -5,6 +5,7 @@ contract and native oracle. Results describe independent memberships, not
 assignment precedence, composite classes, or effective electrical constraints.
 """
 
+import re
 from copy import deepcopy
 from string import ascii_letters, digits
 from typing import Any
@@ -25,6 +26,25 @@ _REGEX_PUNCTUATION = frozenset(".+()")
 _QUANTIFIERS = frozenset("*?+")
 
 _ALLOWED = _LITERAL | _REGEX_PUNCTUATION | _QUANTIFIERS
+
+
+# Only this literal-only regex form is emitted and decoded. Hex escapes keep
+# metacharacters literal under regex and keep * and ? out of the wildcard arm.
+_HEX_ESCAPE = re.compile(r"\\x([0-7][0-9a-f])")
+_EXACT_PATTERN = re.compile(r"\\A((?:[A-Za-z0-9_ :/-]|[^\x00-\x7f]|\\x[0-7][0-9a-f])+)(?:\\z)+")
+
+
+def exact_netclass_pattern(net: str, board_nets: set[str]) -> str:
+    """A KiCad project pattern matching only this net in the supplied inventory."""
+    if all(c in _LITERAL for c in net) and net + "\n" not in board_nets:
+        return net
+    body = "".join(f"\\x{ord(c):02x}" if c.isascii() and c not in _LITERAL else c for c in net)
+    pattern = rf"\A{body}\z"
+    # The wildcard arm can still match the encoded spelling itself. Another
+    # end anchor changes that spelling while preserving the regex membership.
+    while pattern in board_nets or pattern + "\n" in board_nets:
+        pattern += r"\z"
+    return pattern
 
 
 def _supported(pattern: str) -> bool:
@@ -158,6 +178,8 @@ def diagnose_netclasses(data: Any, net_names: Any = None) -> dict[str, Any]:
             inventory = sorted(set(net_names))
             report["inventory_status"] = "evaluated"
 
+    inventory_set = set(inventory or [])
+
     if not isinstance(data, dict):
         report["settings_status"] = "invalid"
         diagnostic("invalid_project", "$", "Expected a project JSON object.")
@@ -227,7 +249,8 @@ def diagnose_netclasses(data: Any, net_names: Any = None) -> dict[str, Any]:
         if not isinstance(pattern, str):
             diagnostic("invalid_pattern", path + ".pattern", "Expected a pattern string.")
             continue
-        if not _supported(pattern):
+        exact = _EXACT_PATTERN.fullmatch(pattern)
+        if exact is None and not _supported(pattern):
             row["status"] = "unsupported"
             diagnostic(
                 "unsupported_pattern", path + ".pattern", "Outside the verified literal/*/? subset."
@@ -235,7 +258,13 @@ def diagnose_netclasses(data: Any, net_names: Any = None) -> dict[str, Any]:
             continue
         row["status"] = "supported"
         if inventory is not None:
-            row["matches"] = [net for net in inventory if _matches(pattern, net)]
+            if exact:
+                literal = _HEX_ESCAPE.sub(lambda m: chr(int(m[1], 16)), exact[1])
+                row["matches"] = sorted(inventory_set & {literal, pattern, pattern + "\n"})
+            elif all(c in _LITERAL for c in pattern):
+                row["matches"] = sorted((inventory_set & {pattern, pattern + "\n"}) - {""})
+            else:
+                row["matches"] = [net for net in inventory if _matches(pattern, net)]
             if not row["matches"]:
                 diagnostic("no_matches", path + ".pattern", "No supplied board nets match.")
 

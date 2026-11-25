@@ -763,6 +763,10 @@ PRESERVE_MODE_OFF_SPELLING = "0"
 #: replaced, loosened or removed by :func:`apply_router_netclasses`.
 ROUTER_NETCLASSES_META_KEY = "kct_router_netclasses"
 
+# Each net maps to the exact project-pattern row written for it. Older
+# assignment-only projects own no patterns, even if an authored row coincides.
+ROUTER_PATTERNS_META_KEY = "kct_netclass_patterns"
+
 #: ``meta`` key recording the differential pairs the router coupled-routed
 #: whose names KiCad's ``isCoupledDiffPair()`` does not recognise (Issue
 #: #6429): a sorted list of ``[P, N]`` net-name pairs.  The router-class
@@ -852,6 +856,51 @@ def apply_router_coupled_pairs(
     return project_data
 
 
+def remove_router_netclass_patterns(project: dict) -> dict[str, str]:
+    """Withdraw one unchanged row per recorded pattern, keeping authored rows in order."""
+    meta = project.get("meta")
+    record = meta.pop(ROUTER_PATTERNS_META_KEY, None) if isinstance(meta, dict) else None
+    if not isinstance(record, dict):
+        return {}
+    owned = {
+        (row["pattern"], row["netclass"]): net
+        for net, row in record.items()
+        if isinstance(row, dict)
+        and isinstance(row.get("pattern"), str)
+        and isinstance(row.get("netclass"), str)
+    }
+    recorded_classes = {net: cls for (_, cls), net in owned.items()}
+    settings = project.get("net_settings")
+    patterns = settings.get("netclass_patterns") if isinstance(settings, dict) else None
+    if isinstance(patterns, list):
+        kept = []
+        for row in patterns:
+            if isinstance(row, dict) and len(row) == 2:
+                pattern, cls = row.get("pattern"), row.get("netclass")
+                if isinstance(pattern, str) and isinstance(cls, str) and (pattern, cls) in owned:
+                    del owned[pattern, cls]
+                    continue
+            kept.append(row)
+        patterns[:] = kept
+    return recorded_classes
+
+
+def write_router_netclass_patterns(
+    project: dict, assigned: dict[str, str], board_nets: set[str]
+) -> None:
+    """Mirror the new PCB assignments into the project rows read by the schematic editor."""
+    from kicad_tools.core.netclass_diagnostics import exact_netclass_pattern
+
+    rows = {
+        net: {"netclass": cls, "pattern": exact_netclass_pattern(net, board_nets)}
+        for net, cls in sorted(assigned.items())
+    }
+    project["net_settings"].setdefault("netclass_patterns", []).extend(
+        row.copy() for row in rows.values()
+    )
+    project.setdefault("meta", {})[ROUTER_PATTERNS_META_KEY] = rows
+
+
 def _remove_router_netclasses(project_data: dict) -> None:
     """Drop the classes / assignments a previous kct pass declared (#6390).
 
@@ -859,6 +908,7 @@ def _remove_router_netclasses(project_data: dict) -> None:
     assigned each net to, an entry whose target class the user has since
     changed in KiCad is authored intent and is left intact.
     """
+    pattern_classes = remove_router_netclass_patterns(project_data)
     classes, nets = router_netclass_provenance(project_data)
     meta = project_data.get("meta")
     recorded_classes = meta.get("kct_netclass_assignments") if isinstance(meta, dict) else None
@@ -867,14 +917,13 @@ def _remove_router_netclasses(project_data: dict) -> None:
     settings = project_data.get("net_settings")
     if not isinstance(settings, dict):
         return
-    if classes and isinstance(settings.get("classes"), list):
-        settings["classes"] = [
-            c for c in settings["classes"] if not (isinstance(c, dict) and c.get("name") in classes)
-        ]
     assignments = settings.get("netclass_assignments")
     if nets and isinstance(assignments, dict):
         for net in nets:
-            if isinstance(recorded_classes, dict) and isinstance(recorded_classes.get(net), str):
+            previous = pattern_classes.get(net)
+            if previous is None and isinstance(recorded_classes, dict):
+                previous = recorded_classes.get(net)
+            if isinstance(previous, str):
                 cur = assignments.get(net)
                 norm = (
                     [cur]
@@ -883,9 +932,31 @@ def _remove_router_netclasses(project_data: dict) -> None:
                     if isinstance(cur, list)
                     else None
                 )
-                if norm != [recorded_classes[net]]:
+                if norm != [previous]:
                     continue
             assignments.pop(net, None)
+
+    if classes and isinstance(settings.get("classes"), list):
+        # An authored row may now use one of the previously generated classes.
+        removable = set(classes)
+        patterns = settings.get("netclass_patterns")
+        if isinstance(patterns, list):
+            removable.difference_update(
+                row["netclass"]
+                for row in patterns
+                if isinstance(row, dict) and isinstance(row.get("netclass"), str)
+            )
+        if isinstance(assignments, dict):
+            for targets in assignments.values():
+                if isinstance(targets, str):
+                    removable.discard(targets)
+                elif isinstance(targets, list):
+                    removable.difference_update(name for name in targets if isinstance(name, str))
+        settings["classes"] = [
+            c
+            for c in settings["classes"]
+            if not (isinstance(c, dict) and c.get("name") in removable)
+        ]
 
 
 def _authored_netclass_members(project_data: dict, net_names: list[str]) -> set[str]:
@@ -926,8 +997,7 @@ def apply_router_netclasses(
     This writes every router class whose clearance exceeds the project's
     ``Default`` clearance into ``net_settings.classes`` (a clone of
     ``Default`` with ``name`` and ``clearance`` overridden) and assigns its
-    nets by exact name in ``netclass_assignments`` -- never patterns, whose
-    native-verified subset cannot express names like ``+5V`` -- in the shape
+    nets with matching schematic patterns and PCB ``netclass_assignments`` in the shape
     the block's schema reads (schema 3 strings, otherwise arrays; see
     :func:`~kicad_tools.core.project_clearance.netclass_assignment_value`).
 
@@ -958,10 +1028,12 @@ def apply_router_netclasses(
     Returns:
         The same ``project_data`` dict.
     """
-    _remove_router_netclasses(project_data)
-    names = set(net_class_map) if net_names is None else set(net_names) & set(net_class_map)
-    names.discard("")
     settings = project_data.setdefault("net_settings", {})
+    previous_classes = settings.get("classes", [])
+    _remove_router_netclasses(project_data)
+    board_nets = set(net_class_map if net_names is None else net_names)
+    names = board_nets.intersection(net_class_map)
+    names.discard("")
     classes = settings.setdefault("classes", [])
     default_cls = next(
         (c for c in classes if isinstance(c, dict) and c.get("name") == "Default"), None
@@ -997,7 +1069,7 @@ def apply_router_netclasses(
         c.get("name"): c for c in classes if isinstance(c, dict) and isinstance(c.get("name"), str)
     }
     declared: list[str] = []
-    assigned: list[str] = []
+    assigned: dict[str, str] = {}
     assignments = settings.get("netclass_assignments")
     if not isinstance(assignments, dict):
         assignments = {}
@@ -1038,11 +1110,17 @@ def apply_router_netclasses(
             declared.append(class_name)
         for net in nets:
             assignments[net] = netclass_assignment_value(settings, class_name)
-            assigned.append(net)
+            assigned[net] = class_name
 
     if not assigned:
         return project_data
-    classes.extend(new_classes)
+    write_router_netclass_patterns(project_data, assigned, board_nets)
+    if new_classes:
+        # Schema 3 uses list order as priority. A regenerated class keeps
+        # its place relative to classes retained from the previous route.
+        previous_order = {c["name"]: i for i, c in enumerate(previous_classes)}
+        classes.extend(new_classes)
+        classes.sort(key=lambda c: previous_order.get(c["name"], len(previous_order)))
     settings["netclass_assignments"] = dict(sorted(assignments.items()))
     project_data.setdefault("meta", {})[ROUTER_NETCLASSES_META_KEY] = {
         "classes": declared,

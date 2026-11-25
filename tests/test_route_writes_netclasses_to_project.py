@@ -7,7 +7,7 @@ Setup and native DRC never saw the widths the copper actually uses.  These
 tests pin the route-step write (``_write_netclasses_to_project``): one
 ``net_settings.classes`` entry per used router class with the router's
 width / clearance (floored at the project's minimum clearance) / via size, one
-exact-name ``netclass_assignments`` entry per routed net (no pattern
+PCB assignment and one schematic pattern per routed net (no pattern
 metacharacter spillover across ``.``, ``+``, ``()``, ``*``, ``?``), GND and
 power rails in dedicated classes, hand-authored content and edited assignments
 preserved, and the non-fatal degradation paths.
@@ -26,7 +26,7 @@ from kicad_tools.core.project_clearance import (
     authored_netclass_clearances,
     resolve_project_clearances,
 )
-from kicad_tools.core.project_file import default_netclass_definition
+from kicad_tools.core.project_file import create_netclass_definition, default_netclass_definition
 from kicad_tools.manufacturers import get_profile
 from kicad_tools.router.rules import NetClassRouting
 from kicad_tools.validate.rules.netclass_floor import check_netclass_floor
@@ -105,9 +105,9 @@ class TestClassesAndAssignmentsWritten:
         assert classes["Ground"]["via_diameter"] == 0.8
         assert classes["Power"]["track_width"] == 0.5
         assert classes["Digital"]["track_width"] == 0.2
-        # AC1: exact-name netclass_assignments (schema 3 strings), no patterns.
+        # Both editor representations are present, including schema 3 PCB strings.
         assert _assignments(project) == {"+3V3": "Power", "GND": "Ground", "SDA": "Digital"}
-        assert _patterns(project) == []
+        assert len(_patterns(project)) == len(_assignments(project))
         # The Default class is untouched.
         assert classes["Default"]["track_width"] == 0.25
 
@@ -226,6 +226,73 @@ class TestMetacharacterNameControls:
     """Blocker 1 (#10166): exact-name assignments never spill onto lookalike nets."""
 
     @pytest.mark.parametrize(
+        ("label", "lookalike"),
+        [
+            ("AC_LINE", "AC_LINE_N"),
+            ("OC_TRIP_N", "OC_TRIP"),
+            ("A.B", "AXB"),
+            ("+3.3V", "+3x3V"),
+            ("C+P", "CCP"),
+            ("Net-(U5-CAPP)", "Net-U5-CAPP"),
+            ("USB*", "USB1"),
+            ("D?", "D1"),
+        ],
+    )
+    @pytest.mark.parametrize("schema", [3, 5])
+    def test_native_schematic_export_after_routing(
+        self, tmp_path: Path, label: str, lookalike: str, schema: int
+    ):
+        import subprocess
+        import xml.etree.ElementTree as ET
+
+        from kicad_tools.cli.runner import find_kicad_cli
+
+        cli = find_kicad_cli()
+        if cli is None:
+            pytest.skip("kicad-cli not installed")
+        fixture = Path(__file__).parent / "fixtures" / "simple_rc.kicad_sch"
+        schematic = tmp_path / "board.kicad_sch"
+        schematic.write_text(
+            fixture.read_text()
+            .replace('(label "VIN"', f'(label "{label}"')
+            .replace('(label "GND"', f'(label "{lookalike}"')
+        )
+        # Local labels acquire the root sheet prefix in both editors.
+        net, other = f"/{label}", f"/{lookalike}"
+        pcb = _write_pcb(tmp_path, [net, other])
+        # Upgrade a project produced by the assignment-only route writer.
+        router_class = NetClassRouting(name="HV") if label == "AC_LINE" else DIGITAL
+        project = _minimal_project(schema_version=schema)
+        project["net_settings"]["classes"].append(create_netclass_definition(router_class.name))
+        project["net_settings"]["netclass_assignments"] = {
+            net: router_class.name if schema == 3 else [router_class.name]
+        }
+        project["meta"][route_cmd.KCT_NETCLASS_ASSIGNMENTS_META_KEY] = {net: router_class.name}
+        _write_project(tmp_path, project)
+        route_cmd._write_netclasses_to_project(pcb, {net: router_class}, quiet=True)
+
+        xml = tmp_path / "board.xml"
+        subprocess.run(
+            [
+                str(cli),
+                "sch",
+                "export",
+                "netlist",
+                "--format",
+                "kicadxml",
+                "-o",
+                str(xml),
+                str(schematic),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        classes = {n.attrib["name"]: n.attrib["class"] for n in ET.parse(xml).findall("./nets/net")}
+        assert classes == {net: router_class.name, other: "Default"}
+
+    @pytest.mark.parametrize(
         ("target_net", "lookalike_net"),
         [
             ("A.B", "AXB"),
@@ -251,11 +318,12 @@ class TestMetacharacterNameControls:
 
         project = _load(pro)
         # 1. diagnose_netclasses verifies structural/syntax support & membership:
-        #    zero unsupported_pattern diagnostics, zero patterns added, and only
-        #    target_net appears in assignments.
+        #    both representations classify exactly the target.
         report = diagnose_netclasses(project, board_nets)
         assert report["diagnostics"] == []
-        assert report["patterns"] == []
+        assert [(row["target"], row["matches"]) for row in report["patterns"]] == [
+            ("Probe", [target_net])
+        ]
         assert [
             (row["net"], row["target"], row["status"], row["net_present"])
             for row in report["assignments"]
@@ -374,7 +442,10 @@ class TestHandAuthoredContentPreserved:
         saved = _load(pro)
         # Authored wildcard pattern retains its KiCad behaviour across AUX1/AUX2,
         # with no competing netclass_assignments overriding it.
-        assert _patterns(saved) == [{"netclass": "Audio", "pattern": "AUX*"}]
+        assert _patterns(saved) == [
+            {"netclass": "Audio", "pattern": "AUX*"},
+            {"netclass": "Ground", "pattern": "GND"},
+        ]
         assert _assignments(saved) == {"GND": "Ground"}
         resolved = resolve_project_clearances(saved, ["AUX1", "AUX2", "GND"])
         assert resolved["AUX1"].source_class == "Audio"
@@ -403,6 +474,20 @@ class TestHandAuthoredContentPreserved:
         assert _classes(saved)["Ground"]["track_width"] == 0.5
         assert _classes(saved)["Ground"]["via_diameter"] == 0.8
         assert _assignments(saved) == {"GND": "Ground"}
+
+    def test_legacy_ownership_does_not_claim_an_identical_authored_pattern(self, tmp_path: Path):
+        pcb = _write_pcb(tmp_path, ["SDA"])
+        project = _minimal_project()
+        project["net_settings"]["classes"].append({"name": "Digital", "clearance": 0.2})
+        project["net_settings"]["netclass_assignments"] = {"SDA": "Digital"}
+        project["meta"][route_cmd.KCT_NETCLASS_ASSIGNMENTS_META_KEY] = {"SDA": "Digital"}
+        authored = {"netclass": "Digital", "pattern": "SDA"}
+        project["net_settings"]["netclass_patterns"] = [authored]
+        pro = _write_project(tmp_path, project)
+
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": PROBE}, quiet=True)
+        assert _patterns(_load(pro)) == [authored]
+        assert _assignments(_load(pro)) == {}
 
     def test_hand_edited_kct_assignment_survives_rerun(self, tmp_path: Path):
         """Blocker 2 (#10166): if the user re-points a kct-written assignment to
@@ -456,7 +541,10 @@ class TestHandAuthoredContentPreserved:
 
         saved = _load(pro)
         assert _assignments(saved) == {"GND": "Ground"}
-        assert _patterns(saved) == [{"netclass": "EditorSignal", "pattern": "SDA"}]
+        assert _patterns(saved) == [
+            {"netclass": "EditorSignal", "pattern": "SDA"},
+            {"netclass": "Ground", "pattern": "GND"},
+        ]
         resolved = resolve_project_clearances(saved, ["SDA", "GND"])
         assert resolved["SDA"].source_class == "EditorSignal"
 
@@ -482,6 +570,7 @@ class TestIdempotency:
         route_cmd._write_netclasses_to_project(pcb, {"SDA": clock}, quiet=True)
 
         project = _load(pro)
+        assert _patterns(project) == [{"netclass": "Clock", "pattern": "SDA"}]
         assert _assignments(project) == {"SDA": "Clock"}
         assert project["meta"][route_cmd.KCT_NETCLASS_ASSIGNMENTS_META_KEY] == {"SDA": "Clock"}
 
@@ -495,6 +584,7 @@ class TestIdempotency:
         )
 
         project = _load(pro)
+        assert _patterns(project) == []
         assert _assignments(project) == {}
         assert route_cmd.KCT_NETCLASS_ASSIGNMENTS_META_KEY not in project.get("meta", {})
 
@@ -621,7 +711,7 @@ class TestRunPostRouteDrcIntegration:
             "GND": "Ground",
             "SDA": "Digital",
         }
-        assert _patterns(project) == []
+        assert len(_patterns(project)) == len(_assignments(project))
         resolved = resolve_project_clearances(project, ["GND", "+3V3", "SDA", "A.B", "AXB"])
         assert resolved["A.B"].source_class == "Probe"
         assert resolved["AXB"].source_class == "Default"
@@ -671,3 +761,33 @@ class TestRunPostRouteDrcIntegration:
         assert resolved["SDA"].source_class == "EditorSignal"
         assert resolved["SDA"].clearance == pytest.approx(0.18)
         assert resolved["GND"].source_class == "Ground"
+
+    def test_reroute_preserves_edited_pattern_and_its_class(self, tmp_path: Path):
+        pcb = _write_pcb(tmp_path, ["SDA", "SDA1", "AUX"])
+        pro = pcb.with_suffix(".kicad_pro")
+
+        def route():
+            route_cmd.run_post_route_drc(
+                output_path=pcb,
+                manufacturer="jlcpcb",
+                layers=2,
+                net_class_map={"SDA": PROBE, "AUX": NetClassRouting(name="Aux", clearance=0.1)},
+                time_left=20.0,
+                drc_cost_estimate=40.0,
+                quiet=True,
+            )
+
+        route()
+        before = pro.read_bytes()
+        route()
+        assert pro.read_bytes() == before
+
+        project = _load(pro)
+        authored = {"netclass": "Probe", "pattern": "SDA*", "comment": "user edit"}
+        project["net_settings"]["netclass_patterns"][-1] = authored
+        _write_project(tmp_path, project)
+        route()
+        saved = _load(pro)
+        assert _patterns(saved) == [authored, {"netclass": "Aux", "pattern": "AUX"}]
+        assert _assignments(saved) == {"AUX": "Aux"}
+        assert resolve_project_clearances(saved, ["SDA1"])["SDA1"].source_class == "Probe"

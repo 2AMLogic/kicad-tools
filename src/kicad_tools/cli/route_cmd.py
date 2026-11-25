@@ -5580,11 +5580,9 @@ def _write_netclasses_to_project(
     ``ClearanceResolver`` actually enforces) and ``via_diameter`` from the
     router's :class:`~kicad_tools.router.rules.NetClassRouting` -- and assigns
     each routed net by exact name in ``net_settings.netclass_assignments``
-    (never ``netclass_patterns``, where KiCad's regex/wildcard evaluation
-    causes ``.``, ``+``, ``(``, ``)``, ``*`` and ``?`` in net names to match
-    unrelated nets or fail pattern validation; see #10122).  GND and power
-    rails land in their own dedicated classes because the classifier gives
-    them non-``Default`` classes ("Ground", "Power", ...).
+    for pcbnew and a corresponding literal ``netclass_patterns`` row for
+    fresh schematic exports (#10277). GND and power rails land in dedicated
+    classes because the classifier gives them non-``Default`` classes ("Ground", "Power", ...).
 
     Authored intent always wins, through the existing merge helpers:
 
@@ -5601,7 +5599,9 @@ def _write_netclasses_to_project(
       re-run drops only assignments that still carry kct's own class (along
       with unedited #6390 ``meta.kct_router_netclasses`` assignments) -- an
       entry the user re-pointed at another class in KiCad survives untouched,
-      while unedited kct assignments are refreshed idempotently.
+      while unedited kct assignments are refreshed idempotently. A separate
+      ``meta.kct_netclass_patterns`` record identifies the generated pattern
+      rows, so pre-existing and edited rows keep their authored ownership.
 
     Non-fatal exactly like the sidecar writes: a missing ``.kicad_pro``, a
     read-only directory, an unreadable project or an authored netclass block
@@ -5663,8 +5663,10 @@ def _write_netclasses_to_project(
         _authored_netclass_members,
         board_net_names,
         is_kct_owned_project,
+        remove_router_netclass_patterns,
         router_netclass_provenance,
         stamp_kct_project,
+        write_router_netclass_patterns,
     )
 
     # Re-stamp decision taken BEFORE mutating: only a project whose stamp
@@ -5690,6 +5692,7 @@ def _write_netclasses_to_project(
         else {}
     )
 
+    recorded.update(remove_router_netclass_patterns(project))
     settings_raw = project.get("net_settings")
     raw_assignments = (
         settings_raw.get("netclass_assignments") if isinstance(settings_raw, dict) else None
@@ -5829,6 +5832,9 @@ def _write_netclasses_to_project(
         settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
 
     if assigned:
+        write_router_netclass_patterns(
+            project, assigned, board_nets if board_nets is not None else names
+        )
         project.setdefault("meta", {})[KCT_NETCLASS_ASSIGNMENTS_META_KEY] = dict(
             sorted(assigned.items())
         )
