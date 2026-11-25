@@ -64,6 +64,7 @@ FAB_CATEGORY_RULES: dict[str, tuple[str, ...]] = {
     "missing_plated_through_hole": ("missing_plated_hole",),
     "silkscreen_line_width": ("silkscreen",),
     "fiducial": ("fiducials",),
+    "trace_width": ("dimension_trace_width",),
 }
 
 
@@ -112,12 +113,20 @@ def test_rules_are_real_check_categories():
                 assert rule in implemented, (r.category, rule)
 
 
+#: Rows observed in JLCDFM without a recorded per-category count, so no
+#: ``jlcdfm_*.json`` board carries them.  ``trace_width`` (#10173): the report
+#: said every 0.1016 mm outer track was Danger and 0.1524 mm was Good, but gave
+#: no count, so none is invented here.
+ROWS_WITHOUT_RECORDED_COUNTS = frozenset({"trace_width"})
+
+
 def test_table_matches_recorded_categories():
     seen: set[str] = set()
     for counts in _all_recorded_counts():
         assert set(counts) <= set(ROWS), f"unknown category recorded: {set(counts) - set(ROWS)}"
         seen |= set(counts)
-    assert seen == set(ROWS)
+    assert seen | ROWS_WITHOUT_RECORDED_COUNTS == set(ROWS)
+    assert not (seen & ROWS_WITHOUT_RECORDED_COUNTS)
 
 
 def test_danger_capable_matches_recorded_danger():
@@ -131,6 +140,9 @@ def test_danger_capable_matches_recorded_danger():
         cat for counts in _all_recorded_counts() for cat, c in counts.items() if c["danger"] > 0
     }
     for cat, row in ROWS.items():
+        if cat in ROWS_WITHOUT_RECORDED_COUNTS:
+            assert row.danger_capable, cat  # observed Danger, count unrecorded
+            continue
         assert row.danger_capable == (cat in danger_any), cat
 
 
@@ -297,7 +309,8 @@ EXPECTED_DEFAULT_STANZA = (
     "  covered     sharp_trace_corner: sharp_trace_corner\n"
     "  partial     missing_plated_through_hole: missing_plated_hole\n"
     "  partial     silkscreen_line_width: silkscreen\n"
-    "  covered     fiducial: fiducials"
+    "  covered     fiducial: fiducials\n"
+    "  partial     trace_width [danger-capable]: dimension_trace_width"
 )
 
 

@@ -517,8 +517,6 @@ src/kicad_tools/optim/suggestions.py	arg-type	Argument N to "from_pcb" of "Place
 src/kicad_tools/optim/workflow.py	arg-type	Argument N to "add_keepout_zones" has incompatible type "EvolutionaryPlacementOptimizer"; expected "PlacementOptimizer"
 src/kicad_tools/optim/workflow.py	arg-type	Argument N to "add_keepout_zones" has incompatible type "EvolutionaryPlacementOptimizer"; expected "PlacementOptimizer"
 src/kicad_tools/optim/workflow.py	assignment	Incompatible types in assignment (expression has type "list[ConstraintViolation]", variable has type "list[str]")
-src/kicad_tools/optim/workflow.py	attr-defined	"EvolutionaryPlacementOptimizer" has no attribute "compute_energy"
-src/kicad_tools/optim/workflow.py	attr-defined	"EvolutionaryPlacementOptimizer" has no attribute "total_wire_length"; maybe "_total_wire_length"?
 src/kicad_tools/panel/cuts.py	arg-type	Argument "y" to "MousebiteHole" has incompatible type "float | None"; expected "float"
 src/kicad_tools/panel/cuts.py	unused-ignore	Unused "type: ignore" comment
 src/kicad_tools/panel/panel.py	arg-type	Argument N to "tooling_hole_to_sexp" has incompatible type "MousebiteHole"; expected "ToolingHole"

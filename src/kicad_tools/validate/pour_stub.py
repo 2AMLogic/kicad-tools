@@ -298,13 +298,26 @@ def _verify_branch(
     return None
 
 
+@dataclass(frozen=True)
+class PourStubProof:
+    """Verified branches plus how many discovered candidates were actually evaluated."""
+
+    verified: list[tuple[PourStub, PourStubEvidence]]
+    evaluated: int
+    total: int
+
+    @property
+    def partial(self) -> bool:
+        return self.evaluated < self.total
+
+
 def _evaluate(
     pcb: PCB,
     *,
     jointly: bool,
     rule_files: Sequence[Path] | None = None,
     include: Callable[[PourStub], bool] | None = None,
-) -> list[tuple[PourStub, PourStubEvidence]] | None:
+) -> PourStubProof | None:
     source = pcb.path
     if source is None or not pcb.zones or not pcb.segments:
         return None
@@ -331,10 +344,14 @@ def _evaluate(
             previous = _states(baseline)
             saved = {b._signature(): b for b in discover_pour_stubs(baseline)}
             results = []
-            exercised = False
+            evaluated = 0
             for branch in branches:
                 candidate = saved.get(branch._signature())
                 if candidate is None:
+                    logger.warning(
+                        "Could not evaluate pour stub at %s: candidate not found after baseline refill",
+                        branch.pad_name,
+                    )
                     continue
                 with tempfile.TemporaryDirectory(dir=scratch) as trial_dir:
                     trial = Path(trial_dir) / path.name
@@ -344,9 +361,11 @@ def _evaluate(
                     try:
                         evidence = _verify_branch(candidate, baseline, previous, trial, cli)
                     except _TrialUnavailable as exc:
-                        logger.debug("Could not evaluate pour stub at %s: %s", branch.pad_name, exc)
+                        logger.warning(
+                            "Could not evaluate pour stub at %s: %s", branch.pad_name, exc
+                        )
                         continue
-                    exercised = True
+                    evaluated += 1
                     if evidence is None:
                         continue
                     results.append((branch, evidence))
@@ -358,15 +377,27 @@ def _evaluate(
                         baseline = PCB.load(trial)
                         previous = _states(baseline)
                         saved = {b._signature(): b for b in discover_pour_stubs(baseline)}
-            return results if exercised and source.read_bytes() == original else None
+            if evaluated and source.read_bytes() == original:
+                return PourStubProof(results, evaluated, len(branches))
+            return None
     except (OSError, KeyError, ValueError, GEOSException, KiCadToolsError) as exc:
         logger.debug("Could not verify pour-connected pad branches in %s: %s", source, exc)
         return None
 
 
+def prove_pour_stubs(pcb: PCB) -> PourStubProof | None:
+    """Evaluate each candidate independently and report per-candidate coverage (Issue #10211).
+
+    Candidates that disappear on refill or whose native trial is unavailable
+    count toward the total but not the number evaluated.
+    """
+    return _evaluate(pcb, jointly=False)
+
+
 def evaluate_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]] | None:
     """Return branches that are each removable alone, or None if none could be evaluated."""
-    return _evaluate(pcb, jointly=False)
+    proof = prove_pour_stubs(pcb)
+    return None if proof is None else proof.verified
 
 
 def verified_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]]:
@@ -387,4 +418,5 @@ def select_pour_stubs(
     sidecars in the scratch copy (an explicit ``--project``); ``include`` drops
     branches before any trial, so their copper stays in every later proof.
     """
-    return _evaluate(pcb, jointly=True, rule_files=rule_files, include=include)
+    proof = _evaluate(pcb, jointly=True, rule_files=rule_files, include=include)
+    return None if proof is None else proof.verified
