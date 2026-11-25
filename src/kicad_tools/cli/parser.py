@@ -2474,6 +2474,11 @@ def _add_sch_parser(subparsers) -> None:
         help="Only assign numbers to unannotated (?) references",
     )
     sch_reannotate.add_argument(
+        "--pcb",
+        metavar="BOARD",
+        help="Also apply the renumbering to footprint references in this .kicad_pcb",
+    )
+    sch_reannotate.add_argument(
         "--check",
         action="store_true",
         help="Check reference numbers in schematic position order and across electrical "
