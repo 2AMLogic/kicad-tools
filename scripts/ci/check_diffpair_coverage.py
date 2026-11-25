@@ -300,7 +300,8 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # The sideband and PCIe repairs retired MIPI_RST, both USB_CC nets and
     # both PCIe pairs. The clock repair (#10083) retired the five MIPI_CLK+
     # and six MIPI_CLK- findings; the data repair (#10113) retired the two
-    # MIPI_D0+ and four MIPI_D0- findings. The remaining signatures are
+    # MIPI_D0+ and four MIPI_D0- findings. The U1.32 ground repair (#9891)
+    # retired both GND findings. The remaining signatures are
     # listed below.
     # Two independent regenerations reproduced every original
     # signature and per-net count exactly, so the entries are keyed by NET
@@ -317,7 +318,6 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     #     --mfr jlcpcb --errors-only --format json
     ("mask_to_copper", "+1V2"): 8858,
     ("mask_to_copper", "+3V3"): 8858,
-    ("mask_to_copper", "GND"): 8858,
     ("mask_to_copper", "USB2_D+"): 8858,
     ("mask_to_copper", "USB2_D-"): 8858,
     ("mask_to_copper", "USB3_RX1+"): 8858,

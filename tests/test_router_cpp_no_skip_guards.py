@@ -518,7 +518,12 @@ def test_runtime_backstop_fails_router_reasoned_skips(tmp_path):
         "    pytest.skip('fixture only provisioned on hardware runners')\n",
         encoding="utf-8",
     )
-    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+    # The child needs both the repo's conftest and the parent's opt-in pytest plugins.
+    env = os.environ.copy()
+    paths = [str(REPO_ROOT)]
+    if env.get("PYTHONPATH"):
+        paths.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(paths)
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tmp_path)],
         capture_output=True,
