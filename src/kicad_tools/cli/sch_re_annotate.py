@@ -22,6 +22,9 @@ Usage:
 
     # Restart numbering per sheet
     kicad-tools sch re-annotate board.kicad_sch --per-sheet
+
+    # Report parts whose reference order disagrees with position order
+    kicad-tools sch re-annotate board.kicad_sch --check
 """
 
 import re
@@ -488,6 +491,7 @@ def run_re_annotate(
     format: str = "text",
     unannotated_only: bool = False,
     include_power: bool = False,
+    check: bool = False,
 ) -> int:
     """Run the re-annotate operation.
 
@@ -503,6 +507,10 @@ def run_re_annotate(
             references, leaving already-assigned references unchanged.
         include_power: If True, also annotate ``#PWR?`` and ``#FLG?`` power
             symbols (excluded by default).
+        check: If True, report the parts whose current reference number
+            order disagrees with the order re-annotate would assign
+            (schematic position order) and exit 1 when any disagree.
+            Files are never modified under ``--check``.
 
     Returns:
         0 on success, 1 on error.
@@ -556,6 +564,45 @@ def run_re_annotate(
             unannotated_only=unannotated_only,
             include_power=include_power,
         )
+
+    if check:
+        uuid_to_file: dict[str, Path] = {}
+        for sch_file, syms in file_symbols.items():
+            for sym in syms:
+                uid = sym.get("uuid")
+                if uid:
+                    uuid_to_file[uid] = sch_file
+        flagged = _out_of_order_parts(uuid_mapping, uuid_to_file, per_sheet)
+        if format == "json":
+            import json
+
+            print(
+                json.dumps(
+                    {
+                        "check": True,
+                        "out_of_order": flagged,
+                        "total": len(flagged),
+                    },
+                    indent=2,
+                )
+            )
+        elif flagged:
+            print(
+                f"Reference order check: {len(flagged)} part(s) disagree "
+                "with schematic position order:"
+            )
+            print()
+            check_by_prefix: dict[str, list[tuple[str, str]]] = {}
+            for item in flagged:
+                check_by_prefix.setdefault(item["prefix"], []).append((item["old"], item["new"]))
+            for prefix in sorted(check_by_prefix):
+                print(f"  {prefix}:")
+                for old, new in check_by_prefix[prefix]:
+                    print(f"    {old} -> {new}")
+            print()
+        else:
+            print("All reference numbers agree with schematic position order.")
+        return 1 if flagged else 0
 
     # Filter out identity mappings
     effective_mapping = {
@@ -694,6 +741,73 @@ def run_re_annotate(
         )
 
     return 0
+
+
+def _out_of_order_parts(
+    uuid_mapping: dict[str, dict],
+    uuid_to_file: dict[str, Path],
+    per_sheet: bool,
+) -> list[dict]:
+    """Return mapping entries whose number order disagrees with position order.
+
+    Walks the mapping in insertion order — the same order the mapping
+    builders enumerated the symbols (file order, then top-to-bottom,
+    left-to-right position), which is also the order the new numbers are
+    assigned in — and, per prefix, flags every part that participates in an
+    inversion: a part whose current number is strictly greater than a later
+    part's number, or strictly less than an earlier part's number.  Parts
+    with equal numbers (multi-unit components sharing a base) and
+    unannotated references (``R?``) are not ranked.
+
+    Under *per_sheet* the comparison is scoped per file, because per-sheet
+    numbering restarts and cross-sheet number comparisons are meaningless.
+
+    Returns:
+        List of ``{"prefix", "old", "new", "uuid"}`` dicts in mapping
+        (position) order, reusing the mapping builders' assignment — no
+        second ordering implementation.
+    """
+    entries: list[tuple[str, str, int]] = []  # (uuid, prefix, old_number)
+    for uid, info in uuid_mapping.items():
+        if not uid:
+            continue
+        prefix, number, _ = _parse_reference(info["old"])
+        if number is None:
+            continue
+        entries.append((uid, prefix, number))
+
+    if per_sheet:
+        scopes: list[list[tuple[str, str, int]]] = []
+        by_file: dict[Path, list[tuple[str, str, int]]] = {}
+        for uid, prefix, number in entries:
+            by_file.setdefault(uuid_to_file.get(uid, Path("")), []).append((uid, prefix, number))
+        scopes.extend(by_file.values())
+    else:
+        scopes = [entries]
+
+    flagged: set[str] = set()
+    for scope in scopes:
+        by_prefix: dict[str, list[tuple[str, int]]] = {}
+        for uid, prefix, number in scope:
+            by_prefix.setdefault(prefix, []).append((uid, number))
+        for seq in by_prefix.values():
+            numbers = [n for _, n in seq]
+            prefix_max: list[int] = list(numbers)
+            suffix_min: list[int] = list(numbers)
+            for i in range(1, len(numbers)):
+                prefix_max[i] = max(prefix_max[i - 1], numbers[i])
+            for i in range(len(numbers) - 2, -1, -1):
+                suffix_min[i] = min(suffix_min[i + 1], numbers[i])
+            for i, (uid, n) in enumerate(seq):
+                if (prefix_max[i] > n) or (suffix_min[i] < n):
+                    flagged.add(uid)
+
+    results = []
+    for uid, info in uuid_mapping.items():
+        if uid in flagged:
+            prefix, _, _ = _parse_reference(info["old"])
+            results.append({"prefix": prefix, "old": info["old"], "new": info["new"], "uuid": uid})
+    return results
 
 
 def _build_continuous_mapping(
@@ -973,6 +1087,12 @@ def main(argv: list[str] | None = None):
         help="Also annotate unannotated #PWR? and #FLG? power symbols",
     )
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Report parts whose reference number order disagrees with schematic "
+        "position order; exit 1 if any disagree (files are never modified)",
+    )
+    parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
@@ -995,6 +1115,7 @@ def main(argv: list[str] | None = None):
         format=args.format,
         unannotated_only=args.unannotated_only,
         include_power=args.include_power,
+        check=args.check,
     )
 
 

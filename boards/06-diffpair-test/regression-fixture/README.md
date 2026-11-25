@@ -273,12 +273,24 @@ boards and KiCad 10.0.6’s unconnected-item reports agreed on every signal.
 | Backend | Signals connected | Open signals on the saved board |
 | --- | ---: | --- |
 | C++ | 21/21 | None |
-| Pure Python | 17/21 | `USB3_RX1-`, `USB3_RX2-`, `USB3_TX1-`, `USB3_TX2-` |
+| Pure Python (archived single run) | 17/21 | `USB3_RX1-`, `USB3_RX2-`, `USB3_TX1-`, `USB3_TX2-` |
+| Pure Python (after the merged repairs) | 21/21 | None |
 
 Of the nine signals originally open with Python, five now connect on both
 backends. These were `MIPI_RST`, `USB3_RX1+`, `USB3_RX2+`, `USB3_TX1+` and `USB3_TX2+`.
 Each remaining negative leg has two pad islands and one native open on the
-Python board. The other 12 signals connect on both boards.
+archived Python board. The other 12 signals connect on both boards.
+
+The four negative legs were closed later by sequential preserved-copper
+routing repairs on the archived Python board (issue #9850 and its children;
+the last, `USB3_RX2-` from J1.A10 to U2.F6, merged in PR #10099 at commit
+`0c768277`). On the final written Python board (SHA-256
+`c5584b1fd3a5d7f3e3a675ade3ee84d10067c760960c206f81b43d145782347e`) all 21
+signals connect, pinned KiCad 10.0.6 reports zero errors and zero opens
+before and after refill, and independent copper LVS binds all 198 pads. The
+output retained every original track, via and pad record. The C++ reference
+stays the archived single-run board.
+[Final verification and per-stage measurements](https://github.com/2AMLogic/kicad-tools/issues/9850#issuecomment-7146942554)
 
 In `python/route.log`, the router found a path for each negative leg, then
 rolled it back when it could not restore every net it had displaced. Each
@@ -296,6 +308,17 @@ TX2 experiment used a reduced set of neighboring routes. Moving one via by
 0.05 mm gave zero native TX2 opens and cleared the drill-clearance warning.
 The Python router rejected that site because it was reserved for the U2.E3
 power stitch. [Reduced-board TX2 measurements](https://github.com/2AMLogic/kicad-tools/pull/10034#issuecomment-7116139195)
+
+**Saved-board slit residual (#9019).** The archived Python board (and the
+final repaired board, which preserves its stitch copper) carries one
+fab-view same-net slit the C++ board does not: the stitch via at
+(151.29, 72.03) sits 0.33 mm of centerline from the 0.2 mm GND escape stub
+at x=150.96 — 0.005 mm edge-to-edge by exact geometry (0.029 mm by the
+measurement workflow's polygon checker) — neither a copper union nor clear
+of the 0.1016 mm `trace_spacing` detection edge. The stitcher's via-site
+and stub-leg acceptance now apply the #9208 two-region trace-population
+band to same-net tracks and vias (issue #9019), so a regeneration seats
+that via legally instead; the archived bytes are historical.
 
 ### The two downstream modes
 
