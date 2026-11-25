@@ -111,8 +111,8 @@ def _parse_reference(ref: str) -> tuple[str, int | None, str]:
 def _extract_symbols_from_text(text: str) -> list[dict]:
     """Extract symbol references and their positions from schematic text.
 
-    Returns list of dicts with keys: reference, prefix, number, unit_suffix,
-    position_y, position_x, lib_id, uuid, has_project_instance.
+    Each symbol records its reference, prefix, number, unit suffix, position,
+    library ID and UUID. Annotated symbols also record their KiCad unit number.
 
     Two passes are performed:
     1. Main pass: matches symbol blocks ending with an ``(instances)`` block
@@ -151,6 +151,7 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
         at_match = re.search(r"\(at ([\d.eE+-]+) ([\d.eE+-]+)", block)
         ref_match = ref_pattern.search(block)
         uuid_match = re.search(r'\(uuid "([^"]+)"\)', block)
+        unit_match = re.search(r"\(unit (\d+)\)", block)
 
         if not ref_match or not lib_match:
             continue
@@ -170,6 +171,7 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
                 "prefix": prefix,
                 "number": number,
                 "unit_suffix": unit_suffix,
+                "unit": int(unit_match.group(1)) if unit_match else 1,
                 "position_x": x,
                 "position_y": y,
                 "lib_id": lib_id,
@@ -244,6 +246,33 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
         )
 
     return symbols
+
+
+def _mark_paired_units(file_symbols: dict[Path, list[dict]], prefixes: list[str] | None) -> None:
+    """Recognize native units of the same footprint across the schematic hierarchy."""
+    by_reference: dict[str, list[dict]] = defaultdict(list)
+    for symbols in file_symbols.values():
+        for sym in symbols:
+            if (
+                sym["number"] is None
+                or sym["reference"].startswith("#")
+                or (prefixes is not None and sym["prefix"] not in prefixes)
+            ):
+                continue
+            if sym["unit_suffix"]:
+                sym["package_ref"] = sym["reference"].removesuffix(sym["unit_suffix"])
+            else:
+                by_reference[sym["reference"]].append(sym)
+
+    for ref, units in by_reference.items():
+        if len(units) < 2:
+            continue
+        if len({s["lib_id"] for s in units}) != 1 or len({s["unit"] for s in units}) != len(units):
+            raise ValueError(
+                f"Ambiguous schematic reference '{ref}': expected distinct units of one symbol"
+            )
+        for unit in units:
+            unit["package_ref"] = ref
 
 
 def _apply_reference_rename(text: str, old_ref: str, new_ref: str) -> str:
@@ -560,6 +589,13 @@ def run_re_annotate(
     # The mapping is now keyed by UUID to handle unannotated refs (R?, C?)
     # that share the same reference string across multiple components.
 
+    if pcb_path is not None and not check and not unannotated_only:
+        try:
+            _mark_paired_units(file_symbols, prefixes)
+        except ValueError as e:
+            print(f"Error: {e}. No files were modified.", file=sys.stderr)
+            return 1
+
     if per_sheet:
         uuid_mapping = _build_per_sheet_mapping(
             all_files,
@@ -681,28 +717,27 @@ def run_re_annotate(
 
         # Board footprints carry base references (no unit suffix), so
         # multi-unit schematic refs (U1A -> U2A) collapse to U1 -> U2.
-        for info in sorted(effective_mapping.values(), key=lambda i: i["new"]):
+        targets_by_source: dict[str, str] = {}
+        for info in sorted(uuid_mapping.values(), key=lambda i: i["new"]):
             if info["unannotated"]:
                 pcb_warnings.append(
                     f"Skipping '{info['old']}' on the board: unannotated reference is ambiguous"
                 )
                 continue
-            old_pfx, old_num, _ = _parse_reference(info["old"])
-            new_pfx, new_num, _ = _parse_reference(info["new"])
-            if old_num is None or new_num is None:
-                continue
-            old_base = _format_reference(old_pfx, old_num)
-            new_base = _format_reference(new_pfx, new_num)
-            if old_base == new_base:
-                continue
-            if board_mapping.get(old_base, new_base) != new_base:
-                pcb_warnings.append(
-                    f"Skipping '{old_base}' on the board: units map to "
-                    f"different targets "
-                    f"({board_mapping[old_base]} vs {new_base})"
+            # Preserve the exact footprint spelling, including leading zeros.
+            _, _, unit_suffix = _parse_reference(info["old"])
+            old_base = info["old"].removesuffix(unit_suffix)
+            new_base = info["new"].removesuffix(unit_suffix)
+            if old_base in targets_by_source and targets_by_source[old_base] != new_base:
+                print(
+                    f"Error: Units of '{old_base}' would receive different references "
+                    f"({targets_by_source[old_base]} and {new_base}). No files were modified.",
+                    file=sys.stderr,
                 )
-                continue
-            board_mapping[old_base] = new_base
+                return 1
+            targets_by_source[old_base] = new_base
+
+        board_mapping = {old: new for old, new in targets_by_source.items() if old != new}
 
         # Two different footprints must never receive the same new reference
         # (e.g. --per-sheet restarts numbering on every sheet).  Reject before
@@ -1191,8 +1226,8 @@ def _assign_numbers(
 
     # Track next number per prefix
     counters: dict[str, int] = {}
-    # Track base number assignments for multi-unit: (prefix, old_number) -> new_number
-    multi_unit_assigned: dict[tuple[str, int | None], int] = {}
+    # A package's units share one number even when their symbols are far apart.
+    multi_unit_assigned: dict[str, int] = {}
 
     for sym in symbols:
         ref = sym["reference"]
@@ -1213,19 +1248,17 @@ def _assign_numbers(
         unannotated = number is None
 
         # Handle multi-unit components
-        if unit_suffix:
-            key = (prefix, number)
-            if key in multi_unit_assigned:
-                new_number = multi_unit_assigned[key]
-            else:
-                new_number = counters.get(prefix, start_from)
-                counters[prefix] = new_number + 1
-                multi_unit_assigned[key] = new_number
-            new_ref = _format_reference(prefix, new_number, unit_suffix)
+        package_ref = sym.get("package_ref")
+        if package_ref is None and unit_suffix:
+            package_ref = f"{prefix}{number}"
+        if package_ref in multi_unit_assigned:
+            new_number = multi_unit_assigned[package_ref]
         else:
             new_number = counters.get(prefix, start_from)
             counters[prefix] = new_number + 1
-            new_ref = _format_reference(prefix, new_number)
+            if package_ref is not None:
+                multi_unit_assigned[package_ref] = new_number
+        new_ref = _format_reference(prefix, new_number, unit_suffix)
 
         mapping[sym_uuid] = {
             "old": ref,

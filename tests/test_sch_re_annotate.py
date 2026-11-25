@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli import main as kct
 from kicad_tools.cli.sch_re_annotate import (
     _add_project_instance,
     _apply_reference_rename,
@@ -2752,6 +2753,7 @@ MULTI_UNIT_SCHEMATIC = """\
 \t(symbol
 \t\t(lib_id "Device:OpAmp")
 \t\t(at 100 50 0)
+\t\t(unit 1)
 \t\t(property "Reference" "U2A"
 \t\t\t(at 100 48 0)
 \t\t\t(effects (font (size 1.27 1.27)))
@@ -2770,6 +2772,7 @@ MULTI_UNIT_SCHEMATIC = """\
 \t(symbol
 \t\t(lib_id "Device:OpAmp")
 \t\t(at 100 80 0)
+\t\t(unit 2)
 \t\t(property "Reference" "U2B"
 \t\t\t(at 100 78 0)
 \t\t\t(effects (font (size 1.27 1.27)))
@@ -2788,6 +2791,7 @@ MULTI_UNIT_SCHEMATIC = """\
 \t(symbol
 \t\t(lib_id "Device:OpAmp")
 \t\t(at 100 110 0)
+\t\t(unit 1)
 \t\t(property "Reference" "U5A"
 \t\t\t(at 100 108 0)
 \t\t\t(effects (font (size 1.27 1.27)))
@@ -2809,8 +2813,99 @@ MULTI_UNIT_SCHEMATIC = """\
 )
 """
 
+# KiCad stores each gate's unit number separately from the package reference.
+NATIVE_UNIT_SCHEMATIC = (
+    MULTI_UNIT_SCHEMATIC.replace('"U2A"', '"U2"').replace('"U2B"', '"U2"').replace('"U5A"', '"U5"')
+)
+
 
 class TestPcbSync:
+    def test_native_units_share_one_paired_reference(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, NATIVE_UNIT_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["U2", "U5"]))
+        args = [
+            "sch",
+            "re-annotate",
+            str(sch),
+            "--pcb",
+            str(pcb),
+            "--start-from",
+            "81",
+            "--format",
+            "json",
+        ]
+        assert kct(args) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert [(m["old"], m["new"]) for m in result["mappings"]] == [
+            ("U2", "U81"),
+            ("U2", "U81"),
+            ("U5", "U82"),
+        ]
+        assert result["pcb"] == {"path": str(pcb), "renamed": 2, "warnings": []}
+        assert _board_refs(pcb) == {"U81", "U82"}
+        assert sch.read_text().count('(property "Reference" "U81"') == 2
+        assert sch.read_text().count('(reference "U81")') == 2
+
+    def test_padded_source_is_distinct_from_unpadded_footprint(self, tmp_path, capsys):
+        from kicad_tools.schema.pcb import PCB
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC.replace('"R5"', '"R01"'))
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R01", "C3"]))
+        args = [
+            "sch",
+            "re-annotate",
+            str(sch),
+            "--pcb",
+            str(pcb),
+            "--prefix",
+            "R",
+            "--start-from",
+            "81",
+            "--format",
+            "json",
+        ]
+        assert kct(args) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result["pcb"] == {"path": str(pcb), "renamed": 2, "warnings": []}
+        assert {fp.uuid: fp.reference for fp in PCB.load(pcb).footprints} == {
+            "fp-r1": "R81",
+            "fp-r01": "R82",
+            "fp-c3": "C3",
+        }
+        assert all(f'(property "Reference" "{ref}"' in sch.read_text() for ref in ("R81", "R82"))
+
+    @pytest.mark.parametrize(
+        ("old", "new"), [("(unit 2)", "(unit 1)"), ("Device:OpAmp", "Device:Other")]
+    )
+    def test_ambiguous_native_package_is_refused_before_backup(self, tmp_path, capsys, old, new):
+        sch = _write_sch(tmp_path, NATIVE_UNIT_SCHEMATIC.replace(old, new, 1))
+        pcb = _write_pcb(tmp_path, _make_pcb(["U2", "U5"]))
+        before = {p: p.read_bytes() for p in tmp_path.iterdir()}
+        assert kct(["sch", "re-annotate", str(sch), "--pcb", str(pcb), "--backup"]) == 1
+        assert "Ambiguous schematic reference 'U2'" in capsys.readouterr().err
+        assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+    def test_units_on_different_sheets_cannot_split_one_footprint(self, tmp_path, capsys):
+        parent = PARENT_SCHEMATIC.replace('"R3"', '"U9"').replace('"R7"', '"U1"')
+        child = (
+            CHILD_SCHEMATIC.replace('"R14"', '"U1"')
+            .replace('(property "Reference" "U1"', '(unit 2)\n\t\t(property "Reference" "U1"')
+            .replace('(reference "U1") (unit 1)', '(reference "U1") (unit 2)')
+        )
+        sch = _write_sch(tmp_path, parent.replace("Device:R", "Device:OpAmp"))
+        sub = _write_sch(tmp_path, child.replace("Device:R", "Device:OpAmp"), "sub.kicad_sch")
+        pcb = _write_pcb(tmp_path, _make_pcb(["U9", "U1", "C5"]))
+        before = {p: p.read_bytes() for p in tmp_path.iterdir()}
+        args = ["sch", "re-annotate", str(sch), "--pcb", str(pcb), "--prefix", "U"]
+        assert kct([*args, "--per-sheet", "--backup"]) == 1
+        assert "Units of 'U1' would receive different references" in capsys.readouterr().err
+        assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+        assert kct(args) == 0
+        assert '(property "Reference" "U2"' in sch.read_text()
+        assert '(property "Reference" "U2"' in sub.read_text()
+        assert _board_refs(pcb) == {"U1", "U2", "C5"}
+
     def test_board_references_match_renamed_schematic(self, tmp_path):
         sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
         pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
