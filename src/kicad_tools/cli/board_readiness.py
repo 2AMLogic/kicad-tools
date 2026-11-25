@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,14 +22,60 @@ class ReadinessLayout:
     A project-declared output root (Issue #10106) moves the receipt out of
     ``<board>/output/readiness.json`` into the declared root and keys its
     ``inputs`` against the declaring project instead of the board directory.
-    The producer passes the layout it resolved; the board-local entry point
-    (:func:`read_readiness` without a layout) keeps its historical contract.
+    The producer passes its resolved layout. Directory-only readers still
+    use the board-local location unless they explicitly supply a layout.
     """
 
     #: The ``readiness.json`` record to read.
     report: Path
     #: Directory the record's ``inputs`` paths resolve against.
     input_base: Path
+
+    def validate_declaration(self, data: dict, board_dir: Path) -> None:
+        """Check that the receipt describes the project and output selected by the caller."""
+        base = self.input_base.resolve()
+        expected_project = Path(os.path.relpath(base, board_dir.resolve())).as_posix()
+        recorded_project = data.get("project_root")
+        if (
+            data.get("output_root") != self.report.parent.resolve().relative_to(base).as_posix()
+            or not isinstance(recorded_project, str)
+            # Older Windows producers used native separators for this field.
+            or recorded_project.replace("\\", "/") != expected_project
+            or "external_inputs" in data
+        ):
+            raise ValueError(
+                "Readiness receipt does not match the declared project and output root"
+            )
+
+
+def board_directory_for_pcb(pcb: Path) -> Path:
+    """Locate a board's directory for either an editable PCB or a board under output/."""
+    return pcb.parent.parent if pcb.parent.name == "output" else pcb.parent
+
+
+def declared_readiness_layout(pcb: Path, board_dir: Path) -> ReadinessLayout | None:
+    """Resolve the selected PCB's local output declaration with the producer's path rules."""
+    from kicad_tools.config import ConfigError, find_readiness_output_root
+
+    try:
+        declaration = find_readiness_output_root(pcb.parent)
+    except ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    if declaration is None:
+        return None
+    output_root, declared_by = declaration
+    project_dir = declared_by.parent.resolve()
+    if output_root == project_dir or not output_root.is_relative_to(project_dir):
+        raise ValueError(
+            f"[readiness] output_root in {declared_by.name} must resolve to a directory "
+            f"inside the project {project_dir}; got {output_root}"
+        )
+    if output_root == board_dir.resolve():
+        raise ValueError(
+            f"[readiness] output_root in {declared_by.name} must not be the board directory "
+            f"itself ({output_root}); the release must not mix with the editable design"
+        )
+    return ReadinessLayout(report=output_root / "readiness.json", input_base=project_dir)
 
 
 def is_manufacturing_manifest(rel_name: str) -> bool:
@@ -82,21 +129,28 @@ def _input_hash_matches(name: str, raw: bytes, expected: object) -> bool:
 def read_readiness(board_dir: Path, *, layout: ReadinessLayout | None = None) -> dict:
     """Load the v1 sidecar, failing closed on missing or changed evidence.
 
-    Paths and hashes are relative to the board directory, never timestamps.
-    This validates evidence provenance; the report writer runs the checks.
-    A *layout* names a project-declared receipt location and input base
-    (Issue #10106); without one the board-local ``output/readiness.json``
-    contract is unchanged.
+    A selected PCB discovers its project declaration and must itself be a
+    hashed input. Directory callers keep the board-local receipt location
+    unless the producer supplies its trusted layout.
     """
     unknown = {"status": "unverified", "blockers": ["Readiness has not been verified."]}
     try:
-        data = json.loads(
-            (
-                layout.report if layout is not None else board_dir / "output/readiness.json"
-            ).read_text()
-        )
+        pcb = None
+        if board_dir.suffix == ".kicad_pcb" and not board_dir.is_dir():
+            pcb = board_dir.resolve()
+            board_dir = board_directory_for_pcb(pcb)
+            if layout is None:
+                layout = declared_readiness_layout(pcb, board_dir)
+        report = layout.report if layout is not None else board_dir / "output/readiness.json"
+        if layout is not None and report.resolve() != report.parent.resolve() / report.name:
+            raise ValueError("Readiness receipt leaves its declared location")
+        data = json.loads(report.read_text())
         if not isinstance(data, dict):
             raise ValueError("report must be an object")
+        if layout is not None:
+            layout.validate_declaration(data, board_dir)
+        elif pcb is not None and "output_root" in data:
+            raise ValueError("Readiness receipt needs its project output declaration")
         if (
             data.get("schema_version") != 1
             or data.get("mode") not in {"assembly", "pcb_only"}
@@ -139,6 +193,8 @@ def read_readiness(board_dir: Path, *, layout: ReadinessLayout | None = None) ->
         if not isinstance(inputs, dict) or not inputs:
             raise ValueError("missing input hashes")
         root = layout.input_base.resolve() if layout is not None else board_dir.resolve()
+        if pcb is not None and pcb.relative_to(root).as_posix() not in inputs:
+            raise ValueError("Readiness receipt was not produced for this board")
         for name, expected in inputs.items():
             path = Path(name)
             if path.is_absolute() or ".." in path.parts or "\\" in name:
@@ -208,7 +264,10 @@ def read_readiness(board_dir: Path, *, layout: ReadinessLayout | None = None) ->
             not isinstance(data["manufacturer"], str) or not data["manufacturer"]
         ):
             raise ValueError("invalid manufacturer")
-        known_issues = _bound_known_issues(data, inputs, root)
+        output_prefix = (
+            layout.report.parent.resolve().relative_to(root) if layout else Path("output")
+        )
+        known_issues = _bound_known_issues(data, inputs, root, output_prefix)
         if data["status"] == "ready" and defects(known_issues):
             numbers = ", ".join(f"#{entry['issue']}" for entry in defects(known_issues))
             raise ValueError(f"Ready conflicts with known defect {numbers}")
@@ -234,7 +293,7 @@ def read_readiness(board_dir: Path, *, layout: ReadinessLayout | None = None) ->
         return {**unknown, "blockers": [f"Readiness needs verification: {exc}"]}
 
 
-def _bound_known_issues(data: dict, inputs: dict, root: Path) -> list[dict]:
+def _bound_known_issues(data: dict, inputs: dict, root: Path, output_prefix: Path) -> list[dict]:
     """Validate ``known_issues`` and require it to match its hashed evidence (#7261).
 
     The report itself is not hashed, so the list is also written to a
@@ -249,7 +308,7 @@ def _bound_known_issues(data: dict, inputs: dict, root: Path) -> list[dict]:
     known_issues = validate_known_issues(data.get("known_issues"))
     orphans = sorted(
         rel
-        for folder in _evidence_folders(data, inputs)
+        for folder in _evidence_folders(data, inputs, output_prefix)
         for path in (root / folder).rglob(KNOWN_ISSUES_FILENAME)
         if path.is_file() and (rel := path.relative_to(root).as_posix()) not in inputs
     )
@@ -271,10 +330,10 @@ def _bound_known_issues(data: dict, inputs: dict, root: Path) -> list[dict]:
     return known_issues
 
 
-def _evidence_folders(data: dict, inputs: dict) -> set[str]:
+def _evidence_folders(data: dict, inputs: dict, output_prefix: Path) -> set[str]:
     """Board-relative evidence folders the record itself names (#7337).
 
-    The folder of an evidence path is its first directory below ``output/``
+    The folder of an evidence path is its first directory below the output root
     (``output/readiness/refilled-native/x.json`` -> ``output/readiness``), or
     its first directory when the board has no ``output/`` folder.  Folders come
     from the ``evidence`` map and from any bound ``known-issues.json``; a
@@ -290,7 +349,7 @@ def _evidence_folders(data: dict, inputs: dict) -> set[str]:
         parts = Path(name).parts
         if ".." in parts or Path(name).is_absolute():
             continue
-        depth = 2 if parts[:1] == ("output",) else 1
+        depth = len(output_prefix.parts) + 1 if Path(name).is_relative_to(output_prefix) else 1
         if len(parts) > depth:
             folders.add(Path(*parts[:depth]).as_posix())
-    return folders or {"output/readiness"}
+    return folders or {(output_prefix / "readiness").as_posix()}

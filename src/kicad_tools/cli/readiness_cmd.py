@@ -67,7 +67,13 @@ from kicad_tools.analysis.routing_quality import (
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.sexp import ParseError, parse_file
 
-from .board_readiness import ReadinessLayout, read_readiness, readiness_input_hash
+from .board_readiness import (
+    ReadinessLayout,
+    board_directory_for_pcb,
+    declared_readiness_layout,
+    read_readiness,
+    readiness_input_hash,
+)
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
 from .kicad_toolchain import (
     KiCadEnvironmentError,
@@ -1110,45 +1116,6 @@ def _find_sibling(pcb: Path, suffix: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def _resolve_declared_output_root(
-    pcb: Path, board_dir: Path
-) -> tuple[Path | None, Path | None, str | None]:
-    """Resolve a project-local ``[readiness] output_root`` declaration (#10106).
-
-    Discovery starts at the selected PCB and resolves the declared value
-    against the declaring TOML's directory.  Returns ``(output_root,
-    declaring_project, error)``; the declaration establishes the project (used
-    as the run's root when ``--project-root`` is not given) and every run with
-    a declaration publishes under ``output_root``.  ``None`` output keeps the
-    historical board-local destinations (Issue #8766 refusals included).
-    """
-    from kicad_tools.config import ConfigError, find_readiness_output_root
-
-    try:
-        declaration = find_readiness_output_root(pcb.parent)
-    except ConfigError as exc:
-        return None, None, str(exc)
-    if declaration is None:
-        return None, None, None
-    output_root, declared_by = declaration
-    project_dir = declared_by.parent.resolve()
-    if output_root == project_dir or not output_root.is_relative_to(project_dir):
-        return (
-            None,
-            None,
-            f"[readiness] output_root in {declared_by.name} must resolve to a directory "
-            f"inside the project {project_dir}; got {output_root}",
-        )
-    if output_root == board_dir.resolve():
-        return (
-            None,
-            None,
-            f"[readiness] output_root in {declared_by.name} must not be the board directory "
-            f"itself ({output_root}); the release must not mix with the editable design",
-        )
-    return output_root, project_dir, None
-
-
 def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, str | None]:
     """Resolve CLI arguments into :class:`ReadinessOptions`.
 
@@ -1172,14 +1139,16 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         if target.suffix != ".kicad_pcb":
             return None, f"expected a .kicad_pcb file or board directory, got {target.name}"
         pcb = target
-        board_dir = target.parent.parent if target.parent.name == "output" else target.parent
+        board_dir = board_directory_for_pcb(target)
 
     # Project-declared output root (Issue #10106): resolve and validate the
     # declaration before anything is read or created, so an unsafe root refuses
     # here rather than mid-run.
-    output_root, declared_project, declaration_error = _resolve_declared_output_root(pcb, board_dir)
-    if declaration_error is not None:
-        return None, declaration_error
+    try:
+        layout = declared_readiness_layout(pcb, board_dir)
+    except ValueError as exc:
+        return None, str(exc)
+    output_root = layout.report.parent if layout is not None else None
 
     manufacturer = args.manufacturer or _discover_tier(board_dir, pcb, output_root=output_root)
     if manufacturer is None:
@@ -1212,14 +1181,14 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             and pcb.resolve().is_relative_to(project_root)
         ):
             return None, f"--project-root {project_root} must contain the board {board_dir}"
-    if output_root is not None:
+    if layout is not None:
         # The declaration itself establishes the project: its TOML's directory
         # bounds sources and the declared output root when --project-root is
         # not given (Issue #10106).  An explicit root must contain the declared
         # output root; nothing outside the root is ever read (#5813 stands).
         if project_root is None:
-            project_root = declared_project
-        elif not output_root.is_relative_to(project_root):
+            project_root = layout.input_base
+        elif not layout.report.parent.is_relative_to(project_root):
             return None, (
                 f"--project-root {project_root} must contain the declared output root {output_root}"
             )
@@ -4305,7 +4274,9 @@ def build_report(
         # and the released artifacts share one portable input base (the
         # declaring project) and the receipt names both that base and the
         # declared output root explicitly, so a moved project still verifies.
-        report["project_root"] = os.path.relpath(options.root, options.board_dir.resolve())
+        report["project_root"] = Path(
+            os.path.relpath(options.root, options.board_dir.resolve())
+        ).as_posix()
         report["output_root"] = options.output_root.resolve().relative_to(options.root).as_posix()
     else:
         external = _external_dependencies(options)

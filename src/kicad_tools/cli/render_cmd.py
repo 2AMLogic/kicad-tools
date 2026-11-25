@@ -52,7 +52,7 @@ Usage:
 
 When the positional argument is a ``.kicad_pcb`` file (rather than a board or
 root directory), that PCB is rendered directly and its four artifacts are
-written to ``<pcb-dir>/renders/`` by default, or to the directory given with
+written to ``renders/`` in the declared output root or the PCB directory, or to the directory given with
 ``-o/--output``. Directory/root scanning behavior (and its
 ``boards/<id>/output/renders/`` output path) is unchanged.
 """
@@ -68,6 +68,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from kicad_tools.cli.board_readiness import board_directory_for_pcb, declared_readiness_layout
 from kicad_tools.cli.export_cmd import _find_pcb_for_export
 from kicad_tools.cli.kicad_toolchain import (
     KiCadEnvironmentError,
@@ -433,16 +434,33 @@ def run_render(args: argparse.Namespace) -> int:
     pinned *version* is not enforced; the version that ran is reported in the
     ``--format json`` output instead.
     """
-    if not docker_fallback_enabled():
-        return _run_render(args, None)
     root = Path(args.path)
     mounts = [root if root.is_dir() else root.parent]
     output = getattr(args, "output", None)
+    destination = Path(output) if output else None
     if output:
         mounts.append(Path(output))
+    elif root.is_file() and root.suffix == ".kicad_pcb":
+        pcb = root.resolve()
+        try:
+            layout = declared_readiness_layout(pcb, board_directory_for_pcb(pcb))
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if layout is not None:
+            destination = layout.report.parent / "renders"
+            if destination.resolve() != destination:
+                print(
+                    f"Error: renders directory leaves its declared location: {destination}",
+                    file=sys.stderr,
+                )
+                return 1
+            mounts.append(layout.input_base)
+    if not docker_fallback_enabled():
+        return _run_render(args, None, destination)
     try:
         with evidence_toolchain(mounts, required_version=None):
-            return _run_render(args, docker_image())
+            return _run_render(args, docker_image(), destination)
     except KiCadEnvironmentError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -457,7 +475,7 @@ def _render_json(boards: list[dict], kicad_cli: Path, image: str | None) -> str:
     return json.dumps(payload, indent=2)
 
 
-def _run_render(args: argparse.Namespace, image: str | None) -> int:
+def _run_render(args: argparse.Namespace, image: str | None, destination: Path | None) -> int:
     root = Path(args.path)
     if not root.exists():
         print(f"Error: path not found: {root}", file=sys.stderr)
@@ -491,11 +509,7 @@ def _run_render(args: argparse.Namespace, image: str | None) -> int:
             )
             return 1
 
-    output = getattr(args, "output", None)
-
     # --- Direct .kicad_pcb file mode ---
-    # When the positional arg is a file, render it directly (no board/output
-    # discovery). Output goes to -o/--output if given, else <pcb-dir>/renders/.
     if root.is_file():
         if root.suffix != ".kicad_pcb":
             print(f"Error: Expected .kicad_pcb file, got: {root.name}", file=sys.stderr)
@@ -505,7 +519,7 @@ def _run_render(args: argparse.Namespace, image: str | None) -> int:
             )
             return 1
 
-        renders_dir = Path(output) if output else root.parent / "renders"
+        renders_dir = destination if destination is not None else root.parent / "renders"
         result = _render_pcb(
             root,
             renders_dir,
@@ -570,7 +584,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "Output directory for a single .kicad_pcb file "
-            "(default: <pcb-dir>/renders/). Ignored in directory/root scanning mode."
+            "(default: renders/ under the declared output root or the PCB directory). "
+            "Ignored in directory/root scanning mode."
         ),
     )
     parser.add_argument(
