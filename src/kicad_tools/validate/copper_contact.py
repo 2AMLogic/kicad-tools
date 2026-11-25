@@ -689,6 +689,27 @@ _OUTLINE_SLACK = 0.02
 _FOREIGN_OVERLAP_AREA = 1e-4
 
 
+def _no_pour_rule_areas(cv: ConnectivityValidator) -> list[tuple[frozenset[str], Any]]:
+    """``(layers, polygon)`` for every rule area that excludes copper pours."""
+    from shapely.geometry import Polygon
+
+    out: list[tuple[frozenset[str], Any]] = []
+    for zone in [*cv.pcb.rule_areas, *cv.pcb.footprint_rule_areas]:
+        if zone.keepout is None or zone.keepout.copperpour_allowed or len(zone.polygon) < 3:
+            continue
+        layers: set[str] = set()
+        for name in zone.layers or [zone.layer]:
+            if name == "*.Cu":
+                layers.update({"F.Cu", "B.Cu"} | {f"In{n}.Cu" for n in range(1, 31)})
+            elif name == "F&B.Cu":
+                layers.update({"F.Cu", "B.Cu"})
+            else:
+                layers.add(name)
+        area = Polygon(zone.polygon)
+        out.append((frozenset(layers), area if area.is_valid else area.buffer(0)))
+    return out
+
+
 def _current_fill_indices(
     cv: ConnectivityValidator, items: list[CopperItem], net_number: int
 ) -> set[int]:
@@ -703,7 +724,10 @@ def _current_fill_indices(
       after the last refill), or
     * the fill overlaps another net's pad, via or track by positive area (a
       fresh refill always retreats from foreign copper, so the copper was
-      routed after the last refill).
+      routed after the last refill), or
+    * the fill overlaps by positive area a rule area that excludes copper
+      pours on a shared layer (a refill carves that region out, so the rule
+      area was added after the last refill).
 
     Rejected fills simply do not exist for the caller's purposes.
     """
@@ -716,6 +740,7 @@ def _current_fill_indices(
         if item.kind in (PAD, VIA, TRACK) and item.net != net_number
     ]
     tree = STRtree([item.geom for item in foreign]) if foreign else None
+    no_pour = _no_pour_rule_areas(cv)
     outlines: dict[int, Any] = {}
     current: set[int] = set()
     for index, item in enumerate(items):
@@ -730,6 +755,11 @@ def _current_fill_indices(
                 _OUTLINE_SLACK
             )
         if not outlines[item.zone].covers(item.geom):
+            continue
+        if any(
+            layers & item.layers and area.intersection(item.geom).area > _FOREIGN_OVERLAP_AREA
+            for layers, area in no_pour
+        ):
             continue
         if tree is not None:
             hits = tree.query(item.geom, predicate="intersects")
@@ -808,6 +838,17 @@ def pads_bonded_to_plane(
         return pad_layers is not None and not item.layers <= pad_layers
 
     # The intended plane component carries the most current plane-layer fill.
+    # The plane is resolved from the copper, not from the caller's target layer
+    # (which follows zone order): when the net has current fill on inner
+    # layers those are the plane; otherwise the caller's layers apply.
+    inner = frozenset(
+        layer
+        for index in current
+        for layer in items[index].layers
+        if layer.startswith("In") and layer.endswith(".Cu")
+    )
+    if inner:
+        plane_layers = inner
     plane_area: dict[int, float] = {}
     for index in current:
         item = items[index]
@@ -822,12 +863,13 @@ def pads_bonded_to_plane(
         pad_item = items[pad_idx]
         if find(pad_idx) != plane_root:
             continue
-        if plane_layers is None:
-            reaches = any(
-                on_plane(items[i], pad_item.layers) for i in current if find(i) == plane_root
-            )
-        else:
-            reaches = any(items[i].layers & plane_layers for i in current if find(i) == plane_root)
+        # The component must hold fill on a plane layer that is not merely the
+        # pad's own surface layer: an isolated surface island is no plane.
+        reaches = any(
+            on_plane(items[i], pad_item.layers) and not items[i].layers <= pad_item.layers
+            for i in current
+            if find(i) == plane_root
+        )
         if not reaches:
             continue
         fill_layers = sorted({layer for i in fills for layer in items[i].layers})

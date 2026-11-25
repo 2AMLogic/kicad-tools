@@ -231,3 +231,43 @@ def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
     vias = len(re.findall(r'\(via\b.*?\(net "GNDA"\)', text, re.S))
     # Two original GNDA segments and vias; an island adds exactly one stitch.
     assert (segments, vias) == ((3, 3) if island else (2, 2))
+
+
+_KEEPOUT = """\t(zone
+\t\t(net 0)
+\t\t(net_name "")
+\t\t(layer "F.Cu")
+\t\t(uuid "99999999-2222-5333-8444-555555555555")
+\t\t(hatch edge 0.5)
+\t\t(connect_pads (clearance 0))
+\t\t(min_thickness 0.25)
+\t\t(keepout (tracks allowed) (vias allowed) (pads allowed) (copperpour not_allowed) (footprints allowed))
+\t\t(fill (thermal_gap 0.5) (thermal_bridge_width 0.5))
+\t\t(polygon (pts (xy 114 104) (xy 116 104) (xy 116 116) (xy 114 116)))
+\t)
+"""
+
+
+def test_pour_keepout_added_after_refill_invalidates_the_saved_bond(tmp_path, native_cli):
+    board = make_board(tmp_path)
+    refill(board, native_cli)
+    assert "C1.1" in bonded_pads(stitch(board))
+    text = board.read_text().rstrip()[:-1].rstrip() + "\n" + _KEEPOUT + ")\n"
+    board.write_text(text)  # carves the surface path on the next refill; fill left stale
+    result = stitch(board, target_layer="In1.Cu")
+    assert "C1.1" not in bonded_pads(result)
+
+
+def test_isolated_surface_island_is_not_its_own_plane_regardless_of_zone_order(
+    tmp_path, native_cli
+):
+    board = make_board(tmp_path, right_edge=115)
+    refill(board, native_cli)
+    text = board.read_text()
+    marker = "\t(zone\n"
+    head, *zones = text.split(marker)
+    tail = ")\n"
+    zones[-1] = zones[-1].rstrip()[:-1].rstrip() + "\n"  # drop the board's closing paren
+    for ordering in (zones, zones[::-1]):
+        board.write_text(head + "".join(marker + z for z in ordering) + tail)
+        assert "C1.1" not in bonded_pads(stitch(board))
