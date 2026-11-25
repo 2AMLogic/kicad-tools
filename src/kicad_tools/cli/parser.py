@@ -1570,6 +1570,12 @@ def _add_sch_parser(subparsers) -> None:
     )
     sch_pins.add_argument("--format", choices=["table", "json"], default="table")
 
+    sch_decoupling = sch_subparsers.add_parser(
+        "decoupling", help="Show each schematic bypass capacitor and its designated supply pin"
+    )
+    sch_decoupling.add_argument("schematic", help="Path to the root .kicad_sch file")
+    sch_decoupling.add_argument("--format", choices=["table", "json"], default="table")
+
     # sch pin-map
     sch_pin_map = sch_subparsers.add_parser("pin-map", help="Show resolved pin-to-net assignments")
     sch_pin_map.add_argument("schematic", help="Path to .kicad_sch file")
