@@ -1785,7 +1785,8 @@ def _run_mask_pass(
                     manufacturer=args.mfr,
                     layers=args.layers,
                     project_pcb_path=pcb_path,
-                    **_mask_kwargs(args),
+                    mask_copper=True,
+                    guard_warnings=guard_baseline is not None,
                     elbow_gaps=final_gaps,
                 )
                 if final is None or _mask_assessment_missing(final):
@@ -1919,7 +1920,8 @@ def _verify_mask_actions(
         manufacturer=args.mfr,
         layers=args.layers,
         project_pcb_path=pcb_path,
-        **_mask_kwargs(args),
+        mask_copper=True,
+        guard_warnings=guard_baseline is not None,
         elbow_gaps=gaps,
     )
     if _mask_assessment_missing(after):
