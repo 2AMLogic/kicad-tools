@@ -305,13 +305,7 @@ class TestSchematicDiscovery:
         assert _associate_from_schematic(str(pcb), groups, quiet=True) is groups
 
 
-@pytest.mark.parametrize("radius", [6.0, 0.25])
-def test_optimize_writes_only_a_feasible_designated_cap(tmp_path, capsys, radius):
-    """Read the placement and pads back from the output of the public command."""
-    import json
-
-    from kicad_tools.cli.optimize_placement_cmd import run_optimize_placement
-    from kicad_tools.schema.pcb import PCB
+def make_designated_back_side_board(tmp_path: Path) -> Path:
     from tests.test_decoupling_association import make_sheet
     from tests.test_placement_decoupling import _silk_board
 
@@ -325,6 +319,18 @@ def test_optimize_writes_only_a_feasible_designated_cap(tmp_path, capsys, radius
         [("U1", 50.8, 50.8, "+3V3", ""), ("C1", 55.88, 50.8, "+3V3", "")],
         [(50.8, 50.8, 55.88, 50.8)],
     )
+    return source
+
+
+@pytest.mark.parametrize("radius", [6.0, 0.25])
+def test_optimize_writes_only_a_feasible_designated_cap(tmp_path, capsys, radius):
+    """Read the placement and pads back from the output of the public command."""
+    import json
+
+    from kicad_tools.cli.optimize_placement_cmd import run_optimize_placement
+    from kicad_tools.schema.pcb import PCB
+
+    source = make_designated_back_side_board(tmp_path)
     original = source.read_bytes()
     output = tmp_path / "result.kicad_pcb"
     output.write_bytes(original)
