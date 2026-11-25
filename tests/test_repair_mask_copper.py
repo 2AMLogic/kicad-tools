@@ -18,7 +18,7 @@ import math
 from pathlib import Path
 
 import pytest
-from shapely.geometry import Point  # type: ignore[import-untyped]
+from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
 from kicad_tools.cli import fix_drc_cmd
 from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer, MaskRepairResult
@@ -2816,6 +2816,242 @@ def test_elbow_flip_declines_when_the_mirror_corner_stays_outside_the_pad(tmp_pa
     assert result.repaired == 0
     assert [u.reason for u in result.unrepaired] == ["not_own_pad_entry"]
     assert not repairer.modified and repairer.doc.to_string() == before
+
+
+def _stub_elbow_fixture(tmp_path, *, anchor_y=100.9, extra="", lock=""):
+    """A track hugging the pad's left edge (x = 99) that hands over to a stub.
+
+    ``hug`` runs up the edge to y = 100 and ``turn`` is the 0.25 mm stub into
+    the pad. Swapping the legs puts the corner at (99.2, ``anchor_y``) below the
+    pad, so the entry is a vertical track and the corner stays outside the pad.
+    """
+    tracks = [
+        _seg("hug", (98.95, anchor_y), (98.95, 100.0)),
+        _seg("turn", (98.95, 100.0), (99.2, 100.0)).replace(
+            "(segment ", f"(segment {lock} " if lock else "(segment "
+        ),
+    ]
+    return _board(tmp_path, "\n".join([*tracks, extra]))
+
+
+def test_elbow_flip_takes_a_corner_that_stays_below_the_pad_and_undoes(tmp_path):
+    board = _stub_elbow_fixture(tmp_path)
+    before = board.read_bytes()
+    original = {n: _end(board, n) for n in ("hug", "turn")}
+    repairer = MaskCopperRepairer(board)
+    assert (
+        repairer.repair([_overlap_pass_through("hug")], dry_run=True, **_ELBOW_OPTS).repaired == 1
+    )
+    assert board.read_bytes() == before
+
+    result = repairer.repair([_overlap_pass_through("hug")], **_ELBOW_OPTS)
+    assert result.repaired == 1
+    (action,) = result.actions
+    repairer.save(board)
+    hug, turn = _end(board, "hug"), _end(board, "turn")
+    # The outer ends stay put; the corner moves below the pad, outside it.
+    assert hug[0] == original["hug"][0] and turn[1] == original["turn"][1]
+    assert hug[1] == turn[0] == (99.2, 100.9)
+    pad = _pad_poly(board, "R1/1")
+    assert not pad.buffer(-0.015).contains(Point(hug[1]))
+    # The entry runs straight into the pad; the other leg clears its opening.
+    assert turn[0][0] == turn[1][0] and pad.buffer(-0.015).contains(Point(turn[1]))
+    assert LineString(hug).buffer(0.1).distance(pad) >= 0.09 + 0.02 - 1e-9
+    assert not repairer.off_angle_tracks()
+    assert math.dist(*hug) == pytest.approx(math.dist(*original["turn"]))
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert {n: _end(board, n) for n in original} == original
+
+
+@pytest.mark.parametrize(("slack", "expected"), [(0.21, True), (0.22, False)])
+def test_outside_elbow_respects_explicit_margin_at_the_boundary(tmp_path, slack, expected):
+    board = _stub_elbow_fixture(tmp_path)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_overlap_pass_through("hug")], margin_mm=slack, **_ELBOW_OPTS)
+    assert result.repaired == int(expected)
+    if expected:
+        assert "straight entry" in result.actions[0].detail
+    else:
+        assert not repairer.modified and repairer.doc.to_string() == before
+
+
+@pytest.mark.parametrize(
+    ("board_margin", "fp_margin", "pad_margin", "version", "expected"),
+    [
+        (0.0, None, 0.02, 20240108, False),
+        (0.02, None, None, 20240108, False),
+        (0.0, 0.02, None, 20240108, False),
+        (0.0, 0.02, 0.0, 20240108, False),
+        (0.0, 0.02, 0.0, 20260206, True),
+        (0.02, None, -0.02, 20260206, True),
+    ],
+)
+def test_outside_elbow_uses_the_effective_mask_opening(
+    tmp_path, board_margin, fp_margin, pad_margin, version, expected
+):
+    # At y=100.72 the flipped 0.2 mm trace clears the copper by 0.12 mm.
+    board = _stub_elbow_fixture(tmp_path, anchor_y=100.72)
+    source = board.read_text().replace("20240108", str(version))
+    source = source.replace("pad_to_mask_clearance 0", f"pad_to_mask_clearance {board_margin}")
+    if fp_margin is not None:
+        source = source.replace(
+            '(property "Reference"', f'(solder_mask_margin {fp_margin}) (property "Reference"'
+        )
+    if pad_margin is not None:
+        source = source.replace(
+            f'(uuid "{PAD}")', f'(solder_mask_margin {pad_margin}) (uuid "{PAD}")'
+        )
+    board.write_text(source)
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_overlap_pass_through("hug")], **_ELBOW_OPTS)
+    assert result.repaired == int(expected)
+    if not expected:
+        assert not repairer.modified
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    ("expansion", "margin", "expected"),
+    [(0.0, None, True), (0.015, None, False), (0.0, 0.03, True), (0.0, 0.031, False)],
+)
+def test_verified_outside_elbow_clears_the_plotted_opening(
+    tmp_path, capsys, expansion, margin, expected
+):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+
+    fixture = Path(__file__).parent / "fixtures" / "mask_elbow_outside_pad.kicad_pcb"
+    board = tmp_path / fixture.name
+    lead = "e1dda6eb-ce7b-52c5-b8ff-623efb07a385"
+    board.write_text(
+        fixture.read_text().replace("(solder_mask_margin 0)", f"(solder_mask_margin {expansion})")
+    )
+    board.with_suffix(".kicad_pro").write_text("{}")
+    before = board.read_bytes()
+    with evidence_toolchain([tmp_path]):
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-displacement",
+                "2",
+                "--max-passes",
+                "1",
+                "--format",
+                "json",
+                *(["--margin", str(margin)] if margin is not None else []),
+            ]
+        )
+        report = json.loads(capsys.readouterr().out)["mask_copper"]
+        checked = fix_drc_cmd._run_python_drc(board, manufacturer="jlcpcb-tier1", mask_copper=True)
+    assert report["repaired"] == int(expected)
+    assert checked is not None
+    measured = next(
+        v for v in checked.violations if v.type == ViolationType.MASK_TO_COPPER and lead in v.items
+    )
+    if expected:
+        assert measured.actual_value_mm == pytest.approx(0.12, abs=1e-6)
+    else:
+        assert measured.is_error and board.read_bytes() == before
+
+
+@pytest.mark.timeout(180)
+def test_saved_elbow_rolls_back_a_gap_beyond_the_usual_advisory_range(
+    tmp_path, capsys, monkeypatch
+):
+    from shapely.geometry import box  # type: ignore[import-untyped]
+
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+
+    fixture = Path(__file__).parent / "fixtures" / "mask_elbow_outside_pad.kicad_pcb"
+    board = tmp_path / fixture.name
+    board.write_text(
+        fixture.read_text()
+        .replace("40.82", "41.0")
+        .replace("(solder_mask_margin 0)", "(solder_mask_margin 0.015)")
+    )
+    board.with_suffix(".kicad_pro").write_text("{}")
+    before = board.read_bytes()
+    # Give the predictor the unexpanded land: it will propose an elbow with a
+    # 0.300 mm modeled gap. The native plot sees 0.285 mm, beyond the ordinary
+    # 0.150 mm warning range but short of the requested 0.090 + 0.210 mm.
+    monkeypatch.setattr(
+        MaskCopperRepairer,
+        "_elbow_mask_apertures",
+        {("ad22088e-c1cf-5aaf-8d08-4a5294d93e8f", "F.Cu"): box(52.3, 39.6, 54.0, 40.6)},
+    )
+    with evidence_toolchain([tmp_path]):
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--margin",
+                "0.21",
+                "--max-displacement",
+                "2",
+                "--max-passes",
+                "1",
+                "--format",
+                "json",
+            ]
+        )
+    report = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert report["repaired"] == 0
+    assert any(item["reason"] == "mask_margin_not_met" for item in report["unrepaired"])
+    assert board.read_bytes() == before
+
+
+def test_elbow_flip_below_the_pad_declines_when_its_lead_leg_stays_in_the_opening(tmp_path):
+    # The swapped lead leg would run along y = 100.7, 0.1 mm under the pad's
+    # edge: inside the mask gap, so the swap only trades one finding for another.
+    board = _stub_elbow_fixture(tmp_path, anchor_y=100.7)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_overlap_pass_through("hug")], **_ELBOW_OPTS)
+    assert result.repaired == 0
+    assert [u.reason for u in result.unrepaired] == ["not_own_pad_entry"]
+    assert not repairer.modified and repairer.doc.to_string() == before
+
+
+def test_elbow_flip_below_the_pad_vetoed_by_foreign_copper_or_a_lock_restores_everything(
+    tmp_path,
+):
+    cases = {
+        # Foreign copper 0.1 mm from the swapped lead leg (clearance floor 0.127).
+        "foreign-copper": (_seg("foreign", (99.0, 101.2), (99.4, 101.2), net=2), ""),
+        "locked-neighbour": ("", "locked"),
+    }
+    for name, (extra, lock) in cases.items():
+        sub = tmp_path / name
+        sub.mkdir()
+        board = _stub_elbow_fixture(sub, extra=extra, lock=lock)
+        repairer = MaskCopperRepairer(board)
+        before = repairer.doc.to_string()
+        result = repairer.repair([_overlap_pass_through("hug")], **_ELBOW_OPTS)
+        assert result.repaired == 0, name
+        assert not repairer.modified and repairer.doc.to_string() == before, name
+
+
+def test_verified_elbow_flip_that_leaves_the_finding_restores_every_end(
+    tmp_path, monkeypatch, capsys
+):
+    board = _stub_elbow_fixture(tmp_path)
+    before = board.read_bytes()
+    elbow = _overlap_pass_through("hug")
+    _run(monkeypatch, board, [_report(elbow), _report(elbow)], extra=("--format", "json"))
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [
+        ("hug", "finding_not_cleared")
+    ]
+    assert board.read_bytes() == before
 
 
 def test_elbow_flip_vetoed_by_foreign_copper_a_lock_or_a_branch_restores_everything(tmp_path):

@@ -39,6 +39,7 @@ from .preflight import (
     PreflightResult,
     report_source_mismatch,
 )
+from .rotation_overrides import placement_preview_instructions
 
 logger = logging.getLogger(__name__)
 
@@ -2844,6 +2845,9 @@ class ManufacturingPackage:
                 desc = file_descriptions["pnp"]
                 lines.append(f"  {result.assembly_result.pnp_path.name}")
                 lines.append(f"    {desc[0]}: {desc[1]}")
+                lines.extend(
+                    f"    {line}" for line in placement_preview_instructions(self.manufacturer)
+                )
                 tht_excluded = result.assembly_result.tht_excluded
                 if tht_excluded:
                     refs = ", ".join(p.reference for p in tht_excluded)

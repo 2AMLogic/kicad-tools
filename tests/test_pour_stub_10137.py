@@ -272,3 +272,55 @@ def test_proof_uses_the_in_memory_board_being_checked(tmp_path):
     assert not verified_pour_stubs(pcb)
     assert pcb.path == path
     assert path.read_bytes() == original
+
+
+def test_partial_candidate_evaluation_is_disclosed_not_reported_as_full(
+    tmp_path, monkeypatch, caplog
+):
+    """Issue #10211: 1 of 2 candidates evaluated must not read as a complete proof."""
+    from kicad_tools.validate import pour_stub
+
+    require_native_refill()
+    path = fixture_board(tmp_path, "connected")
+    real_discover, real_verify = pour_stub.discover_pour_stubs, pour_stub._verify_branch
+    # Present the single real candidate twice; the second trial cannot be refilled.
+    monkeypatch.setattr(
+        pour_stub, "discover_pour_stubs", lambda pcb: (lambda r: r + r)(real_discover(pcb))
+    )
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise pour_stub._TrialUnavailable("native KiCad did not save the trial refill")
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(pour_stub, "_verify_branch", flaky)
+    with caplog.at_level("WARNING", logger=pour_stub.logger.name):
+        result = check_result(path)
+    # Coverage contract unchanged (0/1); the omission is visible as info + a warning log.
+    assert result.rules_checked_by_rule[RULE] == 1
+    (notice,) = [v for v in result.violations if v.rule_id == RULE and v.severity == "info"]
+    assert "1 of 2" in notice.message
+    assert len([v for v in result.violations if v.severity == "warning" and v.rule_id == RULE]) == 1
+    assert any("Could not evaluate pour stub" in r.message for r in caplog.records)
+
+
+def test_skipped_branch_reports_coverage_when_native_refill_succeeded(tmp_path, caplog):
+    require_native_refill()
+    path = fixture_board(tmp_path, "connected")
+    # KiCad rounds this width to 0.25 mm on save. The other branch keeps its identity.
+    extra = (
+        '(segment (start 15 5) (end 15 7) (width 0.2500001) (layer "F.Cu") '
+        f"(net 1) (uuid {uid('rounded-track')}))"
+    )
+    path.write_text(path.read_text().replace("(segment ", extra + "\n(segment ", 1))
+
+    result = check_result(path)
+
+    (notice,) = [v for v in result.infos if v.rule_id == RULE]
+    assert notice.message == "Pour-stub proof evaluated 1 of 2 candidate branches."
+    assert result.rules_checked_by_rule[RULE] == 1
+    assert any(
+        "J1.1: candidate not found after baseline refill" in r.message for r in caplog.records
+    )
