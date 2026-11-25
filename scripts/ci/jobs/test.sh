@@ -51,14 +51,11 @@ run_board05() {
 }
 
 run_board06() {
-  # Issue #10125: the four real rule-area cases each drive the generator's
-  # refill transaction -- one `kct zones fill` child that itself launches
-  # three gated native checks -- and a slot wait inside that child is wall
-  # time the parent pytest alarm pays with no credit (the credit is
-  # process-local). The permitted-width case passed a hosted bulk run in
-  # 55.55 s against the pool's 60 s cap, so a slower runner tipped it over.
-  # Run the module outside the xdist pool with the conformance lane's 120 s
-  # budget; every other case in it is fast, and the pool keeps its 60 s cap.
+  # Issue #10125: both constrained clock cases stop after the parent DRC.
+  # Each permitted clock case launches a fill child with three native checks.
+  # Child slot waits consume the parent's deadline. Permitted clock width
+  # reached the 60 s bulk cap, and both permitted data cases also took
+  # about 20 s in the hosted serial lane.
   step "Run Board06 pad-departure regression"
   uv run pytest tests/test_board06_pad_departures.py -o addopts= --benchmark-disable --timeout=120 -m "not slow" "$@"
 }

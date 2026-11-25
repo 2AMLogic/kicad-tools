@@ -117,11 +117,8 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
     common = ["-o", "addopts=", "--benchmark-disable", "--timeout=60", "-m", "not slow"]
     expected = {
         "board05": ["run", "pytest", "tests/test_board_05_drc_allowlist.py", *common],
-        # Issue #10125: the four real rule-area cases drive the generator's
-        # refill transaction (a `kct zones fill` child whose native-slot
-        # waits are wall time the parent pytest alarm pays with no credit),
-        # so the module runs serially with the conformance lane's 120 s
-        # budget rather than the bulk pool's 60 s.
+        # Issue #10125: pin the serial lane's 120 s budget. Permitted
+        # clock width reached the bulk pool's 60 s deadline.
         "board06": [
             "run",
             "pytest",
