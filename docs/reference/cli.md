@@ -2293,7 +2293,7 @@ kct optimize-placement <pcb_file> [options]
 | `--max-iterations N` | Maximum optimizer iterations (default: 1000) |
 | `-o`, `--output PATH` | Output PCB (default: overwrite input) |
 | `--seed {force-directed,random,current}` | Seed placement method. `current` warm-starts from the board's own footprint positions; its slide-off passes only move parts that overlap or break the 0.2 mm clearance rule, on a 0.05 mm grid (Issue #6250) |
-| `--weights JSON` | Custom cost weights: `overlap`, `drc`, `boundary`, `wirelength`, `area`, `creepage`, `cohesion`, `decoupling` (default 2.0; `{"decoupling": 0}` turns off the decoupling-cap affinity term and its snap pass) |
+| `--weights JSON` | Custom cost weights: `overlap`, `drc`, `boundary`, `wirelength`, `area`, `creepage`, `cohesion`, `decoupling` (default 2.0; `{"decoupling": 0}` turns off the decoupling-cap affinity term and its snap pass), `group_cohesion` and `group_order` (default 1.0 each; keep same-sheet parts together and in schematic order on multi-sheet designs, `0` turns both off — see [placement-scoring.md](../placement-scoring.md)) |
 | `--dry-run` | Evaluate current placement without optimizing |
 | `--progress N` | Print score every N iterations (0 disables) |
 | `--checkpoint DIR` | Directory for checkpoint save/resume |
