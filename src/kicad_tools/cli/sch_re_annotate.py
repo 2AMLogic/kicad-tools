@@ -847,20 +847,35 @@ def run_re_annotate(
     # original contents so a retry of the same command sees the original pair.
     written: list[tuple[Path, bytes]] = []  # (path, original bytes)
 
+    def _matches_original(path: Path, original: bytes) -> bool:
+        try:
+            return path.read_bytes() == original
+        except OSError:
+            # An unreadable or missing file can still be restored.
+            return False
+
     def _rollback() -> None:
+        failed = False
         for path, original in reversed(written):
+            if _matches_original(path, original):
+                continue
             try:
                 path.write_bytes(original)
             except OSError as rb_err:
+                if _matches_original(path, original):
+                    continue
+                failed = True
                 print(
                     f"Error: could not restore {path} after failed write: {rb_err}",
                     file=sys.stderr,
                 )
-        if written:
+        if failed:
             print(
-                "Restored previously written files; no files were modified.",
+                "The source files may be out of sync. Check the files listed above.",
                 file=sys.stderr,
             )
+        elif written:
+            print("All source files match their original contents.", file=sys.stderr)
 
     write_pcb = pcb_path is not None and pcb_board is not None and bool(board_mapping)
 

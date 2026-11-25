@@ -10,6 +10,8 @@ schematic traversal, and the read-only --check order report.
 import json
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli.sch_re_annotate import (
     _add_project_instance,
     _apply_reference_rename,
@@ -2966,14 +2968,20 @@ class TestPcbPairedWriteSafety:
         def boom(self, path):
             raise OSError("Operation not permitted")
 
+        def refuse_restore(path, data):
+            assert path == pcb
+            raise PermissionError("board is read-only")
+
         with monkeypatch.context() as m:
             m.setattr(PCB, "save", boom)
+            m.setattr(Path, "write_bytes", refuse_restore)
             ret = main([str(sch), "--pcb", str(pcb), "--format", "json"])
 
         captured = capsys.readouterr()
         assert ret == 1
         assert captured.out.strip() == ""
         assert "Operation not permitted" in captured.err
+        assert "could not restore" not in captured.err.lower()
         assert sch.read_bytes() == sch_before
         assert pcb.read_bytes() == pcb_before
 
@@ -2985,3 +2993,47 @@ class TestPcbPairedWriteSafety:
         assert data["total"] == 2
         assert data["pcb"]["renamed"] == 2
         assert _board_refs(pcb) == {"R1", "R2", "C1"}
+
+    @pytest.mark.parametrize("board_restore_error", [None, "before_write", "after_write"])
+    def test_partial_schematic_write_reports_final_pair(
+        self, tmp_path, monkeypatch, capsys, board_restore_error
+    ):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before, pcb_before = sch.read_bytes(), pcb.read_bytes()
+        write_text = Path.write_text
+        write_bytes = Path.write_bytes
+
+        def interrupt_schematic(path, text, *args, **kwargs):
+            if path == sch:
+                write_bytes(path, b"part of the new schematic")
+                raise OSError("schematic write interrupted")
+            return write_text(path, text, *args, **kwargs)
+
+        def restore(path, data):
+            if path == pcb and board_restore_error == "before_write":
+                raise PermissionError("board restore refused")
+            count = write_bytes(path, data)
+            if path == pcb and board_restore_error == "after_write":
+                raise OSError("failure after the bytes reached disk")
+            return count
+
+        with monkeypatch.context() as m:
+            m.setattr(Path, "write_text", interrupt_schematic)
+            m.setattr(Path, "write_bytes", restore)
+            ret = main([str(sch), "--pcb", str(pcb), "--format", "json"])
+
+        captured = capsys.readouterr()
+        assert ret == 1 and not captured.out.strip()
+        assert "schematic write interrupted" in captured.err
+        assert sch.read_bytes() == sch_before
+        if board_restore_error == "before_write":
+            assert pcb.read_bytes() != pcb_before
+            assert f"could not restore {pcb}" in captured.err
+            assert "may be out of sync" in captured.err.lower()
+            assert "no files were modified" not in captured.err.lower()
+            assert "match their original contents" not in captured.err.lower()
+        else:
+            assert pcb.read_bytes() == pcb_before
+            assert "could not restore" not in captured.err.lower()
+            assert "may be out of sync" not in captured.err.lower()
