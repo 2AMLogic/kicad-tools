@@ -251,11 +251,26 @@ class RedundantCopperRule(DRCRule):
 
         self._check_via_offcentre(pcb, segments, results)
         if self._prove_pour_stubs and getattr(pcb, "path", None) and pcb.zones:
-            from kicad_tools.validate.pour_stub import evaluate_pour_stubs
+            from kicad_tools.validate.pour_stub import prove_pour_stubs
 
-            proven = evaluate_pour_stubs(pcb)
-            results.rules_checked_by_rule["redundant_copper_pour_stub"] = int(proven is not None)
-            for stub, evidence in proven or ():
+            proof = prove_pour_stubs(pcb)
+            results.rules_checked_by_rule["redundant_copper_pour_stub"] = int(proof is not None)
+            if proof is not None and proof.partial:
+                # Coverage stays 0/1 (a CI-side boolean); the partial case is
+                # disclosed here so it never reads as a full proof (Issue #10211).
+                results.add(
+                    DRCViolation(
+                        rule_id="redundant_copper_pour_stub",
+                        severity="info",
+                        message=(
+                            f"Pour-stub proof evaluated {proof.evaluated} of {proof.total} "
+                            "candidate branches."
+                        ),
+                        location=None,
+                        layer="",
+                    )
+                )
+            for stub, evidence in proof.verified if proof else ():
                 seg = stub.segment
                 ox, oy = self._origin
                 start = f"({seg.start[0] + ox:.3f}, {seg.start[1] + oy:.3f})"

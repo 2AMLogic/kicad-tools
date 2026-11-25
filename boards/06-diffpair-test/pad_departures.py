@@ -39,10 +39,11 @@ from collections import defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass
 from itertools import pairwise
-from math import dist
+from math import dist, isfinite
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from shapely import make_valid
 from shapely.geometry import LineString, Point, Polygon
 
 from kicad_tools.cli.kicad_toolchain import (
@@ -777,14 +778,16 @@ def _zone_shape(zone):
     if not rings:
         return None
     shape = Polygon(rings[0], holes=rings[1:])
-    return shape if shape.is_valid else shape.buffer(0)
+    if not shape.is_valid:
+        # A self-crossing keepout can protect copper in both lobes.
+        shape = make_valid(shape)
+    return shape if not shape.is_empty and shape.area > 0 else None
 
 
 def _pcie_taper_authored_rules_ok(pcb: PCB, path: Path, added: list[Segment]) -> bool:
     """Reject proposed F.Cu rails that break an authored keepout or track-width rule.
 
-    Fails closed: a rule area or condition the evaluator cannot decide is
-    treated as applying, so the pair is left untouched.
+    Preserve the pair when an applicable width bound or keepout cannot be evaluated.
     """
     rails = [
         (track, LineString([track.start, track.end]).buffer(track.width / 2)) for track in added
@@ -805,12 +808,18 @@ def _pcie_taper_authored_rules_ok(pcb: PCB, path: Path, added: list[Segment]) ->
         return True  # no design-rules file: nothing authored to violate
     except Exception:
         return False
-    named = {
-        zone.name: _zone_shape(zone)
-        for zone in (*pcb.zones, *getattr(pcb, "footprint_rule_areas", ()))
-        if zone.name
-    }
+    # Names can repeat. Keep back-only names with an empty list so a known
+    # off-layer area is distinct from a reference we cannot resolve.
+    named = {}
+    for zone in (*pcb.zones, *getattr(pcb, "footprint_rule_areas", ())):
+        if zone.name:
+            shapes = named.setdefault(zone.name, [])
+            if _zone_covers_f_cu(zone):
+                shapes.append(_zone_shape(zone))
     for rule in tree.find_all("rule"):
+        severity_node = rule.find_child("severity")
+        if severity_node is not None and str(severity_node.get_first_atom()).casefold() == "ignore":
+            continue  # where an ignored rule wins, KiCad checks nothing
         layer_node = rule.find_child("layer")
         layer = layer_node.get_first_atom() if layer_node is not None else None
         if layer is not None and _layer_matches(str(layer), "F.Cu") is False:
@@ -822,17 +831,23 @@ def _pcie_taper_authored_rules_ok(pcb: PCB, path: Path, added: list[Segment]) ->
             if not atoms or str(atoms[0]) != "track_width":
                 continue
             limits = {}
+            unknown_bound = False
             for bound in ("min", "max"):
                 node = constraint.find_child(bound)
-                value = _parse_length_mm(node.get_first_atom()) if node is not None else None
-                if value is not None:
+                if node is None:
+                    continue
+                value = _parse_length_mm(node.get_first_atom()) if len(node.children) == 1 else None
+                if value is None or not isfinite(value):
+                    # KiCad also accepts expressions. A missing bound is optional,
+                    # but a present bound we cannot evaluate still constrains the rail.
+                    unknown_bound = True
+                else:
                     limits[bound] = value
             for track, copper in rails:
                 if (
-                    "min" in limits
-                    and track.width < limits["min"] - _EPS
-                    or "max" in limits
-                    and track.width > limits["max"] + _EPS
+                    unknown_bound
+                    or track.width < limits.get("min", 0.0) - _EPS
+                    or track.width > limits.get("max", float("inf")) + _EPS
                 ) and _dru_rule_applies(
                     str(raw) if raw is not None else None, track, copper, named, project
                 ):
@@ -846,10 +861,29 @@ def _dru_rule_applies(condition, track, copper, areas, project) -> bool:
         return True
 
     def area_test(match) -> str:
-        shape = areas.get(match.group(1))
-        if shape is None:
-            return match.group(0)  # unknown area: stays undecided
-        return "(1 == 1)" if shape.intersects(copper) else "(1 == 0)"
+        pattern = match.group(1)
+        if "*" in pattern or "?" in pattern:
+            # KiCad matches the argument as a wildcard pattern, so every
+            # on-layer area whose name fits it counts. KiCad's case handling is
+            # not modelled: a name that fits only after case-folding makes the
+            # match uncertain (and a `!` would invert a wrong guess), so the
+            # condition stays undecided and the pair is preserved.
+            body = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+            exact = re.compile(body, re.DOTALL)
+            folded = re.compile(body, re.DOTALL | re.IGNORECASE)
+            hits = [name for name in areas if exact.fullmatch(name)]
+            if hits != [name for name in areas if folded.fullmatch(name)]:
+                return match.group(0)
+            shapes = [shape for name in hits for shape in areas[name]] if hits else None
+        else:
+            shapes = areas.get(pattern)
+        if shapes is None:
+            return match.group(0)
+        if any(shape is not None and shape.intersects(copper) for shape in shapes):
+            return "(1 == 1)"
+        if None in shapes:
+            return match.group(0)  # An invalid outline leaves the condition undecided.
+        return "(1 == 0)"
 
     condition = re.sub(r"\bA\.intersectsArea\(\s*'([^']*)'\s*\)", area_test, condition)
     props = item_props_for_type(

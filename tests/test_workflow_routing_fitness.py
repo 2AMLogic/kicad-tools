@@ -138,8 +138,7 @@ class TestRunEvolutionaryRoutingFitness:
             # individual + matching attributes for the result-building code.
             mock_optimizer = MagicMock()
             mock_optimizer.components = []
-            mock_optimizer.total_wire_length.return_value = 0.0
-            mock_optimizer.compute_energy.return_value = 0.0
+            mock_optimizer._total_wire_length.return_value = 0.0
             mock_optimizer.optimize.return_value = MagicMock(fitness=42.0)
             mock_from_pcb.return_value = mock_optimizer
 
@@ -169,8 +168,7 @@ class TestRunEvolutionaryRoutingFitness:
         ):
             mock_optimizer = MagicMock()
             mock_optimizer.components = []
-            mock_optimizer.total_wire_length.return_value = 0.0
-            mock_optimizer.compute_energy.return_value = 0.0
+            mock_optimizer._total_wire_length.return_value = 0.0
             mock_optimizer.optimize.return_value = MagicMock(fitness=0.0)
             mock_from_pcb.return_value = mock_optimizer
 
@@ -202,8 +200,7 @@ class TestRunEvolutionaryRoutingFitness:
         ):
             mock_optimizer = MagicMock()
             mock_optimizer.components = []
-            mock_optimizer.total_wire_length.return_value = 0.0
-            mock_optimizer.compute_energy.return_value = 0.0
+            mock_optimizer._total_wire_length.return_value = 0.0
             mock_optimizer.optimize.return_value = MagicMock(fitness=0.0)
             mock_from_pcb.return_value = mock_optimizer
 

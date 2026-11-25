@@ -63,6 +63,7 @@ from kicad_tools.manufacturers.resolve import (  # noqa: F401  (re-exported; sha
     _resolve_effective_check_mfr,
 )
 from kicad_tools.pcb.reinforcement_sidecar import load_wires_if_present
+from kicad_tools.physics.stackup import stackup_copper_oz
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     current_paths_sidecar_candidates,
@@ -3715,19 +3716,6 @@ def resolve_net_class_map_for_board(net_class_map: dict, pcb: PCB) -> tuple[dict
     return rekeyed, resolution
 
 
-def stackup_copper_oz(pcb: PCB) -> tuple[float | None, float | None]:
-    """Outer/inner copper weight (oz) from the board's declared stackup, if any."""
-    try:
-        from kicad_tools.physics.stackup import Stackup
-
-        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
-    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
-        return (None, None)
-    if derived is None:
-        return (None, None)
-    return derived
-
-
 @dataclass
 class CheckRuleSet:
     """The rule set ``kct check --mfr <mfr>`` applies to a board (Issue #6431).
@@ -4702,6 +4690,7 @@ def _apply_dfm_table(
     if assumed:
         stackup += " (assumed: no stackup/--copper weight declared)"
     table_version = profile.dfm_thresholds.version
+    checker.design_rules = profile.apply_dfm_floors(checker.design_rules, entry)
     if entry is None:
         copper_weights["dfm_table"] = {
             "version": table_version,
@@ -4716,7 +4705,6 @@ def _apply_dfm_table(
         )
         return True
     t = entry.thresholds
-    checker.design_rules = profile.apply_dfm_floors(checker.design_rules, entry)
     copper_weights["dfm_table"] = {
         "version": table_version,
         "stackup": stackup,
