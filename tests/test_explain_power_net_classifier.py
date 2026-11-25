@@ -255,7 +255,9 @@ def test_board03_has_no_findings_on_usb_data_nets() -> None:
             assert not usb_data & set(m.components), m
             assert not any(net in m.explanation for net in usb_data), m
 
-    assert not [m for m in mistakes if m.category == MistakeCategory.DECOUPLING]
+    # The per-pin count advisory (#10134) may fire on VBUS; the rail-wide
+    # missing-decoupling check must stay silent.
+    assert not _rail_decoupling_findings(mistakes)
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +267,22 @@ def test_board03_has_no_findings_on_usb_data_nets() -> None:
 BOARD_05 = REPO_ROOT / "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
 BOARD_07 = REPO_ROOT / "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
 BOARD_09 = REPO_ROOT / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
+
+
+DECOUPLING_COUNT_RULE = "mistake.decoupling_count"
+
+
+def _rail_decoupling_findings(mistakes: list) -> list:
+    """DECOUPLING findings other than the per-pin count advisory (#10134)."""
+    return [
+        m
+        for m in mistakes
+        if m.category == MistakeCategory.DECOUPLING and m.rule_id != DECOUPLING_COUNT_RULE
+    ]
+
+
+def _count_findings(mistakes: list) -> list:
+    return [m for m in mistakes if m.rule_id == DECOUPLING_COUNT_RULE]
 
 
 def _power_trace_nets(mistakes: list) -> set[str]:
@@ -282,12 +300,20 @@ def test_board09_buck_output_keeps_its_trace_width_warning() -> None:
     nets = _power_trace_nets(mistakes)
     assert {"VOUT_PRE", "VBUS_RAW"} <= nets
     assert not {"KELVIN_P", "KELVIN_N", "VBUS_SENSE"} & nets
-    # Q1 (P-MOSFET on VBUS_FUSED) is not an IC that needs decoupling.
-    assert not [m for m in mistakes if m.category == MistakeCategory.DECOUPLING]
+    # Q1 (P-MOSFET on VBUS_FUSED) is not an IC that needs decoupling: neither
+    # the rail-wide check nor the per-pin count advisory (#10134) may name it.
+    assert not _rail_decoupling_findings(mistakes)
+    assert not [m for m in _count_findings(mistakes) if "Q1" in m.components]
 
 
-@pytest.mark.parametrize("board", [BOARD_05, BOARD_07], ids=["board05", "board07"])
-def test_decoupled_regulator_pins_are_not_missing_decoupling(board: Path) -> None:
+@pytest.mark.parametrize(
+    ("board", "decoupled_nets"),
+    [(BOARD_05, {"V3P3"}), (BOARD_07, {"VCAP1", "VCAP2"})],
+    ids=["board05", "board07"],
+)
+def test_decoupled_regulator_pins_are_not_missing_decoupling(
+    board: Path, decoupled_nets: set[str]
+) -> None:
     """Board 05 V3P3 has C6 470nF and board 07 VCAP1/2 have 2.2uF caps.
 
     Neither value is in ``is_bypass_cap``'s fixed list, so the decoupling
@@ -296,7 +322,10 @@ def test_decoupled_regulator_pins_are_not_missing_decoupling(board: Path) -> Non
     if not board.exists():
         pytest.skip("board output not present")
     mistakes = detect_mistakes(PCB.load(str(board)))
-    assert not [m for m in mistakes if m.category == MistakeCategory.DECOUPLING]
+    assert not _rail_decoupling_findings(mistakes)
+    # The per-pin count advisory (#10134) may flag other rails, but never the
+    # regulator pins whose caps are recognised by parsed capacitance.
+    assert not [m for m in _count_findings(mistakes) if decoupled_nets & set(m.components)]
 
 
 @pytest.mark.parametrize(

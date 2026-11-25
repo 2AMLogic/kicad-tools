@@ -10,6 +10,7 @@ from .bypass import BypassCapDistanceCheck
 from .connectivity import LedSeriesResistorCheck, PullUpResistorCheck
 from .crystal import CrystalNoiseProximityCheck, CrystalTraceLengthCheck
 from .decoupling import MissingDecouplingCapCheck
+from .decoupling_count import DecouplingCountCheck
 from .differential import DifferentialPairSkewCheck
 from .power import PowerTraceWidthCheck
 from .thermal import ThermalPadConnectionCheck
@@ -27,6 +28,7 @@ __all__ = [
     "AcidTrapCheck",
     "TombstoningRiskCheck",
     "MissingDecouplingCapCheck",
+    "DecouplingCountCheck",
     "PullUpResistorCheck",
     "LedSeriesResistorCheck",
     "BomFieldHealthCheck",
