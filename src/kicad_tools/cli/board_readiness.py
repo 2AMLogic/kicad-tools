@@ -258,6 +258,21 @@ def read_readiness(board_dir: Path, *, layout: ReadinessLayout | None = None) ->
             rotations = discover_rotation_overrides(root / name)
             if rotations is not None and rotations.resolve().is_relative_to(root):
                 required.add(rotations.resolve().relative_to(root).as_posix())
+        # Issue #10107: every sheet reachable from a hashed schematic shapes the
+        # released BOM and drawings, so a child edit must not read as ready.
+        from kicad_tools.report.utils import walk_schematic_hierarchy
+
+        for name in list(inputs):
+            if not name.endswith(".kicad_sch") or not (root / name).is_file():
+                continue
+            walked = walk_schematic_hierarchy(
+                (root / name).resolve(), lambda sheet: sheet.is_relative_to(root)
+            )
+            required.update(
+                sheet.resolve().relative_to(root).as_posix()
+                for sheet in walked.sheets
+                if sheet.resolve().is_relative_to(root)
+            )
         if not required.issubset(inputs):
             raise ValueError("Evidence omits current project or rule files")
         if "manufacturer" in data and (

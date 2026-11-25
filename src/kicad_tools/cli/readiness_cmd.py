@@ -38,6 +38,7 @@ is a report the gallery's validator accepts.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import errno
 import hashlib
@@ -444,8 +445,13 @@ def _run_export(
     merge_lcsc_from: Path | None = None,
     quantity: int | None = None,
     inventory_covered: frozenset[str] | None = None,
+    schematic: Path | None = None,
 ) -> EngineRun:
-    """Generate a generic bundle without changing the already-checked project rules."""
+    """Generate a generic bundle without changing the already-checked project rules.
+
+    *schematic* is the selected root schematic; without it the exporter would
+    pick whichever schematic sits next to the PCB for the BOM (#10107).
+    """
     from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
     from kicad_tools.export.preflight import PreflightConfig
 
@@ -464,7 +470,10 @@ def _run_export(
         )
         with stdout_to_stderr_when(True):
             result = ManufacturingPackage(
-                pcb_path=pcb, manufacturer=manufacturer, config=config
+                pcb_path=pcb,
+                schematic_path=schematic,
+                manufacturer=manufacturer,
+                config=config,
             ).export(output_dir)
         if not result.success:
             return EngineRun(False, "Generic manufacturing export failed")
@@ -3399,6 +3408,8 @@ def _gate_artifacts(
         export_kwargs["quantity"] = options.quantity
     if options.inventory_covered:
         export_kwargs["inventory_covered"] = options.inventory_covered
+    if options.schematic is not None and options.schematic.is_file():
+        export_kwargs["schematic"] = options.schematic
     run = engines.export(*export_args, **export_kwargs)
     if not run.ok:
         return CheckOutcome(
@@ -4000,6 +4011,18 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     ):
         if candidate is not None and candidate.is_file():
             paths.add(candidate.resolve())
+
+    # Every sheet reachable from the selected root is evidence too: a child
+    # edit changes the released BOM/drawings (#10107).  The root stays
+    # identifiable by its own path.
+    if options.schematic is not None and options.schematic.is_file():
+        # A ValueError (missing/outside sheet) is reported by the artifacts gate.
+        with contextlib.suppress(ValueError):
+            paths.update(
+                _schematic_hierarchy(
+                    options.schematic, options.root, options.project_root is not None
+                )
+            )
 
     output_dir = options.board_dir / "output"
     if output_dir.is_dir():

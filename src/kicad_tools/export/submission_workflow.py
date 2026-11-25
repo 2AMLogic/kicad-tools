@@ -416,6 +416,17 @@ def _check_declared_submission_sources(
             raise WorkflowError(
                 f"The signed readiness receipt does not cover the selected {role} path and sha256"
             )
+    from kicad_tools.report.utils import walk_schematic_hierarchy
+
+    walked = walk_schematic_hierarchy(
+        schematic, lambda sheet: sheet.is_relative_to(layout.input_base)
+    )
+    for sheet in walked.sheets:
+        rel = sheet.resolve().relative_to(layout.input_base).as_posix()
+        if rel not in inputs or inputs[rel] != _file_sha(sheet):
+            raise WorkflowError(
+                f"The signed readiness receipt does not cover schematic sheet {rel} at its current sha256"
+            )
 
 
 SIGNOFF_STAGES = ("release", "fab-review", "fab-dfm")

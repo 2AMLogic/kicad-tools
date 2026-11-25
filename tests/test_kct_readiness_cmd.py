@@ -225,9 +225,11 @@ class FakeEngines:
         merge_lcsc_from: Path | None = None,
         quantity: int | None = None,
         inventory_covered: frozenset[str] | None = None,
+        schematic: Path | None = None,
     ) -> EngineRun:
         self.calls.append("export")
         self.export_kwargs = {"quantity": quantity, "inventory_covered": inventory_covered}
+        self.export_schematic = schematic
         self.merge_lcsc_from = merge_lcsc_from
         self.pcb_bytes_at_export = pcb.read_bytes()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -326,6 +328,34 @@ def run(board: Path, fake: FakeEngines, *extra: str) -> tuple[int, dict]:
     )
     report = json.loads(report_path.read_text()) if report_path.is_file() else {}
     return code, report
+
+
+def test_child_sheet_is_hashed_and_its_edit_stales_the_receipt(tmp_path):
+    """Issue #10107: a sub-sheet edit must not leave the release marked ready."""
+    board = make_board(tmp_path)
+    child = board / "output" / "child.kicad_sch"
+    child.write_text("(kicad_sch child)\n")
+    (board / "output" / SCH_NAME).write_text(
+        '(kicad_sch (sheet (property "Sheetfile" "child.kicad_sch")))\n'
+    )
+    fake = FakeEngines(board)
+    code, report = run(board, fake)
+    assert code == 0
+    assert "output/child.kicad_sch" in report["inputs"]
+    assert fake.export_schematic is not None
+    assert fake.export_schematic.name == SCH_NAME
+    assert read_readiness(board)["status"] == "ready"
+
+    child.write_text("(kicad_sch child edited)\n")
+    assert read_readiness(board)["status"] == "unverified"
+
+    # An older receipt that never listed the child is refused, not trusted.
+    receipt = board / "output" / "readiness.json"
+    data = json.loads(receipt.read_text())
+    data["inputs"].pop("output/child.kicad_sch")
+    receipt.write_text(json.dumps(data))
+    result = read_readiness(board)
+    assert result["status"] == "unverified"
 
 
 def check_status(report: dict, name: str) -> str | None:
@@ -995,8 +1025,8 @@ def test_partial_package_is_detected_by_the_manifest_gate(tmp_path):
     fake = FakeEngines(board)
     original_export = fake.export
 
-    def export_then_delete(pcb, mfr, output_dir, assembly):
-        result = original_export(pcb, mfr, output_dir, assembly)
+    def export_then_delete(pcb, mfr, output_dir, assembly, **kw):
+        result = original_export(pcb, mfr, output_dir, assembly, **kw)
         # A file listed by the export that vanishes before packaging.
         (output_dir / "report.md").unlink()
         return result
