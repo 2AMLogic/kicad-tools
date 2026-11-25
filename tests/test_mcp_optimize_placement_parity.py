@@ -218,11 +218,18 @@ def test_designated_cap_checks_route_selected_board(tmp_path, monkeypatch, accep
     assert pcb.read_bytes() == original
 
 
-def test_designated_cap_value_order_and_overlap_diagnostics(tmp_path):
+@pytest.mark.parametrize(
+    ("small_cap_x", "ordering_violation"),
+    [(24, True), (23, True), (22, False)],
+    ids=["farther", "same-distance", "closer"],
+)
+def test_designated_cap_value_order_and_overlap_diagnostics(
+    tmp_path, small_cap_x, ordering_violation
+):
     from tests.test_decoupling_association import make_sheet
 
-    # Both caps are locked inside the radius. The smaller cap is 5 mm from
-    # U1.1, and overlaps the larger cap, whose supply pad is 4 mm away.
+    # Both caps are locked and overlap in every case. The larger cap's supply
+    # pad is 4 mm from U1.1; the smaller cap's pad is 5, 4 or 3 mm away.
     board = _DECAP_PCB.replace('(layer "F.Cu")', '(locked yes) (layer "F.Cu")')
     start = board.index('  (footprint "C_0805"')
     end = board.index("  (gr_line", start)
@@ -234,7 +241,7 @@ def test_designated_cap_value_order_and_overlap_diagnostics(tmp_path):
             '(property "Reference" "{ref}") (property "Value" "{value}")',
         )
     )
-    caps = template.format(x=24, ref="C1", value="100nF") + template.format(
+    caps = template.format(x=small_cap_x, ref="C1", value="100nF") + template.format(
         x=23, ref="C2", value="1uF"
     )
     pcb = tmp_path / "ordered.kicad_pcb"
@@ -249,10 +256,12 @@ def test_designated_cap_value_order_and_overlap_diagnostics(tmp_path):
     )
     result = get_tool("optimize_placement").handler({"pcb_path": str(pcb), "max_iterations": 1})
     assert result["success"] and not result["feasible"]
-    assert (
-        result["infeasible_detail"]
-        == "C1 has a smaller capacitance than C2 but is farther from U1.1"
+    expected_detail = (
+        "C1 has a smaller capacitance than C2 but is not closer to U1.1"
+        if ordering_violation
+        else None
     )
+    assert result.get("infeasible_detail") == expected_detail
     assert any(
         {pair["ref1"], pair["ref2"]} == {"C1", "C2"} for pair in result["unresolved_overlaps"]
     )
