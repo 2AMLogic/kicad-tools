@@ -558,6 +558,10 @@ class _GatedPopen(subprocess.Popen):
             and not os.environ.get(ENV_HELD)
             and is_native_launch(args, kwargs.get("executable"))
         ):
+            if "test_final_clock_copper_obeys_j4_rule_area[permitted-width]" in os.environ.get("PYTEST_CURRENT_TEST", ""):
+                words = _words(args)
+                phase = "fill" if "fill-zones" in words else "drc" if "drc" in words else "native"
+                _record({"event": "phase", "phase": phase, "refill": "--refill-zones" in words})
             permit = _acquire(limit, os.environ)
             if permit.bounded:
                 # Charge the whole subtree once: a native descendant of a
