@@ -254,14 +254,31 @@ class TestInstrumentationAPI:
             assert len(records) == 1
             samples.append(records[0])
         rec = min(samples, key=lambda r: r["elapsed"])
-        # Schema parity with the Python pathfinder.
-        assert set(rec.keys()) == {
+        # Schema parity with the Python pathfinder: the shared audit fields
+        # (Issue #2929) must keep their names/types so callers can ingest
+        # records from either backend without branching.  The C++ record
+        # additionally carries the Issue #8486 per-attempt diagnostic (pad
+        # pair, goal bounds/layers, fence decision, per-search outcome) --
+        # additive keys the Python pathfinder (which installs no escape
+        # fences) never emits.
+        assert {
             "net",
             "net_name",
             "elapsed",
             "per_net_timeout",
             "deadline_violated",
             "succeeded",
+        } <= set(rec.keys())
+        assert rec.keys() >= {
+            "start_pad",
+            "end_pad",
+            "start_bounds",
+            "start_layers",
+            "end_bounds",
+            "end_layers",
+            "goal_covered",
+            "fence_decision",
+            "searches",
         }
         assert rec["net"] == start.net
         assert rec["net_name"] == "AUDIT_NET"
