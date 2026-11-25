@@ -361,17 +361,17 @@ def test_detector_reports_incomplete_coverage_without_dropping_mistakes(
     # One CheckCoverage entry per registered check.
     assert len(coverage) == len(detector.checks)
 
-    incomplete = [c for c in coverage if c.status == "incomplete"]
-    assert len(incomplete) == 1
-    assert incomplete[0].check_name == "BomFieldHealthCheck"
-    assert incomplete[0].category == MistakeCategory.BOM_HEALTH
-    assert incomplete[0].reason  # non-empty explanation
+    incomplete = {c.check_name: c for c in coverage if c.status == "incomplete"}
+    assert set(incomplete) == {"BomFieldHealthCheck", "BypassCapDistanceCheck"}
+    assert incomplete["BomFieldHealthCheck"].category == MistakeCategory.BOM_HEALTH
+    assert incomplete["BypassCapDistanceCheck"].category == MistakeCategory.BYPASS_CAP
+    assert all(c.reason for c in incomplete.values())  # non-empty explanation
 
     # Every other check still ran and contributed to `mistakes` normally --
-    # the incomplete BOM check does not silently swallow other findings.
+    # incomplete checks do not silently swallow other findings.
     ran_names = {c.check_name for c in coverage if c.status == "ran"}
-    assert "BomFieldHealthCheck" not in ran_names
-    assert len(ran_names) == len(detector.checks) - 1
+    assert ran_names.isdisjoint(incomplete)
+    assert len(ran_names) == len(detector.checks) - len(incomplete)
     assert isinstance(mistakes, list)
 
 

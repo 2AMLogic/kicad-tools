@@ -155,6 +155,7 @@ class DRCChecker:
         routing_policy_defer_pair_vias: bool = True,
         strict_copper: bool = True,
         declared_reference_height_mm: float | None = None,
+        prove_pour_stubs: bool = False,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -259,6 +260,9 @@ class DRCChecker:
                 ``routing_policy`` leaves the via cap of engaged diff-pair
                 nets to ``diffpair_uncoupled_length`` so it is not reported
                 twice.  Pass False when that category does not run.
+            prove_pour_stubs: Opt in to the native-refill proof behind
+                ``redundant_copper_pour_stub`` (Issue #10137); costs one
+                kicad-cli refill per candidate branch.
             strict_copper: When True (default), a heavier-than-1oz outer
                 weight with no profile entry raises
                 ``UnsupportedCopperWeightError`` instead of silently using
@@ -283,6 +287,12 @@ class DRCChecker:
         # check_all(); set to a (possibly empty) dict of
         # WidthConsistencyRule options to include it.
         self.width_consistency_options: dict[str, object] | None = None
+        # ``bypass_distance`` needs the board's schematic.  ``kct check`` passes
+        # the resolved path to :meth:`check_bypass_distance` explicitly; these
+        # defaults serve ``check_all`` callers (no schematic -> the rule does
+        # not run).
+        self.schematic_path: Path | None = None
+        self.bypass_max_distance_mm: float = 3.0
         self.pcb = pcb
         self.manufacturer = manufacturer
         self.layers = layers
@@ -348,6 +358,7 @@ class DRCChecker:
         self.fab_view = fab_view
         self.fab_view_copper_oz = fab_view_copper_oz
         self.fab_view_gap_policy = fab_view_gap_policy
+        self.prove_pour_stubs = prove_pour_stubs
         self.emit_measurements = emit_measurements
         # The skew / continuity rules surface their measured info findings
         # when either the user asked for --verbose OR a caller wants the
@@ -451,6 +462,7 @@ class DRCChecker:
         "check_sharp_trace_corner",
         "check_missing_plated_hole",
         "check_board_id",
+        "check_bypass_distance",
         "check_single_pad_nets",
         "check_pad_grid_alignment",
         "check_thermal_asymmetry",
@@ -551,6 +563,12 @@ class DRCChecker:
         # fab-blocking defect.  Explicit entry REQUIRED -- the ``via``
         # prefix fallback would file it under Manufacturing.
         "via_under_body": CATEGORY_ADVISORY,
+        # Bypass-cap distance to the schematic-designated supply pin: a
+        # placement-quality advisory.  The unassociated/unmeasurable info
+        # companion needs its own entry -- unknown ids default to the
+        # fab-blocking Manufacturing bucket.
+        "bypass_distance": CATEGORY_ADVISORY,
+        "bypass_distance_unassociated": CATEGORY_ADVISORY,
         # JLCDFM mask warnings (Issue #8847): fab-DFM advisories.
         "mask_negative_expansion": CATEGORY_ADVISORY,
         "mask_multi_segment": CATEGORY_ADVISORY,
@@ -593,6 +611,7 @@ class DRCChecker:
         "redundant_copper_detour": CATEGORY_ADVISORY,
         "redundant_copper_staircase": CATEGORY_ADVISORY,
         "redundant_copper_via_offcentre": CATEGORY_ADVISORY,
+        "redundant_copper_pour_stub": CATEGORY_ADVISORY,
         # Isolated copper (Issue #4680, second slice): orphaned zone-fill
         # islands.  Warning-severity quality advisory mirroring KiCad's
         # default severity (project_generator.py pins it to "warning") --
@@ -918,14 +937,35 @@ class DRCChecker:
         Before Issue #8914 this method called the rule with no arguments at
         all, which pinned the old ``include_vias=False`` default on every
         ``kct check`` run and made the via arm unreachable.
+
+        Issue #10172: when the resolved manufacturer profile supplies
+        ``tht_smd_danger_mm`` / ``tht_smd_warning_mm``, those bands are passed
+        through instead of relying solely on the rule module's defaults.
         """
         if not self.fab_view:
             return DRCResults()
-        from .rules.tht_smd_spacing import ANCHOR_DRILL_MM, check_tht_smd_spacing
+        from .rules.tht_smd_spacing import (
+            ANCHOR_DRILL_MM,
+            DANGER_MM,
+            WARNING_MM,
+            check_tht_smd_spacing,
+        )
 
+        danger_mm = (
+            self.design_rules.tht_smd_danger_mm
+            if self.design_rules.tht_smd_danger_mm is not None
+            else DANGER_MM
+        )
+        warning_mm = (
+            self.design_rules.tht_smd_warning_mm
+            if self.design_rules.tht_smd_warning_mm is not None
+            else WARNING_MM
+        )
         return self._absolutize(
             check_tht_smd_spacing(
                 self.pcb,
+                danger_mm=danger_mm,
+                warning_mm=warning_mm,
                 via_drill_mm=ANCHOR_DRILL_MM if via_drill_mm is None else via_drill_mm,
             )
         )
@@ -1125,6 +1165,7 @@ class DRCChecker:
             # view; with neither active there is no slit floor to match.
             physical_copper_gap_mm=self.physical_copper_gap_mm,
             fab_view_gap_policy=self.fab_view_gap_policy if self.fab_view else None,
+            prove_pour_stubs=self.prove_pour_stubs,
         )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
@@ -2062,6 +2103,40 @@ class DRCChecker:
         from .rules.via_type_capability import ViaTypeCapabilityRule
 
         rule = ViaTypeCapabilityRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_bypass_distance(
+        self,
+        schematic_path: str | Path | None = None,
+        max_distance_mm: float | None = None,
+    ) -> DRCResults:
+        """Check each bypass cap's distance to the supply pin its schematic designates.
+
+        Measures from the cap's supply pad to the pad of the pin chosen by
+        :func:`kicad_tools.placement.decoupling.schematic_cap_associations`
+        -- never the nearest pin on the rail, so two ICs sharing a rail with
+        swapped caps are reported.  Over-distance caps are ``bypass_distance``
+        warnings; caps with no defensible target (or not on the board) are
+        ``bypass_distance_unassociated`` info findings.  Advisory category.
+
+        Args:
+            schematic_path: The board's schematic; defaults to
+                :attr:`schematic_path`.  With neither, nothing runs (``kct
+                check`` reports the category as ``unknown``, not passed).
+            max_distance_mm: Maximum allowed distance in mm; defaults to
+                :attr:`bypass_max_distance_mm` (3.0).
+
+        Returns:
+            DRCResults containing ``bypass_distance`` findings.
+        """
+        from .rules.bypass_distance import BypassDistanceRule
+
+        rule = BypassDistanceRule(
+            schematic_path if schematic_path is not None else self.schematic_path,
+            max_distance_mm=(
+                max_distance_mm if max_distance_mm is not None else self.bypass_max_distance_mm
+            ),
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_via_under_body(self) -> DRCResults:

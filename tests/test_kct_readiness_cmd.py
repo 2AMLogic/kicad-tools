@@ -678,6 +678,60 @@ def test_acknowledged_warnings_pass_and_become_accepted_risk_lines(tmp_path):
     }
 
 
+def test_tht_smd_spacing_warning_requires_ack_in_assembly_mode(tmp_path):
+    """Issue #10172: warning-band tht_smd_spacing blocks assembly sign-off until acknowledged."""
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, warnings={"tht_smd_spacing": 1})
+
+    # No acknowledgement -> warning_review fails.
+    code, report = run(board, fake, "--assembly")
+    assert code != 0
+    assert check_status(report, "warning_review") == "failed"
+    assert any("tht_smd_spacing=1" in blocker for blocker in report["blockers"])
+
+    # Unrelated acknowledgement -> warning_review still fails.
+    fake_unrelated = FakeEngines(board, warnings={"tht_smd_spacing": 1})
+    code, report = run(board, fake_unrelated, "--assembly", "--ack-warnings", "silk_over_copper")
+    assert code != 0
+    assert check_status(report, "warning_review") == "failed"
+    assert any("tht_smd_spacing=1" in blocker for blocker in report["blockers"])
+
+    # Matching acknowledgement -> warning_review passes and records accepted risk.
+    fake_acked = FakeEngines(board, warnings={"tht_smd_spacing": 1})
+    code, report = run(board, fake_acked, "--assembly", "--ack-warnings", "tht_smd_spacing")
+    assert code == 0
+    assert check_status(report, "warning_review") == "passed"
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "ACCEPTED RISK: tht_smd_spacing (1 warning(s))" in readme
+
+
+def test_tht_smd_spacing_error_fails_gate_1_even_when_acknowledged(tmp_path):
+    """Issue #10172: error-band tht_smd_spacing still fails Gate 1 with --ack-warnings."""
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, check_errors=1)
+    real_kct_check = fake.kct_check
+
+    def kct_check_with_tht_error(pcb, mfr, report_path, extra):
+        result = real_kct_check(pcb, mfr, report_path, extra)
+        data = json.loads(report_path.read_text())
+        data["violations"] = [
+            {
+                "rule_id": "tht_smd_spacing",
+                "severity": "error",
+                "message": "THT/via to SMD pad (J1.1 to R1.1) spacing 1.8500mm < 2.032mm",
+            }
+        ]
+        report_path.write_text(json.dumps(data, indent=2))
+        return result
+
+    fake.kct_check = kct_check_with_tht_error
+
+    code, report = run(board, fake, "--assembly", "--ack-warnings", "tht_smd_spacing")
+    assert code != 0
+    assert report["status"] == "blocked"
+    assert check_status(report, "kct_check") == "failed"
+
+
 # -- Baseline comparison (Issue #8664) ---------------------------------------
 
 

@@ -139,6 +139,9 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
         "board_id_missing",
         # Issue #8884: a layer dominated (by length) by off-axis copper.
         "routing_quality_off_axis_length",
+        # Issue #10172: warning-band THT/anchor-via to SMD-pad spacing is a
+        # wave/selective-solder and rework hazard until acknowledged.
+        "tht_smd_spacing",
     }
 )
 

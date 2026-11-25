@@ -151,6 +151,13 @@ MEASURABLE_SHAPES = frozenset({"circle", "rect", "oval", "obround", "roundrect"}
 _MAX_LISTED_IDENTITIES = 10
 
 
+def _pad_label(fp: Any, pad: Any, index: int) -> str:
+    """Human-readable component-pad name for finding messages (Issue #10172)."""
+    ref = fp.reference or fp.name or "?"
+    num = pad.number or f"#{index}"
+    return f"{ref}.{num}"
+
+
 def check_tht_smd_spacing(
     pcb,
     danger_mm: float = DANGER_MM,
@@ -187,9 +194,9 @@ def check_tht_smd_spacing(
     origin = board_origin(pcb)
     ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
 
-    # (layer, identity, geometry, net, footprint) / (layers, identity, geometry, net, footprint)
-    smd: list[tuple[str, str, Any, str, int | None]] = []
-    tht: list[tuple[set[str], str, Any, str, int | None]] = []
+    # (layer, identity, label, geometry, net, footprint) / (layers, identity, label, geometry, net, footprint)
+    smd: list[tuple[str, str, str, Any, str, int | None]] = []
+    tht: list[tuple[set[str], str, str, Any, str, int | None]] = []
     # shape -> identities of pads this rule cannot measure (Issue #8914).
     unmeasured: dict[str, list[str]] = {}
     for fp in pcb.footprints:
@@ -200,6 +207,7 @@ def check_tht_smd_spacing(
                 # Issue #9528: no copper layer, so no copper to space.
                 continue
             identity = pad.uuid or f"{fp.reference}:{pad.number}:pad:{index}"
+            label = _pad_label(fp, pad, index)
             if pad.shape == "custom":
                 # Issue #9498: a custom pad is measurable whenever the shared
                 # outline builder produced its anchor-plus-primitives copper;
@@ -209,8 +217,8 @@ def check_tht_smd_spacing(
 
                 geometry, refusal = custom_pad_outline_detail(pad, _transform_pad_position(pad, fp))
                 if geometry is None:
-                    label = f"custom: {refusal or 'source pad node unavailable'}"
-                    unmeasured.setdefault(label, []).append(identity)
+                    unmeasured_label = f"custom: {refusal or 'source pad node unavailable'}"
+                    unmeasured.setdefault(unmeasured_label, []).append(identity)
                     continue
             elif pad.shape not in MEASURABLE_SHAPES:
                 unmeasured.setdefault(pad.shape, []).append(identity)
@@ -223,9 +231,9 @@ def check_tht_smd_spacing(
             if pad.type == "smd":
                 for layer in layers:
                     if _pad_on_layer(pad, layer):
-                        smd.append((layer, identity, geom, net, owner))
+                        smd.append((layer, identity, label, geom, net, owner))
             else:
-                tht.append((set(layers), identity, geom, net, owner))
+                tht.append((set(layers), identity, label, geom, net, owner))
     for shape in sorted(unmeasured):
         identities = sorted(unmeasured[shape])
         listed = ", ".join(identities[:_MAX_LISTED_IDENTITIES])
@@ -277,9 +285,21 @@ def check_tht_smd_spacing(
         if not via.drill >= via_drill_mm - TOLERANCE:
             continue
         anchor_vias.append(len(tht))
-        tht.append((span, identity, geom, net, None))
+        tht.append((span, identity, identity, geom, net, None))
 
-    def report(layer, identity, geom, net, other_id, other_geom, other_net, what, where=None):
+    def report(
+        layer,
+        identity,
+        label,
+        geom,
+        net,
+        other_id,
+        other_label,
+        other_geom,
+        other_net,
+        what,
+        where=None,
+    ):
         distance = geom.distance(other_geom)
         if distance <= TOLERANCE or distance >= warning_mm:
             return
@@ -289,7 +309,7 @@ def check_tht_smd_spacing(
             DRCViolation(
                 "tht_smd_spacing",
                 "error" if is_error else "warning",
-                f"THT/via to {what} spacing {distance:.4f}mm < "
+                f"THT/via to {what} ({label} to {other_label}) spacing {distance:.4f}mm < "
                 f"{(danger_mm if is_error else warning_mm):.3f}mm "
                 f"(copper edge to copper edge) on {where or layer}; closest points "
                 f"({a.x + ox:.6f}, {a.y + oy:.6f}) and ({b.x + ox:.6f}, {b.y + oy:.6f})",
@@ -304,15 +324,26 @@ def check_tht_smd_spacing(
 
     for layer in sorted({s[0] for s in smd}):
         pads = [s for s in smd if s[0] == layer]
-        tree = STRtree([p[2] for p in pads])
-        for span, identity, geom, net, tht_owner in tht:
+        tree = STRtree([p[3] for p in pads])
+        for span, identity, label, geom, net, tht_owner in tht:
             if layer not in span:
                 continue
             for raw in tree.query(geom, predicate="dwithin", distance=warning_mm):
-                _, smd_id, smd_geom, smd_net, smd_owner = pads[int(raw)]
+                _, smd_id, smd_label, smd_geom, smd_net, smd_owner = pads[int(raw)]
                 if smd_id == identity or (tht_owner is not None and tht_owner == smd_owner):
                     continue
-                report(layer, identity, geom, net, smd_id, smd_geom, smd_net, "SMD pad")
+                report(
+                    layer,
+                    identity,
+                    label,
+                    geom,
+                    net,
+                    smd_id,
+                    smd_label,
+                    smd_geom,
+                    smd_net,
+                    "SMD pad",
+                )
 
     # An anchor-vs-annulus pair is one physical feature pair: two anchor vias
     # are each on both sides of this comparison, and a pair exposed on both
@@ -327,7 +358,7 @@ def check_tht_smd_spacing(
         rings = [a for a in annuli if a[0] == layer]
         tree = STRtree([r[2] for r in rings])
         for index in anchor_vias:
-            span, identity, geom, net, _ = tht[index]
+            span, identity, _label, geom, net, _ = tht[index]
             if layer not in span:
                 continue
             for raw in tree.query(geom, predicate="dwithin", distance=warning_mm):
@@ -359,8 +390,10 @@ def check_tht_smd_spacing(
         report(
             pair_layers[0],
             hole_id,
+            hole_id,
             hole_geom,
             hole_net,
+            ring_id,
             ring_id,
             ring_geom,
             ring_net,

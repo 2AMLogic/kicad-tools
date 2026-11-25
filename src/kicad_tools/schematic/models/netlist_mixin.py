@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, TypeVar
 from .wire_geometry import wire_segments_connect
 
 if TYPE_CHECKING:
-    pass
+    from .elements import PowerSymbol
 
 
 _Node = TypeVar("_Node")
@@ -113,6 +113,8 @@ def _instance_owns_pin(sym, pin) -> bool:
 
 class SchematicNetlistMixin:
     """Mixin providing netlist extraction and query operations for Schematic class."""
+
+    power_symbols: list[PowerSymbol]
 
     def _build_connectivity_graph(self) -> tuple[dict, dict, dict]:
         """Build a connectivity graph using Union-Find.
@@ -300,7 +302,9 @@ class SchematicNetlistMixin:
 
         return parent, point_to_net_names, point_to_pins
 
-    def extract_netlist(self, hierarchical: bool = False) -> dict[str, list[PinRef]]:
+    def extract_netlist(
+        self, hierarchical: bool = False, *, include_power_symbols: bool = False
+    ) -> dict[str, list[PinRef]]:
         """Extract netlist from schematic.
 
         Analyzes schematic connectivity to build a mapping from net names
@@ -317,6 +321,9 @@ class SchematicNetlistMixin:
                 byte-identical to previous releases: only the root
                 sheet's wires, symbols, labels, and power symbols are
                 considered.
+            include_power_symbols: Include the pins of placed power symbols and
+                PWR_FLAGs when a caller needs to distinguish an exclusive
+                component connection from one attached to a supply.
 
         Returns:
             Dict mapping net names to list of connected pins.
@@ -357,10 +364,16 @@ class SchematicNetlistMixin:
                     "to walk sub-sheets."
                 )
 
-            _, net_dict = _collect_hierarchy_components(Path(saved_path), "/")
+            _, net_dict = _collect_hierarchy_components(
+                Path(saved_path), "/", include_symbol_pins=include_power_symbols
+            )
             return net_dict
 
         parent, point_to_net_names, point_to_pins = self._build_connectivity_graph()
+        if include_power_symbols:
+            for power in self.power_symbols:
+                pos = (round(power.x, 2), round(power.y, 2))
+                point_to_pins.setdefault(pos, []).append(PinRef(power.reference, "1"))
 
         def find(p):
             """Find root with path compression."""

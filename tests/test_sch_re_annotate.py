@@ -1180,6 +1180,162 @@ class TestRunReAnnotate:
         assert '"Reference" "R10"' not in text
 
 
+def _series_partners(*, crossed=True, names=("SER_A", "SER_B")):
+    """Keep both rows in the same position order. Only the connections change."""
+    from kicad_tools.schematic.models import Schematic
+
+    sch = Schematic.load(str(Path(__file__).parent / "fixtures/electrical_rating/leds.kicad_sch"))
+    sch.symbols = [s for s in sch.symbols if s.reference in {"D1", "D2", "R1", "R2"}]
+    sch.labels.clear()
+    for sym in sch.symbols:
+        is_led = sym.reference.startswith("D")
+        if is_led:
+            sym.y += 15
+        pin = sym.pin_position("1" if is_led else "2")
+        end = (pin[0], round(pin[1] + (-2.54 if is_led else 2.54), 2))
+        sch.add_wire(pin, end, snap=False)
+        column = int(sym.reference[1:]) - 1
+        name = names[1 - column if is_led and crossed else column]
+        sch.add_label(name, *end, snap=False)
+    return sch
+
+
+class TestPartnerOrder:
+    def test_crossed_report_names_both_pairs_and_preserves_input(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners().write(path)
+        before = path.read_bytes()
+        assert main([str(path), "--check", "--format", "json"]) == 1
+        report = json.loads(capsys.readouterr().out)
+        assert report["out_of_order"] == []
+        assert report["total"] == 2
+        assert [(p["parts"], p["net"]) for p in report["partner_inversions"]] == [
+            (["D1", "R2"], "SER_B"),
+            (["D2", "R1"], "SER_A"),
+        ]
+        assert main([str(path), "--check", "--backup"]) == 1
+        out = capsys.readouterr().out
+        assert "D1/R2" in out and "D2/R1" in out
+        assert "power" in out.lower() and "shared" in out and "multiple" in out
+        assert path.read_bytes() == before
+        assert list(tmp_path.iterdir()) == [path]
+
+    def test_aligned_pairs_are_clean(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners(crossed=False).write(path)
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["total"] == 0
+        assert report["partner_inversions"] == []
+
+    @pytest.mark.parametrize("args", [["--prefix", "R"], ["--unannotated-only"]])
+    def test_filters_exclude_partner_comparison(self, tmp_path, capsys, args):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners().write(path)
+        assert main([str(path), "--check", "--format", "json", *args]) == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "check": True,
+            "out_of_order": [],
+            "total": 0,
+        }
+
+    @pytest.mark.parametrize("net", ["GND", "+5V"])
+    def test_named_rails_do_not_establish_partners(self, tmp_path, capsys, net):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners(names=(net, "SER_B")).write(path)
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    def test_power_flag_on_two_pin_net(self, tmp_path, capsys):
+        from kicad_tools.operations.netlist import build_netlist_from_schematic
+        from kicad_tools.schematic.models.elements import PowerSymbol
+
+        path = tmp_path / "pair.kicad_sch"
+        sch = _series_partners()
+        label = next(label for label in sch.labels if label.text == "SER_A")
+        sch.power_symbols.append(
+            PowerSymbol("power:PWR_FLAG", label.x, label.y, reference="#FLG01")
+        )
+        sch.write(path)
+        # The ordinary netlist still contains just the two component pins.
+        nets = build_netlist_from_schematic(path).nets
+        assert {n.reference for n in next(n for n in nets if n.name == "SER_A").nodes} == {
+            "D2",
+            "R1",
+        }
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    def test_supply_input_on_signal_named_net(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners().write(path)
+        # Both test LEDs have this facing pin. Only its electrical type changes.
+        marker = '(pin passive line (at 0 3.81 270) (length 1.27) (name "K")'
+        text = path.read_text()
+        assert marker in text
+        path.write_text(text.replace(marker, marker.replace("passive", "power_in")))
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    def test_shared_net_is_skipped(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        sch = _series_partners()
+        r2 = next(sym for sym in sch.symbols if sym.reference == "R2")
+        sch.add_label("SER_A", *r2.pin_position("1"), snap=False, validate_connection=False)
+        sch.write(path)
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    def test_second_candidate_excluded_even_if_filtered_out(self, tmp_path, capsys):
+        path = tmp_path / "pair.kicad_sch"
+        sch = _series_partners()
+        r2 = next(sym for sym in sch.symbols if sym.reference == "R2")
+        thermistor = sch.add_symbol("Device:R", 140, 50, ref="RT1", value="NTC")
+        for pin in (r2.pin_position("1"), thermistor.pin_position("1")):
+            sch.add_label("EXTRA", *pin, snap=False, validate_connection=False)
+        sch.write(path)
+        assert main([str(path), "--check", "--prefix", "D,R", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 0
+
+    @pytest.mark.parametrize("separate_unit", [False, True])
+    def test_unwired_third_pin_disqualifies_a_part(self, tmp_path, capsys, separate_unit):
+        path = tmp_path / "pair.kicad_sch"
+        _series_partners().write(path)
+        # The package still has a third pin if it belongs to an unplaced unit.
+        extra_pin = '(pin passive line (at 3.81 0 180) (length 1.27) (name "NC") (number "3"))'
+        marker = '(symbol "LED_1_1"'
+        definition = (
+            f'(symbol "LED_2_1" {extra_pin}) {marker}' if separate_unit else f"{marker} {extra_pin}"
+        )
+        text = path.read_text().replace(marker, definition)
+        path.write_text(text)
+        assert main([str(path), "--check", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "check": True,
+            "out_of_order": [],
+            "total": 0,
+        }
+
+    def test_per_sheet_compares_only_pairs_on_the_same_sheet(self, tmp_path, capsys):
+        from kicad_tools.sexp import parse_string
+
+        parent = tmp_path / "parent.kicad_sch"
+        child = tmp_path / "sub.kicad_sch"
+        for path, keep in [(parent, {"D1", "R2"}), (child, {"D2", "R1"})]:
+            sch = _series_partners()
+            sch.symbols = [sym for sym in sch.symbols if sym.reference in keep]
+            sch.write(path)
+        root = parse_string(parent.read_text())
+        root.append(parse_string(PARENT_SCHEMATIC).get("sheet"))
+        parent.write_text(root.to_string())
+        inputs = {path: path.read_bytes() for path in (parent, child)}
+        for args, expected in [([], 2), (["--per-sheet"], 0)]:
+            assert main([str(parent), "--check", "--format", "json", *args]) == int(expected > 0)
+            report = json.loads(capsys.readouterr().out)
+            assert len(report["partner_inversions"]) == expected
+        assert {path: path.read_bytes() for path in inputs} == inputs
+
+
 class TestCheckMode:
     def test_check_swapped_exits_nonzero_and_lists_mapping(self, tmp_path, capsys):
         sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
