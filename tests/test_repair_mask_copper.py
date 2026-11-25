@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from inspect import signature
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
@@ -3253,3 +3255,89 @@ def test_verified_disjoint_jog_slide_that_creates_a_finding_restores_every_end(
     result = json.loads(capsys.readouterr().out)["mask_copper"]
     assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [("jog", "new_mask_finding")]
     assert board.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Issue #10217: the repair caller clamps a disjoint pass-through slide to 0.25 mm
+# ---------------------------------------------------------------------------
+
+
+def _disjoint_chamfer_fixture(tmp_path):
+    """A 45 degree chamfer between a vertical and a horizontal run, short of the pad.
+
+    The pad's top edge is y = 99.5 and its right edge x = 101. The chamfer
+    runs from (100.6, 98.95) to (101.0, 99.35), so its far end sits beside the
+    pad's top-right corner without entering it: a disjoint pass-through
+    finding. Neither run reaches the pad, so the chamfer is not an own-pad entry.
+    """
+    shapes = {
+        "run": ((100.6, 96.0), (100.6, 98.95)),
+        "chamfer": ((100.6, 98.95), (101.0, 99.35)),
+        "lead": ((101.0, 99.35), (104.0, 99.35)),
+    }
+    tracks = [_seg(name, a, b) for name, (a, b) in shapes.items()]
+    return _board(tmp_path, "\n".join(tracks)), shapes
+
+
+@pytest.mark.parametrize(
+    ("fixture", "conductor", "required", "slide_method"),
+    [
+        (_disjoint_jog_fixture, "jog", 0.285, "_slide_jog_along_runs"),
+        (_disjoint_chamfer_fixture, "chamfer", 0.165, "_slide_chamfer_between_runs"),
+    ],
+)
+def test_disjoint_pass_through_slide_longer_than_the_bound_falls_back_to_the_nudge(
+    tmp_path, fixture, conductor, required, slide_method
+):
+    # Each conductor needs a 0.255 mm slide, one 0.005 mm step beyond the bound.
+    board, _ = fixture(tmp_path)
+    repairer = MaskCopperRepairer(board)
+    finding = _pt_finding(conductor, measured=0.05, required=required)
+    slide = getattr(repairer, slide_method)
+    with patch.object(repairer, slide_method, wraps=slide) as attempt:
+        result = repairer.repair([finding], **_JOG_OPTS)
+    assert result.repaired == 1 and not result.unrepaired
+    (action,) = result.actions
+    assert action.action == "nudge_clear"
+    assert action.detail.startswith("moved "), action.detail
+
+    # A change smaller than one slide step leaves the same copper. Check the
+    # limit the caller supplied while still running the real slide above.
+    attempt.assert_called_once()
+    call = signature(slide).bind(*attempt.call_args.args, **attempt.call_args.kwargs)
+    assert call.arguments["max_displacement"] == 0.25
+
+
+def test_disjoint_pass_through_chamfer_slides_along_its_runs_and_undoes(tmp_path):
+    board, shapes = _disjoint_chamfer_fixture(tmp_path)
+    before = board.read_bytes()
+    original = {name: _end(board, name) for name in shapes}
+    repairer = MaskCopperRepairer(board)
+    finding = _pt_finding("chamfer", measured=0.05)
+    assert repairer.repair([finding], dry_run=True, **_JOG_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair([finding], **_JOG_OPTS)
+    assert result.repaired == 1
+    (action,) = result.actions
+    assert action.action == "nudge_clear" and "chamfer" in action.detail
+    # Within the bound, so the slide (not the nudge) is what repaired it.
+    assert 0 < action.displacement_mm <= 0.25
+    repairer.save(board)
+    assert not repairer.off_angle_tracks()
+    run, chamfer, lead = (_end(board, name) for name in ("run", "chamfer", "lead"))
+    # Each anchor stays on its own line and the joints stay connected.
+    assert run[0] == original["run"][0] and lead[1] == original["lead"][1]
+    assert run[1] == chamfer[0] and chamfer[1] == lead[0]
+    assert run[1][0] == 100.6 and lead[0][1] == 99.35
+    # Still a 45 degree chamfer, now further from the pad opening.
+    assert math.isclose(
+        abs(chamfer[1][0] - chamfer[0][0]), abs(chamfer[1][1] - chamfer[0][1]), abs_tol=1e-9
+    )
+    assert chamfer != original["chamfer"]
+    copper, _ = _saved_copper(board, "chamfer")
+    assert copper.distance(_pad_poly(board, "R1/1")) >= 0.09
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert {name: _end(board, name) for name in shapes} == original

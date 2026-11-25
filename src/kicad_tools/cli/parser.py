@@ -22,6 +22,7 @@ from kicad_tools.cli.check_categories import CHECK_CATEGORIES
 from kicad_tools.cli.copper_weight import add_check_copper_argument
 from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES, STACKUP_ID_HELP
 from kicad_tools.cli.format_options import add_format_flag
+from kicad_tools.cli.placement_options import add_decoupling_radius_argument
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
 __all__ = [
@@ -2471,6 +2472,11 @@ def _add_sch_parser(subparsers) -> None:
         "--unannotated-only",
         action="store_true",
         help="Only assign numbers to unannotated (?) references",
+    )
+    sch_reannotate.add_argument(
+        "--pcb",
+        metavar="BOARD",
+        help="Also apply the renumbering to footprint references in this .kicad_pcb",
     )
     sch_reannotate.add_argument(
         "--check",
@@ -6231,6 +6237,7 @@ def _add_placement_parser(subparsers) -> None:
         "optimize", help="Optimize placement for routability"
     )
     placement_optimize.add_argument("pcb", help="Path to .kicad_pcb file")
+    add_decoupling_radius_argument(placement_optimize)
     placement_optimize.add_argument("-o", "--output", help="Output file path")
     placement_optimize.add_argument(
         "--strategy",
@@ -6791,18 +6798,7 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "(Issue #9799). With this flag authored silk is byte-identical."
         ),
     )
-    op_parser.add_argument(
-        "--decoupling-radius",
-        dest="decoupling_radius",
-        type=float,
-        default=6.0,
-        metavar="MM",
-        help=(
-            "Furthest a decoupling capacitor's supply pad may sit from the IC "
-            "pin it serves in the post-optimize snap (default: 6.0 mm; "
-            "Issue #10142)."
-        ),
-    )
+    add_decoupling_radius_argument(op_parser)
     op_parser.add_argument("-v", "--verbose", action="store_true")
     op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(op_parser)
