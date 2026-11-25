@@ -97,14 +97,14 @@ def refill(board: Path, cli: str) -> dict:
     return json.loads(report.read_text())
 
 
-def edit_surface_zone(board: Path, old: str, new: str) -> None:
-    """Edit only the F.Cu surface zone, leaving its stored fill stale.
+def edit_zone(board: Path, layer: str, old: str, new: str) -> None:
+    """Edit the zone on one layer, leaving its stored fill untouched.
 
     Native refill rewrites the file and may reorder zones, so find the block.
     """
     marker = "\t(zone\n"
     head, *zones = board.read_text().split(marker)
-    (index,) = [i for i, z in enumerate(zones) if '(layer "F.Cu")' in z.split("(polygon")[0]]
+    (index,) = [i for i, z in enumerate(zones) if f'(layer "{layer}")' in z.split("(polygon")[0]]
     assert old in zones[index]
     zones[index] = zones[index].replace(old, new, 1)
     board.write_text(head + "".join(marker + z for z in zones))
@@ -173,7 +173,7 @@ def test_stale_fill_after_outline_edit_earns_no_skip(tmp_path, native_cli):
     refill(board, native_cli)
     assert "C1.1" in bonded_pads(stitch(board))
     # The positive outline now ends before the vias but the old fill polygons remain.
-    edit_surface_zone(board, "(xy 135 105) (xy 135 115)", "(xy 115 105) (xy 115 115)")
+    edit_zone(board, "F.Cu", "(xy 135 105) (xy 135 115)", "(xy 115 105) (xy 115 115)")
     result = stitch(board)
     assert "C1.1" not in bonded_pads(result)
     assert stitched_pads(result) == {"C1.1"}
@@ -200,18 +200,14 @@ def test_disabled_pad_connection_earns_no_skip(tmp_path, native_cli):
 def test_stale_fill_with_pad_connection_disabled_earns_no_skip(tmp_path, native_cli):
     board = make_board(tmp_path)
     refill(board, native_cli)
-    edit_surface_zone(board, "connect_pads yes", "connect_pads no")  # fill left as written
+    edit_zone(board, "F.Cu", "connect_pads yes", "connect_pads no")  # fill left as written
     result = stitch(board)
     assert "C1.1" not in bonded_pads(result)
     assert stitched_pads(result) == {"C1.1"}
 
 
-@pytest.mark.parametrize("island", [False, True], ids=["bonded", "island"])
-def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
-    board = make_board(tmp_path, right_edge=115 if island else 135)
-    before = refill(board, native_cli)
-    assert len(before["unconnected_items"]) == (1 if island else 0)
-    routed = tmp_path / "routed.kicad_pcb"
+def route_and_refill(board: Path, native_cli: str) -> tuple[int, int]:
+    routed = board.with_name("routed.kicad_pcb")
     subprocess.run(
         [sys.executable, "-m", "kicad_tools.cli", "route", str(board)]
         + ["--layers", "4", "--stitch-power-planes", "--via-diameter", "0.6"]
@@ -219,18 +215,82 @@ def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
         capture_output=True,
         text=True,
         timeout=240,
-        cwd=tmp_path,
+        cwd=board.parent,
         env={**os.environ, "PYTHONPATH": str(SRC)},
         check=True,
     )
-    shutil.copy2(routed, tmp_path / "after.kicad_pcb")
-    after = refill(tmp_path / "after.kicad_pcb", native_cli)
+    probe = board.with_name("after.kicad_pcb")
+    shutil.copy2(routed, probe)
+    after = refill(probe, native_cli)
     assert after["unconnected_items"] == []
     text = routed.read_text()
     segments = len(re.findall(r'\(segment\b[^"]*?\(layer "[^"]+"\)\s*\(net "GNDA"\)', text, re.S))
     vias = len(re.findall(r'\(via\b.*?\(net "GNDA"\)', text, re.S))
-    # Two original GNDA segments and vias; an island adds exactly one stitch.
-    assert (segments, vias) == ((3, 3) if island else (2, 2))
+    return segments, vias
+
+
+@pytest.mark.parametrize("island", [False, True], ids=["bonded", "island"])
+def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
+    board = make_board(tmp_path, right_edge=115 if island else 135)
+    before = refill(board, native_cli)
+    assert len(before["unconnected_items"]) == (1 if island else 0)
+    assert route_and_refill(board, native_cli) == ((3, 3) if island else (2, 2))
+
+
+@pytest.mark.parametrize("refill_first", [False, True], ids=["stale", "refilled"])
+def test_board_cutout_cannot_hide_a_required_stitch(tmp_path, native_cli, refill_first):
+    board = make_board(tmp_path)
+    # Widen only the inner plane so it runs around both ends of the new slot.
+    edit_zone(
+        board,
+        "In1.Cu",
+        "(xy 105 105) (xy 135 105) (xy 135 115) (xy 105 115)",
+        "(xy 103 102) (xy 137 102) (xy 137 118) (xy 103 118)",
+    )
+    assert not refill(board, native_cli)["unconnected_items"]
+    slot = (
+        "(gr_rect (start 114 104) (end 116 116) (stroke (width 0.05) (type default)) "
+        '(fill none) (layer "Edge.Cuts") (uuid "390472d5-0042-402b-b0a0-f9b2816164f2"))'
+    )
+    board.write_text(board.read_text().rstrip()[:-1] + slot + ")\n")
+    probe = board.with_name("before.kicad_pcb")
+    shutil.copyfile(board, probe)
+    assert len(refill(probe, native_cli)["unconnected_items"]) == 1
+    if refill_first:
+        shutil.copyfile(probe, board)
+    original = board.read_bytes()
+    assert route_and_refill(board, native_cli) == (3, 3)
+    assert board.read_bytes() == original
+
+
+def test_failed_refill_uses_the_project_copy_and_withholds_the_bond(
+    tmp_path, native_cli, monkeypatch
+):
+    from kicad_tools.cli import runner
+
+    board = make_board(tmp_path)
+    refill(board, native_cli)
+    project = board.with_suffix(".kicad_pro")
+    rules = board.with_suffix(".kicad_dru")
+    project.write_text('{"board": {}}')
+    rules.write_text("(version 1)\n")
+    original = {p: p.read_bytes() for p in (board, project, rules)}
+    attempted = []
+
+    def fail_on_copy(copy, *, require_save):
+        assert require_save and copy.parent != board.parent and copy.name == board.name
+        for path, content in original.items():
+            assert copy.with_suffix(path.suffix).read_bytes() == content
+        attempted.append(copy)
+        copy.write_text("partial native write")
+        return runner.KiCadCLIResult(success=False, stderr="injected refill failure")
+
+    monkeypatch.setattr(runner, "run_refill_zones", fail_on_copy)
+    result = stitch(board)
+    assert attempted and not attempted[0].exists()
+    assert "C1.1" not in bonded_pads(result)
+    assert stitched_pads(result) == {"C1.1"}
+    assert all(path.read_bytes() == content for path, content in original.items())
 
 
 _KEEPOUT = """\t(zone

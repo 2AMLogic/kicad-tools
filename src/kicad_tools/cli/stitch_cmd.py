@@ -6522,20 +6522,48 @@ def _compute_plane_bonded_pads(
     net_names: set[str],
     net_target_layers: dict[str, str | None],
 ) -> dict[str, str]:
+    """Only skip a pad when its saved bond survives a native refill under the current rules."""
+    import tempfile
+
+    from kicad_tools._shapely import has_shapely
+    from kicad_tools.cli.runner import run_refill_zones
+    from kicad_tools.sidecars import copy_project_sidecars
+
+    if not has_shapely():
+        return {}
+    # Board cutouts, project clearances and other edits can invalidate a
+    # stored pour without touching its zone outline. Refill once for all nets
+    # on a writable copy, including during a dry run on a read-only source.
+    with tempfile.TemporaryDirectory(prefix="kct-stitch-fill-") as temporary:
+        staged = Path(temporary) / pcb_path.name
+        original = pcb_path.read_bytes()
+        staged.write_bytes(original)
+        copy_project_sidecars(pcb_path, staged)
+        saved = _saved_plane_bonds(staged, net_names, net_target_layers)
+        if not saved or not run_refill_zones(staged, require_save=True).success:
+            return {}
+        if staged.read_bytes() == original:
+            return saved
+        refilled = _saved_plane_bonds(staged, net_names, net_target_layers)
+    return {pad: refilled[pad] for pad in saved if pad in refilled}
+
+
+def _saved_plane_bonds(
+    pcb_path: Path,
+    net_names: set[str],
+    net_target_layers: dict[str, str | None],
+) -> dict[str, str]:
     """``REF.PAD`` -> reason for pads provably bonded to their plane (issue #10136).
 
     Wraps :func:`kicad_tools.validate.copper_contact.pads_bonded_to_plane` per
     target net.  The plane layer is the net's resolved target layer; ``None``
     (2-layer fallback) means any layer other than the pad's own.  A
     duplicated ``REF.PAD`` key is kept only when every pad carrying it is
-    bonded.  Returns ``{}`` when shapely is unavailable.
+    bonded.
     """
-    from kicad_tools._shapely import has_shapely
     from kicad_tools.validate.connectivity import ConnectivityValidator
     from kicad_tools.validate.copper_contact import pads_bonded_to_plane
 
-    if not has_shapely():
-        return {}
     validator = ConnectivityValidator(pcb_path)
     pcb = validator.pcb
     proven: dict[str, str] = {}
