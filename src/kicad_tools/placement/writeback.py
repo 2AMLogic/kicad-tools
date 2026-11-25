@@ -16,14 +16,42 @@ instead of the footprint's.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import PCB
+
+
+def flip_footprint(pcb: PCB, reference: str) -> str | None:
+    """Flip one footprint to the other side; return an error message or None.
+
+    Reuses the exact call ``pcb-modify flip`` makes
+    (``StrategyApplicator`` with a ``MIRROR_COMPONENT`` strategy) so there is a
+    single flip transform.  Mutates ``pcb`` in memory; the caller saves once.
+    """
+    from kicad_tools.recovery.applicator import StrategyApplicator
+    from kicad_tools.recovery.types import Action, Difficulty, ResolutionStrategy, StrategyType
+
+    result = StrategyApplicator().apply_strategy(
+        pcb,
+        ResolutionStrategy(
+            type=StrategyType.MIRROR_COMPONENT,
+            difficulty=Difficulty.EASY,
+            confidence=1.0,
+            actions=[Action(type="mirror", target=reference)],
+        ),
+    )
+    return None if result.success else result.message
 
 
 def write_footprint_placements(
     pcb_path: str | Path,
     output_path: str | Path,
     placements: Iterable[tuple[str, float, float, float | None]],
+    *,
+    flip_refs: Collection[str] = (),
 ) -> int:
     """Move footprints and save the board to *output_path*.
 
@@ -34,6 +62,7 @@ def write_footprint_placements(
             ``x``/``y`` in mm (the values that appear in the file's
             ``(at ...)``).  ``rotation`` is in degrees; ``None`` keeps the
             current rotation.
+        flip_refs: Footprints to flip before applying their new stored angles.
 
     Returns:
         The number of footprints found and moved.  Unknown references are
@@ -45,6 +74,8 @@ def write_footprint_placements(
     ox, oy = pcb.board_origin
     moved = 0
     for reference, x, y, rotation in placements:
+        if reference in flip_refs and (error := flip_footprint(pcb, reference)):
+            raise ValueError(f"Cannot flip {reference}: {error}")
         if pcb.update_footprint_position(
             reference,
             float(x) - ox,

@@ -155,6 +155,7 @@ class DRCChecker:
         routing_policy_defer_pair_vias: bool = True,
         strict_copper: bool = True,
         declared_reference_height_mm: float | None = None,
+        prove_pour_stubs: bool = False,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -259,6 +260,9 @@ class DRCChecker:
                 ``routing_policy`` leaves the via cap of engaged diff-pair
                 nets to ``diffpair_uncoupled_length`` so it is not reported
                 twice.  Pass False when that category does not run.
+            prove_pour_stubs: Opt in to the native-refill proof behind
+                ``redundant_copper_pour_stub`` (Issue #10137); costs one
+                kicad-cli refill per candidate branch.
             strict_copper: When True (default), a heavier-than-1oz outer
                 weight with no profile entry raises
                 ``UnsupportedCopperWeightError`` instead of silently using
@@ -354,6 +358,7 @@ class DRCChecker:
         self.fab_view = fab_view
         self.fab_view_copper_oz = fab_view_copper_oz
         self.fab_view_gap_policy = fab_view_gap_policy
+        self.prove_pour_stubs = prove_pour_stubs
         self.emit_measurements = emit_measurements
         # The skew / continuity rules surface their measured info findings
         # when either the user asked for --verbose OR a caller wants the
@@ -626,6 +631,7 @@ class DRCChecker:
         "redundant_copper_detour": CATEGORY_ADVISORY,
         "redundant_copper_staircase": CATEGORY_ADVISORY,
         "redundant_copper_via_offcentre": CATEGORY_ADVISORY,
+        "redundant_copper_pour_stub": CATEGORY_ADVISORY,
         # Isolated copper (Issue #4680, second slice): orphaned zone-fill
         # islands.  Warning-severity quality advisory mirroring KiCad's
         # default severity (project_generator.py pins it to "warning") --
@@ -723,6 +729,11 @@ class DRCChecker:
         "netclass_via_diameter": CATEGORY_MANUFACTURING,
         "netclass_via_drill": CATEGORY_MANUFACTURING,
         "netclass_annular_ring": CATEGORY_MANUFACTURING,
+        # Issue #10139: sidecar / project / copper net-class agreement.
+        # Warning-severity consistency audit, never fab-blocking.  Explicit
+        # entries are REQUIRED: unknown ids default to Manufacturing.
+        "netclass_sidecar_mismatch": CATEGORY_ADVISORY,
+        "netclass_track_width_mismatch": CATEGORY_ADVISORY,
         # Issue #7292: project.kct requirements vs the routed board.
         "spec_conformance_dimensions": CATEGORY_MANUFACTURING,
         "spec_conformance_layers": CATEGORY_MANUFACTURING,
@@ -1179,6 +1190,7 @@ class DRCChecker:
             # view; with neither active there is no slit floor to match.
             physical_copper_gap_mm=self.physical_copper_gap_mm,
             fab_view_gap_policy=self.fab_view_gap_policy if self.fab_view else None,
+            prove_pour_stubs=self.prove_pour_stubs,
         )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
