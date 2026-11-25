@@ -2832,20 +2832,26 @@ NATIVE_UNIT_SCHEMATIC = (
 
 
 class TestPcbSync:
-    def test_native_units_share_one_paired_reference(self, tmp_path, capsys):
+    @pytest.mark.parametrize("paired", [True, False], ids=["paired", "schematic"])
+    @pytest.mark.parametrize("scope", [[], ["--per-sheet"]], ids=["continuous", "per-sheet"])
+    def test_native_units_share_one_reference(self, tmp_path, capsys, paired, scope):
         sch = _write_sch(tmp_path, NATIVE_UNIT_SCHEMATIC)
         pcb = _write_pcb(tmp_path, _make_pcb(["U2", "U5"]))
         args = [
             "sch",
             "re-annotate",
             str(sch),
-            "--pcb",
-            str(pcb),
+            *(["--pcb", str(pcb)] if paired else []),
+            *scope,
             "--start-from",
             "81",
             "--format",
             "json",
         ]
+        before = sch.read_bytes(), pcb.read_bytes()
+        assert kct([*args, "--dry-run"]) == 0
+        preview = json.loads(capsys.readouterr().out)
+        assert (sch.read_bytes(), pcb.read_bytes()) == before
         assert kct(args) == 0
         result = json.loads(capsys.readouterr().out)
         assert [(m["old"], m["new"]) for m in result["mappings"]] == [
@@ -2853,10 +2859,21 @@ class TestPcbSync:
             ("U2", "U81"),
             ("U5", "U82"),
         ]
-        assert result["pcb"] == {"path": str(pcb), "renamed": 2, "warnings": []}
-        assert _board_refs(pcb) == {"U81", "U82"}
+        assert preview["mappings"] == result["mappings"]
+        if paired:
+            assert result["pcb"] == {"path": str(pcb), "renamed": 2, "warnings": []}
+            assert _board_refs(pcb) == {"U81", "U82"}
+        else:
+            assert "pcb" not in result
+            assert pcb.read_bytes() == before[1]
         assert sch.read_text().count('(property "Reference" "U81"') == 2
         assert sch.read_text().count('(reference "U81")') == 2
+
+    def test_schematic_only_suffixed_units_keep_their_numeric_group(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, MULTI_UNIT_SCHEMATIC.replace('"U2A"', '"U02A"'))
+        assert kct(["sch", "re-annotate", str(sch), "--start-from", "81", "--format", "json"]) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert [m["new"] for m in result["mappings"]] == ["U81A", "U81B", "U82A"]
 
     def test_padded_source_is_distinct_from_unpadded_footprint(self, tmp_path, capsys):
         from kicad_tools.schema.pcb import PCB
@@ -2897,7 +2914,8 @@ class TestPcbSync:
         assert "Ambiguous schematic reference 'U2'" in capsys.readouterr().err
         assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
 
-    def test_units_on_different_sheets_cannot_split_one_footprint(self, tmp_path, capsys):
+    @pytest.mark.parametrize("paired", [True, False], ids=["paired", "schematic"])
+    def test_units_on_different_sheets_cannot_split_one_package(self, tmp_path, capsys, paired):
         parent = PARENT_SCHEMATIC.replace('"R3"', '"U9"').replace('"R7"', '"U1"')
         child = (
             CHILD_SCHEMATIC.replace('"R14"', '"U1"')
@@ -2908,7 +2926,9 @@ class TestPcbSync:
         sub = _write_sch(tmp_path, child.replace("Device:R", "Device:OpAmp"), "sub.kicad_sch")
         pcb = _write_pcb(tmp_path, _make_pcb(["U9", "U1", "C5"]))
         before = {p: p.read_bytes() for p in tmp_path.iterdir()}
-        args = ["sch", "re-annotate", str(sch), "--pcb", str(pcb), "--prefix", "U"]
+        args = ["sch", "re-annotate", str(sch), "--prefix", "U"]
+        if paired:
+            args += ["--pcb", str(pcb)]
         assert kct([*args, "--per-sheet", "--backup"]) == 1
         assert "Units of 'U1' would receive different references" in capsys.readouterr().err
         assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
@@ -2916,7 +2936,10 @@ class TestPcbSync:
         assert kct(args) == 0
         assert '(property "Reference" "U2"' in sch.read_text()
         assert '(property "Reference" "U2"' in sub.read_text()
-        assert _board_refs(pcb) == {"U1", "U2", "C5"}
+        if paired:
+            assert _board_refs(pcb) == {"U1", "U2", "C5"}
+        else:
+            assert pcb.read_bytes() == before[pcb]
 
     def test_board_references_match_renamed_schematic(self, tmp_path):
         sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)

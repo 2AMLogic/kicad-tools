@@ -1656,7 +1656,7 @@ def _run_mask_pass(
     if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
         load_path = output_path
     try:
-        repairer = MaskCopperRepairer(load_path, project_pcb_path=pcb_path)
+        repairer = MaskCopperRepairer(load_path, project_pcb_path=pcb_path, will_refill=True)
         request = default_request_for_manufacturer(args.mfr)
         result = repairer.repair(
             mask_violations,
@@ -1722,6 +1722,18 @@ def _run_mask_pass(
                     raise _MaskAssessmentFailed("could not complete the pre-edit mask assessment")
             proposed = len(result.actions)
             repairer.save(candidate)
+            from kicad_tools.cli.runner import run_refill_zones
+
+            def refill_candidate() -> None:
+                refill = run_refill_zones(candidate, require_save=True)
+                if not refill.success:
+                    raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
+
+            # The barrel's old antipad belongs to the old drill position. Grade
+            # a pad bridge against the copper that will actually be published.
+            refilled = has_zones and any(a.action == "bridge_via" for a in result.actions)
+            if refilled:
+                refill_candidate()
             _verify_mask_actions(
                 result,
                 report,
@@ -1738,12 +1750,8 @@ def _run_mask_pass(
                     raise _MaskPadConnectionLost(
                         f"saved repair disconnected copper on {', '.join(sorted(lost))}"
                     )
-            if result.actions and has_zones:
-                from kicad_tools.cli.runner import run_refill_zones
-
-                refill = run_refill_zones(candidate, require_save=True)
-                if not refill.success:
-                    raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
+            if result.actions and has_zones and (not refilled or result.repaired < proposed):
+                refill_candidate()
             if result.actions and before_native is not None:
                 errors, opens = _mask_native_state(candidate)
                 new_errors = (errors - before_native[0]).total()
@@ -1871,7 +1879,7 @@ _VERIFY_DISPOSITIONS = frozenset(
 
 
 class _ElbowGapCheck:
-    """Compare accepted outside elbows with the saved board's native mask measurements."""
+    """Check proposed conductor gaps against the saved board's native mask measurements."""
 
     def __init__(self, result: MaskRepairResult) -> None:
         self.required = {
