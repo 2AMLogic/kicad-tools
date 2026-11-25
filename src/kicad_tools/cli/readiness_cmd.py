@@ -4451,9 +4451,15 @@ class _PublicationHold:
             self.reserve.unlink()
 
     def discard(self) -> None:
-        self.release_space()
-        self.path.unlink(missing_ok=True)
-        self.path.parent.rmdir()
+        """Retire a private backup after its contents have been committed or restored."""
+        try:
+            self.release_space()
+            self.path.unlink(missing_ok=True)
+            self.path.parent.rmdir()
+        except OSError as error:
+            # A busy backup or an unexpected file belongs to the operator. Keep
+            # it available without changing the outcome of either public region.
+            logger.warning("Could not clean up readiness backup %s: %s", self.path.parent, error)
 
     def restore(self) -> None:
         self.release_space()
@@ -4466,14 +4472,25 @@ class _PublicationHold:
 
 
 def _claim_target(
-    target: Path, expected: tuple[Any, ...] | None, links: bool, *, reserve: bool = False
+    target: Path,
+    expected: tuple[Any, ...] | None,
+    links: bool,
+    region_root: Path,
+    *,
+    reserve: bool = False,
 ) -> _PublicationHold | None:
     """Retain the actual displaced file so a writer with it open can finish a save."""
     if expected is None:
         if os.path.lexists(target):
             raise RuntimeError(f"Concurrent edit before publication: {target.name}")
         return None
-    private = Path(tempfile.mkdtemp(prefix=".readiness-", dir=target.parent))
+    # Keep retained backups outside package and evidence subdirectories. A
+    # nested mount needs a hold on its own device for the editor-preserving rename.
+    parent = target.parent
+    device = parent.stat().st_dev
+    while parent != region_root and parent.parent.stat().st_dev == device:
+        parent = parent.parent
+    private = Path(tempfile.mkdtemp(prefix=".readiness-", dir=parent))
     hold = _PublicationHold(target, private / ".readiness-hold-original", expected, links)
     try:
         with ExitStack() as stack:
@@ -4529,7 +4546,10 @@ def _publication_lock(lock: Path) -> Iterator[None]:
     try:
         yield
     finally:
-        lock.rmdir()
+        try:
+            lock.rmdir()
+        except OSError as error:
+            logger.warning("Could not release readiness publication lock %s: %s", lock, error)
 
 
 def _publish_candidate(
@@ -4554,33 +4574,38 @@ def _publish_candidate(
                 _publication_lock(root.parent / f".{root.name}.readiness-publish.lock")
             )
 
-        inventories = []
         holds: list[_PublicationHold] = []
-        for staged, live, snapshot in regions:
-            after = publication.enter_context(
-                _install_candidate(staged, live, snapshot, receipt, holds)
-            )
-            inventories.append((live, after))
-        # Both regions can still roll back when we recheck an earlier file or
-        # a project dependency outside them. The consumer receipt was installed last.
-        held_dirs = {hold.path.parent for hold in holds}
-        for live, after in inventories:
-            current = _snapshot_inventory(live, held_dirs)
-            if current != after:
-                raise RuntimeError(
-                    _with_changes(
-                        "Concurrent edit during publication", _inventory_changes(after, current)
-                    )
+        with ExitStack() as installs:
+            inventories = []
+            for staged, live, snapshot in regions:
+                after = installs.enter_context(
+                    _install_candidate(staged, live, snapshot, receipt, holds)
                 )
-        if external_before:
-            edits = _external_input_changes(destination, external_before)
-            if edits:
-                raise RuntimeError(_with_changes("Concurrent edit during publication", edits))
-        # An already-open editor can save to a displaced inode while we install
-        # either region. Check all originals while both journals can still unwind.
-        for hold in holds:
-            if _publication_identity(hold.path) != hold.identity:
-                raise RuntimeError(f"Concurrent edit during publication: {hold.target.name}")
+                inventories.append((live, after))
+            # Both regions can still roll back when we recheck an earlier file or
+            # a project dependency outside them. The consumer receipt was installed last.
+            held_dirs = {hold.path.parent for hold in holds}
+            for live, after in inventories:
+                current = _snapshot_inventory(live, held_dirs)
+                if current != after:
+                    raise RuntimeError(
+                        _with_changes(
+                            "Concurrent edit during publication", _inventory_changes(after, current)
+                        )
+                    )
+            if external_before:
+                edits = _external_input_changes(destination, external_before)
+                if edits:
+                    raise RuntimeError(_with_changes("Concurrent edit during publication", edits))
+            # An already-open editor can save to a displaced inode while we install
+            # either region. Check all originals while both journals can still unwind.
+            for hold in holds:
+                if _publication_identity(hold.path) != hold.identity:
+                    raise RuntimeError(f"Concurrent edit during publication: {hold.target.name}")
+
+        # Both regions have committed. Retire all backups under the locks.
+        for original in holds:
+            original.discard()
 
 
 def _make_publish_directory(directory: Path, created: list[Path]) -> None:
@@ -4648,7 +4673,7 @@ def _install_candidate(
                     staged = Path(staged_name)
                     preparation.callback(staged.unlink, missing_ok=True)
                     shutil.copy2(candidate / name, staged)
-                hold = _claim_target(target, expected[name], links, reserve=True)
+                hold = _claim_target(target, expected[name], links, destination, reserve=True)
                 if hold is not None:
                     originals[name] = hold
                     holds.append(hold)
@@ -4683,7 +4708,7 @@ def _install_candidate(
                 original.release_space()
             links = links_by_device[target.parent.stat().st_dev]
             try:
-                withdrawn = _claim_target(target, identity, links)
+                withdrawn = _claim_target(target, identity, links, destination)
             except Exception:
                 # A newer save (or an editor's deletion) owns the public name.
                 if (
@@ -4728,9 +4753,6 @@ def _install_candidate(
                 + ", ".join(conflicts)
             ) from exc
         raise
-    else:
-        for original in originals.values():
-            original.discard()
 
 
 def _remove_fill_local_settings(evidence: Path) -> None:

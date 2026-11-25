@@ -206,7 +206,9 @@ byte-for-byte (`tests/test_readiness_verification_receipts_7536.py`).
 checks an isolated candidate, then publishes only if every gate passes. A
 failed attempt leaves the previous release intact and writes diagnostics under
 `output/readiness-attempt/`. Publication checks for concurrent release edits
-and rolls back replaced files if a write fails. Existing packages without the
+and rolls back replaced files if a write fails. After both regions commit, a
+busy private backup produces a cleanup warning with its location. The published
+receipt describes the committed release. Existing packages without the
 `kct readiness` producer identity are refused: regenerate recipe-finalised
 packages using their own recipe, then verify them. No commands from package
 metadata are executed. Generic generation preserves existing native project

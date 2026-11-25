@@ -313,6 +313,95 @@ def test_group_publication_failure_preserves_release_and_editor(
         assert {p.name for p in (project / "output").iterdir()} == expected_directories
 
 
+@pytest.mark.parametrize("region", ["kicad", "output"])
+@pytest.mark.parametrize("cleanup", ["backup-directory", "backup-file", "publisher-lock"])
+def test_committed_release_survives_cleanup_error(tmp_path, monkeypatch, caplog, region, cleanup):
+    project = make_project(tmp_path)
+    board = project / "kicad" / "board.kicad_pcb"
+    receipt = project / "output" / "readiness.json"
+    archive = project / "output" / "manufacturing.zip"
+    assert run(project, "--generate", "--checked-at", "2026-11-23T00:00:00Z")[0] == 0
+    assert read_readiness(board.parent, layout=layout_for(project))["status"] == "ready"
+    old_receipt, old_archive = receipt.read_bytes(), archive.read_bytes()
+    checked_at = "2026-11-24T00:00:00Z"
+    old_rmdir, old_unlink = Path.rmdir, Path.unlink
+    interrupted = []
+
+    def after_install():
+        return not interrupted and receipt.is_file() and checked_at in receipt.read_text()
+
+    def rmdir(path):
+        if cleanup == "publisher-lock" and path == project / f".{region}.readiness-publish.lock":
+            if after_install():
+                interrupted.append(path)
+                raise OSError(errno.EBUSY, "publisher lock busy")
+        if cleanup == "backup-directory" and path.name.startswith(".readiness-"):
+            if path.is_relative_to(project / region) and after_install():
+                interrupted.append(path)
+                (path / ".indexer-note").write_text("metadata added before directory retirement")
+        return old_rmdir(path)
+
+    def unlink(path, *args, **kwargs):
+        if cleanup == "backup-file" and path.name == ".readiness-hold-original":
+            if path.is_relative_to(project / region) and after_install():
+                interrupted.append(path)
+                raise OSError(errno.EBUSY, "private backup busy")
+        return old_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rmdir", rmdir)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    code, _ = run(
+        project, "--generate", "--checked-at", checked_at, fake=_changed_candidate(project)
+    )
+    assert len(interrupted) == 1
+    assert code == 0
+    assert board.read_text() == "(kicad_pcb refilled candidate revision)\n"
+    assert archive.read_bytes() != old_archive and receipt.read_bytes() != old_receipt
+    assert json.loads(receipt.read_bytes())["checked_at"] == checked_at
+    assert read_readiness(board.parent, layout=layout_for(project))["status"] == "ready"
+    assert not (project / "output/readiness-attempt/readiness.json").exists()
+    assert str(interrupted[0].parent if cleanup == "backup-file" else interrupted[0]) in caplog.text
+
+
+def test_retained_evidence_backup_is_private_on_retry(tmp_path, monkeypatch):
+    project = make_project(tmp_path)
+    output = project / "output"
+    assert run(project, "--generate", "--checked-at", "2026-11-23T00:00:00Z")[0] == 0
+    held = []
+    old_replace, old_rmdir = os.replace, Path.rmdir
+
+    def record_evidence_hold(source, target):
+        old_replace(source, target)
+        if not held and Path(source).is_relative_to(output / "readiness"):
+            if Path(target).name == ".readiness-hold-original":
+                held.append(Path(target).parent)
+
+    def metadata_before_retirement(path):
+        if held and path == held[0]:
+            (path / ".indexer-note").write_text("external directory metadata")
+        return old_rmdir(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", record_evidence_hold)
+        patch.setattr(Path, "rmdir", metadata_before_retirement)
+        code, _ = run(
+            project,
+            "--generate",
+            "--checked-at",
+            "2026-11-24T00:00:00Z",
+            fake=_changed_candidate(project),
+        )
+        assert code == 0
+    assert len(held) == 1
+    note = held[0] / ".indexer-note"
+    assert note.read_text() == "external directory metadata"
+    assert read_readiness(project / "kicad", layout=layout_for(project))["status"] == "ready"
+    assert run(project, "--generate", "--checked-at", "2026-11-25T00:00:00Z")[0] == 0
+    report = json.loads((output / "readiness.json").read_bytes())
+    assert note.relative_to(project).as_posix() not in report["inputs"]
+    assert note.read_text() == "external directory metadata"
+
+
 @pytest.mark.parametrize("prior", [False, True], ids=["first", "prior"])
 @pytest.mark.parametrize("target_name", ["board", "readme"])
 @pytest.mark.parametrize("moment", ["before-claim", "in-gap"])
