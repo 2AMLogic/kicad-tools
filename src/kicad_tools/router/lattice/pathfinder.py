@@ -8155,6 +8155,8 @@ class LatticePathfinder:
         keepouts, max_shift = self._pair_hop_keepouts(points[0], points[-1], net, half)
 
         def clear(a: Pt, b: Pt) -> bool:
+            # A direct pad-to-pad segment replaces both original escape stubs.
+            attached = () if (a, b) == (points[0], points[-1]) else stubs
             return (
                 self._escape_boundary.segment_clear(a, b, half)
                 and not (keepouts and keepouts.segment_blocked(a, b, layer, net, half))
@@ -8166,7 +8168,7 @@ class LatticePathfinder:
                     )
                 )
                 and committed.seg_clear(a, b, layer, net, half, clearance)
-                and self._own_net_pad_band_ok(a, b, layer, net, half, attached=stubs)
+                and self._own_net_pad_band_ok(a, b, layer, net, half, attached=attached)
             )
 
         chosen = shorter_pair_hop(points, clear, max_shift=max_shift)
