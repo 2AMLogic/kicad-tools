@@ -6,6 +6,7 @@ import logging
 import math
 import tempfile
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
 from kicad_tools.cli import runner
 from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.schema.pcb import PCB, Segment, Via
-from kicad_tools.sidecars import copy_project_sidecars
+from kicad_tools.sidecars import copy_project_sidecars, stage_project_rules
 from kicad_tools.validate.connectivity import ConnectivityValidator
 from kicad_tools.validate.copper_contact import (
     FILL,
@@ -110,6 +111,8 @@ def _candidates(pcb: PCB, graph: CopperContactGraph) -> list[PourStub]:
         via = None
         if vias:
             via = pcb.vias[graph.items[vias[0]].key]
+            if via.locked:
+                continue
             if len(adjacency[vias[0]]) != 1 or math.dist(via.position, outer_ends[0]) > 1e-6:
                 continue
         if not any(
@@ -308,24 +311,18 @@ class PourStubProof:
         return self.evaluated < self.total
 
 
-def evaluate_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]] | None:
-    """Return verified branches, or None if no candidate could be evaluated."""
-    proof = prove_pour_stubs(pcb)
-    return None if proof is None else proof.verified
-
-
-def prove_pour_stubs(pcb: PCB) -> PourStubProof | None:
-    """Like :func:`evaluate_pour_stubs`, but also report per-candidate coverage (Issue #10211).
-
-    A candidate that raises ``_TrialUnavailable`` (or cannot be matched on the
-    refilled baseline) is not evaluated; ``evaluated < total`` lets callers say
-    so instead of implying every candidate was proven.
-    """
+def _evaluate(
+    pcb: PCB,
+    *,
+    jointly: bool,
+    rule_files: Sequence[Path] | None = None,
+    include: Callable[[PourStub], bool] | None = None,
+) -> PourStubProof | None:
     source = pcb.path
     if source is None or not pcb.zones or not pcb.segments:
         return None
     try:
-        branches = discover_pour_stubs(pcb)
+        branches = [b for b in discover_pour_stubs(pcb) if include is None or include(b)]
         if not branches or (cli := runner.find_kicad_cli()) is None:
             return None
         with tempfile.TemporaryDirectory(prefix="kct-pour-stub-") as scratch:
@@ -334,7 +331,12 @@ def prove_pour_stubs(pcb: PCB) -> PourStubProof | None:
             # Include pending in-memory edits. PCB.save changes its receiver's
             # path, so save a shallow copy without redirecting the caller.
             copy(pcb).save(path)
-            rules = {p.name: p.read_bytes() for p in copy_project_sidecars(source, path)}
+            if rule_files is None:
+                staged = copy_project_sidecars(source, path)
+            else:
+                stage_project_rules(rule_files, path)
+                staged = [path.with_suffix(r.suffix) for r in rule_files]
+            rules = {p.name: p.read_bytes() for p in staged}
             if not _refill(path, cli):
                 return None
             frozen = path.read_bytes()
@@ -364,8 +366,17 @@ def prove_pour_stubs(pcb: PCB) -> PourStubProof | None:
                         )
                         continue
                     evaluated += 1
-                    if evidence is not None:
-                        results.append((branch, evidence))
+                    if evidence is None:
+                        continue
+                    results.append((branch, evidence))
+                    if jointly:
+                        # The next branch is judged on the refilled board that
+                        # already lacks this one, so two branches that each
+                        # keep the pour connected cannot both be removed.
+                        frozen = trial.read_bytes()
+                        baseline = PCB.load(trial)
+                        previous = _states(baseline)
+                        saved = {b._signature(): b for b in discover_pour_stubs(baseline)}
             if evaluated and source.read_bytes() == original:
                 return PourStubProof(results, evaluated, len(branches))
             return None
@@ -374,6 +385,38 @@ def prove_pour_stubs(pcb: PCB) -> PourStubProof | None:
         return None
 
 
+def prove_pour_stubs(pcb: PCB) -> PourStubProof | None:
+    """Evaluate each candidate independently and report per-candidate coverage (Issue #10211).
+
+    Candidates that disappear on refill or whose native trial is unavailable
+    count toward the total but not the number evaluated.
+    """
+    return _evaluate(pcb, jointly=False)
+
+
+def evaluate_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]] | None:
+    """Return branches that are each removable alone, or None if none could be evaluated."""
+    proof = prove_pour_stubs(pcb)
+    return None if proof is None else proof.verified
+
+
 def verified_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]]:
     """List branches with positive removal evidence for callers that consume them."""
     return evaluate_pour_stubs(pcb) or []
+
+
+def select_pour_stubs(
+    pcb: PCB,
+    *,
+    rule_files: Sequence[Path] | None = None,
+    include: Callable[[PourStub], bool] | None = None,
+) -> list[tuple[PourStub, PourStubEvidence]] | None:
+    """Return a set of branches that can be removed together, or None if unproven.
+
+    Each branch is re-proven on the refilled board that already lacks the
+    branches accepted before it. ``rule_files`` replaces the board's own project
+    sidecars in the scratch copy (an explicit ``--project``); ``include`` drops
+    branches before any trial, so their copper stays in every later proof.
+    """
+    proof = _evaluate(pcb, jointly=True, rule_files=rule_files, include=include)
+    return None if proof is None else proof.verified

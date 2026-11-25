@@ -784,8 +784,9 @@ class MaskCopperRepairer(CopperGapRepairer):
                 copper-gap via repair.
             margin_mm: Slack a pass-through nudge must open beyond the policy
                 clearance, in mm.
-            warning_clearance_mm: Preferred mask gap for a shared pad exit
-                when the manufacturer's policy includes an advisory tier.
+            warning_clearance_mm: Preferred mask gap for a shared pad exit or a
+                via with an already-reported approach, when the manufacturer's
+                policy includes an advisory tier.
         """
         if not math.isfinite(margin_mm) or margin_mm < 0:
             raise ValueError("Mask clearance margin must be a finite, nonnegative distance")
@@ -803,6 +804,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         # model check must not compare it against the report's measurement.
         touched_by_action: set[str] = set()
         pass_throughs: dict[str, list[DRCViolation]] = {}
+        reported_tracks: set[str] = set()
 
         for violation in findings:
             uuids = _item_uuids(violation)
@@ -811,6 +813,8 @@ class MaskCopperRepairer(CopperGapRepairer):
                 continue
             conductor = uuids[-1]
             openings = uuids[:-1]
+            if conductor in segments:
+                reported_tracks.add(conductor)
             if (
                 PASS_THROUGH_MARKER in violation.message
                 and DISJOINT_RELATION_MARKER in violation.message
@@ -951,6 +955,7 @@ class MaskCopperRepairer(CopperGapRepairer):
                 conductor,
                 members,
                 segments,
+                reported_tracks,
                 pads,
                 result,
                 max_displacement,
@@ -1346,6 +1351,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         conductor: str,
         members: list[DRCViolation],
         segments: dict[str, SExp],
+        reported_tracks: set[str],
         pads: dict,
         result: MaskRepairResult,
         max_displacement: float,
@@ -1466,6 +1472,8 @@ class MaskCopperRepairer(CopperGapRepairer):
                 design_rules,
                 margin_mm,
                 touched_by_action,
+                reported_tracks,
+                warning_clearance_mm,
             )
         return "not_a_straight_segment", ""
 
@@ -2619,18 +2627,16 @@ class MaskCopperRepairer(CopperGapRepairer):
         design_rules: DesignRules | None,
         margin_mm: float,
         touched_by_action: set[str],
+        reported_tracks: set[str],
+        warning_clearance_mm: float | None,
     ) -> tuple[str, str] | None:
-        """Move a pass-through via (dragging its anchored track ends) clear.
+        """Move a pass-through via clear while preserving its track connections.
 
-        When the shortest push is declined by the clearance gates, or the
-        destination it selects needs more than ``max_displacement``,
-        alternative displacements are searched (issue #9939): bounded by the
-        caller's maximum, ordered shortest first, re-validated against the
-        project's authored net classes on every spanned layer.  A candidate
-        that survives keeps each anchored approach on its own line and adds a
-        short 0/45/90/135-degree connection wholly inside the new via land
-        instead of dragging the ends off angle.  A via with no legal
-        candidate stays where it is, reported with the primary refusal.
+        An attached track with a mask finding favors a relocation that keeps
+        the approach on its original line. Other vias try the shortest direct
+        push first. Relocations use bounded, aligned connections inside the
+        new via land and check the project's authored clearances on every
+        spanned layer. If no candidate passes, report the primary refusal.
         """
         entries = [pads[opening] for opening in openings]
         if any(entry[5] == "unsupported" for entry in entries):
@@ -2681,8 +2687,8 @@ class MaskCopperRepairer(CopperGapRepairer):
         push = self._push_clear_of_openings(
             copper, [(pads[o][0], pads[o][1]) for o in openings], required + margin_mm
         )
-        primary_reason: tuple[str, str] | None = None
-        primary_push: tuple[float, float] | None = None
+        primary_reason: tuple[str, str] | None = ("infeasible", "")
+        primary_push = None
         if push is not None:
             displacement = math.hypot(*push)
             if displacement < _TOLERANCE_MM / 2:
@@ -2691,7 +2697,21 @@ class MaskCopperRepairer(CopperGapRepairer):
                 primary_reason = "exceeds_max_displacement", f"needs {displacement:.4f}mm"
             else:
                 primary_push = push
-                primary_reason = self._via_drag_candidate(
+
+        def relocate(preferred_gap: float) -> bool:
+            if project is None:
+                return False
+            for candidate in self._via_alternate_candidates(
+                at,
+                size,
+                openings,
+                pads,
+                required + margin_mm,
+                max_displacement,
+                primary_push,
+                preferred_gap=preferred_gap,
+            ):
+                outcome = self._via_tails_candidate(
                     via_node,
                     via_uuid,
                     openings,
@@ -2701,9 +2721,9 @@ class MaskCopperRepairer(CopperGapRepairer):
                     size,
                     copper,
                     joined,
-                    push,
+                    candidate,
                     required,
-                    displacement,
+                    math.hypot(*candidate),
                     max_displacement,
                     dry_run,
                     clearance_mm,
@@ -2711,19 +2731,18 @@ class MaskCopperRepairer(CopperGapRepairer):
                     touched_by_action,
                     project,
                 )
-                if primary_reason is None:
-                    return None
-        else:
-            primary_reason = "infeasible", ""
+                if outcome is None:
+                    return True
+            return False
 
-        # The shortest push did not survive its gates: search alternative
-        # displacements with the kept-line contact model (issue #9939).
-        if project is None:
-            return primary_reason
-        for candidate in self._via_alternate_candidates(
-            at, size, openings, pads, required + margin_mm, max_displacement, primary_push
-        ):
-            outcome = self._via_tails_candidate(
+        # Bending an approach that already has a mask finding can put that
+        # same exposure on a newly split segment. Keep the original approach
+        # line and identity if a bounded relocation passes the project rules.
+        preserve_approach = any(uid in reported_tracks for uid, *_ in joined)
+        if preserve_approach and relocate(max(required, warning_clearance_mm or 0) + margin_mm):
+            return None
+        if primary_push is not None:
+            primary_reason = self._via_drag_candidate(
                 via_node,
                 via_uuid,
                 openings,
@@ -2733,9 +2752,9 @@ class MaskCopperRepairer(CopperGapRepairer):
                 size,
                 copper,
                 joined,
-                candidate,
+                primary_push,
                 required,
-                math.hypot(*candidate),
+                math.hypot(*primary_push),
                 max_displacement,
                 dry_run,
                 clearance_mm,
@@ -2743,8 +2762,10 @@ class MaskCopperRepairer(CopperGapRepairer):
                 touched_by_action,
                 project,
             )
-            if outcome is None:
+            if primary_reason is None:
                 return None
+        if not preserve_approach and relocate(required + margin_mm):
+            return None
         return primary_reason
 
     def _via_drag_candidate(
@@ -2871,30 +2892,27 @@ class MaskCopperRepairer(CopperGapRepairer):
         target_gap: float,
         max_displacement: float,
         primary: tuple[float, float] | None,
+        *,
+        preferred_gap: float,
     ) -> list[tuple[float, float]]:
-        """Alternative via displacements that clear every opening, shortest first.
+        """Bounded via displacements that clear every opening by ``target_gap``.
 
-        The shortest push (``primary``, when it exists) comes first, then a
-        bounded polar grid: ``_VIA_SEARCH_DIRECTIONS`` directions at
-        ascending magnitudes up to the caller's maximum.  A candidate is
-        kept only when the whole translated disc clears every opening by
-        ``target_gap`` (exact: the disc-to-polygon distance equals the
-        centre distance minus the radius).  Rounded duplicates collapse.
+        Include the primary push and a polar grid up to the caller's maximum.
+        Measure disc-to-opening clearance at the rounded centre. Try candidates
+        meeting the preferred gap first, shortest first within each tier.
         """
-        seen: set[tuple[float, float]] = set()
-        out: list[tuple[float, float]] = []
+        clears_preferred: dict[tuple[float, float], bool] = {}
 
         def consider(dx: float, dy: float) -> None:
             centre = (round(at[0] + dx, 4), round(at[1] + dy, 4))
             key = (round(centre[0] - at[0], 4), round(centre[1] - at[1], 4))
-            if key in seen or math.hypot(*key) > max_displacement + 1e-9:
+            if key in clears_preferred or math.hypot(*key) > max_displacement + 1e-9:
                 return
             point = Point(centre)
-            for opening in openings:
-                if pads[opening][0].distance(point) - size / 2 < target_gap - 1e-9:
-                    return
-            seen.add(key)
-            out.append(key)
+            gap = min(pads[opening][0].distance(point) for opening in openings) - size / 2
+            if gap < target_gap - 1e-9:
+                return
+            clears_preferred[key] = gap >= preferred_gap - 1e-9
 
         if primary is not None:
             consider(*primary)
@@ -2903,8 +2921,14 @@ class MaskCopperRepairer(CopperGapRepairer):
             for index in range(_VIA_SEARCH_DIRECTIONS):
                 angle = math.tau * index / _VIA_SEARCH_DIRECTIONS
                 consider(magnitude * math.cos(angle), magnitude * math.sin(angle))
-        out.sort(key=lambda d: (round(math.hypot(*d), 4), round(math.atan2(d[1], d[0]), 6)))
-        return out
+        return sorted(
+            clears_preferred,
+            key=lambda d: (
+                not clears_preferred[d],
+                round(math.hypot(*d), 4),
+                round(math.atan2(d[1], d[0]), 6),
+            ),
+        )
 
     def _via_tail_plan(
         self,
