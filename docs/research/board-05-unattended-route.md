@@ -469,3 +469,31 @@ pads on both forms. All 399 revised tracks are horizontal, vertical or 45
 degrees. The stored board still has 13 mask-to-copper errors, and the
 refilled board has 12. RESET and the 77 nightly warnings keep the unattended
 gate at exit 1.
+
+## RESET branch entering a via beside its trunk, 2026-11-24 (issue #9424)
+
+On the public recipe at `b66f14f47`, the optimizer introduced a 0.029810 mm
+F.Cu gap between two RESET tracks. The fabrication limit was 0.1016 mm.
+The shorter branch already ran down a longer RESET trace. Continuing along
+that trace to the level of the via and then entering its barrel removes the
+diagonal facing the neighbouring branch. Both new legs lie within the existing
+trunk and barrel. The optimizer retains a connected path between the original
+endpoints and checks for other copper that depended on the removed diagonal.
+
+| Pinned KiCad 10.0.6, C++ router build 79 | Before | After |
+| --- | ---: | ---: |
+| Nightly manufacturer check, errors / warnings | 1 / 77 | 0 / 77 |
+| Full manufacturer check on the saved board | 14 / 100 | 13 / 100 |
+| Full manufacturer check after independent refill | 13 / 104 | 12 / 104 |
+
+Seeds 42, 7 and 1337 each routed 37 of 37 nets and 143 of 143 connections
+with 121 vias. Native DRC and ERC were clean. Copper LVS matched 149 pads on
+both the saved and refilled boards. The three saved boards and a second fresh
+seed-42 run produced the same PCB bytes.
+
+The RESET slit was the sole manufacturer error removed. One existing
+mask-to-copper warning on U1/29 names a different generated UUID for the
+same neighbouring track. Its location, measurement (0.130009 mm) and limit
+(0.090 mm) are unchanged. The remaining warning records match in full. All
+checks used zero waivers. The 77 nightly warnings and the full-check
+mask findings keep Board 05 below the unattended acceptance target.
