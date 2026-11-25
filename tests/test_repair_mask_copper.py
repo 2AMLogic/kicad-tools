@@ -3554,3 +3554,116 @@ def test_pad_chain_added_leg_verification_failure_preserves_prior_output(
     assert result["unrepaired"][-1]["reason"] == "new_mask_finding"
     assert board.read_bytes() == original
     assert output.read_bytes() == prior
+
+
+def _bonded_via_finding():
+    found = _pt_finding("via-bond", measured=0.0)
+    found.message = "Mask-to-copper overlap: exposed copper via (net N1); same-net pass-through"
+    return found
+
+
+def test_direct_pad_via_keeps_its_connection_and_undoes_as_one_action(tmp_path):
+    from kicad_tools.manufacturers import get_profile
+
+    board = _board(tmp_path, _via("via-bond", (101.20, 100.35)))
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "net_settings": {
+                    "meta": {"version": 3},
+                    "classes": [{"name": "Default"}, {"name": "Power", "track_width": 0.24}],
+                    "netclass_patterns": [{"netclass": "Power", "pattern": "N1"}],
+                }
+            }
+        )
+    )
+    repairer = MaskCopperRepairer(board)
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=2)
+    repair = repairer.repair(
+        [_bonded_via_finding()], design_rules=rules, clearance_mm=0.15, warning_clearance_mm=0.15
+    )
+    assert repair.repaired == 1
+    action = repair.actions[0]
+    assert len(action.added_segments) == 1
+    uid, ax, ay, vx, vy, width, layer, net = action.added_segments[0]
+    assert layer == "F.Cu" and net == 1 and width == 0.24
+    assert _is_quantum_aligned(vx - ax, vy - ay)
+    repairer.save(board)
+    pad, (via, seat), (bridge, _) = (
+        _pad_poly(board, "R1/1"),
+        _saved_copper(board, "via-bond"),
+        _saved_copper(board, uid),
+    )
+    assert seat == (vx, vy) and pad.distance(via) >= 0.15
+    assert pad.contains(Point(ax, ay)) and bridge.intersects(via) and bridge.intersects(pad)
+    assert not MaskCopperRepairer(board).off_angle_tracks()
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert _saved_copper(board, "via-bond")[1] == (101.2, 100.35)
+    assert uid not in MaskCopperRepairer(board)._segment_nodes()
+
+
+@pytest.mark.parametrize(
+    "obstacle", ["project clearance", "drill spacing", "locked via", "generated via", "contact"]
+)
+def test_direct_pad_via_veto_preserves_the_copper(tmp_path, obstacle):
+    from kicad_tools.manufacturers import get_profile
+
+    copper = _via("via-bond", (101.20, 100.35))
+    if obstacle == "project clearance":
+        # The closest mask-safe seat leaves 0.175 mm to this rear track.
+        copper += _seg("rear", (102.045, 98.0), (102.045, 102.0), layer="B.Cu", net=2)
+    elif obstacle == "drill spacing":
+        copper += _via("other-drill", (102.22, 100.35), size=0.4, drill=0.3, net=2)
+    elif obstacle == "locked via":
+        copper += '(group "protected" (uuid "grp") (locked yes) (members "via-bond"))'
+    elif obstacle == "generated via":
+        copper += "(generated (uuid tuning) (members via-bond))"
+    else:
+        # Its locked tip touches the original annulus by width on the rear.
+        copper += _seg("tap", (100.3, 100.35), (100.95, 100.35), layer="B.Cu").replace(
+            "(segment ", "(segment (locked yes) "
+        )
+    board = _board(tmp_path, copper)
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=2)
+    opts = {
+        "max_displacement": 0.28,
+        "design_rules": rules,
+        "clearance_mm": 0.127,
+        "warning_clearance_mm": 0.15,
+    }
+    if obstacle == "project clearance":
+        # First demonstrate that the manufacturer's smaller floor would permit it.
+        board.with_suffix(".kicad_pro").write_text(
+            json.dumps(
+                {
+                    "net_settings": {
+                        "meta": {"version": 3},
+                        "classes": [{"name": "Default", "clearance": 0.127}],
+                    }
+                }
+            )
+        )
+        assert (
+            MaskCopperRepairer(board).repair([_bonded_via_finding()], dry_run=True, **opts).repaired
+            == 1
+        )
+        board.with_suffix(".kicad_pro").write_text(
+            json.dumps(
+                {
+                    "net_settings": {
+                        "meta": {"version": 3},
+                        "classes": [
+                            {"name": "Default", "clearance": 0.127},
+                            {"name": "Power", "clearance": 0.2},
+                        ],
+                        "netclass_patterns": [{"netclass": "Power", "pattern": "N1"}],
+                    }
+                }
+            )
+        )
+    before = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bonded_via_finding()], **opts)
+    assert not result.actions and not repairer.modified
+    assert result.unrepaired and board.read_bytes() == before
