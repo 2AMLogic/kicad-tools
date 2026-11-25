@@ -1059,6 +1059,16 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | `--fill-tolerance MM2` | Per-layer filled-copper tolerance for the saved-vs-refilled equivalence check |
 | `--format {text,json}` | Output format (default: `text`) |
 
+**Reproducible `gerbers/gerbers.zip`** (Issue #10174): kicad-cli stamps the plot
+time into every Gerber, drill and job file, so `--generate` pins that creation
+date. With `SOURCE_DATE_EPOCH` unset it uses the fixed constant
+`READINESS_GERBER_EPOCH` (1980-01-01T00:00:00Z); a valid `SOURCE_DATE_EPOCH`
+overrides it. ZIP members are sorted with fixed metadata, so two generations of
+an unchanged board produce byte-identical archives and the manifest SHA-256 of
+`gerbers.zip` can be re-checked by regenerating. Only the Gerber plot is pinned:
+sign-off timestamps and other bundle files keep their real times, and standalone
+`kct export` Gerbers are unchanged.
+
 Gate order is load-bearing: the copper pours are refilled and **saved to the
 canonical PCB before both** the native cross-gate and the export, so the bytes
 the checkers judged are the bytes the Gerbers come from. Every gate is judged
