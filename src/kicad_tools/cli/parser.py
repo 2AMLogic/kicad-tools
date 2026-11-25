@@ -6765,6 +6765,18 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "(Issue #9799). With this flag authored silk is byte-identical."
         ),
     )
+    op_parser.add_argument(
+        "--decoupling-radius",
+        dest="decoupling_radius",
+        type=float,
+        default=6.0,
+        metavar="MM",
+        help=(
+            "Furthest a decoupling capacitor's supply pad may sit from the IC "
+            "pin it serves in the post-optimize snap (default: 6.0 mm; "
+            "Issue #10142)."
+        ),
+    )
     op_parser.add_argument("-v", "--verbose", action="store_true")
     op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(op_parser)

@@ -55,8 +55,11 @@ from kicad_tools.placement.cost import (
 from kicad_tools.placement.decoupling import (
     DecouplingGroup,
     SnapMove,
+    apply_cap_associations,
     decoupling_pairs,
     identify_decoupling_groups,
+    parse_capacitance_farads,
+    schematic_cap_associations,
     snap_decoupling_caps,
 )
 from kicad_tools.placement.geometry import (
@@ -408,6 +411,49 @@ def _read_local_courtyards(pcb_path: str) -> dict[str, tuple[float, float, float
     return out
 
 
+DEFAULT_DECOUPLING_RADIUS_MM = 6.0
+"""Furthest supply-pad-to-pin distance the decoupling snap tries (mm)."""
+
+
+def _read_cap_values(pcb_path: str) -> dict[str, float]:
+    """``reference -> farads`` for every footprint whose value is a capacitance."""
+    from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+    out: dict[str, float] = {}
+    for fp in SchemaPCB.load(pcb_path).footprints:
+        farads = parse_capacitance_farads(getattr(fp, "value", "") or "")
+        if fp.reference and farads is not None:
+            out[fp.reference] = farads
+    return out
+
+
+def _associate_from_schematic(
+    pcb_path: str,
+    groups: list[DecouplingGroup],
+    *,
+    quiet: bool,
+) -> list[DecouplingGroup]:
+    """Attach the schematic's cap -> pin designations to *groups* (issue #10142).
+
+    The schematic is the ``.kicad_sch`` beside the board (KiCad's own project
+    layout). Without one, or when it cannot be read, *groups* come back as
+    given and the pairing stays distance-greedy.
+    """
+    schematic = Path(pcb_path).with_suffix(".kicad_sch")
+    if not schematic.is_file():
+        return groups
+    try:
+        associated = apply_cap_associations(groups, schematic_cap_associations(schematic))
+    except Exception as exc:  # a schematic we cannot read must not stop placement
+        if not quiet:
+            print(f"  Decoupling: schematic association skipped ({schematic.name}: {exc})")
+        return groups
+    n = sum(len(g.associated) for g in associated)
+    if n and not quiet:
+        print(f"  Decoupling: {n} cap(s) paired to the pin their schematic designates")
+    return associated
+
+
 def _build_decoupling_context(
     pcb_path: str,
     nets: Sequence[Net],
@@ -425,6 +471,7 @@ def _build_decoupling_context(
     groups = identify_decoupling_groups(nets, _read_pad_pin_types(pcb_path))
     if not groups:
         return None
+    groups = _associate_from_schematic(pcb_path, groups, quiet=quiet)
     if not quiet:
         n_caps = sum(len(g.caps) for g in groups)
         n_pins = sum(len(g.pins) for g in groups)
@@ -453,6 +500,7 @@ def snap_decoupling(
     required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
     exempt_pairs: set[frozenset[str]] | None = None,
     pad_anchored: bool = False,
+    max_radius_mm: float = DEFAULT_DECOUPLING_RADIUS_MM,
 ) -> tuple[PlacementVector, list[SnapMove]]:
     """Run the post-optimize decoupling-cap snap (issue #6020).
 
@@ -464,6 +512,10 @@ def snap_decoupling(
 
     Shared by ``kct optimize-placement`` and the MCP ``optimize_placement``
     tool (issue #6253). A no-op when *decoupling_groups* is empty/``None``.
+
+    *max_radius_mm* is the furthest a cap's supply pad may sit from its pin
+    (issue #10142; ``--decoupling-radius``). Caps sharing a pin are snapped
+    smallest value first, from the footprint values on the board.
     """
     if not decoupling_groups:
         return vector, []
@@ -494,6 +546,8 @@ def snap_decoupling(
         cost_config,
         pad_nets={pin: net.name for net in nets for pin in net.pins},
         extents=_read_local_courtyards(pcb_path),
+        max_radius_mm=max_radius_mm,
+        cap_values=_read_cap_values(pcb_path),
     )
 
 
@@ -1296,6 +1350,7 @@ def run_optimize_placement(
     route_check_timeout: float | None = None,
     require_outline: bool = False,
     silk_fix: bool = True,
+    decoupling_radius_mm: float = DEFAULT_DECOUPLING_RADIUS_MM,
 ) -> int:
     """Run placement optimization.
 
@@ -1368,6 +1423,9 @@ def run_optimize_placement(
             route (``--per-net-iterations``), so the verdict is reproducible.
         route_check_timeout: Wall-clock safety backstop per check route in
             seconds (Python-API only; ``None`` = the module default).
+        decoupling_radius_mm: Furthest a decoupling cap's supply pad may sit
+            from the IC pin it serves in the post-optimize snap (issue #10142;
+            ``--decoupling-radius``).
         silk_fix: Run the shared silk legalisation pass (``legalize_silk``,
             #9795 phase 1) on the written board and the snap reference
             repair it augments (Issue #9799). ``False`` (the
@@ -1928,6 +1986,7 @@ def run_optimize_placement(
             required_mm_by_domain_pair=hv_required,
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
+            max_radius_mm=decoupling_radius_mm,
         )
     else:
         # --- Route-check acceptance (issue #6234) ---
@@ -1955,6 +2014,7 @@ def run_optimize_placement(
                 required_mm_by_domain_pair=hv_required,
                 exempt_pairs=hv_exempt,
                 pad_anchored=pad_anchored_wirelength,
+                max_radius_mm=decoupling_radius_mm,
             )
             snaps[snapped.data.tobytes()] = moves
             return snapped
