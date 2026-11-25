@@ -217,7 +217,7 @@ def _finish_failed_export(args, disposition: RoutingPlacementDisposition) -> Non
     atomic_write_text(path, content)
 
 
-def finish(args, exit_code: int) -> int:
+def finish(args, exit_code: int, *, json_fields: dict | None = None) -> int:
     """Report physically observed completion without counting blocked nets as attempts."""
     disposition = getattr(args, "_placement_disposition", None)
     if disposition is None or not disposition.invalid_nets:
@@ -254,22 +254,15 @@ def finish(args, exit_code: int) -> int:
     if exit_code != 0:
         report["clean_success"] = False
     if getattr(args, "format", None) == "json":
-        # The normal diagnostics branch is bypassed by placement-only partials
-        # and early all-invalid exits. Publish an attempt summary on every such
-        # path, including --quiet and runs without --complete-report.
-        from kicad_tools.json_stdout import json_stdout
+        attempt = {"exit_code": exit_code, "output_written": fresh, "placement_disposition": report}
+        if json_fields is None:
+            # Early exits and the deadline supervisor can finish without a
+            # routing diagnostics document to attach these fields to.
+            from kicad_tools.json_stdout import json_stdout
 
-        print(
-            json.dumps(
-                {
-                    "exit_code": exit_code,
-                    "output_written": fresh,
-                    "placement_disposition": report,
-                },
-                indent=2,
-            ),
-            file=json_stdout(),
-        )
+            print(json.dumps(attempt, indent=2), file=json_stdout())
+        else:
+            json_fields.update(attempt)
     report_path = getattr(args, "complete_report", None)
     if report_path:
         from kicad_tools.core.atomic_write import atomic_write_text

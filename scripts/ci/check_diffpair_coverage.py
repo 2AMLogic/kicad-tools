@@ -299,7 +299,9 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # #9326/#9332 repair path's population) across 22 net signatures.
     # The sideband and PCIe repairs retired MIPI_RST, both USB_CC nets and
     # both PCIe pairs. The clock repair (#10083) retired the five MIPI_CLK+
-    # and six MIPI_CLK- findings. The remaining signatures are listed below.
+    # and six MIPI_CLK- findings; the data repair (#10113) retired the two
+    # MIPI_D0+ and four MIPI_D0- findings. The remaining signatures are
+    # listed below.
     # Two independent regenerations reproduced every original
     # signature and per-net count exactly, so the entries are keyed by NET
     # SIGNATURE like the #8957 slits (mask_to_copper's items are
@@ -316,8 +318,6 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("mask_to_copper", "+1V2"): 8858,
     ("mask_to_copper", "+3V3"): 8858,
     ("mask_to_copper", "GND"): 8858,
-    ("mask_to_copper", "MIPI_D0+"): 8858,
-    ("mask_to_copper", "MIPI_D0-"): 8858,
     ("mask_to_copper", "USB2_D+"): 8858,
     ("mask_to_copper", "USB2_D-"): 8858,
     ("mask_to_copper", "USB3_RX1+"): 8858,
