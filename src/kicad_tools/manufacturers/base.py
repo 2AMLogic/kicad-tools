@@ -67,6 +67,13 @@ DFM_THRESHOLD_NAMES: tuple[str, ...] = (
 )
 
 
+#: Optional threshold names (Issue #10173).  A stackup may omit them; a
+#: missing entry means "no recorded evidence" and produces no finding, never an
+#: ``incomplete`` verdict.  Parsed with the same mandatory provenance as the
+#: required names when present.
+DFM_OPTIONAL_THRESHOLD_NAMES: tuple[str, ...] = ("trace_width",)
+
+
 #: Max |declared - offered| oz still treated as the offered weight (0.434 -> 0.5).
 DFM_OZ_SNAP_TOLERANCE = 0.1
 
@@ -157,9 +164,11 @@ def load_dfm_thresholds(manufacturer_id: str) -> DfmThresholdTable | None:
     entries = []
     for key, raw in section.get("entries", {}).items():
         ths: dict[str, DfmThreshold] = {}
-        for name in DFM_THRESHOLD_NAMES:
+        for name in DFM_THRESHOLD_NAMES + DFM_OPTIONAL_THRESHOLD_NAMES:
             t = (raw.get("thresholds") or {}).get(name)
             if t is None:
+                if name in DFM_OPTIONAL_THRESHOLD_NAMES:
+                    continue
                 raise ValueError(f"{manufacturer_id} dfm_thresholds[{key}] missing '{name}'")
             for req in ("source_url", "retrieved", "danger_mm", "basis"):
                 if not t.get(req):
@@ -323,6 +332,13 @@ class DesignRules:
     # behaviour driven by ``min_silk_to_pad_clearance_mm``.
     silk_to_pad_danger_mm: float | None = None
     silk_to_pad_warning_mm: float | None = None
+    # Outer-layer track width below which the fab's DFM tool grades the track
+    # Danger although the published capability (``min_trace_width_mm``) allows
+    # it (Issue #10173).  Set only by :meth:`ManufacturerProfile.apply_dfm_floors`
+    # from a stackup's optional ``trace_width`` DFM threshold; ``None`` (the
+    # default) means no recorded evidence, so no finding.  Drives a *warning*,
+    # never an error.
+    trace_width_warning_mm: float | None = None
     # Operator ruling 2026-11-20 (#9795, Issue #9798): under the jlcpcb
     # profiles these silk categories grade as errors instead of warnings.
     # Each flag is independent and defaults to off, so every other profile
@@ -723,8 +739,10 @@ class ManufacturerProfile:
         from dataclasses import replace
 
         t = entry.thresholds
+        tw = t.get("trace_width")
         return replace(
             rules,
+            trace_width_warning_mm=tw.warning_mm if tw is not None else None,
             min_clearance_mm=max(rules.min_clearance_mm, t["trace_spacing"].danger_mm),
             min_smd_pad_clearance_mm=max(
                 rules.min_smd_pad_clearance_mm or 0.0, t["pad_spacing"].danger_mm
