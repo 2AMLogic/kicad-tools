@@ -16,6 +16,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-25
 
+- **PR #10155**: test: stub Python fallback in no-deadline escape-fence control
+- **PR #10154**: feat: add --check order report to sch re-annotate
+- **PR #10150**: fix(recovery): retain readable boards across symlink rewrites
+- **PR #10118**: fix(board06): rebuild the MIPI data pad exits inside the land and retire their fixture allowances
+- **Issue #10151** (closed): Escape-fence no-deadline control test spends ~42s in the Python A* fallback after its assertions are already decided
+- **Issue #10132** (closed): annotation: report and fix reference designators that disagree with schematic and board position order
+- **Issue #10113** (closed): Board 06: clear the MIPI data pad exits at J4 and U4 without new impedance warnings
+- **Issue #10102** (closed): Retained recovery copies are invisible to recovery_copies()/kct clean when the board is a relative symlink
 - **PR #10103**: fix(router): clear exposed gaps where a branch enters a via beside its trunk
 - **PR #10126**: fix: evaluate punctuated netclass patterns in copper clearance checks
 - **PR #10094**: fix(route): fail and report post-route DRC on the default --auto-layers path
