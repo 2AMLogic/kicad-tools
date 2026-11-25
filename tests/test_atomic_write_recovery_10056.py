@@ -681,6 +681,8 @@ def test_same_directory_alias_chain_and_peer_recovery_survive_project_clean(tmp_
     (peer_record,) = recovery_copies(other)
     preview = find_cleanable_files(project)
     assert [r.path for r in preview.to_delete] == [record]
+    kept = {p.path: p.reason for p in preview.to_keep}
+    assert kept[peer_record] == "recovery copy of other.kicad_pcb - clean that board's project"
     assert delete_files(preview)[0] == 1
     assert board.is_symlink() and intermediary.is_symlink() and board.read_bytes() == b"new"
     assert peer_record.is_dir() and other.read_bytes() == b"edited peer"
