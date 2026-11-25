@@ -859,7 +859,8 @@ class _SidecarWrite:
             try:
                 self.live.rename(withdrawn)
             except FileNotFoundError:
-                return False  # Another writer already removed the published name.
+                # A later removal wins. Retain any independent save to the old inode.
+                return self.displaced and self._read_displaced(self.original) != self.before
             if not self._owns(withdrawn) or self._read_displaced(withdrawn) != self.data:
                 restore = withdrawn  # The live name or its bytes already belong to the editor.
         if restore is not None:
@@ -989,7 +990,7 @@ class _StagedSource:
                     if write.rollback():
                         self._preserve_backups = True
                         logger.warning("Concurrent editor saves retained at %s", self.dir)
-                except OSError as exc:
+                except (OSError, SourceChangedError) as exc:
                     rollback_errors.append(f"{write.live.name}: {exc}")
             if rollback_errors:
                 self._preserve_backups = True

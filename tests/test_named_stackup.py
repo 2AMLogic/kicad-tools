@@ -690,6 +690,46 @@ def test_editor_save_during_board_commit_rolls_back_the_group(tmp_path, monkeypa
     assert rules.read_bytes() == b"authored"
 
 
+def test_racing_save_during_rollback_still_restores_other_files(tmp_path, monkeypatch):
+    import os
+
+    from kicad_tools.core.atomic_write import SourceChangedError
+    from kicad_tools.export import manufacturing
+
+    board = tmp_path / "board.kicad_pcb"
+    project, rules = board.with_suffix(".kicad_pro"), board.with_suffix(".kicad_dru")
+    for path in (board, project, rules):
+        path.write_bytes(b"authored")
+    stage = manufacturing._StagedSource(board)
+    for path in (board, project, rules):
+        (stage.dir / path.name).write_bytes(b"generated")
+
+    rename = os.rename
+    install = manufacturing._install_unoccupied
+
+    def refuse_board(src, dst, *args, **kwargs):
+        if Path(src) == board and Path(dst).name == "original":
+            raise PermissionError("immutable board")
+        return rename(src, dst, *args, **kwargs)
+
+    def edit_when_restoring(source, destination):
+        if source.name == "board.kicad_dru.original" and destination == rules:
+            rules.write_bytes(b"new editor save")
+            raise SourceChangedError("rules changed during rollback")
+        return install(source, destination)
+
+    monkeypatch.setattr(os, "rename", refuse_board)
+    monkeypatch.setattr(manufacturing, "_install_unoccupied", edit_when_restoring)
+    try:
+        with pytest.raises(OSError, match="rules changed during rollback"):
+            stage.publish()
+    finally:
+        stage.close()
+    assert board.read_bytes() == project.read_bytes() == b"authored"
+    assert rules.read_bytes() == b"new editor save"
+    assert (stage.dir / "board.kicad_dru.original").read_bytes() == b"authored"
+
+
 @pytest.mark.parametrize("fault", ["none", "editor", "two-editors", "short-write"])
 def test_linkless_sidecar_publication_for_an_unchanged_board(tmp_path, monkeypatch, fault):
     import os
