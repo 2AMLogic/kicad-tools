@@ -8,7 +8,7 @@ manufacturer profiles that can be used across different fabrication houses.
 from __future__ import annotations
 
 import fnmatch
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +66,13 @@ DFM_THRESHOLD_NAMES: tuple[str, ...] = (
     "mask_bridge",
     "tht_smd_spacing",
 )
+
+
+#: Optional threshold names (Issue #10173).  A stackup may omit them; a
+#: missing entry means "no recorded evidence" and produces no finding, never an
+#: ``incomplete`` verdict.  Parsed with the same mandatory provenance as the
+#: required names when present.
+DFM_OPTIONAL_THRESHOLD_NAMES: tuple[str, ...] = ("trace_width",)
 
 
 #: Max |declared - offered| oz still treated as the offered weight (0.434 -> 0.5).
@@ -158,9 +165,11 @@ def load_dfm_thresholds(manufacturer_id: str) -> DfmThresholdTable | None:
     entries = []
     for key, raw in section.get("entries", {}).items():
         ths: dict[str, DfmThreshold] = {}
-        for name in DFM_THRESHOLD_NAMES:
+        for name in DFM_THRESHOLD_NAMES + DFM_OPTIONAL_THRESHOLD_NAMES:
             t = (raw.get("thresholds") or {}).get(name)
             if t is None:
+                if name in DFM_OPTIONAL_THRESHOLD_NAMES:
+                    continue
                 raise ValueError(f"{manufacturer_id} dfm_thresholds[{key}] missing '{name}'")
             for req in ("source_url", "retrieved", "danger_mm", "basis"):
                 if not t.get(req):
@@ -207,6 +216,20 @@ class FileNamingConvention:
     gerber_zip_name: str = "gerbers.zip"
 
 
+def _rotation_tables(manufacturer_id: str) -> dict[str, Any]:
+    path = _DATA_DIR / f"{manufacturer_id}_rotations.yaml"
+    return _load_yaml(path) if path.exists() else {}
+
+
+def load_catalog_rotation_corrections(manufacturer_id: str) -> dict[str, dict[str, float]]:
+    """Previewed offsets by catalog part and KiCad footprint pattern."""
+    catalog = _rotation_tables(manufacturer_id).get("catalog_rotation_corrections", {})
+    return {
+        part: {pattern: float(degrees) for pattern, degrees in rows.items()}
+        for part, rows in catalog.items()
+    }
+
+
 def load_rotation_corrections(manufacturer_id: str) -> dict[str, float]:
     """Load rotation corrections from a YAML data file.
 
@@ -217,12 +240,7 @@ def load_rotation_corrections(manufacturer_id: str) -> dict[str, float]:
         Dict mapping footprint glob pattern to rotation offset in degrees.
         Empty dict if no rotation corrections file exists.
     """
-    yaml_path = _DATA_DIR / f"{manufacturer_id}_rotations.yaml"
-    if not yaml_path.exists():
-        return {}
-
-    data = _load_yaml(yaml_path)
-    return data.get("rotation_corrections", {})
+    return _rotation_tables(manufacturer_id).get("rotation_corrections", {})
 
 
 def match_rotation_correction(
@@ -420,6 +438,11 @@ class DesignRules:
     # preserve the public constructor's positional arguments.
     tht_smd_danger_mm: float | None = None
     tht_smd_warning_mm: float | None = None
+    # Appended last to preserve positional constructor order.
+    # Advisory below the outer-track width graded Good on the reported board
+    # (Issue #10173). The exact stackup's optional ``trace_width`` threshold
+    # supplies this value. Without one, only the published width floor applies.
+    trace_width_warning_mm: float | None = None
 
     def __post_init__(self) -> None:
         """Enforce ``min_inner_clearance_mm <= min_clearance_mm`` (Issue #9113).
@@ -469,6 +492,14 @@ class DesignRules:
         """Clearance in mils."""
         return self.min_clearance_mm / 0.0254
 
+    def with_trace_width_advisory(self, entry: DfmEntry | None) -> DesignRules:
+        """Bind the optional outer-track warning to this exact DFM stackup."""
+        threshold = entry.thresholds.get("trace_width") if entry is not None else None
+        warning = threshold.warning_mm if threshold is not None else None
+        if self.trace_width_warning_mm == warning:
+            return self
+        return replace(self, trace_width_warning_mm=warning)
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         return {
@@ -509,6 +540,7 @@ class DesignRules:
             "via_in_pad_process_id": self.via_in_pad_process_id,
             "blind_buried_vias_supported": self.blind_buried_vias_supported,
             "micro_vias_supported": self.micro_vias_supported,
+            "trace_width_warning_mm": self.trace_width_warning_mm,
         }
 
 
@@ -726,11 +758,12 @@ class ManufacturerProfile:
         ``kct export`` and the generated ``.kicad_dru`` all go through it, so
         they enforce the same floors.  Floors only tighten (``max``).  Outer
         and inner spacing stay separate: only ``min_clearance_mm`` (outer) is
-        touched, never ``min_inner_clearance_mm``.
+        touched, never ``min_inner_clearance_mm``. The separate trace-width
+        advisory follows the exact entry and clears when its threshold is absent.
         """
+        rules = rules.with_trace_width_advisory(entry)
         if entry is None:
             return rules
-        from dataclasses import replace
 
         t = entry.thresholds
         tht_smd = t["tht_smd_spacing"]
@@ -769,7 +802,14 @@ class ManufacturerProfile:
             return rules
         inner = float(rules.inner_copper_oz) if layers > 2 else 0.0
         entry = self.get_dfm_entry(layers, float(rules.outer_copper_oz), inner)
-        return self.apply_dfm_floors(rules, entry)
+        effective = self.apply_dfm_floors(rules, entry)
+        if copper_oz != rules.outer_copper_oz:
+            # A fallback preset keeps its established capability floors. Its
+            # measured advisory only applies if the requested weight has evidence.
+            effective = effective.with_trace_width_advisory(
+                self.get_dfm_entry(layers, copper_oz, inner)
+            )
+        return effective
 
     def copper_options(self, layers: int) -> list[tuple[float, float]]:
         """Distinct ``(outer_oz, inner_oz)`` builds the profile offers for a layer count.
