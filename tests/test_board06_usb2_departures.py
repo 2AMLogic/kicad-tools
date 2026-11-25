@@ -303,6 +303,13 @@ def test_j1_usb2_reroutes_both_orientations(mirrored_connector, repair):
             (s.start, s.end) for s in pcb.segments if s.net_name == net and s.layer == "F.Cu"
         ]
         assert ((x, 8.0), (x, 8.7)) in launches
+    for net, seat, inner in (
+        ("USB2_D+", (14.5, 8.7), "In1.Cu"),
+        ("USB2_D-", (14.96, 9.24), "In2.Cu"),
+    ):
+        assert {
+            s.layer for s in pcb.segments if s.net_name == net and seat in (s.start, s.end)
+        } == {"F.Cu", inner}
     # The incoming diagonal, the U1 trunk and the mirrored barrel branch all
     # terminate at the B7 pad centre, the actual three-way copper junction.
     b7 = pcb.get_pad_position("J1", "B7")
