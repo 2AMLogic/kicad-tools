@@ -120,6 +120,7 @@ class TestRoutingAwareFlagForwarding:
             keepout = None
             auto_keepout = False
             routing_aware = True  # Key flag being tested
+            decoupling_radius = 3.5
             check_routability = False
             dry_run = True
             format = "text"
@@ -140,6 +141,7 @@ class TestRoutingAwareFlagForwarding:
 
         # Verify --routing-aware was forwarded
         assert "--routing-aware" in called_with
+        assert called_with[called_with.index("--decoupling-radius") + 1] == "3.5"
 
     def test_check_routability_forwarded(self, tmp_path: Path):
         """Test that --check-routability is forwarded to placement_cmd."""
@@ -352,7 +354,7 @@ class TestFixedFlagWithRoutingAware:
 
         captured: dict = {}
 
-        def fake_routing_aware(args, p, quiet, output_format, fixed_refs=None):
+        def fake_routing_aware(args, p, quiet, output_format, fixed_refs, groups):
             captured["fixed_refs"] = list(fixed_refs or [])
             captured["pcb_path"] = p
             print(json.dumps({"success": True, "captured": True}))
@@ -389,7 +391,7 @@ class TestFixedFlagWithRoutingAware:
 
         captured: dict = {}
 
-        def fake_routing_aware(args, p, quiet, output_format, fixed_refs=None):
+        def fake_routing_aware(args, p, quiet, output_format, fixed_refs, groups):
             captured["fixed_refs"] = list(fixed_refs or [])
             return 0
 
