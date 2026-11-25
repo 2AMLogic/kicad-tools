@@ -24,6 +24,7 @@ from kicad_tools.cli import fix_drc_cmd
 from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer, MaskRepairResult
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
+from kicad_tools.router.quantize import _is_quantum_aligned
 from kicad_tools.sexp import parse_file
 
 PAD = "pad-r1-1"
@@ -2477,6 +2478,177 @@ def test_jog_slide_vetoed_by_other_net_copper_or_a_split_restores_everything(tmp
         result = repairer.repair([_entry_finding("jog-0")], dry_run=True, **_JOG_OPTS)
         assert not any(a.action == "nudge_clear" for a in result.actions), name
         assert repairer.doc.to_string() == before, name
+
+
+# ---------------------------------------------------------------------------
+# Issue #9939: a chamfer between perpendicular runs slides along both
+# ---------------------------------------------------------------------------
+
+
+def _chamfer_fixture(tmp_path, *, run_end=(101.4, 102.0), copies=1, extra="", lock=""):
+    """The pad lead runs out through the pad's right edge (x = 101).
+
+    The 45 degree chamfer leaves the edge exactly at (101, 100) and turns into
+    a downstream run along x = 101.4, like the TQFP escapes on Board 03.
+    """
+    shapes = {
+        "lead": ((100.0, 100.0), (101.0, 100.0)),
+        "chamfer": ((101.0, 100.0), (101.4, 100.4)),
+        "run": ((101.4, 100.4), run_end),
+    }
+    tracks = [
+        _seg(f"{name}-{i}", a, b).replace(
+            "(segment ", f"(segment {lock} " if (name, i) == ("run", 0) else "(segment "
+        )
+        for name, (a, b) in shapes.items()
+        for i in range(copies)
+    ]
+    return _board(tmp_path, "\n".join([*tracks, extra])), shapes
+
+
+# Other-net copper above the pad that a plain recentre of the chamfer's pad end
+# (to the pad centre) would crowd, the way Board 03's U1/33 entry is declined.
+_CROWD_RECENTRE = _seg("crowd", (100.3, 100.45), (100.8, 100.45), net=2)
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_chamfer_between_perpendicular_runs_slides_each_end_along_its_run(tmp_path, copies):
+    board, shapes = _chamfer_fixture(tmp_path, copies=copies, extra=_CROWD_RECENTRE)
+    before = board.read_bytes()
+    original = {f"{n}-{i}": _end(board, f"{n}-{i}") for n in shapes for i in range(copies)}
+    repairer = MaskCopperRepairer(board)
+    findings = [_entry_finding(f"chamfer-{i}") for i in range(copies)]
+    assert repairer.repair(findings, dry_run=True, **_JOG_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair(findings, **_JOG_OPTS)
+    assert result.repaired == 1
+    (action,) = result.actions
+    assert action.action == "nudge_clear" and "chamfer" in action.detail
+    assert len(action.points) == 4 * copies and len(action.shifts) == len(action.points)
+    repairer.save(board)
+    assert not repairer.off_angle_tracks()
+    for i in range(copies):
+        lead, chamfer, run = (_end(board, f"{n}-{i}") for n in ("lead", "chamfer", "run"))
+        # The pad centre and the downstream anchor never move.
+        assert lead[0] == original[f"lead-{i}"][0]
+        assert run[1] == original[f"run-{i}"][1]
+        # The joints stay connected, each on its own line.
+        assert lead[1] == chamfer[0] and chamfer[1] == run[0]
+        assert lead[1][1] == 100.0 and run[0][0] == 101.4
+        # Still a 45 degree chamfer, now clear of the pad opening.
+        assert lead[1][0] > 101.0
+        assert math.isclose(
+            abs(chamfer[1][0] - chamfer[0][0]), abs(chamfer[1][1] - chamfer[0][1]), abs_tol=1e-9
+        )
+        copper, _ = _saved_copper(board, f"chamfer-{i}")
+        assert copper.distance(_pad_poly(board, "R1/1")) >= 0.15
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert {k: _end(board, k) for k in original} == original
+
+
+def test_chamfer_slide_declines_and_leaves_the_board_alone_when_vetoed(tmp_path):
+    # Every case also crowds the plain recentre, so only the slide's own veto is tested.
+    cases = {
+        # Other-net copper beside the chamfer's new position.
+        "foreign-copper": (
+            _seg("beside", (101.55, 99.8), (101.55, 100.15), net=2),
+            "",
+            (101.4, 102.0),
+        ),
+        "locked-run": ("", "locked", (101.4, 102.0)),
+        # A via at the chamfer's far end cannot be dragged, as at Board 03's U1/17.
+        "via-at-far-end": (
+            '  (via (at 101.4 100.4) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(net 1) (uuid "via-far"))',
+            "",
+            (101.4, 102.0),
+        ),
+    }
+    for name, (extra, lock, run_end) in cases.items():
+        sub = tmp_path / name
+        sub.mkdir()
+        board, _ = _chamfer_fixture(
+            sub, extra=f"{_CROWD_RECENTRE}\n{extra}", lock=lock, run_end=run_end
+        )
+        repairer = MaskCopperRepairer(board)
+        before = repairer.doc.to_string()
+        result = repairer.repair([_entry_finding("chamfer-0")], dry_run=True, **_JOG_OPTS)
+        assert not result.actions and not result.repaired, name
+        assert repairer.doc.to_string() == before, name
+
+
+# ---------------------------------------------------------------------------
+# Issue #10183: 4 dp rounding of the slid ends never trips the angle census
+# ---------------------------------------------------------------------------
+
+
+def _rounding_chamfer_fixture(tmp_path, *, diagonal, signs, offset, reach, chamfer):
+    """A chamfer between runs whose coordinates sit off the 4 dp grid.
+
+    Axis-aligned runs (``diagonal=False``) give a 45 degree chamfer; 45 degree
+    runs give a horizontal one. ``offset`` shifts every point by a 6 dp amount
+    so the slid ends round to 4 dp by different amounts, and ``signs`` mirrors
+    the layout about the pad centre.
+    """
+    if diagonal:
+        joints = ((reach, reach), (reach + chamfer, reach), (reach + chamfer + 1.0, reach - 1.0))
+    else:
+        joints = ((reach, 0.0), (reach + chamfer, chamfer), (reach + chamfer, chamfer + 1.0))
+
+    def at(dx, dy):
+        return (
+            round(100 + signs[0] * dx + offset[0], 6),
+            round(100 + signs[1] * dy + offset[1], 6),
+        )
+
+    points = [at(0.0, 0.0), *(at(*joint) for joint in joints)]
+    shapes = dict(
+        zip(("lead", "chamfer", "run"), zip(points, points[1:], strict=False), strict=True)
+    )
+    copper = [_seg(name, a, b) for name, (a, b) in shapes.items()]
+    # Other-net copper that makes a plain recentre of the pad end decline.
+    copper.append(_seg("crowd", at(0.3, 0.9), at(0.9, 0.9), net=2))
+    return _board(tmp_path, "\n".join(copper)), shapes
+
+
+@pytest.mark.parametrize("signs", [(1, 1), (-1, 1), (1, -1), (-1, -1)])
+@pytest.mark.parametrize("diagonal", [False, True], ids=["axis-runs", "diagonal-runs"])
+@pytest.mark.parametrize("offset", [(0.0, 0.0), (3.7e-05, 1.9e-05), (8.7e-05, 5e-05)])
+@pytest.mark.parametrize("reach, chamfer", [(0.7, 0.8), (1.2, 0.8), (1.2, 0.4)])
+def test_chamfer_slide_rounding_keeps_the_angle_census_clean(
+    tmp_path, signs, diagonal, offset, reach, chamfer
+):
+    """Measured refutation of the #10183 hypothesis, kept as a regression guard.
+
+    ``moved`` rounds each end to 4 dp on its own, so a slid chamfer can sit one
+    0.1 um quantum off its exact angle. The census accepts exactly that much
+    (``_is_quantum_aligned``) and the rounding cannot exceed it, so the slide is
+    never declined as ``would_bend_trace`` and no track is saved off angle.
+    """
+    board, shapes = _rounding_chamfer_fixture(
+        tmp_path, diagonal=diagonal, signs=signs, offset=offset, reach=reach, chamfer=chamfer
+    )
+    original = {name: _end(board, name) for name in shapes}
+    assert not MaskCopperRepairer(board).off_angle_tracks()
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_entry_finding("chamfer")], **_JOG_OPTS)
+    (action,) = result.actions
+    assert action.action == "nudge_clear" and "chamfer" in action.detail
+    repairer.save(board)
+
+    lead, chamfer_seg, run = (_end(board, name) for name in shapes)
+    # The slide moved both joints, and neither anchor.
+    assert lead[1] != original["lead"][1] and run[0] != original["run"][0]
+    assert lead[0] == original["lead"][0] and run[1] == original["run"][1]
+    assert lead[1] == chamfer_seg[0] and chamfer_seg[1] == run[0]
+    assert not repairer.off_angle_tracks()
+    for name, (start, end) in zip(shapes, (lead, chamfer_seg, run), strict=True):
+        assert _is_quantum_aligned(end[0] - start[0], end[1] - start[1]), name
+    copper, _ = _saved_copper(board, "chamfer")
+    assert copper.distance(_pad_poly(board, "R1/1")) >= 0.09 - 1e-3
 
 
 # ---------------------------------------------------------------------------

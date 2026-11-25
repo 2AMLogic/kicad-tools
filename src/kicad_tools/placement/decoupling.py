@@ -36,16 +36,21 @@ when the optimizer moves or rotates it.
 from __future__ import annotations
 
 import math
+from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Mapping, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
 
 if TYPE_CHECKING:
+    from kicad_tools.schema import Schematic
+
     from .cost import ComponentPlacement, Net, PlacementCostConfig, PlacementScore
     from .vector import PlacementVector
 
 __all__ = [
     "DecouplingCap",
     "DecouplingGroup",
+    "SchematicCapAssociation",
     "SnapMove",
     "SupplyPin",
     "assign_caps_to_pins",
@@ -53,6 +58,7 @@ __all__ = [
     "compute_pin_coverage",
     "decoupling_pairs",
     "identify_decoupling_groups",
+    "schematic_cap_associations",
     "snap_decoupling_caps",
 ]
 
@@ -82,6 +88,188 @@ class SupplyPin:
 
     reference: str
     pad: str
+
+
+@dataclass(frozen=True)
+class SchematicCapAssociation:
+    """One drawn decoupling cap, including caps without a defensible target."""
+
+    cap: DecouplingCap
+    net: str
+    sheet: str
+    pin: SupplyPin | None
+    source: Literal["derived", "overridden", "unassociated"]
+    reason: str
+
+
+# A labelled cap elsewhere on the page is not a local bypass designation.
+_SCHEMATIC_PROXIMITY_MM = 25.4
+_TARGET_FIELD = "KCT_Decouples"
+
+
+@dataclass(frozen=True)
+class _DrawnPin:
+    sheet: str
+    position: tuple[float, float]
+    wire: tuple[int, int] | None
+
+
+def _drawn_wire_groups(schematic: Schematic) -> dict[tuple[int, int], tuple[int, int]]:
+    """Physical wire groups on one drawing, before joining equal label names."""
+    from kicad_tools.cli.sch_connectivity import build_wire_graph
+
+    edges, _ = build_wire_graph(schematic)
+    groups = {}
+    for start, adjacent in edges.items():
+        if not adjacent or start in groups:
+            continue
+        groups[start] = start
+        pending = [start]
+        while pending:
+            for node in edges[pending.pop()]:
+                if node not in groups:
+                    groups[node] = start
+                    pending.append(node)
+    return groups
+
+
+def _associate_drawn_cap(
+    cap: DecouplingCap,
+    net: str,
+    site: _DrawnPin,
+    targets: dict[SupplyPin, _DrawnPin],
+    override: str,
+) -> SchematicCapAssociation:
+    if override:
+        ref, _, pad = override.rpartition(".")
+        target = SupplyPin(ref, pad)
+        if target in targets:
+            return SchematicCapAssociation(
+                cap, net, site.sheet, target, "overridden", _TARGET_FIELD
+            )
+        return SchematicCapAssociation(
+            cap,
+            net,
+            site.sheet,
+            None,
+            "unassociated",
+            f"{_TARGET_FIELD}={override} does not name a supply pin on {net}",
+        )
+    ranked = []
+    for pin, other in targets.items():
+        if other.sheet != site.sheet:
+            continue
+        distance = math.dist(site.position, other.position)
+        if distance <= _SCHEMATIC_PROXIMITY_MM:
+            wired = site.wire is not None and site.wire == other.wire
+            ranked.append((not wired, distance, pin))
+    ranked.sort(key=lambda entry: entry[:2])
+    if not ranked:
+        reason = "No nearby same-sheet supply pin on this net"
+    elif (
+        len(ranked) > 1
+        and ranked[0][0] == ranked[1][0]
+        and math.isclose(ranked[0][1], ranked[1][1], abs_tol=0.001)
+    ):
+        reason = "Equally close supply pins on this net"
+    else:
+        label_only, distance, selected = ranked[0]
+        evidence = "matching net" if label_only else "shared drawn wire"
+        return SchematicCapAssociation(
+            cap, net, site.sheet, selected, "derived", f"{evidence}, {distance:.2f} mm on sheet"
+        )
+    return SchematicCapAssociation(cap, net, site.sheet, None, "unassociated", reason)
+
+
+def _drawn_decoupling_cap(
+    ref: str, pins: dict[str, tuple[str, _DrawnPin]]
+) -> tuple[DecouplingCap, str, _DrawnPin] | None:
+    from kicad_tools.router.net_class import is_ground_rail_name
+
+    if len(pins) != 2:
+        return None
+    first, second = pins
+    first_ground = is_ground_rail_name(pins[first][0])
+    if first_ground == is_ground_rail_name(pins[second][0]):
+        return None
+    supply, ground = (second, first) if first_ground else (first, second)
+    net, site = pins[supply]
+    return DecouplingCap(ref, supply, ground), net, site
+
+
+def schematic_cap_associations(path: str | Path) -> list[SchematicCapAssociation]:
+    """Associate each supply-to-ground cap with the power pin its schematic designates.
+
+    Pin and net identities are hierarchy-aware. The drawn inference stays on
+    the same sheet, while an explicit cap symbol property can name any actual
+    same-net supply pin in the design. This function never reads PCB positions.
+    """
+    from kicad_tools.cli.sch_connectivity import snap_coord, to_coord
+    from kicad_tools.lvs.board_lvs import _schematic_pin_to_net
+    from kicad_tools.router.net_class import (
+        is_ground_rail_name,
+        is_power_rail_name,
+        is_power_rail_pin,
+    )
+    from kicad_tools.schema import Schematic
+    from kicad_tools.schema.hierarchy import build_hierarchy
+
+    nets = _schematic_pin_to_net(Path(path))
+    sheets = build_hierarchy(str(path)).all_nodes()
+    multiplicity = Counter(node.path for node in sheets)
+    targets: dict[str, dict[SupplyPin, _DrawnPin]] = defaultdict(dict)
+    caps = []
+    for node in sheets:
+        schematic = Schematic.load(node.path)
+        sheet = node.get_path_string()
+        wire_groups = _drawn_wire_groups(schematic)
+        wire_nodes = set(wire_groups)
+        for symbol in schematic.symbols:
+            ref = symbol.reference
+            if multiplicity[node.path] > 1:
+                ref = symbol.instance_reference(node.instance_path) or ref
+            lib = schematic.get_lib_symbol_resolved(symbol.lib_id)
+            if lib is None:
+                continue
+            prefix = lib.properties.get("Reference", "")
+            is_cap = _is_capacitor(ref) or prefix == "C"
+            if not (
+                is_cap
+                or _is_ic(ref)
+                or prefix in ("U", "IC")
+                or symbol.lib_id.startswith("Oscillator:")
+            ):
+                continue
+            unit_pins = lib.get_pins_for_unit(symbol.unit)
+            if is_cap and len({pin.number for pin in unit_pins}) != 2:
+                continue
+            positions = lib.get_all_pin_positions(
+                instance_pos=symbol.position,
+                instance_rot=symbol.rotation,
+                mirror=symbol.mirror,
+                unit=symbol.unit,
+            )
+            cap_pins = {}
+            for pin in unit_pins:
+                net = nets.get((ref, pin.number))
+                if not net or pin.number not in positions:
+                    continue
+                pos = positions[pin.number]
+                wire = wire_groups.get(snap_coord(to_coord(*pos), wire_nodes))
+                site = _DrawnPin(sheet, pos, wire)
+                if is_cap:
+                    cap_pins[pin.number] = (net, site)
+                elif is_power_rail_pin(pin.type, pin.name) and not is_ground_rail_name(net):
+                    targets[net][SupplyPin(ref, pin.number)] = site
+            if is_cap and (cap := _drawn_decoupling_cap(ref, cap_pins)):
+                caps.append((*cap, (symbol.get_property(_TARGET_FIELD) or "").strip()))
+    return [
+        _associate_drawn_cap(cap, net, site, targets.get(net, {}), override)
+        for cap, net, site, override in sorted(
+            caps, key=lambda entry: (entry[2].sheet, entry[0].reference)
+        )
+        if net in targets or is_power_rail_name(net) or override
+    ]
 
 
 @dataclass(frozen=True)
