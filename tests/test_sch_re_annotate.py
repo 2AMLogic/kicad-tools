@@ -2851,6 +2851,38 @@ class TestPcbPairedWriteSafety:
         assert ret == 0
         assert _board_refs(pcb) == {"R1", "R2", "C1"}
 
+    def test_schematic_backup_failure_leaves_both_sources_untouched(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A refused schematic backup must not leave the board renamed."""
+        import kicad_tools.cli.sch_re_annotate as mod
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        real_backup = mod.create_backup
+
+        def refuse_sch_backup(path):
+            if path.suffix == ".kicad_sch":
+                raise PermissionError("read-only directory")
+            return real_backup(path)
+
+        monkeypatch.setattr(mod, "create_backup", refuse_sch_backup)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=True, pcb_path=pcb)
+        monkeypatch.undo()
+
+        assert ret == 1
+        assert "backup" in capsys.readouterr().err.lower()
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=True, pcb_path=pcb)
+        assert ret == 0
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+        assert '"Reference" "R2"' in sch.read_text()
+
     def test_per_sheet_duplicate_board_targets_rejected_before_write(self, tmp_path, capsys):
         parent = tmp_path / "parent.kicad_sch"
         parent.write_text(PARENT_SCHEMATIC)

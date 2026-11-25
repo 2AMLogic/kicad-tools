@@ -859,11 +859,27 @@ def run_re_annotate(
                 file=sys.stderr,
             )
 
-    if pcb_path is not None and pcb_board is not None and board_mapping:
-        if backup:
-            bak = create_backup(pcb_path)
+    write_pcb = pcb_path is not None and pcb_board is not None and bool(board_mapping)
+
+    # Create every requested backup before the first live write, so a backup
+    # that cannot be created (e.g. read-only parent directory) leaves the
+    # board and all schematics untouched.
+    if backup:
+        backup_targets: list[Path] = []
+        if write_pcb and pcb_path is not None:
+            backup_targets.append(pcb_path)
+        backup_targets.extend(modified_files)
+        for target in backup_targets:
+            try:
+                bak = create_backup(target)
+            except Exception as e:
+                print(f"Error creating backup of {target}: {e}", file=sys.stderr)
+                print("No files were modified.", file=sys.stderr)
+                return 1
             if format == "text":
                 print(f"  Backup: {bak.name}")
+
+    if write_pcb and pcb_path is not None and pcb_board is not None:
         try:
             original_pcb = pcb_path.read_bytes()
             written.append((pcb_path, original_pcb))
@@ -874,10 +890,6 @@ def run_re_annotate(
             return 1
 
     for sch_file, new_text in modified_files.items():
-        if backup:
-            bak = create_backup(sch_file)
-            if format == "text":
-                print(f"  Backup: {bak.name}")
         try:
             written.append((sch_file, sch_file.read_bytes()))
             sch_file.write_text(new_text, encoding="utf-8")
