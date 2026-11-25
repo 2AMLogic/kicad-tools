@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "waivers": [
+    {
+      "rule": "bypass_distance",
+      "items": [
+        "C15",
+        "U2"
+      ],
+      "reason": "Board-04 schematic designates C15 (100nF) for U2 pin 1 (+3.3V), but the committed PCB places the MCU decoupling cluster below U2 (16.85mm from U2.1); genuine advisory finding from the new bypass_distance rule (#10141), waived until Board 04 placement is updated (tracking #10194).",
+      "issue": "#10194"
+    },
+    {
+      "rule": "bypass_distance",
+      "items": [
+        "C16",
+        "U2"
+      ],
+      "reason": "Board-04 schematic designates C16 (4.7uF) for U2 pin 1 (+3.3V), but the committed PCB places the MCU decoupling cluster below U2 (17.05mm from U2.1); genuine advisory finding from the new bypass_distance rule (#10141), waived until Board 04 placement is updated (tracking #10194).",
+      "issue": "#10194"
+    }
+  ]
+}

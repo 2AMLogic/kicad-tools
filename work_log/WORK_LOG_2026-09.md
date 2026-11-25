@@ -2,6 +2,16 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-25
+
+- **PR #5728**: cleanup(router/mesh): retire merge_overlapping and segment_intersects_* helpers
+- **PR #5727**: perf(router): vectorise the coupled via predicate's raster sweeps
+- **PR #5726**: fix(mfr): warn when the emitted SMD Pad Clearance rule is inert on the installed KiCad
+- **Issue #5724** (closed): fix(mfr): warn when the emitted SMD Pad Clearance rule is inert on the installed KiCad
+- **Issue #5720** (closed): router: the coupled Python via predicate's raster sweeps dominate what is left after #5696's memo
+- **Issue #5708** (closed): Flaky perf gate (recurrence): test_dormant_partner_optimized_not_slower fails at 1.33x on shared CI runners (threshold 1.25, #3581 closed)
+- **Issue #5685** (closed): cleanup(router/mesh): retire the three helpers Epic #5509 Phase 3e left without a production caller
+
 ### 2026-09-24
 
 - **PR #5725**: test(mfr): gate native SMD Pad Clearance on a measured availability probe

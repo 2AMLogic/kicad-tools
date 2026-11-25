@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-25
 
+- **PR #10186**: feat(check): add bypass_distance rule using the schematic cap-to-pin association
+- **Issue #10141** (closed): check: bypass_distance rule using schematic cap-pin association
+- **PR #10182**: fix: name THT/SMD pads, load JLCPCB limits, gate assembly warnings
+- **PR #10196**: fix(drc): extend a pad entry to clear its fixed via lead
+- **Issue #10172** (closed): Name both pads in JLCPCB THT-to-SMD findings, source limits from the profile, and gate assembly warnings
 - **Issue #9019** (closed): Grid router (Python + C++): keep own-net pad-vs-trace legs and neck-down taper out of the slit band (#9011, board 06)
 - **Issue #9011** (closed): Router: keep same-net pad-vs-trace escapes out of the fab slit band (both engines, #8976 attribution)
 - **Issue #10200** (closed): Confirm readiness gerbers.zip reproducibility end-to-end with the epoch unset on the pinned KiCad image
@@ -4139,16 +4144,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **PR #5735**: test(conformance): hard-gate the route-halo refinement against kicad-cli
 - **PR #5734**: fix: give the optimizer's grid collision checker an exact narrow phase
 - **Issue #5625** (closed): router/optimizer: GridCollisionChecker and VectorCollisionChecker disagree on near-threshold copper
-
-### 2026-09-25
-
-- **PR #5728**: cleanup(router/mesh): retire merge_overlapping and segment_intersects_* helpers
-- **PR #5727**: perf(router): vectorise the coupled via predicate's raster sweeps
-- **PR #5726**: fix(mfr): warn when the emitted SMD Pad Clearance rule is inert on the installed KiCad
-- **Issue #5724** (closed): fix(mfr): warn when the emitted SMD Pad Clearance rule is inert on the installed KiCad
-- **Issue #5720** (closed): router: the coupled Python via predicate's raster sweeps dominate what is left after #5696's memo
-- **Issue #5708** (closed): Flaky perf gate (recurrence): test_dormant_partner_optimized_not_slower fails at 1.33x on shared CI runners (threshold 1.25, #3581 closed)
-- **Issue #5685** (closed): cleanup(router/mesh): retire the three helpers Epic #5509 Phase 3e left without a production caller
 
 ### 2026-07-20 (evening)
 

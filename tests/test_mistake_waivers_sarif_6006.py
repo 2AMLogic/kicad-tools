@@ -41,6 +41,8 @@ from kicad_tools.validate.sarif import (
     sarif_log,
 )
 
+from .test_decoupling_association import make_sheet  # noqa: E402
+
 FIXTURES = Path(__file__).parent / "fixtures"
 PROJECTS = FIXTURES / "projects"
 SARIF_SCHEMA = json.loads((FIXTURES / "schemas" / "sarif-schema-2.1.0.json").read_text())
@@ -59,6 +61,18 @@ def board(tmp_path) -> Path:
     """A scratch copy of a board with bypass-cap and power-trace mistakes."""
     dest = tmp_path / "proj"
     shutil.copytree(PROJECTS, dest)
+    # The bypass check takes its cap-to-pin pairing from the schematic (issue
+    # #10141): draw C1 beside U1's +3V3 supply pin (pad 2 on this board).
+    sheet = make_sheet(
+        dest / "multilayer_zones.kicad_sch",
+        [("U1", 50.8, 50.8, "+3V3", None), ("C1", 55.88, 50.8, "+3V3", None)],
+        [(50.8, 50.8, 55.88, 50.8)],
+    )
+    sheet.write_text(
+        sheet.read_text()
+        .replace('(name "VDD") (number "1")', '(name "VDD") (number "2")')
+        .replace('(name "GND") (number "2")', '(name "GND") (number "1")')
+    )
     return dest / "multilayer_zones.kicad_pcb"
 
 

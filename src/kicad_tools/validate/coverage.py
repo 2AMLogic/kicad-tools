@@ -323,6 +323,13 @@ def precheck(
             return skipped(category, "drc_only")
         if sch_path is None:
             return unknown(category, "needs_input:schematic")
+    if category == "bypass_distance":
+        # Issue #10141: the rule measures against the schematic's cap-to-pin
+        # association; with no schematic it cannot say anything.
+        if drc_only:
+            return skipped(category, "drc_only")
+        if sch_path is None:
+            return unknown(category, "needs_input:schematic")
     if category == "doc_drift" and pcb_path is None:
         return unknown(category, "needs_input:pcb_path")
     if category == "netclass_clearance_copper":
