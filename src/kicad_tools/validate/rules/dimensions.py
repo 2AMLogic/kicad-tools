@@ -20,6 +20,10 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
 
+#: Outer copper layers: the only ones the #10173 JLCDFM trace-width evidence covers.
+_OUTER_COPPER_LAYERS = frozenset({"F.Cu", "B.Cu"})
+
+
 class DimensionRules(DRCRule):
     """Check dimension rules for traces and vias.
 
@@ -71,10 +75,43 @@ class DimensionRules(DRCRule):
         design_rules: DesignRules,
         results: DRCResults,
     ) -> None:
-        """Check minimum trace width for all segments."""
-        min_width = design_rules.min_trace_width_mm
+        """Check minimum trace width for all segments.
 
-        for segment in pcb.segments:
+        Below ``min_trace_width_mm`` is an error.  Separately (Issue #10173), an
+        *outer-layer* track at or above that floor but narrower than the
+        stackup's recorded ``trace_width_warning_mm`` receives an advisory.
+        The threshold is the measured Good width on the reported board.
+        Inner layers are never flagged by the warning (no evidence for them).
+        """
+        min_width = design_rules.min_trace_width_mm
+        warn_width = getattr(design_rules, "trace_width_warning_mm", None)
+
+        # Straight tracks and circular track arcs share the same width rules.
+        for segment in [*pcb.segments, *getattr(pcb, "arcs", [])]:
+            if (
+                warn_width is not None
+                and segment.layer in _OUTER_COPPER_LAYERS
+                and segment.width + DRC_TOLERANCE >= min_width
+                and segment.width + DRC_TOLERANCE < warn_width
+            ):
+                net = pcb.get_net(segment.net_number)
+                net_name = net.name if net else f"net:{segment.net_number}"
+                results.add(
+                    DRCViolation(
+                        rule_id="dimension_trace_width",
+                        severity="warning",
+                        message=(
+                            f"Outer trace width {segment.width:.4f} mm is below the "
+                            f"{warn_width:.4f} mm advisory threshold. JLCDFM graded "
+                            "0.1016 mm Danger and 0.1524 mm Good on the reported board."
+                        ),
+                        location=segment.start,
+                        layer=segment.layer,
+                        actual_value=segment.width,
+                        required_value=warn_width,
+                        items=(net_name,),
+                    )
+                )
             if segment.width + DRC_TOLERANCE < min_width:
                 # Get net name if available
                 net = pcb.get_net(segment.net_number)
