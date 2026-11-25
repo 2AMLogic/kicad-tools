@@ -6573,7 +6573,10 @@ def _add_optimize_placement_parser(subparsers) -> None:
             'Custom cost weights as JSON, e.g. \'{"wirelength": 2.0, "overlap": 1e6}\'. '
             "Keys: overlap, drc, boundary, wirelength, area, creepage, cohesion, "
             "decoupling (default 2.0: pull each decoupling cap onto the IC supply pin "
-            "it serves, then snap it beside that pin; 0 turns both off)"
+            "it serves, then snap it beside that pin; 0 turns both off), "
+            "group_cohesion and group_order (default 1.0 each: keep same-sheet "
+            "parts together and in schematic order on multi-sheet designs; 0 "
+            "turns both off)"
         ),
     )
     op_parser.add_argument(
