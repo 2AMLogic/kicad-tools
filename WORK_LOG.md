@@ -16,6 +16,20 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-25
 
+- **Issue #10220** (closed): Board 03 mask repair aborted with "could not verify mask openings" on a second host — establish whether it is host-specific
+- **PR #10207**: fix(drc): slide a disjoint pass-through jog along its runs before recentring it
+- **Issue #10142** (closed): placement: use schematic cap-pin association as optimizer constraint
+- **PR #10184**: feat(placement): pair decoupling caps by their schematic designation
+- **Issue #10106** (closed): Resolve a project-declared output directory during readiness staging and publication
+- **PR #10115**: feat(readiness): resolve a project-declared output root for staging and publication
+- **Issue #10185** (closed): test flake: loader-isolation test asserts a global sys.modules absence that any generate_design importer breaks
+- **PR #10191**: test: check recipe loader isolation for preloaded modules
+- **Issue #10171** (closed): sch re-annotate: report reversed reference order across LED and resistor pairs
+- **PR #10188**: feat: report reversed schematic references across electrical partners
+- **Issue #10137** (closed): check: report pad stubs proven redundant by refilled pour connectivity
+- **PR #10156**: feat(check): report pad branches proven redundant by refilled pours
+- **PR #10186**: feat(check): add bypass_distance rule using the schematic cap-to-pin association
+- **Issue #10141** (closed): check: bypass_distance rule using schematic cap-pin association
 - **PR #10182**: fix: name THT/SMD pads, load JLCPCB limits, gate assembly warnings
 - **PR #10196**: fix(drc): extend a pad entry to clear its fixed via lead
 - **Issue #10172** (closed): Name both pads in JLCPCB THT-to-SMD findings, source limits from the profile, and gate assembly warnings

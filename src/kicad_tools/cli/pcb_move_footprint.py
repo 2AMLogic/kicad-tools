@@ -54,28 +54,6 @@ def _footprint_side(layer: str) -> str | None:
     return None
 
 
-def _flip_footprint(pcb, reference: str) -> str | None:
-    """Flip one footprint to the other side; return an error message or None.
-
-    Reuses the exact call ``pcb-modify flip`` makes
-    (``StrategyApplicator`` with a ``MIRROR_COMPONENT`` strategy) so there is a
-    single flip transform.  Mutates ``pcb`` in memory; the caller saves once.
-    """
-    from kicad_tools.recovery.applicator import StrategyApplicator
-    from kicad_tools.recovery.types import Action, Difficulty, ResolutionStrategy, StrategyType
-
-    result = StrategyApplicator().apply_strategy(
-        pcb,
-        ResolutionStrategy(
-            type=StrategyType.MIRROR_COMPONENT,
-            difficulty=Difficulty.EASY,
-            confidence=1.0,
-            actions=[Action(type="mirror", target=reference)],
-        ),
-    )
-    return None if result.success else result.message
-
-
 def run_move_footprint(
     pcb_path: Path,
     reference: str | None = None,
@@ -115,6 +93,7 @@ def run_move_footprint(
     Returns:
         Exit code (0 for success, 1 for errors).
     """
+    from kicad_tools.placement.writeback import flip_footprint
     from kicad_tools.schema.pcb import PCB
 
     try:
@@ -329,7 +308,7 @@ def run_move_footprint(
         for detail in move_details:
             if detail.get("side_changed"):
                 flip_ref = str(detail["reference"])
-                error = _flip_footprint(pcb, flip_ref)
+                error = flip_footprint(pcb, flip_ref)
                 if error:
                     _print_error(f"Failed to flip {flip_ref}: {error}", output_format)
                     return 1
