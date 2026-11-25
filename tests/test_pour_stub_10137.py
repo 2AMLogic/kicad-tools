@@ -272,3 +272,35 @@ def test_proof_uses_the_in_memory_board_being_checked(tmp_path):
     assert not verified_pour_stubs(pcb)
     assert pcb.path == path
     assert path.read_bytes() == original
+
+
+def test_partial_candidate_evaluation_is_disclosed_not_reported_as_full(
+    tmp_path, monkeypatch, caplog
+):
+    """Issue #10211: 1 of 2 candidates evaluated must not read as a complete proof."""
+    from kicad_tools.validate import pour_stub
+
+    require_native_refill()
+    path = fixture_board(tmp_path, "connected")
+    real_discover, real_verify = pour_stub.discover_pour_stubs, pour_stub._verify_branch
+    # Present the single real candidate twice; the second trial cannot be refilled.
+    monkeypatch.setattr(
+        pour_stub, "discover_pour_stubs", lambda pcb: (lambda r: r + r)(real_discover(pcb))
+    )
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise pour_stub._TrialUnavailable("native KiCad did not save the trial refill")
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(pour_stub, "_verify_branch", flaky)
+    with caplog.at_level("WARNING", logger=pour_stub.logger.name):
+        result = check_result(path)
+    # Coverage contract unchanged (0/1); the omission is visible as info + a warning log.
+    assert result.rules_checked_by_rule[RULE] == 1
+    (notice,) = [v for v in result.violations if v.rule_id == RULE and v.severity == "info"]
+    assert "1 of 2" in notice.message
+    assert len([v for v in result.violations if v.severity == "warning" and v.rule_id == RULE]) == 1
+    assert any("Could not evaluate pour stub" in r.message for r in caplog.records)
