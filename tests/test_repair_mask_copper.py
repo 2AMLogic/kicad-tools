@@ -3060,11 +3060,9 @@ def test_saved_elbow_rolls_back_a_gap_beyond_the_usual_advisory_range(
     # Give the predictor the unexpanded land: it will propose an elbow with a
     # 0.300 mm modeled gap. The native plot sees 0.285 mm, beyond the ordinary
     # 0.150 mm warning range but short of the requested 0.090 + 0.210 mm.
-    monkeypatch.setattr(
-        MaskCopperRepairer,
-        "_elbow_mask_apertures",
-        {("ad22088e-c1cf-5aaf-8d08-4a5294d93e8f", "F.Cu"): box(52.3, 39.6, 54.0, 40.6)},
-    )
+    apertures = MaskCopperRepairer(board)._pad_mask_openings
+    apertures["ad22088e-c1cf-5aaf-8d08-4a5294d93e8f", "F.Cu"].geometry = box(52.3, 39.6, 54.0, 40.6)
+    monkeypatch.setattr(MaskCopperRepairer, "_pad_mask_openings", apertures)
     with evidence_toolchain([tmp_path]):
         fix_drc_cmd.main(
             [
@@ -3419,3 +3417,140 @@ def test_disjoint_pass_through_chamfer_slides_along_its_runs_and_undoes(tmp_path
     assert repairer.undo_action(action)
     repairer.save(board)
     assert {name: _end(board, name) for name in shapes} == original
+
+
+def _pad_chain(tmp_path, *, reverse=False, extra="", lock_tail=False, project_floor=0.1016):
+    anchor, elbow, target = (100, 100), (100.85, 100.85), (100.85, 101.35)
+    diagonal, tail = (anchor, elbow), (elbow, target)
+    if reverse:
+        diagonal, tail = diagonal[::-1], tail[::-1]
+    straight = _seg("tail", *tail)
+    if lock_tail:
+        straight = straight.replace("(width", "(locked yes) (width")
+    # This parallel trace vetoes moving the existing diagonal toward lower Y.
+    copper = [
+        _seg("diag", *diagonal),
+        straight,
+        _seg("foreign", (100.52, 100.07), (100.72, 100.27), net=2),
+        extra,
+    ]
+    board = _board2(tmp_path, "\n".join(copper), "100.85 101.35")
+    board.write_text(
+        board.read_text().replace("smd rect", "smd circle").replace("(size 2 1)", "(size 0.7 0.7)")
+    )
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"net_settings": {"classes": [{"name": "Default", "clearance": project_floor}]}})
+    )
+    return board, _pt_finding("diag", "pad-r2-1", measured=0.05)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_pad_chain_shares_the_straight_length_and_restores_the_authored_tracks(tmp_path, reverse):
+    board, finding = _pad_chain(tmp_path, reverse=reverse)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    assert repairer.repair([finding], clearance_mm=0.1016, dry_run=True).repaired == 1
+    assert repairer.doc.to_string() == before
+    (action,) = repairer.repair([finding], clearance_mm=0.1016).actions
+    repairer.save(board)
+    saved = MaskCopperRepairer(board)
+    legs = {
+        tuple(sorted(_end(board, uid)))
+        for uid, node in saved._segment_nodes().items()
+        if uid != "foreign"
+        and node.get("width").get_float() == 0.2
+        and saved._net_name(node) == "N1"
+        and node.get("layer").get_string() == "F.Cu"
+    }
+    assert legs == {
+        ((100, 100), (100, 100.25)),
+        ((100, 100.25), (100.85, 101.1)),
+        ((100.85, 101.1), (100.85, 101.35)),
+    }
+    assert sum(math.dist(*leg) for leg in legs) == pytest.approx(math.hypot(0.85, 0.85) + 0.5)
+    assert saved.undo_action(action)
+    assert saved._segment_nodes().keys() == {"diag", "tail", "foreign"}
+    assert saved.doc.to_string() == before
+
+
+@pytest.mark.parametrize(("floor", "accepted"), [(0.1016, False), (0.08, True)])
+def test_pad_chain_checks_project_clearance_on_the_saved_diagonal(tmp_path, floor, accepted):
+    # The replacement clears this foreign trace by 0.09 mm.
+    obstacle = _seg("obstacle", (100.25, 100.91), (100.4, 101.06), net=2)
+    board, finding = _pad_chain(tmp_path, extra=obstacle, project_floor=floor)
+    original = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    assert bool(repairer.repair([finding], clearance_mm=0.08).actions) == accepted
+    if not accepted:
+        assert not repairer.modified
+        assert board.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("extra", "locked"),
+    [
+        # A same-net mid-track tap on the side from which the diagonal recedes.
+        (_seg("tap", (100.6, 100.43), (100.6, 100.0)), False),
+        ("", True),
+        # Copper clears this pad but would be exposed by its enlarged mask opening.
+        (
+            '(footprint "test:TP" (layer "F.Cu") (at 100.25 100.98) '
+            '(pad "1" smd circle (at 0 0) (size 0.15 0.15) (layers "F.Cu" "F.Mask") '
+            '(solder_mask_margin 0.2) (net 2 "N2") (uuid "tp-pad")))',
+            False,
+        ),
+    ],
+    ids=["lost_contact", "locked_tail", "mask_opening"],
+)
+def test_pad_chain_refusals_preserve_original_copper(tmp_path, extra, locked):
+    board, finding = _pad_chain(tmp_path, extra=extra, lock_tail=locked)
+    original = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    assert not repairer.repair([finding], clearance_mm=0.08).actions
+    assert repairer.doc.to_string() == before
+    assert board.read_bytes() == original
+
+
+def test_pad_chain_added_leg_verification_failure_preserves_prior_output(
+    tmp_path, monkeypatch, capsys
+):
+    from collections import Counter
+
+    board, finding = _pad_chain(tmp_path)
+    original = board.read_bytes()
+    output = tmp_path / "prior.kicad_pcb"
+    prior = original + b"\n"
+    output.write_bytes(prior)
+    observed = []
+
+    def check(path, **kwargs):
+        new = MaskCopperRepairer(path)._segment_nodes().keys() - {"diag", "tail", "foreign"}
+        if not new:
+            return _report(finding)
+        (added,) = new
+        observed.append(added)
+        return _report(_pt_finding(added, "unrelated-opening"))
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", check)
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--mfr",
+            "jlcpcb-tier1",
+            "--verify",
+            "--format",
+            "json",
+            "--no-connectivity-check",
+            "--output",
+            str(output),
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert observed and result["repaired"] == 0
+    assert result["unrepaired"][-1]["reason"] == "new_mask_finding"
+    assert board.read_bytes() == original
+    assert output.read_bytes() == prior
