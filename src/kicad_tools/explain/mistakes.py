@@ -473,6 +473,7 @@ def get_default_checks() -> list[MistakeCheck]:
         BypassCapDistanceCheck,
         CrystalNoiseProximityCheck,
         CrystalTraceLengthCheck,
+        DecouplingCountCheck,
         DifferentialPairSkewCheck,
         LedSeriesResistorCheck,
         MissingDecouplingCapCheck,
@@ -495,6 +496,7 @@ def get_default_checks() -> list[MistakeCheck]:
         TombstoningRiskCheck(),
         # Issue #4899: Konnect design-review audit parity (net-new checks).
         MissingDecouplingCapCheck(),
+        DecouplingCountCheck(),  # Issue #10134
         PullUpResistorCheck(),
         LedSeriesResistorCheck(),
         BomFieldHealthCheck(),
