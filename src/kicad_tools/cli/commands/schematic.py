@@ -699,6 +699,7 @@ def run_sch_command(args) -> int:
             format=getattr(args, "format", "text"),
             unannotated_only=getattr(args, "unannotated_only", False),
             pcb_path=pcb_path,
+            check=getattr(args, "check", False),
         )
 
     elif args.sch_command == "fix-annotation":

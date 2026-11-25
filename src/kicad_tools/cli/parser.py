@@ -2448,6 +2448,12 @@ def _add_sch_parser(subparsers) -> None:
         metavar="BOARD",
         help="Also apply the renumbering to footprint references in this .kicad_pcb",
     )
+    sch_reannotate.add_argument(
+        "--check",
+        action="store_true",
+        help="Report parts whose reference number order disagrees with schematic "
+        "position order; exit 1 if any disagree (files are never modified)",
+    )
     sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
 
     # sch repair-instances

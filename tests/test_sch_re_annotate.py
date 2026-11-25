@@ -3,8 +3,8 @@
 Covers _parse_reference(), _extract_symbols_from_text(),
 _apply_reference_rename(), run_re_annotate() with dry-run,
 backup, prefix filtering, start-from, per-sheet mode,
-multi-unit components, power symbol exclusion, and
-hierarchical schematic traversal.
+multi-unit components, power symbol exclusion, hierarchical
+schematic traversal, and the read-only --check order report.
 """
 
 import json
@@ -20,6 +20,7 @@ from kicad_tools.cli.sch_re_annotate import (
     _extract_symbols_from_text,
     _format_reference,
     _parse_reference,
+    main,
     run_re_annotate,
 )
 
@@ -435,6 +436,265 @@ SEQUENTIAL_SCHEMATIC = """\
 \t)
 )
 """
+
+# Schematic whose reference order disagrees with position order:
+# the top resistor is R2 and the bottom one is R1.
+SWAPPED_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R2"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R2") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# Resistors in position order, capacitors swapped: for --prefix filter tests.
+RC_MIXED_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "R1"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "R2"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "R2") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:C")
+\t\t(at 120 50 0)
+\t\t(property "Reference" "C2"
+\t\t\t(at 120 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "100nF"
+\t\t\t(at 120 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 120 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "C2") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:C")
+\t\t(at 120 80 0)
+\t\t(property "Reference" "C1"
+\t\t\t(at 120 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "1uF"
+\t\t\t(at 120 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 120 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "55555555-5555-5555-5555-555555555555")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "C1") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# Multi-unit symbols: U2 (units A and B) sits above U1, so the component
+# numbers rank opposite to their positions.
+MULTI_UNIT_SWAPPED_SCHEMATIC = """\
+(kicad_sch
+\t(version 20231120)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(uuid "00000000-0000-0000-0000-000000000001")
+\t(paper "A4")
+\t(lib_symbols
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 50 0)
+\t\t(property "Reference" "U2A"
+\t\t\t(at 100 48 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 52 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 54 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "U2A") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 60 0)
+\t\t(property "Reference" "U2B"
+\t\t\t(at 100 58 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "10k"
+\t\t\t(at 100 62 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 64 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "22222222-2222-2222-2222-222222222222")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "U2B") (unit 2))
+\t\t\t)
+\t\t)
+\t)
+\t(symbol
+\t\t(lib_id "Device:R")
+\t\t(at 100 80 0)
+\t\t(property "Reference" "U1A"
+\t\t\t(at 100 78 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "4.7k"
+\t\t\t(at 100 82 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" ""
+\t\t\t(at 100 84 0)
+\t\t\t(effects (font (size 1.27 1.27)) (hide yes))
+\t\t)
+\t\t(uuid "33333333-3333-3333-3333-333333333333")
+\t\t(instances
+\t\t\t(project "test"
+\t\t\t\t(path "/" (reference "U1A") (unit 1))
+\t\t\t)
+\t\t)
+\t)
+\t(sheet_instances
+\t\t(path "/" (page "1"))
+\t)
+)
+"""
+
+# Multi-unit symbols sharing one base number: never an order disagreement.
+MULTI_UNIT_SAME_BASE_SCHEMATIC = MULTI_UNIT_SWAPPED_SCHEMATIC.replace("U2A", "U1A").replace(
+    "U2B", "U1B"
+)
+
+# Child sheet whose single resistor is numbered below the parent's, so the
+# continuous numbering order disagrees while per-sheet numbering agrees.
+CHILD_LOW_NUMBER_SCHEMATIC = CHILD_SCHEMATIC.replace('"R14"', '"R1"').replace(
+    '(reference "R14")', '(reference "R1")'
+)
 
 
 # Schematic with unannotated components (multi-project scenario)
@@ -916,6 +1176,135 @@ class TestRunReAnnotate:
         assert '"Reference" "R2"' in text
         assert '"Reference" "R5"' not in text
         assert '"Reference" "R10"' not in text
+
+
+class TestCheckMode:
+    def test_check_swapped_exits_nonzero_and_lists_mapping(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 1
+        out = capsys.readouterr().out
+        assert "R2 -> R1" in out
+        assert "R1 -> R2" in out
+        assert "R:" in out
+
+    def test_check_never_modifies_files(self, tmp_path):
+        sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
+        original = sch.read_text()
+        ret = run_re_annotate(schematic_path=sch, backup=True, check=True)
+        assert ret == 1
+        assert sch.read_text() == original
+        # --check never writes backups either
+        assert list(tmp_path.glob("*_backup_*")) == []
+
+    def test_check_ordered_exits_zero(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+        assert "agree" in capsys.readouterr().out
+
+    def test_check_gaps_are_not_order_disagreements(self, tmp_path, capsys):
+        """R1, R5 in position order: a gap, but the order agrees."""
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+        assert capsys.readouterr().out.strip() == (
+            "All reference numbers agree with schematic position order."
+        )
+
+    def test_check_prefix_filter_agreeing_prefix(self, tmp_path):
+        sch = _write_sch(tmp_path, RC_MIXED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, prefixes=["R"], check=True)
+        assert ret == 0
+
+    def test_check_prefix_filter_swapped_prefix(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, RC_MIXED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, prefixes=["C"], check=True)
+        assert ret == 1
+        out = capsys.readouterr().out
+        assert "C2 -> C1" in out
+        assert "C1 -> C2" in out
+        # The agreeing R prefix is filtered out
+        assert "R2 ->" not in out
+
+    def test_check_json_output(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, format="json", check=True)
+        assert ret == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["check"] is True
+        assert data["total"] == 2
+        entries = data["out_of_order"]
+        assert {e["old"] for e in entries} == {"R1", "R2"}
+        for e in entries:
+            assert e["prefix"] == "R"
+            assert e["uuid"]
+            assert e["new"] in ("R1", "R2")
+            assert e["old"] != e["new"]
+
+    def test_check_json_clean_outputs_document(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, format="json", check=True)
+        assert ret == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data == {"check": True, "out_of_order": [], "total": 0}
+
+    def test_check_continuous_mode_spans_sheets(self, tmp_path, capsys):
+        parent = tmp_path / "parent.kicad_sch"
+        parent.write_text(PARENT_SCHEMATIC)
+        child = tmp_path / "sub.kicad_sch"
+        child.write_text(CHILD_LOW_NUMBER_SCHEMATIC)
+        # Continuous: R order is R3, R7 (parent) then R1 (child) -> inverted
+        ret = run_re_annotate(schematic_path=parent, backup=False, check=True)
+        assert ret == 1
+        out = capsys.readouterr().out
+        assert "R1 -> R3" in out
+
+    def test_check_per_sheet_scopes_each_sheet(self, tmp_path):
+        parent = tmp_path / "parent.kicad_sch"
+        parent.write_text(PARENT_SCHEMATIC)
+        child = tmp_path / "sub.kicad_sch"
+        child.write_text(CHILD_LOW_NUMBER_SCHEMATIC)
+        # Per-sheet: parent R3,R7 and child R1 each agree within their sheet
+        ret = run_re_annotate(schematic_path=parent, backup=False, per_sheet=True, check=True)
+        assert ret == 0
+
+    def test_check_unannotated_excluded(self, tmp_path):
+        """R? has no number to rank, so it cannot disagree."""
+        sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
+        original = sch.read_text()
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+        assert sch.read_text() == original
+
+    def test_check_multi_unit_swapped(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, MULTI_UNIT_SWAPPED_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 1
+        out = capsys.readouterr().out
+        assert "U2A -> U1A" in out
+        assert "U2B -> U1B" in out
+        assert "U1A -> U2A" in out
+
+    def test_check_multi_unit_same_base_agrees(self, tmp_path):
+        sch = _write_sch(tmp_path, MULTI_UNIT_SAME_BASE_SCHEMATIC)
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+
+    def test_check_power_symbols_excluded(self, tmp_path):
+        sch = _write_sch(tmp_path, POWER_SCHEMATIC)
+        original = sch.read_text()
+        ret = run_re_annotate(schematic_path=sch, backup=False, check=True)
+        assert ret == 0
+        assert sch.read_text() == original
+
+    def test_main_check_flag(self, tmp_path, capsys):
+        sch = _write_sch(tmp_path, SWAPPED_SCHEMATIC)
+        ret = main(["--check", str(sch)])
+        assert ret == 1
+        assert "R2 -> R1" in capsys.readouterr().out
+        ordered = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC, name="ordered.kicad_sch")
+        assert main(["--check", str(ordered)]) == 0
 
 
 # ---------------------------------------------------------------------------
