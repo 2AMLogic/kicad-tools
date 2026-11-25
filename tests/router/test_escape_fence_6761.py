@@ -710,3 +710,27 @@ def test_per_attempt_diagnostic_leaves_the_copper_unchanged(
     assert pathfinder_on.get_and_clear_per_call_timings()
 
     assert copper_on == copper_off, "the diagnostic must not steer the search"
+
+
+@requires_cpp
+def test_early_return_attempt_carries_no_stale_diagnostic() -> None:
+    """An attempt that returns before a native search records no diagnostic.
+
+    ``_route_impl`` returns early when ``allowed_layers`` leaves no legal
+    start layer; the record for that attempt must not inherit the previous
+    traced attempt's pad pair / searches (Issue #8486 review).
+    """
+    router, pathfinder = _build_diag_shape((6.5, 12.6), False)
+    pathfinder.enable_per_call_timing(True)
+    assert router.route_net(1, per_net_timeout=2.0), "WIDE must route"
+    first = pathfinder.get_and_clear_per_call_timings()
+    assert len(first) == 1 and first[0]["searches"]
+
+    router.rules.allowed_layers = {"In1.Cu"}  # F.Cu pads: no legal start layer
+    router.route_net(2, per_net_timeout=2.0)
+    second = pathfinder.get_and_clear_per_call_timings()
+    assert second, "the attempt still produces a timing record"
+    for record in second:
+        assert record["net"] == 2
+        assert "start_pad" not in record
+        assert "searches" not in record

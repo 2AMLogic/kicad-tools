@@ -2621,6 +2621,10 @@ class CppPathfinder:
         # A skipped native search or Python fallback must not inherit the
         # preceding edge's failure evidence (#9900).
         self._last_failure_info = None
+        # Issue #8486: same per-edge discipline for the trace diagnostic -- an
+        # attempt that returns before ``_route_impl`` assigns it (no legal
+        # layer) must not record the previous attempt's pad pair/searches.
+        self._attempt_diagnostic = None
         if self._py_router is not None:
             self._py_router.last_route_exhausted = False
             self._py_router.last_route_deadline_hit = False
