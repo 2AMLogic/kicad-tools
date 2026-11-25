@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-11-20T08:31:13+00:00",
+  "checked_at": "2026-11-25T05:14:31+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -93,7 +93,8 @@
     "output/readiness/native-erc-linux.json": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",
     "output/manufacturing/native-erc-linux.json": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",
     "output/readiness/known-issues.json": "7164a6fe31ab03b9c2479986b7d8c5aa6d0c4570a83c691ecb65244e411198b1",
-    "output/net_class_map.json": "68d7dc586f39f5a0fc360a7ba9017fb0c380b5fa1021003d5761087f86129b40"
+    "output/net_class_map.json": "68d7dc586f39f5a0fc360a7ba9017fb0c380b5fa1021003d5761087f86129b40",
+    "output/.kct_waivers.json": "08629c9af15ff4352b4ab16e3273e9d79b905a1678a5401ea09652e03cccd0fb"
   },
   "evidence": {
     "kct_check": "output/readiness/kct-check.json",

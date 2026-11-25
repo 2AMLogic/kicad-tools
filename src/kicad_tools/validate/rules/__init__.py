@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .base import DRC_TOLERANCE, DRCRule
     from .board_id import BoardIdRule
+    from .bypass_distance import BypassDistanceRule
     from .clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
     from .connector_access import ConnectorEdgeAccessRule
     from .dangling_copper import DanglingCopperRule
@@ -68,6 +69,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "DiffPairRoutingContinuityRule": ".diffpair_routing_continuity",
     "DiffPairUncoupledLengthRule": ".diffpair_uncoupled_length",
     "BoardIdRule": ".board_id",
+    "BypassDistanceRule": ".bypass_distance",
     "FiducialsRule": ".fiducials",
     "DimensionRules": ".dimensions",
     "EdgeClearanceRule": ".edge",
@@ -118,6 +120,7 @@ __all__ = [
     "DimensionRules",
     "EdgeClearanceRule",
     "BoardIdRule",
+    "BypassDistanceRule",
     "FiducialsRule",
     "ImpedanceRule",
     "IsolatedCopperRule",
