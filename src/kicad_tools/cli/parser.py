@@ -7835,9 +7835,9 @@ def _add_readiness_parser(subparsers) -> None:
         default=None,
         help=(
             "Directory containing the board directory and every project dependency "
-            "(schematic hierarchy, sibling symbol/footprint libraries). Referenced "
-            "files outside the board directory but inside this root are collected "
-            "into the staged package and hashed; nothing outside it is ever read."
+            "(schematic hierarchy, sibling symbol/footprint libraries). With a declared "
+            "output root, dependencies must also be inside the declaring project. "
+            "Receipt paths are relative to that declaration."
         ),
     )
     rd_parser.add_argument(

@@ -1018,11 +1018,19 @@ class ReadinessOptions:
     silk_fix: bool = True
     # User-selected PCB before candidate preparation, for render receipt verification.
     source_pcb_bytes: bytes | None = field(default=None, repr=False)
+    # Receipt and archive paths remain relative to the directory containing
+    # the output declaration when an explicit --project-root narrows source access.
+    declared_project_root: Path | None = None
 
     @property
     def root(self) -> Path:
         """The resolved containment boundary for collected dependencies."""
         return (self.project_root or self.board_dir).resolve()
+
+    @property
+    def project_base(self) -> Path:
+        """Portable base for staging the project and naming its archive members."""
+        return (self.declared_project_root or self.project_root or self.board_dir).resolve()
 
     @property
     def assembly(self) -> bool:
@@ -1037,7 +1045,7 @@ def _input_base(options: ReadinessOptions) -> Path:
     the declaring project, so board sources, sibling dependencies and the
     released artifacts under the output root share one portable base.
     """
-    return options.root if options.output_root is not None else options.board_dir
+    return options.project_base if options.output_root is not None else options.board_dir
 
 
 def _report_path(options: ReadinessOptions) -> Path:
@@ -1054,7 +1062,7 @@ def readiness_layout(options: ReadinessOptions) -> ReadinessLayout | None:
     """
     if options.output_root is None:
         return None
-    return ReadinessLayout(report=_report_path(options), input_base=options.root)
+    return ReadinessLayout(report=_report_path(options), input_base=_input_base(options))
 
 
 @dataclass
@@ -1182,11 +1190,9 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         ):
             return None, f"--project-root {project_root} must contain the board {board_dir}"
     if layout is not None:
-        # The declaration itself establishes the project: its TOML's directory
-        # bounds sources and the declared output root when --project-root is
-        # not given (Issue #10106).  An explicit root must contain the declared
-        # output root; nothing outside the root is ever read (#5813 stands).
-        if project_root is None:
+        # Use the intersection of the declaration and the requested source
+        # boundary. An enclosing checkout cannot authorize sibling projects.
+        if project_root is None or layout.input_base.is_relative_to(project_root):
             project_root = layout.input_base
         elif not layout.report.parent.is_relative_to(project_root):
             return None, (
@@ -1324,6 +1330,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             operation="generate" if args.generate else "verify",
             project_root=project_root,
             output_root=output_root,
+            declared_project_root=layout.input_base if layout is not None else None,
             checked_at=checked_at,
             skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
             skip_fiducials=bool(getattr(args, "skip_fiducials", False)),
@@ -2860,7 +2867,7 @@ def _archive_names(options: ReadinessOptions, sources: Sequence[Path]) -> dict[P
     base = options.pcb.parent.resolve()
     if all(s.resolve().is_relative_to(base) for s in sources):
         return {s: s.resolve().relative_to(base).as_posix() for s in sources}
-    return {s: s.resolve().relative_to(options.root).as_posix() for s in sources}
+    return {s: s.resolve().relative_to(options.project_base).as_posix() for s in sources}
 
 
 def _normalize_project_archive(options: ReadinessOptions) -> None:
@@ -2885,7 +2892,7 @@ def _normalize_project_archive(options: ReadinessOptions) -> None:
         members = {
             info.filename: zf.read(info.filename) for info in zf.infolist() if not info.is_dir()
         }
-    prefix = base.relative_to(options.root).as_posix() if rerooted else "."
+    prefix = base.relative_to(options.project_base).as_posix() if rerooted else "."
     rebuilt = {(f"{prefix}/{n}" if prefix != "." else n): d for n, d in members.items()}
     missing = [s for s in required if names_for[s] not in rebuilt]
     if not missing and not rerooted:
@@ -4274,10 +4281,8 @@ def build_report(
         # and the released artifacts share one portable input base (the
         # declaring project) and the receipt names both that base and the
         # declared output root explicitly, so a moved project still verifies.
-        report["project_root"] = Path(
-            os.path.relpath(options.root, options.board_dir.resolve())
-        ).as_posix()
-        report["output_root"] = options.output_root.resolve().relative_to(options.root).as_posix()
+        report["project_root"] = Path(os.path.relpath(root, options.board_dir.resolve())).as_posix()
+        report["output_root"] = options.output_root.resolve().relative_to(root).as_posix()
     else:
         external = _external_dependencies(options)
         if external:
@@ -4874,7 +4879,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     if options.checked_at is None:
         options = replace(options, checked_at=_iso_now())
     original = options.board_dir.resolve()
-    project_root = options.root
+    source_root = options.root
+    project_base = options.project_base
     # Issue #10106: a project-declared output root publishes the release under
     # a dedicated root.  When that root sits inside the board directory the
     # copy of the board already carries it and the single board-region publish
@@ -4910,7 +4916,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         else {}
     )
     release_prefix = (
-        release_region.relative_to(project_root).as_posix() if release_region is not None else None
+        release_region.relative_to(project_base).as_posix() if release_region is not None else None
     )
     diagnostic_name = (
         "readiness-verification" if options.operation == "verify" else "readiness-attempt"
@@ -4918,7 +4924,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     diagnostics = _diagnostics_dir(options, original, diagnostic_name)
     with tempfile.TemporaryDirectory(prefix="kct-readiness-candidate-") as temporary:
         candidate_root = Path(temporary) / "board"
-        candidate = candidate_root / original.relative_to(project_root)
+        candidate = candidate_root / original.relative_to(project_base)
+        candidate_source_root = candidate_root / source_root.relative_to(project_base)
         shutil.copytree(
             original,
             candidate,
@@ -4932,7 +4939,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         )
         candidate_release: Path | None = None
         if release_region is not None:
-            candidate_release = candidate_root / release_region.relative_to(project_root)
+            candidate_release = candidate_root / release_region.relative_to(project_base)
             if release_region.is_dir():
                 shutil.copytree(
                     release_region,
@@ -4947,7 +4954,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 )
 
         for source in externals:
-            target = candidate_root / source.relative_to(project_root)
+            target = candidate_source_root / source.relative_to(source_root)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
 
@@ -4959,8 +4966,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         if options.bom_spec_file is not None and not options.bom_spec_file.is_relative_to(original):
             spec = options.bom_spec_file
             spec_target = (
-                candidate_root / spec.relative_to(project_root)
-                if spec.is_relative_to(project_root)
+                candidate_source_root / spec.relative_to(source_root)
+                if spec.is_relative_to(source_root)
                 else Path(temporary) / spec.name
             )
             spec_target.parent.mkdir(parents=True, exist_ok=True)
@@ -4970,13 +4977,13 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         def remap(path: Path | None) -> Path | None:
             if path is None:
                 return None
-            return candidate_root / path.resolve().relative_to(project_root)
+            return candidate_source_root / path.resolve().relative_to(source_root)
 
         diagnostic_source = None
         try:
             if options.output_root is not None:
                 staged_evidence = (
-                    candidate_root / options.output_root.resolve().relative_to(project_root)
+                    candidate_root / options.output_root.resolve().relative_to(project_base)
                 ) / ("readiness" if options.operation == "generate" else diagnostic_name)
             else:
                 staged_evidence = (
@@ -4987,11 +4994,12 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             staged = replace(
                 options,
                 board_dir=candidate,
-                project_root=candidate_root,
+                project_root=candidate_source_root,
+                declared_project_root=candidate_root if options.declared_project_root else None,
                 pcb=candidate / options.pcb.resolve().relative_to(original),
                 schematic=remap(options.schematic),
                 project=remap(options.project),
-                output_dir=candidate_root / options.output_dir.resolve().relative_to(project_root),
+                output_dir=candidate_root / options.output_dir.resolve().relative_to(project_base),
                 output_root=remap(options.output_root),
                 net_class_map=remap(options.net_class_map),
                 hv_voltage_map=remap(options.hv_voltage_map),
@@ -5429,9 +5437,9 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Directory containing the board directory and every project dependency "
-            "(schematic hierarchy, sibling symbol/footprint libraries). Referenced "
-            "files outside the board directory but inside this root are collected "
-            "into the staged package and hashed; nothing outside it is ever read."
+            "(schematic hierarchy, sibling symbol/footprint libraries). With a declared "
+            "output root, dependencies must also be inside the declaring project. "
+            "Receipt paths are relative to that declaration."
         ),
     )
     parser.add_argument(

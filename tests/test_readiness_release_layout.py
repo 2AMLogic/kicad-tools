@@ -98,6 +98,60 @@ def test_release_signoff_and_dry_run_use_relocated_bundle(project, location, mon
     }
 
 
+@pytest.fixture(params=["enclosing", "narrower"])
+def nested_roots(tmp_path, request):
+    checkout = tmp_path / "checkout"
+    project = make_project(checkout, '[readiness]\noutput_root = "fabrication"\n')
+    if request.param == "enclosing":
+        return project, project, checkout
+    (project / ".kicad-tools.toml").unlink()
+    (checkout / ".kicad-tools.toml").write_text(
+        '[readiness]\noutput_root = "project/fabrication"\n'
+    )
+    return project, checkout, project
+
+
+def test_explicit_root_keeps_the_declared_receipt_base(tmp_path, nested_roots):
+    project, declared_root, requested_root = nested_roots
+    pcb = project / "kicad/board.kicad_pcb"
+    pcb.write_text(PCB)
+    engines = HandoffEngines(
+        pcb.parent, part_numbers={"R1": "C17630"}, tht_refs=(), cpl_refs=("R1",)
+    )
+    flags = ["--project-root", str(requested_root)]
+    assert run(project, "--generate", *flags, fake=engines)[0] == 0
+    assert run(project, "--verify", fake=engines)[0] == 0
+    assert run(project, "--verify", *flags, fake=engines)[0] == 0
+
+    output = project / "fabrication"
+    board_key = pcb.relative_to(declared_root).as_posix()
+    output_key = output.relative_to(declared_root).as_posix()
+    relocated = declared_root.rename(tmp_path / "relocated")
+    pcb = relocated / board_key
+    output = relocated / output_key
+    assert read_readiness(pcb)["status"] == "ready"
+    for location in ("readiness.json", "readiness-verification/readiness.json"):
+        receipt = output / location
+        record = json.loads(receipt.read_text())
+        assert record["output_root"] == output_key
+        assert board_key in record["inputs"]
+        sign_off_bundle(output / "manufacturing", pcb, "local test", readiness=receipt)
+        assert read_readiness(pcb)["status"] == "ready"
+
+
+def test_explicit_root_and_declaration_both_bound_schematic(nested_roots):
+    project, _, requested_root = nested_roots
+    schematic = project.parent / "other-board.kicad_sch"
+    schematic.write_text("(kicad_sch other)")
+    for operation in ("--generate", "--verify"):
+        code, engines = run(
+            project, operation, "--project-root", str(requested_root), "--sch", str(schematic)
+        )
+        assert code == 2
+        assert engines.calls == []
+        assert not (project / "fabrication").exists()
+
+
 def test_selected_history_copy_is_not_the_checked_board(project):
     pcb = project / "kicad/board.kicad_pcb"
     history = project / "history/board.kicad_pcb"

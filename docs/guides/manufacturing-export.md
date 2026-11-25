@@ -39,8 +39,11 @@ You'll also need KiCad 8+ installed for Gerber generation via `kicad-cli`.
 
 Keep the PCB, schematic, project, rules and local libraries under version control.
 For example, place them in `kicad/`, alongside a project-root `.kicad-tools.toml`
-that declares a sibling output directory. Paths in the declaration are relative
-to the directory containing the TOML file.
+that declares a sibling output directory. Both the output path and receipt
+input names are relative to the directory containing the TOML file. You can
+pass an enclosing checkout to `--project-root` and move the declared project
+on its own. A narrower `--project-root` must contain the board, its dependencies
+and the output directory.
 
 ```toml
 [readiness]
