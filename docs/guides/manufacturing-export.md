@@ -62,9 +62,11 @@ kct readiness kicad/controller.kicad_pcb --sch kicad/controller.kicad_sch --mfr 
 
 After reviewing the package, use your reviewer name to sign it. The generated
 receipt at `output/readiness.json` and the verification receipt shown here
-both bind the release to the selected PCB and bundle. A dry run prepares a
-local order preview and checks stock. Give it a new directory outside the
-source and manufacturing directories.
+both bind the release to the selected PCB and bundle. Keep the receipt used
+at sign-off with the package. Submission checks the PCB and schematic paths
+and hashes against that receipt, including a schematic in a sibling source
+directory. A dry run prepares a local order preview and checks stock. Give it
+a new directory outside the source and manufacturing directories.
 
 ```bash
 kct tapeout-sign-off output/manufacturing --board kicad/controller.kicad_pcb \

@@ -277,6 +277,29 @@ def _selected_layout(board: Path) -> ReadinessLayout | None:
         raise WorkflowError(str(exc)) from exc
 
 
+def _receipt_locations(generated: Path) -> tuple[Path, Path]:
+    return generated, generated.parent / "readiness-verification/readiness.json"
+
+
+def _readiness_record(
+    raw: bytes, layout: ReadinessLayout | None, board_dir: Path
+) -> dict[str, Any]:
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise WorkflowError("Readiness receipt is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise WorkflowError("Readiness receipt is not a JSON object")
+    if layout is not None:
+        try:
+            layout.validate_declaration(data, board_dir)
+        except ValueError as exc:
+            raise WorkflowError(str(exc)) from exc
+    elif "output_root" in data:
+        raise WorkflowError("Readiness receipt needs its project output declaration")
+    return data
+
+
 def _load_readiness(
     readiness: Path, board: Path, board_sha: str, bundle_shas: dict[str, str], bundle_root: Path
 ) -> str:
@@ -298,22 +321,10 @@ def _load_readiness(
     layout = _selected_layout(board)
     generated = layout.report if layout is not None else board_dir / "output/readiness.json"
     readiness = readiness.resolve()
-    if readiness not in {generated, generated.parent / "readiness-verification/readiness.json"}:
+    if readiness not in _receipt_locations(generated):
         raise WorkflowError(_READINESS_LOCATION_MSG)
     raw = readiness.read_bytes()
-    try:
-        data = json.loads(raw)
-    except ValueError as exc:
-        raise WorkflowError("Readiness receipt is not valid JSON") from exc
-    if not isinstance(data, dict):
-        raise WorkflowError("Readiness receipt is not a JSON object")
-    if layout is not None:
-        try:
-            layout.validate_declaration(data, board_dir)
-        except ValueError as exc:
-            raise WorkflowError(str(exc)) from exc
-    elif "output_root" in data:
-        raise WorkflowError("Readiness receipt needs its project output declaration")
+    data = _readiness_record(raw, layout, board_dir)
     if data.get("schema_version") != 1:
         raise WorkflowError("Readiness receipt schema_version is not 1")
     if data.get("status") != "ready":
@@ -369,6 +380,42 @@ def _load_readiness(
     if uncovered:
         raise WorkflowError(f"Readiness receipt does not cover bundle files: {uncovered}")
     return _sha(raw)
+
+
+def _check_declared_submission_sources(
+    layout: ReadinessLayout, facts: Preflight, board: Path, schematic: Path, schematic_sha: str
+) -> None:
+    """Bind the chosen design files to the exact receipt used at release sign-off."""
+    signed_sha = facts.manifest["tapeout"]["readiness_sha256"]
+    for location in _receipt_locations(layout.report):
+        try:
+            if not location.is_file() or location.resolve(strict=True) != location:
+                continue
+            raw = location.read_bytes()
+        except (OSError, RuntimeError):
+            continue
+        if _sha(raw) == signed_sha:
+            break
+    else:
+        raise WorkflowError("The readiness receipt used at release sign-off is missing or changed")
+
+    record = _readiness_record(raw, layout, board_directory_for_pcb(board))
+    inputs = record.get("inputs")
+    if not isinstance(inputs, dict):
+        raise WorkflowError("The signed readiness receipt has no inputs hash map")
+    if schematic.suffix.lower() != ".kicad_sch":
+        raise WorkflowError("The selected schematic must be a .kicad_sch file")
+    for role, path, digest in (
+        ("PCB", board, facts.board_sha256),
+        ("schematic", schematic, schematic_sha),
+    ):
+        if (
+            not path.is_relative_to(layout.input_base)
+            or inputs.get(path.relative_to(layout.input_base).as_posix()) != digest
+        ):
+            raise WorkflowError(
+                f"The signed readiness receipt does not cover the selected {role} path and sha256"
+            )
 
 
 SIGNOFF_STAGES = ("release", "fab-review", "fab-dfm")
@@ -780,9 +827,16 @@ def run_submission(
     if not selected_pcb.is_relative_to(source_root.resolve()):
         raise WorkflowError("PCB must live under the declared project")
     pcb_rel = selected_pcb.relative_to(source_root.resolve()).as_posix()
+    if not schematic.is_file():
+        raise WorkflowError(f"Schematic file not found: {schematic}")
+    schematic_sha = _file_sha(schematic)
+    if layout is not None:
+        _check_declared_submission_sources(
+            layout, facts, board.resolve(), schematic.resolve(), schematic_sha
+        )
     evidence = {
         "pcb": SourceEvidence(pcb_rel, facts.board_sha256, board.stat().st_size),
-        "schematic": SourceEvidence(schem_rel, _file_sha(schematic), schematic.stat().st_size),
+        "schematic": SourceEvidence(schem_rel, schematic_sha, schematic.stat().st_size),
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     plan = prepare_submission(

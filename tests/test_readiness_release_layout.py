@@ -63,6 +63,23 @@ def test_selected_board_reads_its_receipt_and_renders_to_declared_root(project):
     assert read_readiness(pcb)["status"] == "ready"
 
 
+def _submission_preview(bundle, pcb, schematic, destination):
+    return submit_jlcpcb_cmd.main(
+        [
+            str(bundle),
+            "--board",
+            str(pcb),
+            "--schematic",
+            str(schematic),
+            "--quantity",
+            "5",
+            "--dry-run",
+            "-o",
+            str(destination),
+        ]
+    )
+
+
 @pytest.mark.parametrize("location", ["readiness.json", "readiness-verification/readiness.json"])
 def test_release_signoff_and_dry_run_use_relocated_bundle(project, location, monkeypatch):
     pcb = project / "kicad/board.kicad_pcb"
@@ -73,29 +90,61 @@ def test_release_signoff_and_dry_run_use_relocated_bundle(project, location, mon
     _no_browser(monkeypatch)
     _stock(monkeypatch, {"C17630": 100})
     review = project.parent / "submission-preview"
-    assert (
-        submit_jlcpcb_cmd.main(
-            [
-                str(bundle),
-                "--board",
-                str(pcb),
-                "--schematic",
-                str(project / "schematics/board.kicad_sch"),
-                "--quantity",
-                "5",
-                "--dry-run",
-                "-o",
-                str(review),
-            ]
-        )
-        == 0
-    )
+    assert _submission_preview(bundle, pcb, project / "schematics/board.kicad_sch", review) == 0
     assert (review / "review-page/index.md").is_file()
     plan = json.loads((review / "handoff/plan.json").read_text())
     assert {role: row["path"] for role, row in plan["sources"].items()} == {
         "pcb": "kicad/board.kicad_pcb",
         "schematic": "schematics/board.kicad_sch",
     }
+
+
+@pytest.mark.parametrize("location", ["readiness.json", "readiness-verification/readiness.json"])
+def test_submission_requires_the_signed_schematic_path_and_digest(project, location, monkeypatch):
+    pcb = project / "kicad/board.kicad_pcb"
+    schematic = project / "schematics/board.kicad_sch"
+    output = project / "fabrication"
+    bundle = output / "manufacturing"
+    sign_off_bundle(bundle, pcb, "local test", readiness=output / location)
+    artifacts = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
+    _no_browser(monkeypatch)
+    _stock(monkeypatch, {"C17630": 100})
+
+    historical = project / "history/board.kicad_sch"
+    shutil.copyfile(schematic, historical)
+    unrelated = project / "history/other.kicad_sch"
+    unrelated.write_text("(kicad_sch (version 20250114))\n")
+    destination = project.parent / "refused-preview"
+    for selected in (
+        historical,
+        unrelated,
+        project / "kicad/board.kicad_pro",
+        project / "history/missing.kicad_sch",
+    ):
+        assert _submission_preview(bundle, pcb, selected, destination) == 2
+        assert not destination.exists()
+
+    schematic.write_bytes(schematic.read_bytes() + b"\n")
+    assert _submission_preview(bundle, pcb, schematic, destination) == 2
+    assert not destination.exists()
+    assert {path: path.read_bytes() for path in output.rglob("*") if path.is_file()} == artifacts
+
+
+def test_submission_uses_only_the_receipt_named_by_the_release_digest(project, monkeypatch, capsys):
+    output = project / "fabrication"
+    pcb = project / "kicad/board.kicad_pcb"
+    bundle = output / "manufacturing"
+    signed = output / "readiness-verification/readiness.json"
+    sign_off_bundle(bundle, pcb, "local test", readiness=signed)
+    _stock(monkeypatch, {"C17630": 100})
+    signed.write_bytes(signed.read_bytes() + b"\n")
+
+    destination = project.parent / "refused-preview"
+    assert (
+        _submission_preview(bundle, pcb, project / "schematics/board.kicad_sch", destination) == 2
+    )
+    assert "used at release sign-off is missing or changed" in capsys.readouterr().err
+    assert not destination.exists()
 
 
 @pytest.fixture(params=["enclosing", "narrower"])
