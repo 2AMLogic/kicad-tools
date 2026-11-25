@@ -14,8 +14,17 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-25
+
+- **PR #10103**: fix(router): clear exposed gaps where a branch enters a via beside its trunk
+- **PR #10126**: fix: evaluate punctuated netclass patterns in copper clearance checks
+- **PR #10094**: fix(route): fail and report post-route DRC on the default --auto-layers path
+- **Issue #10122** (closed): Verify copper clearance for KiCad net-class patterns containing common power and generated net names
+- **Issue #10057** (closed): kct route --format json omits summary.failure_reason on the default --auto-layers path
+
 ### 2026-11-24
 
+- **PR #10127**: test: pin the escape-fence pair's search-budget controls
 - **Issue #10135** (closed): circuit-review: a value that contradicts an explicit datasheet statement must not end as a note nobody acts on
 - **PR #10147**: feat: grade explicit datasheet contradictions at warning and gate tapeout on open review decisions
 - **Issue #10056** (closed): Checked PCB publication can still lose a save that lands between its post-link re-check and the unlink
