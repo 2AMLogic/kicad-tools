@@ -206,6 +206,20 @@ class FileNamingConvention:
     gerber_zip_name: str = "gerbers.zip"
 
 
+def _rotation_tables(manufacturer_id: str) -> dict[str, Any]:
+    path = _DATA_DIR / f"{manufacturer_id}_rotations.yaml"
+    return _load_yaml(path) if path.exists() else {}
+
+
+def load_catalog_rotation_corrections(manufacturer_id: str) -> dict[str, dict[str, float]]:
+    """Previewed offsets by catalog part and KiCad footprint pattern."""
+    catalog = _rotation_tables(manufacturer_id).get("catalog_rotation_corrections", {})
+    return {
+        part: {pattern: float(degrees) for pattern, degrees in rows.items()}
+        for part, rows in catalog.items()
+    }
+
+
 def load_rotation_corrections(manufacturer_id: str) -> dict[str, float]:
     """Load rotation corrections from a YAML data file.
 
@@ -216,12 +230,7 @@ def load_rotation_corrections(manufacturer_id: str) -> dict[str, float]:
         Dict mapping footprint glob pattern to rotation offset in degrees.
         Empty dict if no rotation corrections file exists.
     """
-    yaml_path = _DATA_DIR / f"{manufacturer_id}_rotations.yaml"
-    if not yaml_path.exists():
-        return {}
-
-    data = _load_yaml(yaml_path)
-    return data.get("rotation_corrections", {})
+    return _rotation_tables(manufacturer_id).get("rotation_corrections", {})
 
 
 def match_rotation_correction(

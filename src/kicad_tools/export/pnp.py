@@ -86,6 +86,7 @@ class PnPFormatter(ABC):
     ):
         self.config = config or PnPExportConfig()
         self.rotation_corrections: dict[str, float] = rotation_corrections or {}
+        self.catalog_corrections: dict[str, dict[str, float]] = {}
         # Per-project sidecar corrections (issue #9322); take precedence over
         # the footprint-glob table above.
         self.rotation_overrides = rotation_overrides
@@ -109,8 +110,8 @@ class PnPFormatter(ABC):
         component rotation **before** the global ``rotation_offset``.
 
         A per-project sidecar (``rotation_overrides``) is consulted first:
-        reference designator, then LCSC number, then the footprint table
-        (issue #9322).
+        reference designator, then project LCSC, shipped catalog calibration,
+        and finally the footprint table.
         """
         from .rotation_overrides import resolve_rotation_correction
 
@@ -124,7 +125,7 @@ class PnPFormatter(ABC):
 
         # Per-footprint rotation correction
         fp_correction, _source = resolve_rotation_correction(
-            placement, self.rotation_corrections, self.rotation_overrides
+            placement, self.rotation_corrections, self.rotation_overrides, self.catalog_corrections
         )
 
         rotation = (placement.rotation + fp_correction + self.config.rotation_offset) % 360
@@ -170,9 +171,12 @@ class JLCPCBPnPFormatter(PnPFormatter):
         rotation_corrections: dict[str, float] | None = None,
         rotation_overrides: RotationOverrides | None = None,
     ):
+        from kicad_tools.manufacturers.jlcpcb import CATALOG_ROTATION_CORRECTIONS
+
         if config is None:
             config = PnPExportConfig(exclude_tht=False)
         super().__init__(config, rotation_corrections, rotation_overrides)
+        self.catalog_corrections = CATALOG_ROTATION_CORRECTIONS
 
     def get_headers(self) -> list[str]:
         """JLCPCB CPL column headers."""
@@ -729,5 +733,8 @@ def count_rotation_corrections(
     return sum(
         1
         for p in placements
-        if resolve_rotation_correction(p, rotation_corrections, rotation_overrides)[0] != 0
+        if resolve_rotation_correction(
+            p, rotation_corrections, rotation_overrides, formatter.catalog_corrections
+        )[0]
+        != 0
     )

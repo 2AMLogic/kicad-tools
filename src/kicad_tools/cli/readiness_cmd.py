@@ -3961,15 +3961,8 @@ def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
 
 
 def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
-    """Problems between the retained CPL and the project's rotation sidecar (#9322).
-
-    Re-derives each sidecar-corrected placement's rotation from the PCB and the
-    sidecar *as they are now* and compares it with the retained CPL row, so an
-    edited sidecar (or one removed since generation) fails verification instead
-    of being waved through on a stale bundle.  Boards without a sidecar are not
-    touched.
-    """
-    from kicad_tools.export.rotation_overrides import SOURCE_GLOB
+    """Compare the retained CPL with project overrides and previewed catalog offsets."""
+    from kicad_tools.export.rotation_overrides import SOURCE_CATALOG, SOURCE_GLOB
 
     if not options.assembly:
         return []
@@ -3978,7 +3971,10 @@ def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
         # An invalid sidecar, or a re-derivation that could not run (issue
         # #9346): report it instead of letting the check pass by omission.
         return [problem]
-    if review is None or review.sidecar is None:
+    if review is None:
+        return []
+    reviewed_parts = [entry for entry in review.applied if entry["source"] != SOURCE_GLOB]
+    if not reviewed_parts:
         return []
     cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
     if cpl is None:
@@ -3997,15 +3993,24 @@ def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
         if max(ref_col, rot_col) < len(row)
     }
     problems: list[str] = []
-    for entry in review.applied:
-        if entry["source"] == SOURCE_GLOB:
-            continue
+    for entry in reviewed_parts:
         ref = entry["reference"]
         expected = f"{review.rotations[ref]:.1f}"
-        if ref in retained and retained[ref] != expected:
+        if ref not in retained:
+            continue
+        try:
+            same_angle = float(retained[ref]) == float(expected)
+        except ValueError:
+            same_angle = False
+        if not same_angle:
+            source = (
+                f"JLCPCB catalog correction for {entry['key']}"
+                if entry["source"] == SOURCE_CATALOG
+                else Path(review.sidecar).name
+            )
             problems.append(
                 f"CPL rotation for {ref} is {retained[ref]} but the current "
-                f"{Path(review.sidecar).name} gives {expected}; regenerate the bundle"
+                f"{source} gives {expected}; regenerate the bundle"
             )
     return problems
 

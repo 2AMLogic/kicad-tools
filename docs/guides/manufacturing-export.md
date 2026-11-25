@@ -535,9 +535,9 @@ can land a quarter turn off in the fab's placement preview. Two sources of
 correction feed the CPL, and corrections are always **added** to the KiCad
 rotation (`(kicad + correction) % 360`):
 
-1. The shipped per-manufacturer table
-   (`manufacturers/data/jlcpcb_rotations.yaml`), keyed on footprint-name globs
-   such as `SOT-23*`.
+1. The shipped manufacturer table in `manufacturers/data/jlcpcb_rotations.yaml`
+   contains footprint defaults and corrections verified for individual catalog
+   parts on their KiCad footprints.
 2. A **per-project sidecar**, `cpl_rotations.yaml`, committed next to your
    `.kicad_pcb`. `kct export` and `kct readiness --generate` discover it
    automatically:
@@ -552,14 +552,22 @@ by_lcsc:             # every placement of that LCSC part
   C4991872: 270      # SJ-3523-SMT audio jack
 ```
 
-Precedence per placement is `by_reference` > `by_lcsc` > the shipped footprint
-table. A sidecar entry replaces the table's correction for that part; parts the
-sidecar does not name keep the table's. Prefer `by_lcsc` for connectors: the
-correction belongs to the fab's model of the LCSC part, and a footprint glob
-such as `PinHeader_*` would rotate every other header wrongly. The LCSC number
-is the one in the generated BOM (falling back to the footprint's `LCSC`
-property). Measure the offset by rotating the part in the fab's placement
-preview until the body sits on its pads.
+For each placement, the exporter first checks the project's `by_reference`
+and then `by_lcsc`. It next checks the manufacturer's catalog entry for the
+part and footprint, then the footprint default. It uses the first matching
+offset. The generated BOM supplies the LCSC number when available. The PCB
+footprint's `LCSC` property is the fallback.
+
+| JLCPCB part | KiCad footprint | Total offset |
+| --- | --- | ---: |
+| C51118 (AP2112K-3.3TRG1) and C19829593 (74LVC1G17GV) | SOT-23-5 | 270° |
+| C2286 (KT-0603R) and C12624 (KT-0603G) | LED_0603 | 0° |
+| C408389 (BAT54S) | SOT-23, three pins | 180° from the footprint default |
+
+Remove any post-export script adjustment for these parts before regenerating
+the CPL. For example, a C19829593 placed at 0° in KiCad exports at 270°.
+Before ordering, check lead alignment and pin 1 or polarity in JLCPCB's
+placement preview. [JLCPCB orientation guidance](https://jlcpcb.com/help/article/pcb-assembly-faqs-part-2)
 
 An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is not
 `Cnnnn`) fails the CPL step instead of silently shipping an uncorrected file.
@@ -568,8 +576,9 @@ An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is no
 
 - the sidecar is hashed as a readiness input, so editing, adding or deleting it
   makes the evidence stale and `--verify` fails;
-- `cpl_rotations.applied` lists each shifted placement (reference, which key
-  matched, degrees), and `cpl_rotations.sidecar_sha256` pins the sidecar;
+- `cpl_rotations.applied` records the reference, matched key and offset for
+  shifted placements and explicit catalog or project matches, including 0°.
+  `cpl_rotations.sidecar_sha256` pins the project sidecar;
 - `cpl_rotations.unreviewed` lists connectors, ICs, diodes, transistors, LEDs,
   switches, crystals/oscillators and jumpers (reference prefix
   `J`/`U`/`D`/`Q`/`LED`/`SW`/`Y`/`JP`/`X`) that **no** correction matched.

@@ -171,7 +171,7 @@ class AssemblyPackageResult:
         if review.sidecar:
             lines.append(
                 f"Rotation overrides: {Path(review.sidecar).name} "
-                f"({sum(1 for a in review.applied if a['source'] != 'footprint_glob')}"
+                f"({sum(1 for a in review.applied if a['source'] in ('by_reference', 'by_lcsc'))}"
                 " row(s) corrected)"
             )
         if review.unreviewed:
@@ -770,6 +770,7 @@ class AssemblyPackage:
                 formatter.apply_transforms,
                 rotation_corrections,
                 rotation_overrides,
+                formatter.catalog_corrections,
             )
             result.pnp_placement_count = len(placements)
             sides = {p.layer for p in placements}
@@ -985,7 +986,13 @@ def review_cpl_rotations(
     placements = formatter.filter_placements(
         extract_placements(footprints, formatter.config, lcsc_by_reference=lcsc_by_reference)
     )
-    return review_rotations(placements, formatter.apply_transforms, corrections, overrides)
+    return review_rotations(
+        placements,
+        formatter.apply_transforms,
+        corrections,
+        overrides,
+        formatter.catalog_corrections,
+    )
 
 
 def create_assembly_package(

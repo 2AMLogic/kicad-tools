@@ -604,3 +604,73 @@ def test_unlisted_rotation_sidecar_refuses_evidence(tmp_path):
     result = read_readiness(tmp_path)
     assert result["status"] == "unverified"
     assert "omits current project or rule files" in result["blockers"][0]
+
+
+@pytest.fixture
+def catalog_board(tmp_path):
+    """Board with previewed catalog parts and controls using the same footprint."""
+    packages = [
+        ("U1", "Package_TO_SOT_SMD:SOT-23-5", "C51118"),
+        ("U2", "Package_TO_SOT_SMD:SOT-23-5", "C19829593"),
+        ("D1", "LED_SMD:LED_0603_1608Metric", "C2286"),
+        ("D2", "LED_SMD:LED_0603_1608Metric", "C12624"),
+        ("D3", "Package_TO_SOT_SMD:SOT-23", "C408389"),
+        ("U3", "Package_TO_SOT_SMD:SOT-23-5", ""),
+        ("D4", "LED_SMD:LED_0603_1608Metric", "C99999999"),
+        ("U4", "Package_TO_SOT_SMD:SOT-23-6", "C51118"),
+    ]
+
+    def write(angle):
+        path = tmp_path / "catalog.kicad_pcb"
+        rows = [
+            f'''(footprint "{fp}" (layer "F.Cu") (at {10 + i * 3} 10 {angle}) (attr smd)
+                 (property "Reference" "{ref}") (property "Value" "test") (property "LCSC" "{part}")
+                 (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask")))'''
+            for i, (ref, fp, part) in enumerate(packages)
+        ]
+        path.write_text(_PCB[: _PCB.index("  (footprint")] + "\n".join(rows) + ")")
+        return path
+
+    return write
+
+
+@pytest.mark.parametrize("angle", [-90, 0, 90, 180, 270])
+def test_jlcpcb_catalog_rotations_in_cpl(catalog_board, angle):
+    board = catalog_board(angle)
+    offsets = {"U1": 270, "U2": 270, "D1": 0, "D2": 0, "D3": 180, "U3": 180, "D4": 180, "U4": 180}
+    assert _cpl(board) == {ref: (angle + offset) % 360 for ref, offset in offsets.items()}
+
+
+def test_catalog_rotations_use_the_selected_parts_and_project_precedence(catalog_board):
+    board = catalog_board(0)
+    (board.parent / SIDECAR_NAME).write_text(
+        "by_reference:\n  U1: 90\nby_lcsc:\n  C51118: 0\n  C2286: 180\n"
+    )
+    review = review_cpl_rotations(board, "jlcpcb-tier1", lcsc_by_reference={"U3": "c51118"})
+    applied = {
+        row["reference"]: (row["degrees"], row["source"], row["key"]) for row in review.applied
+    }
+    assert applied["U1"] == (90, "by_reference", "U1")
+    assert applied["U3"] == (0, "by_lcsc", "C51118")
+    assert applied["U2"] == (270, "catalog_lcsc", "C19829593")
+    assert applied["D1"] == (180, "by_lcsc", "C2286")
+    assert applied["D2"] == (0, "catalog_lcsc", "C12624")
+    assert _cpl(board, lcsc_by_reference={"U3": "c51118"})["U3"] == 270
+    other = review_cpl_rotations(board, "pcbway")
+    assert all(row["source"] != "catalog_lcsc" for row in other.applied)
+
+
+def test_readiness_detects_stale_catalog_rotations_without_a_sidecar(catalog_board, tmp_path):
+    from kicad_tools.cli.readiness_cmd import _verify_cpl_rotations
+
+    board = catalog_board(0)
+    out = tmp_path / "output"
+    out.mkdir()
+    cpl = out / "cpl_jlcpcb.csv"
+    cpl.write_text("Designator,Rotation\nU1,270\nD1,0.00\n")
+    options = _readiness_options(board, out)
+    assert _verify_cpl_rotations(options) == []
+    cpl.write_text("Designator,Rotation\nU1,180.0\nD1,180.0\n")
+    problems = _verify_cpl_rotations(options)
+    assert any("U1" in message and "270" in message and "C51118" in message for message in problems)
+    assert any("D1" in message and "0.0" in message and "C2286" in message for message in problems)
