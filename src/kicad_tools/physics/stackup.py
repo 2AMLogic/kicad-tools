@@ -39,6 +39,17 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
 
+def stackup_copper_oz(pcb: PCB) -> tuple[float | None, float | None]:
+    """Outer/inner copper weight (oz) from the board's declared stackup, if any."""
+    try:
+        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
+        return (None, None)
+    if derived is None:
+        return (None, None)
+    return derived
+
+
 class LayerType(Enum):
     """Type of layer in the stackup."""
 

@@ -10,6 +10,7 @@ from .base import (
     AssemblyCapabilities,
     ManufacturerProfile,
     PartsLibrary,
+    load_catalog_rotation_corrections,
     load_design_rules_from_yaml,
     load_dfm_thresholds,
     load_rotation_corrections,
@@ -21,6 +22,7 @@ _DFM_THRESHOLDS = load_dfm_thresholds("jlcpcb")
 
 # Load rotation corrections for JLCPCB pick-and-place files
 _ROTATION_CORRECTIONS = load_rotation_corrections("jlcpcb")
+CATALOG_ROTATION_CORRECTIONS = load_catalog_rotation_corrections("jlcpcb")
 
 # JLCPCB Assembly Capabilities -- two PCBA service tiers (Issue #7204).
 #
