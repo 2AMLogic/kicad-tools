@@ -416,8 +416,6 @@ def replace_segments(
     name_to_id = {name: nid for nid, name in net_names.items()}
     name_only = bool(_RE_NET_NAME.search(pcb_text))
 
-    # Keep unchanged track blocks verbatim, including locks and KiCad metadata.
-    optimized = {net: segs for net, segs in optimized.items() if segs != original.get(net)}
     net_names_to_remove = {
         net_name for net_name, segs in original.items() if net_name in optimized and segs
     }
@@ -1429,9 +1427,9 @@ def optimize_pcb(
         text = apply_arc_width_edits(
             pcb_text, (edit for copper in nets.values() for edit in copper.arc_edits)
         )
-        return replace_segments(
-            text, segments_by_net, {n: c.segments for n, c in nets.items()}, scratch=scratch
-        )
+        # Keep unchanged track blocks verbatim, including locks and KiCad metadata.
+        changed = {n: c.segments for n, c in nets.items() if c.segments != segments_by_net.get(n)}
+        return replace_segments(text, segments_by_net, changed, scratch=scratch)
 
     rolled_back_nets: set[str] = set()
     net_violations: dict[str, dict[str, int]] = {}

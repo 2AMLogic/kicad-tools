@@ -4115,7 +4115,10 @@ class PCB:
         """
         # A lone (net 0 "") declares only the no-net sentinel. Name-only
         # copper on such a board still needs the same in-memory net table.
-        if self._nets and (not self._net_name_only_dialect or self._nets.keys() != {0}):
+        lone_sentinel = (
+            self._nets.keys() == {0} and not self._nets[0].name and self._net_name_only_dialect
+        )
+        if self._nets and not lone_sentinel:
             return
 
         # Iterate elements in a stable order and collect (name, surviving_num).
