@@ -640,6 +640,40 @@ def test_guard_checks_unattributed_and_post_refill_findings(
     assert board.read_bytes() == original
 
 
+def test_guard_compares_stock_warning_band_when_elbow_margin_needs_wider_measurements(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from kicad_tools.cli import check_cmd
+    from kicad_tools.drc import compat
+
+    board = _board(tmp_path, ENTRY)
+    bands = []
+    gaps = Mock(required={("pad", "track"): 0.30})
+
+    def assess(rule_set):
+        band = rule_set.checker.mask_copper_request.policy.warning_clearance_mm
+        bands.append(band)
+        return SimpleNamespace(violations=[], mask_copper_assessments=[band])
+
+    def report(results, path):
+        # The 0.20 mm gap shows up only in the expanded measurement pass.
+        if results.mask_copper_assessments[0] >= 0.20:
+            return _report(_finding("other", severity=Severity.WARNING))
+        return _report()
+
+    monkeypatch.setattr(check_cmd, "run_check_rule_set", assess)
+    monkeypatch.setattr(compat, "drc_results_to_report", report)
+    saved = fix_drc_cmd._run_python_drc(
+        board, manufacturer="jlcpcb", mask_copper=True, guard_warnings=True, elbow_gaps=gaps
+    )
+    assert saved is not None and not saved.violations
+    assert bands == [0.30, 0.15]
+    gaps.check.assert_called_once_with([0.30])
+
+
 def test_guard_rechecks_geometry_left_by_selective_undo(tmp_path, monkeypatch):
     from dataclasses import replace
 

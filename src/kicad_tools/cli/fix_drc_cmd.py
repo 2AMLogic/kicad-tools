@@ -2338,6 +2338,7 @@ def _run_python_drc(
         project = Path(project_pcb_path) if project_pcb_path is not None else Path(pcb_path)
         pcb = PCB.load(pcb_path)
         rule_set = build_check_rule_set(project, manufacturer=manufacturer, layers=layers, pcb=pcb)
+        stock_mask_request = None
         if mask_copper:
             request = default_request_for_manufacturer(rule_set.manufacturer)
             if (
@@ -2352,6 +2353,7 @@ def _run_python_drc(
                 # elbow gap even beyond the usual advisory range. Its error
                 # clearance and the stock manufacturer's policy stay intact.
                 if measure_mask_gap_mm > (policy.warning_clearance_mm or policy.clearance_mm):
+                    stock_mask_request = request
                     request = replace(
                         request, policy=replace(policy, warning_clearance_mm=measure_mask_gap_mm)
                     )
@@ -2379,6 +2381,16 @@ def _run_python_drc(
         if elbow_gaps and elbow_gaps.required:
             # Use the physical observations before waiver and severity filtering.
             elbow_gaps.check(results.mask_copper_assessments)
+        if (
+            guard_warnings
+            and stock_mask_request is not None
+            and not any(v.rule_id == "mask_to_copper_incomplete" for v in results.violations)
+        ):
+            # An explicit elbow margin can reach beyond the manufacturer's
+            # warning band. Its extra measurements only check that elbow;
+            # compare warnings on the same policy that produced the baseline.
+            rule_set.checker.mask_copper_request = stock_mask_request
+            results = run_check_rule_set(rule_set)
         # The ordinary repairer only needs repairable rules. The guarded
         # comparison also needs topology and fab-gap findings the nightly grades.
         results.violations = [
