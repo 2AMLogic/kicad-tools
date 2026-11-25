@@ -2042,7 +2042,8 @@ register_tool(
                 "type": "object",
                 "description": (
                     "Cost function weight overrides. Keys: overlap, drc, boundary, "
-                    "wirelength, area, creepage, cohesion, decoupling. Higher weights "
+                    "wirelength, area, creepage, cohesion, decoupling, "
+                    "group_cohesion, group_order. Higher weights "
                     "penalize that metric more. 'decoupling' (default 2.0) is the "
                     "decoupling-cap affinity term and its post-optimize snap pass; "
                     "set it to 0 to disable both."
@@ -2064,6 +2065,21 @@ register_tool(
                         "description": (
                             "Decoupling-cap affinity weight (default: 2.0). 0 disables "
                             "the term and the post-optimize snap pass."
+                        ),
+                    },
+                    "group_cohesion": {
+                        "type": "number",
+                        "description": (
+                            "Schematic-sheet cohesion weight (default: 1.0). Pulls "
+                            "parts whose symbols share a sheet into a compact zone."
+                        ),
+                    },
+                    "group_order": {
+                        "type": "number",
+                        "description": (
+                            "Schematic-order weight (default: 1.0). Penalises "
+                            "same-prefix parts of a sheet placed against their "
+                            "schematic order."
                         ),
                     },
                 },

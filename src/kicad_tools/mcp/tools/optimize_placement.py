@@ -233,7 +233,8 @@ def optimize_placement(
         max_iterations: Maximum number of optimization iterations.
         weights: Optional cost function weight overrides. Keys:
             overlap, drc, boundary, wirelength, area, creepage, cohesion,
-            decoupling, plus ``mode`` ("lexicographic" or "weighted_sum").
+            decoupling, group_cohesion, group_order, plus ``mode``
+            ("lexicographic" or "weighted_sum").
             Same keys and defaults as ``kct optimize-placement --weights``.
             The decoupling-capacitor affinity term (default weight 2.0)
             pulls each decoupling cap onto the IC supply pin it serves, and

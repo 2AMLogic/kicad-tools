@@ -212,6 +212,43 @@ partition (no per-pair voltages), so it fires on both the `--voltage-map` and
 `--hv-domains` paths, and stays dormant (contributing `0.0`) when no HV input is
 supplied — preserving the byte-identical guarantee above.
 
+## Schematic-sheet grouping (issue #10146)
+
+The HV terms group footprints by *voltage*; the schematic-group terms group
+them by *where the schematic draws them*. A **schematic group** is the set of
+footprints whose symbols sit on the same schematic sheet — the one grouping
+the schematic encodes unambiguously (via the netlist's `sheetpath` node).
+Hierarchical labels and reference prefixes alone were rejected as heuristics.
+
+`optimize-placement` resolves the schematic next to the PCB (the same
+discovery `kct check` uses), exports a netlist with kicad-cli into a scratch
+directory and builds a `ref -> sheet_path` map. Two soft terms consume it:
+
+- **Sheet cohesion** (`compute_sheet_cohesion`, weight `group_cohesion`,
+  default `1.0`): for each sheet with three or more placed members, the
+  radius-of-gyration spread around the sheet centroid — the identical
+  formulation as the voltage-domain cohesion term, partitioned by sheet.
+  Minimizing it packs each sheet's circuit into a compact zone.
+- **Sheet order** (`compute_sheet_order`, weight `group_order`, default
+  `1.0`): within a sheet, parts sharing a reference prefix (`R1`, `R2`, …)
+  are read along the group's dominant axis (the axis of its larger extent)
+  and every pair placed opposite to its schematic (annotation) order
+  contributes the depth of the inversion (mm). A correctly ordered group
+  scores zero however far it is spread — ordering never fights compactness.
+
+Both are soft preferences exactly like cohesion: excluded from `is_feasible`
+and from the infeasible branch of the lexicographic score, and dormant
+whenever no map is available, the design has a single sheet, or a sheet has
+fewer than three members — so single-sheet and schematic-less boards keep the
+historical objective **byte-identical**, and a failed netlist export degrades
+to the same dormant state instead of failing the run. Weights of 0 (either
+one) also skip the netlist export entirely. `--weights '{"group_cohesion": 0,
+"group_order": 0}'` turns both off.
+
+Composability note: the MCP `optimize_placement` tool accepts the same weight
+keys, but builds its scoring context without the sheet map — MCP-driven runs
+score without the schematic-group terms on multi-sheet boards.
+
 ### Input contract
 
 Two mutually-exclusive sources:
@@ -259,6 +296,8 @@ Two mutually-exclusive sources:
 | `--hv-threshold` | `30.0` | Minimum cross-domain `|ΔV|` (V) that triggers a keepout. Lower-difference domain pairs rely on normal DRC clearance, so low-voltage/low-voltage nets are not over-segregated. |
 | `--weights '{"creepage": …}'` | `1e5` | Weight applied to the creepage shortfall (a hard-feasibility term). |
 | `--weights '{"cohesion": …}'` | `1.0` | Weight applied to the same-domain clustering penalty (a soft preference; see above). |
+| `--weights '{"group_cohesion": …}'` | `1.0` | Weight applied to the per-sheet spread penalty (a soft preference; see [Schematic-sheet grouping](#schematic-sheet-grouping-issue-10146)). |
+| `--weights '{"group_order": …}'` | `1.0` | Weight applied to the within-sheet schematic-order penalty (a soft preference; same section). |
 
 A `|ΔV|` above the highest tabulated creepage row raises a loud
 `StandardLookupError` (surfaced as an `Error:` and exit code 1) — the tool

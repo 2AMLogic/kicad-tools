@@ -220,6 +220,7 @@ def _evaluate(
     exempt_pairs: set[frozenset[str]] | None = None,
     pad_anchored: bool = False,
     decoupling_groups: Sequence[DecouplingGroup] | None = None,
+    ref_sheets: dict[str, str] | None = None,
     fixed_sides: Sequence[int] | None = None,
 ) -> PlacementScore:
     """Evaluate a single placement vector and return its score.
@@ -235,6 +236,10 @@ def _evaluate(
 
     *decoupling_groups* (issue #6020) enables the decoupling-cap affinity
     term. It always measures at pads, whatever *pad_anchored* says.
+
+    *ref_sheets* (issue #10146) enables the soft schematic-group terms:
+    per-sheet cohesion and within-sheet schematic order. ``None`` (the
+    default) or a single-sheet map keeps the score byte-identical.
 
     *fixed_sides* overrides the vector's side flags before decoding (see
     :func:`_with_sides`), so pads are scored where the writer will put them.
@@ -260,6 +265,7 @@ def _evaluate(
         pad_positions=pad_positions,
         decoupling_groups=decoupling_groups,
         decoupling_pad_positions=pad_map,
+        ref_sheets=ref_sheets,
     )
 
 
@@ -452,6 +458,7 @@ def snap_decoupling(
     ref_domains: dict[str, str] | None = None,
     required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
     exempt_pairs: set[frozenset[str]] | None = None,
+    ref_sheets: dict[str, str] | None = None,
     pad_anchored: bool = False,
 ) -> tuple[PlacementVector, list[SnapMove]]:
     """Run the post-optimize decoupling-cap snap (issue #6020).
@@ -464,6 +471,8 @@ def snap_decoupling(
 
     Shared by ``kct optimize-placement`` and the MCP ``optimize_placement``
     tool (issue #6253). A no-op when *decoupling_groups* is empty/``None``.
+    *ref_sheets* (issue #10146) keeps the snap's acceptance scoring on the
+    same schematic-group terms as the optimizer loop.
     """
     if not decoupling_groups:
         return vector, []
@@ -480,6 +489,7 @@ def snap_decoupling(
             ref_domains=ref_domains,
             required_mm_by_domain_pair=required_mm_by_domain_pair,
             exempt_pairs=exempt_pairs,
+            ref_sheets=ref_sheets,
             pad_anchored=pad_anchored,
             decoupling_groups=decoupling_groups,
             fixed_sides=fixed_sides,
@@ -816,6 +826,83 @@ def _build_hv_context(
     return ref_domains, required
 
 
+def _sheet_map_from_netlist_components(
+    components: Sequence,
+) -> dict[str, str] | None:
+    """Build the ``ref -> sheet_path`` map from parsed netlist components.
+
+    A schematic group is the set of footprints whose symbols sit on the same
+    schematic sheet (the netlist's ``sheetpath`` node, issue #10146). A map
+    spanning fewer than two distinct sheets carries no grouping information
+    (a single-sheet design is one whole-board group), so ``None`` comes back
+    and the schematic-group terms stay dormant. Components without a
+    reference or a sheet path are skipped.
+    """
+    ref_sheets = {
+        comp.reference: comp.sheet_path
+        for comp in components
+        if getattr(comp, "reference", "") and getattr(comp, "sheet_path", "")
+    }
+    if len(set(ref_sheets.values())) < 2:
+        return None
+    return ref_sheets
+
+
+def _build_sheet_map(pcb_path: str, quiet: bool = False) -> dict[str, str] | None:
+    """Resolve the ``ref -> sheet_path`` map for the board (issue #10146).
+
+    Discovers the schematic associated with the PCB
+    (:func:`kicad_tools.sync.discover.resolve_schematic_for_pcb`), exports a
+    netlist with kicad-cli into a scratch directory and parses each
+    component's ``sheetpath``. Every failure mode -- no schematic next to the
+    board, kicad-cli unavailable, a failed export -- degrades to ``None`` so
+    the objective stays byte-identical; the schematic-group terms are an
+    opt-out-by-degradation preference, never a run-breaking input.
+
+    Returns the map, or ``None`` when unavailable or the design is
+    single-sheet.
+    """
+    from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+    sch_path = resolve_schematic_for_pcb(pcb_path)
+    if sch_path is None:
+        return None
+
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    kicad_cli = find_kicad_cli()
+    if kicad_cli is None:
+        if not quiet:
+            print("  Schematic sheets: kicad-cli not found; schematic-group terms dormant")
+        return None
+
+    from kicad_tools.cli.export_netlist import export_netlist, load_netlist
+
+    with tempfile.TemporaryDirectory(prefix="kct-sheet-map-") as tmp:
+        netlist_path = Path(tmp) / "netlist.net"
+        ok, error = export_netlist(sch_path, netlist_path, kicad_cli)
+        if not ok:
+            if not quiet:
+                print(
+                    f"  WARNING: schematic-sheet grouping unavailable "
+                    f"(netlist export failed: {error}); terms dormant"
+                )
+            return None
+        netlist = load_netlist(netlist_path)
+
+    ref_sheets = _sheet_map_from_netlist_components(netlist.components)
+    if ref_sheets is None:
+        return None
+
+    if not quiet:
+        n_sheets = len(set(ref_sheets.values()))
+        print(
+            f"  Schematic sheets: {n_sheets} sheet(s) over {len(ref_sheets)} refs "
+            f"from {sch_path.name}; group_cohesion weight shapes the layout"
+        )
+    return ref_sheets
+
+
 def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
     """Parse a JSON string into PlacementCostConfig.
 
@@ -846,7 +933,13 @@ def weights_to_cost_config(data: dict | None) -> PlacementCostConfig:
     convergence check (issue #2821) can use the feasibility-sentinel
     score (>= 1e12) to refuse early convergence in the infeasible region.
     The decoupling-cap affinity term (issue #6020) is on by default;
-    ``{"decoupling": 0}`` turns it (and the post-optimize snap) off.
+    ``{"decoupling": 0}`` turns it (and the post-optimize snap) off. The
+    schematic-group terms (issue #10146) -- ``group_cohesion`` (per-sheet
+    spread) and ``group_order`` (within-sheet schematic order) -- are soft
+    preferences on by default at ``1.0``; they only fire on multi-sheet
+    designs whose schematic is discoverable next to the PCB, and
+    ``{"group_cohesion": 0, "group_order": 0}`` disables both (and skips the
+    netlist export that feeds them).
 
     Callers can override the mode via the ``"mode"`` key (``"lexicographic"``
     or ``"weighted_sum"``).
@@ -863,6 +956,8 @@ def weights_to_cost_config(data: dict | None) -> PlacementCostConfig:
         "creepage_weight": 1e5,
         "cohesion_weight": 1.0,
         "decoupling_weight": 2.0,
+        "group_cohesion_weight": 1.0,
+        "group_order_weight": 1.0,
         "mode": CostMode.LEXICOGRAPHIC,
     }
 
@@ -887,6 +982,8 @@ def weights_to_cost_config(data: dict | None) -> PlacementCostConfig:
         creepage_weight=data.get("creepage", defaults["creepage_weight"]),
         cohesion_weight=data.get("cohesion", defaults["cohesion_weight"]),
         decoupling_weight=data.get("decoupling", defaults["decoupling_weight"]),
+        group_cohesion_weight=data.get("group_cohesion", defaults["group_cohesion_weight"]),
+        group_order_weight=data.get("group_order", defaults["group_order_weight"]),
         mode=mode,
     )
 
@@ -1015,10 +1112,13 @@ def _print_score(label: str, score: PlacementScore) -> None:
     feasible = "feasible" if score.is_feasible else "INFEASIBLE"
     creepage_str = f" crp={b.creepage:.2f}" if b.creepage else ""
     decoupling_str = f" dcp={b.decoupling:.2f}" if b.decoupling else ""
+    sheet_cohesion_str = f" sgrp={b.group_cohesion:.2f}" if b.group_cohesion else ""
+    sheet_order_str = f" sord={b.group_order:.2f}" if b.group_order else ""
     print(
         f"  {label}: {score.total:.4f} ({feasible}) "
         f"[wl={b.wirelength:.2f} ovl={b.overlap:.2f} bnd={b.boundary:.2f} "
-        f"drc={b.drc:.0f} area={b.area:.2f}{creepage_str}{decoupling_str}]"
+        f"drc={b.drc:.0f} area={b.area:.2f}{creepage_str}{decoupling_str}"
+        f"{sheet_cohesion_str}{sheet_order_str}]"
     )
 
 
@@ -1511,6 +1611,20 @@ def run_optimize_placement(
     # and an unchanged objective.
     decoupling_groups = _build_decoupling_context(pcb_path, nets, cost_config, quiet=quiet)
 
+    # Schematic-sheet grouping (issue #10146): keep the parts a sheet draws
+    # together and in schematic order. The map is resolved from the
+    # schematic next to the PCB (netlist export via kicad-cli); single-sheet
+    # and schematic-less boards, and zeroed group weights, all keep the
+    # objective byte-identical to today.
+    sheet_map: dict[str, str] | None = None
+    if cost_config.group_cohesion_weight or cost_config.group_order_weight:
+        try:
+            sheet_map = _build_sheet_map(pcb_path, quiet=quiet)
+        except Exception as e:  # pragma: no cover - defensive: never break a run
+            if not quiet:
+                print(f"  WARNING: schematic-sheet grouping unavailable ({e}); terms dormant")
+            sheet_map = None
+
     # Pad-anchored wirelength (issue #4831 M1). The pads are transformed on
     # every decode regardless; this only decides whether the objective reads
     # them or throws them away. Warn -- rather than silently no-op -- when the
@@ -1569,6 +1683,7 @@ def run_optimize_placement(
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
             decoupling_groups=decoupling_groups,
+            ref_sheets=sheet_map,
             fixed_sides=fixed_sides,
         )
         # Report BOTH wirelength estimators for this layout (issue #4831 M5).
@@ -1726,6 +1841,7 @@ def run_optimize_placement(
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
             decoupling_groups=decoupling_groups,
+            ref_sheets=sheet_map,
             fixed_sides=fixed_sides,
         )
         if not quiet:
@@ -1753,6 +1869,7 @@ def run_optimize_placement(
                 exempt_pairs=hv_exempt,
                 pad_anchored=pad_anchored_wirelength,
                 decoupling_groups=decoupling_groups,
+                ref_sheets=sheet_map,
                 fixed_sides=fixed_sides,
             )
             initial_scores.append(score.total)
@@ -1775,6 +1892,7 @@ def run_optimize_placement(
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
             decoupling_groups=decoupling_groups,
+            ref_sheets=sheet_map,
             fixed_sides=fixed_sides,
         )
 
@@ -1831,6 +1949,7 @@ def run_optimize_placement(
                     exempt_pairs=hv_exempt,
                     pad_anchored=pad_anchored_wirelength,
                     decoupling_groups=decoupling_groups,
+                    ref_sheets=sheet_map,
                     fixed_sides=fixed_sides,
                 )
                 scores.append(score.total)
@@ -1927,6 +2046,7 @@ def run_optimize_placement(
             ref_domains=hv_ref_domains,
             required_mm_by_domain_pair=hv_required,
             exempt_pairs=hv_exempt,
+            ref_sheets=sheet_map,
             pad_anchored=pad_anchored_wirelength,
         )
     else:
@@ -1954,6 +2074,7 @@ def run_optimize_placement(
                 ref_domains=hv_ref_domains,
                 required_mm_by_domain_pair=hv_required,
                 exempt_pairs=hv_exempt,
+                ref_sheets=sheet_map,
                 pad_anchored=pad_anchored_wirelength,
             )
             snaps[snapped.data.tobytes()] = moves
@@ -2020,6 +2141,7 @@ def run_optimize_placement(
         exempt_pairs=hv_exempt,
         pad_anchored=pad_anchored_wirelength,
         decoupling_groups=decoupling_groups,
+        ref_sheets=sheet_map,
         fixed_sides=fixed_sides,
     )
 
@@ -2061,6 +2183,10 @@ def run_optimize_placement(
             print(f"    Creepage:      {_delta(si.creepage, sf.creepage)}")
         if si.decoupling or sf.decoupling:
             print(f"    Decoupling:    {_delta(si.decoupling, sf.decoupling)}")
+        if si.group_cohesion or sf.group_cohesion:
+            print(f"    SheetCohesion: {_delta(si.group_cohesion, sf.group_cohesion)}")
+        if si.group_order or sf.group_order:
+            print(f"    SheetOrder:    {_delta(si.group_order, sf.group_order)}")
 
         # Feasibility transition (categorical, not percent)
         seed_feas = "feasible" if seed_score.is_feasible else "INFEASIBLE"
