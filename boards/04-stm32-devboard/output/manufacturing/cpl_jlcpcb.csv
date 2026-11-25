@@ -1,12 +1,12 @@
 Designator,Val,Package,Mid X,Mid Y,Rotation,Layer
 C1,10uF,Capacitor_SMD:C_0805_2012Metric,122.5000mm,-85.5000mm,0.0,Top
 C10,20pF,Capacitor_SMD:C_0805_2012Metric,137.5000mm,-83.5000mm,0.0,Top
-C11,20pF,Capacitor_SMD:C_0805_2012Metric,143.5000mm,-83.5000mm,0.0,Top
+C11,20pF,Capacitor_SMD:C_0805_2012Metric,143.5000mm,-82.6000mm,0.0,Top
 C12,100nF,Capacitor_SMD:C_0805_2012Metric,144.5000mm,-99.5000mm,0.0,Top
 C13,100nF,Capacitor_SMD:C_0805_2012Metric,149.5000mm,-99.5000mm,0.0,Top
 C14,100nF,Capacitor_SMD:C_0805_2012Metric,154.5000mm,-99.5000mm,0.0,Top
-C15,100nF,Capacitor_SMD:C_0805_2012Metric,144.5000mm,-103.5000mm,0.0,Top
-C16,4.7uF,Capacitor_SMD:C_0805_2012Metric,149.5000mm,-103.5000mm,0.0,Top
+C15,100nF,Capacitor_SMD:C_0805_2012Metric,142.8000mm,-84.6000mm,180.0,Top
+C16,4.7uF,Capacitor_SMD:C_0805_2012Metric,141.5000mm,-86.6000mm,180.0,Top
 C2,10uF,Capacitor_SMD:C_0805_2012Metric,133.5000mm,-77.5000mm,0.0,Top
 C3,100nF,Capacitor_SMD:C_0805_2012Metric,133.5000mm,-83.5000mm,0.0,Top
 D1,LED,LED_SMD:LED_0805_2012Metric,165.5000mm,-79.5000mm,180.0,Top
