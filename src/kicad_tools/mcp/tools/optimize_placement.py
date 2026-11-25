@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 from kicad_tools.cli.optimize_placement_cmd import (
     _board_pins,
     _build_decoupling_context,
+    _build_sheet_map,
     _compute_net_anchor_weight,  # noqa: F401  (re-exported)
     _decoupling_report,
     _evaluate,
@@ -128,10 +129,28 @@ def _evaluate_vector(
     board: BoardOutline,
     cost_config: PlacementCostConfig,
     footprint_sizes: dict[str, tuple[float, float]],
+    ref_sheets: dict[str, str] | None = None,
 ) -> PlacementScore:
     """Evaluate a single placement vector and return its score."""
     placements = _vector_to_placements(vector, components)
-    return cost_evaluate_placement(placements, nets, rules, board, cost_config, footprint_sizes)
+    return cost_evaluate_placement(
+        placements, nets, rules, board, cost_config, footprint_sizes, ref_sheets=ref_sheets
+    )
+
+
+def _resolve_sheet_map(pcb_path: str, cost_config: PlacementCostConfig) -> dict[str, str] | None:
+    """``ref -> sheet`` map for the schematic-group terms, or ``None``.
+
+    Mirrors the CLI's gate: skipped (no netlist export) when both group weights
+    are zero, and any failure degrades to ``None`` (issue #10146).
+    """
+    if not (cost_config.group_cohesion_weight or cost_config.group_order_weight):
+        return None
+    try:
+        return _build_sheet_map(pcb_path, quiet=True)
+    except Exception:  # defensive: never break a run
+        logger.debug("schematic-sheet grouping unavailable", exc_info=True)
+        return None
 
 
 def _build_footprint_sizes(
@@ -330,6 +349,9 @@ def optimize_placement(
     fixed_sides = _board_pins(_read_current_vector(pcb_path, components), components, locked_refs)
     locked_indices = sorted(fixed_sides.poses)
     decoupling_groups = _build_decoupling_context(pcb_path, nets, cost_config, quiet=True)
+    # Schematic-sheet grouping (issue #10146): same map, same weight gate as the
+    # CLI, so ``group_cohesion`` / ``group_order`` are not inert here.
+    sheet_map = _resolve_sheet_map(pcb_path, cost_config)
 
     def _score(vec: PlacementVector) -> PlacementScore:
         return _evaluate(
@@ -342,6 +364,7 @@ def optimize_placement(
             footprint_sizes,
             decoupling_groups=decoupling_groups,
             fixed_sides=fixed_sides,
+            ref_sheets=sheet_map,
         )
 
     # Create strategy.  Annotated with the concrete union (not the abstract
@@ -494,6 +517,7 @@ def optimize_placement(
             footprint_sizes,
             _without_caps(decoupling_groups, locked_refs),
             fixed_sides=fixed_sides,
+            ref_sheets=sheet_map,
         )
 
     route_check_report: RouteCheckReport | None = None
@@ -697,7 +721,13 @@ def evaluate_placement(
 
     # Evaluate placement
     score = cost_evaluate_placement(
-        current_placements, nets, rules, board_outline, cost_config, footprint_sizes
+        current_placements,
+        nets,
+        rules,
+        board_outline,
+        cost_config,
+        footprint_sizes,
+        ref_sheets=_resolve_sheet_map(pcb_path, cost_config),
     )
 
     # Compute per-footprint ratsnest distances

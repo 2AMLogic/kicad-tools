@@ -37,7 +37,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable, ParamSpec, Sequence, TypeVar
+from typing import TYPE_CHECKING, Callable, ParamSpec, Sequence, TypeVar
 
 import numpy as np
 
@@ -84,6 +84,9 @@ from kicad_tools.placement.wirelength import (
     compare_wirelength_estimators,
 )
 from kicad_tools.placement.writeback import write_footprint_placements
+
+if TYPE_CHECKING:
+    from kicad_tools.cli.export_netlist import Component as NetlistComponent
 
 # Placement grid for slide-off displacements on a ``--seed current`` warm
 # start (issue #6250). Matches the decoupling snap's grid and board 04's
@@ -827,7 +830,7 @@ def _build_hv_context(
 
 
 def _sheet_map_from_netlist_components(
-    components: Sequence,
+    components: Sequence[NetlistComponent],
 ) -> dict[str, str] | None:
     """Build the ``ref -> sheet_path`` map from parsed netlist components.
 
@@ -839,9 +842,7 @@ def _sheet_map_from_netlist_components(
     reference or a sheet path are skipped.
     """
     ref_sheets = {
-        comp.reference: comp.sheet_path
-        for comp in components
-        if getattr(comp, "reference", "") and getattr(comp, "sheet_path", "")
+        comp.reference: comp.sheet_path for comp in components if comp.reference and comp.sheet_path
     }
     if len(set(ref_sheets.values())) < 2:
         return None
@@ -898,7 +899,7 @@ def _build_sheet_map(pcb_path: str, quiet: bool = False) -> dict[str, str] | Non
         n_sheets = len(set(ref_sheets.values()))
         print(
             f"  Schematic sheets: {n_sheets} sheet(s) over {len(ref_sheets)} refs "
-            f"from {sch_path.name}; group_cohesion weight shapes the layout"
+            f"from {sch_path.name}; schematic-group terms active"
         )
     return ref_sheets
 

@@ -730,18 +730,21 @@ def compute_creepage_violation(
     return total
 
 
-def _centroid_spread(positions: Sequence[tuple[float, float]]) -> float:
-    """Sum of member distances to the centroid of *positions* (mm).
+def _centroid_spread(positions: Sequence[tuple[float, float]], start: float = 0.0) -> float:
+    """Sum of member distances to the centroid of *positions* (mm), added to *start*.
+
+    *start* lets a caller keep one running accumulator across several groups,
+    preserving the original float summation order.
 
     The radius-of-gyration-style spread shared by the domain-cohesion and
     sheet-cohesion terms (issue #10146). Fewer than two members yield ``0.0``.
     """
     n = len(positions)
     if n < 2:
-        return 0.0
+        return start
     cx = sum(x for x, _ in positions) / n
     cy = sum(y for _, y in positions) / n
-    return float(sum(((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 for x, y in positions))
+    return float(sum((((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 for x, y in positions), start))
 
 
 def compute_domain_cohesion(
@@ -798,7 +801,10 @@ def compute_domain_cohesion(
             continue
         by_domain.setdefault(domain, []).append((p.x, p.y))
 
-    return sum(_centroid_spread(positions) for positions in by_domain.values())
+    total = 0.0
+    for positions in by_domain.values():
+        total = _centroid_spread(positions, total)
+    return total
 
 
 # Minimum members for a schematic sheet to count as a group (issue #10146):
@@ -912,10 +918,12 @@ def compute_sheet_order(
     Within each sheet (see :func:`compute_sheet_cohesion` for the group
     definition), parts sharing a reference prefix are ordered by their
     schematic (reference/annotation) order -- ``R2`` before ``R10`` -- and
-    their positions are read along the group's **dominant axis** (the axis of
-    the group's larger bounding-box extent). Every pair placed in the
+    their positions are read along that prefix group's **dominant axis** (the
+    axis of the *prefix group's* larger bounding-box extent, not the sheet's). Every pair placed in the
     opposite order along that axis contributes the depth of the inversion
-    (mm): a smooth, piecewise-linear penalty that is zero for a correctly
+    (mm): a piecewise-linear penalty (continuous for a fixed axis; the axis pick
+    flips when a prefix group's x-extent crosses its y-extent, so it is not
+    continuous overall -- tolerable for derivative-free CMA-ES) that is zero for a correctly
     ordered group however far apart it is spread, and grows with how badly
     the placement disagrees with the schematic's reading order.
 
