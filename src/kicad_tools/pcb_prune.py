@@ -2529,6 +2529,108 @@ class PruneResult:
     creepage: dict[str, Any] | None = None
 
 
+def _seg_index(pcb: PCB, seg: Segment) -> int | None:
+    def geometry(s: Segment) -> tuple:
+        return (s.net_number, s.layer, s.width, tuple(sorted((s.start, s.end))))
+
+    if seg.uuid:
+        hits = [i for i, s in enumerate(pcb.segments) if s.uuid == seg.uuid]
+    else:
+        hits = [i for i, s in enumerate(pcb.segments) if geometry(s) == geometry(seg)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _via_index(pcb: PCB, via: Any) -> int | None:
+    if via.uuid:
+        hits = [i for i, v in enumerate(pcb.vias) if v.uuid == via.uuid]
+    else:
+        hits = [
+            i
+            for i, v in enumerate(pcb.vias)
+            if v.position == via.position and v.net_number == via.net_number
+        ]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _has_pour_candidates(pcb: PCB) -> bool:
+    """Cheap, kicad-cli-free test for whether a pour-stub proof could add anything."""
+    from kicad_tools.validate.pour_stub import discover_pour_stubs
+
+    try:
+        return bool(pcb.zones and pcb.segments and discover_pour_stubs(pcb))
+    except Exception as e:  # noqa: BLE001 - discovery must never fail prune
+        logger.debug("pour-stub discovery failed: %s", e)
+        return False
+
+
+def _plan_pour_stubs(
+    pcb_path: Path,
+    accepted: list[NetPlan],
+    *,
+    rule_files: Sequence[Path] | None,
+    nets: Collection[str] | None,
+    region: Region | None,
+) -> list[NetPlan]:
+    """One plan per net removing pad branches proven redundant on the refilled pour.
+
+    The proof runs on ``pcb_path`` with ``accepted`` applied, and each branch is
+    judged on the refilled board that lacks the branches accepted before it
+    (Issue #10138). A branch's track and via are removed together. Nothing is
+    returned unless every selected branch maps back onto untouched board copper.
+    """
+    from kicad_tools.validate.pour_stub import PourStub, select_pour_stubs
+
+    def include(branch: PourStub) -> bool:
+        if nets is not None and branch.net not in nets:
+            return False
+        if region is None:
+            return True
+        x1, y1, x2, y2 = region
+        pts = [branch.segment.start, branch.segment.end]
+        if branch.via:
+            pts.append(branch.via.position)
+        return all(x1 <= x <= x2 and y1 <= y <= y2 for x, y in pts)
+
+    staged = PCB.load(pcb_path)
+    if accepted:
+        apply_plans(staged, accepted)
+    picked = select_pour_stubs(staged, rule_files=rule_files, include=include)
+    if not picked:
+        return []
+    original = PCB.load(pcb_path)
+    touched_segs = {
+        i
+        for p in accepted
+        for i in (
+            *p.remove,
+            *(i for i, *_ in p.snaps),
+            *(i for i, *_ in p.extends),
+            *(i for i, _ in p.splits),
+        )
+    }
+    touched_vias = {i for p in accepted for i in p.remove_vias}
+    by_net: dict[int, NetPlan] = {}
+    for branch, _evidence in picked:
+        seg_i = _seg_index(original, branch.segment)
+        via_i = _via_index(original, branch.via) if branch.via else None
+        if (
+            seg_i is None
+            or seg_i in touched_segs
+            or (branch.via is not None and (via_i is None or via_i in touched_vias))
+        ):
+            return []
+        plan = by_net.setdefault(
+            branch.segment.net_number, NetPlan(branch.segment.net_number, branch.net)
+        )
+        plan.remove.append(seg_i)
+        plan.reasons[seg_i] = (
+            f"pad {branch.pad_name} stays bonded to the refilled pour without this branch"
+        )
+        if via_i is not None:
+            plan.remove_vias.append(via_i)
+    return [by_net[n] for n in sorted(by_net)]
+
+
 def prune_board(
     pcb_path: Path,
     *,
@@ -2577,7 +2679,10 @@ def prune_board(
     rejected: list[NetPlan] = []
     drc_verified, note = False, "DRC verification skipped (--no-drc)"
 
-    if verify_drc and plans:
+    pour_plans: list[NetPlan] = []
+    pour_all: list[NetPlan] = []
+    wants_pour = verify_drc and _has_pour_candidates(pcb)
+    if verify_drc and (plans or wants_pour):
         with tempfile.TemporaryDirectory(prefix="kct_prune_") as tmp:
             trial_path = Path(tmp) / "trial.kicad_pcb"
             # DRC must run with the project's rules (clearances, netclasses).
@@ -2603,28 +2708,56 @@ def prune_board(
                         "default rules only, custom clearances were NOT evaluated)"
                     )
 
-                def _trial_ok(group: list[NetPlan]) -> bool:
+                def _trial_sig(group: list[NetPlan]) -> Counter | None:
                     trial = PCB.load(pcb_path)
                     apply_plans(trial, group)
                     trial.save(trial_path)
-                    after = _drc_signature(trial_path)
-                    return after is not None and not _worse(after, baseline)
+                    return _drc_signature(trial_path)
 
-                # One DRC for everything; fall back to per-net only if it fails.
-                if _trial_ok(plans):
-                    accepted, rejected = list(plans), []
-                else:
-                    accepted, rejected = [], []
-                    for plan in plans:
-                        if _trial_ok([*accepted, plan]):
-                            accepted.append(plan)
-                        else:
-                            rejected.append(plan)
+                def _trial_ok(group: list[NetPlan], base: Counter = baseline) -> bool:
+                    after = _trial_sig(group)
+                    return after is not None and not _worse(after, base)
+
+                if plans:
+                    # One DRC for everything; fall back to per-net only if it fails.
+                    if _trial_ok(plans):
+                        accepted, rejected = list(plans), []
+                    else:
+                        accepted, rejected = [], []
+                        for plan in plans:
+                            if _trial_ok([*accepted, plan]):
+                                accepted.append(plan)
+                            else:
+                                rejected.append(plan)
+
+                # Issue #10138: a pour-redundant branch needs a native refill proof
+                # as well as the DRC comparison. Without either it stays on the board.
+                if wants_pour:
+                    proposed = _plan_pour_stubs(
+                        Path(pcb_path),
+                        accepted,
+                        rule_files=list(rules),
+                        nets=nets,
+                        region=region,
+                    )
+                    pour_all = list(proposed)
+                    pour_base: Counter | None = baseline
+                    if proposed and accepted:
+                        # Compare against the board the ordinary edits leave behind.
+                        pour_base = _trial_sig(accepted)
+                    if pour_base is not None:
+                        for plan in proposed:
+                            if _trial_ok([*accepted, *pour_plans, plan], pour_base):
+                                pour_plans.append(plan)
+                            else:
+                                plan.reject_reason = "pour-stub removal added new DRC findings"
+                                rejected.append(plan)
     elif verify_drc:
         note = "nothing to verify"
 
     # Issue #8687: never trade a resolved declared-current net for an ambiguous one.
     gate_specs = _gate_specs(Path(pcb_path), current_paths)
+    ordinary_accepted = len(accepted)
     if gate_specs and accepted:
         accepted, audit_rejected = _audit_gate(Path(pcb_path), accepted, gate_specs)
         rejected = [*rejected, *audit_rejected]
@@ -2640,6 +2773,30 @@ def prune_board(
             creepage_required_pairs,
         )
 
+    if pour_plans:
+        if len(accepted) != ordinary_accepted:
+            # A gate dropped an ordinary edit, so the pour proof's board is gone.
+            for plan in pour_plans:
+                plan.reject_reason = "pour proof no longer matches the edits kept by the gates"
+            rejected = [*rejected, *pour_plans]
+            pour_plans = []
+        else:
+            if gate_specs:
+                pour_plans, audit_rejected = _audit_gate(Path(pcb_path), pour_plans, gate_specs)
+                rejected = [*rejected, *audit_rejected]
+            if creepage_audit is not None and pour_plans:
+                accepted, more, creepage_report = _creepage_gate(
+                    Path(pcb_path),
+                    [*accepted, *pour_plans],
+                    creepage_audit,
+                    creepage_baseline_text,
+                    creepage_required_pairs,
+                )
+                creepage_rejected = [*creepage_rejected, *more]
+            else:
+                accepted = [*accepted, *pour_plans]
+
+    plans = [*plans, *pour_all]
     stats = {"segments_removed": 0, "ends_snapped": 0}
     if apply and accepted:
         stats = apply_plans(pcb, accepted)

@@ -2830,3 +2830,179 @@ def test_uncovered_tail_to_via_and_pad_survives_prune(tmp_path):
         v["actual_value"] == 0.2 and "too narrow" in v["message"]
         for v in _path_ampacity_violations(report)
     )
+
+
+# ---------------------------------------------------------------------------
+# Verified pour-redundant pad branches (issue #10138)
+# ---------------------------------------------------------------------------
+
+
+def _pour_uid(name):
+    from tests.test_pour_stub_10137 import uid
+
+    return uid(name)
+
+
+def _pour_board(folder: Path, case: str, *, via: bool = True, twin: bool = False) -> Path:
+    from tests.test_pour_stub_10137 import fixture_board
+
+    path = fixture_board(folder, case, via=via)
+    if twin:
+        # A second U1.1-like branch at y=8 whose copper is, like the first, one of
+        # two links between the front pour and the In1 plane.
+        uid = _pour_uid
+        footprint = f"""(footprint "Test:U2" (layer "F.Cu") (at 3 8) (uuid {uid("U2")})
+          (property "Reference" "U2" (at 0 -2 0) (layer "F.SilkS"))
+          (pad "1" smd rect (layers "F.Cu" "F.Mask") (at 0 0) (size 1.4 1.4) (net 1 "GND")
+            (uuid {uid("U2pad")})))"""
+        extra = f"""{footprint}
+          (segment (start 3 8) (end 6 8) (width 0.25) (layer "F.Cu") (net 1) (uuid {uid("track2")}))
+          (via (at 6 8) (size 0.7) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid {uid("via2")}))"""
+        text = path.read_text().rstrip()
+        assert text.endswith(")")
+        path.write_text(text[:-1] + extra + ")")
+    return path
+
+
+def _pour_run(path: Path, *extra: str, apply: bool = False):
+    from kicad_tools.cli.commands.pcb import _run_prune_command
+    from kicad_tools.cli.parser import create_parser
+
+    argv = ["pcb", "prune", str(path), "--format", "json", *extra]
+    if not apply:
+        argv.append("--dry-run")
+    return _run_prune_command(create_parser().parse_args(argv), path)
+
+
+def _snapshot(folder: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in folder.iterdir()}
+
+
+def _copper(path: Path):
+    pcb = PCB.load(path)
+    return {s.uuid for s in pcb.segments}, {v.uuid for v in pcb.vias}
+
+
+@pytest.mark.parametrize("via", [True, False])
+def test_prune_removes_verified_pour_branch_and_second_pass_is_quiet(tmp_path, capsys, via):
+    from tests.test_pour_stub_10137 import require_native_refill
+
+    require_native_refill()
+    path = _pour_board(tmp_path, "connected", via=via)
+    before = _snapshot(tmp_path)
+    assert _pour_run(path) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["removed"] == {"segments": 1, "vias": 1 if via else 0}
+    assert preview["drc_verified"]
+    assert _snapshot(tmp_path) == before  # preview never writes
+
+    assert _pour_run(path, apply=True) == 0
+    capsys.readouterr()
+    segs, vias = _copper(path)
+    assert _pour_uid("track") not in segs
+    assert _pour_uid("via") not in vias
+
+    again = _snapshot(tmp_path)
+    assert _pour_run(path) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["removed"] == {"segments": 0, "vias": 0}
+    assert _snapshot(tmp_path) == again
+
+
+def test_prune_keeps_sole_plane_bridge(tmp_path, capsys):
+    from tests.test_pour_stub_10137 import require_native_refill
+
+    require_native_refill()
+    path = _pour_board(tmp_path, "bridge")
+    assert _pour_run(path) == 0
+    assert json.loads(capsys.readouterr().out)["removed"] == {"segments": 0, "vias": 0}
+
+
+def test_prune_never_removes_both_branches_that_jointly_bridge_the_plane(tmp_path, capsys):
+    from kicad_tools.cli import runner
+    from tests.test_pour_stub_10137 import require_native_refill
+
+    require_native_refill()
+    path = _pour_board(tmp_path, "bridge", twin=True)
+    assert _pour_run(path) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["removed"] == {"segments": 1, "vias": 1}
+
+    assert _pour_run(path, apply=True) == 0
+    capsys.readouterr()
+    segs, vias = _copper(path)
+    # Preview and apply agree: exactly one branch survives, whole.
+    assert (_pour_uid("track") in segs) != (_pour_uid("track2") in segs)
+    assert (_pour_uid("via") in vias) == (_pour_uid("track") in segs)
+    assert (_pour_uid("via2") in vias) == (_pour_uid("track2") in segs)
+
+    # The survivor still joins the surface pour to the In1 plane after a refill.
+    assert runner.run_refill_zones(path, require_save=True).success
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    partition = set(ConnectivityValidator(path).extract_pad_partition())
+    assert partition == {frozenset({"J1.1", "U1.1", "U2.1"})}
+
+
+def test_prune_keeps_pour_branch_without_native_proof(tmp_path, capsys, monkeypatch):
+    from kicad_tools.cli import runner
+    from tests.test_pour_stub_10137 import require_native_refill
+
+    require_native_refill()
+    path = _pour_board(tmp_path, "connected")
+
+    # Disabled verification: nothing may be removed on the strength of a proof.
+    assert _pour_run(path, "--no-drc", "--unverified") == 0
+    assert json.loads(capsys.readouterr().out)["removed"] == {"segments": 0, "vias": 0}
+
+    # No kicad-cli at all.
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: None)
+    assert _pour_run(path) == 0
+    assert json.loads(capsys.readouterr().out)["removed"] == {"segments": 0, "vias": 0}
+
+
+def test_prune_keeps_branch_whose_trial_refill_fails(tmp_path, capsys, monkeypatch):
+    from kicad_tools.cli import runner
+    from tests.test_pour_stub_10137 import require_native_refill
+
+    require_native_refill()
+    path = _pour_board(tmp_path, "bridge", twin=True)
+    refill = runner.run_refill_zones
+    calls = []
+
+    def second_trial_fails(board_path, *args, **kwargs):
+        calls.append(board_path)
+        if len(calls) == 3:  # baseline, first trial, then the second trial
+            return runner.KiCadCLIResult(success=False, stderr="trial refill failed")
+        return refill(board_path, *args, **kwargs)
+
+    monkeypatch.setattr(runner, "run_refill_zones", second_trial_fails)
+    assert _pour_run(path, apply=True) == 0
+    capsys.readouterr()
+    segs, vias = _copper(path)
+    assert _pour_uid("track") not in segs  # the branch that was proven goes
+    assert _pour_uid("track2") in segs and _pour_uid("via2") in vias  # the failed one stays
+
+
+def test_prune_keeps_pour_branch_when_edit_adds_a_drc_finding(tmp_path, capsys, monkeypatch):
+    from collections import Counter
+
+    import kicad_tools.pcb_prune as mod
+    from tests.test_pour_stub_10137 import require_native_refill
+
+    require_native_refill()
+    path = _pour_board(tmp_path, "connected")
+    calls = []
+
+    def signature(board_path):
+        calls.append(board_path)
+        # the baseline is clean; the board with the branch removed is not
+        return Counter() if len(calls) == 1 else Counter({("clearance", "error", "", ()): 1})
+
+    monkeypatch.setattr(mod, "_drc_signature", signature)
+    assert _pour_run(path, apply=True) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["removed"] == {"segments": 0, "vias": 0}
+    assert [n["net"] for n in out["rejected_by_drc"]] == ["GND"]
+    segs, vias = _copper(path)
+    assert _pour_uid("track") in segs and _pour_uid("via") in vias
