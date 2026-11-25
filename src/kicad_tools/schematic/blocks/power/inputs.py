@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from .. import decoupling_defaults as defaults
 from ..base import CircuitBlock
 
 if TYPE_CHECKING:
@@ -87,7 +88,7 @@ class BarrelJackInput(CircuitBlock):
         y: float,
         voltage: str = "12V",
         protection: str = "pfet",  # "pfet", "diode", or "none"
-        filter_cap: str = "100uF",
+        filter_cap: str = defaults.DefaultValue(defaults.BARREL_INPUT),
         ref_prefix: str = "J1",
         jack_symbol: str = "Connector:Barrel_Jack_Switch",
         pfet_symbol: str = "Device:Q_PMOS",
@@ -209,7 +210,9 @@ class BarrelJackInput(CircuitBlock):
         # Place filter capacitor
         c_ref = f"C{base_num}"
         c_x = x + cap_offset
-        self.filter_cap = sch.add_symbol(cap_symbol, c_x, y + 10, c_ref, filter_cap)
+        self.filter_cap = self._add_decoupling_cap(
+            cap_symbol, c_x, y + 10, c_ref, filter_cap, owner=ref_prefix, role="bulk"
+        )
         self.components["C_FILT"] = self.filter_cap
 
         # Wire protection output to cap
@@ -286,7 +289,7 @@ class USBPowerInput(CircuitBlock):
         x: float,
         y: float,
         protection: str = "fuse",  # "fuse", "polyfuse", or "none"
-        filter_cap: str = "10uF",
+        filter_cap: str = defaults.DefaultValue(defaults.BULK),
         fuse_rating: str = "500mA",
         ref_prefix: str = "J1",
         fuse_symbol: str = "Device:Polyfuse",
@@ -344,7 +347,9 @@ class USBPowerInput(CircuitBlock):
         # Place filter capacitor
         c_ref = f"C{base_num}"
         c_x = x + cap_offset
-        self.filter_cap = sch.add_symbol(cap_symbol, c_x, y + 10, c_ref, filter_cap)
+        self.filter_cap = self._add_decoupling_cap(
+            cap_symbol, c_x, y + 10, c_ref, filter_cap, owner=ref_prefix, role="bulk"
+        )
         self.components["C_FILT"] = self.filter_cap
 
         # Wire fuse output to cap
@@ -407,7 +412,7 @@ class BatteryInput(CircuitBlock):
         voltage: str = "3.7V",
         connector: str = "JST-PH",
         protection: str = "pfet",  # "pfet", "diode", or "none"
-        filter_cap: str = "10uF",
+        filter_cap: str = defaults.DefaultValue(defaults.BULK),
         ref_prefix: str = "J1",
         connector_symbol: str = "Connector_Generic:Conn_01x02",
         pfet_symbol: str = "Device:Q_PMOS",
@@ -491,7 +496,9 @@ class BatteryInput(CircuitBlock):
         # Place filter capacitor
         c_ref = f"C{base_num}"
         c_x = x + cap_offset
-        self.filter_cap = sch.add_symbol(cap_symbol, c_x, y + 10, c_ref, filter_cap)
+        self.filter_cap = self._add_decoupling_cap(
+            cap_symbol, c_x, y + 10, c_ref, filter_cap, owner=ref_prefix, role="bulk"
+        )
         self.components["C_FILT"] = self.filter_cap
 
         # Wire protection output to cap
@@ -548,7 +555,6 @@ def create_12v_barrel_jack(
         y,
         voltage="12V",
         protection=protection,
-        filter_cap="100uF",
         ref_prefix=ref,
     )
 
@@ -574,7 +580,6 @@ def create_usb_power(
         x,
         y,
         protection="polyfuse",
-        filter_cap="10uF",
         fuse_rating="500mA",
         ref_prefix=ref,
     )
@@ -594,6 +599,5 @@ def create_lipo_battery(
         voltage="3.7V",
         connector="JST-PH",
         protection="pfet",
-        filter_cap="10uF",
         ref_prefix=ref,
     )
