@@ -12,6 +12,8 @@ from kicad_tools.explain.checks.crystal import CrystalTraceLengthCheck
 from kicad_tools.explain.checks.power import PowerTraceWidthCheck
 from kicad_tools.schema.pcb import PCB
 
+from .test_decoupling_association import make_sheet
+
 _HEADER = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -52,17 +54,32 @@ def _ic(ref: str, x: float) -> str:
 """
 
 
-def test_bypass_one_finding_per_cap_and_pairs_nearest_ic(tmp_path: Path) -> None:
+def _bypass_schematic(tmp_path: Path) -> None:
+    """C1 is drawn beside U1 (not U2) on the shared +3V3 rail (issue #10141)."""
+    make_sheet(
+        tmp_path / "board.kicad_sch",
+        [
+            ("U1", 50.8, 50.8, "+3V3", None),
+            ("U2", 101.6, 50.8, "+3V3", None),
+            ("C1", 55.88, 50.8, "+3V3", None),
+        ],
+        [(50.8, 50.8, 55.88, 50.8)],
+    )
+
+
+def test_bypass_one_finding_per_cap_and_pairs_its_designated_ic(tmp_path: Path) -> None:
     # C1 sits beside U1; U2 is far away on the same rail.
     pcb = _load(tmp_path, _ic("U1", 20) + _ic("U2", 80) + _cap("C1", 17.5))
+    _bypass_schematic(tmp_path)
     assert BypassCapDistanceCheck().check(pcb) == []
 
 
 def test_bypass_far_cap_warns_once_even_with_two_ics(tmp_path: Path) -> None:
     pcb = _load(tmp_path, _ic("U1", 20) + _ic("U2", 80) + _cap("C1", 50))
+    _bypass_schematic(tmp_path)
     mistakes = BypassCapDistanceCheck().check(pcb)
     assert len(mistakes) == 1
-    assert mistakes[0].components[0] == "C1"
+    assert mistakes[0].components == ["C1", "U1"]
 
 
 def _seg(x1, y1, x2, y2, w=0.25, net=3, layer="F.Cu") -> str:

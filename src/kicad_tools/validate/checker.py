@@ -283,6 +283,12 @@ class DRCChecker:
         # check_all(); set to a (possibly empty) dict of
         # WidthConsistencyRule options to include it.
         self.width_consistency_options: dict[str, object] | None = None
+        # ``bypass_distance`` needs the board's schematic.  ``kct check`` passes
+        # the resolved path to :meth:`check_bypass_distance` explicitly; these
+        # defaults serve ``check_all`` callers (no schematic -> the rule does
+        # not run).
+        self.schematic_path: Path | None = None
+        self.bypass_max_distance_mm: float = 3.0
         self.pcb = pcb
         self.manufacturer = manufacturer
         self.layers = layers
@@ -451,6 +457,7 @@ class DRCChecker:
         "check_sharp_trace_corner",
         "check_missing_plated_hole",
         "check_board_id",
+        "check_bypass_distance",
         "check_single_pad_nets",
         "check_pad_grid_alignment",
         "check_thermal_asymmetry",
@@ -551,6 +558,12 @@ class DRCChecker:
         # fab-blocking defect.  Explicit entry REQUIRED -- the ``via``
         # prefix fallback would file it under Manufacturing.
         "via_under_body": CATEGORY_ADVISORY,
+        # Bypass-cap distance to the schematic-designated supply pin: a
+        # placement-quality advisory.  The unassociated/unmeasurable info
+        # companion needs its own entry -- unknown ids default to the
+        # fab-blocking Manufacturing bucket.
+        "bypass_distance": CATEGORY_ADVISORY,
+        "bypass_distance_unassociated": CATEGORY_ADVISORY,
         # JLCDFM mask warnings (Issue #8847): fab-DFM advisories.
         "mask_negative_expansion": CATEGORY_ADVISORY,
         "mask_multi_segment": CATEGORY_ADVISORY,
@@ -2062,6 +2075,40 @@ class DRCChecker:
         from .rules.via_type_capability import ViaTypeCapabilityRule
 
         rule = ViaTypeCapabilityRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_bypass_distance(
+        self,
+        schematic_path: str | Path | None = None,
+        max_distance_mm: float | None = None,
+    ) -> DRCResults:
+        """Check each bypass cap's distance to the supply pin its schematic designates.
+
+        Measures from the cap's supply pad to the pad of the pin chosen by
+        :func:`kicad_tools.placement.decoupling.schematic_cap_associations`
+        -- never the nearest pin on the rail, so two ICs sharing a rail with
+        swapped caps are reported.  Over-distance caps are ``bypass_distance``
+        warnings; caps with no defensible target (or not on the board) are
+        ``bypass_distance_unassociated`` info findings.  Advisory category.
+
+        Args:
+            schematic_path: The board's schematic; defaults to
+                :attr:`schematic_path`.  With neither, nothing runs (``kct
+                check`` reports the category as ``unknown``, not passed).
+            max_distance_mm: Maximum allowed distance in mm; defaults to
+                :attr:`bypass_max_distance_mm` (3.0).
+
+        Returns:
+            DRCResults containing ``bypass_distance`` findings.
+        """
+        from .rules.bypass_distance import BypassDistanceRule
+
+        rule = BypassDistanceRule(
+            schematic_path if schematic_path is not None else self.schematic_path,
+            max_distance_mm=(
+                max_distance_mm if max_distance_mm is not None else self.bypass_max_distance_mm
+            ),
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_via_under_body(self) -> DRCResults:
