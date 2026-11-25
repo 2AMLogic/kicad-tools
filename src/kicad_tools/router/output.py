@@ -1258,6 +1258,7 @@ def print_routing_diagnostics_json(
     grid_selection: str | None = None,
     silk_fix: dict | None = None,
     post_route_drc_only: bool = False,
+    exit_code: int | None = None,
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -1281,6 +1282,8 @@ def print_routing_diagnostics_json(
         silk_fix: Report for silk legalisation on the saved candidate, when run.
         post_route_drc_only: Set when the saved board is fully connected and only
             post-route DRC failed. Adds ``summary.failure_reason="post_route_drc"``.
+        exit_code: Include the adaptive route's existing top-level exit code and
+            verdict when adding a detailed summary to its compact document.
     """
     diagnostics = get_routing_diagnostics_json(
         router,
@@ -1299,6 +1302,8 @@ def print_routing_diagnostics_json(
         diagnostics["summary"]["failure_reason"] = "post_route_drc"
     if verdict is not None:
         diagnostics["summary"]["verdict"] = verdict
+    if exit_code is not None:
+        diagnostics.update(exit_code=exit_code, verdict=verdict)
     # json_stdout(): the real stdout even while ``kct route --format json``
     # diverts progress prints to stderr (issue #5938).
     from kicad_tools.json_stdout import json_stdout

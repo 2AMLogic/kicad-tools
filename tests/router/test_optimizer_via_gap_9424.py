@@ -243,3 +243,211 @@ def test_via_exit_at_either_end_uses_only_its_drilled_layers():
     via.span_type = "buried"
     assert list(via_exit_doglegs(forward, grid)) == []
     assert list(via_exit_doglegs(reverse, grid)) == []
+
+
+@pytest.mark.parametrize(
+    ("nearby", "extra_pad", "arc_layer", "arc_net"),
+    [
+        pytest.param(True, False, None, "20", id="exposed-slit"),
+        pytest.param(False, False, None, "20", id="clear-diagonal"),
+        pytest.param(True, True, None, "20", id="exposed-pad-gap"),
+        pytest.param(True, False, "F.Cu", "20", id="exposed-arc-gap"),
+        pytest.param(True, False, "F.Cu", '"RESET"', id="named-arc-net"),
+        pytest.param(True, False, "B.Cu", "20", id="arc-on-other-layer"),
+    ],
+)
+def test_reset_branch_enters_via_from_its_existing_trunk(
+    tmp_path, nearby, extra_pad, arc_layer, arc_net
+):
+    """Check the saved elbow against Board 05's adjacent pads, branches and curved track."""
+    from kicad_tools.cli.route_cmd import _write_routed_pcb
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.router.io import load_pcb_for_routing
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.physical_gap import (
+        check_physical_copper_gap_fab_view,
+        fab_gap_policy_from_entry,
+    )
+
+    start, barrel, end = (160.1, 95.8375), (159.765, 94.35), (170.49, 75.305)
+    pads = [
+        ("A", "1", *start, "F.Cu", "rect", 0, 0.4, 0.4, 20, "RESET"),
+        ("B", "1", *end, "B.Cu", "rect", 0, 0.4, 0.4, 20, "RESET"),
+        ("U1", "30", 159.3, 95.8375, "F.Cu", "roundrect", 0, 0.55, 1.475, 21, "STATUS_LED"),
+    ]
+    if extra_pad:
+        pads.append(("TP1", "1", 160.115, 94.55, "F.Cu", "rect", -45, 0.25, 0.25, 20, "RESET"))
+    board_items = [
+        f'(footprint "{ref}" (layer "{layer}") (at {x} {y}) (property "Reference" "{ref}") '
+        f'(pad "{pin}" smd {shape} (at 0 0 {angle}) (size {w} {h}) (layers "{layer}") '
+        f'(roundrect_rratio 0.25) (net {net} "{name}") (uuid "pad-{ref}-{pin}")))'
+        for ref, pin, x, y, layer, shape, angle, w, h, net, name in pads
+    ]
+    if arc_layer:
+        board_items.append(
+            "(arc (start 160.1 94.46) (mid 160.0705 94.4955) (end 160.035 94.525) "
+            f'(width 0.2) (layer "{arc_layer}") (net {arc_net}) '
+            '(uuid "0369116f-c7e0-49b6-a2b3-99cd87a50d6b"))'
+        )
+    source = tmp_path / "input.kicad_pcb"
+    source.write_text(
+        "(kicad_pcb (version 20240108) (generator pcbnew) (general (thickness 1.6))\n"
+        '(layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))\n'
+        '(net 0 "") (net 20 "RESET") (net 21 "STATUS_LED")\n'
+        "(gr_rect (start 150 73) (end 174 99) (stroke (width 0.05) (type default)) "
+        '(fill none) (layer "Edge.Cuts"))\n' + "\n".join(board_items) + "\n)"
+    )
+    policy = fab_gap_policy_from_entry(get_profile("jlcpcb").get_dfm_entry(4, 1.0, 0.5))
+    router, _ = load_pcb_for_routing(
+        str(source),
+        rules=DesignRules(
+            grid_resolution=0.1,
+            same_net_trace_gap_band_edge_mm=policy.trace.detection_edge_mm,
+            same_net_pad_gap_band_edge_mm=policy.pad.detection_edge_mm,
+        ),
+        layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+        use_pcb_rules=False,
+        validate_drc=False,
+        force_python=True,
+        edge_clearance=0,
+    )
+
+    def legs(points, layer=Layer.F_CU):
+        return [Segment(*a, *b, 0.2, layer, 20, "RESET") for a, b in pairwise(points)]
+
+    via = Via(*barrel, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 20, "RESET")
+    front = legs([start, (159.96, 95.6975), (159.96, 95.26), (159.96, 94.545), barrel])
+    back = legs([barrel, (158.725, 93.31), (170.49, 81.545), end], Layer.B_CU)
+    route = Route(net=20, net_name="RESET", segments=[*front, *back], vias=[via])
+    trunk = legs([start, (160.1, 92.41)])
+    other = legs([(159.7, 91.165), (159.7, 94.61), (159.96, 94.87)]) if nearby else []
+    sibling = Route(net=20, net_name="RESET", segments=[*trunk, *other])
+    router.routes = [route]
+    router.grid.mark_route(route)
+    router.grid.mark_route(sibling)
+
+    _optimize_traces(router, Namespace(), quiet=True)
+
+    (saved,) = router.routes
+    assert saved.vias == [via]
+    actual = [s for s in saved.segments if s.layer == Layer.F_CU]
+    blocks_repair = extra_pad or arc_layer == "F.Cu"
+    corner = (160.1, 94.35) if nearby and not blocks_repair else (160.1, 94.685)
+    assert [(s.start, s.end) for s in actual] == [(start, corner), (corner, barrel)]
+
+    output = tmp_path / "saved.kicad_pcb"
+    _write_routed_pcb(source, output, saved.to_sexp() + "\n" + sibling.to_sexp(), layer_count=4)
+    pcb = PCB.load(output)
+    assert len(pcb.arcs) == int(arc_layer is not None)
+    findings = [
+        v
+        for v in check_physical_copper_gap_fab_view(pcb, policy).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+    pad_findings = [v for v in findings if v.fab_band == "pad"]
+    trace_findings = [v for v in findings if v.fab_band == "trace"]
+    assert pad_findings == []
+    if blocks_repair:
+        assert [v.actual_value for v in trace_findings] == pytest.approx([0.029810], abs=1e-6)
+    else:
+        assert trace_findings == []
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("forward", True),
+        ("reverse", True),
+        ("horizontal-trunk", True),
+        ("foreign-trunk", False),
+        ("other-layer", False),
+        ("narrow-trunk", False),
+        ("short-trunk", False),
+        ("buried-via", False),
+        ("branch-contact", False),
+        ("gap-below-policy", False),
+        ("exposed-pad-gap", False),
+        ("pad-gap-within-policy", True),
+        ("trace-gap-between-thresholds", True),
+        ("wider-trace-threshold", False),
+        ("trace-only-policy", True),
+        ("pad-only-trace-slit", False),
+    ],
+)
+def test_via_elbow_preserves_existing_copper_and_branch_contacts(case, expected):
+    from kicad_tools.router.optimizer.pad_slits import covered_via_elbow
+
+    start, corner, barrel = (160.1, 95.8375), (160.1, 94.685), (159.765, 94.35)
+    bend = (160.1, 94.35)
+
+    def point(p):
+        return p[::-1] if case == "horizontal-trunk" else p
+
+    points = [start, corner, barrel]
+    if case == "reverse":
+        points.reverse()
+    chain = _segments([point(p) for p in points], Layer.F_CU)
+    via = Via(*point(barrel), 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 26, "VM")
+    if case == "buried-via":
+        via.layers = (Layer.IN1_CU, Layer.IN2_CU)
+        via.span_type = "buried"
+    original = Route(net=26, net_name="VM", segments=chain, vias=[via])
+    net = 27 if case == "foreign-trunk" else 26
+    layer = Layer.B_CU if case == "other-layer" else Layer.F_CU
+    width = 0.15 if case == "narrow-trunk" else 0.2
+    extent = corner if case == "short-trunk" else (160.1, 92.41)
+    trunk = Segment(*point(start), *point(extent), width, layer, net, "spine")
+    neighbour = _segments(
+        [point(p) for p in [(159.7, 91.165), (159.7, 94.61), (159.96, 94.87)]], Layer.F_CU
+    )
+    pads = []
+    if case == "branch-contact":
+        neighbour.append(Segment(159.92, 94.64, 159.925, 94.64, 0.01, Layer.F_CU, 26, "VM"))
+    elif case in {"exposed-pad-gap", "pad-gap-within-policy"}:
+        pads.append(
+            Pad(
+                x=160.115,
+                y=94.55,
+                width=0.25,
+                height=0.25,
+                net=26,
+                net_name="VM",
+                layer=Layer.F_CU,
+                ref="TP1",
+                pin="1",
+                shape="rect",
+                rotation=-45,
+            )
+        )
+    elif case in {"trace-gap-between-thresholds", "wider-trace-threshold"}:
+        neighbour.append(Segment(160.1, 94.48, 160.065, 94.515, 0.2, Layer.F_CU, 26, "VM"))
+
+    trace_edge = (
+        None
+        if case == "pad-only-trace-slit"
+        else 0.01
+        if case == "gap-below-policy"
+        else 0.1524
+        if case == "wider-trace-threshold"
+        else 0.1016
+    )
+    pad_edge = (
+        None if case == "trace-only-policy" else 0.105 if case == "pad-gap-within-policy" else 0.15
+    )
+    grid = SimpleNamespace(
+        rules=DesignRules(
+            same_net_trace_gap_band_edge_mm=trace_edge,
+            same_net_pad_gap_band_edge_mm=pad_edge,
+        ),
+        pads=pads,
+        routes=[
+            original,
+            Route(net=net, net_name="spine", segments=[trunk]),
+            Route(net=26, net_name="VM", segments=neighbour),
+        ],
+    )
+    result = covered_via_elbow(chain, original, grid)
+    if expected:
+        assert result == _segments([point(points[0]), point(bend), point(points[-1])], Layer.F_CU)
+    else:
+        assert result is None
