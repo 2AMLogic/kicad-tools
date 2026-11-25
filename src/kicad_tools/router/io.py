@@ -40,6 +40,7 @@ import re
 import warnings
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from kicad_tools.core.board_outline import OutlineSegments
+    from kicad_tools.core.project_clearance import NetclassWidth
     from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
     from kicad_tools.sexp import SExp
@@ -5474,6 +5476,42 @@ def _authored_net_clearances(
     return {name: value.clearance for name, value in resolved.items()}
 
 
+def _authored_net_widths(
+    pcb_path: str | Path,
+    project_path: str | Path | None,
+    net_map: dict[str, int],
+) -> dict[str, NetclassWidth]:
+    """``{net_name: NetclassWidth}`` for nets in a non-``Default`` netclass (#10189).
+
+    Sibling of :func:`_authored_net_clearances`: resolves non-``Default``
+    class ``track_width`` values from ``project_path`` (default:
+    ``pcb_path``'s ``.kicad_pro`` sibling) via
+    :func:`~kicad_tools.core.project_clearance.authored_netclass_widths`.
+    A missing project returns ``{}``; unreadable JSON or invalid/unsupported
+    netclass declarations raise :class:`ProjectClearanceError`.
+    """
+    import json
+
+    from kicad_tools.core.project_clearance import (
+        ProjectClearanceError,
+        authored_netclass_widths,
+    )
+
+    sidecar = (
+        Path(project_path) if project_path is not None else Path(pcb_path).with_suffix(".kicad_pro")
+    )
+    if not sidecar.is_file():
+        return {}
+    try:
+        project = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ProjectClearanceError(f"Cannot read project {sidecar}: {exc}") from exc
+    try:
+        return authored_netclass_widths(project, list(net_map))
+    except ProjectClearanceError as exc:
+        raise ProjectClearanceError(f"{sidecar}: {exc}") from exc
+
+
 def authored_net_widths(
     pcb_path: str | Path,
     net_names: Iterable[str],
@@ -5550,6 +5588,8 @@ def load_pcb_for_routing(
     router_class_floors: bool = True,
     record_decisions: bool = False,
     mark_plane_zones: bool = True,
+    explicit_trace_width: float | None = None,
+    ignore_existing_nets: AbstractSet[str] | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -6207,6 +6247,28 @@ def load_pcb_for_routing(
                     _width_floor,
                 )
 
+    # Issue #10189: honour non-``Default`` project netclass ``track_width``
+    # declarations over the router's name-classified defaults; an explicit
+    # ``--trace-width`` override still wins over both, and ``Default``-sourced
+    # widths stay excluded per ``authored_netclass_widths``.
+    authored_widths_by_name = _authored_net_widths(pcb_path, project_path, net_map)
+    for _net_name, _nw in authored_widths_by_name.items():
+        if _nw.width <= 0:
+            continue
+        if _net_name in net_class_map:
+            net_class_map[_net_name] = replace(net_class_map[_net_name], trace_width=_nw.width)
+        else:
+            net_class_map[_net_name] = NetClassRouting(
+                name=_nw.source_class,
+                trace_width=_nw.width,
+                clearance=rules.trace_clearance,
+                via_size=rules.via_diameter,
+            )
+    if explicit_trace_width is not None and explicit_trace_width > 0:
+        _explicit_w = float(explicit_trace_width)
+        for _cls_key, _cls in list(net_class_map.items()):
+            net_class_map[_cls_key] = replace(_cls, trace_width=_explicit_w)
+
     # Issue #6427: the router's own net classes are declared in the routed
     # sidecars (#6390), so KiCad holds every foreign pair to
     # max(class(a), class(b)).  Feed each class stricter than the base into
@@ -6264,9 +6326,7 @@ def load_pcb_for_routing(
     remember_authored_floors(router, authored_floors)
     # Issue #9600 (row 3 review): the authored netclass TRACK widths for the
     # neck census, resolved from the same project the floors came from.
-    # Diagnostic data: missing/unresolvable widths simply leave the census on
-    # the classification map + global rule (see ``authored_net_widths``).
-    router.authored_net_widths = authored_net_widths(pcb_path, list(net_map), project_path)
+    router.authored_net_widths = {name: nw.width for name, nw in authored_widths_by_name.items()}
     # Issue #5863: what this board lost to pad geometry the router cannot
     # represent, for reports and callers that need to say so out loud.
     router.unsupported_geometry_nets = frozenset(unsupported_geometry_nets)
@@ -6466,6 +6526,12 @@ def load_pcb_for_routing(
         route_count = 0
         for net_name in sorted(all_net_names) if preserve_placement else all_net_names:
             if not load_existing_routes and net_name not in preserve_placement:
+                continue
+            if (
+                ignore_existing_nets
+                and net_name in ignore_existing_nets
+                and net_name not in preserve_placement
+            ):
                 continue
             segs = existing_segments.get(net_name, [])
             vias = existing_vias.get(net_name, [])

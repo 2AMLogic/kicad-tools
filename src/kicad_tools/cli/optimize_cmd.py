@@ -403,7 +403,7 @@ def _refill_written_board(written: Path) -> tuple[bool, str | None]:
     return False, result.stderr.strip() or "unknown error"
 
 
-def _build_collision_checker(pcb_path: Path):
+def _build_collision_checker(pcb_path: Path, project_path: Path | None = None):
     """Build a collision checker plus a grid-synced optimize function factory.
 
     Loads the board (existing routes included, netclass / ``.kicad_dru``
@@ -421,6 +421,7 @@ def _build_collision_checker(pcb_path: Path):
     with contextlib.redirect_stdout(sys.stderr):
         router, _net_map = load_pcb_for_routing(
             str(pcb_path),
+            project_path=project_path,
             rules=_declared_design_rules(pcb_path),
             router_class_floors=False,
             validate_drc=False,
@@ -519,14 +520,43 @@ def _creepage_keys(args, stats) -> dict:
     }
 
 
-def _make_grid_synced_optimize_fn(router, optimizer):
+def _project_netclass_widths(
+    pcb_path: Path,
+    project_arg: str | None,
+    net_names,
+) -> dict[str, float]:
+    """Resolve non-``Default`` project netclass ``track_width`` values (#10189)."""
+    import json
+
+    from kicad_tools.core.project_clearance import authored_netclass_widths
+
+    base = Path(project_arg) if project_arg else pcb_path
+    pro_path = base.with_suffix(".kicad_pro")
+    if not pro_path.is_file():
+        return {}
+    project = json.loads(pro_path.read_text(encoding="utf-8"))
+    resolved = authored_netclass_widths(project, net_names)
+    return {name: nw.width for name, nw in resolved.items() if nw.width > 0}
+
+
+def _make_grid_synced_optimize_fn(
+    router,
+    optimizer,
+    project_widths: dict[str, float] | None = None,
+    checker=None,
+):
     """Return ``(optimize, commit)`` wrapping ``optimizer.optimize_segments``.
 
-    * ``optimize``: net identity (Issue #8214 review).  The file parser yields
+    * ``optimize``: net identity (Issue #8214 review) and project netclass
+      ``track_width`` application (Issue #10189).  The file parser yields
       net id 0 for every segment on a KiCad-10 name-only board, while the grid
       carries the loader's dialect-normalized ids.  The optimizer excludes
       ``seg.net`` as "own net", so the segments are re-keyed to the grid id
       (looked up by net *name*) for the optimization and restored afterwards.
+      When ``project_widths`` supplies a non-``Default`` class ``track_width``
+      for the net (and at least one optimization pass is enabled), segments are
+      updated to that width -- checking ``checker.path_is_clear`` before
+      widening any segment so tight clearances / pad escapes cannot short.
       It does **not** touch the grid.
     * ``commit(net_name, original, kept)``: static grid (Issue #8214 review).
       Nets are optimized in turn, so net B must be checked against net A's
@@ -544,16 +574,53 @@ def _make_grid_synced_optimize_fn(router, optimizer):
     grid = router.grid
     base_optimize = optimizer.optimize_segments
     by_name = {r.net_name: i for i, r in enumerate(router.existing_routes) if r.net > 0}
+    cfg = optimizer.config
+    any_pass_enabled = any(
+        (
+            cfg.merge_collinear,
+            cfg.eliminate_zigzags,
+            cfg.convert_45_corners,
+            cfg.remove_jogs,
+            cfg.compress_staircase,
+            cfg.pull_tight,
+            cfg.shorten_detours,
+        )
+    )
+    effective_widths = project_widths if (project_widths and any_pass_enabled) else None
+
+    def _apply_width(items, target_w: float, exclude_net: int):
+        updated = []
+        for s in items:
+            if abs(s.width - target_w) <= 1e-6:
+                updated.append(s)
+            elif (
+                target_w < s.width
+                or checker is None
+                or checker.path_is_clear(s.x1, s.y1, s.x2, s.y2, s.layer, target_w, exclude_net)
+            ):
+                updated.append(replace(s, width=target_w))
+            else:
+                updated.append(s)
+        return updated
 
     def optimize(segs):
         if not segs:
             return base_optimize(segs)
-        idx = by_name.get(segs[0].net_name)
+        net_name = segs[0].net_name
+        target_w = effective_widths.get(net_name) if effective_widths else None
+        idx = by_name.get(net_name)
         if idx is None:
             # Net has no copper in the grid (or neutralised ownership).
-            return base_optimize(segs)
+            work = _apply_width(segs, target_w, -1) if target_w is not None else segs
+            out = base_optimize(work)
+            return _apply_width(out, target_w, -1) if target_w is not None else out
         gid = router.existing_routes[idx].net
-        out = base_optimize([replace(s, net=gid) for s in segs])
+        work = [replace(s, net=gid) for s in segs]
+        if target_w is not None:
+            work = _apply_width(work, target_w, gid)
+        out = base_optimize(work)
+        if target_w is not None:
+            out = _apply_width(out, target_w, gid)
         return [replace(s, net=segs[0].net) for s in out]
 
     def commit(net_name, original, kept):
@@ -1026,7 +1093,22 @@ def _run_optimization(args: argparse.Namespace, files: contextlib.ExitStack) -> 
     # that cannot be built is reported, never silently downgraded to unchecked
     # rewrites.
     try:
-        router, checker = _build_collision_checker(pcb_path)
+        from kicad_tools.router.optimizer.pcb import parse_segments as _parse_opt_segments
+
+        router, checker = _build_collision_checker(
+            pcb_path,
+            **(
+                {"project_path": Path(args.project).with_suffix(".kicad_pro")}
+                if args.project
+                else {}
+            ),
+        )
+        _segment_nets = set(_parse_opt_segments(pcb_path.read_text(encoding="utf-8")).keys())
+        project_widths = _project_netclass_widths(
+            pcb_path,
+            args.project,
+            sorted(_segment_nets | set(router.net_names.values())),
+        )
     except Exception as e:
         return _fail(
             as_json,
@@ -1160,7 +1242,7 @@ def _run_optimization(args: argparse.Namespace, files: contextlib.ExitStack) -> 
     # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
     # optimize_fn hook, so the instance method is deliberately rebound.
     optimizer.optimize_segments, commit_net = _make_grid_synced_optimize_fn(  # type: ignore[method-assign]
-        router, optimizer
+        router, optimizer, project_widths=project_widths, checker=checker
     )
 
     if not quiet:

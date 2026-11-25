@@ -3779,14 +3779,30 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
 def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route"], str]:
     """Capture fixed source copper once, before checkpoint writes can replace it."""
     preserve = bool(getattr(args, "preserve_existing", False))
+    stale = frozenset(getattr(args, "_stale_width_nets", None) or ())
     routes = _capture_preserved_routes(pcb_path) if preserve else []
+    if stale:
+        routes = [route for route in routes if route.net_name not in stale]
     disposition = getattr(args, "_placement_disposition", None)
     names = disposition.preserve_copper_nets if disposition is not None else frozenset()
     if preserve and _keep_input_copper_on_routed_nets(args):
         # The geometry model supplies routing obstacles. Keep the source forms
         # for output as well, including locks and per-via fabrication settings.
+        text = pcb_path.read_text()
         input_blocks: list[str] = []
-        _strip_route_blocks(pcb_path.read_text(), collect=input_blocks)
+        _strip_route_blocks(text, collect=input_blocks)
+        if stale:
+            from kicad_tools.router.optimizer.pcb import parse_net_names, resolve_block_net
+
+            net_names = parse_net_names(text)
+            by_name = {name: number for number, name in net_names.items()}
+            input_blocks = [
+                block
+                for block in input_blocks
+                if (identity := resolve_block_net(block, net_names, by_name)) is None
+                or identity[1] in names
+                or identity[1] not in stale
+            ]
         return routes, "\n\t".join(input_blocks)
     name_only = _board_uses_name_only_dialect(pcb_path)
     ordinary = _serialize_preserved_routes(
@@ -12136,6 +12152,18 @@ DEFAULT_TRACE_WIDTH_MM = 0.2
 _TRACE_WIDTH_EPS = 1e-9
 
 
+def _extra_load_width_kwargs(args, tier_width: float | None = None) -> dict:
+    """Optional #10189 kwargs for ``load_pcb_for_routing`` (omitted when unset)."""
+    extra: dict = {}
+    explicit = getattr(args, "_explicit_trace_width", None)
+    if explicit is not None:
+        extra["explicit_trace_width"] = float(tier_width if tier_width is not None else explicit)
+    stale = getattr(args, "_stale_width_nets", None)
+    if stale:
+        extra["ignore_existing_nets"] = stale
+    return extra
+
+
 def _effective_trace_width(args) -> float:
     """Return ``args.trace_width``, falling back to the CLI default.
 
@@ -12379,6 +12407,8 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     )
 
     explicit_width = getattr(args, "trace_width", None)
+    with contextlib.suppress(AttributeError):
+        args._explicit_trace_width = float(explicit_width) if explicit_width is not None else None
     if explicit_width is None:
         resolved = DEFAULT_TRACE_WIDTH_MM if floor is None else max(DEFAULT_TRACE_WIDTH_MM, floor)
         args.trace_width = resolved
@@ -14472,6 +14502,7 @@ def route_with_layer_escalation(
                     # copper is loaded as grid obstacles + populated into
                     # router.existing_routes so it survives the route pass.
                     load_existing_routes=getattr(args, "preserve_existing", False),
+                    **_extra_load_width_kwargs(args),
                     # Issue #4148: region-bounded routing.  When set, cells
                     # outside the board-relative box are marked as obstacles.
                     region=getattr(args, "_region_box", None),
@@ -15767,6 +15798,7 @@ def route_with_rule_relaxation(
                     strict_drc=False,
                     # Issue #3155: incremental routing (see route_with_layer_escalation).
                     load_existing_routes=getattr(args, "preserve_existing", False),
+                    **_extra_load_width_kwargs(args, tier.trace_width),
                     # Issue #4148: region-bounded routing (see main()).
                     region=getattr(args, "_region_box", None),
                     # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -18339,6 +18371,7 @@ def route_with_combined_escalation(
                         strict_drc=False,
                         # Issue #3155: incremental routing (see route_with_layer_escalation).
                         load_existing_routes=getattr(args, "preserve_existing", False),
+                        **_extra_load_width_kwargs(args, tier.trace_width),
                         # Issue #4148: region-bounded routing (see main()).
                         region=getattr(args, "_region_box", None),
                         # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -20956,6 +20989,75 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
     return 0
 
 
+def _stale_width_connected_nets(args, pcb_path: Path, connected: list[str]) -> set[str]:
+    """Connected nets whose existing copper disagrees with authored width (#10189).
+
+    Under an auto-selected ``preserve_existing`` re-run (no explicit
+    ``--preserve-existing`` or ``--resume``), a net whose project netclass
+    ``track_width`` (or explicit ``--trace-width`` / ``--net-class-map``) was
+    edited since the copper was laid must be re-routed at the new width rather
+    than kept verbatim at the old width, while nets whose width still matches
+    keep their existing copper untouched.
+    """
+    import json
+
+    from kicad_tools.core.project_clearance import ProjectClearanceError, authored_netclass_widths
+    from kicad_tools.router.optimizer.pcb import locked_segment_nets, parse_segments
+
+    target: dict[str, float] = {}
+    project_path = Path(getattr(args, "pcb", pcb_path)).with_suffix(".kicad_pro")
+    if project_path.is_file():
+        try:
+            project = json.loads(project_path.read_text(encoding="utf-8"))
+            for net_name, nw in authored_netclass_widths(project, connected).items():
+                if nw.width > 0:
+                    target[net_name] = nw.width
+        except (OSError, ValueError, ProjectClearanceError):
+            # Surface canonical project errors at load_pcb_for_routing time.
+            pass
+
+    explicit_width = getattr(args, "trace_width", None)
+    if explicit_width is not None and float(explicit_width) > 0:
+        ew = float(explicit_width)
+        for net_name in connected:
+            target[net_name] = ew
+
+    loaded = getattr(args, "_loaded_net_class_map", None)
+    if loaded:
+        for net_name in connected:
+            if net_name in loaded:
+                lw = float(getattr(loaded[net_name], "trace_width", 0.0) or 0.0)
+                if lw > 0:
+                    target[net_name] = lw
+
+    if not target:
+        return set()
+
+    try:
+        pcb_text = pcb_path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+
+    locked = locked_segment_nets(pcb_text)
+    disposition = getattr(args, "_placement_disposition", None)
+    preserved_placement = (
+        disposition.preserve_copper_nets if disposition is not None else frozenset()
+    )
+    segs_by_net = parse_segments(pcb_text)
+    stale: set[str] = set()
+    for net_name in connected:
+        if net_name in locked or net_name in preserved_placement or net_name not in target:
+            continue
+        segs = segs_by_net.get(net_name)
+        if not segs:
+            continue
+        # Compare the trunk (maximum) width so a fine-pitch pad neck-down on an
+        # unedited class does not look like a stale class width.
+        if abs(max(s.width for s in segs) - target[net_name]) > 1e-4:
+            stale.add(net_name)
+    return stale
+
+
 def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
     """Hold already-complete nets out of a ``--preserve-existing`` route set (Issue #5788).
 
@@ -20998,6 +21100,7 @@ def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
     call site reads uniformly.
     """
     args._preserved_connected_nets = []
+    args._stale_width_nets = frozenset()
     if not getattr(args, "preserve_existing", False):
         return 0
     # An explicitly chosen route set (--nets / --complete) or a spatial bound
@@ -21023,6 +21126,14 @@ def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
 
     if not connected:
         return 0
+
+    if getattr(args, "_auto_preserve_existing", False):
+        stale = _stale_width_connected_nets(args, pcb_path, connected)
+        if stale:
+            args._stale_width_nets = frozenset(stale)
+            connected = [n for n in connected if n not in stale]
+            if not connected:
+                return 0
 
     args._preserved_connected_nets = list(connected)
     if not getattr(args, "quiet", False):
@@ -25873,7 +25984,9 @@ def _run_main_impl(args, parser, argv) -> int:
         except (OSError, UnicodeError) as exc:
             print(f"Error reading input routing copper from {pcb_path}: {exc}", file=sys.stderr)
             return 1
+        args._auto_preserve_existing = bool(args.preserve_existing)
     else:
+        args._auto_preserve_existing = False
         _warn_existing_copper_replacement(pcb_path, args)
 
     # Issue #5788: a bare --preserve-existing must honour its own --help ("only
@@ -26684,6 +26797,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 strict_drc=False,  # Only fail on hard constraint (grid > clearance)
                 # Issue #3155: incremental routing (see route_with_layer_escalation).
                 load_existing_routes=getattr(args, "preserve_existing", False),
+                **_extra_load_width_kwargs(args),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
                 # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -26777,6 +26891,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 validate_drc=not args.force,
                 strict_drc=False,
                 load_existing_routes=getattr(args, "preserve_existing", False),
+                **_extra_load_width_kwargs(args),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
                 # Issue #4472 (epic #4465, Phase 2): --complete localizes the
