@@ -114,8 +114,13 @@ def _instance_owns_pin(sym, pin) -> bool:
 class SchematicNetlistMixin:
     """Mixin providing netlist extraction and query operations for Schematic class."""
 
-    def _build_connectivity_graph(self) -> tuple[dict, dict, dict]:
+    def _build_connectivity_graph(
+        self, *, connect_named_points: bool = False
+    ) -> tuple[dict, dict, dict]:
         """Build a connectivity graph using Union-Find.
+
+        With ``connect_named_points``, equal labels join separate wire branches
+        on this sheet, including branches connected transitively through aliases.
 
         Returns:
             Tuple of (parent dict, point_to_net_names dict, point_to_pins dict)
@@ -126,6 +131,14 @@ class SchematicNetlistMixin:
         parent = {}
         point_to_net_names: dict[tuple, list[str]] = {}
         point_to_pins: dict[tuple, list[PinRef]] = {}
+        name_priority: dict[str, int] = {}
+
+        def add_net_name(point: tuple[float, float], name: str, priority: int) -> None:
+            point_to_net_names.setdefault(point, []).append(name)
+            if connect_named_points:
+                # KiCad selects global labels, power, local labels, then
+                # hierarchical labels. Equal-priority names sort lexically.
+                name_priority[name] = min(name_priority.get(name, priority), priority)
 
         def find(p):
             """Find root of point p in Union-Find structure."""
@@ -250,7 +263,7 @@ class SchematicNetlistMixin:
                 # after the pin, as a power symbol is (legacy power symbols
                 # without the library ``(power)`` flag rely on this).
                 if pin.hidden and pin.pin_type == "power_in" and pin.name not in ("", "~"):
-                    point_to_net_names.setdefault(pos_rounded, []).append(pin.name)
+                    add_net_name(pos_rounded, pin.name, 1)
 
                 # Connect to wires (KiCad: pins connect at wire endpoints
                 # or junctions only, never to a wire crossing mid-span)
@@ -262,7 +275,7 @@ class SchematicNetlistMixin:
             # Power symbol net name comes from lib_id (e.g., "power:+3.3V" -> "+3.3V")
             net_name = pwr.net_name
             if net_name is not None:
-                point_to_net_names.setdefault(pwr_pos, []).append(net_name)
+                add_net_name(pwr_pos, net_name, 1)
 
             # Power symbols connect through their pin — same endpoint-or-
             # junction rule as symbol pins.
@@ -272,9 +285,7 @@ class SchematicNetlistMixin:
         for label in self.labels:
             label_pos = (round(label.x, 2), round(label.y, 2))
 
-            if label_pos not in point_to_net_names:
-                point_to_net_names[label_pos] = []
-            point_to_net_names[label_pos].append(label.text)
+            add_net_name(label_pos, label.text, 2)
 
             connect_to_wire(label_pos)
 
@@ -282,9 +293,7 @@ class SchematicNetlistMixin:
         for gl in self.global_labels:
             gl_pos = (round(gl.x, 2), round(gl.y, 2))
 
-            if gl_pos not in point_to_net_names:
-                point_to_net_names[gl_pos] = []
-            point_to_net_names[gl_pos].append(gl.text)
+            add_net_name(gl_pos, gl.text, 0)
 
             connect_to_wire(gl_pos)
 
@@ -292,11 +301,20 @@ class SchematicNetlistMixin:
         for hl in self.hier_labels:
             hl_pos = (round(hl.x, 2), round(hl.y, 2))
 
-            if hl_pos not in point_to_net_names:
-                point_to_net_names[hl_pos] = []
-            point_to_net_names[hl_pos].append(hl.text)
+            add_net_name(hl_pos, hl.text, 3)
 
             connect_to_wire(hl_pos)
+
+        if connect_named_points:
+            first_point: dict[str, tuple] = {}
+            for point, names in point_to_net_names.items():
+                for name in names:
+                    union(point, first_point.setdefault(name, point))
+            # Both physical wires and shared names are now in the same graph.
+            # Keep one representative name per electrical component.
+            point_to_net_names = {}
+            for name in sorted(first_point, key=lambda name: (name_priority[name], name)):
+                point_to_net_names.setdefault(find(first_point[name]), [name])
 
         return parent, point_to_net_names, point_to_pins
 

@@ -198,7 +198,7 @@ class Schematic(
 
         # Element collections
         self.symbols: list[SymbolInstance] = []
-        self._decoupling_caps: dict[str, tuple[str, str, bool]] = {}
+        self._decoupling_caps: dict[str, tuple[str, str, str | None]] = {}
         self.power_symbols: list[PowerSymbol] = []
         self.wires: list[Wire] = []
         self.junctions: list[Junction] = []
@@ -253,27 +253,28 @@ class Schematic(
     def register_decoupling_cap(
         self, cap: SymbolInstance, source: str, role: str, *, from_default: bool = False
     ) -> None:
-        """Record supply capacitor provenance on this in-memory schematic."""
-        self._decoupling_caps[cap.uuid_str] = (source, role, from_default)
+        """Record the source and any selected default value on this in-memory schematic."""
+        self._decoupling_caps[cap.uuid_str] = (source, role, cap.value if from_default else None)
 
     def decoupling_report(self) -> dict[str | None, RailDecoupling]:
         """Group placed supply capacitors by the current electrical net of pin 1.
 
         Each rail contains its count and each cap's reference, value, block source,
-        role and default provenance. Floating pins appear under ``None``. Warn
-        once per connected rail whose defaults come from multiple block instances.
+        role and whether its live value matches a default selected by the block.
+        Floating pins appear under ``None``. Warn once per electrically connected
+        rail whose defaults come from multiple block instances.
         The live schematic retains this block provenance during construction.
         """
         report: dict[str | None, RailDecoupling] = {}
         if not self._decoupling_caps:
             return report
-        # Same net identities as get_net_for_pin(ref, "1"), with one graph build.
-        nets = self.get_all_pin_nets()
+        # A local label can carry a power net to a different wire branch.
+        nets = self._pin_nets_from_graph(*self._build_connectivity_graph(connect_named_points=True))
         for cap in self.symbols:
             provenance = self._decoupling_caps.get(cap.uuid_str)
             if provenance is None:
                 continue
-            source, role, from_default = provenance
+            source, role, default_value = provenance
             net = nets.get((cap.reference, "1"))
             rail = report.setdefault(net, {"count": 0, "caps": []})
             rail["caps"].append(
@@ -282,7 +283,7 @@ class Schematic(
                     "value": cap.value,
                     "source": source,
                     "role": role,
-                    "from_default": from_default,
+                    "from_default": default_value is not None and cap.value == default_value,
                 }
             )
             rail["count"] += 1

@@ -63,6 +63,66 @@ def test_different_heights_shared_rail_warns_once_naming_only_defaults():
     assert [cap["from_default"] for cap in report["+3V3"]["caps"]] == [True, True, False]
 
 
+@pytest.mark.parametrize("separate", [False, True])
+def test_local_supply_labels_resolve_to_the_power_net(separate):
+    sch = Schematic("Power rail aliases")
+    first = oscillator(sch, 1, 25.4, "VDD_LOCAL")
+    second = oscillator(sch, 2, 50.8, "VDD_OTHER" if separate else "VDD_LOCAL")
+    feeds = [(first, 25.4, "+3V3")]
+    if separate:
+        feeds.append((second, 50.8, "+1V8"))
+    for block, y, supply in feeds:
+        x = block.cap.pin_position("1")[0]
+        sch.add_wire((x, y), (x - 10.16, y))
+        sch.add_power(f"power:{supply}", x - 10.16, y, snap=False)
+
+    if separate:
+        report = quiet_report(sch)
+        assert {net: [cap["ref"] for cap in group["caps"]] for net, group in report.items()} == {
+            "+3V3": ["C1"],
+            "+1V8": ["C2"],
+        }
+    else:
+        with pytest.warns(UserWarning, match=r"\+3V3.*Y1.*Y2") as emitted:
+            report = sch.decoupling_report()
+        assert len(emitted) == 1
+        assert set(report) == {"+3V3"}
+        assert [cap["ref"] for cap in report["+3V3"]["caps"]] == ["C1", "C2"]
+
+
+def test_editing_a_default_capacitor_value_makes_it_a_caller_override():
+    sch = Schematic("Edited decoupling")
+    oscillator(sch, 1, 25.4, "VDD")
+    second = oscillator(sch, 2, 50.8, "VDD")
+    second.cap.value = "47nF"
+
+    first_cap, edited_cap = quiet_report(sch)["VDD"]["caps"]
+    assert first_cap["from_default"] is True
+    assert edited_cap["value"] == "47nF"
+    assert edited_cap["from_default"] is False
+    assert "Y2" in edited_cap["source"]
+
+
+def test_global_supply_name_propagates_through_local_aliases():
+    sch = Schematic("Transitive supply aliases")
+    oscillator(sch, 1, 25.4, "LOCAL_A")
+    oscillator(sch, 2, 50.8, "LOCAL_B")
+    # A wire away from either oscillator joins the two local names. Its
+    # global label supplies the name KiCad uses in the netlist.
+    left, middle, right = (228.6, 25.4), (233.68, 25.4), (238.76, 25.4)
+    sch.add_wire(left, middle)
+    sch.add_wire(middle, right)
+    sch.add_label("LOCAL_A", *left, snap=False)
+    sch.add_label("LOCAL_B", *middle, snap=False)
+    sch.add_global_label("SUPPLY", *right, snap=False)
+
+    with pytest.warns(UserWarning, match="SUPPLY.*Y1.*Y2") as emitted:
+        report = sch.decoupling_report()
+    assert len(emitted) == 1
+    assert list(report) == ["SUPPLY"]
+    assert report["SUPPLY"]["count"] == 2
+
+
 def test_floating_then_unnamed_then_labeled_and_schematic_local():
     sch = Schematic("Changing connectivity")
     a = blocks.OscillatorBlock(sch, 50.8, 50.8)
