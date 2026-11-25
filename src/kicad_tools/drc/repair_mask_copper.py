@@ -3045,8 +3045,11 @@ class MaskCopperRepairer(CopperGapRepairer):
         if len(faces) != 1 or owner.covers(Point(at)) or owner.distance(Point(at)) >= size / 2:
             return
         layer = faces.pop()
-        aperture = self._elbow_mask_apertures.get((opening, layer))
-        if aperture is None or not aperture.intersects(Point(at).buffer(size / 2)):
+        mask_opening = self._pad_mask_openings.get((opening, layer))
+        if mask_opening is None:
+            return
+        aperture = mask_opening.geometry
+        if not aperture.intersects(Point(at).buffer(size / 2)):
             return
         pcb = PCB(self.doc)
         via = next((v for v in pcb.vias if v.uuid == via_uuid), None)
