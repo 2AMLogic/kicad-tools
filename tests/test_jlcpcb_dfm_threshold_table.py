@@ -62,16 +62,16 @@ def test_missing_stackup_has_no_fallback(stackup):
     assert get_profile("jlcpcb").get_dfm_entry(*stackup) is None
 
 
-def _checker(n_layers=4):
+def _checker(n_layers=4, copper_oz=2.0):
     return SimpleNamespace(
         pcb=SimpleNamespace(copper_layers=list(range(n_layers))),
-        design_rules=get_profile("jlcpcb").get_design_rules(n_layers, 2.0),
+        design_rules=get_profile("jlcpcb").get_design_rules(n_layers, copper_oz),
     )
 
 
 def test_apply_table_missing_stackup_is_incomplete(capsys):
     cw: dict = {}
-    checker = _checker()
+    checker = _checker(copper_oz=1.0)
     assert checker.design_rules.trace_width_warning_mm is not None
     assert _apply_dfm_table(checker, "jlcpcb", 4, 3.0, 0.5, 1.0, cw) is True
     assert cw["dfm_table"]["entry"] is None

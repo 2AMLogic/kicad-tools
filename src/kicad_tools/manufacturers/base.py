@@ -521,7 +521,6 @@ class DesignRules:
             "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,
             "tht_smd_danger_mm": self.tht_smd_danger_mm,
             "tht_smd_warning_mm": self.tht_smd_warning_mm,
-            "trace_width_warning_mm": self.trace_width_warning_mm,
             "min_inner_clearance_mm": self.min_inner_clearance_mm,
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
@@ -532,6 +531,7 @@ class DesignRules:
             "via_in_pad_process_id": self.via_in_pad_process_id,
             "blind_buried_vias_supported": self.blind_buried_vias_supported,
             "micro_vias_supported": self.micro_vias_supported,
+            "trace_width_warning_mm": self.trace_width_warning_mm,
         }
 
 
@@ -749,7 +749,8 @@ class ManufacturerProfile:
         ``kct export`` and the generated ``.kicad_dru`` all go through it, so
         they enforce the same floors.  Floors only tighten (``max``).  Outer
         and inner spacing stay separate: only ``min_clearance_mm`` (outer) is
-        touched, never ``min_inner_clearance_mm``.
+        touched, never ``min_inner_clearance_mm``. The separate trace-width
+        advisory follows the exact entry and clears when its threshold is absent.
         """
         rules = rules.with_trace_width_advisory(entry)
         if entry is None:
