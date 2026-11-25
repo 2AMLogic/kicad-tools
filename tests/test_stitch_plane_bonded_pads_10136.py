@@ -22,6 +22,8 @@ import pytest
 
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.cli.stitch_cmd import run_stitch
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.sidecars import copy_project_sidecars
 
 FIXTURE = Path(__file__).parent / "fixtures" / "stitch-5388" / "continuous.kicad_pcb"
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -206,11 +208,16 @@ def test_stale_fill_with_pad_connection_disabled_earns_no_skip(tmp_path, native_
     assert stitched_pads(result) == {"C1.1"}
 
 
-def route_and_refill(board: Path, native_cli: str) -> tuple[int, int]:
+def route_and_refill(
+    board: Path, native_cli: str, *route_options: str, stitch_planes: bool = True
+) -> PCB:
     routed = board.with_name("routed.kicad_pcb")
+    original = board.read_bytes()
     subprocess.run(
         [sys.executable, "-m", "kicad_tools.cli", "route", str(board)]
-        + ["--layers", "4", "--stitch-power-planes", "--via-diameter", "0.6"]
+        + (["--stitch-power-planes"] if stitch_planes else [])
+        + list(route_options)
+        + ["--layers", "4", "--via-diameter", "0.6"]
         + ["--via-drill", "0.3", "--clearance", "0.2", "-o", str(routed)],
         capture_output=True,
         text=True,
@@ -219,14 +226,44 @@ def route_and_refill(board: Path, native_cli: str) -> tuple[int, int]:
         env={**os.environ, "PYTHONPATH": str(SRC)},
         check=True,
     )
+    assert board.read_bytes() == original
     probe = board.with_name("after.kicad_pcb")
     shutil.copy2(routed, probe)
+    copy_project_sidecars(routed, probe)
     after = refill(probe, native_cli)
     assert after["unconnected_items"] == []
-    text = routed.read_text()
-    segments = len(re.findall(r'\(segment\b[^"]*?\(layer "[^"]+"\)\s*\(net "GNDA"\)', text, re.S))
-    vias = len(re.findall(r'\(via\b.*?\(net "GNDA"\)', text, re.S))
-    return segments, vias
+    return PCB.load(routed)
+
+
+def ground_copper(pcb: PCB) -> tuple[int, int]:
+    return (
+        sum(segment.net_name == "GNDA" for segment in pcb.segments),
+        sum(via.net_name == "GNDA" for via in pcb.vias),
+    )
+
+
+@pytest.mark.parametrize("prefilled", [False, True], ids=["unfilled", "prefilled"])
+@pytest.mark.parametrize("stitch_planes", [False, True], ids=["default", "stitch"])
+def test_mixed_signal_route_keeps_the_bonded_ground_copper(
+    tmp_path, native_cli, prefilled, stitch_planes
+):
+    board = make_board(tmp_path)
+    text = board.read_text().rstrip()[:-1]
+    # SIG crosses the F.Cu GNDA pour between two new one-pad footprints.
+    for i, x in enumerate((115, 125), 1):
+        text += f"""
+        (footprint "Test:OnePad" (layer "F.Cu") (at {x} 112)
+          (property "Reference" "R{i}" (at 0 -1.5) (layer "F.SilkS"))
+          (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask" "F.Paste")
+            (net "SIG")))
+        """
+    board.write_text(text + ")\n")
+    if prefilled:
+        assert len(refill(board, native_cli)["unconnected_items"]) == 1
+    assert ground_copper(PCB.load(board)) == (2, 2)
+    routed = route_and_refill(board, native_cli, stitch_planes=stitch_planes)
+    assert sum(segment.net_name == "SIG" for segment in routed.segments) == 1
+    assert ground_copper(routed) == (2, 2)
 
 
 @pytest.mark.parametrize("island", [False, True], ids=["bonded", "island"])
@@ -234,7 +271,46 @@ def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
     board = make_board(tmp_path, right_edge=115 if island else 135)
     before = refill(board, native_cli)
     assert len(before["unconnected_items"]) == (1 if island else 0)
-    assert route_and_refill(board, native_cli) == ((3, 3) if island else (2, 2))
+    routed = route_and_refill(board, native_cli)
+    assert ground_copper(routed) == ((3, 3) if island else (2, 2))
+    refilled = PCB.load(board.with_name("after.kicad_pcb"))
+    assert {z.layer: z.filled_polygons for z in routed.zones} == {
+        z.layer: z.filled_polygons for z in refilled.zones
+    }
+
+
+def test_zero_signal_stitch_saves_the_hole_in_a_foreign_plane(tmp_path, native_cli):
+    from shapely.geometry import Point, Polygon
+
+    board = make_board(tmp_path, right_edge=115)
+    # A through via must clear this floating shield even when no SIG net routed.
+    shield = """
+    (zone (net "SHIELD") (layer "B.Cu") (uuid "22222222-2222-5333-8444-555555555555")
+      (hatch edge 0.5) (connect_pads yes (clearance 0.2)) (min_thickness 0.25)
+      (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5) (island_removal_mode 1))
+      (polygon (pts (xy 105 105) (xy 135 105) (xy 135 115) (xy 105 115))))
+    """
+    board.write_text(board.read_text().rstrip()[:-1] + shield + ")\n")
+    before_path = board.with_name("before.kicad_pcb")
+    shutil.copyfile(board, before_path)
+    assert len(refill(before_path, native_cli)["unconnected_items"]) == 1
+    before = PCB.load(before_path)
+    assert ground_copper(before) == (2, 2)
+    # Leave the input unfilled. The disabled oracle makes the stitcher supply
+    # the bridge, and native zone rules let KiCad reproduce its exact cutout.
+    routed = route_and_refill(board, native_cli, "--oracle-rounds", "0", "--native-zone-clearance")
+    assert len(routed.vias) == 3
+    (added_position,) = {v.position for v in routed.vias} - {v.position for v in before.vias}
+    center = Point(added_position)
+
+    def shield_polygon(pcb):
+        (polygon,) = next(z for z in pcb.zones if z.net_name == "SHIELD").filled_polygons
+        return Polygon(polygon)
+
+    assert shield_polygon(before).covers(center)
+    saved = shield_polygon(routed)
+    assert saved.distance(center) >= 0.5  # 0.3 mm via radius + 0.2 mm clearance
+    assert saved.equals(shield_polygon(PCB.load(board.with_name("after.kicad_pcb"))))
 
 
 @pytest.mark.parametrize("refill_first", [False, True], ids=["stale", "refilled"])
@@ -259,7 +335,7 @@ def test_board_cutout_cannot_hide_a_required_stitch(tmp_path, native_cli, refill
     if refill_first:
         shutil.copyfile(probe, board)
     original = board.read_bytes()
-    assert route_and_refill(board, native_cli) == (3, 3)
+    assert ground_copper(route_and_refill(board, native_cli)) == (3, 3)
     assert board.read_bytes() == original
 
 

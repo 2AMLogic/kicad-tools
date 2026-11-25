@@ -11215,9 +11215,9 @@ def _publish_preserved_departure(pcb_path, output_path, route_sexp, args, router
         _write_routed_pcb(pcb_path, staged, route_sexp, guard_copper_loss=True)
         trial = copy(args)
         trial._preserved_departure_trial = True
-        _run_post_save_stitching(trial, staged, quiet=quiet)
         _fill_zones_after_route(staged, quiet=quiet, router=router, args=trial)
         _complete_pour_nets_with_oracle(staged, args=trial, quiet=quiet, router=router)
+        _run_post_save_stitching(trial, staged, router=router, pour_pass_ran=True, quiet=quiet)
         if not (
             getattr(trial, "_zone_fill_verified", False)
             and getattr(trial, "_pour_connectivity_verified", False)
@@ -15175,19 +15175,23 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
     # Must run BEFORE DRC so the DRC sees filled zones rather than bare
     # zone outlines and does not flag zone-to-trace clearance against
     # unfilled polygons.
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
@@ -16229,16 +16233,20 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
@@ -18841,16 +18849,20 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
-    # Issue #7377: --stitch-power-planes runs on every tail, after the save
-    # and before the zone fill (same position as the single-attempt path).
-    _run_post_save_stitching(args, output_path, quiet=quiet)
-
     # Fill copper-pour zones now that traces exist (issue #2516).
-    if final_result.nets_routed > 0:
+    run_pour_pass = final_result.nets_routed > 0
+    if run_pour_pass:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
         _complete_pour_nets_with_oracle(
             output_path, args=args, quiet=quiet, router=final_result.router
         )
+    _run_post_save_stitching(
+        args,
+        output_path,
+        router=final_result.router,
+        pour_pass_ran=run_pour_pass,
+        quiet=quiet,
+    )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
@@ -19475,13 +19487,15 @@ def _warn_bus_flags_ignored_early(args, router, multi_res_plan=None) -> None:
         _warn_bus_flags_ignored(args, reason)
 
 
-def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
+def _run_post_save_stitching(
+    args, output_path: Path, *, router, pour_pass_ran: bool, quiet: bool = False
+):
     """Run ``--stitch-power-planes`` on the saved board; shared by every tail (#7377).
 
-    Must run after the routed board is saved and verified, and before the
-    copper-pour zone fill so the fill and DRC see the stitching vias.  Returns
-    the ``run_stitch`` result, or ``None`` when the flag is off, ``--dry-run``
-    is set, or the board has no plane nets.
+    The stitcher checks pads against the pour left by signal routing and oracle
+    completion. A plane-only board skips that ordinary pass, so run it here
+    before deciding which pads still need copper. If stitching edits the board,
+    repeat the fill and connectivity check on the geometry that will ship.
     """
     if not getattr(args, "stitch_power_planes", False) or args.dry_run:
         return None
@@ -19499,6 +19513,10 @@ def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
             print("  No power plane nets found (no zones with assigned nets)")
         return None
 
+    if not pour_pass_ran:
+        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+
     net_names = list(plane_nets.keys())
     if not quiet:
         print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
@@ -19511,6 +19529,10 @@ def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
         clearance=args.clearance,
         dry_run=False,
     )
+
+    if stitch_result.vias_added or stitch_result.traces_added:
+        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
 
     if not quiet:
         if stitch_result.vias_added:
@@ -28289,12 +28311,15 @@ def _run_main_impl(args, parser, argv) -> int:
     output_verification_regressed = output_verification.regressed
 
     if departure is None:
-        _run_post_save_stitching(args, output_path, quiet=quiet)
         # Fill before DRC so KiCad sees poured copper (issue #2516). A
         # provisional departure already ran both steps on its staged board.
-        if not args.dry_run and stats["nets_routed"] > 0:
+        run_pour_pass = not args.dry_run and stats["nets_routed"] > 0
+        if run_pour_pass:
             _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
             _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet, router=router)
+        _run_post_save_stitching(
+            args, output_path, router=router, pour_pass_ran=run_pour_pass, quiet=quiet
+        )
 
     # Issue #9799 (#9795 phase 3): legalise silk on the finished board,
     # after copper is written and before post-route DRC judges silk.
