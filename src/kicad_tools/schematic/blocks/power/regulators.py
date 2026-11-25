@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 from ...exceptions import PinNotFoundError
+from .. import decoupling_defaults as defaults
 from .._stub_helpers import _emit_pin_net_stub, _stub_endpoint_would_collide
 from ..base import CircuitBlock
 from ..interfaces import PowerPort
@@ -71,8 +72,8 @@ class LDOBlock(CircuitBlock):
         ref: str = "U1",
         value: str = "LDO",
         ldo_symbol: str = "Regulator_Linear:XC6206PxxxMR",
-        input_cap: str = "10uF",
-        output_caps: list[str] = None,
+        input_cap: str = defaults.DefaultValue(defaults.BULK),
+        output_caps: list[str] | None = None,
         cap_ref_start: int = 1,
         en_tied_to_vin: bool = True,
         domain: str = "",
@@ -116,7 +117,7 @@ class LDOBlock(CircuitBlock):
         self.output_voltage = output_voltage
 
         if output_caps is None:
-            output_caps = ["10uF", "100nF"]
+            output_caps = defaults.default_bank(defaults.LDO_OUTPUT)
 
         # Spacing constants
         cap_spacing = 15
@@ -129,8 +130,15 @@ class LDOBlock(CircuitBlock):
         # Place input capacitor
         c_in_x = x + input_cap_offset
         c_in_ref = f"C{cap_ref_start}"
-        self.input_cap = sch.add_symbol(
-            "Device:C", c_in_x, y + 15, c_in_ref, input_cap, auto_footprint=auto_footprint
+        self.input_cap = self._add_decoupling_cap(
+            "Device:C",
+            c_in_x,
+            y + 15,
+            c_in_ref,
+            input_cap,
+            owner=ref,
+            role="input",
+            auto_footprint=auto_footprint,
         )
 
         # Place output capacitors
@@ -138,8 +146,15 @@ class LDOBlock(CircuitBlock):
         for i, cap_value in enumerate(output_caps):
             c_out_x = x + output_cap_offset + i * cap_spacing
             c_out_ref = f"C{cap_ref_start + 1 + i}"
-            cap = sch.add_symbol(
-                "Device:C", c_out_x, y + 15, c_out_ref, cap_value, auto_footprint=auto_footprint
+            cap = self._add_decoupling_cap(
+                "Device:C",
+                c_out_x,
+                y + 15,
+                c_out_ref,
+                cap_value,
+                owner=ref,
+                role="output",
+                auto_footprint=auto_footprint,
             )
             self.output_caps.append(cap)
 
@@ -399,8 +414,8 @@ class BuckConverter(CircuitBlock):
         input_voltage: float = 24.0,
         output_voltage: float = 5.0,
         topology: str = "async",
-        input_cap: str = "100uF",
-        output_cap: str = "220uF",
+        input_cap: str = defaults.DefaultValue(defaults.BUCK_INPUT),
+        output_cap: str = defaults.DefaultValue(defaults.BUCK_OUTPUT),
         inductor: str = "33uH",
         diode: str = "SS34",
         feedback_divider: bool = False,
@@ -469,8 +484,15 @@ class BuckConverter(CircuitBlock):
         # Place input capacitor
         c_in_x = x + input_cap_offset
         c_in_ref = f"C{cap_ref_start}"
-        self.input_cap = sch.add_symbol(
-            "Device:C_Polarized", c_in_x, y + 15, c_in_ref, input_cap, auto_footprint=auto_footprint
+        self.input_cap = self._add_decoupling_cap(
+            "Device:C_Polarized",
+            c_in_x,
+            y + 15,
+            c_in_ref,
+            input_cap,
+            owner=ref,
+            role="input",
+            auto_footprint=auto_footprint,
         )
 
         # Place inductor
@@ -482,12 +504,14 @@ class BuckConverter(CircuitBlock):
         # Place output capacitor
         c_out_x = x + output_cap_offset
         c_out_ref = f"C{cap_ref_start + 1}"
-        self.output_cap = sch.add_symbol(
+        self.output_cap = self._add_decoupling_cap(
             "Device:C_Polarized",
             c_out_x,
             y + 15,
             c_out_ref,
             output_cap,
+            owner=ref,
+            role="output",
             auto_footprint=auto_footprint,
         )
 
@@ -849,8 +873,6 @@ def create_3v3_ldo(
         ref=ref,
         value="XC6206-3.3V",
         ldo_symbol="Regulator_Linear:XC6206PxxxMR",
-        input_cap="10uF",
-        output_caps=["10uF", "100nF"],
         cap_ref_start=cap_ref_start,
         domain=domain,
         output_voltage="3V3",
@@ -898,8 +920,6 @@ def create_5v_buck(
         input_voltage=input_voltage,
         output_voltage=5.0,
         topology="async",
-        input_cap="100uF",
-        output_cap="220uF",
         inductor="33uH",
         diode="SS34",
         feedback_divider=False,
@@ -947,8 +967,6 @@ def create_3v3_buck(
         input_voltage=input_voltage,
         output_voltage=3.3,
         topology="async",
-        input_cap="100uF",
-        output_cap="220uF",
         inductor="33uH",
         diode="SS34",
         feedback_divider=False,
@@ -995,8 +1013,7 @@ def create_12v_buck(
         input_voltage=input_voltage,
         output_voltage=12.0,
         topology="async",
-        input_cap="100uF",
-        output_cap="330uF",
+        output_cap=defaults.DefaultValue(defaults.BUCK_12V_OUTPUT),
         inductor="68uH",
         diode="SS54",
         feedback_divider=False,
@@ -1008,8 +1025,7 @@ def create_12v_buck(
 # Cascaded buck → LDO power tree
 # ---------------------------------------------------------------------------
 
-# Configuration table mapping (vin, v_mid, vout) to (buck_part, ldo_part)
-# tuples. Each tuple is (value, symbol, ldo_input_cap, ldo_output_caps).
+# Select the buck by (vin, v_mid, vout) and the LDO by (v_mid, vout).
 #
 # The buck side keeps the existing per-rail factory defaults
 # (e.g. LM2596-5.0 with 100uF/220uF/33uH/SS34) — see ``create_5v_buck``,
@@ -1023,18 +1039,28 @@ _BUCK_PART_TABLE: dict[tuple[float, float, float], tuple[str, str]] = {
     (48.0, 12.0, 5.0): ("LM2596-12", "Regulator_Switching:LM2596S-12"),
 }
 
-_LDO_PART_TABLE: dict[tuple[float, float], tuple[str, str, str, list[str]]] = {
-    # (v_mid, vout) -> (ldo_value, ldo_symbol, ldo_input_cap, ldo_output_caps)
-    (5.0, 3.3): ("AMS1117-3.3", "Regulator_Linear:AMS1117-3.3", "10uF", ["10uF"]),
-    (12.0, 5.0): ("AMS1117-5.0", "Regulator_Linear:AMS1117-5.0", "10uF", ["10uF"]),
+# Both AMS1117 variants use DualSupplyCascade's single input and output capacitors.
+_LDO_PART_TABLE: dict[tuple[float, float], tuple[str, str]] = {
+    (5.0, 3.3): ("AMS1117-3.3", "Regulator_Linear:AMS1117-3.3"),
+    (12.0, 5.0): ("AMS1117-5.0", "Regulator_Linear:AMS1117-5.0"),
 }
 
 # Buck-stage component defaults keyed on (v_mid). Allows the (48, 12, 5)
 # combination to pick a heavier inductor / diode than the 5V case.
 _BUCK_COMPONENTS_TABLE: dict[float, dict[str, str]] = {
     # v_mid -> dict of buck component values
-    5.0: {"input_cap": "100uF", "output_cap": "220uF", "inductor": "33uH", "diode": "SS34"},
-    12.0: {"input_cap": "100uF", "output_cap": "330uF", "inductor": "68uH", "diode": "SS54"},
+    5.0: {
+        "input_cap": defaults.BUCK_INPUT,
+        "output_cap": defaults.BUCK_OUTPUT,
+        "inductor": "33uH",
+        "diode": "SS34",
+    },
+    12.0: {
+        "input_cap": defaults.BUCK_INPUT,
+        "output_cap": defaults.BUCK_12V_OUTPUT,
+        "inductor": "68uH",
+        "diode": "SS54",
+    },
 }
 
 
@@ -1092,8 +1118,8 @@ class DualSupplyCascade(CircuitBlock):
         buck_value: str = "LM2596-5.0",
         buck_symbol: str = "Regulator_Switching:LM2596S-5",
         buck_topology: str = "async",
-        buck_input_cap: str = "100uF",
-        buck_output_cap: str = "220uF",
+        buck_input_cap: str = defaults.DefaultValue(defaults.BUCK_INPUT),
+        buck_output_cap: str = defaults.DefaultValue(defaults.BUCK_OUTPUT),
         buck_inductor: str = "33uH",
         buck_diode: str = "SS34",
         buck_diode_ref: str = "D2",
@@ -1102,7 +1128,7 @@ class DualSupplyCascade(CircuitBlock):
         ldo_ref: str = "U2",
         ldo_value: str = "AMS1117-3.3",
         ldo_symbol: str = "Regulator_Linear:AMS1117-3.3",
-        ldo_input_cap: str = "10uF",
+        ldo_input_cap: str = defaults.DefaultValue(defaults.BULK),
         ldo_output_caps: list[str] | None = None,
         ldo_en_tied_to_vin: bool = True,
         # Numbering
@@ -1164,7 +1190,7 @@ class DualSupplyCascade(CircuitBlock):
         self.vout = vout
 
         if ldo_output_caps is None:
-            ldo_output_caps = ["10uF"]
+            ldo_output_caps = defaults.default_bank(defaults.CASCADE_LDO_OUTPUT)
 
         # ----- Buck stage -----
         # Buck owns C{cap_ref_start} (input cap) and C{cap_ref_start+1}
@@ -1428,12 +1454,9 @@ def create_dual_supply_cascade(
         # This should not be reachable because the buck table already
         # implies a valid LDO key — guard anyway for future extensions.
         raise ValueError(f"No LDO mapping for (v_mid, vout) = ({v_mid}, {vout})")
-    ldo_value, ldo_symbol, ldo_input_cap, ldo_output_caps = _LDO_PART_TABLE[ldo_key]
+    ldo_value, ldo_symbol = _LDO_PART_TABLE[ldo_key]
 
-    buck_components = _BUCK_COMPONENTS_TABLE.get(
-        float(v_mid),
-        {"input_cap": "100uF", "output_cap": "220uF", "inductor": "33uH", "diode": "SS34"},
-    )
+    buck_components = _BUCK_COMPONENTS_TABLE.get(float(v_mid), _BUCK_COMPONENTS_TABLE[5.0])
 
     return DualSupplyCascade(
         sch,
@@ -1447,8 +1470,8 @@ def create_dual_supply_cascade(
         buck_value=buck_value,
         buck_symbol=buck_symbol,
         buck_topology="async",
-        buck_input_cap=buck_components["input_cap"],
-        buck_output_cap=buck_components["output_cap"],
+        buck_input_cap=defaults.DefaultValue(buck_components["input_cap"]),
+        buck_output_cap=defaults.DefaultValue(buck_components["output_cap"]),
         buck_inductor=buck_components["inductor"],
         buck_diode=buck_components["diode"],
         buck_diode_ref=buck_diode_ref,
@@ -1456,8 +1479,6 @@ def create_dual_supply_cascade(
         ldo_ref=ldo_ref,
         ldo_value=ldo_value,
         ldo_symbol=ldo_symbol,
-        ldo_input_cap=ldo_input_cap,
-        ldo_output_caps=list(ldo_output_caps),
         ldo_en_tied_to_vin=True,
         cap_ref_start=cap_ref_start,
         auto_footprint=auto_footprint,

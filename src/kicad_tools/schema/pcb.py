@@ -2363,6 +2363,13 @@ class Footprint:
         return fp
 
 
+def _copper_item_locked(sexp: SExp) -> bool:
+    """Read a KiCad lock child or the legacy bare lock token."""
+    if (locked := sexp.find("locked")) is not None:
+        return (locked.get_string(0) or "yes") != "no"
+    return any(child.is_atom and child.value == "locked" for child in sexp.children)
+
+
 @dataclass
 class Segment:
     """PCB trace segment."""
@@ -2422,10 +2429,7 @@ class Segment:
                 seg.net_name_only = True
         if uuid := sexp.find("uuid"):
             seg.uuid = uuid.get_string(0) or ""
-        if (locked := sexp.find("locked")) is not None:
-            seg.locked = (locked.get_string(0) or "yes") != "no"
-        elif any(c.is_atom and c.value == "locked" for c in sexp.children):
-            seg.locked = True
+        seg.locked = _copper_item_locked(sexp)
 
         return seg
 
@@ -2598,6 +2602,7 @@ class Via:
     # actually reads.  Only the PCB loader consumes it (one warning per
     # board); the source S-expression is not rewritten.
     layers_read_as_through: bool = field(default=False, compare=False, repr=False)
+    locked: bool = field(default=False, compare=False)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Via:
@@ -2608,6 +2613,7 @@ class Via:
             drill=0.0,
             layers=[],
             net_number=0,
+            locked=_copper_item_locked(sexp),
         )
 
         # Issue #3124: detect the optional leading via-type token.  KiCad
@@ -2697,6 +2703,8 @@ class Via:
         via_sexp = SExp.list("via")
         if self.via_type:
             via_sexp.append(SExp.atom(self.via_type))
+        if self.locked:
+            via_sexp.append(SExp.list("locked", "yes"))
         via_sexp.append(SExp.list("at", self.position[0] + ox, self.position[1] + oy))
         via_sexp.append(SExp.list("size", self.size))
         via_sexp.append(SExp.list("drill", self.drill))

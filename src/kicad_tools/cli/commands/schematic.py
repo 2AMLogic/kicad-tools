@@ -717,6 +717,8 @@ def run_sch_command(args) -> int:
         if args.prefix:
             prefix_list = [p.strip() for p in args.prefix.split(",")]
 
+        pcb_path = Path(args.pcb) if getattr(args, "pcb", None) else None
+
         return run_re_annotate(
             schematic_path=schematic_path,
             dry_run=getattr(args, "dry_run", False),
@@ -726,6 +728,7 @@ def run_sch_command(args) -> int:
             per_sheet=getattr(args, "per_sheet", False),
             format=getattr(args, "format", "text"),
             unannotated_only=getattr(args, "unannotated_only", False),
+            pcb_path=pcb_path,
             check=getattr(args, "check", False),
         )
 
