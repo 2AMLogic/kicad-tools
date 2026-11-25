@@ -3914,7 +3914,33 @@ def _rel(options: ReadinessOptions, path: Path) -> str:
     return path.resolve().relative_to(base).as_posix()
 
 
-def _is_render_artifact(rel: Path) -> bool:
+def _declared_render_prefixes(options: ReadinessOptions) -> list[tuple[str, ...]]:
+    """Input-base-relative ``renders`` directories of a project-declared output root.
+
+    A declared ``[readiness] output_root`` may carry any name (Issue #10106), so
+    the render exclusion cannot rely on the literal ``output`` segment alone
+    (Issue #10163).  Returns the ``<output_root>/renders``,
+    ``<output_root>/manufacturing/renders`` and ``<output_dir>/renders`` prefixes;
+    empty for a board-local run.
+    """
+    if options.output_root is None:
+        return []
+    base = _input_base(options).resolve()
+    prefixes: list[tuple[str, ...]] = []
+    for directory, tail in (
+        (options.output_root, ("renders",)),
+        (options.output_root, ("manufacturing", "renders")),
+        (options.output_dir, ("renders",)),
+    ):
+        resolved = directory.resolve()
+        if resolved.is_relative_to(base):
+            prefix = (*resolved.relative_to(base).parts, *tail)
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+    return prefixes
+
+
+def _is_render_artifact(rel: Path, options: ReadinessOptions | None = None) -> bool:
     """True for ``kct render`` output under ``output/`` or ``output/manufacturing/``.
 
     Renders are derived presentation artifacts: the verdict depends on the PCB,
@@ -3924,10 +3950,23 @@ def _is_render_artifact(rel: Path) -> bool:
     ``output/`` directory may sit at any depth: a project-declared output root
     keys receipts against the project, so board-local renders appear as
     ``<board>/output/renders/...`` (Issue #10106).
+
+    With ``options`` carrying a project-declared output root, renders under
+    ``<output_root>/renders``, ``<output_root>/manufacturing/renders`` and
+    ``<output_dir>/renders`` are excluded whatever the root is named
+    (Issue #10163).  ``rel`` is relative to the input base.
     """
     parts = rel.parts
-    return any(parts[i : i + 2] == ("output", "renders") for i in range(len(parts) - 1)) or any(
+    if any(parts[i : i + 2] == ("output", "renders") for i in range(len(parts) - 1)) or any(
         parts[i : i + 3] == ("output", "manufacturing", "renders") for i in range(len(parts) - 2)
+    ):
+        return True
+    if options is None:
+        return False
+    # At least one segment must follow ``renders`` (the file itself).
+    return any(
+        len(parts) > len(prefix) and parts[: len(prefix)] == prefix
+        for prefix in _declared_render_prefixes(options)
     )
 
 
@@ -4013,7 +4052,7 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         and p.name != _REPORT_NAME
         and not _is_transient_local(p.relative_to(base))
         and not _is_private_hold(p.relative_to(base))
-        and not _is_render_artifact(p.relative_to(base))
+        and not _is_render_artifact(p.relative_to(base), options)
     )
 
 
@@ -4252,7 +4291,7 @@ def build_report(
         resolved = Path(path).resolve()
         if not resolved.is_file() or not resolved.is_relative_to(root):
             raise ValueError(f"extra readiness input is not a board file: {path}")
-        if not _is_render_artifact(resolved.relative_to(root)):
+        if not _is_render_artifact(resolved.relative_to(root), options):
             hashed.add(resolved)
     report["inputs"] = {
         _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
