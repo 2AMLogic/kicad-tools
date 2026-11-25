@@ -207,7 +207,9 @@ class DecouplingCountCheck:
 
             return resolve_schematic_for_pcb(board_path)
         except Exception as exc:  # discovery must not break detect-mistakes
-            logger.debug("decoupling count: schematic discovery failed for %s (%s)", board_path, exc)
+            logger.debug(
+                "decoupling count: schematic discovery failed for %s (%s)", board_path, exc
+            )
             return None
 
     def schematic_associations(self, pcb: PCB) -> dict[str, SchematicCapAssociation] | None:
