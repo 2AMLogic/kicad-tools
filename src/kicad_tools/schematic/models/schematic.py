@@ -368,7 +368,10 @@ class Schematic(
             if not is_provisional(elem.uuid_str)
         )
         for kind, elem, key in pending:
+            previous_uuid = elem.uuid_str
             elem.uuid_str = self._mint_uuid(kind, *key(elem))
+            if kind == "symbol" and previous_uuid in self._decoupling_caps:
+                self._decoupling_caps[elem.uuid_str] = self._decoupling_caps.pop(previous_uuid)
         return len(pending)
 
     def _text_note_uuid(self, text: str, x: float, y: float, seen: dict) -> str:

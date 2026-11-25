@@ -6,7 +6,7 @@ import pytest
 
 from kicad_tools.schematic import blocks
 from kicad_tools.schematic.grid import get_symbol_search_paths
-from kicad_tools.schematic.models import Schematic
+from kicad_tools.schematic.models import Schematic, SymbolInstance
 
 pytestmark = pytest.mark.skipif(
     not any((path / "Device.kicad_sym").is_file() for path in get_symbol_search_paths()),
@@ -252,3 +252,49 @@ def test_explicit_registration_tracks_component_edits_and_removal():
     ]
     sch.remove_symbol("C2")
     assert quiet_report(sch) == {}
+
+
+@pytest.mark.parametrize("direct", [False, True], ids=["add-symbol", "direct-symbol"])
+def test_registered_cap_provenance_survives_public_write(tmp_path, direct):
+    sch = Schematic("Registered bypass parts")
+    block = oscillator(sch, 1, 25.4, "VDD")
+    if direct:
+        cap = SymbolInstance(block.cap.symbol_def, 152.4, 76.2, 0, "C2", "100nF")
+        sch.symbols.append(cap)
+    else:
+        cap = sch.add_symbol("Device:C", 152.4, 76.2, "C2", "100nF")
+    sch.register_decoupling_cap(cap, "Aux supply", "bypass", from_default=True)
+    supply = cap.pin_position("1")
+    rail = (supply[0], 25.4)
+    sch.add_wire(supply, rail)
+    sch.add_label("VDD", *rail, snap=False)
+
+    def report():
+        with pytest.warns(UserWarning, match="VDD.*Aux supply.*Y1") as emitted:
+            result = sch.decoupling_report()
+        assert len(emitted) == 1
+        return result
+
+    before = report()
+    assert before["VDD"]["count"] == 2
+    assert before["VDD"]["caps"][-1] == {
+        "ref": "C2",
+        "value": "100nF",
+        "source": "Aux supply",
+        "role": "bypass",
+        "from_default": True,
+    }
+    path = tmp_path / "board.kicad_sch"
+    sch.write(path)
+    assert report() == before
+    saved = path.read_bytes()
+    sch.write(path)
+    assert path.read_bytes() == saved
+    assert report() == before
+    cap.value = "47nF"
+    sch.write(path)
+    assert quiet_report(sch)["VDD"]["caps"][-1] == {
+        **before["VDD"]["caps"][-1],
+        "value": "47nF",
+        "from_default": False,
+    }
