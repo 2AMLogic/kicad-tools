@@ -143,7 +143,11 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(
             module.runpy,
             "run_path",
-            lambda *a, **k: {"repair": lambda *a: None, "apply_native_floors": lambda *a: None},
+            lambda *a, **k: {
+                "repair": lambda *a: None,
+                "apply_native_floors": lambda *a: None,
+                "repair_bypass_mask_escapes": lambda *a: None,
+            },
         )
 
         lvs_called: list[bool] = []

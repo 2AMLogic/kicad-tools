@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from .. import decoupling_defaults as defaults
 from .._pins import diode_pin_position
 from ..base import CircuitBlock
 
@@ -154,7 +155,7 @@ class CANTransceiver(CircuitBlock):
         termination: bool | str = False,
         split_cap: str = "4.7nF",
         esd_protection: bool = False,
-        decoupling_cap: str = "100nF",
+        decoupling_cap: str = defaults.DefaultValue(defaults.BYPASS),
         ref_prefix: str = "U",
         cap_ref_start: int = 1,
         resistor_ref_start: int = 1,
@@ -237,7 +238,9 @@ class CANTransceiver(CircuitBlock):
         c_ref = f"C{cap_ref_start}"
         c_x = x + cap_offset_x
         c_y = y + cap_offset_y
-        self.decoupling_cap = sch.add_symbol(cap_symbol, c_x, c_y, c_ref, decoupling_cap)
+        self.decoupling_cap = self._add_decoupling_cap(
+            cap_symbol, c_x, c_y, c_ref, decoupling_cap, owner=u_ref
+        )
         self.components["C_DEC"] = self.decoupling_cap
 
         # Track bus output positions (after protection/termination)

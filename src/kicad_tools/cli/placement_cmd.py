@@ -13,14 +13,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kicad_tools.optim import OptimizationResult, OptimizationWorkflow
+    from kicad_tools.placement.decoupling import DecouplingGroup
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.copper_contact import CopperContactGraph
 
-from kicad_tools.cli.format_options import add_format_flag, emit_json
+from kicad_tools.cli.format_options import add_format_flag, emit_json, stdout_to_stderr_when
+from kicad_tools.cli.placement_options import add_decoupling_radius_argument
 from kicad_tools.placement import (
     Conflict,
     PlacementAnalyzer,
@@ -1134,12 +1142,103 @@ def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, i
         return (1.0, 0, 0)
 
 
+@dataclass(frozen=True)
+class _RoutedBypassNet:
+    number: int
+    pairs: str
+    copper: CopperContactGraph
+
+
+def _protect_routed_bypass_parts(
+    pcb: PCB, groups: list[DecouplingGroup], fixed_refs: list[str]
+) -> list[_RoutedBypassNet]:
+    """Keep designated parts attached to routed copper fixed and record their net connectivity."""
+    if not groups:
+        return []
+    routed_nets = {segment.net_number for segment in pcb.segments}
+    routed_nets.update(arc.net_number for arc in pcb.arcs)
+    routed_nets.update(via.net_number for via in pcb.vias)
+    routed_nets.update(zone.net_number for zone in pcb.zones if zone.filled_polygons)
+    if not routed_nets:
+        return []
+
+    pairs_by_net: dict[int, set[str]] = {}
+    designated_refs: set[str] = set()
+    for group in groups:
+        for ref, pin in group.associated:
+            designated_refs.update((ref, pin.reference))
+            cap = pcb.get_footprint(ref)
+            if cap is not None:
+                for pad in cap.pads:
+                    if pad.net_number and pad.net_number in routed_nets:
+                        pairs_by_net.setdefault(pad.net_number, set()).add(
+                            f"{ref} to {pin.reference}.{pin.pad}"
+                        )
+    if not pairs_by_net:
+        return []
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+    from kicad_tools.validate.copper_contact import PAD, build_copper_contact_graph
+
+    routes = []
+    validator = ConnectivityValidator(pcb)
+    attached: set[str] = set()
+    footprints = pcb.footprints
+    for number, pairs in pairs_by_net.items():
+        graph = build_copper_contact_graph(validator, number)
+        for component in graph.components():
+            items = [graph.items[index] for index in component]
+            if any(item.kind != PAD for item in items):
+                attached.update(
+                    footprints[item.key[0]].reference for item in items if item.kind == PAD
+                )
+        routes.append(_RoutedBypassNet(number, ", ".join(sorted(pairs)), graph))
+    fixed_refs.extend(sorted((attached & designated_refs) - set(fixed_refs)))
+    return routes
+
+
+def _finish_placement_candidate(
+    candidate: Path,
+    destination: Path | None,
+    groups: list[DecouplingGroup],
+    fixed_refs: list[str],
+    routes: list[_RoutedBypassNet],
+    radius: float,
+    result: dict,
+) -> None:
+    """Validate the serialized placement before publishing it or reporting dry-run success."""
+    from kicad_tools.cli.optimize_placement_cmd import snap_and_check_designated_caps
+
+    errors = snap_and_check_designated_caps(candidate, groups, set(fixed_refs), radius)
+    if routes and not errors:
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+        written = ConnectivityValidator(candidate)
+        for route in routes:
+            if not build_copper_contact_graph(written, route.number).preserves_connections(
+                route.copper
+            ):
+                errors.append(
+                    f"Placement would disconnect existing routed copper for {route.pairs}"
+                )
+    result.setdefault("constraint_violations", []).extend(errors)
+    if errors:
+        raise ValueError("; ".join(errors))
+    if destination is not None:
+        if destination.exists():
+            shutil.copymode(destination, candidate)
+        candidate.replace(destination)
+        result["output_path"] = str(destination)
+
+
 def _cmd_optimize_routing_aware(
     args,
     pcb_path: Path,
     quiet: bool,
     output_format: str,
-    fixed_refs: list[str] | None = None,
+    fixed_refs: list[str],
+    groups: list[DecouplingGroup],
 ) -> int:
     """
     Run routing-aware placement optimization.
@@ -1160,9 +1259,6 @@ def _cmd_optimize_routing_aware(
     from kicad_tools.cli.progress import spinner
     from kicad_tools.optim.place_route import PlaceRouteOptimizer
     from kicad_tools.schema.pcb import PCB
-
-    # Defensive: caller may not pass fixed_refs (legacy callers).
-    fixed_refs = fixed_refs or []
 
     # For JSON output, suppress text output
     if output_format == "json":
@@ -1201,6 +1297,7 @@ def _cmd_optimize_routing_aware(
     try:
         with spinner("Loading PCB...", quiet=quiet):
             pcb = PCB.load(str(pcb_path))
+            routes = _protect_routed_bypass_parts(pcb, groups, fixed_refs)
     except Exception as e:
         if output_format != "json":
             print(f"Error loading PCB: {e}", file=sys.stderr)
@@ -1223,11 +1320,12 @@ def _cmd_optimize_routing_aware(
     # Run optimization
     max_iterations = getattr(args, "iterations", 10)
     try:
-        opt_result = optimizer.optimize(
-            max_iterations=max_iterations,
-            allow_placement_changes=True,
-            skip_drc=False,
-        )
+        with stdout_to_stderr_when(output_format == "json"):
+            opt_result = optimizer.optimize(
+                max_iterations=max_iterations,
+                allow_placement_changes=True,
+                skip_drc=False,
+            )
     except Exception as e:
         if output_format != "json":
             print(f"Error during optimization: {e}", file=sys.stderr)
@@ -1248,21 +1346,17 @@ def _cmd_optimize_routing_aware(
         else:
             print(f"Optimization did not fully converge: {opt_result.message}")
 
-    # Save if not dry run
-    if not args.dry_run:
-        output_path = Path(args.output) if args.output else pcb_path
-        try:
-            with spinner("Saving optimized PCB...", quiet=quiet):
-                pcb.save(str(output_path))
-            result["output_path"] = str(output_path)
-            if not quiet:
-                print(f"Saved to: {output_path}")
-        except Exception as e:
-            if output_format != "json":
-                print(f"Error saving PCB: {e}", file=sys.stderr)
-            return output_result(False, f"Error saving PCB: {e}")
-    else:
-        result["message"] = "Dry run - no changes made"
+    output_path = None if args.dry_run else Path(args.output or args.pcb)
+    try:
+        _finish_placement_candidate(
+            pcb_path, output_path, groups, fixed_refs, routes, args.decoupling_radius, result
+        )
+    except Exception as e:
+        if output_format != "json":
+            print(f"Error finalizing placement: {e}", file=sys.stderr)
+        return output_result(False, f"Error finalizing placement: {e}")
+    if output_path and not quiet:
+        print(f"Saved to: {output_path}")
 
     return output_result(
         opt_result.success,
@@ -1272,7 +1366,9 @@ def _cmd_optimize_routing_aware(
 
 def cmd_optimize(args) -> int:
     """Optimize component placement for routability."""
+    from kicad_tools.cli.optimize_placement_cmd import designated_decoupling_groups
     from kicad_tools.cli.progress import spinner
+    from kicad_tools.core.pcb_item_locks import BoardItemLocks
     from kicad_tools.optim import (
         OptimizationWorkflow,
         WorkflowConfig,
@@ -1328,11 +1424,41 @@ def cmd_optimize(args) -> int:
     if args.fixed:
         fixed_refs = [r.strip() for r in args.fixed.split(",") if r.strip()]
 
-    # Handle routing-aware optimization mode
-    if routing_aware:
-        return _cmd_optimize_routing_aware(
-            args, pcb_path, quiet, output_format, fixed_refs=fixed_refs
-        )
+    if not math.isfinite(args.decoupling_radius) or args.decoupling_radius < 0:
+        message = "--decoupling-radius must be a finite nonnegative distance"
+        if output_format != "json":
+            print(message, file=sys.stderr)
+        return output_result(False, message)
+
+    output_path = Path(args.output or pcb_path)
+    try:
+        with spinner("Loading PCB...", quiet=quiet):
+            pcb = PCB.load(str(pcb_path))
+            groups = designated_decoupling_groups(pcb_path, pcb, quiet=quiet)
+        locks = BoardItemLocks(pcb._sexp)
+        for fp in pcb.footprints:
+            node = fp._sexp_node
+            locked = locks.is_locked(node) if node is not None else fp.locked
+            if locked and fp.reference not in fixed_refs:
+                fixed_refs.append(fp.reference)
+        if routing_aware:
+            # The routing fixer's iterations and checkpoints can write to its input.
+            with TemporaryDirectory(dir=None if args.dry_run else output_path.parent) as staging:
+                candidate = Path(staging) / pcb_path.name
+                shutil.copyfile(pcb_path, candidate)
+                return _cmd_optimize_routing_aware(
+                    args,
+                    candidate,
+                    quiet,
+                    output_format,
+                    fixed_refs=fixed_refs,
+                    groups=groups,
+                )
+        routes = _protect_routed_bypass_parts(pcb, groups, fixed_refs)
+    except Exception as e:
+        if output_format != "json":
+            print(f"Error preparing PCB: {e}", file=sys.stderr)
+        return output_result(False, f"Error preparing PCB: {e}")
 
     # Load constraints if specified
     constraints = []
@@ -1351,15 +1477,6 @@ def cmd_optimize(args) -> int:
             if output_format != "json":
                 print(f"Error loading constraints: {e}", file=sys.stderr)
             return output_result(False, f"Error loading constraints: {e}")
-
-    # Load PCB
-    try:
-        with spinner("Loading PCB...", quiet=quiet):
-            pcb = PCB.load(str(pcb_path))
-    except Exception as e:
-        if output_format != "json":
-            print(f"Error loading PCB: {e}", file=sys.stderr)
-        return output_result(False, f"Error loading PCB: {e}")
 
     # Load keepout zones
     keepout_zones = []
@@ -1444,7 +1561,8 @@ def cmd_optimize(args) -> int:
             _print_pre_optimization_info(workflow, args, constraints)
 
         with spinner(f"Running {strategy} optimization...", quiet=quiet):
-            opt_result = workflow.run(callback=callback if args.verbose else None)
+            with stdout_to_stderr_when(output_format == "json"):
+                opt_result = workflow.run(callback=callback if args.verbose else None)
 
         if not opt_result.success:
             if output_format != "json":
@@ -1470,17 +1588,9 @@ def cmd_optimize(args) -> int:
                 traceback.print_exc()
         return output_result(False, f"Error during optimization: {e}")
 
-    # Dry run - just report
-    if args.dry_run:
-        if not quiet:
-            print("\n(Dry run - no changes made)")
-            print(workflow.get_report())
-        result["message"] = "Dry run - no changes made"
-        return output_result(True)
-
     # Check routability before saving (if requested)
     before_rate, before_nets, before_problems = 0.0, 0, 0
-    if check_routability:
+    if check_routability and not args.dry_run:
         if not quiet:
             print("\nChecking routability before optimization...")
         before_rate, before_nets, before_problems = _estimate_routability(pcb_path, quiet)
@@ -1490,24 +1600,37 @@ def cmd_optimize(args) -> int:
                 f"({before_nets} nets, {before_problems} problem nets)"
             )
 
-    # Write results
-    output_path = Path(args.output) if args.output else pcb_path
-
     try:
-        with spinner("Writing optimized placement...", quiet=quiet):
-            updated = workflow.save(output_path)
-
-        result["components_updated"] = updated
-        result["output_path"] = str(output_path)
-
-        if not quiet:
-            print(f"\nUpdated {updated} component positions")
-            print(f"Saved to: {output_path}")
-
+        if groups or not args.dry_run:
+            with TemporaryDirectory(dir=None if args.dry_run else output_path.parent) as staging:
+                candidate = Path(staging) / pcb_path.name
+                with spinner("Writing optimized placement...", quiet=quiet):
+                    updated = workflow.save(candidate)
+                    _finish_placement_candidate(
+                        candidate,
+                        None if args.dry_run else output_path,
+                        groups,
+                        fixed_refs,
+                        routes,
+                        args.decoupling_radius,
+                        result,
+                    )
     except Exception as e:
         if output_format != "json":
-            print(f"Error saving PCB: {e}", file=sys.stderr)
-        return output_result(False, f"Error saving PCB: {e}")
+            print(f"Error finalizing placement: {e}", file=sys.stderr)
+        return output_result(False, f"Error finalizing placement: {e}")
+
+    if args.dry_run:
+        if not quiet:
+            print("\n(Dry run - no changes made)")
+            print(workflow.get_report())
+        result["message"] = "Dry run - no changes made"
+        return output_result(True)
+
+    result["components_updated"] = updated
+    if not quiet:
+        print(f"\nUpdated {updated} component positions")
+        print(f"Saved to: {output_path}")
 
     # Check routability after saving (if requested)
     if check_routability:
@@ -1993,6 +2116,7 @@ def main(argv: list[str] | None = None) -> int:
     optimize_parser = subparsers.add_parser(
         "optimize", help="Optimize component placement for routability"
     )
+    add_decoupling_radius_argument(optimize_parser)
     optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     optimize_parser.add_argument(
         "-o",

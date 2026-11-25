@@ -34,8 +34,8 @@ gate passes.  Stages, in order:
    ``--refill-zones`` must report 0 errors, 0 zone clearance findings and 0
    unconnected items.  The existing gates only check refilled copper, which
    is how stale fills slipped through.
-4. **Re-plot** (only when the bundle no longer binds the current routed
-   project files, or with ``--force-replot``): a fresh ``kct export`` supplies
+4. **Re-plot** when the bundle needs rebuilding or ``--force-replot`` is set.
+   A fresh ``kct export`` supplies
    ``gerbers/gerbers.zip`` (re-zipped deterministically), ``images/*`` and the
    report; ``kicad-cli`` re-plots the assembly PDFs from the routed PCB and
    the schematic PDF from the published schematic (Issue #7675: a title-block
@@ -47,10 +47,12 @@ gate passes.  Stages, in order:
    #7199): placement is not this driver's business.
    Board 04 (Issue #7357) re-plots only the ``gerber_members`` of its committed
    ``gerbers.zip`` (copper and F.Silkscreen; every other member keeps its bytes)
-   instead of a whole ``kct export``, and writes ``output/drc_report.json`` from
-   its recipe's ``run_drc`` once the bundle is final.  Its check report comes
-   from the board-local ``check_manufacturing.py``, not ``kct check``.  Its
-   assembly PDFs are re-plotted from the published routed PCB, and its whole
+   instead of a whole ``kct export``. Its recipe writes ``output/drc_report.json``
+   for the final copper before export and checks it again after re-hashing the
+   manifest. If only the manifest's DRC entry is stale, the driver refreshes
+   that entry from the bound report. The board-local ``check_manufacturing.py``
+   supplies the check report. Its assembly PDFs are re-plotted from the
+   published routed PCB, and its whole
    ``output/manufacturing`` bundle (report, README, manifest) is regenerated
    through the recipe's ``generate_manufacturing`` under the reviewed paid
    process with ``SOURCE_DATE_EPOCH`` anchored to ``--checked-at``, so the
@@ -625,6 +627,41 @@ def bundle_is_stale(staged: Path, cfg: rr.BoardConfig) -> bool:
     return not archive_is_current(staged / archive, [staged / s for s in search])
 
 
+def check_recipe_drc_preflight(staged: Path, cfg: rr.BoardConfig, *, refresh: bool = False) -> bool:
+    """Check the exporter's DRC result, optionally refreshing that entry in a current bundle."""
+    from kicad_tools.export.preflight import PreflightChecker
+
+    routed = staged / cfg.routed_pcb
+    report = routed.parent / "drc_report.json"
+    manifest = routed.parent / "manufacturing" / "manifest.json"
+    if not report.is_file() or not manifest.is_file():
+        return False
+    data = json.loads(report.read_bytes())
+    if (
+        data.get("pcb_sha256") != sha256(routed)
+        or data.get("manufacturer") != cfg.tier
+        or Path(data.get("file", "")).name != routed.name
+        or data.get("meta_checks", {}).get("manifest", {}).get("status") != "PASSED"
+    ):
+        return False
+    published = json.loads(manifest.read_bytes())
+    entries = published.get("preflight", [])
+    matches = [i for i, entry in enumerate(entries) if entry["name"] == "drc"]
+    if len(matches) != 1:
+        return False
+    expected = PreflightChecker(routed, manufacturer=cfg.tier)._check_drc().to_dict()
+    index = matches[0]
+    if entries[index] != expected:
+        if not refresh:
+            return False
+        # The PCB, report and project archive still bind. Keep the artwork and
+        # other preflight observations when only this recorded result is stale.
+        entries[index] = expected
+        manifest.write_text(json.dumps(published, indent=2) + "\n", encoding="utf-8")
+        log("  manufacturing manifest: refreshed DRC preflight from the bound report")
+    return True
+
+
 def check_fresh_cpl(committed: bytes, fresh: bytes, routed_pcb: Path) -> None:
     """Refuse a fresh CPL that moves a part; accept a pure coordinate-frame refresh (#7199).
 
@@ -844,13 +881,18 @@ def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) 
     _write_targets(staged, bundle.check_reports, data)
 
 
-def stage_recipe_drc(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
+def stage_recipe_drc(
+    staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig, *, before_export: bool = False
+) -> None:
     """Capture the recipe's ``run_drc`` report as ``output/drc_report.json`` (board 04).
 
-    The report runs the manifest meta-check against the bundle, so it must
-    come after the manifest re-hash; it is not itself part of the bundle.
+    Export needs the new copper's DRC. Its manifest meta-check is authoritative
+    only on the second run, once the new bundle has been built and re-hashed.
     """
     assert bundle.recipe_drc is not None
+    routed = staged / cfg.routed_pcb
+    report = routed.parent / "drc_report.json"
+    report.unlink(missing_ok=True)
     snippet = (
         "import runpy, sys; from pathlib import Path; "
         "recipe = runpy.run_path(sys.argv[1], run_name='refresh_bundles_recipe'); "
@@ -862,16 +904,18 @@ def stage_recipe_drc(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) ->
             "-c",
             snippet,
             str(staged / bundle.recipe_drc),
-            str(staged / cfg.routed_pcb),
+            str(routed),
         ],
         cwd=staged,
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(staged)},
     )
-    report = staged / "output" / "drc_report.json"
-    if not report.is_file():
+    if proc.returncode != 0 or not report.is_file():
         raise GateFailure(f"{bundle.recipe_drc} run_drc wrote no report: {proc.stderr[-2000:]}")
-    status = json.loads(report.read_text()).get("meta_checks", {}).get("manifest", {}).get("status")
-    if status != "PASSED":
+    data = json.loads(report.read_bytes())
+    if data.get("pcb_sha256") != sha256(routed):
+        raise GateFailure("output/drc_report.json does not bind the final routed PCB")
+    status = data.get("meta_checks", {}).get("manifest", {}).get("status")
+    if not before_export and status != "PASSED":
         raise GateFailure(
             f"output/drc_report.json: manifest meta-check is {status!r}, not 'PASSED'"
         )
@@ -947,8 +991,17 @@ def refresh_bundle(
         if bundle.parity_drc_reports:
             gate_parity_drc(staged, cfg, bundle)
 
-        stale = force_replot or bundle_is_stale(staged, cfg)
+        stale = (
+            force_replot
+            or bundle_is_stale(staged, cfg)
+            or (
+                bundle.recipe_drc is not None
+                and not check_recipe_drc_preflight(staged, cfg, refresh=True)
+            )
+        )
         if stale:
+            if bundle.recipe_drc is not None:
+                stage_recipe_drc(staged, cfg, bundle, before_export=True)
             if bundle.recipe_manufacturing is not None:
                 stage_recipe_manufacturing(staged, cfg, bundle)
             stage_replot(staged, cfg, bundle, saved_drc=saved_drc)
@@ -985,6 +1038,10 @@ def refresh_bundle(
                     staged / "output" / "manufacturing"
                 )
                 stage_recipe_drc(staged, cfg, bundle)
+                if not check_recipe_drc_preflight(staged, cfg):
+                    raise GateFailure(
+                        "published DRC preflight disagrees with output/drc_report.json"
+                    )
 
         return rr.repin_staged(
             board,
