@@ -2901,3 +2901,87 @@ class TestPcbPairedWriteSafety:
         assert ret == 1
         assert "duplicate" in capsys.readouterr().err
         assert (parent.read_bytes(), child.read_bytes(), pcb.read_bytes()) == before
+
+    def test_refused_backup_json_emits_only_after_successful_publication(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Refused backup under --format json must not report completed renames."""
+        import kicad_tools.cli.sch_re_annotate as mod
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        real_backup = mod.create_backup
+
+        def refuse_sch_backup(path):
+            if path.suffix == ".kicad_sch":
+                raise PermissionError("read-only directory")
+            return real_backup(path)
+
+        monkeypatch.setattr(mod, "create_backup", refuse_sch_backup)
+        ret = main([str(sch), "--pcb", str(pcb), "--backup", "--format", "json"])
+        monkeypatch.undo()
+
+        captured = capsys.readouterr()
+        assert ret == 1
+        assert captured.out.strip() == ""
+        assert "backup" in captured.err.lower()
+        assert "no files were modified" in captured.err.lower()
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        # Dry run still emits the proposed mapping in JSON.
+        ret = main([str(sch), "--pcb", str(pcb), "--dry-run", "--format", "json"])
+        assert ret == 0
+        dry_data = json.loads(capsys.readouterr().out)
+        assert dry_data["dry_run"] is True
+        assert dry_data["total"] == 2
+        assert dry_data["pcb"]["renamed"] == 2
+
+        # Writable retry publishes both files and reports completed renames.
+        ret = main([str(sch), "--pcb", str(pcb), "--backup", "--format", "json"])
+        assert ret == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["dry_run"] is False
+        assert data["total"] == 2
+        assert data["pcb"]["path"] == str(pcb)
+        assert data["pcb"]["renamed"] == 2
+        assert data["pcb"]["warnings"] == []
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+        assert '"Reference" "R2"' in sch.read_text()
+
+    def test_write_failure_json_does_not_claim_completed_renames(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A late PCB write refusal under --format json must not report completed renames."""
+        from kicad_tools.schema.pcb import PCB
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        def boom(self, path):
+            raise OSError("Operation not permitted")
+
+        with monkeypatch.context() as m:
+            m.setattr(PCB, "save", boom)
+            ret = main([str(sch), "--pcb", str(pcb), "--format", "json"])
+
+        captured = capsys.readouterr()
+        assert ret == 1
+        assert captured.out.strip() == ""
+        assert "Operation not permitted" in captured.err
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        # Retry succeeds and reports completed renames.
+        ret = main([str(sch), "--pcb", str(pcb), "--format", "json"])
+        assert ret == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["dry_run"] is False
+        assert data["total"] == 2
+        assert data["pcb"]["renamed"] == 2
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}

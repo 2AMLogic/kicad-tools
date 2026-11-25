@@ -726,11 +726,10 @@ def run_re_annotate(
                     )
                     return 1
 
-    # Phase 3: Output mapping / apply changes
-    if format == "json":
+    def _emit_json_result() -> None:
         import json
 
-        output = {
+        payload: dict = {
             "mappings": [
                 {"old": info["old"], "new": info["new"], "uuid": uid}
                 for uid, info in sorted(effective_mapping.items(), key=lambda x: x[1]["new"])
@@ -739,13 +738,15 @@ def run_re_annotate(
             "dry_run": dry_run,
         }
         if pcb_path is not None:
-            output["pcb"] = {
+            payload["pcb"] = {
                 "path": str(pcb_path),
                 "renamed": len(board_mapping),
                 "warnings": pcb_warnings,
             }
-        print(json.dumps(output, indent=2))
-    else:
+        print(json.dumps(payload, indent=2))
+
+    # Phase 3: Output mapping / apply changes
+    if format != "json":
         print(f"Re-annotation mapping ({len(effective_mapping)} changes):")
         print()
 
@@ -771,7 +772,9 @@ def run_re_annotate(
         print()
 
     if dry_run:
-        if format == "text":
+        if format == "json":
+            _emit_json_result()
+        elif format == "text":
             print("Dry run: no changes made.")
         return 0
 
@@ -869,11 +872,11 @@ def run_re_annotate(
         if write_pcb and pcb_path is not None:
             backup_targets.append(pcb_path)
         backup_targets.extend(modified_files)
-        for target in backup_targets:
+        for backup_target in backup_targets:
             try:
-                bak = create_backup(target)
+                bak = create_backup(backup_target)
             except Exception as e:
-                print(f"Error creating backup of {target}: {e}", file=sys.stderr)
+                print(f"Error creating backup of {backup_target}: {e}", file=sys.stderr)
                 print("No files were modified.", file=sys.stderr)
                 return 1
             if format == "text":
@@ -898,7 +901,9 @@ def run_re_annotate(
             _rollback()
             return 1
 
-    if format == "text":
+    if format == "json":
+        _emit_json_result()
+    elif format == "text":
         message = (
             f"Re-annotated {len(effective_mapping)} reference(s) "
             f"across {len(modified_files)} file(s)."
