@@ -48,6 +48,10 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from shapely import get_parts
+from shapely.geometry import LineString, Polygon
+from shapely.geometry.base import BaseGeometry
+
 from kicad_tools.schema.pcb import _segment_dedup_key
 
 from ..violations import DRCResults, DRCViolation
@@ -76,6 +80,13 @@ def _unit(seg: Any) -> tuple[float, float, float] | None:
     if length < 1e-9:
         return None
     return dx / length, dy / length, length
+
+
+@dataclass(frozen=True)
+class _Pour:
+    outline: BaseGeometry
+    clearance: float
+    min_thickness: float
 
 
 @dataclass(frozen=True)
@@ -126,15 +137,19 @@ class PourSlotRule(DRCRule):
 
     def iter_pairs(self, pcb: PCB) -> Iterator[PourSlotPair]:
         """Yield each flagged pair (the single detection path, Issue #8440)."""
-        # layer -> zones: the widest requirement of the pours on that layer is
-        # the conservative (largest) threshold.
-        zones: dict[str, list[Any]] = defaultdict(list)
+        zones: dict[str, list[_Pour]] = defaultdict(list)
         for zone in pcb.zones:
-            if getattr(zone, "keepout", None) is not None:
+            if zone.keepout is not None or len(zone.polygon) < 3:
                 continue
+            outline = Polygon(zone.polygon)
+            pour = _Pour(
+                outline if outline.is_valid else outline.buffer(0),
+                zone.clearance,
+                zone.min_thickness,
+            )
             for layer in {zone.layer, *getattr(zone, "layers", [])}:
                 if layer:
-                    zones[layer].append(zone)
+                    zones[layer].append(pour)
         if not zones:
             return
 
@@ -181,19 +196,11 @@ class PourSlotRule(DRCRule):
 
     # ------------------------------------------------------------------
 
-    def _pair_clearance(self, zlist: list[Any], a: Any, b: Any) -> tuple[float, float]:
-        """(clearance, min_thickness) for a pair: zone vs netclass maximum."""
-        clearance = max(z.clearance for z in zlist)
-        thickness = max(z.min_thickness for z in zlist)
-        for seg in (a, b):
-            clearance = max(clearance, self.netclass_clearances.get(seg.net_name, 0.0))
-        return clearance, thickness
-
     def _check_layer(
         self,
         layer: str,
         items: list[tuple[Any, tuple[float, float, float]]],
-        zlist: list[Any],
+        zlist: list[_Pour],
     ) -> Iterator[PourSlotPair]:
         max_clear = max([z.clearance for z in zlist] + list(self.netclass_clearances.values()))
         max_thick = max(z.min_thickness for z in zlist)
@@ -226,7 +233,7 @@ class PourSlotRule(DRCRule):
         layer: str,
         first: tuple[Any, tuple[float, float, float]],
         second: tuple[Any, tuple[float, float, float]],
-        zlist: list[Any],
+        zlist: list[_Pour],
     ) -> PourSlotPair | None:
         a, (ux, uy, la) = first
         b, (vx, vy, _lb) = second
@@ -242,31 +249,45 @@ class PourSlotRule(DRCRule):
 
         tb0, db0 = frame(b.start)
         tb1, db1 = frame(b.end)
-        overlap = min(la, max(tb0, tb1)) - max(0.0, min(tb0, tb1))
+        start_t = max(0.0, min(tb0, tb1))
+        end_t = min(la, max(tb0, tb1))
+        overlap = end_t - start_t
         if overlap < MIN_OVERLAP_MM:
             return None
         centre_dist = abs((db0 + db1) / 2)
         gap = centre_dist - (a.width + b.width) / 2
-        clearance, thickness = self._pair_clearance(zlist, a, b)
-        threshold = 2 * clearance + thickness
-        # A pair packed to (or below) 2 x clearance has no fillable strip
-        # between the keep-outs, so min_thickness has no island to drop: the
-        # void between the tracks is the unavoidable clearance void of any
-        # two different-net conductors at that spacing, not a pour slot
-        # (Issue #10121, native-refill controls).
-        if gap <= 2 * clearance + PACKED_GAP_TOL_MM or gap >= threshold - 1e-6:
-            return None
-
-        mid_t = (max(0.0, min(tb0, tb1)) + min(la, max(tb0, tb1))) / 2
-        loc = (a.start[0] + ux * mid_t, a.start[1] + uy * mid_t)
-        return PourSlotPair(
-            layer=layer,
-            first=a,
-            second=b,
-            gap=gap,
-            threshold=threshold,
-            clearance=clearance,
-            thickness=thickness,
-            overlap=overlap,
-            location=loc,
-        )
+        net_clearance = max(self.netclass_clearances.get(s.net_name, 0.0) for s in (a, b))
+        channel = None
+        for zone in zlist:
+            clearance = max(zone.clearance, net_clearance)
+            threshold = 2 * clearance + zone.min_thickness
+            if gap <= 2 * clearance + PACKED_GAP_TOL_MM or gap >= threshold - 1e-6:
+                continue
+            # Clip the midline between the facing track edges to the authored
+            # zone outline. The dropped strip is absent from its filled polygon.
+            if channel is None:
+                ends = []
+                for t in (start_t, end_t):
+                    d = db0 + (db1 - db0) * (t - tb0) / (tb1 - tb0)
+                    offset = d / 2 + math.copysign(1, d) * (a.width - b.width) / 4
+                    ends.append(
+                        (a.start[0] + ux * t - uy * offset, a.start[1] + uy * t + ux * offset)
+                    )
+                channel = LineString(ends)
+            covered = zone.outline.intersection(channel)
+            run = max(get_parts(covered), key=lambda part: part.length, default=None)
+            if run is None or run.length < MIN_OVERLAP_MM:
+                continue
+            point = run.interpolate(0.5, normalized=True)
+            return PourSlotPair(
+                layer=layer,
+                first=a,
+                second=b,
+                gap=gap,
+                threshold=threshold,
+                clearance=clearance,
+                thickness=zone.min_thickness,
+                overlap=run.length,
+                location=(point.x, point.y),
+            )
+        return None

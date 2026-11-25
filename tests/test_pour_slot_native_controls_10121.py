@@ -72,7 +72,7 @@ def _roundtrip(pcb: PCB, tmp_path: Path, name: str) -> PCB:
     return PCB.load(str(path))
 
 
-def _control_p(tmp_path: Path) -> PCB:
+def _control_p(tmp_path: Path, zones: tuple[str, ...] = (ZONE,)) -> PCB:
     pcb = PCB.create(width=50, height=40, center=False)
     pcb.add_trace((11, 15), (19, 15), width=0.4, layer="F.Cu", net="NET1")
     pcb.add_trace((11, 15.95), (19, 15.95), width=0.4, layer="F.Cu", net="NET2")
@@ -80,7 +80,8 @@ def _control_p(tmp_path: Path) -> PCB:
     pcb.add_via(10.2, 15.95, size=0.6, drill=0.3, net="NET2")
     pcb.add_via(19.8, 15, size=0.6, drill=0.3, net="NET1")
     pcb.add_via(19.8, 15.95, size=0.6, drill=0.3, net="NET2")
-    pcb._sexp.append(parse_string(ZONE))
+    for zone in zones:
+        pcb._sexp.append(parse_string(zone))
     return _roundtrip(pcb, tmp_path, "control_p.kicad_pcb")
 
 
@@ -117,6 +118,22 @@ def test_control_p_genuine_slot_still_warns(tmp_path: Path) -> None:
     # 0.550 mm copper-free channel over the whole 8 mm run, pour both sides).
     assert round(gap - 2 * CLEARANCE_MM, 4) == 0.15
     assert gap - 2 * CLEARANCE_MM < MIN_THICKNESS_MM
+
+
+def test_remote_zone_cannot_change_the_local_fill_band(tmp_path: Path) -> None:
+    local = ZONE.replace("(xy 45 ", "(xy 25 ")
+    remote = ZONE.replace("(xy 5 ", "(xy 32 ").replace("clearance 0.2", "clearance 0.4")
+    assert _pair_gaps(_control_p(tmp_path, (local, remote))) == [("NET1", "NET2", 0.55)]
+    thin = local.replace("min_thickness 0.3", "min_thickness 0.1")
+    assert _pair_gaps(_control_p(tmp_path, (thin, remote))) == []
+
+
+def test_slot_only_partly_inside_zone(tmp_path: Path) -> None:
+    # A zone ending at X=12 covers the first mm of the run at X=11..19.
+    local = ZONE.replace("(xy 45 ", "(xy 12 ")
+    (pair,) = iter_pour_slot_pairs(_control_p(tmp_path, (local,)))
+    assert pair.overlap == 1.0
+    assert pair.location[0] == 11.5
 
 
 def test_control_n_pad_exit_stays_silent(tmp_path: Path) -> None:
