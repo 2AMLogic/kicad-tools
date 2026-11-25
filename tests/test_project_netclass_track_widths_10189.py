@@ -779,3 +779,63 @@ def test_arc_only_width_edit_obeys_dry_run_and_output_verifier(tmp_path, capsys)
     assert True in seen and False in seen
     assert stats.output_verify_rolled_back["drc"] == ["NET_B"]
     assert pcb.read_text() == board
+
+
+@pytest.mark.parametrize("command", ["route", "optimize-traces"])
+@pytest.mark.parametrize("lock", ["direct", "group"])
+def test_width_edit_preserves_net_with_only_a_locked_arc(tmp_path, capsys, command, lock):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+    board = _arc_fixture_ids(pcb.read_text()).replace(
+        "(segment (start 4 18)", "(arc (start 4 18) (mid 12 18.2)"
+    )
+    if lock == "direct":
+        board = board.replace("(arc (start 4 18)", "(arc (locked yes) (start 4 18)")
+    else:
+        board = board.rstrip().removesuffix(")") + (
+            '(group "tuned" (uuid "00000000-0000-4000-8000-0000000000c1") (locked yes)'
+            ' (members "00000000-0000-4000-8000-0000000000b1")))'
+        )
+    pcb.write_text(board)
+    settings = json.loads(project.read_text())
+    next(c for c in settings["net_settings"]["classes"] if c["name"] == "ClassB")["track_width"] = (
+        0.55
+    )
+    project.write_text(json.dumps(settings))
+    before = _arc_geometry(PCB.load(pcb).arcs[0])
+    if command == "route":
+        _route_board(pcb, ["--skip-drc"])
+    else:
+        assert optimize_cmd.main([str(pcb), "--net", "NET_B", "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["locked_nets_skipped"] == ["NET_B"]
+    assert [_arc_geometry(arc) for arc in PCB.load(pcb).arcs] == [before]
+
+
+@pytest.mark.parametrize("detached", [True, False])
+def test_reroute_recovers_old_detached_arc_but_keeps_connected_neckdown(tmp_path, detached):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+    board = _arc_fixture_ids(pcb.read_text()).replace("(width 0.25)", "(width 0.37)")
+    if detached:
+        board = board.rstrip().removesuffix(")") + (
+            '(arc (start 8 9) (mid 10 9.1) (end 12 9) (width 0.25) (layer "F.Cu")'
+            ' (net 1) (uuid "00000000-0000-4000-8000-0000000000a3")))'
+        )
+    else:
+        board = board.replace(
+            "(segment (start 4 6) (end 12 6) (width 0.37)",
+            "(arc (start 4 6) (mid 8 6.2) (end 12 6) (width 0.25)",
+        )
+    pcb.write_text(board)
+    settings = json.loads(project.read_text())
+    next(c for c in settings["net_settings"]["classes"] if c["name"] == "ClassA")["track_width"] = (
+        0.37
+    )
+    project.write_text(json.dumps(settings))
+    original = _arc_geometry(PCB.load(pcb).arcs[0])
+    _route_board(pcb, ["--skip-drc"])
+    result = PCB.load(pcb)
+    assert {s.width for s in result.segments if s.net_name == "NET_A"} == {0.37}
+    assert [_arc_geometry(arc) for arc in result.arcs] == ([] if detached else [original])

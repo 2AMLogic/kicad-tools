@@ -1302,8 +1302,8 @@ def optimize_pcb(
             if fnmatch.fnmatchcase(net, net_pattern)
         }
 
-    # An arc-only net still participates in the same filters and rollback gates.
-    for net in arc_edits:
+    # Arc-only edits and wholly locked nets still appear in the filtered report.
+    for net in sorted(arc_edits.keys() | locked_nets):
         if (not net_filter or net == net_filter) and (
             not net_pattern or fnmatch.fnmatchcase(net, net_pattern)
         ):

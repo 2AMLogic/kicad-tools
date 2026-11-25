@@ -21116,12 +21116,14 @@ def _stale_width_connected_nets(args, pcb_path: Path, pcb: "PCB", connected: lis
     trunk_widths: dict[str, float] = {}
     for seg in chain(pcb.segments, pcb.arcs):
         trunk_widths[seg.net_name] = max(trunk_widths.get(seg.net_name, 0.0), seg.width)
-    candidates = target.keys() & trunk_widths.keys() & set(connected)
-    stale = {
-        name
-        for name in candidates - preserved_placement
-        if abs(trunk_widths[name] - target[name]) > 1e-4
-    }
+    candidates = (target.keys() & trunk_widths.keys() & set(connected)) - preserved_placement
+    stale = {name for name in candidates if abs(trunk_widths[name] - target[name]) > 1e-4}
+    if pcb.arcs:
+        from kicad_tools.router.preserve_existing import detached_off_width_arc_nets
+
+        # An older writer could leave an off-width arc behind an already
+        # corrected trunk. Preserve connected neck-downs on the same net.
+        stale.update(detached_off_width_arc_nets(pcb, {n: target[n] for n in candidates - stale}))
     if stale:
         # Re-routing replaces the whole net, including vias and group members.
         stale.difference_update(locked_copper_nets(pcb._sexp, net_names))
