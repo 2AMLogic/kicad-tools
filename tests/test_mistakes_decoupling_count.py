@@ -530,3 +530,41 @@ def test_stage_suffixed_board_without_schematic_keeps_geometric_fallback(tmp_pat
         ("U1", "1"): ["geometric"],
         ("U2", "1"): ["geometric"],
     }
+
+
+def test_json_report_parses_the_schematic_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #10241: findings and inventory share one schematic parse."""
+    import kicad_tools.placement.decoupling as decoupling
+
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    calls: list[Path] = []
+    real = decoupling.schematic_cap_associations
+
+    def counting(path, *args, **kwargs):
+        calls.append(Path(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(decoupling, "schematic_cap_associations", counting)
+    assert mistakes_cmd.main([str(board), "--category", "decoupling", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(calls) == 1
+    assert payload["decoupling_inventory"]
+
+
+def test_detector_reports_inventory_from_registered_check(tmp_path: Path) -> None:
+    """The inventory comes from the registered instance, so its settings apply."""
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    pcb = PCB.load(str(board))
+    check = DecouplingCountCheck(radius_mm=0.5)
+    reports: dict = {}
+    mistakes, _ = MistakeDetector([check]).detect_with_coverage(pcb, reports)
+    assert [r.to_dict() for r in reports["DecouplingCountCheck"]] == [
+        r.to_dict() for r in check.pin_inventory(pcb)
+    ]
+    assert mistakes
+    assert [m.title for m in mistakes] == [m.title for m in check.check(pcb)]
+    # Without a reports dict nothing is collected and nothing is kept.
+    plain, _ = MistakeDetector([check]).detect_with_coverage(pcb)
+    assert [m.title for m in plain] == [m.title for m in mistakes]

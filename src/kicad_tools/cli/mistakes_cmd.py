@@ -237,11 +237,14 @@ def _analyze_pcb(args) -> int:
     # of silently looking like a clean pass -- mirrors the #4011
     # vacuity-guard discipline used for `kct check`'s `lvs` sub-check.
     detector = MistakeDetector()
+    # Issue #10241: the JSON report's decoupling inventory comes from the
+    # registered check's own run, not a second instance and schematic parse.
+    reports: dict[str, Any] | None = {} if args.format == "json" else None
     if args.category:
         cat = MistakeCategory(args.category)
-        mistakes, coverage = detector.detect_by_category_with_coverage(pcb, cat)
+        mistakes, coverage = detector.detect_by_category_with_coverage(pcb, cat, reports)
     else:
-        mistakes, coverage = detector.detect_with_coverage(pcb)
+        mistakes, coverage = detector.detect_with_coverage(pcb, reports)
 
     # Issue #6006: stable keys + evidence hashes, then evidence-bound waivers.
     waiver_outcome, code = _apply_waivers(args, pcb, pcb_path, mistakes, coverage)
@@ -267,7 +270,7 @@ def _analyze_pcb(args) -> int:
             coverage,
             advisories,
             board_origin(pcb),
-            decoupling_inventory=_decoupling_inventory(pcb, args.category),
+            decoupling_inventory=_decoupling_inventory(reports),
         )
     elif args.format == "sarif":
         from kicad_tools.explain.mistake_waivers import board_origin
@@ -505,16 +508,15 @@ def _summary(mistakes: list, advisories: list) -> dict:
     }
 
 
-def _decoupling_inventory(pcb, category: str | None) -> list[dict] | None:
+def _decoupling_inventory(reports: dict[str, Any] | None) -> list[dict] | None:
     """Issue #10134: per-pin decoupling inventory (clean and empty pins too).
 
-    None when the decoupling check is not part of this run.
+    From the registered decoupling check's own run (Issue #10241), so it
+    shares the findings' settings and schematic parse.  None when the check
+    did not produce one (another ``--category``, or the check was incomplete).
     """
-    if category not in (None, "decoupling"):
-        return None
-    from kicad_tools.explain.checks import DecouplingCountCheck
-
-    return [row.to_dict() for row in DecouplingCountCheck().pin_inventory(pcb)]
+    rows = (reports or {}).get("DecouplingCountCheck")
+    return None if rows is None else [row.to_dict() for row in rows]
 
 
 def _output_json(

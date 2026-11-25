@@ -316,18 +316,22 @@ class MistakeDetector:
         mistakes, _coverage = self.detect_with_coverage(pcb)
         return mistakes
 
-    def detect_with_coverage(self, pcb: PCB) -> tuple[list[Mistake], list[CheckCoverage]]:
+    def detect_with_coverage(
+        self, pcb: PCB, reports: dict[str, Any] | None = None
+    ) -> tuple[list[Mistake], list[CheckCoverage]]:
         """Run all checks and return both mistakes and per-check coverage.
 
         Args:
             pcb: The PCB to analyze
+            reports: Optional dict filled with the supplementary report of
+                every check that offers one (see :meth:`_run`).
 
         Returns:
             ``(mistakes, coverage)`` -- mistakes sorted by severity, and one
             :class:`CheckCoverage` entry per registered check recording
             whether it ran or was ``incomplete`` (issue #4899).
         """
-        return self._run(self._checks, pcb)
+        return self._run(self._checks, pcb, reports)
 
     def detect_by_category(
         self,
@@ -350,22 +354,35 @@ class MistakeDetector:
         self,
         pcb: PCB,
         category: MistakeCategory,
+        reports: dict[str, Any] | None = None,
     ) -> tuple[list[Mistake], list[CheckCoverage]]:
         """Run only checks in a specific category, with coverage (issue #4899).
 
         Args:
             pcb: The PCB to analyze
             category: Only run checks in this category
+            reports: Optional dict filled with the supplementary report of
+                every selected check that offers one (see :meth:`_run`).
 
         Returns:
             ``(mistakes, coverage)`` for checks in the specified category.
         """
         checks = [c for c in self._checks if c.category == category]
-        return self._run(checks, pcb)
+        return self._run(checks, pcb, reports)
 
     @staticmethod
-    def _run(checks: list[MistakeCheck], pcb: PCB) -> tuple[list[Mistake], list[CheckCoverage]]:
+    def _run(
+        checks: list[MistakeCheck],
+        pcb: PCB,
+        reports: dict[str, Any] | None = None,
+    ) -> tuple[list[Mistake], list[CheckCoverage]]:
         """Run *checks* against *pcb*, catching :class:`CheckIncomplete` per-check.
+
+        When *reports* is given, a check that has ``check_with_inventory``
+        (Issue #10241) is run through it and its inventory is stored under the
+        check's class name, so the caller reports from the same instance and
+        the same schematic parse as the findings.  The dict is the caller's and
+        scoped to this one run; nothing is kept on the detector.
 
         A check that raises ``CheckIncomplete`` contributes a ``"incomplete"``
         :class:`CheckCoverage` entry (and no mistakes); every other check
@@ -378,7 +395,11 @@ class MistakeDetector:
             check_name = type(check).__name__
             rule_id = mistake_rule_id(check)
             try:
-                found = check.check(pcb)
+                with_report = getattr(check, "check_with_inventory", None)
+                if reports is not None and with_report is not None:
+                    found, reports[check_name] = with_report(pcb)
+                else:
+                    found = check.check(pcb)
             except CheckIncomplete as exc:
                 coverage.append(
                     CheckCoverage(
