@@ -6320,6 +6320,11 @@ def load_pcb_for_routing(
 
         router.grid.authored_arc_copper = authored_arc_copper(identity_document, net_map)
 
+    # Issue #10164: the fabrication gap check also grades footprint copper polygons.
+    from .optimizer.pad_slits import authored_footprint_poly_copper
+
+    router.grid.authored_footprint_poly_copper = authored_footprint_poly_copper(identity_document)
+
     router.placement_disposition = placement_disposition
     # Issue #8066: --complete keeps listed nets' preserved copper (obstacle + output).
     router._preserve_listed_copper = bool(preserve_listed_copper and load_existing_routes)
