@@ -2154,7 +2154,11 @@ class CppPathfinder:
         escape fences), ``fence_decision`` (``"none"`` / ``"applied"`` /
         ``"skipped-covered"``), ``searches`` (one dict per native search:
         ``fenced``, ``elapsed``, ``succeeded``, ``failure_reason`` token)
-        and, when the attempt was handed off, ``python_fallback``.  These
+        and, when the attempt was handed off, ``python_fallback``, plus the
+        wall-time split ``native_search_seconds`` (the fresh searches),
+        ``python_fallback_seconds`` (the fallback A*) and ``other_seconds``
+        (the remainder: setup, stored-route sync, clearance-validation
+        resumes), which sum to ``elapsed``.  These
         fields distinguish a drained fenced search from a pre-empted one
         and name the exact connection and target considered -- the data
         the November 24 board trace lacked.  Purely observational: the
@@ -2656,6 +2660,9 @@ class CppPathfinder:
                     self.clear_avoidance_costs()
 
         t0 = time.monotonic()
+        # Issue #8486: the Python fallback's wall time is already summed by
+        # reason; the call's share is the delta across this ``route()``.
+        fallback_s0 = self._python_fallback_total_seconds()
         succeeded = False
         try:
             result = self._route_impl(
@@ -2707,6 +2714,16 @@ class CppPathfinder:
             diag = getattr(self, "_attempt_diagnostic", None)
             if diag is not None:
                 record.update(diag)
+                # Issue #8486: split the call's wall time three ways so a
+                # trace says where a slow attempt went -- fresh native
+                # searches, the Python fallback A*, and everything else
+                # (setup, stored-route sync, clearance-validation resumes).
+                # Pure arithmetic over clocks already taken.
+                native_s = sum(float(sr["elapsed"]) for sr in diag.get("searches", ()))
+                fallback_s = max(0.0, self._python_fallback_total_seconds() - fallback_s0)
+                record["native_search_seconds"] = native_s
+                record["python_fallback_seconds"] = fallback_s
+                record["other_seconds"] = max(0.0, elapsed - native_s - fallback_s)
             self._per_call_timings.append(record)
             # Issue #3474 R1: live slow-call tracing under KCT_DEBUG_PNT.
             if os.environ.get("KCT_DEBUG_PNT") and (deadline_violated or elapsed > 5.0):
@@ -2715,6 +2732,10 @@ class CppPathfinder:
                     f"budget={per_net_timeout} violated={deadline_violated} ok={succeeded}",
                     flush=True,
                 )
+
+    def _python_fallback_total_seconds(self) -> float:
+        """Total wall time spent in the Python fallback A* so far (Issue #8486)."""
+        return float(sum(getattr(self, "_python_fallback_seconds_by_reason", {}).values()))
 
     def _route_impl(
         self,
