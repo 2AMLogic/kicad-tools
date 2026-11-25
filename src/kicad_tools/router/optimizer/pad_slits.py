@@ -180,6 +180,39 @@ def authored_arc_copper(
     return by_layer
 
 
+def authored_footprint_poly_copper(pcb: PCB) -> dict[str, list[BaseGeometry | None]]:
+    """Collect footprint copper polygons in the sheet coordinates used by the routing grid.
+
+    The fabrication gap check grades every ``fp_poly`` on a copper layer (a net tie joins
+    its pads with exactly this primitive, issue #5817), but the router grid models none of
+    them. A polygon the check cannot measure maps to ``None`` so callers fail closed.
+    """
+    from shapely.affinity import translate
+
+    from kicad_tools.validate.rules.physical_gap import (
+        _footprint_transform,
+        _fp_poly_geometry,
+    )
+
+    copper_layers = {layer.name for layer in pcb.copper_layers}
+    by_layer: dict[str, list[BaseGeometry | None]] = {}
+    for footprint in pcb.footprints:
+        transform = _footprint_transform(footprint)
+        for graphic in footprint.graphics:
+            if graphic.graphic_type != "poly" or graphic.layer not in copper_layers:
+                continue
+            try:
+                copper = _fp_poly_geometry(graphic, transform)
+                if copper is not None and not copper.is_empty:
+                    copper = translate(copper, *pcb.board_origin)
+                else:
+                    copper = None
+            except (TypeError, ValueError):
+                copper = None
+            by_layer.setdefault(graphic.layer, []).append(copper)
+    return by_layer
+
+
 def _band_edge(grid: RoutingGrid | None, attr: str) -> float | None:
     edge = getattr(getattr(grid, "rules", None), attr, None)
     if (
@@ -276,7 +309,7 @@ def covered_via_elbow(
     layer, net = run.layer.name, str(run.net)
     local: list[CopperSource] = []
 
-    def add(shape, source_net: int, kind: str) -> None:
+    def add(shape, source_net: int | str, kind: str) -> None:
         if shape is not None and shape.intersects(search_window):
             local.append(CopperSource(shape, layer, str(source_net), f"{kind}:{len(local)}", kind))
 
@@ -301,10 +334,19 @@ def covered_via_elbow(
             return None
         add(shape, source_net, "arc")
 
+    # Footprint copper polygons are graded under the trace band with no net (as the
+    # fabrication check records them), so they are modeled the same way here.
+    for shape in getattr(grid, "authored_footprint_poly_copper", {}).get(run.layer.kicad_name, ()):
+        if shape is None:
+            return None
+        add(shape, "", "poly")
+
     # A third branch can join the protruding arm. Removing its only contact
     # would disconnect it even when both endpoints of this route survive.
     if any(
-        s.net == net and s.geometry.intersects(diagonal) and not s.geometry.intersects(stationary)
+        (s.net == net or s.kind == "poly")
+        and s.geometry.intersects(diagonal)
+        and not s.geometry.intersects(stationary)
         for s in local
     ):
         return None
