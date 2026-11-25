@@ -382,6 +382,10 @@ def run_check_command(args) -> int:
     # guard in tests/test_cli_parser_drift.py now pins all three.
     if getattr(args, "refill_zones", False):
         sub_argv.append("--refill-zones")
+    # Issue #10137: forward the pour-stub proof opt-in (inner parser only
+    # otherwise; the parser-drift guard pins it).
+    if getattr(args, "prove_pour_stubs", False):
+        sub_argv.append("--prove-pour-stubs")
     if getattr(args, "courtyard_waivers", None):
         sub_argv.extend(["--courtyard-waivers", args.courtyard_waivers])
     if getattr(args, "waivers", None):
