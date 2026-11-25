@@ -944,7 +944,8 @@ def compute_sheet_order(
             terms; unused (order is read between footprint centres).
 
     Returns:
-        Sum of pairwise inversion depths (mm). Zero when the term is dormant.
+        Sum over prefix groups of the mean pairwise inversion depth (mm). Zero
+        when the term is dormant.
     """
     del footprint_sizes  # unused: order is read between footprint centres
     by_sheet = _sheet_members(placements, ref_sheets)
@@ -968,11 +969,16 @@ def compute_sheet_order(
             ys = [y for _, _, y in group]
             axis_is_x = (max(xs) - min(xs)) >= (max(ys) - min(ys))
             coords = [x if axis_is_x else y for _, x, y in group]
+            group_total = 0.0
             for i in range(len(coords)):
                 for j in range(i + 1, len(coords)):
                     inversion = coords[i] - coords[j]
                     if inversion > 0.0:
-                        total += inversion
+                        group_total += inversion
+            # Mean over the group's pairs, so the term is O(mm) in the bucket
+            # size like the other soft terms instead of O(k^2 * mm).
+            n = len(coords)
+            total += group_total / (n * (n - 1) / 2)
     return total
 
 

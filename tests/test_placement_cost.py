@@ -436,7 +436,11 @@ _SHEETS = {
 
 class TestComputeSheetCohesion:
     def test_spread_matches_domain_formulation(self) -> None:
-        """Same partition through the domain term gives the same number."""
+        """Same partition through the domain term gives the same number.
+
+        Fixture groups are deliberately at/above ``_SHEET_GROUP_MIN_MEMBERS``
+        (3), so the two terms' differing member floors are not exercised.
+        """
         placements = _sheet_layout()
         assert compute_sheet_cohesion(placements, _SHEETS) == pytest.approx(
             compute_domain_cohesion(placements, _SHEETS)
@@ -506,8 +510,27 @@ class TestComputeSheetOrder:
             ComponentPlacement(reference="U2", x=60.0, y=0.0),
             ComponentPlacement(reference="U3", x=70.0, y=0.0),
         ]
-        # Pairs (R1,R2): 10, (R1,R3): 20, (R2,R3): 10 -- 40 mm of inversions.
-        assert compute_sheet_order(placements, _SHEETS) == pytest.approx(40.0)
+        # Pairs (R1,R2): 10, (R1,R3): 20, (R2,R3): 10 -- 40 mm of inversions
+        # over 3 pairs: mean inversion depth 40/3 mm.
+        assert compute_sheet_order(placements, _SHEETS) == pytest.approx(40.0 / 3)
+
+    def test_fully_reversed_bucket_is_scale_stable(self) -> None:
+        # A fully reversed bucket on a 10 mm pitch has mean inversion depth
+        # (k+1)/3 * 10 mm, i.e. linear in k -- not the O(k^2) raw sum.
+        def reversed_bucket(k: int) -> float:
+            placements = [
+                ComponentPlacement(reference=f"R{i + 1}", x=10.0 * (k - i), y=0.0) for i in range(k)
+            ]
+            placements += [
+                ComponentPlacement(reference=f"U{i + 1}", x=1000.0 + 10.0 * i, y=0.0)
+                for i in range(3)
+            ]
+            sheets = {f"R{i + 1}": _SHEET_A for i in range(k)}
+            sheets.update({f"U{i + 1}": _SHEET_B for i in range(3)})
+            return compute_sheet_order(placements, sheets)
+
+        assert reversed_bucket(40) == pytest.approx(10.0 * 41 / 3)
+        assert reversed_bucket(40) / reversed_bucket(10) < 5.0
 
     def test_dominant_axis_is_y_when_spread_vertically(self) -> None:
         placements = [
@@ -532,7 +555,7 @@ class TestComputeSheetOrder:
             ComponentPlacement(reference="C1", x=70.0, y=0.0),
         ]
         sheets = {**_SHEETS, "C1": _SHEET_B, "C2": _SHEET_B, "C3": _SHEET_B}
-        only_c = 10.0 + 20.0 + 10.0
+        only_c = (10.0 + 20.0 + 10.0) / 3  # mean inversion depth over 3 pairs
         assert compute_sheet_order(placements, sheets) == pytest.approx(only_c)
 
     def test_sheet_with_fewer_than_three_members_skipped(self) -> None:

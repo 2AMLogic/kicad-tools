@@ -313,7 +313,9 @@ directory and builds a `ref -> sheet_path` map. Two soft terms consume it:
   `1.0`): within a sheet, parts sharing a reference prefix (`R1`, `R2`, …)
   are read along that prefix bucket's dominant axis (the axis of the bucket's larger extent)
   and every pair placed opposite to its schematic (annotation) order
-  contributes the depth of the inversion (mm). A correctly ordered group
+  contributes the depth of the inversion (mm); each bucket's total is divided
+  by its pair count (mean inversion depth), so a weight of `1.0` carries the
+  same scale at any number of same-prefix parts. A correctly ordered group
   scores zero however far it is spread — ordering never fights compactness.
 
 Both are soft preferences exactly like cohesion: excluded from `is_feasible`
@@ -321,8 +323,8 @@ and from the infeasible branch of the lexicographic score, and dormant
 whenever no map is available, the design has a single sheet, or a sheet has
 fewer than three members — so single-sheet and schematic-less boards keep the
 historical objective **byte-identical**, and a failed netlist export degrades
-to the same dormant state instead of failing the run. Weights of 0 (either
-one) also skip the netlist export entirely. `--weights '{"group_cohesion": 0,
+to the same dormant state instead of failing the run. The netlist export is skipped only when
+**both** weights are 0. `--weights '{"group_cohesion": 0,
 "group_order": 0}'` turns both off.
 
 Composability note: the MCP `optimize_placement` and `evaluate_placement`
