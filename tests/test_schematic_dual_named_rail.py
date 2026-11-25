@@ -59,3 +59,20 @@ def test_floating_pin_stays_none():
     sch = _two_osc(with_power=True)
     assert sch.get_net_for_pin("Y1", "1") is None  # nothing else on this pin
     assert sch.get_net_for_pin("NOPE", "1") is None
+
+
+def test_distinct_rails_are_not_merged():
+    """Control: two real supplies, each with its own local alias, stay separate."""
+    sch = Schematic("two-rails")
+    for i, (rail_y, alias, power) in enumerate(
+        [(25.4, "VDD_A", "power:+3V3"), (50.8, "VDD_B", "power:+1V8")], start=1
+    ):
+        b = _osc(sch, i, rail_y, alias)
+        x = b.cap.pin_position("1")[0]
+        sch.add_wire((x, rail_y), (x - 10.16, rail_y))
+        sch.add_power(power, x - 10.16, rail_y, snap=False)
+    nets = sch.extract_netlist()
+    assert {str(p) for p in nets["+3V3"]} == {"C1.1", "Y1.4"}
+    assert {str(p) for p in nets["+1V8"]} == {"C2.1", "Y2.4"}
+    assert sch.get_net_for_pin("C1", "1") == "+3V3"
+    assert sch.get_net_for_pin("C2", "1") == "+1V8"
