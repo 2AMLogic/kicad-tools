@@ -36,6 +36,7 @@ CHECK_CATEGORIES = [
     "match_group_length_skew",
     "missing_plated_hole",
     "model_coverage",
+    "netclass_agreement",
     "netclass_clearance_copper",
     "netclass_floor",
     "netlist",

@@ -690,6 +690,11 @@ class DRCChecker:
         "netclass_via_diameter": CATEGORY_MANUFACTURING,
         "netclass_via_drill": CATEGORY_MANUFACTURING,
         "netclass_annular_ring": CATEGORY_MANUFACTURING,
+        # Issue #10139: sidecar / project / copper net-class agreement.
+        # Warning-severity consistency audit, never fab-blocking.  Explicit
+        # entries are REQUIRED: unknown ids default to Manufacturing.
+        "netclass_sidecar_mismatch": CATEGORY_ADVISORY,
+        "netclass_track_width_mismatch": CATEGORY_ADVISORY,
         # Issue #7292: project.kct requirements vs the routed board.
         "spec_conformance_dimensions": CATEGORY_MANUFACTURING,
         "spec_conformance_layers": CATEGORY_MANUFACTURING,
