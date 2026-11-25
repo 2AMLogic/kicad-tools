@@ -415,6 +415,12 @@ class StitchResult:
     traces_added: list[TraceSegment] = field(default_factory=list)
     pads_skipped: list[tuple[PadInfo, str]] = field(default_factory=list)  # (pad, reason)
     already_connected: int = 0
+    # Issue #10136: pads skipped because current filled copper already bonds
+    # them to the net's plane component (a solid or thermal connection to a
+    # pour that reaches the plane).  Each entry is (pad, reason); these pads
+    # are ALSO counted in ``already_connected`` and are never in
+    # ``pads_skipped`` (a pour bond is not a failure to place a via).
+    pour_bonded: list[tuple[PadInfo, str]] = field(default_factory=list)
     # Per-net detected layers: {net_name: layer} for auto-detected layers
     detected_layers: dict[str, str] = field(default_factory=dict)
     # Nets that fell back to default B.Cu (no zone found, 2-layer board)
@@ -6270,6 +6276,50 @@ def _pads_off_the_plane(net: "NetStatus") -> set[str]:
     return off
 
 
+def _compute_plane_bonded_pads(
+    pcb_path: Path,
+    net_names: set[str],
+    net_target_layers: dict[str, str | None],
+) -> dict[str, str]:
+    """``REF.PAD`` -> reason for pads provably bonded to their plane (issue #10136).
+
+    Wraps :func:`kicad_tools.validate.copper_contact.pads_bonded_to_plane` per
+    target net.  The plane layer is the net's resolved target layer; ``None``
+    (2-layer fallback) means any layer other than the pad's own.  A
+    duplicated ``REF.PAD`` key is kept only when every pad carrying it is
+    bonded.  Returns ``{}`` when shapely is unavailable.
+    """
+    from kicad_tools._shapely import has_shapely
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+    from kicad_tools.validate.copper_contact import pads_bonded_to_plane
+
+    if not has_shapely():
+        return {}
+    validator = ConnectivityValidator(pcb_path)
+    pcb = validator.pcb
+    proven: dict[str, str] = {}
+    unproven: set[str] = set()
+    for net_name in net_names:
+        net_number = next(
+            (p.net_number for fp in pcb.footprints for p in fp.pads if p.net_name == net_name),
+            None,
+        )
+        if net_number is None:
+            continue
+        layer = net_target_layers.get(net_name)
+        bonded = pads_bonded_to_plane(validator, net_number, frozenset({layer}) if layer else None)
+        for fi, fp in enumerate(pcb.footprints):
+            for pi, pad in enumerate(fp.pads):
+                if pad.net_name != net_name:
+                    continue
+                key = f"{fp.reference}.{pad.number}"
+                if (fi, pi) in bonded:
+                    proven.setdefault(key, bonded[(fi, pi)])
+                else:
+                    unproven.add(key)
+    return {key: reason for key, reason in proven.items() if key not in unproven}
+
+
 def _split_via_stub(
     stub: tuple[float, float, tuple[float, float] | None] | None,
 ) -> tuple[tuple[float, float] | None, tuple[float, float, float, float] | None]:
@@ -6475,6 +6525,19 @@ def run_stitch(
             strict_sets = _compute_strict_pad_sets(pcb_path, net_name_set)
         except Exception as exc:  # pragma: no cover - defensive fallback
             result.strict_model_error = f"{type(exc).__name__}: {exc}"
+
+    # Issue #10136: pads whose CURRENT filled copper already bonds them to the
+    # net's plane component need no stitch.  Neither the legacy proximity
+    # heuristic (through-hole pads only) nor the strict sets (which can only
+    # veto a skip) can establish this for a bare SMD pad.
+    plane_bonded: dict[str, str] = {}
+    if nets_with_fill:
+        try:
+            plane_bonded = _compute_plane_bonded_pads(pcb_path, net_name_set, net_target_layers)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            result.strict_model_error = (
+                result.strict_model_error or f"plane-bond proof: {type(exc).__name__}: {exc}"
+            )
 
     # Find other-net copper for clearance checking to prevent shorts
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=net_numbers)
@@ -7083,10 +7146,23 @@ def run_stitch(
             and f"{pad.reference}.{pad.pad_number}" in strict_sets[0].get(pad.net_name, set())
         ):
             connected = False
-        if connected and f"{pad.reference}.{pad.pad_number}" in force_pads:
+        pad_key = f"{pad.reference}.{pad.pad_number}"
+        if connected and pad_key in force_pads:
             connected = False
         if connected:
             result.already_connected += 1
+            continue
+
+        # Issue #10136: a pad whose current fill is proven bonded to the plane
+        # component needs no cross-layer path.  The forced-repair override and
+        # the strict model's "needs via to plane" verdict both outrank it.
+        if (
+            pad_key in plane_bonded
+            and pad_key not in force_pads
+            and not (strict_sets is not None and pad_key in strict_sets[0].get(pad.net_name, set()))
+        ):
+            result.already_connected += 1
+            result.pour_bonded.append((pad, plane_bonded[pad_key]))
             continue
 
         # Issue #6701: when every pour of this net sits on the pad's own layer
@@ -7899,6 +7975,7 @@ def result_document(
         "via_in_pad_filtered": result.via_in_pad_filtered,
         "hole_to_hole_rejected": result.hole_to_hole_rejected,
         "same_net_pad_gap_filtered": result.same_net_pad_gap_filtered,
+        "pour_bonded": [{**_pad_ref(pad), "reason": reason} for pad, reason in result.pour_bonded],
         "connectivity_fallback": [
             {**_pad_ref(pad), "reason": reason} for pad, reason in result.connectivity_fallback
         ],

@@ -1,0 +1,233 @@
+"""Power-plane stitching skips SMD pads already bonded to the plane by fill (#10136).
+
+A four-layer board with the GNDA plane on In1.Cu and a surface GNDA pour on F.Cu.
+C1.1 is a bare SMD pad on the pour.  Whether it needs a stitch depends on whether
+the CURRENT F.Cu fill is physically in the same copper-contact component as the
+In1.Cu plane (through the two existing vias at x=120.8 and x=130.8), not on the
+mere presence of a zone outline or of any fill.  Every case is checked against a
+native KiCad refill; the cases skip when KiCad 10 is unavailable.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.cli.stitch_cmd import run_stitch
+
+FIXTURE = Path(__file__).parent / "fixtures" / "stitch-5388" / "continuous.kicad_pcb"
+SRC = Path(__file__).resolve().parents[1] / "src"
+
+_BARE_SEGMENT = re.compile(
+    r"\t\(segment\n\t\t\(start 110 110\)\n\t\t\(end 112 110\)\n.*?\n\t\)\n", re.DOTALL
+)
+
+
+@pytest.fixture
+def native_cli():
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("find_kicad_cli() found no kicad-cli install; KiCad 10 is needed to refill")
+    cli = str(cli)
+    version = subprocess.run([cli, "version"], capture_output=True, text=True, timeout=20)
+    if version.returncode or not version.stdout.startswith("10."):
+        pytest.skip("These cases require native KiCad 10")
+    return cli
+
+
+def _surface_zone(right_edge: float, connect: str) -> str:
+    return f"""\t(zone
+\t\t(net "GNDA")
+\t\t(layer "F.Cu")
+\t\t(uuid "11111111-2222-5333-8444-555555555555")
+\t\t(hatch edge 0.5)
+\t\t({connect}
+\t\t\t(clearance 0.2)
+\t\t)
+\t\t(min_thickness 0.25)
+\t\t(fill yes
+\t\t\t(thermal_gap 0.5)
+\t\t\t(thermal_bridge_width 0.5)
+\t\t\t(island_removal_mode 0)
+\t\t)
+\t\t(polygon
+\t\t\t(pts
+\t\t\t\t(xy 105 105) (xy {right_edge} 105) (xy {right_edge} 115) (xy 105 115)
+\t\t\t)
+\t\t)
+\t)
+"""
+
+
+def make_board(
+    tmp_path: Path, *, right_edge: float = 135, connect: str = "connect_pads yes"
+) -> Path:
+    """Four-layer variant of the #5388 fixture with C1.1 bare on a surface pour."""
+    text = FIXTURE.read_text().replace(
+        '(2 "B.Cu" signal)', '(4 "In1.Cu" power) (6 "In2.Cu" power) (2 "B.Cu" signal)'
+    )
+    zone_start = text.index("\n\t(zone")
+    text = text[:zone_start] + text[zone_start:].replace('(layer "B.Cu")', '(layer "In1.Cu")')
+    text, removed = _BARE_SEGMENT.subn("", text)
+    assert removed == 1
+    text = text.rstrip()[:-1].rstrip() + "\n" + _surface_zone(right_edge, connect) + ")\n"
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(text)
+    return board
+
+
+def refill(board: Path, cli: str) -> dict:
+    report = board.parent / "native.json"
+    subprocess.run(
+        [cli, "pcb", "drc", str(board), "--refill-zones", "--save-board", "--format", "json"]
+        + ["-o", str(report)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=True,
+    )
+    return json.loads(report.read_text())
+
+
+def edit_surface_zone(board: Path, old: str, new: str) -> None:
+    """Edit only the F.Cu surface zone, leaving its stored fill stale.
+
+    Native refill rewrites the file and may reorder zones, so find the block.
+    """
+    marker = "\t(zone\n"
+    head, *zones = board.read_text().split(marker)
+    (index,) = [i for i, z in enumerate(zones) if '(layer "F.Cu")' in z.split("(polygon")[0]]
+    assert old in zones[index]
+    zones[index] = zones[index].replace(old, new, 1)
+    board.write_text(head + "".join(marker + z for z in zones))
+
+
+def stitch(board: Path, **kwargs):
+    return run_stitch(
+        pcb_path=board,
+        net_names=["GNDA"],
+        via_size=0.6,
+        drill=0.3,
+        clearance=0.2,
+        dry_run=True,
+        **kwargs,
+    )
+
+
+def stitched_pads(result) -> set[str]:
+    return {f"{v.pad.reference}.{v.pad.pad_number}" for v in result.vias_added}
+
+
+def bonded_pads(result) -> dict[str, str]:
+    return {f"{p.reference}.{p.pad_number}": why for p, why in result.pour_bonded}
+
+
+@pytest.mark.parametrize(
+    "connect", ["connect_pads yes", "connect_pads"], ids=["solid", "thermal-spokes"]
+)
+def test_pour_bond_reaching_the_plane_needs_no_stitch(tmp_path, native_cli, connect):
+    board = make_board(tmp_path, connect=connect)
+    assert refill(board, native_cli)["unconnected_items"] == []
+    result = stitch(board)
+    assert "C1.1" not in stitched_pads(result)
+    assert "F.Cu" in bonded_pads(result)["C1.1"]
+    assert "plane" in bonded_pads(result)["C1.1"]
+    assert not result.vias_added
+    assert not result.traces_added
+    assert not [p for p, _ in result.pads_skipped]
+
+
+def test_island_pour_still_gets_a_legal_stitch(tmp_path, native_cli):
+    board = make_board(tmp_path, right_edge=115)
+    assert len(refill(board, native_cli)["unconnected_items"]) == 1
+    result = stitch(board)
+    assert stitched_pads(result) == {"C1.1"}
+    assert "C1.1" not in bonded_pads(result)
+
+
+def test_forced_native_open_repair_outranks_the_bond(tmp_path, native_cli):
+    board = make_board(tmp_path)
+    refill(board, native_cli)
+    result = stitch(board, force_pads=frozenset({"C1.1"}))
+    assert stitched_pads(result) == {"C1.1"}
+    assert "C1.1" not in bonded_pads(result)
+
+
+def test_outline_without_fill_earns_no_skip(tmp_path, native_cli):
+    board = make_board(tmp_path)  # never refilled: the zone is outline only
+    assert "filled_polygon" not in board.read_text().split("(zone", 3)[-1]
+    result = stitch(board)
+    assert "C1.1" not in bonded_pads(result)
+
+
+def test_stale_fill_after_outline_edit_earns_no_skip(tmp_path, native_cli):
+    board = make_board(tmp_path)
+    refill(board, native_cli)
+    assert "C1.1" in bonded_pads(stitch(board))
+    # The positive outline now ends before the vias but the old fill polygons remain.
+    edit_surface_zone(board, "(xy 135 105) (xy 135 115)", "(xy 115 105) (xy 115 115)")
+    result = stitch(board)
+    assert "C1.1" not in bonded_pads(result)
+    assert stitched_pads(result) == {"C1.1"}
+
+
+def test_fill_overlapping_foreign_copper_is_stale(tmp_path, native_cli):
+    board = make_board(tmp_path)
+    refill(board, native_cli)
+    text = board.read_text().rstrip()[:-1]
+    text += '(segment (start 124 112) (end 126 112) (width 0.3) (layer "F.Cu") (net "SIG")))'
+    board.write_text(text)  # routed after the refill: the fill still covers it
+    result = stitch(board)
+    assert "C1.1" not in bonded_pads(result)
+
+
+def test_disabled_pad_connection_earns_no_skip(tmp_path, native_cli):
+    board = make_board(tmp_path, connect="connect_pads no")
+    assert len(refill(board, native_cli)["unconnected_items"]) == 1
+    result = stitch(board)
+    assert stitched_pads(result) == {"C1.1"}
+    assert "C1.1" not in bonded_pads(result)
+
+
+def test_stale_fill_with_pad_connection_disabled_earns_no_skip(tmp_path, native_cli):
+    board = make_board(tmp_path)
+    refill(board, native_cli)
+    edit_surface_zone(board, "connect_pads yes", "connect_pads no")  # fill left as written
+    result = stitch(board)
+    assert "C1.1" not in bonded_pads(result)
+    assert stitched_pads(result) == {"C1.1"}
+
+
+@pytest.mark.parametrize("island", [False, True], ids=["bonded", "island"])
+def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
+    board = make_board(tmp_path, right_edge=115 if island else 135)
+    before = refill(board, native_cli)
+    assert len(before["unconnected_items"]) == (1 if island else 0)
+    routed = tmp_path / "routed.kicad_pcb"
+    subprocess.run(
+        [sys.executable, "-m", "kicad_tools.cli", "route", str(board)]
+        + ["--layers", "4", "--stitch-power-planes", "--via-diameter", "0.6"]
+        + ["--via-drill", "0.3", "--clearance", "0.2", "-o", str(routed)],
+        capture_output=True,
+        text=True,
+        timeout=240,
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(SRC)},
+        check=True,
+    )
+    shutil.copy2(routed, tmp_path / "after.kicad_pcb")
+    after = refill(tmp_path / "after.kicad_pcb", native_cli)
+    assert after["unconnected_items"] == []
+    text = routed.read_text()
+    segments = len(re.findall(r'\(segment\b[^"]*?\(layer "[^"]+"\)\s*\(net "GNDA"\)', text, re.S))
+    vias = len(re.findall(r'\(via\b.*?\(net "GNDA"\)', text, re.S))
+    # Two original GNDA segments and vias; an island adds exactly one stitch.
+    assert (segments, vias) == ((3, 3) if island else (2, 2))

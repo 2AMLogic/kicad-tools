@@ -669,10 +669,169 @@ def describe_item(cv: ConnectivityValidator, item: CopperItem) -> tuple[str, str
     return item_id, f"Zone island {item_id}"
 
 
+# Slack (mm) between a stored fill and its zone outline before the fill is
+# treated as stale.  A refill never writes copper outside the outline; this
+# only absorbs coordinate rounding.
+_OUTLINE_SLACK = 0.02
+# Overlap area (mm^2) with foreign-net copper above which a fill is stale: a
+# fresh refill always leaves a clearance moat around other nets' copper.
+_FOREIGN_OVERLAP_AREA = 1e-4
+
+
+def _current_fill_indices(
+    cv: ConnectivityValidator, items: list[CopperItem], net_number: int
+) -> set[int]:
+    """Indices of ``FILL`` items that look like a CURRENT refill (Issue #10136).
+
+    The stored ``filled_polygon`` data is only evidence of copper while it
+    matches the board it sits on.  A fill is rejected when
+
+    * its zone has no outline polygon, or the fill is a stroked encoding
+      (the stored outline is then not the real copper), or
+    * the fill reaches outside its zone's outline (the outline was edited
+      after the last refill), or
+    * the fill overlaps another net's pad, via or track by positive area (a
+      fresh refill always retreats from foreign copper, so the copper was
+      routed after the last refill).
+
+    Rejected fills simply do not exist for the caller's purposes.
+    """
+    from shapely.geometry import Polygon
+    from shapely.strtree import STRtree
+
+    foreign = [
+        item
+        for item in _collect_items(cv, None)
+        if item.kind in (PAD, VIA, TRACK) and item.net != net_number
+    ]
+    tree = STRtree([item.geom for item in foreign]) if foreign else None
+    outlines: dict[int, Any] = {}
+    current: set[int] = set()
+    for index, item in enumerate(items):
+        if item.kind != FILL:
+            continue
+        zone = cv.pcb.zones[item.zone]
+        if zone.is_stroked_fill() or len(zone.polygon) < 3:
+            continue
+        if item.zone not in outlines:
+            outline = Polygon(zone.polygon)
+            outlines[item.zone] = (outline if outline.is_valid else outline.buffer(0)).buffer(
+                _OUTLINE_SLACK
+            )
+        if not outlines[item.zone].covers(item.geom):
+            continue
+        if tree is not None:
+            hits = tree.query(item.geom, predicate="intersects")
+            if any(
+                foreign[hit].layers & item.layers
+                and foreign[hit].geom.intersection(item.geom).area > _FOREIGN_OVERLAP_AREA
+                for hit in hits.tolist()
+            ):
+                continue
+        current.add(index)
+    return current
+
+
+def pads_bonded_to_plane(
+    cv: ConnectivityValidator,
+    net_number: int,
+    plane_layers: frozenset[str] | None,
+) -> dict[tuple[int, int], str]:
+    """Pads of ``net_number`` provably bonded to the net's plane by fill (Issue #10136).
+
+    A pad qualifies only when ALL of these hold on the board as written:
+
+    1. it touches CURRENT filled copper of its own net on one of its layers
+       (:func:`_current_fill_indices`), and the zone's effective connection to
+       that pad (the pad's / footprint's ``zone_connect`` override, else the
+       zone's ``connect_pads``) is not ``none`` -- a zone outline, a stale
+       fill, or a disabled pad connection is no bond;
+    2. that bond reaches the *intended plane component*: the same-net contact
+       component (fill, vias, tracks) holding the most current fill area on
+       ``plane_layers``.  ``None`` means "a layer other than the pad's own".
+       Unlike :meth:`CopperContactGraph.fill_bonded_pads`, which accepts ANY
+       fill in the component, a pad on an isolated surface island is rejected.
+
+    Returns ``{(footprint_index, pad_index): reason}``; absent pads need a
+    cross-layer path.  Requires shapely (callers guard).
+    """
+    from kicad_tools.validate.rules.thermal_asymmetry import NONE, effective_mode
+
+    graph = build_copper_contact_graph(cv, net_number, with_bonds=True)
+    items = graph.items
+    current = _current_fill_indices(cv, items, net_number)
+    usable = {i for i, item in enumerate(items) if item.kind != FILL or i in current}
+
+    def pad_bond_allowed(pad_item: CopperItem, fill_item: CopperItem) -> bool:
+        fi, pi = pad_item.key
+        footprint = cv.pcb.footprints[fi]
+        zone = cv.pcb.zones[fill_item.zone]
+        mode = effective_mode(
+            footprint.pads[pi], zone.connect_pads, getattr(footprint, "zone_connect", None)
+        )
+        return mode != NONE
+
+    parent = list(range(len(items)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    direct_fill: dict[int, list[int]] = {}
+    for a, b in graph.bonds:
+        if a not in usable or b not in usable:
+            continue
+        ia, ib = items[a], items[b]
+        if {ia.kind, ib.kind} == {PAD, FILL}:
+            pad_idx, fill_idx = (a, b) if ia.kind == PAD else (b, a)
+            if not pad_bond_allowed(items[pad_idx], items[fill_idx]):
+                continue
+            direct_fill.setdefault(pad_idx, []).append(fill_idx)
+        parent[find(b)] = find(a)
+
+    def on_plane(item: CopperItem, pad_layers: frozenset[str] | None = None) -> bool:
+        if plane_layers is not None:
+            return bool(item.layers & plane_layers)
+        return pad_layers is not None and not item.layers <= pad_layers
+
+    # The intended plane component carries the most current plane-layer fill.
+    plane_area: dict[int, float] = {}
+    for index in current:
+        item = items[index]
+        if plane_layers is None or item.layers & plane_layers:
+            plane_area[find(index)] = plane_area.get(find(index), 0.0) + item.geom.area
+    if not plane_area:
+        return {}
+    plane_root = max(plane_area, key=lambda root: plane_area[root])
+
+    bonded: dict[tuple[int, int], str] = {}
+    for pad_idx, fills in direct_fill.items():
+        pad_item = items[pad_idx]
+        if find(pad_idx) != plane_root:
+            continue
+        if plane_layers is None:
+            reaches = any(
+                on_plane(items[i], pad_item.layers) for i in current if find(i) == plane_root
+            )
+        else:
+            reaches = any(items[i].layers & plane_layers for i in current if find(i) == plane_root)
+        if not reaches:
+            continue
+        fill_layers = sorted({layer for i in fills for layer in items[i].layers})
+        bonded[pad_item.key] = (
+            f"already bonded to the plane by current {', '.join(fill_layers)} filled copper "
+            "(solid or thermal connection reaches the plane component)"
+        )
+    return bonded
+
+
 __all__ = [
     "CopperContactGraph",
     "CopperItem",
     "build_copper_contact_graph",
     "describe_item",
     "pad_items_by_key",
+    "pads_bonded_to_plane",
 ]
