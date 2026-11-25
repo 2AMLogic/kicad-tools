@@ -450,10 +450,9 @@ Examples:
         "--no-new-warnings",
         action="store_true",
         help=(
-            "With --only mask-copper: also revert a move whose re-check shows "
-            "a warning the board did not have (pour_slot, redundant_copper_*, "
-            "a new mask_to_copper warning), not only a new error. A finding "
-            "that drops from error to warning still counts as repaired."
+            "With --only mask-copper, compare the saved board with the pre-edit "
+            "board and revert moves that introduce errors or warnings. An error "
+            "may improve to a warning. Exit 4 means the mask assessment failed."
         ),
     )
     parser.add_argument(

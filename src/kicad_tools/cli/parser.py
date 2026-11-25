@@ -5843,10 +5843,9 @@ def _add_fix_drc_parser(subparsers) -> None:
         "--no-new-warnings",
         action="store_true",
         help=(
-            "With --only mask-copper: also revert a move whose re-check shows "
-            "a warning the board did not have (pour_slot, redundant_copper_*, "
-            "a new mask_to_copper warning), not only a new error. A finding "
-            "that drops from error to warning still counts as repaired."
+            "With --only mask-copper, compare the saved board with the pre-edit "
+            "board and revert moves that introduce errors or warnings. An error "
+            "may improve to a warning. Exit 4 means the mask assessment failed."
         ),
     )
     fix_drc_parser.add_argument(
@@ -5855,7 +5854,8 @@ def _add_fix_drc_parser(subparsers) -> None:
         help=(
             "Snapshot the output file before repairing and roll it back "
             "byte-identical if the run fails (exception, Ctrl-C, no-progress "
-            "exit 1, or connectivity-rollback exit 3); the failed attempt is "
+            "exit 1, connectivity-rollback exit 3, or failed mask assessment "
+            "exit 4); the failed attempt is "
             "preserved as a <file>.failed-<timestamp> sidecar. Exit 2 "
             "(partial repair) keeps the applied repairs."
         ),
