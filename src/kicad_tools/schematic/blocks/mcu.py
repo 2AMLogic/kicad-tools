@@ -3,6 +3,7 @@
 import contextlib
 from typing import TYPE_CHECKING
 
+from . import decoupling_defaults as defaults
 from ._pins import diode_pin_position
 from .base import CircuitBlock
 
@@ -102,7 +103,7 @@ class MCUBlock(CircuitBlock):
 
         # Default bypass caps if not specified
         if bypass_caps is None:
-            bypass_caps = ["100nF", "100nF", "100nF", "100nF"]
+            bypass_caps = defaults.default_bank(defaults.MCU_BYPASS)
 
         # Default value to symbol name if not provided
         if not value:
@@ -124,7 +125,9 @@ class MCUBlock(CircuitBlock):
 
         for i, cap_value in enumerate(bypass_caps):
             cap_ref = f"{cap_ref_prefix}{cap_ref_start + i}"
-            cap = sch.add_symbol(cap_symbol, cap_x + i * cap_spacing, cap_y, cap_ref, cap_value)
+            cap = self._add_decoupling_cap(
+                cap_symbol, cap_x + i * cap_spacing, cap_y, cap_ref, cap_value, owner=ref
+            )
             self.bypass_caps.append(cap)
             self.components[f"C{i + 1}"] = cap
 

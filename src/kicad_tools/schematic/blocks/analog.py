@@ -3,6 +3,7 @@
 import contextlib
 from typing import TYPE_CHECKING, Literal
 
+from . import decoupling_defaults as defaults
 from .base import CircuitBlock
 from .power.passives import VoltageDivider
 
@@ -288,7 +289,14 @@ class OpAmpBlock(CircuitBlock):
                 )
 
         # Place decoupling capacitor between the supply pins
-        c_bypass = sch.add_symbol(capacitor_symbol, x + 38.1, y, f"C{r_ref_num}", "100nF")
+        c_bypass = self._add_decoupling_cap(
+            capacitor_symbol,
+            x + 38.1,
+            y,
+            f"C{r_ref_num}",
+            defaults.DefaultValue(defaults.BYPASS),
+            owner=ref,
+        )
         self.components["C_bypass"] = c_bypass
         c_top, c_bot = self._ends(c_bypass)
         self._wire(c_top, (c_top[0], pin_vcc[1] - 2.54), (pin_vcc[0], pin_vcc[1] - 2.54), pin_vcc)

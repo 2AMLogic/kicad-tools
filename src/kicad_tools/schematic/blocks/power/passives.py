@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from .. import decoupling_defaults as defaults
 from ..base import CircuitBlock
 
 if TYPE_CHECKING:
@@ -36,6 +37,8 @@ class DecouplingCaps(CircuitBlock):
         cap_symbol: str = "Device:C",
         auto_footprint: bool = False,
         cap_footprint: str | None = None,
+        *,
+        _bulk_index: int | None = None,
     ):
         """
         Create a bank of decoupling capacitors.
@@ -64,7 +67,15 @@ class DecouplingCaps(CircuitBlock):
             add_kwargs: dict = {"auto_footprint": auto_footprint}
             if cap_footprint is not None:
                 add_kwargs["footprint"] = cap_footprint
-            cap = sch.add_symbol(cap_symbol, cap_x, y, ref, value, **add_kwargs)
+            cap = self._add_decoupling_cap(
+                cap_symbol,
+                cap_x,
+                y,
+                ref,
+                value,
+                role="bulk" if i == _bulk_index else "bypass",
+                **add_kwargs,
+            )
             self.caps.append(cap)
 
         self.components = {f"C{i + 1}": cap for i, cap in enumerate(self.caps)}
@@ -475,8 +486,8 @@ def create_mcu_decoupling_array(
     y: float,
     *,
     supply_pins: int,
-    bypass_value: str = "100nF",
-    bulk_value: str = "4.7uF",
+    bypass_value: str = defaults.DefaultValue(defaults.BYPASS),
+    bulk_value: str = defaults.DefaultValue(defaults.MCU_ARRAY_BULK),
     ref_start: int = 1,
     ref_prefix: str = "C",
     spacing: float = 10,
@@ -553,6 +564,7 @@ def create_mcu_decoupling_array(
         x,
         y,
         values=values,
+        _bulk_index=supply_pins,
         ref_start=ref_start,
         ref_prefix=ref_prefix,
         spacing=spacing,

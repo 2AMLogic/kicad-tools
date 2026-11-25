@@ -6,6 +6,7 @@ Symbol definitions and instances for schematic generation.
 
 import re
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -599,6 +600,17 @@ class SymbolInstance:
     # applies it after the rotation (issue #6005); see
     # :func:`kicad_tools.core.symbol_transform.symbol_to_sheet_offset`.
     mirror: str = ""
+
+    @cached_property
+    def _value_assignment(self) -> object:
+        """Identify the current assignment for callers tracking value provenance."""
+        return object()
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "value":
+            # An explicit assignment owns the value even when its text is unchanged.
+            self.__dict__.pop("_value_assignment", None)
+        super().__setattr__(name, value)
 
     def find_pin(self, pin_name_or_number: str) -> Pin:
         """Resolve a pin name/number to its :class:`Pin` on this instance.
