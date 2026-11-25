@@ -8,12 +8,14 @@ KiCad project ZIP, and a manifest with SHA256 checksums.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 import zipfile
 from collections.abc import Iterator
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import kicad_tools
+from kicad_tools.core.atomic_write import SourceChangedError, checked_write_text
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.parts.lcsc import LCSCDependencyMissingError
@@ -695,13 +698,180 @@ def _build_manifest(
     return manifest
 
 
-def _atomic_restore_bytes(path: Path, data: bytes) -> None:
-    """Publish ``data`` to ``path`` atomically (tmp + fsync + replace)."""
-    tmp = path.with_name(path.name + ".restore.tmp")
-    tmp.write_bytes(data)
-    with open(tmp, "r+b") as f:
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+class _SidecarRecoveryError(OSError):
+    """The filesystem refused rollback; the staging directory must be retained."""
+
+
+def _withdraw_copy(
+    destination: Path, recovery: Path, fd: int, data: bytes, start: int, written: int
+) -> None:
+    # Inspect the entry actually withdrawn; an intervening save may have
+    # replaced the name or written to our inode before our append.
+    captured = recovery / "captured"
+    try:
+        destination.rename(captured)
+    except FileNotFoundError:
+        return
+    restore = captured
+    if os.path.samestat(os.fstat(fd), captured.lstat()):
+        raw = captured.read_bytes()
+        end = start + written
+        if raw[start:end] == data[:written]:
+            raw = raw[:start] + raw[end:]
+        if not raw:
+            return
+        restore = recovery / "editor"
+        restore.write_bytes(raw)
+    # If another save already reclaimed the name, leave that version live
+    # and keep the captured version in the recovery directory.
+    _install_unoccupied(restore, destination)
+
+
+def _copy_unoccupied(source: Path, destination: Path) -> os.stat_result:
+    """Reserve a name on linkless FAT and never overwrite an intervening save."""
+    data = source.read_bytes()
+    recovery = Path(tempfile.mkdtemp(prefix="copy-rollback-", dir=source.parent))
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_APPEND | getattr(os, "O_BINARY", 0)
+    fd = os.open(destination, flags, source.stat().st_mode & 0o777)
+    with os.fdopen(fd, "r+b", buffering=0) as stream:
+        start = written = 0
+        try:
+            # One append to the exclusively created file. If an editor got to
+            # this new inode first, its bytes precede ours and remain recoverable.
+            written = os.write(fd, data)
+            start = stream.tell() - written
+            if start:
+                raise SourceChangedError(f"{destination.name} changed during manufacturing export")
+            if written != len(data):
+                raise OSError(errno.ENOSPC, "Incomplete sidecar write", destination)
+            os.fsync(fd)
+        except BaseException:
+            try:
+                _withdraw_copy(destination, recovery, fd, data, start, written)
+            except (OSError, SourceChangedError) as exc:
+                raise _SidecarRecoveryError(
+                    f"Could not restore {destination.name}; recovery files retained at {recovery}"
+                ) from exc
+            raise
+        # FAT32 assigns the permanent identity only after the first data cluster.
+        return os.fstat(fd)
+
+
+def _install_unoccupied(source: Path, destination: Path) -> os.stat_result:
+    """Publish only into a vacant name, preferring whole-file operations."""
+    identity = source.lstat()
+    try:
+        os.link(source, destination, follow_symlinks=False)
+        return identity
+    except OSError as exc:
+        if exc.errno not in (errno.EPERM, errno.ENOTSUP, errno.ENOSYS, errno.EOPNOTSUPP):
+            raise
+        if os.name == "nt":  # Windows rename already refuses an occupied destination.
+            source.rename(destination)
+            return identity
+        # Linkless filesystems can still publish sidecars for a no-op silk pass.
+        # Use the platform's exclusive rename. A check followed by replace would
+        # discard a save between those two calls.
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        src, dst = os.fsencode(source), os.fsencode(destination)
+        if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+            result = libc.renamex_np(src, dst, 0x4)  # RENAME_EXCL
+        elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+            result = libc.renameat2(-100, src, -100, dst, 1)  # AT_FDCWD, RENAME_NOREPLACE
+        else:
+            result = -1
+            ctypes.set_errno(errno.ENOTSUP)
+        if result == 0:
+            return identity
+        code = ctypes.get_errno()
+        if code not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS):
+            raise OSError(code, os.strerror(code), destination)
+        if source.is_symlink():
+            destination.symlink_to(source.readlink())
+            return destination.lstat()
+        return _copy_unoccupied(source, destination)
+
+
+class _SidecarWrite:
+    """Hold the displaced entry until the entire source publication commits."""
+
+    def __init__(self, live: Path, staged: Path, before: bytes | None, data: bytes) -> None:
+        self.live = live
+        self.staged = staged
+        self.before = before
+        self.data = data
+        self.original = staged.with_name(staged.name + ".original")
+        self.identity = staged.stat()
+        self.displaced = False
+        self.published = False
+
+    def _read_displaced(self, path: Path) -> bytes:
+        # A relative symlink still describes a target relative to the live directory.
+        if path.is_symlink():
+            path = self.live.parent / path.readlink()
+        return path.read_bytes()
+
+    def _changed(self) -> SourceChangedError:
+        return SourceChangedError(f"{self.live.name} changed during manufacturing export")
+
+    def _owns(self, path: Path) -> bool:
+        try:
+            return os.path.samestat(self.identity, path.lstat())
+        except FileNotFoundError:
+            return False
+
+    def publish(self) -> None:
+        if self.before is not None:
+            try:
+                self.live.rename(self.original)
+            except FileNotFoundError as exc:
+                raise self._changed() from exc
+            finally:
+                self.displaced = os.path.lexists(self.original)
+            if self._read_displaced(self.original) != self.before:
+                raise self._changed()
+        try:
+            self.identity = _install_unoccupied(self.staged, self.live)
+        except FileExistsError as exc:
+            raise self._changed() from exc
+        finally:
+            # Some filesystems can finish an operation before reporting its failure.
+            self.published = self._owns(self.live)
+
+    def verify(self) -> None:
+        try:
+            if (
+                (self.displaced and self._read_displaced(self.original) != self.before)
+                or not self._owns(self.live)
+                or self.live.read_bytes() != self.data
+            ):
+                raise self._changed()
+        except FileNotFoundError as exc:
+            raise self._changed() from exc
+
+    def rollback(self) -> bool:
+        """Restore the latest live entry. Retain backups if two saves compete for it."""
+        restore = self.original if self.displaced else None
+        if self.published:
+            withdrawn = self.staged.with_name(self.staged.name + ".withdrawn")
+            try:
+                self.live.rename(withdrawn)
+            except FileNotFoundError:
+                return False  # Another writer already removed the published name.
+            if not self._owns(withdrawn) or self._read_displaced(withdrawn) != self.data:
+                restore = withdrawn  # The live name or its bytes already belong to the editor.
+        if restore is not None:
+            try:
+                _install_unoccupied(restore, self.live)
+            except FileExistsError:
+                return restore != self.original or self._read_displaced(restore) != self.before
+        return bool(
+            self.displaced
+            and restore != self.original
+            and self._read_displaced(self.original) != self.before
+        )
 
 
 class _StagedSource:
@@ -715,7 +885,8 @@ class _StagedSource:
     therefore run on this copy, in a hidden directory beside the board (same
     filesystem, so the silk pass meets the same link/permission limits), and
     :meth:`publish` writes the results back only after every one of them
-    succeeded.  A refusal just discards the copy: nothing live was touched.
+    succeeded. Publication retains displaced entries until all live writes
+    and concurrent-save checks finish.
     """
 
     _SUFFIXES = (".kicad_pro", ".kicad_dru")
@@ -723,6 +894,7 @@ class _StagedSource:
     def __init__(self, live_pcb: Path) -> None:
         self.live = live_pcb
         self.dir = Path(tempfile.mkdtemp(prefix=f".{live_pcb.name}.export-", dir=live_pcb.parent))
+        self._preserve_backups = False
         try:
             self.pcb = self.dir / live_pcb.name
             self.pcb_bytes = live_pcb.read_bytes()
@@ -753,48 +925,78 @@ class _StagedSource:
             return None
 
     def close(self) -> None:
-        shutil.rmtree(self.dir, ignore_errors=True)
+        if not self._preserve_backups:
+            shutil.rmtree(self.dir, ignore_errors=True)
 
     def publish(self) -> None:
         """Write the staged results to the live names.
 
         Raises ``SourceChangedError`` if the board or a sidecar no longer
-        holds the bytes the export started from (an editor save); in that
-        case nothing is written.  The live files are checked again right
-        before each is replaced.
+        holds the bytes the export started from. Any failure rolls back the
+        provisional writes, preserving intervening editor saves.
         """
-        from kicad_tools.core.atomic_write import SourceChangedError, atomic_write_text
-
-        def unchanged() -> None:
-            if self._read(self.live) != self.pcb_bytes:
-                raise SourceChangedError("PCB changed during manufacturing export")
-            for suffix, before in self.sidecars_before.items():
-                if self._read(self.live.with_suffix(suffix)) != before:
-                    raise SourceChangedError(
-                        f"{self.live.with_suffix(suffix).name} changed during manufacturing export"
-                    )
-
-        unchanged()
-        staged_pcb = self.pcb.read_bytes()
-        if staged_pcb != self.pcb_bytes:
-            atomic_write_text(
-                self.live,
-                staged_pcb.decode("utf-8"),
-                encoding="utf-8",
-                newline="",
-                expected_sha256=hashlib.sha256(self.pcb_bytes).hexdigest(),
-            )
-        for suffix, before in self.sidecars_before.items():
-            data = self._read(self.pcb.with_suffix(suffix))
-            live = self.live.with_suffix(suffix)
-            if data is None or data == before:
-                continue
+        if self._read(self.live) != self.pcb_bytes:
+            raise SourceChangedError("PCB changed during manufacturing export")
+        inputs = {
+            self.live.with_suffix(suffix): data for suffix, data in self.sidecars_before.items()
+        }
+        inputs[self._marker(self.live)] = self.marker_before
+        writes = []
+        unchanged = {}
+        for live, before in inputs.items():
             if self._read(live) != before:
                 raise SourceChangedError(f"{live.name} changed during manufacturing export")
-            _atomic_restore_bytes(live, data)
-        marker = self._read(self._marker(self.pcb))
-        if marker is not None and marker != self.marker_before:
-            _atomic_restore_bytes(self._marker(self.live), marker)
+            staged = self.dir / live.name
+            data = self._read(staged)
+            if data is None or data == before:
+                unchanged[live] = before
+            else:
+                with staged.open("r+b") as stream:
+                    os.fsync(stream.fileno())
+                writes.append(_SidecarWrite(live, staged, before, data))
+        if writes:
+            # Check the volume's no-overwrite operation before displacing a live file.
+            probe = self.dir / "publication-test"
+            probe.write_bytes(b"")
+            _install_unoccupied(probe, self.dir / "publication-test-link")
+        staged_pcb = self.pcb.read_bytes()
+        board_write = (
+            checked_write_text(
+                self.live,
+                staged_pcb.decode("utf-8"),
+                hashlib.sha256(self.pcb_bytes).hexdigest(),
+                newline="",
+            )
+            if staged_pcb != self.pcb_bytes
+            else nullcontext()
+        )
+        unchanged[self.live] = staged_pcb
+        try:
+            for write in writes:
+                write.publish()
+            # Finish verification while the board writer can still roll back its inode.
+            with board_write:
+                for write in writes:
+                    write.verify()
+                for live, before in unchanged.items():
+                    if self._read(live) != before:
+                        raise SourceChangedError(f"{live.name} changed during manufacturing export")
+        except BaseException as failure:
+            self._preserve_backups = isinstance(failure, _SidecarRecoveryError)
+            rollback_errors = []
+            for write in reversed(writes):
+                try:
+                    if write.rollback():
+                        self._preserve_backups = True
+                        logger.warning("Concurrent editor saves retained at %s", self.dir)
+                except OSError as exc:
+                    rollback_errors.append(f"{write.live.name}: {exc}")
+            if rollback_errors:
+                self._preserve_backups = True
+                raise OSError(
+                    f"Could not restore {', '.join(rollback_errors)}; originals retained at {self.dir}"
+                )
+            raise
 
 
 class ManufacturingPackage:
@@ -893,8 +1095,6 @@ class ManufacturingPackage:
         # Steps 0a-0c.  A named-stackup export with the default silk repair
         # runs them on a scratch copy and publishes only on success, so a
         # refused repair leaves the board and its siblings untouched (#10091).
-        from kicad_tools.core.atomic_write import SourceChangedError
-
         staged: _StagedSource | None = None
         live_pcb = self.pcb_path
         if (
@@ -914,6 +1114,10 @@ class ManufacturingPackage:
             proceed, selected_stackup_source_hash = self._prepare_source(
                 result, selected_stackup_source_hash
             )
+        except BaseException:
+            if staged is not None:
+                staged.close()
+            raise
         finally:
             self.pcb_path = live_pcb
             self._live_pcb_path = None

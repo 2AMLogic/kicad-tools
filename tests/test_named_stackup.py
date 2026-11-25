@@ -545,6 +545,216 @@ def test_linkless_refusal_preserves_editor_save_during_export(tmp_path, monkeypa
     assert dru.read_text() == editor_save
 
 
+@pytest.mark.parametrize(
+    "blocked",
+    ["board.kicad_pcb", "board.kicad_pro", "board.kicad_dru", ".board.kicad_pcb.zonefill"],
+)
+@pytest.mark.parametrize("missing_others", [False, True])
+def test_publication_refusal_restores_every_source_file(
+    tmp_path, monkeypatch, blocked, missing_others
+):
+    import os
+
+    from kicad_tools.export.manufacturing import _StagedSource
+
+    board = tmp_path / "board.kicad_pcb"
+    paths = [
+        board,
+        board.with_suffix(".kicad_pro"),
+        board.with_suffix(".kicad_dru"),
+        tmp_path / ".board.kicad_pcb.zonefill",
+    ]
+    for path in paths:
+        if not missing_others or path == board or path.name == blocked:
+            path.write_bytes(f"authored {path.name}\n".encode())
+    before = {path: path.read_bytes() if path.exists() else None for path in paths}
+    staged = _StagedSource(board)
+    for path in paths:
+        (staged.dir / path.name).write_bytes(f"produced {path.name}\n".encode())
+
+    def immutable_at_boundary(operation):
+        def wrapped(src, dst, *args, **kwargs):
+            if tmp_path / blocked in (Path(src), Path(dst)):
+                raise PermissionError("immutable authored source")
+            return operation(src, dst, *args, **kwargs)
+
+        return wrapped
+
+    for name in ("rename", "replace"):
+        monkeypatch.setattr(os, name, immutable_at_boundary(getattr(os, name)))
+    try:
+        with pytest.raises(PermissionError, match="immutable"):
+            staged.publish()
+    finally:
+        staged.close()
+    assert {p.name for p in tmp_path.iterdir()} == {
+        p.name for p, data in before.items() if data is not None
+    }
+    assert all(p.read_bytes() == data for p, data in before.items() if data is not None)
+
+
+@pytest.mark.parametrize(
+    "name", ["board.kicad_pro", "board.kicad_dru", ".board.kicad_pcb.zonefill"]
+)
+def test_publication_preserves_an_editor_save_at_the_final_rename(tmp_path, monkeypatch, name):
+    import os
+
+    from kicad_tools.core.atomic_write import SourceChangedError
+    from kicad_tools.export.manufacturing import _StagedSource
+
+    board = tmp_path / "board.kicad_pcb"
+    paths = [
+        board,
+        board.with_suffix(".kicad_pro"),
+        board.with_suffix(".kicad_dru"),
+        tmp_path / ".board.kicad_pcb.zonefill",
+    ]
+    for path in paths:
+        path.write_bytes(b"authored\n")
+    staged = _StagedSource(board)
+    for path in paths:
+        (staged.dir / path.name).write_bytes(b"generated\n")
+    target = tmp_path / name
+    replace = os.replace
+    edited = False
+
+    def save_at_boundary(operation):
+        def wrapped(src, dst, *args, **kwargs):
+            nonlocal edited
+            if not edited and target in (Path(src), Path(dst)):
+                edited = True
+                file = tmp_path / "editor-save"
+                file.write_bytes(b"editor\n")
+                replace(file, target)
+            return operation(src, dst, *args, **kwargs)
+
+        return wrapped
+
+    for method in ("rename", "replace"):
+        monkeypatch.setattr(os, method, save_at_boundary(getattr(os, method)))
+    try:
+        with pytest.raises(SourceChangedError, match="changed"):
+            staged.publish()
+    finally:
+        staged.close()
+    assert edited
+    assert target.read_bytes() == b"editor\n"
+    assert all(p.read_bytes() == b"authored\n" for p in paths if p != target)
+
+
+@pytest.mark.parametrize(
+    "editor_target", ["original-handle", "published-project", "published-board"]
+)
+def test_editor_save_during_board_commit_rolls_back_the_group(tmp_path, monkeypatch, editor_target):
+    import os
+
+    from kicad_tools.core.atomic_write import SourceChangedError
+    from kicad_tools.export.manufacturing import _StagedSource
+
+    board = tmp_path / "board.kicad_pcb"
+    project = board.with_suffix(".kicad_pro")
+    rules = board.with_suffix(".kicad_dru")
+    for path in (board, project, rules):
+        path.write_bytes(b"authored")
+    staged = _StagedSource(board)
+    for path in (board, project, rules):
+        (staged.dir / path.name).write_bytes(b"generated")
+
+    link = os.link
+    with project.open("r+b", buffering=0) as old_project:
+
+        def edit_while_board_is_provisional(src, dst, **kwargs):
+            result = link(src, dst, **kwargs)
+            if Path(dst) == board and Path(src).name == "repaired":
+                if editor_target == "original-handle":
+                    old_project.seek(0)
+                    old_project.write(b"editor")
+                    old_project.truncate()
+                else:
+                    path = project if editor_target == "published-project" else board
+                    saved = tmp_path / "editor-save"
+                    saved.write_bytes(b"editor")
+                    os.replace(saved, path)
+            return result
+
+        monkeypatch.setattr(os, "link", edit_while_board_is_provisional)
+        try:
+            with pytest.raises(SourceChangedError, match="changed"):
+                staged.publish()
+        finally:
+            staged.close()
+    assert board.read_bytes() == (b"editor" if editor_target == "published-board" else b"authored")
+    assert project.read_bytes() == (
+        b"authored" if editor_target == "published-board" else b"editor"
+    )
+    assert rules.read_bytes() == b"authored"
+
+
+@pytest.mark.parametrize("fault", ["none", "editor", "two-editors", "short-write"])
+def test_linkless_sidecar_publication_for_an_unchanged_board(tmp_path, monkeypatch, fault):
+    import os
+
+    from kicad_tools.core.atomic_write import SourceChangedError
+    from kicad_tools.export import manufacturing
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_bytes(b"unchanged")
+    project, rules = board.with_suffix(".kicad_pro"), board.with_suffix(".kicad_dru")
+    project.write_bytes(b"authored")
+    stage = manufacturing._StagedSource(board)
+    stage.pcb.with_suffix(".kicad_pro").write_bytes(b"new project")
+    stage.pcb.with_suffix(".kicad_dru").write_bytes(b"new rules")
+    # macOS FAT32 supports exclusive creation but neither hard links nor
+    # exclusive rename. Exercise that last publication method on every CI host.
+    monkeypatch.setattr(manufacturing, "_install_unoccupied", manufacturing._copy_unoccupied)
+    opened = os.open
+    write = os.write
+    target_fd = None
+
+    def reserve(path, flags, *args, **kwargs):
+        nonlocal target_fd
+        fd = opened(path, flags, *args, **kwargs)
+        if target_fd is None and Path(path) == rules and flags & os.O_EXCL:
+            target_fd = fd
+            if fault in ("editor", "two-editors"):
+                rules.write_bytes(b"editor")
+        return fd
+
+    def write_part(fd, data):
+        if fault == "short-write" and fd == target_fd and data == b"new rules":
+            return write(fd, data[:2])
+        return write(fd, data)
+
+    rename = os.rename
+
+    def save_again(src, dst, *args, **kwargs):
+        result = rename(src, dst, *args, **kwargs)
+        if fault == "two-editors" and Path(src) == rules and Path(dst).name == "captured":
+            rules.write_bytes(b"second save")
+        return result
+
+    monkeypatch.setattr(os, "open", reserve)
+    monkeypatch.setattr(os, "write", write_part)
+    monkeypatch.setattr(os, "rename", save_again)
+    try:
+        if fault == "none":
+            stage.publish()
+        else:
+            with pytest.raises(SourceChangedError if fault == "editor" else OSError):
+                stage.publish()
+    finally:
+        stage.close()
+    assert board.read_bytes() == b"unchanged"
+    assert project.read_bytes() == (b"new project" if fault == "none" else b"authored")
+    if fault == "two-editors":
+        assert rules.read_bytes() == b"second save"
+        assert [p.read_bytes() for p in stage.dir.rglob("editor")] == [b"editor"]
+    elif fault == "short-write":
+        assert not rules.exists()
+    else:
+        assert rules.read_bytes() == (b"editor" if fault == "editor" else b"new rules")
+
+
 def test_strict_preflight_failure_still_emits_drc_constraints(tmp_path, monkeypatch):
     """Issue #10091 regression guard: only the silk refusal undoes the writes.
 

@@ -31,7 +31,8 @@ import os
 import re
 import shutil
 import tempfile
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -139,9 +140,16 @@ def _withdraw_published(
             os.link(withdrawn, path, follow_symlinks=False)
 
 
-def _publish_checked(
-    path: Path, content: str, expected_sha256: str, encoding: str | None, newline: str | None
-) -> None:
+@contextmanager
+def checked_write_text(
+    path: Path,
+    content: str,
+    expected_sha256: str,
+    *,
+    encoding: str | None = "utf-8",
+    newline: str | None = None,
+) -> Iterator[None]:
+    """Keep the previous board available for rollback until the caller finishes validation."""
     # A digest check followed by os.replace() can still erase a save between
     # the two calls. Move the current entry aside, verify that exact file,
     # then link into the vacant name. link() never overwrites a racing save.
@@ -174,6 +182,7 @@ def _publish_checked(
                 raise SourceChangedError("PCB changed during manufacturing export")
             os.link(repaired, path)
             linked = True
+            yield
             # An editor holding the displaced inode can still save to it.
             if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
                 raise SourceChangedError("PCB changed during manufacturing export")
@@ -289,7 +298,8 @@ def atomic_write_text(
     """
     path = Path(path)
     if expected_sha256 is not None:
-        _publish_checked(path, content, expected_sha256, encoding, newline)
+        with checked_write_text(path, content, expected_sha256, encoding=encoding, newline=newline):
+            pass
         return
     tmp_path = path.with_suffix(path.suffix + ".tmp")
 
