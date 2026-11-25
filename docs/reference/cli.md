@@ -523,10 +523,19 @@ inside a pad/via/zone): a segment is removed only if every pad and zone
 terminal stays in the same component and no joint becomes overlap-only;
 copper that touches other same-net copper away from a shared endpoint (a
 spur beside a via) is removed only when connectivity also holds over those
-body-touching neighbours; straight end-to-end runs of same-width segments
-are merged into one; locked tracks are never touched. When applying edits,
-prune repeats until a pass makes no changes or it reaches the 10-pass limit
-(#8730). A dry run previews only the first pass, so it can undercount edits
+body-touching neighbours. Prune merges straight end-to-end runs of same-width
+segments and preserves locked tracks.
+
+With DRC verification enabled, prune can remove a pad's track branch and its
+terminal via, if present, when a native KiCad refill shows that the pour still
+connects the same terminals. It tests each branch against the copper left by
+the previous removal, so it keeps the last connection to a plane. A locked
+terminal via protects the whole branch. Prune also keeps the branch when the
+native refill is unavailable, when you use `--no-drc`, or when the trial adds
+a DRC finding.
+
+When applying edits, prune repeats until a pass makes no changes or it reaches
+the 10-pass limit (#8730). A dry run previews only the first pass, so it can undercount edits
 when that pass exposes more redundant copper. With kicad-cli
 available each net's edits are checked with `pcb drc --refill-zones` and
 dropped if they add violations; without that check the file is only written
