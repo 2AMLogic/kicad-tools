@@ -316,17 +316,22 @@ def test_transmitter_uses_the_declared_pair_rate(tmp_path, repair):
     assert repair(board, rules) == 2
 
 
-def _rule_area(name, x0, y0, x1, y1, *, tracks):
+UUID_AREA = "00000000-0000-0000-0000-0000000009a1"
+
+
+def _rule_area_poly(name, pts, *, tracks, layer="F.Cu", uid=UUID_AREA):
     return (
-        f'(zone (net 0) (net_name "") (layers "F.Cu") (uuid "{UUID_AREA}") (name "{name}") '
+        f'(zone (net 0) (net_name "") (layers "{layer}") (uuid "{uid}") (name "{name}") '
         "(hatch edge 0.5) (connect_pads (clearance 0)) (min_thickness 0.2) "
         f"(keepout (tracks {tracks}) (vias allowed) (pads allowed) (copperpour allowed) "
         "(footprints allowed)) (fill (thermal_gap 0.5) (thermal_bridge_width 0.5)) "
-        f"(polygon (pts (xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1}))))"
+        f"(polygon (pts {' '.join(f'(xy {x} {y})' for x, y in pts)})))"
     )
 
 
-UUID_AREA = "00000000-0000-0000-0000-0000000009a1"
+def _rule_area(name, x0, y0, x1, y1, *, tracks, layer="F.Cu", uid=UUID_AREA):
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    return _rule_area_poly(name, corners, tracks=tracks, layer=layer, uid=uid)
 
 
 def _add_area(board, area):
@@ -343,10 +348,56 @@ def test_receiver_declines_both_rails_inside_a_track_keepout(tmp_path, repair):
     before = board.read_bytes()
     assert repair(board, rules) == 0
     assert board.read_bytes() == before
+    # Near miss: a band the original 0.144/0.156 mm taper clears (its copper
+    # tops out 0.012 mm below the band) but the widened 0.225 mm rail enters.
+    _taper_board(board, "J3", pair="RX")
+    _add_area(board, _rule_area("keep", 9.3, 9.94, 9.4, 9.95, tracks="not_allowed"))
+    before = board.read_bytes()
+    assert repair(board, rules) == 0
+    assert board.read_bytes() == before
     # Control: the same area moved clear of the widened rail is allowed.
     _taper_board(board, "J3", pair="RX")
     _add_area(board, _rule_area("keep", 9.3, 9.3, 9.4, 9.4, tracks="not_allowed"))
     assert repair(board, rules) == 2
+
+
+def test_receiver_declines_a_keepout_whose_ring_is_degenerate(tmp_path, repair):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    _add_area(
+        board,
+        _rule_area_poly(
+            "keep", [(9.3, 9.85), (9.4, 9.85), (9.5, 9.85), (9.6, 9.85)], tracks="not_allowed"
+        ),
+    )
+    before = board.read_bytes()
+    assert repair(board, rules) == 0
+    assert board.read_bytes() == before
+    # Control: both lobes of this self-intersecting keepout clear the rails.
+    _taper_board(board, "J3", pair="RX")
+    _add_area(
+        board,
+        _rule_area_poly(
+            "keep", [(9.3, 10.2), (9.5, 10.4), (9.5, 10.2), (9.3, 10.4)], tracks="not_allowed"
+        ),
+    )
+    assert repair(board, rules) == 2
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["forward", "reversed"])
+def test_receiver_respects_both_lobes_of_a_self_crossing_keepout(tmp_path, repair, reverse):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    # Only the lower lobe reaches the proposed 0.225 mm rail. The original
+    # copper clears it in either winding.
+    ring = [(9.30, 9.94), (9.40, 10.01), (9.30, 10.01), (9.40, 9.94)]
+    if reverse:
+        ring.reverse()
+    _add_area(board, _rule_area_poly("keep", ring, tracks="not_allowed"))
+    before = board.read_bytes()
+    assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == 0
+    assert board.read_bytes() == before
 
 
 def test_receiver_declines_both_rails_over_an_authored_maximum_width(tmp_path, repair):
@@ -367,3 +418,170 @@ def test_receiver_declines_both_rails_over_an_authored_maximum_width(tmp_path, r
     # Control: a maximum that admits the 0.225 mm rail is allowed.
     dru.write_text(template.format(limit="0.23"))
     assert repair(board, rules) == 2
+
+
+def test_receiver_skips_an_ignored_authored_maximum_width(tmp_path, repair):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    _add_area(board, _rule_area("J3 connector exit", 9.3, 9.8, 9.4, 9.9, tracks="allowed"))
+    dru = board.with_suffix(".kicad_dru")
+    template = (
+        '(version 1)\n(rule "exit width" {severity}(layer "F.Cu") '
+        "(condition \"A.NetName == 'PCIE_RX+' && A.intersectsArea('J3 connector exit')\") "
+        "(constraint track_width (max 0.2mm)))"
+    )
+    dru.write_text(template.format(severity="(severity ignore) "))
+    assert repair(board, rules) == 2
+    # Control: without the ignored severity the same rule still declines.
+    _taper_board(board, "J3", pair="RX")
+    _add_area(board, _rule_area("J3 connector exit", 9.3, 9.8, 9.4, 9.9, tracks="allowed"))
+    dru.write_text(template.format(severity=""))
+    before = board.read_bytes()
+    assert repair(board, rules) == 0
+    assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("layer", "net", "bound", "limit", "expected"),
+    [
+        ("F.Cu", "PCIE_RX+", "max", "0.1mm + 0.1mm", 0),
+        ("F.Cu", "PCIE_RX+", "min", "0.1mm + 0.15mm", 0),
+        ("B.Cu", "PCIE_RX+", "max", "0.1mm + 0.1mm", 2),
+        ("F.Cu", "PCIE_TX+", "max", "0.1mm + 0.1mm", 2),
+    ],
+)
+def test_receiver_checks_active_width_expression_after_ignored_rule(
+    tmp_path, repair, layer, net, bound, limit, expected
+):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    _add_area(board, _rule_area("J3 connector exit", 9.3, 9.8, 9.4, 9.9, tracks="allowed"))
+    area = "A.intersectsArea('J3 connector exit')"
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "Ignored narrow width" (severity ignore) (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+' && {area}")
+  (constraint track_width (max 0.2mm)))
+(rule "Active width" (layer "{layer}")
+  (condition "A.NetName == '{net}' && {area}")
+  (constraint track_width ({bound} "{limit}")))
+"""
+    )
+    before = board.read_bytes()
+    assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
+    if expected == 0:
+        assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("near_first", [True, False], ids=["near-first", "near-last"])
+@pytest.mark.parametrize(("near_layer", "expected"), [("F.Cu", 0), ("B.Cu", 2)])
+def test_receiver_checks_every_rule_area_with_the_same_name(
+    tmp_path, repair, near_first, near_layer, expected
+):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    name = "J3 connector exit"
+    near = _rule_area(name, 9.3, 9.8, 9.4, 9.9, tracks="allowed", layer=near_layer)
+    far = _rule_area(
+        name, 9.3, 10.8, 9.4, 10.9, tracks="allowed", uid="00000000-0000-0000-0000-0000000009a2"
+    )
+    for area in (near, far) if near_first else (far, near):
+        _add_area(board, area)
+    board.with_suffix(".kicad_dru").write_text(
+        """(version 1)
+(rule "Legacy RX width" (severity ignore) (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+'") (constraint track_width (max 0.2mm)))
+(rule "Active width in connector exits" (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+' && A.intersectsArea('J3 connector exit')")
+  (constraint track_width (max "0.1mm + 0.1mm")))
+"""
+    )
+    before = board.read_bytes()
+    assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
+    if expected == 0:
+        assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("literal_first", [True, False], ids=["literal-first", "literal-last"])
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("J3 *", 0),
+        ("J3 conn????? exit", 0),
+        ("J3 connector exit", 0),
+        ("Q9 *", 0),
+    ],  # a pattern naming no area is undecided: preserve
+)
+def test_receiver_treats_intersects_area_argument_as_a_wildcard(
+    tmp_path, repair, literal_first, pattern, expected
+):
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    # The literal "J3 *" area is on B.Cu; the distinct F.Cu area is what the
+    # wildcard pattern actually reaches.
+    literal = _rule_area(
+        "J3 *",
+        9.3,
+        9.8,
+        9.4,
+        9.9,
+        tracks="allowed",
+        layer="B.Cu",
+        uid="00000000-0000-0000-0000-0000000009b1",
+    )
+    front = _rule_area("J3 connector exit", 9.3, 9.8, 9.4, 9.9, tracks="allowed")
+    for area in (literal, front) if literal_first else (front, literal):
+        _add_area(board, area)
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "Enforced width" (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+' && A.intersectsArea('{pattern}')")
+  (constraint track_width (max 0.2mm)))
+"""
+    )
+    before = board.read_bytes()
+    assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
+    if expected == 0:
+        assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("literal_first", [True, False], ids=["literal-first", "literal-last"])
+@pytest.mark.parametrize(
+    "pattern",
+    ["j3 *", "J3 *", "j3 conn????? exit", "J3 conn????? exit"],
+)
+def test_receiver_preserves_pair_under_negated_area_wildcard(
+    tmp_path, repair, literal_first, pattern
+):
+    # `!A.intersectsArea('j3 *')`: a name matching only after case-folding must
+    # not decide the negation false and drop KiCad's enforced width rule. The
+    # uppercase controls match exactly, so the rule is decided inactive there.
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    roi = _rule_area("ROI", 9.3, 9.8, 9.4, 9.9, tracks="allowed")
+    front = _rule_area(
+        "J3 connector exit",
+        9.3,
+        9.8,
+        9.4,
+        9.9,
+        tracks="allowed",
+        uid="00000000-0000-0000-0000-0000000009c1",
+    )
+    for area in (roi, front) if literal_first else (front, roi):
+        _add_area(board, area)
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "test" (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+' && A.intersectsArea('ROI') && !A.intersectsArea('{pattern}')")
+  (constraint track_width (max 0.2mm)))
+"""
+    )
+    before = board.read_bytes()
+    result = repair(board, get_profile("jlcpcb").get_design_rules(layers=4))
+    if pattern.startswith("j3"):
+        assert result == 0
+        assert board.read_bytes() == before
+    else:
+        assert result == 2
