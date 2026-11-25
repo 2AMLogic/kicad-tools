@@ -198,7 +198,7 @@ class Schematic(
 
         # Element collections
         self.symbols: list[SymbolInstance] = []
-        self._decoupling_caps: dict[str, tuple[str, str, str | None]] = {}
+        self._decoupling_caps: dict[str, tuple[str, str, object | None]] = {}
         self.power_symbols: list[PowerSymbol] = []
         self.wires: list[Wire] = []
         self.junctions: list[Junction] = []
@@ -253,14 +253,15 @@ class Schematic(
     def register_decoupling_cap(
         self, cap: SymbolInstance, source: str, role: str, *, from_default: bool = False
     ) -> None:
-        """Record the source and any selected default value on this in-memory schematic."""
-        self._decoupling_caps[cap.uuid_str] = (source, role, cap.value if from_default else None)
+        """Record the source and whether the current value was selected by a block."""
+        assignment = cap._value_assignment if from_default else None
+        self._decoupling_caps[cap.uuid_str] = (source, role, assignment)
 
     def decoupling_report(self) -> dict[str | None, RailDecoupling]:
         """Group placed supply capacitors by the current electrical net of pin 1.
 
         Each rail contains its count and each cap's reference, value, block source,
-        role and whether its live value matches a default selected by the block.
+        role and whether the block's default assignment remains in place.
         Floating pins appear under ``None``. Warn once per electrically connected
         rail whose defaults come from multiple block instances.
         The live schematic retains this block provenance during construction.
@@ -274,7 +275,7 @@ class Schematic(
             provenance = self._decoupling_caps.get(cap.uuid_str)
             if provenance is None:
                 continue
-            source, role, default_value = provenance
+            source, role, assignment = provenance
             net = nets.get((cap.reference, "1"))
             rail = report.setdefault(net, {"count": 0, "caps": []})
             rail["caps"].append(
@@ -283,7 +284,7 @@ class Schematic(
                     "value": cap.value,
                     "source": source,
                     "role": role,
-                    "from_default": default_value is not None and cap.value == default_value,
+                    "from_default": assignment is not None and cap._value_assignment is assignment,
                 }
             )
             rail["count"] += 1

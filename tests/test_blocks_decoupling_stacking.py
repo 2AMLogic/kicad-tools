@@ -90,15 +90,17 @@ def test_local_supply_labels_resolve_to_the_power_net(separate):
         assert [cap["ref"] for cap in report["+3V3"]["caps"]] == ["C1", "C2"]
 
 
-def test_editing_a_default_capacitor_value_makes_it_a_caller_override():
+@pytest.mark.parametrize("edits", [("47nF",), ("100nF",), ("47nF", "100nF")])
+def test_editing_a_default_capacitor_value_makes_it_a_caller_override(edits):
     sch = Schematic("Edited decoupling")
     oscillator(sch, 1, 25.4, "VDD")
     second = oscillator(sch, 2, 50.8, "VDD")
-    second.cap.value = "47nF"
+    for value in edits:
+        second.cap.value = value
 
     first_cap, edited_cap = quiet_report(sch)["VDD"]["caps"]
     assert first_cap["from_default"] is True
-    assert edited_cap["value"] == "47nF"
+    assert edited_cap["value"] == edits[-1]
     assert edited_cap["from_default"] is False
     assert "Y2" in edited_cap["source"]
 
