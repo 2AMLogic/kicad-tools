@@ -2552,12 +2552,14 @@ def _via_index(pcb: PCB, via: Any) -> int | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def _has_pour_candidates(pcb: PCB) -> bool:
-    """Cheap, kicad-cli-free test for whether a pour-stub proof could add anything."""
+def _has_pour_candidates(pcb: PCB, nets: Collection[str] | None) -> bool:
+    """Check whether a selected net has a branch that needs native verification."""
     from kicad_tools.validate.pour_stub import discover_pour_stubs
 
     try:
-        return bool(pcb.zones and pcb.segments and discover_pour_stubs(pcb))
+        if not pcb.zones or not pcb.segments:
+            return False
+        return any(nets is None or branch.net in nets for branch in discover_pour_stubs(pcb))
     except Exception as e:  # noqa: BLE001 - discovery must never fail prune
         logger.debug("pour-stub discovery failed: %s", e)
         return False
@@ -2696,7 +2698,7 @@ def prune_board(
 
     pour_plans: list[NetPlan] = []
     pour_all: list[NetPlan] = []
-    wants_pour = verify_drc and _has_pour_candidates(pcb)
+    wants_pour = verify_drc and _has_pour_candidates(pcb, nets)
     if verify_drc and (plans or wants_pour):
         with tempfile.TemporaryDirectory(prefix="kct_prune_") as tmp:
             trial_path = Path(tmp) / "trial.kicad_pcb"

@@ -2931,6 +2931,29 @@ def test_prune_preserves_pour_branch_with_locked_via(tmp_path, capsys):
         assert path.read_bytes() == original
 
 
+def test_net_scope_requires_rules_only_for_selected_pour_candidates(tmp_path, capsys):
+    path = _pour_board(tmp_path, "connected")
+    pcb = PCB.load(path)
+    pcb.add_net("SENSE")
+    pcb.save(path)
+    path.with_suffix(".kicad_pro").unlink()
+    path.with_suffix(".kicad_dru").unlink()
+    original = path.read_bytes()
+
+    for apply in (False, True):
+        assert _pour_run(path, "--nets", "SENSE", apply=apply) == 0
+        no_op = json.loads(capsys.readouterr().out)
+        assert no_op["removed"] == {"segments": 0, "vias": 0}
+        assert not no_op["saved"]
+        assert path.read_bytes() == original
+
+        assert _pour_run(path, "--nets", "SENSE,GND", apply=apply) == 1
+        refused = json.loads(capsys.readouterr().out)
+        assert "no project rules found" in refused["error"]
+        assert not refused["saved"]
+        assert path.read_bytes() == original
+
+
 def test_region_applies_all_or_none_of_a_nets_pour_branches(tmp_path, capsys):
     from tests.test_pour_stub_10137 import require_native_refill
 
