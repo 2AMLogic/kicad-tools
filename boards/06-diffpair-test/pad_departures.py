@@ -85,6 +85,7 @@ from kicad_tools.validate.diffpair_skew import derive_pair_skews
 from kicad_tools.validate.mask_copper import default_request_for_manufacturer
 from kicad_tools.validate.mask_geometry import board_mask_margin, pad_mask_margin, pad_mask_shapes
 from kicad_tools.validate.rules.diffpair_length_skew import measured_skew_verdict
+from kicad_tools.validate.rules.dimensions import DimensionRules
 from kicad_tools.validate.rules.impedance import ImpedanceRule
 
 XY = tuple[float, float]
@@ -1590,14 +1591,14 @@ _J1_USB_EXITS = (
         # The diagonal lands at B7's centre, the existing branch to its barrel.
         (
             (0, 0),
-            (0, 0.70),
-            (-0.54, 1.24),
+            (0, 0.83),
+            (-0.54, 1.37),
             (-0.54, 1.54),
             (-1, 2),
             (-1, 8.925),
             (-1.0975, 9.0225),
         ),
-        ((-0.54, 1.24), (-0.45, 1.33), (-0.45, 2.55)),
+        ((-0.54, 1.37), (-0.45, 1.46), (-0.45, 2.55)),
     ),
 )
 
@@ -1741,6 +1742,12 @@ def _clear_j1_usb_pair(path: Path, rules: DesignRules) -> int:
         new_tracks, via = staged
         tracks.extend(new_tracks)
         vias.append(via)
+    dimensions = DimensionRules().check(pcb, rules)
+    if any(
+        v.rule_id == "hole_to_hole_clearance" and set(v.nets or ()).intersection(_USB2_NETS)
+        for v in dimensions.errors
+    ):
+        return 0
     if not _within_project_skew_budget(pcb, path, _USB2_NETS) or not _usb2_electrical_limits_ok(
         pcb, path
     ):

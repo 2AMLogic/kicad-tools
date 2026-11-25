@@ -294,18 +294,18 @@ def test_j1_usb2_reroutes_both_orientations(mirrored_connector, repair):
     barrels = {(v.net_name, v.position, v.size, v.drill) for v in pcb.vias}
     assert barrels == {
         ("USB2_D+", (14.5, 8.7), 0.45, 0.25),
-        ("USB2_D-", (14.96, 9.24), 0.45, 0.25),
+        ("USB2_D-", (14.96, 9.37), 0.45, 0.25),
         ("USB2_D+", (16.05, 9.45), 0.45, 0.25),
         ("USB2_D-", (15.05, 10.55), 0.45, 0.25),
     }
-    for net, x in (("USB2_D+", 14.5), ("USB2_D-", 15.5)):
+    for net, x, y in (("USB2_D+", 14.5, 8.7), ("USB2_D-", 15.5, 8.83)):
         launches = [
             (s.start, s.end) for s in pcb.segments if s.net_name == net and s.layer == "F.Cu"
         ]
-        assert ((x, 8.0), (x, 8.7)) in launches
+        assert ((x, 8.0), (x, y)) in launches
     for net, seat, inner in (
         ("USB2_D+", (14.5, 8.7), "In1.Cu"),
-        ("USB2_D-", (14.96, 9.24), "In2.Cu"),
+        ("USB2_D-", (14.96, 9.37), "In2.Cu"),
     ):
         assert {
             s.layer for s in pcb.segments if s.net_name == net and seat in (s.start, s.end)
@@ -321,6 +321,7 @@ def test_j1_usb2_reroutes_both_orientations(mirrored_connector, repair):
         == 3
     )
     checker = _checker(path)
+    assert not checker.check_dimensions().errors
     assert not checker.check_diffpair_routing_continuity().errors
     assert not checker.check_impedance().errors
     assert not checker.check_diffpair_length_skew().errors
@@ -334,6 +335,7 @@ def test_j1_usb2_reroutes_both_orientations(mirrored_connector, repair):
     [
         "locked via",
         "foreign copper",
+        "drill spacing",
         "coupling",
         "mask margin",
         "inner tap",
@@ -344,6 +346,7 @@ def test_j1_usb2_reroutes_both_orientations(mirrored_connector, repair):
 def test_j1_usb2_rejects_a_changed_partner(mirrored_connector, repair, control):
     path = mirrored_connector
     board = path.read_text()
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
     if control == "locked via":
         board = board.replace("(via (at 15.75 8.55)", "(via (locked yes) (at 15.75 8.55)")
     elif control == "exposed back barrel":
@@ -353,8 +356,10 @@ def test_j1_usb2_rejects_a_changed_partner(mirrored_connector, repair, control):
     elif control == "foreign copper":
         board = (
             board.rstrip()[:-1]
-            + '(segment (start 14.96 9.24) (end 15.3 9.24) (width 0.2) (layer "In1.Cu") (net 3)))'
+            + '(segment (start 14.96 9.37) (end 15.3 9.37) (width 0.2) (layer "In1.Cu") (net 3)))'
         )
+    elif control == "drill spacing":
+        rules = replace(rules, min_hole_to_hole_mm=0.60)
     elif control == "inner tap":
         board = (
             board.rstrip()[:-1]
@@ -377,7 +382,7 @@ def test_j1_usb2_rejects_a_changed_partner(mirrored_connector, repair, control):
         path.with_name("net_class_map.json").write_text(json.dumps(net_class_map_to_dict(classes)))
     path.write_text(board)
     before = path.read_bytes()
-    assert repair(path, get_profile("jlcpcb").get_design_rules(layers=4)) == 0
+    assert repair(path, rules) == 0
     assert path.read_bytes() == before
 
 
