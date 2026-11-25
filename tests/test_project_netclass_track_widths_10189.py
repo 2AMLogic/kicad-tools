@@ -489,16 +489,25 @@ class TestOptimizeTracesHonoursProjectNetclassWidths:
 
 
 def test_default_auto_layers_reroute_updates_edited_class_only(tmp_path: Path) -> None:
-    """Default ``kct route`` (``--auto-layers`` active) updates only the edited class."""
-    pcb = _write_unrouted_board(tmp_path, [("+5V", 6.0), ("SDA", 18.0)])
+    """Two default re-routes retain the authored class names, widths and assignments."""
+    pcb = _write_unrouted_board(tmp_path, [("VIN", 6.0), ("VOUT", 18.0)])
     pro = pcb.with_suffix(".kicad_pro")
     pro.write_text(json.dumps(_base_project(), indent=2), encoding="utf-8")
 
-    assert (
-        route_cmd.main([str(pcb), "-o", str(pcb), "--no-auto-pour", "--no-cache", "--quiet"]) == 0
+    # Both names classify as Power without the user's original map.
+    user_map = tmp_path / "classes.json"
+    user_map.write_text(
+        json.dumps(
+            {
+                "VIN": {"name": "Power", "trace_width": 0.5, "clearance": 0.2},
+                "VOUT": {"name": "Sense", "trace_width": 0.25, "clearance": 0.2},
+            }
+        )
     )
-    assert _widths_by_net(pcb) == {"+5V": {0.5}, "SDA": {0.2}}
-    sda_before = _geometry_signature(pcb, "SDA")
+    args = [str(pcb), "-o", str(pcb), "--no-auto-pour", "--no-cache", "--quiet"]
+    assert route_cmd.main([*args, "--net-class-map", str(user_map)]) == 0
+    assert _widths_by_net(pcb) == {"VIN": {0.5}, "VOUT": {0.25}}
+    sense_before = _geometry_signature(pcb, "VOUT")
 
     project = json.loads(pro.read_text(encoding="utf-8"))
     for cls in project["net_settings"]["classes"]:
@@ -506,8 +515,13 @@ def test_default_auto_layers_reroute_updates_edited_class_only(tmp_path: Path) -
             cls["track_width"] = 0.34
     pro.write_text(json.dumps(project, indent=2), encoding="utf-8")
 
-    assert (
-        route_cmd.main([str(pcb), "-o", str(pcb), "--no-auto-pour", "--no-cache", "--quiet"]) == 0
-    )
-    assert _widths_by_net(pcb) == {"+5V": {0.34}, "SDA": {0.2}}
-    assert _geometry_signature(pcb, "SDA") == sda_before
+    for _ in range(2):
+        assert route_cmd.main(args) == 0
+        assert _widths_by_net(pcb) == {"VIN": {0.34}, "VOUT": {0.25}}
+        assert _geometry_signature(pcb, "VOUT") == sense_before
+        settings = json.loads(pro.read_text())["net_settings"]
+        assert settings["netclass_assignments"] == {"VIN": "Power", "VOUT": "Sense"}
+        widths = {c["name"]: c["track_width"] for c in settings["classes"]}
+        assert widths["Power"] == 0.34 and widths["Sense"] == 0.25
+        sidecar = json.loads(pcb.with_suffix(".net_class_map.json").read_text())
+        assert sidecar["VOUT"]["name"] == "Sense"

@@ -244,57 +244,41 @@ def _wide_bus_project() -> dict:
 
 
 @pytest.mark.parametrize(
-    ("command", "extra", "corridor_at_class_width"),
+    ("command", "expected_width"),
     [
-        (["route", "--layers", "2", "--force"], [], False),
-        (["route-auto", "--net", "BUS"], [], True),
+        (["route", "--layers", "2", "--force"], 0.6),
+        (["route-auto", "--net", "BUS"], 0.6),
+        (["route", "--layers", "2", "--force", "--trace-width", "0.2"], 0.2),
     ],
-    ids=["kct-route", "route-auto"],
+    ids=["kct-route", "route-auto", "explicit-narrow-width"],
 )
 def test_row3_census_uses_authored_netclass_assignment(
-    tmp_path: Path, capsys, command, extra, corridor_at_class_width
+    tmp_path: Path, capsys, command, expected_width
 ):
-    """Row 3 review: an authored netclass assignment defines the class width.
-
-    The reviewer's case: ``BUS`` assigned to ``Wide`` (0.6 mm) in a
-    schema-3 ``.kicad_pro``, emitted copper at the 0.2 mm board default.
-    Name classification knows nothing about ``BUS``, so a census that only
-    consults the router's class map stays silent -- on both commands.
-
-    Issue #9716 splits the verdict per command: ``route-auto``'s corridor
-    now materialises at the authored class width (0.6 mm), so its census
-    has nothing sub-class to report and the written copper is wide; the
-    ``kct route`` grid path still emits at the 0.2 mm rule default and
-    keeps reporting the neck (out of scope for #9716).
-    """
+    """Both commands use the project width. An explicit narrower route reports the neck."""
     from kicad_tools.cli import main as kct_main
 
     board = tmp_path / "bus_two_pad.kicad_pcb"
     board.write_text(_two_pad_bus_board_text())
-    (tmp_path / "bus_two_pad.kicad_pro").write_text(json.dumps(_wide_bus_project()))
+    board.with_suffix(".kicad_pro").write_text(json.dumps(_wide_bus_project()))
 
     out_path = tmp_path / "out.kicad_pcb"
-    rc = kct_main([*command, str(board), "-o", str(out_path), "--format", "json", *extra])
+    rc = kct_main([*command, str(board), "-o", str(out_path), "--format", "json"])
     assert rc == 0
     doc = json.loads(capsys.readouterr().out)
-    if corridor_at_class_width:
-        [net_entry] = doc["nets"]
-        assert net_entry["success"] is True
-        assert "necked_copper" not in net_entry, (
-            f"copper at the authored class width must not census as necked: {net_entry}"
-        )
-        widths = _net_segment_widths(out_path, "BUS")
-        assert widths and all(w == pytest.approx(0.6) for w in widths), (
-            f"the corridor must materialise at the authored 0.6 mm Wide width: {widths}"
-        )
+    widths = _net_segment_widths(out_path, "BUS")
+    assert widths and all(w == pytest.approx(expected_width) for w in widths)
+    if command[0] == "route-auto":
+        [entry] = doc["nets"]
+        assert entry["success"] is True
+    else:
+        entry = doc
+    if expected_width == 0.6:
+        assert "necked_copper" not in entry
         return
-    entries = doc["necked_copper"] if "necked_copper" in doc else doc["nets"][0]["necked_copper"]
-    [neck] = entries
+    [neck] = entry["necked_copper"]
     assert neck["net_name"] == "BUS"
-    assert neck["min_width_mm"] == pytest.approx(0.2), (
-        "the 0.2 mm default-width copper must be measured against the "
-        f"authored 0.6 mm Wide class, not ignored: {neck}"
-    )
+    assert neck["min_width_mm"] == pytest.approx(0.2)
     assert neck["beyond_taper"] is True
 
 
@@ -702,74 +686,57 @@ def test_row3_route_auto_default_width_without_class_override(tmp_path: Path, ca
     )
 
 
-def test_row3_route_auto_reports_necked_copper(tmp_path: Path, capsys):
-    """Row 3 on route-auto: sub-class-width copper is reported, not silent.
-
-    The orchestrator never calls the CLI's ``_finalize_routes`` (where
-    ``kct route`` prints its neck report), so without this the route-auto
-    surface can emit necked copper and say nothing -- the audit's failure
-    mode, on the second code path.  Since #9716 the global corridor emits
-    at the net's class width, so the necking route is the ``hierarchical``
-    strategy: it routes on the ``kct route`` grid machinery at the rule
-    default, and a ``BUS`` authored at 0.6 mm comes back at 0.2 mm --
-    route-auto must still say so.  Asserted on both surfaces route-auto
-    owns: the ``--format json`` document and the text report.
-    """
+def test_row3_route_auto_reports_necked_copper(tmp_path: Path, capsys, monkeypatch):
+    """The JSON and text reports measure copper tapered at a fine-pitch pad."""
     from kicad_tools.cli import main as kct_main
+    from kicad_tools.router.io import PCBDesignRules
 
-    board = tmp_path / "bus_two_pad.kicad_pcb"
-    board.write_text(_two_pad_bus_board_text())
-    (tmp_path / "bus_two_pad.kicad_pro").write_text(json.dumps(_wide_bus_project()))
+    # Enable the router's optional 0.122 mm taper. The real router generates
+    # the copper and both reporting paths have to measure the resulting tracks.
+    to_rules = PCBDesignRules.to_design_rules
 
-    # JSON surface: the per-net document carries the neck census.
-    out_json = tmp_path / "out_json.kicad_pcb"
-    rc = kct_main(
-        [
-            "route-auto",
-            str(board),
-            "--net",
-            "BUS",
-            "--strategy",
-            "hierarchical",
-            "-o",
-            str(out_json),
-            "--format",
-            "json",
-        ]
+    def with_taper(self, *args, **kwargs):
+        rules = to_rules(self, *args, **kwargs)
+        rules.min_trace_width = 0.122
+        return rules
+
+    monkeypatch.setattr(PCBDesignRules, "to_design_rules", with_taper)
+    board = tmp_path / "bus_fine_pitch.kicad_pcb"
+    board.write_text(
+        _HEADER.replace("(end 24 28)", "(end 40 40)")
+        + """  (footprint "Test:IC" (layer "F.Cu") (at 5 5)
+    (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 0.22 0.22) (layers "F.Cu") (net 1 "BUS"))
+    (pad "2" smd rect (at 0 0.5) (size 0.22 0.22) (layers "F.Cu") (net 1 "BUS")))
+  (footprint "Test:Sink" (layer "F.Cu") (at 30 30)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "BUS")))
+)
+"""
     )
-    assert rc == 0
+    board.with_suffix(".kicad_pro").write_text(json.dumps(_wide_bus_project()))
+
+    route_args = ["route-auto", str(board), "--net", "BUS", "--strategy", "hierarchical"]
+    out_json = tmp_path / "out_json.kicad_pcb"
+    assert kct_main([*route_args, "-o", str(out_json), "--format", "json"]) == 0
     doc = json.loads(capsys.readouterr().out)
     [entry] = doc["nets"]
     assert entry["success"] is True
     [neck] = entry["necked_copper"]
+    widths = _net_segment_widths(out_json, "BUS")
+    assert min(widths) == pytest.approx(0.122)
+    assert max(widths) == pytest.approx(0.6)
     assert neck["net_name"] == "BUS"
-    assert neck["min_width_mm"] == pytest.approx(0.2), (
-        "the hierarchical grid route runs at the 0.2 mm board default, "
-        "below the authored 0.6 mm Wide width"
-    )
+    assert neck["min_width_mm"] == pytest.approx(min(widths))
     assert neck["segment_count"] >= 1
-    # A 25 mm corridor necked along its whole length is far beyond the
-    # 1.0 mm taper distance: the entry says so.
-    assert neck["beyond_taper"] is True
+    assert neck["beyond_taper"] is False
 
-    # Text surface: the same census, rendered in the run's report.
     out_text = tmp_path / "out_text.kicad_pcb"
-    rc = kct_main(
-        [
-            "route-auto",
-            str(board),
-            "--net",
-            "BUS",
-            "--strategy",
-            "hierarchical",
-            "-o",
-            str(out_text),
-        ]
-    )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "Necked copper:" in out, f"route-auto text output is silent about necks:\n{out}"
-    assert "BUS" in out and "long, verify intent" in out
+    assert kct_main([*route_args, "-o", str(out_text)]) == 0
+    report = capsys.readouterr().out
+    assert "Necked copper:" in report
+    assert "BUS:" in report and "min width 0.122mm" in report
+    assert "long, verify intent" not in report
 
 
 def test_rows_8_10_route_auto_partial_progress_is_reported(tmp_path: Path):

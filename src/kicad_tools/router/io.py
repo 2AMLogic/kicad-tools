@@ -6256,7 +6256,11 @@ def load_pcb_for_routing(
         if _nw.width <= 0:
             continue
         if _net_name in net_class_map:
-            net_class_map[_net_name] = replace(net_class_map[_net_name], trace_width=_nw.width)
+            # The same map is written to the sidecar and project. Pair the
+            # authored width with its class while retaining the routing options.
+            net_class_map[_net_name] = replace(
+                net_class_map[_net_name], name=_nw.source_class, trace_width=_nw.width
+            )
         else:
             net_class_map[_net_name] = NetClassRouting(
                 name=_nw.source_class,
