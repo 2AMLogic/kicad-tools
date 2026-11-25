@@ -15,17 +15,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from inspect import signature
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
 from kicad_tools.cli import fix_drc_cmd
-from kicad_tools.drc.repair_mask_copper import (
-    _PASS_THROUGH_SLIDE_MAX_MM,
-    MaskCopperRepairer,
-    MaskRepairResult,
-)
+from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer, MaskRepairResult
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 from kicad_tools.router.quantize import _is_quantum_aligned
@@ -3282,29 +3280,32 @@ def _disjoint_chamfer_fixture(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("fixture", "conductor"),
-    [(_disjoint_jog_fixture, "jog"), (_disjoint_chamfer_fixture, "chamfer")],
+    ("fixture", "conductor", "required", "slide_method"),
+    [
+        (_disjoint_jog_fixture, "jog", 0.285, "_slide_jog_along_runs"),
+        (_disjoint_chamfer_fixture, "chamfer", 0.165, "_slide_chamfer_between_runs"),
+    ],
 )
 def test_disjoint_pass_through_slide_longer_than_the_bound_falls_back_to_the_nudge(
-    tmp_path, fixture, conductor
+    tmp_path, fixture, conductor, required, slide_method
 ):
-    # The caller passes min(max_displacement, _PASS_THROUGH_SLIDE_MAX_MM) to the slide,
-    # so even with max_displacement = 1.0 a slide needing more than 0.25 mm is never
-    # tried and the perpendicular nudge repairs the finding. The helper-level bound
-    # test above cannot see this clamp: it hands the helper its limit directly.
-    required = 0.4 if conductor == "jog" else 0.2  # each needs a slide above 0.25 mm
+    # Each conductor needs a 0.255 mm slide, one 0.005 mm step beyond the bound.
     board, _ = fixture(tmp_path)
     repairer = MaskCopperRepairer(board)
     finding = _pt_finding(conductor, measured=0.05, required=required)
-    assert _JOG_OPTS["max_displacement"] > _PASS_THROUGH_SLIDE_MAX_MM
-
-    result = repairer.repair([finding], dry_run=True, **_JOG_OPTS)
+    slide = getattr(repairer, slide_method)
+    with patch.object(repairer, slide_method, wraps=slide) as attempt:
+        result = repairer.repair([finding], **_JOG_OPTS)
     assert result.repaired == 1 and not result.unrepaired
     (action,) = result.actions
     assert action.action == "nudge_clear"
-    assert not action.detail.startswith("slid "), action.detail
     assert action.detail.startswith("moved "), action.detail
-    assert action.displacement_mm > _PASS_THROUGH_SLIDE_MAX_MM
+
+    # A change smaller than one slide step leaves the same copper. Check the
+    # limit the caller supplied while still running the real slide above.
+    attempt.assert_called_once()
+    call = signature(slide).bind(*attempt.call_args.args, **attempt.call_args.kwargs)
+    assert call.arguments["max_displacement"] == 0.25
 
 
 def test_disjoint_pass_through_chamfer_slides_along_its_runs_and_undoes(tmp_path):
@@ -3321,7 +3322,7 @@ def test_disjoint_pass_through_chamfer_slides_along_its_runs_and_undoes(tmp_path
     (action,) = result.actions
     assert action.action == "nudge_clear" and "chamfer" in action.detail
     # Within the bound, so the slide (not the nudge) is what repaired it.
-    assert 0 < action.displacement_mm <= _PASS_THROUGH_SLIDE_MAX_MM
+    assert 0 < action.displacement_mm <= 0.25
     repairer.save(board)
     assert not repairer.off_angle_tracks()
     run, chamfer, lead = (_end(board, name) for name in ("run", "chamfer", "lead"))
