@@ -145,13 +145,25 @@ class TestSysModulesSymmetry:
 class TestNoSiblingBoards:
     """A board dir with no sibling modules must still load cleanly."""
 
-    def test_board_dir_without_sibling_modules(self, loader, clean_sibling_keys, tmp_path):
+    @pytest.mark.parametrize("preloaded", [False, True], ids=["absent", "preloaded"])
+    def test_board_dir_without_sibling_modules(
+        self, loader, clean_sibling_keys, tmp_path, monkeypatch, preloaded
+    ):
         board = tmp_path / "solo-board"
         board.mkdir()
         (board / "generate_design.py").write_text("CONTRACT = 'solo'\n", encoding="utf-8")
+
+        # Record the worker's incoming state for teardown even if a broken loader leaks a key.
+        sentinel = types.ModuleType("generate_design")
+        monkeypatch.setitem(sys.modules, "generate_design", sentinel)
+        if not preloaded:
+            monkeypatch.delitem(sys.modules, "generate_design")
 
         mod = loader(board)
 
         assert mod is not None
         assert mod.CONTRACT == "solo"
-        assert "generate_design" not in sys.modules
+        if preloaded:
+            assert sys.modules["generate_design"] is sentinel
+        else:
+            assert "generate_design" not in sys.modules

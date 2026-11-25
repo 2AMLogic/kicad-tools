@@ -8,22 +8,31 @@ KiCad project ZIP, and a manifest with SHA256 checksums.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import kicad_tools
+from kicad_tools.core.atomic_write import SourceChangedError, checked_write_text
+from kicad_tools.core.package_publication import (
+    PublicationRegion,
+    is_publication_hold,
+    publish_regions,
+)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.parts.lcsc import LCSCDependencyMissingError
@@ -36,6 +45,7 @@ from .preflight import (
     PreflightResult,
     report_source_mismatch,
 )
+from .rotation_overrides import placement_preview_instructions
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +160,13 @@ class ManufacturingResult:
     # Issue #7209: outer/inner copper weight the order requests, derived from the
     # board stackup (see ``preflight.resolve_ordered_copper``).
     ordered_copper: dict | None = None
+    # Issue #10109: footprint-to-symbol instance link report for the
+    # editable-project handoff (``to_dict()`` of
+    # :class:`kicad_tools.sync.instance_links.InstanceLinkReport`), or
+    # ``None`` when no project ZIP was produced or no schematic could be
+    # compared against.  Read-only: broken links are surfaced as warnings,
+    # never repaired here.
+    instance_links: dict | None = None
 
     @property
     def success(self) -> bool:
@@ -219,6 +236,142 @@ class ManufacturingResult:
             for err in self.errors:
                 lines.append(f"    - {err}")
         return "\n".join(lines)
+
+
+class _PackageOutputs:
+    """Map this export's generated files between a private candidate and their public paths."""
+
+    bundle_key = Path("package")
+
+    def __init__(self, out_dir: Path, config: ManufacturingConfig, manufacturer: str) -> None:
+        from kicad_tools.manufacturers import get_fab_family
+
+        config = copy(config)
+        family = get_fab_family(manufacturer)
+        bom = config.bom_filename.format(manufacturer=family)
+        configured = {"project_zip_name": config.project_zip_name}
+        if config.include_bom:
+            configured["bom_filename"] = bom
+        if config.include_pnp:
+            configured["pnp_filename"] = config.pnp_filename.format(manufacturer=family)
+        if config.include_gerbers:
+            configured["gerbers_subdir"] = config.gerbers_subdir
+        if config.include_manifest:
+            configured["manifest_name"] = config.manifest_name
+        # CLI paths live in the bundle. The Python API also allows a member on
+        # another volume. Give each root a directory in the private candidate.
+        bundle_key = self.bundle_key
+        live_bundle = out_dir.resolve()
+        roots = {bundle_key.name: live_bundle}
+        targets = {}
+        for field_name, name in configured.items():
+            path = live_bundle / name
+            targets[field_name] = path.parent.resolve() / path.name
+        # Nested external outputs share one staging subtree, just as they do
+        # on disk. Package paths always retain their bundle-relative names.
+        parents = sorted(
+            {p.parent for p in targets.values() if not p.is_relative_to(live_bundle)},
+            key=lambda p: (len(p.parts), str(p)),
+        )
+        for parent in parents:
+            if not any(parent.is_relative_to(previous) for previous in roots.values()):
+                roots[f"external-{len(roots)}"] = parent
+        members: set[Path] = set()
+        for field_name, target in targets.items():
+            root_name, parent = next(
+                (n, path) for n, path in roots.items() if target.is_relative_to(path)
+            )
+            key = Path(root_name) / target.relative_to(parent)
+            members.add(key)
+            # Keep ordinary templates and the existing bundle-relative path spelling.
+            relative = os.path.relpath(key, bundle_key)
+            if Path(relative) != Path(configured[field_name]):
+                setattr(config, field_name, relative)
+        if config.include_readme:
+            members.add(bundle_key / "README.txt")
+        if config.stackup_id:
+            members.add(bundle_key / "stackup-ordering.json")
+        if config.include_report:
+            members.update(
+                bundle_key / name
+                for name in ("report.pdf", "report.md", "report", "images", ".build/report")
+            )
+
+        self.out_dir = out_dir
+        self.members = members
+        self.roots = roots
+        # A previous BOM supplies the user's LCSC assignments. Its real path
+        # is also recorded in the README and in the returned merge report.
+        if config.merge_lcsc and config.merge_lcsc_from is None and (out_dir / bom).is_file():
+            config.merge_lcsc_from = out_dir / bom
+        self.config = config
+
+    def live_path(self, key: str | Path) -> Path:
+        top, *rest = Path(key).parts
+        root = self.out_dir if top == self.bundle_key.name else self.roots[top]
+        return root.joinpath(*rest)
+
+    def paths(self, root: Path) -> set[Path]:
+        entries: set[Path] = set()
+        bundle = self.out_dir if root == self.out_dir else root / self.bundle_key
+        versions = {
+            self.bundle_key / p.name
+            for p in bundle.glob("v[0-9]*")
+            if self.config.include_report and p.is_dir() and p.name[1:].isdigit()
+        }
+        for name in self.members | versions:
+            path = self.live_path(name) if root == self.out_dir else root / name
+            if path.is_dir() and path.is_symlink():
+                raise OSError(f"Cannot stage package directory symlink: {path}")
+            if path.exists():
+                entries.add(name)
+            if path.is_dir():
+                for item in path.rglob("*"):
+                    if is_publication_hold(item.relative_to(path)):
+                        continue
+                    if item.is_dir() and item.is_symlink():
+                        raise OSError(f"Cannot stage package directory symlink: {item}")
+                    entries.add(name / item.relative_to(path))
+        return entries
+
+    def inventory(self, root: Path, held_dirs: set[Path] | None = None) -> dict[str, str]:
+        snapshot = {}
+        for key in self.paths(root):
+            path = self.live_path(key) if root == self.out_dir else root / key
+            if (not held_dirs or path.parent not in held_dirs) and path.is_file():
+                snapshot[key.as_posix()] = _sha256_file(path)
+        return snapshot
+
+    def seed(self, candidate: Path) -> tuple[set[Path], dict[str, str]]:
+        """Copy existing export inputs and report versions without following directory links."""
+        for member in self.members:
+            if self.live_path(member).parent.is_dir():
+                (candidate / member).parent.mkdir(parents=True, exist_ok=True)
+        existing = self.paths(self.out_dir)
+        before = self.inventory(self.out_dir)
+        for name in existing:
+            source, target = self.live_path(name), candidate / name
+            if source.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+        if self.inventory(candidate) != before:
+            raise RuntimeError("Package changed while preparing the export candidate")
+
+        return existing, before
+
+    def publish(self, candidate: Path, existing: set[Path], before: dict[str, str]) -> None:
+        manifest = os.path.normpath(self.bundle_key / self.config.manifest_name)
+        obsolete = sorted(existing - self.paths(candidate), key=lambda p: -len(p.parts))
+        publish_regions(
+            [PublicationRegion(candidate, self.out_dir, before, self.live_path)],
+            self.inventory,
+            publish_last=self.live_path(manifest),
+            remove_empty_directories=[
+                self.live_path(name) for name in obsolete if self.live_path(name).is_dir()
+            ],
+        )
 
 
 def _now_utc() -> datetime:
@@ -578,7 +731,19 @@ def _create_project_zip(
     Other .kicad_pcb variants (intermediate builds,
     working copies, etc.) and backup files are excluded to keep the
     manufacturing package clean.
+
+    The board, its rules, the project file and the root sheet are delivered
+    under one basename -- the one :mod:`kicad_tools.export.project_identity`
+    picks -- so KiCad opens them as one project (Issue #10108). The ``VERSION.md``
+    kept beside the board travels too, and one describing any renaming is
+    written when the checked names differ.
     """
+    from kicad_tools.export.project_identity import (
+        ProjectIdentityError,
+        archive_layout,
+        project_identity,
+    )
+
     # Resolve once: table-derived members are built from the resolved root, so
     # every member (and its archive name) must share that spelling.  An
     # unresolved/relative/symlinked project_dir (e.g. macOS /var -> /private/var
@@ -610,9 +775,30 @@ def _create_project_zip(
     from kicad_tools.report.utils import find_schematic, walk_schematic_hierarchy
 
     root_sch = Path(schematic_path) if schematic_path else find_schematic(pcb_path)
+    walked_sheets: list[Path] = []
     if root_sch is not None and root_sch.is_file():
         walked = walk_schematic_hierarchy(root_sch, lambda sheet: sheet.is_relative_to(project_dir))
         project_files.extend(walked.sheets)
+        walked_sheets = walked.sheets
+        if schematic_path is not None and root_sch.resolve() not in walked_sheets:
+            raise ProjectIdentityError(
+                f"Cannot pair {root_sch} with {pcb_path}: put the root sheet beside the board "
+                "and preserve its sheet references, or run kct readiness with --sch and "
+                "--project-root pointing to their common project directory"
+            )
+        incomplete = [*walked.outside, *walked.missing]
+        if schematic_path is not None and incomplete:
+            # A ZIP missing part of the selected hierarchy opens in KiCad with
+            # an empty/partial BOM and parity gaps, so never report it as a
+            # successful export (Issue #10108).  An auto-discovered root keeps
+            # the Issue #8752 behaviour: skip with a warning below.
+            listed = ", ".join(str(sheet) for sheet in incomplete)
+            raise ProjectIdentityError(
+                f"Cannot bundle the full schematic hierarchy of {root_sch} with {pcb_path}: "
+                f"sheet(s) outside the board directory or missing: {listed}. Keep every "
+                "sheet beside the board, or run kct readiness with --sch and --project-root "
+                "pointing to their common project directory"
+            )
         for sheet in walked.outside:
             logger.warning("Sub-sheet outside the project directory not bundled: %s", sheet)
     else:
@@ -628,9 +814,27 @@ def _create_project_zip(
     project_files.extend(_project_symbol_files(project_dir))
     project_files.extend(_project_footprint_files(project_dir))
     project_files = sorted(set(project_files))
+
+    project_file = pcb_path.with_suffix(".kicad_pro")
+    archived_root = root_sch.resolve() if root_sch is not None else None
+    identity = project_identity(
+        pcb_path,
+        project_file if project_file in project_files else None,
+        archived_root if archived_root in walked_sheets else None,
+    )
+    layout = archive_layout(
+        identity, project_files, lambda source: source.parent.relative_to(project_dir).as_posix()
+    )
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in project_files:
-            zf.write(f, f.relative_to(project_dir).as_posix())
+        for source in project_files:
+            real = source.resolve()
+            member = layout.names[real]
+            if real == identity.project:
+                zf.writestr(member, layout.member_bytes(real, real.read_bytes()))
+            else:
+                zf.write(source, member)
+        if layout.record is not None:
+            zf.writestr(layout.record_name, layout.record)
 
     logger.info(f"Created project ZIP: {zip_path} ({len(project_files)} files)")
     return zip_path
@@ -695,6 +899,308 @@ def _build_manifest(
     return manifest
 
 
+class _SidecarRecoveryError(OSError):
+    """The filesystem refused rollback; the staging directory must be retained."""
+
+
+def _withdraw_copy(
+    destination: Path, recovery: Path, fd: int, data: bytes, start: int, written: int
+) -> None:
+    # Inspect the entry actually withdrawn; an intervening save may have
+    # replaced the name or written to our inode before our append.
+    captured = recovery / "captured"
+    try:
+        destination.rename(captured)
+    except FileNotFoundError:
+        return
+    restore = captured
+    if os.path.samestat(os.fstat(fd), captured.lstat()):
+        raw = captured.read_bytes()
+        end = start + written
+        if raw[start:end] == data[:written]:
+            raw = raw[:start] + raw[end:]
+        if not raw:
+            return
+        restore = recovery / "editor"
+        restore.write_bytes(raw)
+    # If another save already reclaimed the name, leave that version live
+    # and keep the captured version in the recovery directory.
+    _install_unoccupied(restore, destination)
+
+
+def _copy_unoccupied(source: Path, destination: Path) -> os.stat_result:
+    """Reserve a name on linkless FAT and never overwrite an intervening save."""
+    data = source.read_bytes()
+    recovery = Path(tempfile.mkdtemp(prefix="copy-rollback-", dir=source.parent))
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_APPEND | getattr(os, "O_BINARY", 0)
+    fd = os.open(destination, flags, source.stat().st_mode & 0o777)
+    with os.fdopen(fd, "r+b", buffering=0) as stream:
+        start = written = 0
+        try:
+            # One append to the exclusively created file. If an editor got to
+            # this new inode first, its bytes precede ours and remain recoverable.
+            written = os.write(fd, data)
+            start = stream.tell() - written
+            if start:
+                raise SourceChangedError(f"{destination.name} changed during manufacturing export")
+            if written != len(data):
+                raise OSError(errno.ENOSPC, "Incomplete sidecar write", destination)
+            os.fsync(fd)
+        except BaseException:
+            try:
+                _withdraw_copy(destination, recovery, fd, data, start, written)
+            except (OSError, SourceChangedError) as exc:
+                raise _SidecarRecoveryError(
+                    f"Could not restore {destination.name}; recovery files retained at {recovery}"
+                ) from exc
+            raise
+        # FAT32 assigns the permanent identity only after the first data cluster.
+        return os.fstat(fd)
+
+
+def _install_unoccupied(source: Path, destination: Path) -> os.stat_result:
+    """Publish only into a vacant name, preferring whole-file operations."""
+    identity = source.lstat()
+    try:
+        os.link(source, destination, follow_symlinks=False)
+        return identity
+    except OSError as exc:
+        if exc.errno not in (errno.EPERM, errno.ENOTSUP, errno.ENOSYS, errno.EOPNOTSUPP):
+            raise
+        if os.name == "nt":  # Windows rename already refuses an occupied destination.
+            source.rename(destination)
+            return identity
+        # Linkless filesystems can still publish sidecars for a no-op silk pass.
+        # Use the platform's exclusive rename. A check followed by replace would
+        # discard a save between those two calls.
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        src, dst = os.fsencode(source), os.fsencode(destination)
+        if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+            result = libc.renamex_np(src, dst, 0x4)  # RENAME_EXCL
+        elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+            result = libc.renameat2(-100, src, -100, dst, 1)  # AT_FDCWD, RENAME_NOREPLACE
+        else:
+            result = -1
+            ctypes.set_errno(errno.ENOTSUP)
+        if result == 0:
+            return identity
+        code = ctypes.get_errno()
+        if code not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS):
+            raise OSError(code, os.strerror(code), destination)
+        if source.is_symlink():
+            destination.symlink_to(source.readlink())
+            return destination.lstat()
+        return _copy_unoccupied(source, destination)
+
+
+class _SidecarWrite:
+    """Hold the displaced entry until the entire source publication commits."""
+
+    def __init__(self, live: Path, staged: Path, before: bytes | None, data: bytes) -> None:
+        self.live = live
+        self.staged = staged
+        self.before = before
+        self.data = data
+        self.original = staged.with_name(staged.name + ".original")
+        self.identity = staged.stat()
+        self.displaced = False
+        self.published = False
+
+    def _read_displaced(self, path: Path) -> bytes:
+        # A relative symlink still describes a target relative to the live directory.
+        if path.is_symlink():
+            path = self.live.parent / path.readlink()
+        return path.read_bytes()
+
+    def _changed(self) -> SourceChangedError:
+        return SourceChangedError(f"{self.live.name} changed during manufacturing export")
+
+    def _owns(self, path: Path) -> bool:
+        try:
+            return os.path.samestat(self.identity, path.lstat())
+        except FileNotFoundError:
+            return False
+
+    def publish(self) -> None:
+        if self.before is not None:
+            try:
+                self.live.rename(self.original)
+            except FileNotFoundError as exc:
+                raise self._changed() from exc
+            finally:
+                self.displaced = os.path.lexists(self.original)
+            if self._read_displaced(self.original) != self.before:
+                raise self._changed()
+        try:
+            self.identity = _install_unoccupied(self.staged, self.live)
+        except FileExistsError as exc:
+            raise self._changed() from exc
+        finally:
+            # Some filesystems can finish an operation before reporting its failure.
+            self.published = self._owns(self.live)
+
+    def verify(self) -> None:
+        try:
+            if (
+                (self.displaced and self._read_displaced(self.original) != self.before)
+                or not self._owns(self.live)
+                or self.live.read_bytes() != self.data
+            ):
+                raise self._changed()
+        except FileNotFoundError as exc:
+            raise self._changed() from exc
+
+    def rollback(self) -> bool:
+        """Restore the latest live entry. Retain backups if two saves compete for it."""
+        restore = self.original if self.displaced else None
+        if self.published:
+            withdrawn = self.staged.with_name(self.staged.name + ".withdrawn")
+            try:
+                self.live.rename(withdrawn)
+            except FileNotFoundError:
+                # A later removal wins. Retain any independent save to the old inode.
+                return self.displaced and self._read_displaced(self.original) != self.before
+            if not self._owns(withdrawn) or self._read_displaced(withdrawn) != self.data:
+                restore = withdrawn  # The live name or its bytes already belong to the editor.
+        if restore is not None:
+            try:
+                _install_unoccupied(restore, self.live)
+            except FileExistsError:
+                return restore != self.original or self._read_displaced(restore) != self.before
+        return bool(
+            self.displaced
+            and restore != self.original
+            and self._read_displaced(self.original) != self.before
+        )
+
+
+class _StagedSource:
+    """Scratch copy of the board and its DRC sidecars (issue #10091).
+
+    Maintainer decision, 2026-11-24: a named-stackup export that cannot
+    perform the requested silkscreen repair must leave the input PCB, the
+    project (``.kicad_pro``), the custom rules (``.kicad_dru``) and any
+    zone-fill marker as it found them -- and must not disturb an editor save
+    that lands meanwhile.  Rule emission, the zone refill and the silk pass
+    therefore run on this copy, in a hidden directory beside the board (same
+    filesystem, so the silk pass meets the same link/permission limits), and
+    :meth:`publish` writes the results back only after every one of them
+    succeeded. Publication retains displaced entries until all live writes
+    and concurrent-save checks finish.
+    """
+
+    _SUFFIXES = (".kicad_pro", ".kicad_dru")
+
+    def __init__(self, live_pcb: Path) -> None:
+        self.live = live_pcb
+        self.dir = Path(tempfile.mkdtemp(prefix=f".{live_pcb.name}.export-", dir=live_pcb.parent))
+        self._preserve_backups = False
+        try:
+            self.pcb = self.dir / live_pcb.name
+            self.pcb_bytes = live_pcb.read_bytes()
+            self.pcb.write_bytes(self.pcb_bytes)
+            self.sidecars_before: dict[str, bytes | None] = {}
+            for suffix in self._SUFFIXES:
+                data = self._read(live_pcb.with_suffix(suffix))
+                self.sidecars_before[suffix] = data
+                if data is not None:
+                    self.pcb.with_suffix(suffix).write_bytes(data)
+            marker = self._marker(live_pcb)
+            self.marker_before = self._read(marker)
+            if self.marker_before is not None:
+                self._marker(self.pcb).write_bytes(self.marker_before)
+        except BaseException:
+            self.close()
+            raise
+
+    @staticmethod
+    def _marker(pcb: Path) -> Path:
+        return pcb.with_name(f".{pcb.name}.zonefill")
+
+    @staticmethod
+    def _read(path: Path) -> bytes | None:
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def close(self) -> None:
+        if not self._preserve_backups:
+            shutil.rmtree(self.dir, ignore_errors=True)
+
+    def publish(self) -> None:
+        """Write the staged results to the live names.
+
+        Raises ``SourceChangedError`` if the board or a sidecar no longer
+        holds the bytes the export started from. Any failure rolls back the
+        provisional writes, preserving intervening editor saves.
+        """
+        if self._read(self.live) != self.pcb_bytes:
+            raise SourceChangedError("PCB changed during manufacturing export")
+        inputs = {
+            self.live.with_suffix(suffix): data for suffix, data in self.sidecars_before.items()
+        }
+        inputs[self._marker(self.live)] = self.marker_before
+        writes = []
+        unchanged = {}
+        for live, before in inputs.items():
+            if self._read(live) != before:
+                raise SourceChangedError(f"{live.name} changed during manufacturing export")
+            staged = self.dir / live.name
+            data = self._read(staged)
+            if data is None or data == before:
+                unchanged[live] = before
+            else:
+                with staged.open("r+b") as stream:
+                    os.fsync(stream.fileno())
+                writes.append(_SidecarWrite(live, staged, before, data))
+        if writes:
+            # Check the volume's no-overwrite operation before displacing a live file.
+            probe = self.dir / "publication-test"
+            probe.write_bytes(b"")
+            _install_unoccupied(probe, self.dir / "publication-test-link")
+        staged_pcb = self.pcb.read_bytes()
+        board_write = (
+            checked_write_text(
+                self.live,
+                staged_pcb.decode("utf-8"),
+                hashlib.sha256(self.pcb_bytes).hexdigest(),
+                newline="",
+            )
+            if staged_pcb != self.pcb_bytes
+            else nullcontext()
+        )
+        unchanged[self.live] = staged_pcb
+        try:
+            for write in writes:
+                write.publish()
+            # Finish verification while the board writer can still roll back its inode.
+            with board_write:
+                for write in writes:
+                    write.verify()
+                for live, before in unchanged.items():
+                    if self._read(live) != before:
+                        raise SourceChangedError(f"{live.name} changed during manufacturing export")
+        except BaseException as failure:
+            self._preserve_backups = isinstance(failure, _SidecarRecoveryError)
+            rollback_errors = []
+            for write in reversed(writes):
+                try:
+                    if write.rollback():
+                        self._preserve_backups = True
+                        logger.warning("Concurrent editor saves retained at %s", self.dir)
+                except (OSError, SourceChangedError) as exc:
+                    rollback_errors.append(f"{write.live.name}: {exc}")
+            if rollback_errors:
+                self._preserve_backups = True
+                raise OSError(
+                    f"Could not restore {', '.join(rollback_errors)}; originals retained at {self.dir}"
+                )
+            raise
+
+
 class ManufacturingPackage:
     """
     Generate a complete manufacturing package for PCB production.
@@ -720,9 +1226,16 @@ class ManufacturingPackage:
         config: ManufacturingConfig | None = None,
     ):
         self.pcb_path = Path(pcb_path)
+        # Live board path while ``pcb_path`` points at a staged copy (#10091).
+        self._live_pcb_path: Path | None = None
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.config = config or ManufacturingConfig()
+
+    @property
+    def _lookup_pcb_path(self) -> Path:
+        """Board path for sibling-sidecar discovery (the live one when staged)."""
+        return self._live_pcb_path or self.pcb_path
 
     def export(
         self,
@@ -781,86 +1294,59 @@ class ManufacturingPackage:
             logger.error(f"Assembly generation failed: {e}")
             return result
 
-        # Step 0a: Emit DRC-constraint sources next to the source board so
-        # that kicad-cli pcb drc (run here in preflight, in CI, or by the
-        # gallery render pipeline) loads the manufacturer profile's relaxed
-        # built-in minimums instead of KiCad's stricter hard-coded defaults.
-        # Written before preflight so the constraints exist even when a
-        # strict-preflight failure aborts the rest of the pipeline.
-        if self.config.emit_drc_constraints:
-            self._write_drc_constraints(result)
-            # KiCad plots the saved copper. Check it under the rules that will
-            # ship before plotting, archiving or binding a named stackup (#9987).
-            refill_digest = self._refresh_zone_fill(result, selected_stackup_source_hash)
-            if not result.success:
-                return result
-            if self.config.stackup_id and refill_digest is not None:
-                selected_stackup_source_hash = refill_digest
-
-        # Step 0b (issue #5009): resolve the selected manufacturer profile's
-        # declared via-in-pad fabrication process (if any) for this board's
-        # actual layer/copper configuration, so the manifest and README
-        # steps below can bind it into the bundle.
-        self._resolve_fabrication_process(result)
-        self._resolve_ordered_copper(result)
-
-        # Step 0c (issue #9799): the default silk legalisation pass.  Runs
-        # BEFORE the first check that judges silk, and the checks, plots and
-        # hashes below all read these same repaired bytes (the pass edits
-        # the board in place; a zero-edit board is not re-saved, so an
-        # already-legal board is untouched and idempotent across the
-        # route -> export pipeline).  ``--no-silk-fix`` skips it entirely.
-        # The ``generic`` pseudo-tier has no profile, so it skips too.
-        if self.config.silk_fix and self.manufacturer != "generic":
-            from kicad_tools.cli.silk_default_pass import run_default_silk_pass
-            from kicad_tools.core.atomic_write import SourceChangedError
-
+        # Steps 0a-0c.  A named-stackup export with the default silk repair
+        # runs them on a scratch copy and publishes only on success, so a
+        # refused repair leaves the board and its siblings untouched (#10091).
+        staged: _StagedSource | None = None
+        live_pcb = self.pcb_path
+        if (
+            self.config.emit_drc_constraints
+            and self.config.stackup_id
+            and self.config.silk_fix
+            and self.manufacturer != "generic"
+        ):
             try:
-                result.silk_fix = run_default_silk_pass(
-                    self.pcb_path,
-                    mfr=self.manufacturer,
-                    quiet=True,
-                    expected_sha256=selected_stackup_source_hash,
-                )
-            except SourceChangedError as exc:
-                result.errors.append(f"Stackup ordering validation failed: {exc}")
+                staged = _StagedSource(live_pcb)
+            except OSError as exc:
+                result.errors.append(f"Could not stage {live_pcb.name} for export: {exc}")
                 return result
-            if self.config.stackup_id and result.silk_fix is None:
-                result.silk_fix = {
-                    "applied": False,
-                    "manufacturer": self.manufacturer,
-                    "error": "could not resolve the manufacturer's silk rules for this board",
-                }
-            if result.silk_fix is not None and not result.silk_fix.get("applied"):
-                message = "Silk legalisation pass could not run: " + str(
-                    result.silk_fix.get("error", "unknown reason")
-                )
-                if self.config.stackup_id:
-                    # Issue #10051 (maintainer decision, 2026-11-24): a
-                    # named-stackup export must not publish unrepaired silk.
-                    # The requested repair could not run -- e.g. the
-                    # filesystem lacks the hard-link support the checked
-                    # publication path probes for -- so stop here, before
-                    # any output is written.  ``--no-silk-fix`` is the
-                    # explicit way to ship the original artwork instead.
-                    result.errors.append(
-                        message + " (a named-stackup export requires the requested silk "
-                        "repair; pass --no-silk-fix to ship the original artwork)"
-                    )
-                    return result
-                result.warnings.append(message)
-            # Issue #9990: the pass is export's own edit of the source board.
-            # Re-bind the named-stackup provenance to the bytes the pass
-            # itself wrote (its report carries their sha256), through the
-            # same validation used at the start of export() -- so the
-            # ordering record describes the bytes that ship, while an edit
-            # other than the pass's own still fails the final change guard.
-            written = result.silk_fix.get("output_sha256") if result.silk_fix else None
-            if self.config.stackup_id and written:
-                rebound = self._stackup_hash_after_own_edit(result, written)
-                if rebound is None:
-                    return result
-                selected_stackup_source_hash = rebound
+            self._live_pcb_path = live_pcb
+            self.pcb_path = staged.pcb
+        try:
+            proceed, selected_stackup_source_hash = self._prepare_source(
+                result, selected_stackup_source_hash
+            )
+        except BaseException:
+            if staged is not None:
+                staged.close()
+            raise
+        finally:
+            self.pcb_path = live_pcb
+            self._live_pcb_path = None
+        if staged is not None:
+            try:
+                if proceed:
+                    staged_dir = staged.dir
+                    try:
+                        staged.publish()
+                    except SourceChangedError as exc:
+                        result.errors.append(f"Stackup ordering validation failed: {exc}")
+                        return result
+                    except OSError as exc:
+                        result.errors.append(
+                            f"Silk legalisation pass could not run: {exc} (a named-stackup "
+                            "export requires the requested silk repair; pass --no-silk-fix "
+                            "to ship the original artwork)"
+                        )
+                        return result
+                    result.drc_constraint_paths = [
+                        live_pcb.with_name(Path(os.path.relpath(q, staged_dir)).name)
+                        for q in result.drc_constraint_paths
+                    ]
+            finally:
+                staged.close()
+        if not proceed:
+            return result
 
         # Step 0: Pre-flight validation
         preflight_cfg = self.config.preflight
@@ -908,6 +1394,69 @@ class ManufacturingPackage:
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        if self.config.include_project_zip:
+            return self._publish_package(out_dir, result, selected_stackup_source_hash)
+        return self._write_package(out_dir, result, selected_stackup_source_hash)
+
+    def _publish_package(
+        self, out_dir: Path, result: ManufacturingResult, source_hash: str | None
+    ) -> ManufacturingResult:
+        """Generate the editable project and its manufacturing files as one candidate."""
+        try:
+            layout = _PackageOutputs(out_dir, self.config, self.manufacturer)
+            with tempfile.TemporaryDirectory(prefix="kct-export-") as tmp:
+                candidate = Path(tmp)
+                work_bundle = candidate / layout.bundle_key
+                work_bundle.mkdir()
+                existing, before = layout.seed(candidate)
+                writer = copy(self)
+                writer.config = layout.config
+                result.output_dir = work_bundle
+                writer._write_package(work_bundle, result, source_hash)
+                if result.success:
+                    layout.publish(candidate, existing, before)
+        except (OSError, RuntimeError) as exc:
+            result.errors.append(f"Manufacturing package publication failed: {exc}")
+
+        if result.output_dir != out_dir:
+            self._relocate_package_result(result, out_dir, layout.live_path)
+        return result
+
+    @staticmethod
+    def _relocate_package_result(
+        result: ManufacturingResult, out_dir: Path, live_path: Callable[[str | Path], Path]
+    ) -> None:
+        """Expose published artifact paths, keeping source-side diagnostics on a refusal."""
+        staging = result.output_dir.parent
+
+        def published(path: Path | None) -> Path | None:
+            return (
+                live_path(Path(os.path.abspath(path)).relative_to(staging))
+                if result.success and path is not None
+                else None
+            )
+
+        result.output_dir = out_dir
+        result.project_zip_path = published(result.project_zip_path)
+        result.stackup_path = published(result.stackup_path)
+        result.manifest_path = published(result.manifest_path)
+        result.readme_path = published(result.readme_path)
+        result.report_path = published(result.report_path)
+        result.report_md_path = published(result.report_md_path)
+        result.image_paths = (
+            [live_path(Path(os.path.abspath(p)).relative_to(staging)) for p in result.image_paths]
+            if result.success
+            else []
+        )
+        if (assembly := result.assembly_result) is not None:
+            assembly.output_dir = out_dir
+            assembly.bom_path = published(assembly.bom_path)
+            assembly.pnp_path = published(assembly.pnp_path)
+            assembly.gerber_path = published(assembly.gerber_path)
+
+    def _write_package(
+        self, out_dir: Path, result: ManufacturingResult, selected_stackup_source_hash: str | None
+    ) -> ManufacturingResult:
         # Step 1: BOM + CPL + Gerbers via AssemblyPackage.  When this
         # returns False the stage aborted before writing any artefacts
         # (e.g. schematic missing for a schematic-sourced BOM), so we
@@ -935,6 +1484,8 @@ class ManufacturingPackage:
         # Step 3: KiCad project ZIP (optional)
         if self.config.include_project_zip:
             self._generate_project_zip(out_dir, result)
+            if result.project_zip_path is None:
+                return result
 
         # Step 3.5: README.txt (optional)
         if self.config.include_readme:
@@ -963,6 +1514,96 @@ class ManufacturingPackage:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _prepare_source(
+        self, result: ManufacturingResult, selected_stackup_source_hash: str | None
+    ) -> tuple[bool, str | None]:
+        """Steps 0a-0c: rules, zone refill, fabrication process, silk pass.
+
+        Returns ``(proceed, source_hash)``; errors are recorded on *result*.
+        """
+        # Step 0a: Emit DRC-constraint sources next to the source board so
+        # that kicad-cli pcb drc (run here in preflight, in CI, or by the
+        # gallery render pipeline) loads the manufacturer profile's relaxed
+        # built-in minimums instead of KiCad's stricter hard-coded defaults.
+        # Written before preflight so the constraints exist even when a
+        # strict-preflight failure aborts the rest of the pipeline.
+        if self.config.emit_drc_constraints:
+            self._write_drc_constraints(result)
+            # KiCad plots the saved copper. Check it under the rules that will
+            # ship before plotting, archiving or binding a named stackup (#9987).
+            refill_digest = self._refresh_zone_fill(result, selected_stackup_source_hash)
+            if not result.success:
+                return False, selected_stackup_source_hash
+            if self.config.stackup_id and refill_digest is not None:
+                selected_stackup_source_hash = refill_digest
+
+        # Step 0b (issue #5009): resolve the selected manufacturer profile's
+        # declared via-in-pad fabrication process (if any) for this board's
+        # actual layer/copper configuration, so the manifest and README
+        # steps below can bind it into the bundle.
+        self._resolve_fabrication_process(result)
+        self._resolve_ordered_copper(result)
+
+        # Step 0c (issue #9799): the default silk legalisation pass.  Runs
+        # BEFORE the first check that judges silk, and the checks, plots and
+        # hashes below all read these same repaired bytes (the pass edits
+        # the board in place; a zero-edit board is not re-saved, so an
+        # already-legal board is untouched and idempotent across the
+        # route -> export pipeline).  ``--no-silk-fix`` skips it entirely.
+        # The ``generic`` pseudo-tier has no profile, so it skips too.
+        if self.config.silk_fix and self.manufacturer != "generic":
+            from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+            from kicad_tools.core.atomic_write import SourceChangedError
+
+            try:
+                result.silk_fix = run_default_silk_pass(
+                    self.pcb_path,
+                    mfr=self.manufacturer,
+                    quiet=True,
+                    expected_sha256=selected_stackup_source_hash,
+                )
+            except SourceChangedError as exc:
+                result.errors.append(f"Stackup ordering validation failed: {exc}")
+                return False, selected_stackup_source_hash
+            if self.config.stackup_id and result.silk_fix is None:
+                result.silk_fix = {
+                    "applied": False,
+                    "manufacturer": self.manufacturer,
+                    "error": "could not resolve the manufacturer's silk rules for this board",
+                }
+            if result.silk_fix is not None and not result.silk_fix.get("applied"):
+                message = "Silk legalisation pass could not run: " + str(
+                    result.silk_fix.get("error", "unknown reason")
+                )
+                if self.config.stackup_id:
+                    # Issue #10051 (maintainer decision, 2026-11-24): a
+                    # named-stackup export must not publish unrepaired silk.
+                    # The requested repair could not run -- e.g. the
+                    # filesystem lacks the hard-link support the checked
+                    # publication path probes for -- so stop here, before
+                    # any output is written.  ``--no-silk-fix`` is the
+                    # explicit way to ship the original artwork instead.
+                    result.errors.append(
+                        message + " (a named-stackup export requires the requested silk "
+                        "repair; pass --no-silk-fix to ship the original artwork)"
+                    )
+                    return False, selected_stackup_source_hash
+                result.warnings.append(message)
+            # Issue #9990: the pass is export's own edit of the source board.
+            # Re-bind the named-stackup provenance to the bytes the pass
+            # itself wrote (its report carries their sha256), through the
+            # same validation used at the start of export() -- so the
+            # ordering record describes the bytes that ship, while an edit
+            # other than the pass's own still fails the final change guard.
+            written = result.silk_fix.get("output_sha256") if result.silk_fix else None
+            if self.config.stackup_id and written:
+                rebound = self._stackup_hash_after_own_edit(result, written)
+                if rebound is None:
+                    return False, selected_stackup_source_hash
+                selected_stackup_source_hash = rebound
+
+        return True, selected_stackup_source_hash
 
     def _stackup_hash_after_own_edit(
         self, result: ManufacturingResult, written_sha256: str
@@ -1463,7 +2104,7 @@ class ManufacturingPackage:
         # a reviewed project floor instead of silently reverting it to the
         # profile's conservative default.
         rules, fab_override_msg = resolve_pcb_fabrication_overrides(
-            self.pcb_path, rules, manufacturer_id=profile.id
+            self._lookup_pcb_path, rules, manufacturer_id=profile.id
         )
         if fab_override_msg is not None:
             if fab_override_msg.startswith("ignoring"):
@@ -1638,7 +2279,7 @@ class ManufacturingPackage:
         from dataclasses import replace
 
         exempt: set[str] = set()
-        pcb_path = Path(self.pcb_path)
+        pcb_path = Path(self._lookup_pcb_path)
         try:
             from ..validate.rules.waivers import discover_waivers_sidecar, load_waivers
 
@@ -1744,14 +2385,14 @@ class ManufacturingPackage:
         )
         from ..manufacturers.project_generator import dedupe_net_classes
 
-        ncm_path = _discover_net_class_map_sidecar(Path(self.pcb_path))
+        ncm_path = _discover_net_class_map_sidecar(Path(self._lookup_pcb_path))
         if ncm_path is None:
             return None
         try:
             from ..router.rules import net_class_map_from_path
             from ..schema.pcb import PCB
 
-            net_class_map = net_class_map_from_path(ncm_path, pcb_path=self.pcb_path)
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=self._lookup_pcb_path)
             net_class_map, _ = resolve_net_class_map_for_board(
                 net_class_map, PCB.load(str(self.pcb_path))
             )
@@ -2462,6 +3103,9 @@ class ManufacturingPackage:
                 desc = file_descriptions["pnp"]
                 lines.append(f"  {result.assembly_result.pnp_path.name}")
                 lines.append(f"    {desc[0]}: {desc[1]}")
+                lines.extend(
+                    f"    {line}" for line in placement_preview_instructions(self.manufacturer)
+                )
                 tht_excluded = result.assembly_result.tht_excluded
                 if tht_excluded:
                     refs = ", ".join(p.reference for p in tht_excluded)
@@ -2528,6 +3172,33 @@ class ManufacturingPackage:
                 lines.append(f"  Source: {oc['source']} (verified {oc['source_verified']})")
             lines.append("")
 
+        # Issue #10109: the editable-project handoff contract.  Only written
+        # when the footprint-to-symbol instance link check found defects --
+        # a clean board's README stays byte-identical.
+        if result.instance_links and result.instance_links.get("findings"):
+            links = result.instance_links
+            lines.append("Editing handoff -- footprint to symbol links:")
+            lines.append("-" * 43)
+            lines.append("  This board's kicad_project.zip cannot be fully cross-probed or")
+            lines.append("  updated from its schematic: some footprints' symbol-instance")
+            lines.append("  links are missing, duplicated or stale.")
+            lines.append("")
+            checked = links.get("checked", 0)
+            linked = links.get("linked", 0)
+            lines.append(f"  Footprints checked: {checked}, intact links: {linked}")
+            lines.append("")
+            findings = links.get("findings", [])
+            for finding in findings:
+                lines.append(f"  {finding.get('reference', '?')}: {finding.get('category', '?')}")
+                lines.append(f"    {finding.get('detail', '')}")
+            skipped = links.get("skipped_board_only") or []
+            if skipped:
+                lines.append("")
+                lines.append(
+                    "  Board-only footprints (excluded from the check): " + ", ".join(skipped)
+                )
+            lines.append("")
+
         readme_path = out_dir / "README.txt"
         readme_path.write_text("\n".join(lines), encoding="utf-8")
         result.readme_path = readme_path
@@ -2545,6 +3216,43 @@ class ManufacturingPackage:
         except Exception as e:
             result.errors.append(f"Project ZIP creation failed: {e}")
             logger.error(f"Project ZIP creation failed: {e}")
+            return
+        # The archive above is the editable-project handoff: it carries the
+        # board and its schematics back to KiCad's editors.  Check the
+        # footprint-to-symbol instance links of exactly that pair so a
+        # user returning to the editors knows whether cross-probing and
+        # "update footprints from schematic" will work (Issue #10109).
+        self._check_symbol_links(result)
+
+    def _check_symbol_links(self, result: ManufacturingResult) -> None:
+        """Run the instance-link check for the packaged board (Issue #10109).
+
+        Uses the same root schematic the project ZIP bundles (an explicit
+        ``--sch`` wins, otherwise the sibling auto-discovery), so the report
+        always describes the archive that ships.  Read-only: findings land
+        in ``result.instance_links`` and ``result.warnings``; nothing is
+        rewritten and no finding blocks the export.
+        """
+        from kicad_tools.report.utils import find_schematic
+        from kicad_tools.sync.instance_links import check_instance_links
+
+        root_sch = self.schematic_path or find_schematic(self.pcb_path)
+        if root_sch is None or not Path(root_sch).is_file():
+            logger.info(
+                "No schematic resolved for %s; skipping footprint symbol-link check",
+                self.pcb_path,
+            )
+            return
+        try:
+            report = check_instance_links(root_sch, self.pcb_path)
+        except Exception as e:
+            logger.warning("Footprint symbol-link check failed for %s: %s", self.pcb_path, e)
+            return
+        result.instance_links = report.to_dict()
+        for line in report.warning_lines():
+            result.warnings.append(line)
+        if report.is_clean:
+            logger.info("Footprint symbol-link check: %s", report.summary_line())
 
     def _generate_manifest(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Write manifest.json with SHA256 checksums."""

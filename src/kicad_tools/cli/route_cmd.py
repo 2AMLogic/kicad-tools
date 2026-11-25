@@ -634,6 +634,37 @@ def _record_post_route_drc(args, drc_errors: int) -> None:
         args._drc_skipped_for_time = drc_errors == DRC_SKIPPED_FOR_TIME[0]
 
 
+def _post_route_drc_only_failure(
+    args,
+    *,
+    drc_errors: int,
+    fix_result: int | None,
+    all_nets_routed: bool,
+    has_disconnected: bool,
+    other_checks_passed: bool,
+) -> bool:
+    """Whether verified post-route DRC is the run's sole failure (Issue #10057).
+
+    One definition for every finishing path, so ``summary.failure_reason =
+    "post_route_drc"`` means the same thing whether ``--auto-layers``
+    escalated or not (#6277 path invariance): the saved board is fully
+    connected, every non-DRC gate passed, the verifications actually ran,
+    and the post-route DRC still found errors. The check precedes repair:
+    fix-drc exit 0 clears those errors, and exit 3 reports a rollback.
+    The single-attempt JSON emitter calls this directly. The three escalation
+    paths store the result on ``args`` for :func:`_emit_route_json_fallback`.
+    """
+    return bool(
+        other_checks_passed
+        and all_nets_routed
+        and not has_disconnected
+        and drc_errors > 0
+        and not _unverified_checks(args)
+        and getattr(args, "_auto_fix_status", None) != "skipped_deadline"
+        and fix_result not in (0, 3)
+    )
+
+
 def _unverified_checks(args) -> list[str]:
     """Post-route checks this run skipped for ``--timeout`` (issue #6273).
 
@@ -5481,6 +5512,350 @@ def _write_net_class_map_sidecar(
             print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
+#: ``meta`` key recording the exact-name ``netclass_assignments`` the route
+#: step wrote into the sibling ``.kicad_pro`` (Issue #10133): a ``{net_name:
+#: class_name}`` mapping.  A re-run drops an entry only when it still names
+#: the class kct recorded -- an entry the user re-pointed at another class in
+#: KiCad is authored intent and survives untouched.
+KCT_NETCLASS_ASSIGNMENTS_META_KEY = "kct_netclass_assignments"
+
+
+def _assignment_targets(value: object) -> list[str] | None:
+    """Normalise a schema-3 string or schema-4/5 array assignment to ``[cls, ...]``."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    return None
+
+
+def _project_min_clearance_floor(project: dict) -> float:
+    """Minimum clearance floor declared in ``board.design_settings`` (0.0 if unset)."""
+    import math
+
+    board = project.get("board")
+    ds = board.get("design_settings") if isinstance(board, dict) else None
+    if not isinstance(ds, dict):
+        return 0.0
+    floors: list[float] = []
+    rules = ds.get("rules")
+    if isinstance(rules, dict):
+        val = rules.get("min_clearance")
+        if (
+            not isinstance(val, bool)
+            and isinstance(val, (int, float))
+            and math.isfinite(val)
+            and val > 0
+        ):
+            floors.append(float(val))
+    defaults = ds.get("defaults")
+    if isinstance(defaults, dict):
+        val = defaults.get("clearance_min")
+        if (
+            not isinstance(val, bool)
+            and isinstance(val, (int, float))
+            and math.isfinite(val)
+            and val > 0
+        ):
+            floors.append(float(val))
+    return max(floors, default=0.0)
+
+
+def _write_netclasses_to_project(
+    output_path: Path,
+    net_class_map: dict | None,
+    quiet: bool = False,
+    loaded_net_class_map: dict | None = None,
+    via_drill: float | None = None,
+) -> None:
+    """Declare the classes the router routed with in the sibling ``.kicad_pro``.
+
+    Issue #10133: the router classifies every net and serializes the result
+    to the ``<stem>.net_class_map.json`` sidecar, but nothing told KiCad --
+    the project's ``net_settings`` kept a flat ``Default``, so Board Setup
+    showed classes unrelated to the copper and KiCad's own DRC did not know
+    the intended widths.  This writes one ``net_settings.classes`` entry per
+    router class actually used -- ``track_width``, ``clearance`` (floored at
+    the project's ``board.design_settings`` minimum clearance, matching what
+    ``ClearanceResolver`` actually enforces) and ``via_diameter`` from the
+    router's :class:`~kicad_tools.router.rules.NetClassRouting` -- and assigns
+    each routed net by exact name in ``net_settings.netclass_assignments``
+    (never ``netclass_patterns``, where KiCad's regex/wildcard evaluation
+    causes ``.``, ``+``, ``(``, ``)``, ``*`` and ``?`` in net names to match
+    unrelated nets or fail pattern validation; see #10122).  GND and power
+    rails land in their own dedicated classes because the classifier gives
+    them non-``Default`` classes ("Ground", "Power", ...).
+
+    Authored intent always wins, through the existing merge helpers:
+
+    * :func:`~kicad_tools.core.project_file.add_netclass_definition` merges
+      into a same-named class -- only the passed keys are written and the
+      four floor keys keep the larger value (#7385) -- so hand-authored
+      classes, colours and diff-pair keys survive verbatim.  Note that
+      ``keep_stricter=True`` is one-directional: if a user lowers a floor key
+      on a kct-declared class below the router's value, a later route raises
+      it back to the router's floor;
+    * a net a hand-authored pattern or explicit assignment already
+      classifies keeps its authored class (the #6390 rule).  Provenance under
+      ``meta.kct_netclass_assignments`` records ``{net: class_name}`` so a
+      re-run drops only assignments that still carry kct's own class (along
+      with unedited #6390 ``meta.kct_router_netclasses`` assignments) -- an
+      entry the user re-pointed at another class in KiCad survives untouched,
+      while unedited kct assignments are refreshed idempotently.
+
+    Non-fatal exactly like the sidecar writes: a missing ``.kicad_pro``, a
+    read-only directory, an unreadable project or an authored netclass block
+    that cannot be evaluated safely each degrade to a warning and never fail
+    the route.  A kct-stamped project (#6390 AC5) is re-stamped after the
+    merge so the renamed-output conflict check still recognises it; a
+    hand-authored project is never stamped here.  A no-op merge (identical
+    bytes) leaves the file untouched.
+
+    Args:
+        output_path: Path to the routed PCB file; the project is its
+            ``.kicad_pro`` sibling.
+        net_class_map: The autorouter's ``{net_name: NetClassRouting}`` map.
+            Empty/``None`` writes nothing, mirroring the sidecar writer.
+        quiet: If True, suppress the confirmation and warning lines.
+        loaded_net_class_map: The user's loaded ``--net-class-map`` entries,
+            merged over ``net_class_map`` -- the same effective map the
+            sidecar and DRC-constraint writes use (#4428 round-trip
+            fidelity).
+        via_drill: The board-wide via drill the router actually drills
+            (``router.rules.via_drill``; ``NetClassRouting`` carries only the
+            diameter), written as newly-created classes' ``via_drill``.
+            ``None`` leaves the helper default / authored value in place.
+    """
+    import json
+    import math
+
+    from kicad_tools.core.project_clearance import netclass_assignment_value
+    from kicad_tools.core.project_file import (
+        add_netclass_definition,
+        get_net_settings,
+        load_project,
+        save_project,
+    )
+
+    effective_map = dict(net_class_map or {})
+    if loaded_net_class_map:
+        effective_map.update(loaded_net_class_map)
+    if not effective_map:
+        return
+
+    project_path = output_path.with_suffix(".kicad_pro")
+    if not project_path.exists():
+        if not quiet:
+            print(
+                f"  Warning: no {project_path.name} beside the routed board; "
+                "net classes not written to the project"
+            )
+        return
+
+    try:
+        project = load_project(project_path)
+    except (OSError, ValueError) as e:
+        if not quiet:
+            print(f"  Warning: could not read {project_path.name}: {e}")
+        return
+
+    from kicad_tools.manufacturers.project_generator import (
+        _authored_netclass_members,
+        board_net_names,
+        is_kct_owned_project,
+        router_netclass_provenance,
+        stamp_kct_project,
+    )
+
+    # Re-stamp decision taken BEFORE mutating: only a project whose stamp
+    # currently validates stays kct-owned across this write.  Stamping a
+    # hand-authored project here would let a later renamed-output route
+    # overwrite the user's project silently.
+    restamp = is_kct_owned_project(project)
+
+    # Drop the exact-name assignments a previous route recorded ONLY when they
+    # still carry the class kct wrote; an entry whose target class the user
+    # changed in KiCad stays in place so _authored_netclass_members preserves it.
+    meta = project.get("meta")
+    raw_record = (
+        meta.pop(KCT_NETCLASS_ASSIGNMENTS_META_KEY, None) if isinstance(meta, dict) else None
+    )
+    recorded: dict[str, str] = (
+        {
+            net: cls_name
+            for net, cls_name in raw_record.items()
+            if isinstance(net, str) and isinstance(cls_name, str) and cls_name
+        }
+        if isinstance(raw_record, dict)
+        else {}
+    )
+
+    settings_raw = project.get("net_settings")
+    raw_assignments = (
+        settings_raw.get("netclass_assignments") if isinstance(settings_raw, dict) else None
+    )
+    assignments_mutated = False
+    if isinstance(raw_assignments, dict):
+        for net, recorded_cls in recorded.items():
+            if net in raw_assignments and _assignment_targets(raw_assignments[net]) == [
+                recorded_cls
+            ]:
+                raw_assignments.pop(net, None)
+                assignments_mutated = True
+
+        # kct's own #6390 assignments (_write_drc_constraint_sidecars) are not
+        # authored intent either, provided they were not hand-edited to a
+        # different class.
+        r_classes, r_nets = router_netclass_provenance(project)
+        r_owned_classes = set(r_classes)
+        for net in r_nets:
+            if net in recorded or net not in raw_assignments:
+                continue
+            targets = _assignment_targets(raw_assignments[net])
+            expected_cls = str(getattr(effective_map.get(net), "name", "") or "")
+            if (
+                targets is not None
+                and len(targets) == 1
+                and (targets[0] in r_owned_classes or (expected_cls and targets[0] == expected_cls))
+            ):
+                raw_assignments.pop(net, None)
+                assignments_mutated = True
+
+    # Only nets the board actually carries (the #6390 filter): a loaded user
+    # map may name nets that are not on this board.
+    board_nets = board_net_names(output_path)
+    names = set(effective_map) if board_nets is None else set(effective_map) & board_nets
+    names.discard("")
+
+    assigned: dict[str, str] = {}
+    declared: list[str] = []
+    if names:
+        try:
+            authored = _authored_netclass_members(project, sorted(names))
+        except ValueError as e:
+            # The authored netclass block cannot be evaluated safely: kct
+            # must not guess which nets it classifies (#6390 rule).  Leave
+            # the existing project untouched on disk.
+            if not quiet:
+                print(
+                    f"  Warning: net classes not assigned in {project_path.name}: "
+                    f"authored netclasses cannot be evaluated safely ({e})"
+                )
+            return
+
+        min_clearance_floor = _project_min_clearance_floor(project)
+        existing_classes_list = (
+            settings_raw.get("classes") if isinstance(settings_raw, dict) else None
+        ) or []
+        existing_class_names = {
+            c.get("name")
+            for c in existing_classes_list
+            if isinstance(c, dict) and isinstance(c.get("name"), str)
+        }
+        default_cls = next(
+            (
+                c
+                for c in existing_classes_list
+                if isinstance(c, dict) and c.get("name") == "Default"
+            ),
+            None,
+        )
+        default_via_drill: float | None = None
+        if isinstance(default_cls, dict):
+            vd = default_cls.get("via_drill")
+            if (
+                not isinstance(vd, bool)
+                and isinstance(vd, (int, float))
+                and math.isfinite(vd)
+                and vd > 0
+            ):
+                default_via_drill = float(vd)
+
+        # A class the map gives two values keeps the stricter (larger) one --
+        # the #6390 clearance rule, applied to every floor this write owns.
+        classes: dict[str, dict[str, float]] = {}
+        members: dict[str, list[str]] = {}
+        for net in sorted(names):
+            routing = effective_map[net]
+            class_name = str(getattr(routing, "name", "") or "")
+            if not class_name or class_name == "Default":
+                continue
+            if net in authored:
+                continue
+            agg = classes.setdefault(class_name, {"width": 0.0, "clearance": 0.0, "via": 0.0})
+            agg["width"] = max(agg["width"], float(getattr(routing, "trace_width", 0.0) or 0.0))
+            agg["clearance"] = max(
+                agg["clearance"], float(getattr(routing, "clearance", 0.0) or 0.0)
+            )
+            agg["via"] = max(agg["via"], float(getattr(routing, "via_size", 0.0) or 0.0))
+            members.setdefault(class_name, []).append(net)
+
+        if classes:
+            settings = get_net_settings(project)
+            current_assignments = settings.get("netclass_assignments")
+            assignments: dict[str, object] = (
+                dict(current_assignments) if isinstance(current_assignments, dict) else {}
+            )
+            for class_name in sorted(classes):
+                agg = classes[class_name]
+                cls_via_drill = (
+                    via_drill
+                    if via_drill is not None
+                    else (None if class_name in existing_class_names else default_via_drill)
+                )
+                clearance_val = max(agg["clearance"], min_clearance_floor)
+                add_netclass_definition(
+                    project,
+                    class_name,
+                    track_width=agg["width"] if agg["width"] > 0 else None,
+                    clearance=clearance_val if clearance_val > 0 else None,
+                    via_diameter=agg["via"] if agg["via"] > 0 else None,
+                    via_drill=cls_via_drill,
+                )
+                declared.append(class_name)
+                for net in members[class_name]:
+                    assignments[net] = netclass_assignment_value(settings, class_name)
+                    assigned[net] = class_name
+            settings["netclass_assignments"] = dict(sorted(assignments.items()))
+        elif (
+            assignments_mutated
+            and isinstance(settings_raw, dict)
+            and isinstance(raw_assignments, dict)
+        ):
+            settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
+    elif (
+        assignments_mutated and isinstance(settings_raw, dict) and isinstance(raw_assignments, dict)
+    ):
+        settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
+
+    if assigned:
+        project.setdefault("meta", {})[KCT_NETCLASS_ASSIGNMENTS_META_KEY] = dict(
+            sorted(assigned.items())
+        )
+    if restamp:
+        stamp_kct_project(project)
+
+    payload = json.dumps(project, indent=2)
+    try:
+        if payload == project_path.read_text(encoding="utf-8"):
+            return  # nothing changed -- leave the file (and its mtime) alone
+    except OSError:
+        pass
+    try:
+        save_project(project, project_path)
+    except OSError as e:
+        # Non-fatal: a blocked / read-only output directory must not fail
+        # the route.
+        if not quiet:
+            print(f"  Warning: could not write net classes to {project_path.name}: {e}")
+        return
+    if not quiet and assigned:
+        print(
+            f"  Net classes written to project: {project_path.name} "
+            f"({', '.join(sorted(set(declared)))})"
+        )
+
+
 def _write_routing_plan_sidecar(
     output_path: Path,
     routing_plan: "RoutingPlan | None",
@@ -6653,6 +7028,21 @@ def run_post_route_drc(
         coupled_pairs=_coupled_pairs,
         pair_gaps=_router_pair_gaps(_coupled_pairs, _effective_class_map or None, router),
         edge_clearance=edge_clearance,
+    )
+
+    # Issue #10133: declare the classes the router routed with in the
+    # project's ``net_settings`` (one class per used router class plus one
+    # exact-name ``netclass_assignments`` entry per routed net), so KiCad's
+    # Board Setup and native DRC see the widths the copper actually uses.
+    # Deliberately AFTER the constraint sidecars above: they create / stage /
+    # merge the destination ``.kicad_pro``, and this merge must land in the
+    # final file rather than be clobbered by -- or trip the conflict check of
+    # -- the staged regeneration.
+    _write_netclasses_to_project(
+        output_path,
+        _effective_class_map or None,
+        quiet=quiet,
+        via_drill=getattr(getattr(router, "rules", None), "via_drill", None),
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
@@ -14807,6 +15197,9 @@ def route_with_layer_escalation(
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
+    # Issue #10057: stays 0 when DRC was skipped or nothing routed, so the
+    # DRC-only failure reason cannot apply to a board nobody checked.
+    drc_errors = 0
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -14886,9 +15279,35 @@ def route_with_layer_escalation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
+
+    # Issue #10057: fail on verified DRC errors, the way the single-attempt
+    # path always has (maintainer decision).  When post-route DRC is the
+    # sole failure on a fully connected board this tail exits 3, and the
+    # stash below lets _emit_route_json_fallback attach the same
+    # ``summary.failure_reason = "post_route_drc"`` the direct emitter
+    # would -- computed once here so the key and the exit code cannot
+    # disagree.
+    _drc_only_failure = _post_route_drc_only_failure(
+        args,
+        drc_errors=drc_errors,
+        fix_result=fix_result,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        has_disconnected=_output_verification.has_disconnected,
+        other_checks_passed=(
+            not _new_layer_intent_violations(_layer_intent)
+            and not _pairwise
+            and not _shorts
+            and _stranded_pour_escalation_exit(0, args) == 0
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and not _output_verification.regressed
+        ),
+    )
+    with contextlib.suppress(AttributeError, TypeError):
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -14933,6 +15352,20 @@ def route_with_layer_escalation(
                 args,
                 output_path,
                 f"Design requires minimum {final_result.layer_count} layers",
+            )
+        elif final_result.success and _drc_only_failure:
+            # Issue #10057: SUCCESS must be unreachable while verified
+            # post-route DRC errors are the run's sole failure (exit 3,
+            # JSON verdict "failed"), mirroring the single-attempt path's
+            # "ROUTING FAILED" banner for the same condition.
+            print("ROUTING FAILED: DRC violations detected")
+            print(
+                f"  All signal nets routed on {final_result.layer_count} layers, but "
+                f"post-route DRC found {drc_errors} error(s); manufacturing is blocked."
+            )
+            print(
+                f"  Run 'kct check {output_path} --mfr "
+                f"{getattr(args, 'manufacturer', 'jlcpcb')}' for full details (exit code 3)."
             )
         elif final_result.success:
             print(f"SUCCESS: Design requires minimum {final_result.layer_count} layers")
@@ -15005,6 +15438,11 @@ def route_with_layer_escalation(
         # documented exit-3 contract ("meets threshold but DRC violations
         # detected") already covers this case semantically.
         if fix_result == 3:
+            return 3
+        # Issue #10057: a fully connected board whose verified post-route DRC
+        # failed exits 3 here too (see the banner branch above); the JSON
+        # fallback reports failure_reason="post_route_drc" for it.
+        if _drc_only_failure:
             return 3
         # Issue #6273: a clean result whose DRC / stranded-pour check was
         # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
@@ -15810,6 +16248,9 @@ def route_with_rule_relaxation(
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
+    # Issue #10057: stays 0 when DRC was skipped or nothing routed, so the
+    # DRC-only failure reason cannot apply to a board nobody checked.
+    drc_errors = 0
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -15889,9 +16330,35 @@ def route_with_rule_relaxation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
+
+    # Issue #10057: fail on verified DRC errors, the way the single-attempt
+    # path always has (maintainer decision).  When post-route DRC is the
+    # sole failure on a fully connected board this tail exits 3, and the
+    # stash below lets _emit_route_json_fallback attach the same
+    # ``summary.failure_reason = "post_route_drc"`` the direct emitter
+    # would -- computed once here so the key and the exit code cannot
+    # disagree.
+    _drc_only_failure = _post_route_drc_only_failure(
+        args,
+        drc_errors=drc_errors,
+        fix_result=fix_result,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        has_disconnected=_output_verification.has_disconnected,
+        other_checks_passed=(
+            not _new_layer_intent_violations(_layer_intent)
+            and not _pairwise
+            and not _shorts
+            and _stranded_pour_escalation_exit(0, args) == 0
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and not _output_verification.regressed
+        ),
+    )
+    with contextlib.suppress(AttributeError, TypeError):
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -15931,6 +16398,20 @@ def route_with_rule_relaxation(
         elif final_result.success and _unverified_checks(args):
             # Issue #6273: never "SUCCESS" for a board nobody verified.
             _print_unverified_banner(args, output_path, "Routing complete with adaptive rules")
+        elif final_result.success and _drc_only_failure:
+            # Issue #10057: SUCCESS must be unreachable while verified
+            # post-route DRC errors are the run's sole failure (exit 3,
+            # JSON verdict "failed"), mirroring the single-attempt path's
+            # "ROUTING FAILED" banner for the same condition.
+            print("ROUTING FAILED: DRC violations detected")
+            print(
+                f"  All signal nets routed (tier {final_result.tier} rules), but "
+                f"post-route DRC found {drc_errors} error(s); manufacturing is blocked."
+            )
+            print(
+                f"  Run 'kct check {output_path} --mfr "
+                f"{getattr(args, 'manufacturer', 'jlcpcb')}' for full details (exit code 3)."
+            )
         elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
             if final_result.tier > 0:
@@ -15988,6 +16469,11 @@ def route_with_rule_relaxation(
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
+            return 3
+        # Issue #10057: a fully connected board whose verified post-route DRC
+        # failed exits 3 here too (see the banner branch above); the JSON
+        # fallback reports failure_reason="post_route_drc" for it.
+        if _drc_only_failure:
             return 3
         # Issue #6273: a clean result whose DRC / stranded-pour check was
         # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
@@ -18374,6 +18860,9 @@ def route_with_combined_escalation(
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
+    # Issue #10057: stays 0 when DRC was skipped or nothing routed, so the
+    # DRC-only failure reason cannot apply to a board nobody checked.
+    drc_errors = 0
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
@@ -18453,9 +18942,35 @@ def route_with_combined_escalation(
     # Issue #9597: report plane-zone crossings (and echo hard refusals).
     _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
-    # Issue #6376: carry a verified-open regression into ``final_result``
-    # before the banner and before ``args._last_layer_result`` is stashed.
+    # Account for saved-board opens before deciding what the banner and JSON report.
     _apply_output_verification(final_result, final_stats, _output_verification)
+
+    # Issue #10057: fail on verified DRC errors, the way the single-attempt
+    # path always has (maintainer decision).  When post-route DRC is the
+    # sole failure on a fully connected board this tail exits 3, and the
+    # stash below lets _emit_route_json_fallback attach the same
+    # ``summary.failure_reason = "post_route_drc"`` the direct emitter
+    # would -- computed once here so the key and the exit code cannot
+    # disagree.
+    _drc_only_failure = _post_route_drc_only_failure(
+        args,
+        drc_errors=drc_errors,
+        fix_result=fix_result,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        has_disconnected=_output_verification.has_disconnected,
+        other_checks_passed=(
+            not _new_layer_intent_violations(_layer_intent)
+            and not _pairwise
+            and not _shorts
+            and _stranded_pour_escalation_exit(0, args) == 0
+            and not getattr(args, "_placement_fill_error", None)
+            and not getattr(args, "_placement_repair_error", None)
+            and not _placement_blocked(args)
+            and not _output_verification.regressed
+        ),
+    )
+    with contextlib.suppress(AttributeError, TypeError):
+        args._post_route_drc_result = final_result if _drc_only_failure else None
 
     # Final summary
     if not quiet:
@@ -18499,6 +19014,21 @@ def route_with_combined_escalation(
                 output_path,
                 f"Minimum viable config = {final_result.layer_count} layers + "
                 f"tier {final_result.tier} rules",
+            )
+        elif final_result.success and _drc_only_failure:
+            # Issue #10057: SUCCESS must be unreachable while verified
+            # post-route DRC errors are the run's sole failure (exit 3,
+            # JSON verdict "failed"), mirroring the single-attempt path's
+            # "ROUTING FAILED" banner for the same condition.
+            print("ROUTING FAILED: DRC violations detected")
+            print(
+                f"  All signal nets routed ({final_result.layer_count} layers + "
+                f"tier {final_result.tier} rules), but post-route DRC found "
+                f"{drc_errors} error(s); manufacturing is blocked."
+            )
+            print(
+                f"  Run 'kct check {output_path} --mfr "
+                f"{getattr(args, 'manufacturer', 'jlcpcb')}' for full details (exit code 3)."
             )
         elif final_result.success:
             print(
@@ -18559,6 +19089,11 @@ def route_with_combined_escalation(
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
+            return 3
+        # Issue #10057: a fully connected board whose verified post-route DRC
+        # failed exits 3 here too (see the banner branch above); the JSON
+        # fallback reports failure_reason="post_route_drc" for it.
+        if _drc_only_failure:
             return 3
         # Issue #6273: a clean result whose DRC / stranded-pour check was
         # skipped for --timeout exits EXIT_UNVERIFIED, never 0.
@@ -24730,18 +25265,14 @@ def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = fr
                         )
                         json_stream.flush()
                     return 1
+            # Placement is diagnosed inside the route. Hold JSON until finish()
+            # has inspected the board that was actually written.
             capture = (
-                json_stream.capture()
-                if json_stream is not None
-                and (
-                    gate is not None
-                    or _route_json_capture is not None
-                    or _budget_retry_static_eligible(args)
-                    or _plane_retry_eligible(args)
-                )
-                else contextlib.nullcontext(None)
+                json_stream.capture() if json_stream is not None else contextlib.nullcontext(None)
             )
+            placement_fields: dict = {}
             handed_off = False
+            document = ""
             with capture as held:
                 try:
                     try:
@@ -24778,40 +25309,38 @@ def _main_impl(argv: list[str] | None = None, *, plane_pads: frozenset[str] = fr
                         finally:
                             _lint_gate_unstage_args(args, gate, requested_output)
                         result = outcome.exit_code(result)
-                    exit_code = finish(args, result)
+                    exit_code = finish(args, result, json_fields=placement_fields)
                     if json_stream is not None and not json_stream.written:
                         # The layer/rule-escalation paths (the default) never reached
                         # the direct-route JSON emitter; publish the same document
                         # for the final router so --format json always yields one.
                         _emit_route_json_fallback(args, exit_code)
                 finally:
-                    if _route_json_capture is not None and held is not None:
-                        # Issue #9620 review: an inner (retry) run hands its
-                        # JSON document to the requesting outer run -- consumed
-                        # exactly once there; the inner never also writes it
-                        # locally (its nested json guard would land the
-                        # document on stderr).
-                        _route_json_capture.append(held.getvalue())
-                        handed_off = True
-            retry_json = getattr(args, "_budget_retry_json_document", None)
-            if held is not None and json_stream is not None and not handed_off:
+                    if held is not None:
+                        # A promoted retry's diagnostics describe the published
+                        # board. Its final placement report comes from finish().
+                        document = (
+                            getattr(args, "_budget_retry_json_document", None) or held.getvalue()
+                        )
+                        if placement_fields:
+                            import json
+
+                            payload = json.loads(document) if document.strip() else {}
+                            payload.update(placement_fields)
+                            document = json.dumps(payload, indent=2) + "\n"
+                        if _route_json_capture is not None:
+                            # The requesting outer run publishes the inner retry
+                            # exactly once, after it decides which board to keep.
+                            _route_json_capture.append(document)
+                            handed_off = True
+            if json_stream is not None and not handed_off:
                 if gate is not None and outcome is not None:
                     from .route_lint_gate import merge_into_json_document
 
-                    json_stream.write(
-                        merge_into_json_document(
-                            retry_json if retry_json else held.getvalue(),
-                            outcome,
-                            exit_code,
-                            relocate=gate.relocate,
-                        )
+                    document = merge_into_json_document(
+                        document, outcome, exit_code, relocate=gate.relocate
                     )
-                elif retry_json:
-                    # The coarser retry promoted its board (Issue #9620): its
-                    # document, not the first pass's, describes -o now.
-                    json_stream.write(retry_json)
-                else:
-                    json_stream.write(held.getvalue())
+                json_stream.write(document)
                 json_stream.flush()
             return exit_code
     except DRCConstraintPropagationError as exc:
@@ -24868,20 +25397,20 @@ def _lint_gate_unstage_args(args, gate, requested_output) -> None:
 def _emit_route_json_fallback(args, exit_code: int) -> None:
     """Emit the routing-diagnostics JSON for runs that bypassed it (issue #5938).
 
-    ``route_with_layer_escalation`` (the default path) prints only a prose
-    summary, so ``kct route --format json`` used to put no JSON on stdout at
-    all.  The escalation wrappers stash their final result on
-    ``args._last_layer_result``; reuse :func:`print_routing_diagnostics_json`
-    on it so both paths share one document shape.  Runs that never built a
-    router (dry runs, early validation exits) get a minimal ``exit_code``
-    document instead.
+    Layer escalation retains its selected result for diagnostics. All three
+    escalation paths also retain the result whose verified DRC alone failed.
+    Adaptive paths preserve the top-level exit code and verdict that callers
+    receive on their other outcomes.
     """
     import json
 
     from kicad_tools.json_stdout import json_stdout
 
     silk_fix = getattr(args, "_route_silk_fix", None)
-    last = getattr(args, "_last_layer_result", None)
+    layer_result = getattr(args, "_last_layer_result", None)
+    drc_result = getattr(args, "_post_route_drc_result", None) if exit_code == 3 else None
+    last = drc_result if drc_result is not None else layer_result
+    verdict = _verdict_for_exit(exit_code)
     if last is not None:
         from kicad_tools.router import print_routing_diagnostics_json
 
@@ -24895,14 +25424,19 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 nets_to_route_ids=multi_pad_ids,
                 single_pad_count=getattr(last, "single_pad_count", 0),
                 # Issue #6239: the exit code is the run's single final verdict.
-                verdict=_verdict_for_exit(exit_code),
+                verdict=verdict,
                 grid_selection=getattr(args, "_grid_selection", None),
                 silk_fix=silk_fix,
+                post_route_drc_only=drc_result is not None,
+                exit_code=exit_code if layer_result is None else None,
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Warning: could not build routing diagnostics JSON: {exc}", file=sys.stderr)
-    document = {"exit_code": exit_code, "verdict": _verdict_for_exit(exit_code)}
+    document = {"exit_code": exit_code, "verdict": verdict}
+    if drc_result is not None:
+        # The verified failure still matters if rich diagnostic formatting fails.
+        document["summary"] = {"verdict": verdict, "failure_reason": "post_route_drc"}
     if silk_fix is not None:
         document["silk_fix"] = silk_fix
     print(json.dumps(document, indent=2), file=json_stdout())
@@ -28119,15 +28653,18 @@ def _run_main_impl(args, parser, argv) -> int:
             silk_fix=args._route_silk_fix,
             # Consumers that finish the copper can recheck DRC on the final board.
             # Every other exit-3 cause keeps its original failure verdict.
-            post_route_drc_only=(
-                other_checks_passed
-                and all_nets_routed
-                and not output_verification.has_disconnected
-                and drc_errors > 0
-                and not _unverified
-                and seg_seg_violation_count == 0
-                and getattr(args, "_auto_fix_status", None) != "skipped_deadline"
-                and fix_result != 3
+            # Issue #10057: the condition lives in the shared
+            # _post_route_drc_only_failure helper so the escalation paths
+            # (via _emit_route_json_fallback) report the identical key.
+            post_route_drc_only=_post_route_drc_only_failure(
+                args,
+                drc_errors=drc_errors,
+                fix_result=fix_result,
+                all_nets_routed=all_nets_routed,
+                has_disconnected=output_verification.has_disconnected,
+                # The pre-save seg-seg gate runs on this path only; a seg-seg
+                # violation is another exit-3 cause, not a DRC-only failure.
+                other_checks_passed=other_checks_passed and seg_seg_violation_count == 0,
             ),
         )
 
@@ -28189,6 +28726,10 @@ def _run_main_impl(args, parser, argv) -> int:
     # 1 = Fatal failure — no nets routed, no useful output
     # 2 = Partial routing — some nets routed but below --min-completion threshold
     # 3 = Meets threshold but DRC violations detected (includes seg-seg violations).
+    #     Issue #10057: the escalation tails (layer / rule-relaxation /
+    #     combined -- the default ``--auto-layers`` path among them) return 3
+    #     for the same fully-connected-DRC-only condition, so every finishing
+    #     path agrees on the code and on ``summary.failure_reason``.
     #     Issue #2852: also returned when --auto-fix rolled back due to a
     #     connectivity regression (fix-drc exit 3) — semantically the same
     #     contract ("routing succeeded but DRC is dirty"); callers cannot

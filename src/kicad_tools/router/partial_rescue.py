@@ -224,10 +224,18 @@ def partially_connected_signal_nets(
 ) -> list[str]:
     """Return signal nets whose pads are not all trace-connected.
 
-    Runs ``kct check`` (connectivity is an advisory rule, so this never
-    interferes with the blocking-DRC gate) and parses the
-    "Net 'X' is partially routed" messages, excluding *excluded_nets*
+    Runs ``kct check --only connectivity`` (connectivity is an advisory
+    rule, so this never interferes with the blocking-DRC gate) and parses
+    the "Net 'X' is partially routed" messages, excluding *excluded_nets*
     (pour-carried power nets).
+
+    The ``--only connectivity`` scope (Issue #10110) exists because this
+    probe runs as a CHILD ``kct check`` process: a full check also runs
+    the fabrication categories (Gerber mask export, zone-fill geometry
+    via kicad-cli), which a caller that only hides KiCad in-process --
+    e.g. the route entry-path goldens -- cannot contain, and whose native
+    work this probe never consumes.  Scoped, the probe reads the same
+    connectivity findings and spawns no kicad-cli children.
 
     With ``include_unrouted=True`` the "is not routed" class is included
     too -- useful when the rescue loop should also attempt nets the main
@@ -245,6 +253,8 @@ def partially_connected_signal_nets(
             "kicad_tools.cli",
             "check",
             str(pcb_path),
+            "--only",
+            "connectivity",
             "--mfr",
             manufacturer,
             "--format",

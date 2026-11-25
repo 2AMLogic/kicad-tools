@@ -569,6 +569,8 @@ def _collect_hierarchy_components(
     sch_path: Path,
     sheet_path: str,
     visited: set[Path] | None = None,
+    *,
+    include_symbol_pins: bool = False,
 ) -> tuple[list[NetlistComponent], dict[str, list]]:
     """Recursively collect components and nets from a schematic hierarchy.
 
@@ -587,6 +589,8 @@ def _collect_hierarchy_components(
         visited: Set of already-visited *resolved* paths used for
             circular-reference detection.  Callers should pass ``None``;
             the function creates the set internally.
+        include_symbol_pins: Retain library pin definitions and include the
+            pins of placed power symbols in the connectivity.
 
     Returns:
         A ``(components, net_dict)`` tuple where *components* is a flat
@@ -632,13 +636,18 @@ def _collect_hierarchy_components(
                 footprint=footprint,
                 lib_id=lib_id,
                 sheet_path=sheet_path,
+                pins=[
+                    ComponentPin(pin.number, pin.name, pin.pin_type) for pin in sym.symbol_def.pins
+                ]
+                if include_symbol_pins
+                else [],
             )
         )
 
     # Extract per-sheet connectivity
     net_dict: dict[str, list] = {}
     try:
-        sheet_nets = sch.extract_netlist()
+        sheet_nets = sch.extract_netlist(include_power_symbols=include_symbol_pins)
         for net_name, pins in sheet_nets.items():
             net_dict.setdefault(net_name, []).extend(pins)
     except Exception:
@@ -671,7 +680,9 @@ def _collect_hierarchy_components(
     for entry in sheet_entries:
         sub_path = parent_dir / entry.filename
         sub_sheet_path = f"{sheet_path}{entry.filename}/"
-        sub_components, sub_nets = _collect_hierarchy_components(sub_path, sub_sheet_path, visited)
+        sub_components, sub_nets = _collect_hierarchy_components(
+            sub_path, sub_sheet_path, visited, include_symbol_pins=include_symbol_pins
+        )
         components.extend(sub_components)
 
         # Build a mapping from hierarchical label name -> parent net name
@@ -698,7 +709,9 @@ def _collect_hierarchy_components(
     return components, net_dict
 
 
-def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
+def build_netlist_from_schematic(
+    sch_path: str | Path, *, include_symbol_pins: bool = False
+) -> Netlist:
     """
     Build a Netlist from a schematic using pure Python extraction.
 
@@ -713,6 +726,8 @@ def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
 
     Args:
         sch_path: Path to .kicad_sch file
+        include_symbol_pins: Populate each component’s library pin definitions
+            across all units and include power symbols and PWR_FLAGs in the nets.
 
     Returns:
         Parsed Netlist object
@@ -726,7 +741,9 @@ def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
         raise FileNotFoundError(f"Schematic not found: {sch_path}")
 
     # Recursively collect components and nets from all sheets
-    components, net_dict = _collect_hierarchy_components(sch_path, "/")
+    components, net_dict = _collect_hierarchy_components(
+        sch_path, "/", include_symbol_pins=include_symbol_pins
+    )
 
     # Build nets from merged connectivity data
     nets: list[NetlistNet] = []

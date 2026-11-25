@@ -39,8 +39,9 @@ import tempfile
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.core.atomic_write import atomic_write_text
 from kicad_tools.drc.mask_trace_angles import MaskTraceAngleError
@@ -52,6 +53,7 @@ from kicad_tools.drc.repair_copper_gap import (
 )
 from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer, DrillRepairResult
 from kicad_tools.drc.repair_mask_copper import (
+    PASS_THROUGH_MARGIN_MM,
     MaskCopperRepairer,
     MaskNudgeAction,
     MaskRepairAction,
@@ -66,6 +68,9 @@ from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.transaction import board_transaction
 from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+if TYPE_CHECKING:
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
 
 # Topology advisories that are deliberately excluded from the pure-Python
 # DRC fallback report (issue #4680).
@@ -335,8 +340,7 @@ Examples:
     parser.add_argument(
         "--margin",
         type=float,
-        default=0.01,
-        help="Extra clearance margin beyond minimum in mm (default: 0.01)",
+        help="Extra clearance beyond minimum in mm (default 0.02 for mask copper, 0.01 otherwise)",
     )
     parser.add_argument(
         "--only",
@@ -424,6 +428,11 @@ Examples:
     )
 
     args = parser.parse_args(argv)
+    if args.margin is not None and (not math.isfinite(args.margin) or args.margin < 0):
+        parser.error("--margin must be a finite, nonnegative distance")
+    args.mask_margin = PASS_THROUGH_MARGIN_MM if args.margin is None else args.margin
+    if args.margin is None:
+        args.margin = 0.01
 
     # Validate input file
     pcb_path = Path(args.pcb)
@@ -1556,6 +1565,7 @@ def _run_mask_pass(
             mask_violations,
             max_displacement=args.max_displacement,
             dry_run=args.dry_run,
+            margin_mm=args.mask_margin,
             clearance_mm=design_rules.min_clearance_mm if design_rules is not None else None,
             design_rules=design_rules,
             warning_clearance_mm=(
@@ -1578,19 +1588,15 @@ def _run_mask_pass(
                 if not args.no_connectivity_check
                 else {}
             )
-            # KiCad can join an annulus and a trace at the edge of contact
-            # even when the strict pad-island graph considers them separate.
-            check_nudges = not args.no_connectivity_check and any(
-                isinstance(action, MaskNudgeAction) for action in result.actions
+            # Nudges and pull-ins change copper subject to KiCad's project and
+            # item-specific clearance rules, even when pad connectivity is skipped.
+            check_copper = any(
+                isinstance(action, MaskNudgeAction) or action.action == "pull_in"
+                for action in result.actions
             )
-            # A pull-in extends track copper. Enforce the project's native
-            # electrical and physical rules even when connectivity checks are disabled.
-            has_pull_in = any(action.action == "pull_in" for action in result.actions)
             has_bends = any(action.bends for action in result.actions)
             before_native = (
-                _mask_native_state(candidate)
-                if has_zones or check_nudges or has_pull_in or has_bends
-                else None
+                _mask_native_state(candidate) if has_zones or check_copper or has_bends else None
             )
             # On a partially connected board one new contact can hide a split,
             # even on the same net. Keep KiCad's actual pad groups for that case.
@@ -1649,12 +1655,14 @@ def _run_mask_pass(
                     raise _MaskPadConnectionLost(
                         "final saved board disconnected previously connected pads"
                     )
+                final_gaps = _ElbowGapCheck(result)
                 final = _run_python_drc(
                     candidate,
                     manufacturer=args.mfr,
                     layers=args.layers,
                     project_pcb_path=pcb_path,
                     mask_copper=True,
+                    elbow_gaps=final_gaps,
                 )
                 if final is None or any(
                     v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in final.violations
@@ -1664,8 +1672,12 @@ def _run_mask_pass(
                 previous = {finding_key(v) for v in mask_copper_violations(report.violations)}
                 touched = {uid for key in remaining - previous for uid in key}
                 persisting = {key[-1] for key in remaining if key}
-                if any(
-                    a.uuid in persisting or _mask_action_touches(a, touched) for a in result.actions
+                if (
+                    any(
+                        a.uuid in persisting or _mask_action_touches(a, touched)
+                        for a in result.actions
+                    )
+                    or final_gaps.missed
                 ):
                     raise RuntimeError("mask openings failed verification on the final saved board")
                 if _moves_with_new_errors(
@@ -1717,10 +1729,35 @@ _VERIFY_DISPOSITIONS = frozenset(
         "pad_connection_lost",
         "finding_not_cleared",
         "new_mask_finding",
+        "mask_margin_not_met",
         "new_drc_error",
         "would_bend_trace",
     }
 )
+
+
+class _ElbowGapCheck:
+    """Compare accepted outside elbows with the saved board's native mask measurements."""
+
+    def __init__(self, result: MaskRepairResult) -> None:
+        self.required = {
+            (a.pad_uuid, a.uuid): a.minimum_mask_gap_mm
+            for a in result.actions
+            if isinstance(a, MaskNudgeAction) and a.minimum_mask_gap_mm is not None
+        }
+        self.missed: set[str] = set()
+
+    def check(self, assessments: list[MaskCopperAssessment]) -> None:
+        if not assessments or any(assessment.coverage != "complete" for assessment in assessments):
+            self.missed.update(uid for _pad, uid in self.required)
+            return
+        for assessment in assessments:
+            for measurement in assessment.measurements:
+                uid = measurement.conductor_uuid
+                for opening in measurement.opening_uuids:
+                    gap = self.required.get((opening, uid))
+                    if gap is not None and measurement.clearance_mm < gap - 1e-9:
+                        self.missed.add(uid)
 
 
 def _verify_mask_actions(
@@ -1734,12 +1771,14 @@ def _verify_mask_actions(
     lost_contacts: set[str] | None = None,
 ) -> None:
     """Undo a grouped move if its saved geometry fails the mask, clearance or pad checks."""
+    gaps = _ElbowGapCheck(result)
     after = _run_python_drc(
         candidate,
         manufacturer=args.mfr,
         layers=args.layers,
         project_pcb_path=pcb_path,
         mask_copper=True,
+        elbow_gaps=gaps,
     )
     if after is not None and any(
         v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in after.violations
@@ -1777,6 +1816,8 @@ def _verify_mask_actions(
             revert.append((act, "finding_not_cleared"))
         elif _mask_action_touches(act, touched):
             revert.append((act, "new_mask_finding"))
+        elif act.uuid in gaps.missed:
+            revert.append((act, "mask_margin_not_met"))
         elif act.uuid in regressed:
             revert.append((act, "new_drc_error"))
         else:
@@ -2104,6 +2145,7 @@ def _run_python_drc(
     project_pcb_path: Path | None = None,
     mask_copper: bool = False,
     copper_gap: bool = False,
+    elbow_gaps: _ElbowGapCheck | None = None,
 ) -> DRCReport | None:
     """Run ``kct check``'s rule set and convert the results into a DRCReport.
 
@@ -2146,11 +2188,23 @@ def _run_python_drc(
         pcb = PCB.load(pcb_path)
         rule_set = build_check_rule_set(project, manufacturer=manufacturer, layers=layers, pcb=pcb)
         if mask_copper:
-            from kicad_tools.validate.mask_copper import default_request_for_manufacturer
-
-            rule_set.checker.mask_copper_request = default_request_for_manufacturer(
-                rule_set.manufacturer
-            )
+            request = default_request_for_manufacturer(rule_set.manufacturer)
+            if (
+                request is not None
+                and request.policy is not None
+                and elbow_gaps
+                and elbow_gaps.required
+            ):
+                policy = request.policy
+                measure_mask_gap_mm = max(elbow_gaps.required.values())
+                # The private repair re-check must measure up to an explicit
+                # elbow gap even beyond the usual advisory range. Its error
+                # clearance and the stock manufacturer's policy stay intact.
+                if measure_mask_gap_mm > (policy.warning_clearance_mm or policy.clearance_mm):
+                    request = replace(
+                        request, policy=replace(policy, warning_clearance_mm=measure_mask_gap_mm)
+                    )
+            rule_set.checker.mask_copper_request = request
         if copper_gap:
             from kicad_tools.cli.check_cmd import _resolve_fab_gap_policy, stackup_copper_oz
 
@@ -2171,6 +2225,9 @@ def _run_python_drc(
                 len(pcb.copper_layers),
             )
         results = run_check_rule_set(rule_set)
+        if elbow_gaps and elbow_gaps.required:
+            # Use the physical observations before waiver and severity filtering.
+            elbow_gaps.check(results.mask_copper_assessments)
         results.violations = [
             v
             for v in results.violations

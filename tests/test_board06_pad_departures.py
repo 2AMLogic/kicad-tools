@@ -3,7 +3,7 @@
 import json
 import sys
 from itertools import pairwise
-from math import dist
+from math import dist, sqrt
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -49,6 +49,8 @@ def _write_board(
     locked_index=None,
     neighbor=True,
     extra="",
+    footprint="QFP",
+    net_name="USB_CC2",
 ):
     """One sideband pad, its F.Cu departure, a far pad and an edge outline.
 
@@ -60,17 +62,17 @@ def _write_board(
         "(kicad_pcb (version 20240108) (generator test)",
         '(general (thickness 1.6)) (layers (0 "F.Cu" signal) (2 "In1.Cu" power)'
         ' (4 "In2.Cu" power) (31 "B.Cu" signal))',
-        '(setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "USB_CC2")',
+        f'(setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "{net_name}")',
         "(gr_rect (start 5 4) (end 16 14) (stroke (width 0.05) (type default))"
         ' (fill none) (layer "Edge.Cuts"))',
-        f'(footprint "QFP" (layer "F.Cu") (at {pad_at[0]} {pad_at[1]})'
+        f'(footprint "{footprint}" (layer "F.Cu") (at {pad_at[0]} {pad_at[1]})'
         f' (property "Reference" "{pad_ref}")'
         f' (pad "{pad_number}" smd rect (at 0 0) (size {pad_size[0]} {pad_size[1]})'
-        ' (layers "F.Cu" "F.Mask") (net 1 "USB_CC2")))',
+        f' (layers "F.Cu" "F.Mask") (net 1 "{net_name}")))',
         f'(footprint "Hdr" (layer "F.Cu") (at {far_at[0]} {far_at[1]})'
         f' (property "Reference" "{far_ref}")'
         ' (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4)'
-        ' (layers "*.Cu" "*.Mask") (net 1 "USB_CC2")))',
+        f' (layers "*.Cu" "*.Mask") (net 1 "{net_name}")))',
     ]
     if neighbor:
         low = min(pad_at[1], far_at[1]) - 1.5
@@ -98,6 +100,66 @@ def _write_board(
             f' (net 1) (uuid "{_uid("via", i)}"))'
         )
     path.write_text("\n".join([*items, extra, ")"]))
+
+
+@pytest.mark.parametrize("control", ["ordinary", "locked", "tap", "clearance"])
+def test_u1_ground_departure_keeps_its_barrel_and_branch(tmp_path, departures, control):
+    board = tmp_path / "ground.kicad_pcb"
+    center, branch, tip, via = (10, 10), (9.3, 10.15), (9.8, 10.15), (9.25, 10.15)
+    segments = [
+        ("F.Cu", branch, tip, 0.20),
+        ("F.Cu", tip, via, 0.15),
+        ("F.Cu", branch, (9.3, 11.5), 0.20),
+        ("F.Cu", center, (10, 11.5), 0.20),
+        ("F.Cu", (10, 11.5), (9.3, 11.5), 0.20),
+    ]
+    if control == "tap":
+        # This branch contacts the side of the old run, away from its endpoints.
+        segments.append(("F.Cu", (9.68, 10.29), (9.68, 10.9), 0.15))
+    extra = ""
+    if control == "clearance":
+        extra = (
+            '(net 2 "OTHER") (segment (start 9.6 9.64) (end 9.6 9.70)'
+            ' (width 0.20) (layer "F.Cu") (net 2))'
+        )
+    _write_board(
+        board,
+        pad_number="32",
+        footprint="Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm",
+        net_name="GND",
+        segments=segments,
+        far_at=(9.3, 11.5),
+        vias=[via],
+        locked_index=0 if control == "locked" else None,
+        neighbor=False,
+        extra=extra,
+    )
+    before = board.read_bytes()
+    original = PCB.load(board)
+    via_positions = [(v.uuid, v.position) for v in original.vias]
+    origin_x, origin_y = original.board_origin
+    edited = departures.clear_pad_departures(board, _rules())
+    if control != "ordinary":
+        assert edited == 0
+        assert board.read_bytes() == before
+        return
+
+    assert edited == 1
+    pcb = PCB.load(board)
+    assert [(v.uuid, v.position) for v in pcb.vias] == via_positions
+    assert {_uid("seg", n) for n in (2, 3, 4)} <= {s.uuid for s in pcb.segments}
+    new = [s for s in pcb.segments if s.uuid not in {_uid("seg", n) for n in (2, 3, 4)}]
+
+    def absolute(point):
+        return round(point[0] + origin_x, 6), round(point[1] + origin_y, 6)
+
+    assert {(absolute(s.start), absolute(s.end), s.width) for s in new} == {
+        (center, (9.4, 10), 0.2),
+        ((9.4, 10), via, 0.2),
+    }
+    repaired = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == repaired
 
 
 def _taper(depth=1.0, step=0.05, top=0.1016):
@@ -648,6 +710,10 @@ def test_clock_with_unverifiable_rules_keeps_the_original_file(tmp_path, departu
     assert board.read_bytes() == before
 
 
+# Constrained moves stop after the parent DRC. Permitted moves also run
+# the fill child, whose native-slot waits count against the parent's deadline.
+# Permitted width reached the 60 s bulk timeout, so CI runs this module in
+# the serial board06 lane with a 120 s budget (Issue #10125).
 @pytest.mark.parametrize("constraint", ["keepout", "width"])
 @pytest.mark.parametrize("permitted", [False, True], ids=["constrained", "permitted"])
 def test_final_clock_copper_obeys_j4_rule_area(tmp_path, departures, capsys, constraint, permitted):
@@ -695,3 +761,326 @@ def test_final_clock_copper_obeys_j4_rule_area(tmp_path, departures, capsys, con
     else:
         assert board.read_bytes() == before
         assert ("Items not allowed" if constraint == "keepout" else "Clock exit width") in output
+
+
+# --- MIPI data pair exits (issue #10113) --------------------------------------------------
+
+_DATA_RUNS = {
+    "MIPI_D0+": [
+        [(8.4, 70.0), (8.4, 69.8672)],  # J4.3 straight exit (clean, kept)
+        [(8.4, 69.8672), (9.4172, 68.85)],  # J4.3 diagonal (kept)
+        [(9.4172, 68.85), (25.8828, 68.85)],  # trunk
+        [(25.8828, 68.85), (26.8328, 69.8)],  # U4.3 approach diagonal
+        [(26.8328, 69.8), (26.8, 69.8)],  # U4.3 jog
+        [(26.8, 69.8), (27.0, 69.6)],  # U4.3 entry
+    ],
+    "MIPI_D0-": [
+        [(9.2, 70.0), (9.0, 69.8)],  # J4.4 entry diagonal
+        [(9.0, 69.8), (9.0, 69.8328)],  # J4.4 jog
+        [(9.0, 69.8328), (9.5828, 69.25)],  # J4.4 approach diagonal
+        [(9.5828, 69.25), (25.7172, 69.25)],  # trunk
+        [(25.7172, 69.25), (26.6672, 70.2)],  # U4.4 approach diagonal
+        [(26.6672, 70.2), (26.8, 70.2)],  # U4.4 jog
+        [(26.8, 70.2), (27.0, 70.4)],  # U4.4 entry
+    ],
+}
+
+
+def _data_pair(path, control="", gap=0.1474, tolerance_mm=None):
+    """J4 and U4's data pads exactly as the seed-42 router leaves them.
+
+    Every piece is trunk-width 0.225 mm on F.Cu and each leg carries an
+    interior joint, so corner recognition sees the run the regen built.
+    ``tolerance_mm`` tightens the class's length cap for the timing control.
+    """
+    import dataclasses
+
+    from generate_design import mipi_net_class
+
+    pair = {}
+    for net in ("MIPI_D0+", "MIPI_D0-"):
+        klass = mipi_net_class()
+        if tolerance_mm is not None:
+            klass = dataclasses.replace(klass, skew_tolerance_mm=tolerance_mm)
+        pair[net] = klass
+    path.with_name("net_class_map.json").write_text(json.dumps(net_class_map_to_dict(pair)))
+    path.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "board": {
+                    "design_settings": {
+                        "rules": {
+                            "min_clearance": 0.1016,
+                            "min_track_width": 0.1016,
+                            "min_through_hole_diameter": 0.20,
+                            "min_via_hole": 0.20,
+                        },
+                    },
+                },
+                "net_settings": {"classes": [{"name": "Default", "clearance": 0.15}]},
+            }
+        )
+    )
+    parts = [
+        "(kicad_pcb (version 20240108) (generator test)",
+        '(layers (0 "F.Cu" signal) (1 "In1.Cu" power) (2 "In2.Cu" power) (31 "B.Cu" signal)'
+        ' (36 "B.SilkS" user) (37 "F.SilkS" user) (38 "B.Mask" user) (39 "F.Mask" user)'
+        ' (44 "Edge.Cuts" user))',
+        "(gr_rect (start 0 0) (end 35 80) (stroke (width 0.05) (type default))"
+        ' (fill none) (layer "Edge.Cuts"))',
+        '(net 1 "MIPI_D0+") (net 2 "MIPI_D0-") (net 3 "USB_CC1")',
+        '(footprint "Connector_FFC:FFC_4P_0.5mm" (layer "F.Cu") (at 0 0)',
+        '(property "Reference" "J4" (at 0 0) (layer "F.SilkS"))',
+        '(pad "3" smd rect (at 8.4 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 1 "MIPI_D0+"))',
+        '(pad "4" smd rect (at 9.2 70) (size 0.3 0.8) (layers "F.Cu" "F.Mask") (net 2 "MIPI_D0-")))',
+        '(footprint "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm" (layer "F.Cu") (at 0 0)',
+        '(property "Reference" "U4" (at 0 0) (layer "F.SilkS"))',
+        '(pad "3" smd rect (at 27 69.6) (size 0.7 0.3) (layers "F.Cu" "F.Mask") (net 1 "MIPI_D0+"))',
+        '(pad "4" smd rect (at 27 70.4) (size 0.7 0.3) (layers "F.Cu" "F.Mask") (net 2 "MIPI_D0-")))',
+    ]
+    count = [0]
+
+    def run(net_number, points):
+        # Split each leg in two so every run has interior joints.
+        for a, b in pairwise(points):
+            mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            for start, end in ((a, mid), (mid, b)):
+                count[0] += 1
+                lock = (
+                    " (locked yes)"
+                    if control == "locked" and net_number == 2 and count[0] == 17
+                    else ""
+                )
+                parts.append(
+                    f"(segment (start {start[0]} {start[1]}) (end {end[0]} {end[1]}) "
+                    f'(width 0.225) (layer "F.Cu") (net {net_number}){lock}'
+                    f' (uuid "{_uid("dat", count[0])}"))'
+                )
+
+    run(1, _DATA_RUNS["MIPI_D0+"][0])
+    run(1, _DATA_RUNS["MIPI_D0+"][1])
+    run(1, _DATA_RUNS["MIPI_D0+"][2])
+    run(1, _DATA_RUNS["MIPI_D0+"][3])
+    run(1, _DATA_RUNS["MIPI_D0+"][4])
+    run(1, _DATA_RUNS["MIPI_D0+"][5])
+    run(2, _DATA_RUNS["MIPI_D0-"][0])
+    run(2, _DATA_RUNS["MIPI_D0-"][1])
+    run(2, _DATA_RUNS["MIPI_D0-"][2])
+    run(2, _DATA_RUNS["MIPI_D0-"][3])
+    run(2, _DATA_RUNS["MIPI_D0-"][4])
+    run(2, _DATA_RUNS["MIPI_D0-"][5])
+    run(2, _DATA_RUNS["MIPI_D0-"][6])
+    if control == "branch":
+        parts.append(
+            '(segment (start 26.8328 69.8) (end 26.5 70.1) (width 0.225) (layer "F.Cu")'
+            f' (net 1) (uuid "{_uid("dat", 900)}"))'
+        )
+    if control in ("foreign-gap", "foreign-short"):
+        # A foreign track parallel to the lower half of the rebuilt U4.3
+        # rejoin, ``gap`` mm of edge clearance from it (a negative offset
+        # overlaps for the short).
+        (x0, y0), (x1, y1) = (25.96, 68.85), (26.71, 69.6)
+        offset = 0.1125 + 0.05 + (gap if control == "foreign-gap" else -0.02)
+        ax, ay = x0 + (x1 - x0) * 0.15, y0 + (y1 - y0) * 0.15
+        bx, by = x0 + (x1 - x0) * 0.55, y0 + (y1 - y0) * 0.55
+        nx, ny = (y1 - y0), -(x1 - x0)
+        norm = (nx * nx + ny * ny) ** 0.5
+        parts.append(
+            f"(segment (start {ax + nx / norm * offset} {ay + ny / norm * offset})"
+            f" (end {bx + nx / norm * offset} {by + ny / norm * offset}) (width 0.1) "
+            f'(layer "F.Cu") (net 3) (uuid "{_uid("dat", 901)}"))'
+        )
+    path.write_text("\n".join([*parts, ")"]))
+
+
+def _data_skew(path):
+    pcb = PCB.load(path)
+    classes = net_class_map_from_path(path.with_name("net_class_map.json"), pcb_path=path)
+    (pair,) = (
+        p
+        for p in derive_pair_skews(pcb, classes, num_copper_layers=len(pcb.copper_layers))
+        if p.p_name == "MIPI_D0+"
+    )
+    budget = pair.limits.budget.budget_ps if pair.limits.budget else None
+    return pair.skew_ps, budget
+
+
+def test_data_exits_rebuild_the_measured_corridors(tmp_path, departures):
+    board = tmp_path / "data.kicad_pcb"
+    _data_pair(board)
+    before = PCB.load(board)
+    skew_before, budget = _data_skew(board)
+    assert skew_before is not None and budget is not None and skew_before < budget
+    assert departures.clear_pad_departures(board, _rules()) == 3
+    saved = PCB.load(board)
+    # Both rails shorten by the same measured amount: the pair keeps its skew.
+    deltas = {
+        net: _rail_length(saved, net) - _rail_length(before, net)
+        for net in ("MIPI_D0+", "MIPI_D0-")
+    }
+    assert deltas["MIPI_D0+"] == pytest.approx(-0.2313, abs=2e-3)
+    assert deltas["MIPI_D0-"] == pytest.approx(deltas["MIPI_D0+"], abs=1e-3)
+    skew_after, _ = _data_skew(board)
+    # The raw rail difference is unchanged; the small drift is the #9767
+    # classifier shedding the old jog pieces from the before-measurement.
+    assert skew_after == pytest.approx(skew_before, abs=0.1)
+    assert skew_after < budget
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    assert not ConnectivityValidator(board).validate().issues
+    # The measured exits: one straight axis piece with its corner inside the
+    # land, one 45-degree rejoin, and the trunk extended along its own line.
+    copper = {
+        (net, frozenset((_round(s.start), _round(s.end))))
+        for net in ("MIPI_D0+", "MIPI_D0-")
+        for s in saved.segments
+        if s.net_name == net
+    }
+    for net, a, b in (
+        ("MIPI_D0-", (9.2, 70.0), (9.2, 69.633)),
+        ("MIPI_D0-", (9.2, 69.633), (9.583, 69.25)),
+        ("MIPI_D0+", (27.0, 69.6), (26.71, 69.6)),
+        ("MIPI_D0+", (26.71, 69.6), (25.96, 68.85)),
+        ("MIPI_D0+", (9.417, 68.85), (17.65, 68.85)),
+        ("MIPI_D0+", (17.65, 68.85), (25.96, 68.85)),
+        ("MIPI_D0-", (27.0, 70.4), (26.905, 70.4)),
+        ("MIPI_D0-", (26.905, 70.4), (25.755, 69.25)),
+        ("MIPI_D0-", (9.583, 69.25), (17.65, 69.25)),
+        ("MIPI_D0-", (17.65, 69.25), (25.755, 69.25)),
+    ):
+        assert (net, frozenset((a, b))) in copper, (net, a, b)
+    for s in saved.segments:
+        if s.net_name in ("MIPI_D0+", "MIPI_D0-"):
+            assert s.width == pytest.approx(0.225)
+    once = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == once
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        "foreign-gap",  # the rebuilt U4.3 rejoin would leave 0.1474 mm against the minimum
+        "foreign-short",  # an adjacent foreign net the rebuilt rejoin would touch
+        "locked",
+        "branch",
+    ],
+)
+def test_data_rejections_keep_the_original_geometry(tmp_path, departures, control):
+    board = tmp_path / "data.kicad_pcb"
+    _data_pair(board, control)
+    before = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == before
+
+
+def test_data_gap_control_passes_at_the_project_minimum(tmp_path, departures):
+    """The 0.1474 mm rejection above is the gap, not the foreign track's presence."""
+    board = tmp_path / "data.kicad_pcb"
+    _data_pair(board, "foreign-gap", gap=0.151)
+    assert departures.clear_pad_departures(board, _rules()) == 3
+
+
+@pytest.mark.parametrize(
+    ("reference", "number", "layer", "gap", "edits"),
+    [
+        ("FID8", "1", "F.Cu", 0.1474, 0),
+        ("FID8", "", "F.Cu", 0.1474, 0),
+        ("#FID8", "", "F.Cu", 0.1474, 0),
+        ("FID8", "", "F.Cu", 0.1510, 3),
+        ("FID8", "", "B.Cu", 0.1474, 3),
+        ("FID8", "", "F.Mask", 0.1474, 3),
+    ],
+)
+def test_data_rejoin_clearance_to_unassigned_pad(
+    tmp_path, departures, reference, number, layer, gap, edits
+):
+    board = tmp_path / "data.kicad_pcb"
+    _data_pair(board)
+    # Place the round pad off the proposed U4.3 diagonal by the copper radii
+    # plus the specified edge clearance. The project requires 0.1500 mm.
+    offset = (0.225 / 2 + 0.15 / 2 + gap) / sqrt(2)
+    x, y = 25.96 + 0.75 * 0.35 + offset, 68.85 + 0.75 * 0.35 - offset
+    fiducial = (
+        f'(footprint "Test:Optical_Target" (layer "F.Cu") (at {x:.8f} {y:.8f})'
+        f' (property "Reference" "{reference}" (at 0 0) (layer "F.SilkS"))'
+        f' (pad "{number}" smd circle (at 0 0) (size 0.15 0.15) (layers "{layer}")))'
+    )
+    board.write_text(board.read_text().rstrip()[:-1] + fiducial + "\n)\n")
+    before = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == edits
+    if edits == 0:
+        assert board.read_bytes() == before
+
+
+def test_data_pair_beyond_its_timing_budget_is_left_alone(tmp_path, departures):
+    """The repair keeps the pair inside its differential budget: a class cap
+    the measured 0.65 mm rail difference already breaks refuses it intact."""
+    board = tmp_path / "data.kicad_pcb"
+    _data_pair(board, tolerance_mm=0.2)
+    skew, budget = _data_skew(board)
+    assert skew is not None
+    before = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == before
+
+
+def test_data_without_a_timing_policy_is_left_alone(tmp_path, departures):
+    board = tmp_path / "data.kicad_pcb"
+    _data_pair(board)
+    board.with_name("net_class_map.json").unlink()
+    before = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("constraint", ["keepout", "width"])
+@pytest.mark.parametrize("permitted", [False, True], ids=["constrained", "permitted"])
+def test_final_data_copper_obeys_j4_rule_area(tmp_path, departures, capsys, constraint, permitted):
+    from generate_design import _finalize_signal_copper
+
+    from kicad_tools.cli.kicad_toolchain import docker_fallback_enabled
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if not docker_fallback_enabled() and find_kicad_cli() is None:
+        pytest.skip("kicad-cli is needed to evaluate the authored constraints")
+    board = tmp_path / "data.kicad_pcb"
+    _data_pair(board)
+    # Only the rebuilt J4.4 exit reaches the sliver under the pad's long axis;
+    # the original diagonal left of it never did.
+    if constraint == "keepout":
+        x, y, w, h = (8.95, 69.75, 0.1, 0.1) if permitted else (9.15, 69.6, 0.1, 0.1)
+        tracks = "not_allowed"
+    else:
+        x, y, w, h = 9.1, 69.65, 0.05, 0.1
+        tracks = "allowed"
+        board.with_suffix(".kicad_dru").write_text(
+            '(version 1)\n(rule "Data exit width" (layer "F.Cu") '
+            "(condition \"A.NetName == 'MIPI_D0-'\") "
+            f"(constraint track_width (max {0.23 if permitted else 0.20}mm)))\n"
+        )
+    area = (
+        '(zone (net 0) (net_name "") (layer "F.Cu") (name "Data launch") (hatch edge 0.5)'
+        f" (connect_pads (clearance 0)) (min_thickness 0.25) (keepout (tracks {tracks})"
+        " (vias allowed) (pads allowed) (copperpour allowed) (footprints allowed))"
+        " (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))"
+        f" (polygon (pts (xy {x} {y}) (xy {x + w} {y}) (xy {x + w} {y + h}) (xy {x} {y + h}))))"
+    )
+    board.write_text(board.read_text().rstrip()[:-1] + area + ")\n")
+    before = board.read_bytes()
+    # There are no copper pours on this fixture. Run the generator's same
+    # legalization and refill transaction; KiCad evaluates the actual rule area.
+    fill = [sys.executable, "-m", "kicad_tools.cli", "zones", "fill", str(board)]
+    _finalize_signal_copper(board, fill, lambda tag: True)
+    output = capsys.readouterr().out
+    if permitted:
+        assert "MIPI data pair: 3 exits rebuilt" in output
+        saved = PCB.load(board)
+        assert any(
+            _round(s.start) == (9.2, 70.0) and _round(s.end) == (9.2, 69.633)
+            for s in saved.segments
+            if s.net_name == "MIPI_D0-"
+        )
+    else:
+        assert board.read_bytes() == before
+        assert ("Items not allowed" if constraint == "keepout" else "Data exit width") in output

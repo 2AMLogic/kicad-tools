@@ -22,6 +22,12 @@ their original centerlines, retaining each rail's length and contacts.
 The MIPI clock pair's four exits (J4/U4, #10083) are staged together: trunk-width
 copper, both negative-rail barrels moved clear of the mask, published only if the
 staged copper clears the project gaps and the pair stays inside its skew budget.
+The MIPI data pair's three offending exits (J4.4, U4.3, U4.4, #10113) are staged
+the same way: each rebuilt as one straight axis piece whose corner sits inside the
+pad copper plus one 45-degree rejoin, with the trunk extended along its own line
+so both rails shorten equally and the pair keeps its measured skew.
+U1's USB2 pair uses two different straight exits to clear its mask openings
+while meeting the fixture's coupling, delay and impedance limits (#10235).
 
 Every repair is guarded: the departure is derived from the actual pad and its
 connected copper, and anything locked, branched off the recognized shape, or
@@ -35,10 +41,11 @@ from collections import defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass
 from itertools import pairwise
-from math import dist
+from math import dist, isfinite
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from shapely import make_valid
 from shapely.geometry import LineString, Point, Polygon
 
 from kicad_tools.cli.kicad_toolchain import (
@@ -64,8 +71,13 @@ from kicad_tools.router.rule_area_resolve import all_rule_area_zones
 from kicad_tools.router.rules import net_class_map_from_path
 from kicad_tools.schema.pcb import PCB, Segment, Via
 from kicad_tools.sidecars import copy_project_sidecars
+from kicad_tools.validate import DRCChecker
 from kicad_tools.validate.connectivity import ConnectivityValidator
-from kicad_tools.validate.copper_contact import CopperContactGraph, build_copper_contact_graph
+from kicad_tools.validate.copper_contact import (
+    CopperContactGraph,
+    build_copper_contact_graph,
+    collect_copper_items,
+)
 from kicad_tools.validate.diffpair_skew import derive_pair_skews
 from kicad_tools.validate.mask_copper import default_request_for_manufacturer
 from kicad_tools.validate.mask_geometry import board_mask_margin, pad_mask_margin, pad_mask_shapes
@@ -294,6 +306,22 @@ def _neck_candidate(
     return None
 
 
+def _departure_mask_shapes(pcb: PCB, fp, pad):
+    """Resolve the pad copper and opening under this board's mask settings."""
+    base_margin, declared = board_mask_margin(pcb)
+    if base_margin is None:
+        return None
+    version_node = pcb._sexp.find("version")
+    version = version_node.get_int() if version_node else 0
+    margin, _ = pad_mask_margin(pad, fp, base_margin, declared, board_version=version or 0)
+    if margin is None or margin < 0:
+        return None
+    try:
+        return pad_mask_shapes(pad, fp, margin)
+    except ValueError:
+        return None
+
+
 def _repair_pad(
     path: Path,
     rules: DesignRules,
@@ -308,18 +336,10 @@ def _repair_pad(
     pad = next((p for p in fp.pads if p.number == number), None) if fp else None
     if pad is None or not pad.net_name:
         return 0
-    base_margin, declared = board_mask_margin(pcb)
-    if base_margin is None:
+    shapes = _departure_mask_shapes(pcb, fp, pad)
+    if shapes is None:
         return 0
-    version_node = pcb._sexp.find("version")
-    version = version_node.get_int() if version_node else 0
-    margin, _ = pad_mask_margin(pad, fp, base_margin, declared, board_version=version or 0)
-    if margin is None or margin < 0:
-        return 0
-    try:
-        pad_copper, opening = pad_mask_shapes(pad, fp, margin)
-    except ValueError:
-        return 0
+    pad_copper, opening = shapes
     center = pcb.get_pad_position(ref, number)
     if center is None:
         return 0
@@ -708,7 +728,7 @@ def _copper_gap_ok(
                 ),
             )
         )
-    for item in build_copper_contact_graph(ConnectivityValidator(pcb), None).items:
+    for item in collect_copper_items(ConnectivityValidator(pcb), include_all_pads=True):
         # The enclosing producer regenerates and grades all pours after the edit.
         if item.kind == "fill":
             continue
@@ -761,14 +781,16 @@ def _zone_shape(zone):
     if not rings:
         return None
     shape = Polygon(rings[0], holes=rings[1:])
-    return shape if shape.is_valid else shape.buffer(0)
+    if not shape.is_valid:
+        # A self-crossing keepout can protect copper in both lobes.
+        shape = make_valid(shape)
+    return shape if not shape.is_empty and shape.area > 0 else None
 
 
 def _pcie_taper_authored_rules_ok(pcb: PCB, path: Path, added: list[Segment]) -> bool:
     """Reject proposed F.Cu rails that break an authored keepout or track-width rule.
 
-    Fails closed: a rule area or condition the evaluator cannot decide is
-    treated as applying, so the pair is left untouched.
+    Preserve the pair when an applicable width bound or keepout cannot be evaluated.
     """
     rails = [
         (track, LineString([track.start, track.end]).buffer(track.width / 2)) for track in added
@@ -789,12 +811,18 @@ def _pcie_taper_authored_rules_ok(pcb: PCB, path: Path, added: list[Segment]) ->
         return True  # no design-rules file: nothing authored to violate
     except Exception:
         return False
-    named = {
-        zone.name: _zone_shape(zone)
-        for zone in (*pcb.zones, *getattr(pcb, "footprint_rule_areas", ()))
-        if zone.name
-    }
+    # Names can repeat. Keep back-only names with an empty list so a known
+    # off-layer area is distinct from a reference we cannot resolve.
+    named = {}
+    for zone in (*pcb.zones, *getattr(pcb, "footprint_rule_areas", ())):
+        if zone.name:
+            shapes = named.setdefault(zone.name, [])
+            if _zone_covers_f_cu(zone):
+                shapes.append(_zone_shape(zone))
     for rule in tree.find_all("rule"):
+        severity_node = rule.find_child("severity")
+        if severity_node is not None and str(severity_node.get_first_atom()).casefold() == "ignore":
+            continue  # where an ignored rule wins, KiCad checks nothing
         layer_node = rule.find_child("layer")
         layer = layer_node.get_first_atom() if layer_node is not None else None
         if layer is not None and _layer_matches(str(layer), "F.Cu") is False:
@@ -806,17 +834,23 @@ def _pcie_taper_authored_rules_ok(pcb: PCB, path: Path, added: list[Segment]) ->
             if not atoms or str(atoms[0]) != "track_width":
                 continue
             limits = {}
+            unknown_bound = False
             for bound in ("min", "max"):
                 node = constraint.find_child(bound)
-                value = _parse_length_mm(node.get_first_atom()) if node is not None else None
-                if value is not None:
+                if node is None:
+                    continue
+                value = _parse_length_mm(node.get_first_atom()) if len(node.children) == 1 else None
+                if value is None or not isfinite(value):
+                    # KiCad also accepts expressions. A missing bound is optional,
+                    # but a present bound we cannot evaluate still constrains the rail.
+                    unknown_bound = True
+                else:
                     limits[bound] = value
             for track, copper in rails:
                 if (
-                    "min" in limits
-                    and track.width < limits["min"] - _EPS
-                    or "max" in limits
-                    and track.width > limits["max"] + _EPS
+                    unknown_bound
+                    or track.width < limits.get("min", 0.0) - _EPS
+                    or track.width > limits.get("max", float("inf")) + _EPS
                 ) and _dru_rule_applies(
                     str(raw) if raw is not None else None, track, copper, named, project
                 ):
@@ -830,10 +864,29 @@ def _dru_rule_applies(condition, track, copper, areas, project) -> bool:
         return True
 
     def area_test(match) -> str:
-        shape = areas.get(match.group(1))
-        if shape is None:
-            return match.group(0)  # unknown area: stays undecided
-        return "(1 == 1)" if shape.intersects(copper) else "(1 == 0)"
+        pattern = match.group(1)
+        if "*" in pattern or "?" in pattern:
+            # KiCad matches the argument as a wildcard pattern, so every
+            # on-layer area whose name fits it counts. KiCad's case handling is
+            # not modelled: a name that fits only after case-folding makes the
+            # match uncertain (and a `!` would invert a wrong guess), so the
+            # condition stays undecided and the pair is preserved.
+            body = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+            exact = re.compile(body, re.DOTALL)
+            folded = re.compile(body, re.DOTALL | re.IGNORECASE)
+            hits = [name for name in areas if exact.fullmatch(name)]
+            if hits != [name for name in areas if folded.fullmatch(name)]:
+                return match.group(0)
+            shapes = [shape for name in hits for shape in areas[name]] if hits else None
+        else:
+            shapes = areas.get(pattern)
+        if shapes is None:
+            return match.group(0)
+        if any(shape is not None and shape.intersects(copper) for shape in shapes):
+            return "(1 == 1)"
+        if None in shapes:
+            return match.group(0)  # An invalid outline leaves the condition undecided.
+        return "(1 == 0)"
 
     condition = re.sub(r"\bA\.intersectsArea\(\s*'([^']*)'\s*\)", area_test, condition)
     props = item_props_for_type(
@@ -1133,7 +1186,9 @@ def _stage_clock_exit(
     return added, [via] if via is not None else []
 
 
-def _clock_authored_rules_ok(pcb: PCB, path: Path, tracks: list[Segment], vias: list[Via]) -> bool:
+def _authored_rules_ok(
+    pcb: PCB, path: Path, tracks: list[Segment], vias: list[Via], label: str
+) -> bool:
     """Have KiCad evaluate authored rules on the replacement copper before publishing it."""
     if not path.with_suffix(".kicad_dru").exists() and not all_rule_area_zones(pcb):
         return True
@@ -1141,7 +1196,7 @@ def _clock_authored_rules_ok(pcb: PCB, path: Path, tracks: list[Segment], vias: 
     if not all(changed):
         return False
     try:
-        with TemporaryDirectory(prefix="board06-clock-") as tmp:
+        with TemporaryDirectory(prefix="board06-staged-") as tmp:
             candidate = Path(tmp) / path.name
             pcb.save(candidate)
             copy_project_sidecars(path, candidate)
@@ -1162,17 +1217,17 @@ def _clock_authored_rules_ok(pcb: PCB, path: Path, tracks: list[Segment], vias: 
                     refill_zones=True,
                 )
             if not result.success:
-                print(f"   MIPI clock exits kept: {result.stderr}")
+                print(f"   {label} kept: {result.stderr}")
                 return False
             native = load_native_connectivity_report(report)
     except (OSError, ValueError, KiCadEnvironmentError) as exc:
-        print(f"   MIPI clock exits kept: {exc}")
+        print(f"   {label} kept: {exc}")
         return False
     for finding in [*native.violations, *native.unconnected_items]:
         if finding.is_error and (
             not any(finding.item_uuids) or changed.intersection(finding.item_uuids)
         ):
-            print(f"   MIPI clock exits kept: {finding.message}")
+            print(f"   {label} kept: {finding.message}")
             return False
     return True
 
@@ -1197,11 +1252,349 @@ def _clear_clock_pair(path: Path, rules: DesignRules) -> int:
         return 0
     if not _copper_gap_ok(pcb, path, tracks, vias, rules):
         return 0
-    if not _clock_authored_rules_ok(pcb, path, tracks, vias):
+    if not _authored_rules_ok(pcb, path, tracks, vias, "MIPI clock exits"):
         return 0
     pcb.save(path)
     print(f"   pad departure MIPI clock pair: {len(_CLK_EXITS)} exits widened to {_CLK_WIDTH} mm")
     return len(_CLK_EXITS)
+
+
+_DATA_NETS = ("MIPI_D0+", "MIPI_D0-")
+_DATA_WIDTH = 0.225
+
+
+@dataclass(frozen=True)
+class _DataExit:
+    """Seed-42 F.Cu corners relative to the pad centre, up to the trunk junction.
+
+    MIPI trunks stay in place or extend to the new junction. USB2 instead
+    shortens a measured trunk, retaining its original far endpoint.
+    """
+
+    ref: str
+    footprint: str
+    pad: str
+    pad_size: XY
+    net: str
+    old: tuple[XY, ...]
+    new: tuple[XY, ...]
+    trunk_end: XY | None = None
+
+
+_DATA_EXITS = (
+    # J4.4: the diagonal from the pad corner doubles back through a jog; the
+    # rebuilt exit runs straight up the pad axis to (0, -0.3672) -- inside the
+    # 0.8 mm land -- then rejoins the original diagonal line at the trunk.
+    _DataExit(
+        "J4",
+        _J4,
+        "4",
+        (0.3, 0.8),
+        "MIPI_D0-",
+        old=((0, 0), (-0.2, -0.2), (-0.2, -0.1672), (0.3828, -0.75)),
+        new=((0, 0), (0, -0.3672), (0.3828, -0.75)),
+    ),
+    # U4.3: the approach diagonal, jog and entry pass beside the opening; the
+    # rebuilt exit leaves the land straight to (-0.29, 0) and rejoins at 45
+    # degrees, the trunk growing 0.0772 mm to meet it.
+    _DataExit(
+        "U4",
+        _U4,
+        "3",
+        (0.7, 0.3),
+        "MIPI_D0+",
+        old=((0, 0), (-0.2, 0.2), (-0.1672, 0.2), (-1.1172, -0.75)),
+        new=((0, 0), (-0.29, 0), (-1.04, -0.75)),
+    ),
+    # U4.4: same shape on the negative rail, its corner at (-0.095, 0) inside
+    # the land and the trunk growing 0.0378 mm.
+    _DataExit(
+        "U4",
+        _U4,
+        "4",
+        (0.7, 0.3),
+        "MIPI_D0-",
+        old=((0, 0), (-0.2, -0.2), (-0.3328, -0.2), (-1.2828, -1.15)),
+        new=((0, 0), (-0.095, 0), (-1.245, -1.15)),
+    ),
+)
+
+
+_USB2_NETS = ("USB2_D+", "USB2_D-")
+_U1_QFN = "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm"
+_USB2_EXITS = (
+    _DataExit(
+        "U1",
+        _U1_QFN,
+        "10",
+        (0.3, 0.7),
+        "USB2_D+",
+        old=((0, 0), (0, -0.0025), (0.1975, -0.2), (0.1975, -0.3339), (0.9975, -1.1339)),
+        new=((0, 0), (0, -0.650), (0.9975, -1.6475)),
+        trunk_end=(0.9975, -8.8839),
+    ),
+    _DataExit(
+        "U1",
+        _U1_QFN,
+        "11",
+        (0.3, 0.7),
+        "USB2_D-",
+        old=((0, 0), (0, -0.0025), (-0.1975, -0.2), (-0.1975, -0.1661), (0.6025, -0.9661)),
+        new=((0, 0), (0, -0.875), (0.6025, -1.4775)),
+        trunk_end=(0.6025, -8.7161),
+    ),
+)
+
+
+def _data_run(
+    pcb: PCB, ex: _DataExit, center: XY, junction: XY, protected: set[str], width: float
+) -> tuple[list[Segment], Segment] | None:
+    """The measured escape run and its trunk, or ``None`` to decline.
+
+    The walk follows the unique continuation from the pad centre, consuming
+    only same-width F.Cu pieces of the pad's net; a branch, a stray landing,
+    a lock or a group member declines it.  The consumed corner list must
+    match the measured control, and exactly one trunk piece must remain
+    attached at the junction.
+    """
+    at: dict[XY, list[Segment]] = defaultdict(list)
+    for seg in pcb.segments:
+        if seg.layer == "F.Cu" and seg.net_name == ex.net:
+            at[_xy(seg.start)].append(seg)
+            at[_xy(seg.end)].append(seg)
+    landings = {_xy(v.position) for v in pcb.vias if v.net_name == ex.net}
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name == ex.net:
+                position = pcb.get_pad_position(fp.reference, pad.number)
+                if position is not None:
+                    landings.add(_xy(position))
+    chain: list[Segment] = []
+    points = [center]
+    incoming: Segment | None = None
+    for _ in range(64):
+        point = points[-1]
+        if point == junction:
+            break
+        choices = {id(s): s for s in at.get(point, []) if s is not incoming}
+        if len(choices) != 1:
+            return None
+        seg = next(iter(choices.values()))
+        if seg.locked or (seg.uuid or "").lower() in protected or abs(seg.width - width) > _EPS:
+            return None
+        far = _xy(seg.end) if _xy(seg.start) == point else _xy(seg.start)
+        if far != junction and (far in landings or far in points):
+            return None
+        chain.append(seg)
+        points.append(far)
+        incoming = seg
+    else:
+        return None
+    if not _matches_measured(points, center, ex.old):
+        return None
+    consumed = {id(s) for s in chain}
+    remaining = [s for s in at.get(junction, []) if id(s) not in consumed]
+    if len(remaining) != 1:
+        return None
+    trunk = remaining[0]
+    if trunk.locked or (trunk.uuid or "").lower() in protected or abs(trunk.width - width) > _EPS:
+        return None
+    return chain, trunk
+
+
+def _stage_data_exit(
+    pcb: PCB, ex: _DataExit, protected: set[str], width: float
+) -> list[Segment] | None:
+    """Rebuild one data exit in memory; ``None`` leaves the caller to abandon the pair."""
+    fp = pcb.get_footprint(ex.ref)
+    if fp is None or fp.name != ex.footprint or fp.rotation or fp.layer != "F.Cu":
+        return None
+    pad = next((p for p in fp.pads if p.number == ex.pad), None)
+    position = pcb.get_pad_position(ex.ref, ex.pad)
+    if (
+        pad is None
+        or position is None
+        or pad.net_name != ex.net
+        or pad.shape != "rect"
+        or pad.rotation
+        or pad.size != ex.pad_size
+    ):
+        return None
+    if ex.trunk_end is not None:
+        # These two measured USB2 openings have the same outlines as the SMD lands.
+        if pad.type != "smd" or not {"F.Cu", "F.Mask"} <= set(pad.layers):
+            return None
+        shapes = _departure_mask_shapes(pcb, fp, pad)
+        if shapes is None or not shapes[0].equals(shapes[1]):
+            return None
+    center = _xy(position)
+    junction = _xy((center[0] + ex.old[-1][0], center[1] + ex.old[-1][1]))
+    walked = _data_run(pcb, ex, center, junction, protected, width)
+    if walked is None:
+        return None
+    chain, trunk = walked
+    target = _xy((center[0] + ex.new[-1][0], center[1] + ex.new[-1][1]))
+    far = _xy(trunk.end) if _xy(trunk.start) == junction else _xy(trunk.start)
+    if not _on_line(far, junction, target):
+        return None
+    old_length, new_length = dist(far, junction), dist(far, target)
+    moved = dist(junction, target)
+    if ex.trunk_end is not None:
+        expected_far = _xy((center[0] + ex.trunk_end[0], center[1] + ex.trunk_end[1]))
+        # Only shorten the measured trunk. Never cross or consume its far endpoint.
+        if far != expected_far or target == far or abs(moved + new_length - old_length) > _EPS:
+            return None
+    elif new_length < old_length - _EPS or abs(new_length - old_length - moved) > _CLK_TOL:
+        return None
+    edited = [*chain, trunk]
+    original = list(pcb.segments)
+    validator = ConnectivityValidator(pcb)
+    before = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    if len(before.components()) != 1:
+        return None
+    contacts, ends = _external_contacts(before, original, edited, None)
+    if pcb.remove_segments(edited) != len(edited):
+        return None
+    added: list[Segment] = []
+    for a, b in pairwise(_xy((center[0] + o[0], center[1] + o[1])) for o in ex.new):
+        if a != b:
+            added.extend(pcb.add_trace(a, b, width=width, layer="F.Cu", net=ex.net))
+    added.extend(pcb.add_trace(far, target, width=width, layer="F.Cu", net=ex.net))
+    after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    current, current_ends = _external_contacts(after, pcb.segments, added, None)
+    if len(after.components()) != 1 or not contacts <= current or not ends <= current_ends:
+        return None
+    return added
+
+
+def _usb2_electrical_limits_ok(pcb: PCB, path: Path) -> bool:
+    """Require measured coupling and compliant impedance for the two changed rails."""
+    classes = net_class_map_from_path(path.with_name("net_class_map.json"), pcb_path=path)
+    if any(net not in classes or not classes[net].target_diff_impedance for net in _USB2_NETS):
+        return False
+    # Only this pair is declared for the staged check. The continuity rule emits
+    # below-threshold pairs even without verbose passing measurements, using the
+    # full-precision fractions before rounding their report values.
+    checker = DRCChecker(
+        pcb, layers=len(pcb.copper_layers), net_class_map={net: classes[net] for net in _USB2_NETS}
+    )
+    continuity = checker.check_diffpair_routing_continuity()
+    if (
+        continuity.rules_checked_by_rule.get("diffpair_routing_continuity") != 1
+        or continuity.violations
+    ):
+        return False
+    impedance = checker.check_impedance()
+    return _USB2_NETS not in checker.impedance_unmeasured_pairs and not any(
+        not v.items or set(v.items).intersection(_USB2_NETS) for v in impedance.violations
+    )
+
+
+def _clear_data_pair(
+    path: Path,
+    rules: DesignRules,
+    exits: tuple[_DataExit, ...],
+    nets: tuple[str, str],
+    width: float,
+    label: str,
+) -> int:
+    """Stage all the exits, verify their contacts, clearances and timing, then save once."""
+    pcb = PCB.load(path)
+    protected = _protected_ids(pcb)
+    tracks: list[Segment] = []
+    for ex in exits:
+        staged = _stage_data_exit(pcb, ex, protected, width)
+        if staged is None:
+            return 0
+        tracks.extend(staged)
+    if not _within_project_skew_budget(pcb, path, nets):
+        return 0
+    if nets == _USB2_NETS and not _usb2_electrical_limits_ok(pcb, path):
+        return 0
+    if not _copper_gap_ok(pcb, path, tracks, [], rules):
+        return 0
+    if not _authored_rules_ok(pcb, path, tracks, [], label + " exits"):
+        return 0
+    pcb.save(path)
+    print(f"   pad departure {label} pair: {len(exits)} exits rebuilt at {width} mm")
+    return len(exits)
+
+
+def _center_u1_ground_entry(path: Path, rules: DesignRules, mask_clearance: float) -> int:
+    """Reconnect the seed-42 U1.32 ground branch from the pad center to its original via."""
+    pcb = PCB.load(path)
+    fp = pcb.get_footprint("U1")
+    if fp is None or fp.name != _U1_QFN or fp.layer != "F.Cu" or fp.rotation:
+        return 0
+    pad = next((p for p in fp.pads if p.number == "32"), None)
+    center = pcb.get_pad_position("U1", "32")
+    if (
+        pad is None
+        or pad.type != "smd"
+        or pad.net_name != "GND"
+        or center is None
+        or pad.rotation
+        or pad.shape != "rect"
+        or pad.size != (0.3, 0.7)
+        or "F.Mask" not in pad.layers
+    ):
+        return 0
+
+    x, y = center
+    branch = _xy((x - 0.70, y + 0.15))
+    tip = _xy((x - 0.20, y + 0.15))
+    seat = _xy((x - 0.75, y + 0.15))
+    turn = _xy((x - 0.60, y))
+    # Both original runs extend into the pad opening from the same side.
+    # Match their endpoints and widths, including files with reversed segments.
+    old = [
+        s
+        for s in pcb.segments
+        if s.net_name == "GND" and s.layer == "F.Cu" and tip in (_xy(s.start), _xy(s.end))
+    ]
+    if len(old) != 2 or {
+        (_xy(s.end) if _xy(s.start) == tip else _xy(s.start), s.width) for s in old
+    } != {(branch, 0.20), (seat, 0.15)}:
+        return 0
+    protected = _protected_ids(pcb)
+    if any(s.locked or (s.uuid or "").lower() in protected for s in old):
+        return 0
+    barrels = [
+        i
+        for i, via in enumerate(pcb.vias)
+        if via.net_name == "GND" and _xy(via.position) == seat and "F.Cu" in via.layers
+    ]
+    shapes = _departure_mask_shapes(pcb, fp, pad)
+    if len(barrels) != 1 or shapes is None:
+        return 0
+    barrel = barrels[0]
+    _, opening = shapes
+    if (
+        LineString([turn, seat]).distance(opening) < 0.20 / 2 + mask_clearance
+        or Point(seat).distance(opening) < pcb.vias[barrel].size / 2 + mask_clearance
+    ):
+        return 0
+
+    validator = ConnectivityValidator(pcb)
+    before = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    if len(before.components()) != 1:
+        return 0
+    contacts, ends = _external_contacts(before, pcb.segments, old, barrel)
+    if pcb.remove_segments(old) != len(old):
+        return 0
+    tracks = []
+    for start, end in pairwise((center, turn, seat)):
+        tracks.extend(pcb.add_trace(start, end, width=0.20, layer="F.Cu", net="GND"))
+    after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    new_contacts, new_ends = _external_contacts(after, pcb.segments, tracks, barrel)
+    if len(after.components()) != 1 or not contacts <= new_contacts or not ends <= new_ends:
+        return 0
+    if not _copper_gap_ok(pcb, path, tracks, [], rules):
+        return 0
+    if not _authored_rules_ok(pcb, path, tracks, [], "U1.32 ground entry"):
+        return 0
+    pcb.save(path)
+    return 1
 
 
 def clear_pad_departures(path: Path, rules: DesignRules) -> int:
@@ -1280,4 +1673,7 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
             ("9", ((-0.15, -0.15), (-0.15, -0.20), (-0.9798, -0.20))),
         ),
     )
-    return edits + _clear_clock_pair(path, rules)
+    edits += _clear_clock_pair(path, rules)
+    edits += _clear_data_pair(path, rules, _DATA_EXITS, _DATA_NETS, _DATA_WIDTH, "MIPI data")
+    edits += _clear_data_pair(path, rules, _USB2_EXITS, _USB2_NETS, 0.25, "USB2")
+    return edits + _center_u1_ground_entry(path, rules, request.policy.warning_clearance_mm)

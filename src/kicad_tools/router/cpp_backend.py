@@ -1037,6 +1037,36 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
     return " | ".join(parts)
 
 
+def _failure_reason_token_for_int(reason: int) -> str:
+    """Short stable token for a ``FAILURE_*`` code (#8486)."""
+    if router_cpp is None:
+        return "unknown"
+    tokens = {
+        int(router_cpp.FAILURE_NONE): "none",
+        int(router_cpp.FAILURE_NO_PATH): "no_path",
+        int(router_cpp.FAILURE_ITERATION_LIMIT): "iteration_limit",
+        int(router_cpp.FAILURE_TIMEOUT): "timeout",
+        int(router_cpp.FAILURE_VIA_VIA_BLOCKED): "via_via_blocked",
+        int(router_cpp.FAILURE_PAIRWISE_BLOCKED): "pairwise_blocked",
+    }
+    return tokens.get(int(reason), f"reason_{int(reason)}")
+
+
+def _failure_reason_token(result) -> str:
+    """Short stable token for a ``RouteResult``'s ``FAILURE_*`` code (#8486).
+
+    The per-attempt diagnostic records each native search's outcome; a
+    one-word token (``timeout``, ``no_path``, ...) is what lets a saved
+    trace distinguish a drained wall-clock budget from a geometric
+    dead-end without importing the extension's enum at the read side.
+    """
+    if router_cpp is None:
+        return "unknown"
+    return _failure_reason_token_for_int(
+        int(getattr(result, "failure_reason", router_cpp.FAILURE_NONE))
+    )
+
+
 class CppGrid:
     """C++ Grid3D wrapper matching RoutingGrid interface.
 
@@ -1469,6 +1499,11 @@ class CppGrid:
         self._off_grid_stored_segments.clear()
 
 
+def _python_fallback_total_seconds(pathfinder: CppPathfinder) -> float:
+    """Total wall time spent in the Python fallback A* so far (Issue #8486)."""
+    return float(sum(getattr(pathfinder, "_python_fallback_seconds_by_reason", {}).values()))
+
+
 class CppPathfinder:
     """C++ Pathfinder wrapper.
 
@@ -1842,6 +1877,18 @@ class CppPathfinder:
         if os.environ.get("KCT_DEBUG_PNT"):
             self._per_call_timing_enabled = True
         self._per_call_timings: list[dict] = []
+        # Issue #8486: per-attempt diagnostic populated by ``_route_impl``
+        # ONLY while per-call timing is enabled, and merged into the record
+        # ``route()`` appends -- the chosen pad pair, the legal goal
+        # bounds/layers, the escape-fence decision and each native search's
+        # duration and outcome.  The November 24 private-board trace could
+        # not attribute its three unexplained 30 s attempts because the
+        # per-call record carried only net/elapsed/budget/success; these
+        # fields let a saved trace say WHICH connection and target was
+        # considered, whether every legal goal layer was fence-covered, and
+        # which search of a fenced/unfenced pair was skipped or retried.
+        # Always local: nothing here is logged or exported by this class.
+        self._attempt_diagnostic: dict | None = None
 
         # Issue #3002 (PR #3006 follow-up): Foreign-net via context for the
         # segment-vs-foreign-via clearance gate.  Mirrors the Python
@@ -2102,6 +2149,25 @@ class CppPathfinder:
         actually waited" measurement (a deadline-honoring inner search
         will still be bracketed by the timeout, plus a small fixed setup
         cost).
+
+        Issue #8486: each record also carries the per-attempt diagnostic
+        ``_route_impl`` collected -- ``start_pad``/``end_pad`` (e.g.
+        ``"U1.1"``), ``start_bounds``/``end_bounds`` (the pads' metal
+        boxes in grid cells), ``start_layers``/``end_layers`` (legal grid
+        layer indices), ``goal_covered`` (whether every legal goal cell
+        was trace-fence covered; ``None`` when the connection had no
+        escape fences), ``fence_decision`` (``"none"`` / ``"applied"`` /
+        ``"skipped-covered"``), ``searches`` (one dict per native search:
+        ``fenced``, ``elapsed``, ``succeeded``, ``failure_reason`` token)
+        and, when the attempt was handed off, ``python_fallback``, plus the
+        wall-time split ``native_search_seconds`` (the fresh searches),
+        ``python_fallback_seconds`` (the fallback A*) and ``other_seconds``
+        (the remainder: setup, stored-route sync, clearance-validation
+        resumes), which sum to ``elapsed``.  These
+        fields distinguish a drained fenced search from a pre-empted one
+        and name the exact connection and target considered -- the data
+        the November 24 board trace lacked.  Purely observational: the
+        produced copper is identical with tracing off and on.
 
         Returns:
             The list of timing records since the last drain (or since
@@ -2564,6 +2630,10 @@ class CppPathfinder:
         # A skipped native search or Python fallback must not inherit the
         # preceding edge's failure evidence (#9900).
         self._last_failure_info = None
+        # Issue #8486: same per-edge discipline for the trace diagnostic -- an
+        # attempt that returns before ``_route_impl`` assigns it (no legal
+        # layer) must not record the previous attempt's pad pair/searches.
+        self._attempt_diagnostic = None
         if self._py_router is not None:
             self._py_router.last_route_exhausted = False
             self._py_router.last_route_deadline_hit = False
@@ -2595,6 +2665,9 @@ class CppPathfinder:
                     self.clear_avoidance_costs()
 
         t0 = time.monotonic()
+        # Issue #8486: the Python fallback's wall time is already summed by
+        # reason; the call's share is the delta across this ``route()``.
+        fallback_s0 = _python_fallback_total_seconds(self)
         succeeded = False
         try:
             result = self._route_impl(
@@ -2628,16 +2701,35 @@ class CppPathfinder:
                 and per_net_timeout > 0
                 and elapsed > per_net_timeout * 1.2 + 0.5
             )
-            self._per_call_timings.append(
-                {
-                    "net": start.net,
-                    "net_name": start.net_name,
-                    "elapsed": elapsed,
-                    "per_net_timeout": per_net_timeout,
-                    "deadline_violated": deadline_violated,
-                    "succeeded": succeeded,
-                }
-            )
+            record = {
+                "net": start.net,
+                "net_name": start.net_name,
+                "elapsed": elapsed,
+                "per_net_timeout": per_net_timeout,
+                "deadline_violated": deadline_violated,
+                "succeeded": succeeded,
+            }
+            # Issue #8486: fold in the per-attempt diagnostic ``_route_impl``
+            # collected (pad pair, goal bounds/layers, fence decision,
+            # per-search duration+outcome, Python-fallback handoff).  The
+            # fields exist only under :meth:`enable_per_call_timing`, so a
+            # drained record keeps its historical shape on the fast path.
+            # ``getattr`` keeps duck-typed test doubles working (#5504's
+            # SimpleNamespace pathfinder).
+            diag = getattr(self, "_attempt_diagnostic", None)
+            if diag is not None:
+                record.update(diag)
+                # Issue #8486: split the call's wall time three ways so a
+                # trace says where a slow attempt went -- fresh native
+                # searches, the Python fallback A*, and everything else
+                # (setup, stored-route sync, clearance-validation resumes).
+                # Pure arithmetic over clocks already taken.
+                native_s = sum(float(sr["elapsed"]) for sr in diag.get("searches", ()))
+                fallback_s = max(0.0, _python_fallback_total_seconds(self) - fallback_s0)
+                record["native_search_seconds"] = native_s
+                record["python_fallback_seconds"] = fallback_s
+                record["other_seconds"] = max(0.0, elapsed - native_s - fallback_s)
+            self._per_call_timings.append(record)
             # Issue #3474 R1: live slow-call tracing under KCT_DEBUG_PNT.
             if os.environ.get("KCT_DEBUG_PNT") and (deadline_violated or elapsed > 5.0):
                 print(
@@ -2909,19 +3001,39 @@ class CppPathfinder:
             via_size=net_via_size,
         )
         fence_state = {"on": bool(escape_fences)}
-        # Issue #8486: a fenced search whose EVERY legal goal cell is covered
-        # by an infinite trace fence can never accept a goal -- the native A*
-        # refuses those cells on trace steps and via landings alike, and only
-        # a start seed (which needs no step) could bypass that.  On the
-        # reported 97-net board the unfenced retry after such fenced
-        # timeouts consumed 942.72 s of duplicate second searches.  When the
-        # goal is provably fence-covered, skip the hopeless fenced search and
-        # run the unfenced one directly with the FULL budget: the fenced
-        # search was certain to fail, so the produced copper is exactly the
-        # old failed-fenced-then-unfenced sequence's, minus its wasted first
-        # budget.  Sound-only: any uncovered goal cell, a start seed that is
-        # itself a goal, or an empty goal box keeps the fenced search.
-        if escape_fences and trace_fences_cover_goal(
+        # Issue #8486: per-attempt diagnostic (see ``_attempt_diagnostic`` in
+        # ``__init__``).  Populated only while per-call timing is enabled, so
+        # the production hot path is untouched.  The chosen pad pair, the
+        # legal goal bounds/layers and the fence verdict are exactly the
+        # fields the November 24 board trace lacked: they let a saved trace
+        # say which connection and target was considered and whether every
+        # legal goal layer was fence-covered.  Local-only by construction --
+        # nothing here is logged, written or exported by this class.
+        diag: dict | None = None
+        if self._per_call_timing_enabled:
+            diag = {
+                "start_pad": f"{start.component_key}.{start.terminal_id or start.pin}",
+                "end_pad": f"{end.component_key}.{end.terminal_id or end.pin}",
+                "start_bounds": (
+                    int(start_pad_bounds.metal_gx1),
+                    int(start_pad_bounds.metal_gy1),
+                    int(start_pad_bounds.metal_gx2),
+                    int(start_pad_bounds.metal_gy2),
+                ),
+                "start_layers": sorted(int(l) for l in (start_layers or [])),
+                "end_bounds": (
+                    int(end_pad_bounds.metal_gx1),
+                    int(end_pad_bounds.metal_gy1),
+                    int(end_pad_bounds.metal_gx2),
+                    int(end_pad_bounds.metal_gy2),
+                ),
+                "end_layers": sorted(int(l) for l in (end_layers or [])),
+                "goal_covered": None,
+                "fence_decision": "none",
+                "searches": [],
+            }
+        self._attempt_diagnostic = diag
+        goal_covered = bool(escape_fences) and trace_fences_cover_goal(
             [
                 (
                     int(b.gx1),
@@ -2947,8 +3059,26 @@ class CppPathfinder:
                 int(start_pad_bounds.metal_gy2),
             ),
             start_layers=list(start_layers or []),
-        ):
+        )
+        if diag is not None and escape_fences:
+            diag["goal_covered"] = bool(goal_covered)
+            diag["fence_decision"] = "applied"
+        # Issue #8486: a fenced search whose EVERY legal goal cell is covered
+        # by an infinite trace fence can never accept a goal -- the native A*
+        # refuses those cells on trace steps and via landings alike, and only
+        # a start seed (which needs no step) could bypass that.  On the
+        # reported 97-net board the unfenced retry after such fenced
+        # timeouts consumed 942.72 s of duplicate second searches.  When the
+        # goal is provably fence-covered, skip the hopeless fenced search and
+        # run the unfenced one directly with the FULL budget: the fenced
+        # search was certain to fail, so the produced copper is exactly the
+        # old failed-fenced-then-unfenced sequence's, minus its wasted first
+        # budget.  Sound-only: any uncovered goal cell, a start seed that is
+        # itself a goal, or an empty goal box keeps the fenced search.
+        if escape_fences and goal_covered:
             fence_state["on"] = False
+            if diag is not None:
+                diag["fence_decision"] = "skipped-covered"
             self._escape_fence_fallbacks = getattr(self, "_escape_fence_fallbacks", 0) + 1
             self._escape_fence_preempted = getattr(self, "_escape_fence_preempted", 0) + 1
             logger.info(
@@ -3029,7 +3159,14 @@ class CppPathfinder:
                 search_intra_pair_clearance if partner_net_id >= 0 else -1.0,
             )
             # Round to the writer's grid before the binding narrows to float32.
-            return self._impl.route_resumable(
+            # Issue #8486: while per-call tracing is enabled, every native
+            # search launch (the first attempt, the slit-band retry, the
+            # fence fallback and any #5599 restart all funnel through here)
+            # records its fence state, duration and outcome -- the per-search
+            # view the single aggregate ``elapsed`` cannot give.  Pure
+            # observation: no budget, state or ordering is touched.
+            _search_t0 = time.monotonic() if diag is not None else 0.0
+            result = self._impl.route_resumable(
                 round(start.x, 4),
                 round(start.y, 4),
                 start_layer,
@@ -3086,6 +3223,16 @@ class CppPathfinder:
                 + self._under_body_budgets_for_net(start.net)
                 + (escape_fences if fence_state["on"] else []),
             )
+            if diag is not None:
+                diag["searches"].append(
+                    {
+                        "fenced": bool(fence_state["on"]),
+                        "elapsed": time.monotonic() - _search_t0,
+                        "succeeded": bool(result.success),
+                        "failure_reason": _failure_reason_token(result),
+                    }
+                )
+            return result
 
         try:
             if pending_routable is not None:
@@ -4668,6 +4815,21 @@ class CppPathfinder:
             shared per-net deadline is already exhausted, or the C++ failure
             was a wall-clock timeout per issue #3876).
         """
+        # Issue #8486: record the handoff in the per-attempt diagnostic so a
+        # saved trace can tell a native-only attempt from one that continued
+        # in the Python A* (the stored-via handoffs on the reported board).
+        # The fallback's own outcome is already the record's top-level
+        # ``succeeded``/``elapsed``; this notes WHY it was entered.
+        diag = getattr(self, "_attempt_diagnostic", None)
+        if diag is not None:
+            diag["python_fallback"] = {
+                "reason": str(reason),
+                "cpp_failure_reason": (
+                    _failure_reason_token_for_int(cpp_failure_reason)
+                    if cpp_failure_reason is not None
+                    else None
+                ),
+            }
         py_grid = self._grid._py_grid
         if py_grid is None:
             return None

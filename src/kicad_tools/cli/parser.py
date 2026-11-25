@@ -22,6 +22,7 @@ from kicad_tools.cli.check_categories import CHECK_CATEGORIES
 from kicad_tools.cli.copper_weight import add_check_copper_argument
 from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES, STACKUP_ID_HELP
 from kicad_tools.cli.format_options import add_format_flag
+from kicad_tools.cli.placement_options import add_decoupling_radius_argument
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
 __all__ = [
@@ -1136,6 +1137,15 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument(
+        "--prove-pour-stubs",
+        dest="prove_pour_stubs",
+        action="store_true",
+        help=(
+            "Prove redundant_copper_pour_stub findings with a native kicad-cli "
+            "zone refill per candidate branch (Issue #10137; slow, off by default)"
+        ),
+    )
+    check_parser.add_argument(
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
@@ -1400,6 +1410,20 @@ def _add_check_parser(subparsers) -> None:
             "auto-derivation."
         ),
     )
+    # Issue #10141: bypass_distance maximum cap-to-designated-pin distance.
+    # Declared on BOTH parsers + forwarded by the shim (parser-drift guard).
+    check_parser.add_argument(
+        "--bypass-max-distance",
+        dest="bypass_max_distance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Maximum distance in mm between a decoupling capacitor's supply "
+            "pad and the pad of the supply pin its schematic designates "
+            "before bypass_distance warns (default 3.0; issue #10141)."
+        ),
+    )
     # Issue #4595: sch_fields schematic field-geometry lint threshold.
     # Declared on BOTH parsers + forwarded by the shim (see the parser-drift
     # guard in tests/test_cli_parser_drift.py, issue #4633).
@@ -1560,6 +1584,12 @@ def _add_sch_parser(subparsers) -> None:
         help="Path to symbol library file (uses embedded lib_symbols when omitted)",
     )
     sch_pins.add_argument("--format", choices=["table", "json"], default="table")
+
+    sch_decoupling = sch_subparsers.add_parser(
+        "decoupling", help="Show each schematic bypass capacitor and its designated supply pin"
+    )
+    sch_decoupling.add_argument("schematic", help="Path to the root .kicad_sch file")
+    sch_decoupling.add_argument("--format", choices=["table", "json"], default="table")
 
     # sch pin-map
     sch_pin_map = sch_subparsers.add_parser("pin-map", help="Show resolved pin-to-net assignments")
@@ -2442,6 +2472,17 @@ def _add_sch_parser(subparsers) -> None:
         "--unannotated-only",
         action="store_true",
         help="Only assign numbers to unannotated (?) references",
+    )
+    sch_reannotate.add_argument(
+        "--pcb",
+        metavar="BOARD",
+        help="Also apply the renumbering to footprint references in this .kicad_pcb",
+    )
+    sch_reannotate.add_argument(
+        "--check",
+        action="store_true",
+        help="Check reference numbers in schematic position order and across electrical "
+        "partners. Exit 1 on either disagreement. Files are read-only.",
     )
     sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
 
@@ -6196,6 +6237,7 @@ def _add_placement_parser(subparsers) -> None:
         "optimize", help="Optimize placement for routability"
     )
     placement_optimize.add_argument("pcb", help="Path to .kicad_pcb file")
+    add_decoupling_radius_argument(placement_optimize)
     placement_optimize.add_argument("-o", "--output", help="Output file path")
     placement_optimize.add_argument(
         "--strategy",
@@ -6561,7 +6603,10 @@ def _add_optimize_placement_parser(subparsers) -> None:
             'Custom cost weights as JSON, e.g. \'{"wirelength": 2.0, "overlap": 1e6}\'. '
             "Keys: overlap, drc, boundary, wirelength, area, creepage, cohesion, "
             "decoupling (default 2.0: pull each decoupling cap onto the IC supply pin "
-            "it serves, then snap it beside that pin; 0 turns both off)"
+            "it serves, then snap it beside that pin; 0 turns both off), "
+            "group_cohesion and group_order (default 1.0 each: keep same-sheet "
+            "parts together and in schematic order on multi-sheet designs; 0 "
+            "turns both off)"
         ),
     )
     op_parser.add_argument(
@@ -6753,6 +6798,7 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "(Issue #9799). With this flag authored silk is byte-identical."
         ),
     )
+    add_decoupling_radius_argument(op_parser)
     op_parser.add_argument("-v", "--verbose", action="store_true")
     op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(op_parser)

@@ -27,6 +27,91 @@ URIs before exporting. Libraries supplied by KiCad's global installation
 are not copied; footprint libraries and 3D models are outside this symbol
 packaging support.
 
+## The Editable Project: One Basename, One Working Revision
+
+KiCad opens a project through one basename: `board.kicad_pro` pairs with
+`board.kicad_sch` and `board.kicad_pcb` in the same directory. Keep that
+layout for the working revision, and let an adjacent `VERSION.md` say which
+revision it holds:
+
+```
+board/
+├── board.kicad_pro     # net classes, design rules and library tables
+├── board.kicad_sch     # root sheet; its sub-sheets stay beside it
+├── board.kicad_pcb     # the working revision's board
+├── board.kicad_dru     # custom rules, when the board has them
+├── VERSION.md          # the working revision and where the retired ones are
+└── history/            # retired snapshots, suffixed with the revision they froze
+    └── board_v07.{kicad_pro,kicad_sch,kicad_pcb,kicad_dru}
+```
+
+The working revision always keeps the same file names. When a revision is
+finished, copy the trio into `history/` with the `_vNN` suffix of the revision
+it freezes, then continue editing the same `board.*` files as the next
+revision:
+
+| Step | Files in `board/` | `VERSION.md` |
+| --- | --- | --- |
+| Working on v07 | `board.kicad_pro`, `board.kicad_sch`, `board.kicad_pcb` | `Working revision: v07` |
+| v07 retired | add `history/board_v07.kicad_pro`, `history/board_v07.kicad_sch`, `history/board_v07.kicad_pcb` | v07 is frozen under `history/` |
+| Working on v08 | the same `board.kicad_pro`, `board.kicad_sch`, `board.kicad_pcb` | `Working revision: v08` |
+
+```markdown
+# board revisions
+
+Working revision: v08
+
+| Revision | Status | Where |
+| --- | --- | --- |
+| v07 | retired | `history/board_v07.kicad_pcb` |
+| v08 | working | `board.kicad_pcb` |
+```
+
+### What the package delivers
+
+`kct export` and `kct readiness --generate` put one openable project in
+`kicad_project.zip`: the board, its `.kicad_dru`, the project file and the
+root sheet share the root sheet's basename, and the `VERSION.md` kept beside
+the board travels with them.
+
+The checked files do not have to be laid out that way yet. A revisioned board
+(`board_v07.kicad_pcb` with `board_v07.kicad_pro`) or `kct route`'s
+`board_routed.kicad_pcb`, checked against `board.kicad_sch`, is packaged as
+one `board` project:
+
+| In `kicad_project.zip` | Checked source |
+| --- | --- |
+| `board.kicad_pcb` | `board_v07.kicad_pcb` |
+| `board.kicad_dru` | `board_v07.kicad_dru` |
+| `board.kicad_pro` | `board_v07.kicad_pro` |
+| `board.kicad_sch` | `board.kicad_sch` |
+| `VERSION.md` | written while packaging |
+
+The renaming happens in the archive only. The checked files are not modified,
+the packaged `board.kicad_pro` names itself correctly in `meta.filename`, and
+`VERSION.md` records the working revision and the table above, so the revision
+stays recoverable after extraction. With `--project-root` the archive keeps
+the project tree, so `${KIPRJMOD}/../` references still resolve, and the same
+renaming applies inside it.
+
+`kct readiness --verify` binds every member to its checked source: a changed
+source or an edited member fails verification. A bundle written before this
+layout, which keeps the checked file names, still verifies; regenerate it to
+receive the paired project. When the archive already holds another file under
+the project's name — the unrouted original's `board.kicad_pro` beside a
+`board_routed.kicad_pro`, for instance — readiness refuses before advertising
+the archive and names both files: keep only the selected board's project
+beside it, or rename one of them.
+
+If the checked root sheet lives in a different directory, the archive puts it
+beside the delivered board and moves its child sheets with it. Their relative
+paths stay intact. The project's library tables and libraries keep their paths
+relative to the delivered project. For a schematic tree outside the PCB
+directory, pass its root with `kct readiness --sch` and select their common
+directory with `--project-root`. If a child cannot travel with the root sheet,
+put the root beside the checked board and update its sheet references before
+exporting.
+
 ## Prerequisites
 
 ```bash
@@ -535,9 +620,9 @@ can land a quarter turn off in the fab's placement preview. Two sources of
 correction feed the CPL, and corrections are always **added** to the KiCad
 rotation (`(kicad + correction) % 360`):
 
-1. The shipped per-manufacturer table
-   (`manufacturers/data/jlcpcb_rotations.yaml`), keyed on footprint-name globs
-   such as `SOT-23*`.
+1. The shipped manufacturer table in `manufacturers/data/jlcpcb_rotations.yaml`
+   contains footprint defaults and corrections verified for individual catalog
+   parts on their KiCad footprints.
 2. A **per-project sidecar**, `cpl_rotations.yaml`, committed next to your
    `.kicad_pcb`. `kct export` and `kct readiness --generate` discover it
    automatically:
@@ -552,14 +637,25 @@ by_lcsc:             # every placement of that LCSC part
   C4991872: 270      # SJ-3523-SMT audio jack
 ```
 
-Precedence per placement is `by_reference` > `by_lcsc` > the shipped footprint
-table. A sidecar entry replaces the table's correction for that part; parts the
-sidecar does not name keep the table's. Prefer `by_lcsc` for connectors: the
-correction belongs to the fab's model of the LCSC part, and a footprint glob
-such as `PinHeader_*` would rotate every other header wrongly. The LCSC number
-is the one in the generated BOM (falling back to the footprint's `LCSC`
-property). Measure the offset by rotating the part in the fab's placement
-preview until the body sits on its pads.
+For each placement, the exporter first checks the project's `by_reference`
+and then `by_lcsc`. It next checks the manufacturer's catalog entry for the
+part and footprint, then the footprint default. It uses the first matching
+offset. The selected BOM part supplies the LCSC number when available. The PCB
+footprint's `LCSC` property is the fallback. With `--no-bom`, a JLCPCB export
+still reads part assignments from the design, project spec and any existing
+BOM selected for merging. To reuse catalog selections from an earlier export
+in another directory, pass `--merge-lcsc-from path/to/bom_jlcpcb.csv`.
+
+| JLCPCB part | KiCad footprint | Total offset |
+| --- | --- | ---: |
+| C51118 (AP2112K-3.3TRG1) and C19829593 (74LVC1G17GV) | SOT-23-5 | 270° |
+| C2286 (KT-0603R) and C12624 (KT-0603G) | LED_0603 | 0° |
+| C408389 (BAT54S) | SOT-23, three pins | 180° from the footprint default |
+
+Remove any post-export script adjustment for these parts before regenerating
+the CPL. For example, a C19829593 placed at 0° in KiCad exports at 270°.
+Before ordering, check lead alignment and pin 1 or polarity in JLCPCB's
+placement preview. [JLCPCB orientation guidance](https://jlcpcb.com/help/article/pcb-assembly-faqs-part-2)
 
 An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is not
 `Cnnnn`) fails the CPL step instead of silently shipping an uncorrected file.
@@ -568,8 +664,9 @@ An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is no
 
 - the sidecar is hashed as a readiness input, so editing, adding or deleting it
   makes the evidence stale and `--verify` fails;
-- `cpl_rotations.applied` lists each shifted placement (reference, which key
-  matched, degrees), and `cpl_rotations.sidecar_sha256` pins the sidecar;
+- `cpl_rotations.applied` records the reference, matched key and offset for
+  shifted placements and explicit catalog or project matches, including 0°.
+  `cpl_rotations.sidecar_sha256` pins the project sidecar;
 - `cpl_rotations.unreviewed` lists connectors, ICs, diodes, transistors, LEDs,
   switches, crystals/oscillators and jumpers (reference prefix
   `J`/`U`/`D`/`Q`/`LED`/`SW`/`Y`/`JP`/`X`) that **no** correction matched.
@@ -583,6 +680,54 @@ An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is no
   `readiness.json` records the reason under `cpl_rotations.rederivation_skipped`.
 
 The hand-edited-CSV route is not an option: it breaks the manifest checksums.
+
+## Retained recovery copies beside the board
+
+Export sometimes rewrites the source board itself under a verified-bytes
+check: refreshing the saved zone fills to match the generated DRC rules,
+and the default silk legalisation pass. Each successful checked rewrite
+keeps the displaced previous file as a recoverable copy in a sibling
+directory named
+`.<board>.kicad_pcb.recovery-<UTC timestamp>-<random>/original` (issue
+#10056). If KiCad or another editor still had the previous file open and
+saves into it after the export published, that save stays recoverable in
+the retained copy rather than being lost.
+
+If the exporter rolls back after the repaired board appeared at the live
+filename, the recovery directory also contains `provisional`, the file an
+editor could have opened during that interval. `withdrawn`, when present,
+is the file found at the live name during rollback. It can be another hard
+link to `provisional` or a separate file saved by an editor. Compare these
+files with the live PCB before discarding a recovery. Close any editors
+still writing those versions before cleanup.
+
+Inspect the retained versions with any diff tool:
+
+```bash
+diff boards/04-stm32-devboard/04-stm32-devboard.kicad_pcb \
+     boards/04-stm32-devboard/.04-stm32-devboard.kicad_pcb.recovery-*/original
+```
+
+One copy is kept per rewrite, so the directories accumulate until you
+remove them:
+
+```bash
+kct clean boards/04-stm32-devboard/04-stm32-devboard.kicad_pro --force
+```
+
+`kct clean` lists completed recovery copies in its default dry run and
+deletes them with `--force` while the board exists. If the project's PCB
+is a symlink, export retains the previous version beside the source board.
+Cleanup from the project finds that source's copies when the source is
+inside the project directory tree. For a source outside the project,
+run cleanup on the source project. The recovery API and cleanup preview
+order copies by their marker timestamps, with names breaking ties.
+
+The writer reserves
+the `complete` marker before moving the board. The copy becomes eligible
+for cleanup once the writer verifies the new board and removes its working
+link, `repaired`. A completed rollback renames that link to `provisional`
+after restoring the live name. Interrupted writes remain available for manual recovery.
 
 ## Next Steps
 

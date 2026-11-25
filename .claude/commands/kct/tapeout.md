@@ -2,7 +2,7 @@
 name: tapeout
 invocation: /kct:tapeout
 suggestedModel: sonnet
-description: Produce a complete, fab-ready export bundle for a routed board — or refuse loudly. Superset of the manufacturing-readiness skill: runs the three sign-off pre-gates, then adds a BOM part-number-resolution gate, a per-rule warning-review gate (assembly-affecting warnings block unless explicitly acknowledged), schematic + assembly-view PDFs, a human-readable README, and a manifest that checksums the entire final bundle. "tapeout returned 0" means "upload this directory as-is."
+description: Produce a complete, fab-ready export bundle for a routed board — or refuse loudly. Superset of the manufacturing-readiness skill: runs the three sign-off pre-gates, then adds a BOM part-number-resolution gate, a per-rule warning-review gate (assembly-affecting warnings block unless explicitly acknowledged), a circuit-review open-decisions gate (refuses while any decision is open), schematic + assembly-view PDFs, a human-readable README, and a manifest that checksums the entire final bundle. "tapeout returned 0" means "upload this directory as-is."
 ---
 
 # Tapeout
@@ -158,6 +158,17 @@ The distinction is load-bearing: **matcher-broken → refuse the whole tapeout**
 
 **Gate condition:** the per-rule warning table was derived from Gate 1's JSON report and printed in the tapeout report, **and** every assembly-affecting rule with a nonzero warning count carries an explicit acknowledgement (or all assembly-affecting counts are zero).
 
+### Gate 4c — circuit-review decisions (runs in both `--assembly` and `--pcb-only`)
+
+`{{skill:circuit-review}}` writes a `CIRCUIT_REVIEW.md` whose `### Open decisions` table lists every `blocker`/`warning` finding with a decision the owner must make (fix, or accept with a recorded reason). That is where datasheet-level findings used to get lost: the review found them, graded them `note`, and nothing downstream looked again. This gate closes the hand-off gap — it does **not** make circuit review mandatory.
+
+1. Look for `CIRCUIT_REVIEW.md` **beside the board** — in the same directory as the `.kicad_pcb` (the project directory), where a `.kicad_pro` or `readiness.json` would sit.
+2. **No document → the gate does not apply.** This is neither a refusal nor a pass: the tapeout report says **"no circuit review found"** (recorded in `README.txt`, Gate 7). A board that never had a circuit review is unaffected.
+3. **Document present → print its Open-decisions table in the tapeout report**, then apply a plain text rule — no JSON, no schema: **any row of the `### Open decisions` table whose Decision cell is exactly `open` is undecided.** A document that has no `### Open decisions` section at all (a review that predates the convention) prints that fact and does not refuse; the rule blocks only on an explicit `open` row.
+4. **Any undecided row ⇒ TAPEOUT REFUSED.** The decision belongs to the owner — fix the finding, or accept it with a reason by editing `open` to `fixed` / `accepted: <reason>` in the document — never to this skill. A table whose rows are all decided (or a `none — no blocker or warning findings` line) passes.
+
+**Gate condition:** either no `CIRCUIT_REVIEW.md` sits beside the board (and the report says "no circuit review found"), or its Open-decisions table was printed in the tapeout report and contains no row whose Decision cell is exactly `open`.
+
 ### Gate 5 — schematic PDF (full hierarchy)
 
 `kct export` does **not** produce human-reviewable drawings; generate them with `kicad-cli` into the same output directory:
@@ -203,11 +214,12 @@ Write `<dir>/README.txt` enumerating **every** deliverable in the bundle so a hu
 - **Declared BOM exemptions** (Gate 4, issue #8261) — one line per `exempt (declared)` ref from the `bom_lcsc_values` details: ref, category, reason. If none, say "no declared BOM exemptions."
 - **Hand-solder / THT items** (carried from the CPL's THT-exclusion note) — parts the assembler will *not* place and someone must hand-solder.
 - The **per-rule warning table** from Gate 4b (rule → warning count; not an aggregate total), and **one acknowledgement line per assembly-affecting rule with a nonzero count** — naming the rule, the count, and why the risk is accepted (from `--ack-warnings` or the recorded accepted-risk decision). If every assembly-affecting count is zero, state that explicitly.
+- The **circuit-review decision status** from Gate 4c: the Open-decisions table, or the statement "no circuit review found" (a document without an Open-decisions section says so). When a table is present, state that no decision is `open`.
 - A **Copper cleanup** line from Gate 0: segments/vias removed, or `copper_cleanup: skipped` when `--skip-cleanup` was passed.
 - An **Assembly prep** line per step from Gate 0b: `applied`, or `fiducials: skipped (--skip-fiducials)` / `board_info: skipped (--skip-board-info)` when opted out.
 - Any **accepted-risk notes** carried forward from sign-off docs (e.g. a documented DRC waiver). Waived findings in Gate 1's report (`"status": "waived"`) are listed one per line with their `key`, `waiver_reason` and reviewer from the board's `<board>.kct-waivers.json`. If none, say "no accepted-risk waivers."
 
-**Gate condition:** `README.txt` exists, names the board file, the tier, and the mode, **and** contains the per-rule warning table plus one acknowledgement line per assembly-affecting rule with a nonzero count (or the explicit statement that all assembly-affecting counts are zero).
+**Gate condition:** `README.txt` exists, names the board file, the tier, and the mode, **and** contains the per-rule warning table plus one acknowledgement line per assembly-affecting rule with a nonzero count (or the explicit statement that all assembly-affecting counts are zero), **and** carries the circuit-review decision status from Gate 4c (the Open-decisions table, or "no circuit review found").
 
 ### Gate 8 — full-bundle manifest (checksums the entire output dir)
 
@@ -256,10 +268,11 @@ Emit a **complete, orderable package** (manifest written, exit 0) **only if all 
 1. Pre-gates 1–3 (`{{skill:manufacturing-readiness}}`) sign off at the resolved tier (Gate 1 run with `--output <dir>/check-report.json`).
 2. Gate 4 BOM resolution: in `--assembly`, **zero** unresolved lines **and** resolution machinery intact (part-number column actually populated, not silently empty). Skipped in `--pcb-only`.
 3. Gate 4b warning review: the **per-rule** warning table derived from Gate 1's JSON report and printed (an aggregate total alone does not satisfy this), **and** every assembly-affecting rule with a nonzero warning count explicitly acknowledged — or all assembly-affecting counts are zero. **"0 errors + an aggregate warning total" is never sufficient for this verdict.**
-4. Gate 5 schematic PDF present and fresh.
-5. Gate 6 both assembly-view PDFs present and non-empty.
-6. Gate 7 `README.txt` present, naming board + tier + mode, and carrying the per-rule warning table + per-rule acknowledgement lines (or the all-zero statement).
-7. Gate 8 full-bundle `manifest.json` covers **every** file in the output dir, records the per-rule warning counts, and is the newest artifact.
+4. Gate 4c circuit-review decisions: no `CIRCUIT_REVIEW.md` beside the board (report says "no circuit review found"), or its Open-decisions table printed **and** no row's Decision cell is `open`.
+5. Gate 5 schematic PDF present and fresh.
+6. Gate 6 both assembly-view PDFs present and non-empty.
+7. Gate 7 `README.txt` present, naming board + tier + mode, and carrying the per-rule warning table + per-rule acknowledgement lines (or the all-zero statement), plus the circuit-review decision status from Gate 4c.
+8. Gate 8 full-bundle `manifest.json` covers **every** file in the output dir, records the per-rule warning counts, and is the newest artifact.
 
 If any applicable gate fails or could not run, **do not write the final manifest**. Report **TAPEOUT REFUSED**, name the failing gate, and quote the specific violation(s). Never emit a manifest — and never imply "upload as-is" — on a partial run.
 
@@ -272,6 +285,7 @@ Refuse the tapeout, loudly, when any of these hold:
 - **A blocking check's coverage is `unknown`** — "unknown is not pass" (issue #5946). Gate 1's report carries a `coverage` map (one entry per check: `checked`, `skipped:<reason>` or `unknown:<reason>`, plus `blocking`), and `summary.coverage_blocking_unknown` lists every blocking check that could not evaluate the board (e.g. `segment_zone` with `zone_fills_absent`, `diffpair_length_skew` with `needs_input:net_class_map`, `courtyard_overlap` with `no_courtyard_geometry (N of M footprints)`). Zero findings from such a check is not a pass: refuse, quote the names and reasons, and say which input to supply (refill zones, pass the net-class map, fix the `.kicad_pro`, give each footprint named by a `courtyard_missing` warning an `F.CrtYd` outline or, for a part with no body, set `(attr ... allow_missing_courtyard)`). `kct readiness` enforces the same rule in its `kct_check` gate.
 - **A stale evidence-bound waiver** — `summary.stale_waivers` is nonzero, or any finding carries `"waiver_status": "stale"`. The geometry or nets under a reviewed waiver changed, so the finding is active again; it must be re-reviewed (and re-waived with `kct check --waive <key> --waive-reason ... --waive-reviewer ...` only if still intentional), never carried forward as accepted risk.
 - **Unacknowledged assembly-affecting warnings (Gate 4b)** — any rule in the assembly-affecting set (`silk_over_copper`, `silkscreen_line_width`, `silk_edge_clearance`, `silk_overlap`, `silk_ref_obscured`, `thermal_asymmetry`, `courtyard_missing`, at minimum) has a nonzero warning count with no matching `--ack-warnings` entry or per-rule accepted-risk line. Quote the per-rule warning table in the refusal. "0 errors" is not "fit to fabricate" — these two claims must never be conflated by this skill.
+- **Open circuit-review decisions (Gate 4c)** — a `CIRCUIT_REVIEW.md` sits beside the board and its Open-decisions table has a row whose Decision cell is still `open`. Quote the table in the refusal and name the findings; the owner must edit each `open` to `fixed` or `accepted: <reason>` (or delete a review that no longer applies) before re-running. No document beside the board is **not** a refusal.
 - **`--assembly` with unresolved BOM lines** — one or more components have no fab-orderable part number (human selection required). Surface the unresolved report; do not ship an incomplete assembly order.
 - **LCSC part/package check failed or unverified (Gate 4, `--assembly`)** — the manifest's `bom_lcsc_values` preflight entry is `FAIL`, is missing, or is `WARN` with `unverified` lines not covered by a declared spec exemption, or reports an `exempt ref carries a verifiable LCSC part` conflict (issues #8113, #8261). Quote the offending `details` lines.
 

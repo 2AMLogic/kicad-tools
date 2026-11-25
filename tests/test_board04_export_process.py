@@ -1,6 +1,7 @@
 """Board04 export must retain its reviewed paid-drill contract in the package."""
 
 import importlib.util
+import io
 import json
 import shutil
 import subprocess
@@ -16,6 +17,45 @@ from kicad_tools.export.manufacturing import (
 )
 
 BOARD = Path(__file__).resolve().parents[1] / "boards/04-stm32-devboard"
+
+
+@pytest.mark.parametrize(("ref", "pin"), [("C16", "2"), ("U2", "25"), ("U2", "5")])
+def test_published_front_mask_clears_the_rerouted_conductors(ref, pin):
+    """Check the actual fabrication aperture against the copper in the shipped PCB."""
+    from shapely.geometry import LineString, Point
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.gerber_geometry import parse_gerber_geometry
+    from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+    output = BOARD / "output"
+    pcb = PCB.load(output / "stm32_devboard_routed.kicad_pcb")
+    with zipfile.ZipFile(output / "manufacturing.zip") as bundle:
+        with zipfile.ZipFile(io.BytesIO(bundle.read("kicad_project.zip"))) as project:
+            assert project.read(pcb.path.name) == pcb.path.read_bytes()
+        with zipfile.ZipFile(io.BytesIO(bundle.read("gerbers/gerbers.zip"))) as artwork:
+            mask = artwork.read("stm32_devboard_routed-F_Mask.gts").decode()
+    openings = parse_gerber_geometry(mask).geometry
+    ox, oy = pcb.board_origin
+
+    def absolute(pos):
+        return pos[0] + ox, pos[1] + oy
+
+    pad = next(p for p in pcb.get_footprint(ref).pads if p.number == pin)
+    centre = Point(absolute(pcb.get_pad_position(ref, pin)))
+    opening = next(p for p in openings.geoms if p.covers(centre))
+    floor = default_request_for_manufacturer("jlcpcb-tier1").policy.clearance_mm
+    for via in pcb.vias:
+        gap = opening.distance(Point(absolute(via.position))) - via.size / 2
+        assert gap >= floor, f"{ref}.{pin} to {via.net_name} via {via.uuid}: {gap:.6f} mm"
+    for track in pcb.segments:
+        if track.layer != "F.Cu":
+            continue
+        ends = [Point(absolute(p)) for p in (track.start, track.end)]
+        if track.net_name == pad.net_name and any(opening.covers(p) for p in ends):
+            continue  # The track terminates on its own land.
+        gap = opening.distance(LineString(ends)) - track.width / 2
+        assert gap >= floor, f"{ref}.{pin} to {track.net_name} track {track.uuid}: {gap:.6f} mm"
 
 
 def load_recipe():
@@ -59,7 +99,12 @@ def test_export_preserves_reviewed_floors_in_project_zip(monkeypatch, board):
     monkeypatch.setattr(ManufacturingPackage, "export", export)
     assert recipe.generate_manufacturing(board, board.parent)
     with zipfile.ZipFile(board.parent / "manufacturing/kicad_project.zip") as archive:
-        project = json.loads(archive.read("stm32_devboard_routed.kicad_pro"))
+        # The routed project is delivered under the root sheet's basename, the
+        # one project KiCad opens with schematic and board together (#10108).
+        project = json.loads(archive.read("stm32_devboard.kicad_pro"))
+        assert project["meta"]["filename"] == "stm32_devboard.kicad_pro"
+        assert archive.read("stm32_devboard.kicad_pcb") == board.read_bytes()
+        assert "stm32_devboard_routed.kicad_pro" not in archive.namelist()
         for name in ("board04_symbols.kicad_sym", "kicad_tools_pwr.kicad_sym", "sym-lib-table"):
             assert archive.read(name) == (board.parent / name).read_bytes()
     rules = project["board"]["design_settings"]["rules"]

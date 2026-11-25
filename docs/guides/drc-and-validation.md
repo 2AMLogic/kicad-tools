@@ -637,6 +637,23 @@ Parts Library                     LCSC        None       Global   Seeed OPL
 
 Note: 2-layer boards typically have slightly relaxed via constraints compared to 4-layer, but may have stricter trace width requirements when using 2oz copper.
 
+### JLCPCB 4-layer 1 oz: JLCDFM grades 0.1 mm outer tracks Danger
+
+The JLCPCB profile's 4-layer 1 oz minimum trace width is 0.1016 mm (4 mil), the
+published capability, and `kct check` still reports it as an **error** only below
+that floor. On the reported four-layer board, JLCDFM rated every 0.1016 mm
+outer-layer track **Danger** (listed as "0.1 mm") and every 0.1524 mm (6 mil)
+track Good. The report did not specify copper weights. The profile applies this
+advisory to the four-layer 1 oz outer / 0.5 oz inner stackup. `kct check --mfr jlcpcb` therefore adds a
+**warning** (`dimension_trace_width`) for outer-layer tracks (`F.Cu` / `B.Cu`)
+narrower than 0.1524 mm on that stackup, so the finding is visible before upload.
+
+Limits of the evidence: only those two widths were observed, so JLCDFM's exact
+Danger/Warning/Good edges between them are unknown; inner layers and other
+stackups have no recorded observation and get no warning. The threshold and its
+provenance are the optional `trace_width` entry of `4layer_1oz` in
+`src/kicad_tools/manufacturers/data/jlcpcb.yaml` (`dfm_thresholds`, issue #10173).
+
 ## Python API: Get Manufacturer Rules
 
 ```python
@@ -918,6 +935,36 @@ From the Python API, `ViaUnderBodyRule` takes `footprint_pattern` (default
 `QFN|DFN|SON|LGA`; QFP and BGA are opt-in), `include_references`,
 `exclude_references`, `allow_thermal_pad_vias`, `fallback_to_courtyard`
 and `severity`.
+
+### Bypass Capacitor Too Far From Its Supply Pin
+
+**Warning:** `bypass_distance` — `C1 is 41.00mm from U1 pin 1, the supply pin its schematic designates (derived: shared drawn wire, 5.08 mm on sheet); maximum 3mm ...`
+
+A decoupling cap only helps the supply pin it serves. This rule does **not**
+pair a cap with the nearest power pad on its rail (which mis-pairs when two
+ICs share a rail and their caps are swapped). It measures from the cap's
+supply pad to the pad of the pin the **schematic** designates, using the same
+cap-to-pin association as `kct detect-mistakes` (`schematic_cap_associations`;
+an explicit `KCT_Decouples` symbol field overrides the drawn inference).
+
+Findings:
+
+- `bypass_distance` (warning) — the distance exceeds the maximum
+  (`--bypass-max-distance MM`, default 3.0). A cap on the opposite board side
+  from its pin is measured in XY and the finding says so.
+- `bypass_distance_unassociated` (info) — the schematic designates no
+  defensible pin for the cap (or the cap/pin is not on the board). The distance
+  was **not** checked; that is neither a failure nor a pass.
+
+Without a resolvable schematic (and under `--drc-only`) the category does not
+run, and the coverage report lists it as `unknown (needs_input:schematic)`.
+
+**Fix:** Move the cap beside its pin, correct the drawing (or set
+`KCT_Decouples` to `REF.PAD`) if the association is wrong, or waive in
+`.kct_waivers.json` with `"items": ["C1", "U1"]`. The rules are advisory, so
+they only fail `kct check` under `--strict`; the category is on by default, so
+a board that passed `--strict` before upgrading can newly fail. To opt out run
+`kct check --strict --skip bypass_distance`.
 
 ### Missing or Hidden Pin-1 Marker
 

@@ -50,22 +50,45 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.analysis.routing_quality import (
     RULE_OFF_AXIS_LENGTH_WARNING,
     off_axis_layer_warning_count,
 )
+from kicad_tools.core.package_publication import (
+    PUBLICATION_HOLD_PREFIX,
+    PublicationRegion,
+    publish_regions,
+)
+from kicad_tools.core.package_publication import (
+    PublicationBusy as ReadinessPublicationBusy,
+)
+from kicad_tools.core.package_publication import (
+    inventory_changes as _inventory_changes,
+)
+from kicad_tools.core.package_publication import (
+    is_publication_hold as _is_private_hold,
+)
+from kicad_tools.core.package_publication import (
+    publication_lock as _publication_lock,
+)
+from kicad_tools.core.package_publication import (
+    sha256_file as _sha256_file,
+)
+from kicad_tools.core.package_publication import (
+    with_changes as _with_changes,
+)
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.sexp import ParseError, parse_file
 
-from .board_readiness import read_readiness, readiness_input_hash
+from .board_readiness import ReadinessLayout, read_readiness, readiness_input_hash
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
 from .kicad_toolchain import (
     KiCadEnvironmentError,
@@ -84,6 +107,9 @@ from .known_issues import (
     validate_known_issues,
 )
 
+if TYPE_CHECKING:
+    from kicad_tools.export.project_identity import ArchiveLayout
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -99,6 +125,7 @@ __all__ = [
     "build_report",
     "compare_fill_areas",
     "main",
+    "readiness_layout",
     "require_saved_fill_matches_refill",
     "resolve_options",
     "run_readiness",
@@ -139,6 +166,9 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
         "board_id_missing",
         # Issue #8884: a layer dominated (by length) by off-axis copper.
         "routing_quality_off_axis_length",
+        # Issue #10172: warning-band THT/anchor-via to SMD-pad spacing is a
+        # wave/selective-solder and rework hazard until acknowledged.
+        "tht_smd_spacing",
     }
 )
 
@@ -198,15 +228,6 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
-
-
-def _sha256_file(path: Path) -> str:
-    """Return the SHA256 hex digest of *path*'s bytes."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _iso_now() -> str:
@@ -402,6 +423,24 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
     return result
 
 
+#: Gerber creation date readiness stamps when ``SOURCE_DATE_EPOCH`` is unset
+#: (1980-01-01T00:00:00Z, the ZIP epoch).  Policy local to the Gerber plot so
+#: ``gerbers/gerbers.zip`` is a pure function of the board (Issue #10174);
+#: sign-off timestamps keep their real wall-clock meaning.
+READINESS_GERBER_EPOCH = 315532800
+
+
+def _readiness_gerber_epoch() -> datetime:
+    """Gerber creation date: a valid ``SOURCE_DATE_EPOCH``, else the constant."""
+    raw = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if raw.isdigit():
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            pass
+    return datetime.fromtimestamp(READINESS_GERBER_EPOCH, tz=timezone.utc)
+
+
 def _run_export(
     pcb: Path,
     manufacturer: str,
@@ -422,6 +461,7 @@ def _run_export(
             include_pnp=assembly,
             emit_drc_constraints=False,
             merge_lcsc_from=merge_lcsc_from,
+            gerber_source_date_epoch=_readiness_gerber_epoch(),
             preflight=PreflightConfig(
                 order_boards=quantity or PreflightConfig.order_boards,
                 inventory_covered=inventory_covered or frozenset(),
@@ -434,11 +474,14 @@ def _run_export(
         if not result.success:
             return EngineRun(False, "Generic manufacturing export failed")
         archive = output_dir / "kicad_project.zip"
+        sidecars = {pcb.with_suffix(".kicad_pro"), pcb.with_suffix(".kicad_dru")}
         with zipfile.ZipFile(archive, "a", zipfile.ZIP_DEFLATED) as zf:
             present = set(zf.namelist())
             for source in _project_dependencies(pcb, Path(pcb.anchor)):  # bounded upstream
                 if not source.is_relative_to(pcb.parent):
                     continue  # Collected later by _normalize_project_archive (#5813).
+                if source in sidecars:
+                    continue  # Already archived under the project identity's name.
                 relative = source.relative_to(pcb.parent).as_posix()
                 if relative not in present:
                     zf.write(source, relative)
@@ -932,6 +975,12 @@ class ReadinessOptions:
     # symbol/footprint libraries) may be collected from.  ``None`` keeps the
     # historical boundary (``board_dir``).
     project_root: Path | None = None
+    # Project-declared output root (Issue #10106): the directory a project-local
+    # ``[readiness] output_root`` TOML declaration resolved to.  The bundle,
+    # generated receipt, evidence and diagnostics publish under it (a sibling of
+    # ``board_dir`` for a ``kicad/`` + ``output/`` project layout) instead of the
+    # board-local tree.  ``None`` keeps the historical board-local destinations.
+    output_root: Path | None = None
     # Timestamp recorded as ``checked_at`` (and as every native DRC report's
     # ``date``, Issue #6962).  ``None`` means "now", fixed once per run.
     checked_at: str | None = None
@@ -986,6 +1035,34 @@ class ReadinessOptions:
     @property
     def assembly(self) -> bool:
         return self.mode == "assembly"
+
+
+def _input_base(options: ReadinessOptions) -> Path:
+    """The directory readiness receipt paths are keyed against.
+
+    Board-local runs (no declaration) key ``inputs`` against the board
+    directory; a project-declared output root (Issue #10106) keys them against
+    the declaring project, so board sources, sibling dependencies and the
+    released artifacts under the output root share one portable base.
+    """
+    return options.root if options.output_root is not None else options.board_dir
+
+
+def _report_path(options: ReadinessOptions) -> Path:
+    """Where this run's generated receipt belongs (``readiness.json``)."""
+    if options.output_root is not None:
+        return options.output_root / _REPORT_NAME
+    return options.board_dir / "output" / _REPORT_NAME
+
+
+def readiness_layout(options: ReadinessOptions) -> ReadinessLayout | None:
+    """The trusted receipt layout for a project-declared run (Issue #10106).
+
+    ``None`` keeps :func:`read_readiness`'s board-local contract.
+    """
+    if options.output_root is None:
+        return None
+    return ReadinessLayout(report=_report_path(options), input_base=options.root)
 
 
 @dataclass
@@ -1047,6 +1124,45 @@ def _find_sibling(pcb: Path, suffix: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _resolve_declared_output_root(
+    pcb: Path, board_dir: Path
+) -> tuple[Path | None, Path | None, str | None]:
+    """Resolve a project-local ``[readiness] output_root`` declaration (#10106).
+
+    Discovery starts at the selected PCB and resolves the declared value
+    against the declaring TOML's directory.  Returns ``(output_root,
+    declaring_project, error)``; the declaration establishes the project (used
+    as the run's root when ``--project-root`` is not given) and every run with
+    a declaration publishes under ``output_root``.  ``None`` output keeps the
+    historical board-local destinations (Issue #8766 refusals included).
+    """
+    from kicad_tools.config import ConfigError, find_readiness_output_root
+
+    try:
+        declaration = find_readiness_output_root(pcb.parent)
+    except ConfigError as exc:
+        return None, None, str(exc)
+    if declaration is None:
+        return None, None, None
+    output_root, declared_by = declaration
+    project_dir = declared_by.parent.resolve()
+    if output_root == project_dir or not output_root.is_relative_to(project_dir):
+        return (
+            None,
+            None,
+            f"[readiness] output_root in {declared_by.name} must resolve to a directory "
+            f"inside the project {project_dir}; got {output_root}",
+        )
+    if output_root == board_dir.resolve():
+        return (
+            None,
+            None,
+            f"[readiness] output_root in {declared_by.name} must not be the board directory "
+            f"itself ({output_root}); the release must not mix with the editable design",
+        )
+    return output_root, project_dir, None
+
+
 def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, str | None]:
     """Resolve CLI arguments into :class:`ReadinessOptions`.
 
@@ -1072,7 +1188,14 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         pcb = target
         board_dir = target.parent.parent if target.parent.name == "output" else target.parent
 
-    manufacturer = args.manufacturer or _discover_tier(board_dir, pcb)
+    # Project-declared output root (Issue #10106): resolve and validate the
+    # declaration before anything is read or created, so an unsafe root refuses
+    # here rather than mid-run.
+    output_root, declared_project, declaration_error = _resolve_declared_output_root(pcb, board_dir)
+    if declaration_error is not None:
+        return None, declaration_error
+
+    manufacturer = args.manufacturer or _discover_tier(board_dir, pcb, output_root=output_root)
     if manufacturer is None:
         return None, (
             "could not resolve a fabrication tier from the board recipe; "
@@ -1103,23 +1226,54 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             and pcb.resolve().is_relative_to(project_root)
         ):
             return None, f"--project-root {project_root} must contain the board {board_dir}"
+    if output_root is not None:
+        # The declaration itself establishes the project: its TOML's directory
+        # bounds sources and the declared output root when --project-root is
+        # not given (Issue #10106).  An explicit root must contain the declared
+        # output root; nothing outside the root is ever read (#5813 stands).
+        if project_root is None:
+            project_root = declared_project
+        elif not output_root.is_relative_to(project_root):
+            return None, (
+                f"--project-root {project_root} must contain the declared output root {output_root}"
+            )
     boundary = project_root or board_dir.resolve()
     if schematic is not None and not schematic.resolve().is_relative_to(boundary):
         return None, _outside_root_message(str(schematic), "schematic", project_root is not None)
     if schematic is not None and not schematic.is_file():
         return None, f"schematic not found: {schematic}"
 
-    output_dir = Path(args.output).resolve() if args.output else pcb.parent / "manufacturing"
-    if args.output and not output_dir.is_relative_to(board_dir.resolve()):
-        return None, f"--output must be inside the board directory {board_dir}; got {output_dir}"
-    if args.output and output_dir.name != "manufacturing":
-        return None, (
-            "--output must be a directory named 'manufacturing' (the readiness gate "
-            f"and tapeout-sign-off locate the bundle by that name); got {output_dir}"
-        )
-    evidence_dir = board_dir / "output" / _EVIDENCE_DIRNAME
-    if not (board_dir / "output").is_dir():
-        evidence_dir = board_dir / _EVIDENCE_DIRNAME
+    if output_root is not None:
+        # Declared layout (Issue #10106): the bundle, receipts, evidence and
+        # diagnostics publish under the project-declared output root.  An
+        # explicit --output keeps its working-directory-relative interpretation
+        # and must land inside the declared root.
+        output_dir = Path(args.output).resolve() if args.output else output_root / "manufacturing"
+        if args.output and not output_dir.is_relative_to(output_root):
+            return None, (
+                f"--output must be inside the declared output root {output_root}; got {output_dir}"
+            )
+        if output_dir.name != "manufacturing":
+            return None, (
+                "--output must be a directory named 'manufacturing' (the readiness gate "
+                f"and tapeout-sign-off locate the bundle by that name); got {output_dir}"
+            )
+        evidence_dir = output_root / _EVIDENCE_DIRNAME
+    else:
+        output_dir = Path(args.output).resolve() if args.output else pcb.parent / "manufacturing"
+        if args.output and not output_dir.is_relative_to(board_dir.resolve()):
+            return (
+                None,
+                f"--output must be inside the board directory {board_dir}; got {output_dir}",
+            )
+        if args.output and output_dir.name != "manufacturing":
+            return None, (
+                "--output must be a directory named 'manufacturing' (the readiness gate "
+                f"and tapeout-sign-off locate the bundle by that name); got {output_dir}"
+            )
+        evidence_dir = board_dir / "output" / _EVIDENCE_DIRNAME
+        if not (board_dir / "output").is_dir():
+            evidence_dir = board_dir / _EVIDENCE_DIRNAME
 
     vm_arg = getattr(args, "voltage_map", None)
     voltage_map = Path(vm_arg).resolve() if vm_arg else None
@@ -1182,7 +1336,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
     checked_at = getattr(args, "checked_at", None)
     try:
-        known_issues = _resolve_known_issues(board_dir, args, checked_at)
+        known_issues = _resolve_known_issues(board_dir, args, checked_at, output_root)
     except KnownIssueError as exc:
         return None, str(exc)
 
@@ -1214,6 +1368,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             fill_tolerance_mm2=float(args.fill_tolerance),
             operation="generate" if args.generate else "verify",
             project_root=project_root,
+            output_root=output_root,
             checked_at=checked_at,
             skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
             skip_fiducials=bool(getattr(args, "skip_fiducials", False)),
@@ -1229,13 +1384,18 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
 
 def _resolve_known_issues(
-    board_dir: Path, args: argparse.Namespace, checked_at: str | None
+    board_dir: Path,
+    args: argparse.Namespace,
+    checked_at: str | None,
+    output_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     """The board's recorded issues, updated by ``--known-issue`` / ``--resolve-known-issue``.
 
     Entries already recorded in ``output/readiness.json`` are carried forward:
     regenerating evidence must not silently drop a disclosure.  Only naming an
     issue in ``--resolve-known-issue`` removes it.  Offline and format-only.
+    A project-declared output root keeps its receipt at the declared location
+    (Issue #10106).
     """
     if checked_at:
         try:
@@ -1255,7 +1415,11 @@ def _resolve_known_issues(
             raise KnownIssueError(f"--resolve-known-issue {value!r}: expected an issue number")
         resolved.append(int(text))
     previous: list[dict[str, Any]] = []
-    report = board_dir / "output" / _REPORT_NAME
+    report = (
+        output_root / _REPORT_NAME
+        if output_root is not None
+        else board_dir / "output" / _REPORT_NAME
+    )
     if report.is_file():
         try:
             recorded_list = json.loads(report.read_text()).get("known_issues")
@@ -1268,12 +1432,15 @@ def _resolve_known_issues(
     return merge_known_issues(previous, added, resolved)
 
 
-def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
+def _discover_tier(board_dir: Path, pcb: Path, output_root: Path | None = None) -> str | None:
     """Read the fab tier from the board's own recipe/manifest, never a default."""
-    manifest = pcb.parent / "manufacturing" / "manifest.json"
-    tier = _read_json(manifest).get("manufacturer")
-    if isinstance(tier, str) and tier:
-        return tier
+    manifests = [pcb.parent / "manufacturing" / "manifest.json"]
+    if output_root is not None:
+        manifests.append(output_root / "manufacturing" / "manifest.json")
+    for manifest in manifests:
+        tier = _read_json(manifest).get("manufacturer")
+        if isinstance(tier, str) and tier:
+            return tier
     spec = board_dir / "project.kct"
     if spec.is_file():
         try:
@@ -2510,6 +2677,7 @@ def _bundle_files(output_dir: Path, exclude: Sequence[str] = ()) -> list[Path]:
         for p in output_dir.rglob("*")
         if p.is_file()
         and p.relative_to(output_dir).as_posix() not in excluded
+        and not _is_private_hold(p.relative_to(output_dir))
         and not _is_transient_local(p.relative_to(output_dir))
     )
 
@@ -2698,8 +2866,12 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
     """Every (resolved) file the archived project must contain to be the checked design.
 
     This is the single inventory shared by archive collection and provenance, so
-    nothing provenance requires can be missing from ``kicad_project.zip``.
+    nothing provenance requires can be missing from ``kicad_project.zip``. The
+    ``VERSION.md`` kept beside the board is part of it, so the revision record
+    travels with the editable project (Issue #10108).
     """
+    from kicad_tools.export.project_identity import VERSION_FILE
+
     explicit = options.project_root is not None
     sources: set[Path] = set()
     if options.pcb.is_file():
@@ -2707,6 +2879,9 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
         sources.update(
             p.resolve() for p in _project_dependencies(options.pcb, options.root, explicit)
         )
+        version = options.pcb.parent / VERSION_FILE
+        if version.is_file():
+            sources.add(version.resolve())
     if options.schematic is not None and options.schematic.is_file():
         sources.update(_schematic_hierarchy(options.schematic, options.root, explicit))
     if options.project is not None:
@@ -2720,43 +2895,119 @@ def _external_dependencies(options: ReadinessOptions) -> list[Path]:
     return [p for p in _required_sources(options) if not p.is_relative_to(board)]
 
 
-def _archive_names(options: ReadinessOptions, sources: Sequence[Path]) -> dict[Path, str]:
-    """Archive member names: PCB-directory relative, or root relative with externals."""
+def _archive_layout(options: ReadinessOptions, sources: Sequence[Path]) -> ArchiveLayout:
+    """Member names of the ``kicad_project.zip`` these inputs must deliver.
+
+    Names are PCB-directory relative, or project-root relative once any required
+    file lies outside the PCB directory (Issue #5813), so ``${KIPRJMOD}/../``
+    references keep working inside the archive. The board, its rules, the
+    project file and the root sheet are delivered under the project identity's
+    basename (Issue #10108).
+    """
+    from kicad_tools.export.project_identity import archive_layout, project_identity
+
+    identity = project_identity(options.pcb, options.project, options.schematic)
     base = options.pcb.parent.resolve()
-    if all(s.resolve().is_relative_to(base) for s in sources):
-        return {s: s.resolve().relative_to(base).as_posix() for s in sources}
-    return {s: s.resolve().relative_to(options.root).as_posix() for s in sources}
+
+    def in_board_directory(real: Path) -> str:
+        return real.parent.relative_to(base).as_posix()
+
+    def in_project_root(real: Path) -> str:
+        return real.parent.relative_to(options.root).as_posix()
+
+    directory_of = (
+        in_board_directory
+        if all(source.resolve().is_relative_to(base) for source in sources)
+        else in_project_root
+    )
+    return archive_layout(identity, sources, directory_of)
 
 
 def _normalize_project_archive(options: ReadinessOptions) -> None:
-    """Make kicad_project.zip contain every file provenance requires (#5813).
+    """Make kicad_project.zip the editable project provenance requires (#5813, #10108).
 
     The exporter only archives the PCB directory's top level and its library
     folders.  Sub-sheets in a subdirectory, ``${KIPRJMOD}/../`` libraries and
     out-of-directory schematics are added here.  When any required file lies
     outside the PCB directory, members are re-rooted relative to the project
     root so that ``${KIPRJMOD}/../x`` references keep working inside the archive.
-    Members the exporter already wrote are never overwritten: provenance must
-    still see (and reject) an export that archived the wrong bytes.
+
+    The board, its rules, the project file and the root sheet then take the
+    project identity's basename so KiCad opens them as one project.  A member
+    the exporter already wrote is moved, never re-read, and a ``VERSION.md``
+    member records the renaming: provenance must still see (and reject) an
+    export that archived the wrong bytes.  When another file already occupies
+    the delivered name, nothing is renamed and :class:`ProjectIdentityError`
+    names both files.
     """
+    from kicad_tools.export.project_identity import ProjectIdentityError
+
     archive = options.output_dir / "kicad_project.zip"
     if not archive.is_file():
         return
-    required = _required_sources(options)
-    names_for = _archive_names(options, required)
+    layout = _archive_layout(options, _required_sources(options))
     base = options.pcb.parent.resolve()
-    rerooted = not all(s.is_relative_to(base) for s in required)
+    rerooted = not all(source.is_relative_to(base) for source in layout.names)
+    members = {}
     with zipfile.ZipFile(archive) as zf:
-        members = {
-            info.filename: zf.read(info.filename) for info in zf.infolist() if not info.is_dir()
-        }
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            if info.filename in members:
+                raise ProjectIdentityError(
+                    f"duplicate file identities in kicad_project.zip: {info.filename}"
+                )
+            members[info.filename] = zf.read(info)
     prefix = base.relative_to(options.root).as_posix() if rerooted else "."
-    rebuilt = {(f"{prefix}/{n}" if prefix != "." else n): d for n, d in members.items()}
-    missing = [s for s in required if names_for[s] not in rebuilt]
-    if not missing and not rerooted:
+    board = options.pcb.resolve()
+    board_names = {layout.checked(board), layout.names[board]}
+    if prefix != "." and board_names.isdisjoint(members):
+        rebuilt = {f"{prefix}/{name}": data for name, data in members.items()}
+    else:
+        if prefix != "." and any(Path(name).name in members for name in board_names):
+            raise ProjectIdentityError(
+                "kicad_project.zip contains the selected board under both PCB-relative and "
+                "project-root paths; keep only one editable project"
+            )
+        rebuilt = members.copy()
+    version = layout.identity.version_source
+    if version is not None and layout.record_name in rebuilt:
+        if rebuilt[layout.record_name] not in (version.read_bytes(), layout.record):
+            raise ProjectIdentityError(
+                f"{layout.record_name} inside kicad_project.zip differs from the checked "
+                "revision record; regenerate the export with the current VERSION.md"
+            )
+    for source, delivered in layout.names.items():
+        checked = layout.checked(source)
+        if delivered == checked:
+            continue
+        if delivered in rebuilt:
+            if checked in rebuilt:
+                raise ProjectIdentityError(
+                    f"kicad_project.zip cannot deliver {checked} as {delivered}: another file "
+                    "is already archived under that name. Keep only the selected board's "
+                    "project beside it, or rename one of the two files"
+                )
+            continue
+        if checked in rebuilt:
+            rebuilt[delivered] = rebuilt.pop(checked)
+    for source, delivered in layout.names.items():
+        if delivered not in rebuilt:
+            rebuilt[delivered] = source.read_bytes()
+        rebuilt[delivered] = layout.member_bytes(source, rebuilt[delivered])
+    if layout.record is not None:
+        rebuilt[layout.record_name] = layout.record
+    else:
+        rebuilt.pop(layout.record_name, None)
+    delivered_names = set(layout.names.values())
+    for name in [
+        name
+        for name in rebuilt
+        if name.endswith((".kicad_pcb", ".kicad_pro", ".kicad_dru")) and name not in delivered_names
+    ]:
+        del rebuilt[name]
+    if rebuilt == members:
         return
-    for source in missing:
-        rebuilt[names_for[source]] = source.read_bytes()
     tmp = archive.with_suffix(".zip.tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in sorted(rebuilt):
@@ -2781,9 +3032,14 @@ def _is_project_local_library_member(relative: str) -> bool:
 def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     """Match PCB and native dependencies by relative path, not basename.
 
-    When every problem is a project-local library member missing from the zip,
-    one extra line says the bundle predates the exporter writing them (#8749).
-    Pass/fail is unchanged.
+    The board, its rules, the project file and the root sheet must appear under
+    the delivered project's basename (Issue #10108), byte-equal to the checked
+    sources once the declared packaging transforms are applied. A bundle
+    written before that rule is accepted while it keeps every renamed file
+    under its checked name, even when another archived file already holds the
+    delivered name; mixing the two is not. When every problem is a
+    project-local library member missing from the zip, one extra line says the
+    bundle predates the exporter writing them (#8749). Pass/fail is unchanged.
     """
     archive = options.output_dir / "kicad_project.zip"
     problems: list[str] = []
@@ -2792,19 +3048,60 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
         sources = set(_required_sources(options)) | {options.pcb.resolve()}
         if options.schematic is not None:
             sources.add(options.schematic.resolve())
-        names_for = _archive_names(options, sorted(sources))
+        layout = _archive_layout(options, sorted(sources))
         with zipfile.ZipFile(archive) as zf:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
             if len(names) != len(set(names)):
                 problems.append("duplicate file identities in kicad_project.zip")
+            delivered_layout = False
+            checked_layout: list[str] = []
             for source in sorted(sources):
-                relative = names_for[source]
-                if relative not in names:
-                    problems.append(f"{relative} is absent from kicad_project.zip")
-                    missing_members.append(relative)
-                elif zf.read(relative) != source.read_bytes():
+                delivered, checked = layout.names[source], layout.checked(source)
+                if delivered in names and zf.read(delivered) == layout.member_bytes(
+                    source, source.read_bytes()
+                ):
+                    delivered_layout = delivered_layout or delivered != checked
+                elif checked in names and (delivered not in names or options.operation == "verify"):
+                    if zf.read(checked) == source.read_bytes():
+                        checked_layout.append(checked)
+                    else:
+                        problems.append(
+                            f"{checked} inside kicad_project.zip differs from the checked source"
+                        )
+                elif delivered in names:
                     problems.append(
-                        f"{relative} inside kicad_project.zip differs from the checked source"
+                        f"{delivered} inside kicad_project.zip differs from the checked source"
+                    )
+                else:
+                    problems.append(f"{delivered} is absent from kicad_project.zip")
+                    missing_members.append(delivered)
+            if checked_layout and (delivered_layout or options.operation == "generate"):
+                problems.append(
+                    "kicad_project.zip keeps checked file names instead of forming the "
+                    f"{layout.identity.name} project ({', '.join(checked_layout[:3])}); "
+                    "regenerate the package"
+                )
+            if delivered_layout:
+                extra = sorted(
+                    layout.checked(source)
+                    for source, delivered in layout.names.items()
+                    if layout.checked(source) != delivered
+                    and layout.checked(source) in names
+                    and delivered in names
+                )
+                if extra:
+                    problems.append(
+                        f"kicad_project.zip also contains checked file names beside the "
+                        f"delivered {layout.identity.name} project ({', '.join(extra)}); "
+                        "regenerate the package"
+                    )
+            if delivered_layout and layout.record is not None:
+                record = layout.record_name
+                if record not in names:
+                    problems.append(f"{record} is absent from kicad_project.zip")
+                elif zf.read(record) != layout.record:
+                    problems.append(
+                        f"{record} inside kicad_project.zip does not match the checked sources"
                     )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         problems.append(f"Project provenance could not be verified: {exc}")
@@ -3025,7 +3322,10 @@ def _write_readme(
         "",
     ]
     if options.assembly:
+        from kicad_tools.export.rotation_overrides import placement_preview_instructions
+
         lines.append("Assembly package: BOM and CPL are included.")
+        lines.extend(placement_preview_instructions(options.manufacturer))
     else:
         lines.append("Bare-board package: BOM and CPL are intentionally absent.")
     lines.extend(["", "Contents", "--------"])
@@ -3763,21 +4063,68 @@ def _build_archive(options: ReadinessOptions) -> Path | None:
 
 
 def _rel(options: ReadinessOptions, path: Path) -> str:
-    """Board-relative POSIX path, as the readiness ``inputs`` contract requires."""
-    return path.resolve().relative_to(options.board_dir.resolve()).as_posix()
+    """Input-base-relative POSIX path, as the readiness ``inputs`` contract requires.
+
+    The base is the board directory for board-local runs and the declaring
+    project for a project-declared output root (Issue #10106).
+    """
+    base = _input_base(options).resolve()
+    return path.resolve().relative_to(base).as_posix()
 
 
-def _is_render_artifact(rel: Path) -> bool:
+def _declared_render_prefixes(options: ReadinessOptions) -> list[tuple[str, ...]]:
+    """Input-base-relative ``renders`` directories of a project-declared output root.
+
+    A declared ``[readiness] output_root`` may carry any name (Issue #10106), so
+    the render exclusion cannot rely on the literal ``output`` segment alone
+    (Issue #10163).  Returns the ``<output_root>/renders``,
+    ``<output_root>/manufacturing/renders`` and ``<output_dir>/renders`` prefixes;
+    empty for a board-local run.
+    """
+    if options.output_root is None:
+        return []
+    base = _input_base(options).resolve()
+    prefixes: list[tuple[str, ...]] = []
+    for directory, tail in (
+        (options.output_root, ("renders",)),
+        (options.output_root, ("manufacturing", "renders")),
+        (options.output_dir, ("renders",)),
+    ):
+        resolved = directory.resolve()
+        if resolved.is_relative_to(base):
+            prefix = (*resolved.relative_to(base).parts, *tail)
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+    return prefixes
+
+
+def _is_render_artifact(rel: Path, options: ReadinessOptions | None = None) -> bool:
     """True for ``kct render`` output under ``output/`` or ``output/manufacturing/``.
 
     Renders are derived presentation artifacts: the verdict depends on the PCB,
     rules and DRC/ERC reports, and a picture of the board proves nothing the PCB
     hash does not.  ``scripts/deploy-site.sh`` re-renders them, so fingerprinting
-    them made every deploy invalidate committed evidence (Issue #7678).
+    them made every deploy invalidate committed evidence (Issue #7678).  The
+    ``output/`` directory may sit at any depth: a project-declared output root
+    keys receipts against the project, so board-local renders appear as
+    ``<board>/output/renders/...`` (Issue #10106).
+
+    With ``options`` carrying a project-declared output root, renders under
+    ``<output_root>/renders``, ``<output_root>/manufacturing/renders`` and
+    ``<output_dir>/renders`` are excluded whatever the root is named
+    (Issue #10163).  ``rel`` is relative to the input base.
     """
     parts = rel.parts
-    return (len(parts) >= 3 and parts[:2] == ("output", "renders")) or (
-        len(parts) >= 4 and parts[:3] == ("output", "manufacturing", "renders")
+    if any(parts[i : i + 2] == ("output", "renders") for i in range(len(parts) - 1)) or any(
+        parts[i : i + 3] == ("output", "manufacturing", "renders") for i in range(len(parts) - 2)
+    ):
+        return True
+    if options is None:
+        return False
+    # At least one segment must follow ``renders`` (the file itself).
+    return any(
+        len(parts) > len(prefix) and parts[: len(prefix)] == prefix
+        for prefix in _declared_render_prefixes(options)
     )
 
 
@@ -3789,7 +4136,6 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     and ``output/fab_profile.json`` appear here, so evidence cannot omit the
     rule files it was computed against.
     """
-    root = options.board_dir.resolve()
     paths: set[Path] = (
         {
             p.resolve()
@@ -3800,7 +4146,6 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         if options.pcb.is_file()
         else set()
     )
-
     for candidate in (
         options.pcb,
         options.schematic,
@@ -3854,13 +4199,18 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     if rotations is not None:
         paths.add(rotations.resolve())
 
+    # Issue #10106: a project-declared output root publishes release artifacts
+    # outside the board directory; hashable inputs are then bounded by (and
+    # keyed against) the declaring project instead of the board directory.
+    base = _input_base(options).resolve()
     return sorted(
         p
         for p in paths
-        if p.is_relative_to(root)
+        if p.is_relative_to(base)
         and p.name != _REPORT_NAME
-        and not _is_transient_local(p.relative_to(root))
-        and not _is_render_artifact(p.relative_to(root))
+        and not _is_transient_local(p.relative_to(base))
+        and not _is_private_hold(p.relative_to(base))
+        and not _is_render_artifact(p.relative_to(base), options)
     )
 
 
@@ -3958,15 +4308,8 @@ def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
 
 
 def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
-    """Problems between the retained CPL and the project's rotation sidecar (#9322).
-
-    Re-derives each sidecar-corrected placement's rotation from the PCB and the
-    sidecar *as they are now* and compares it with the retained CPL row, so an
-    edited sidecar (or one removed since generation) fails verification instead
-    of being waved through on a stale bundle.  Boards without a sidecar are not
-    touched.
-    """
-    from kicad_tools.export.rotation_overrides import SOURCE_GLOB
+    """Compare the retained CPL with project overrides and previewed catalog offsets."""
+    from kicad_tools.export.rotation_overrides import SOURCE_CATALOG, SOURCE_GLOB
 
     if not options.assembly:
         return []
@@ -3975,7 +4318,10 @@ def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
         # An invalid sidecar, or a re-derivation that could not run (issue
         # #9346): report it instead of letting the check pass by omission.
         return [problem]
-    if review is None or review.sidecar is None:
+    if review is None:
+        return []
+    reviewed_parts = [entry for entry in review.applied if entry["source"] != SOURCE_GLOB]
+    if not reviewed_parts:
         return []
     cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
     if cpl is None:
@@ -3994,15 +4340,24 @@ def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
         if max(ref_col, rot_col) < len(row)
     }
     problems: list[str] = []
-    for entry in review.applied:
-        if entry["source"] == SOURCE_GLOB:
-            continue
+    for entry in reviewed_parts:
         ref = entry["reference"]
         expected = f"{review.rotations[ref]:.1f}"
-        if ref in retained and retained[ref] != expected:
+        if ref not in retained:
+            continue
+        try:
+            same_angle = float(retained[ref]) == float(expected)
+        except ValueError:
+            same_angle = False
+        if not same_angle:
+            source = (
+                f"JLCPCB catalog correction for {entry['key']}"
+                if entry["source"] == SOURCE_CATALOG
+                else Path(review.sidecar).name
+            )
             problems.append(
                 f"CPL rotation for {ref} is {retained[ref]} but the current "
-                f"{Path(review.sidecar).name} gives {expected}; regenerate the bundle"
+                f"{source} gives {expected}; regenerate the bundle"
             )
     return problems
 
@@ -4093,13 +4448,13 @@ def build_report(
     if metrics and status != STATUS_UNVERIFIED:
         report["metrics"] = metrics
 
-    root = options.board_dir.resolve()
+    root = _input_base(options).resolve()
     hashed = set(_hashable_inputs(options))
     for path in extra_inputs:
         resolved = Path(path).resolve()
         if not resolved.is_file() or not resolved.is_relative_to(root):
             raise ValueError(f"extra readiness input is not a board file: {path}")
-        if not _is_render_artifact(resolved.relative_to(root)):
+        if not _is_render_artifact(resolved.relative_to(root), options):
             hashed.add(resolved)
     report["inputs"] = {
         _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
@@ -4123,13 +4478,21 @@ def build_report(
     cpl_block = _cpl_rotation_report_entry(options)
     if cpl_block is not None:
         report["cpl_rotations"] = cpl_block
-    external = _external_dependencies(options)
-    if external:
-        # Hash the exact collected out-of-directory dependencies (Issue #5813).
+    if options.output_root is not None:
+        # Declared layout (Issue #10106): board sources, sibling dependencies
+        # and the released artifacts share one portable input base (the
+        # declaring project) and the receipt names both that base and the
+        # declared output root explicitly, so a moved project still verifies.
         report["project_root"] = os.path.relpath(options.root, options.board_dir.resolve())
-        report["external_inputs"] = {
-            p.relative_to(options.root).as_posix(): _sha256_file(p) for p in external
-        }
+        report["output_root"] = options.output_root.resolve().relative_to(options.root).as_posix()
+    else:
+        external = _external_dependencies(options)
+        if external:
+            # Hash the exact collected out-of-directory dependencies (Issue #5813).
+            report["project_root"] = os.path.relpath(options.root, options.board_dir.resolve())
+            report["external_inputs"] = {
+                p.relative_to(options.root).as_posix(): _sha256_file(p) for p in external
+            }
     return report
 
 
@@ -4138,40 +4501,31 @@ def build_report(
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_inventory(root: Path) -> dict[str, str]:
+def _snapshot_inventory(root: Path, held_dirs: set[Path] | None = None) -> dict[str, str]:
     return {
         path.relative_to(root).as_posix(): _sha256_file(path)
         for path in sorted(root.rglob("*"))
-        if path.is_file()
+        if (not held_dirs or path.parent not in held_dirs)
+        and path.is_file()
         and not any(
             part in {".git", ".venv", "readiness-verification", "readiness-attempt"}
             for part in path.relative_to(root).parts
         )
+        and not _is_private_hold(path.relative_to(root))
     }
-
-
-def _inventory_changes(before: dict[str, str], after: dict[str, str]) -> list[str]:
-    """Name each path that was added, removed or modified between two inventories."""
-    changes = [f"added {name}" for name in sorted(after.keys() - before.keys())]
-    changes.extend(f"removed {name}" for name in sorted(before.keys() - after.keys()))
-    changes.extend(
-        f"modified {name}"
-        for name in sorted(before.keys() & after.keys())
-        if after[name] != before[name]
-    )
-    return changes
-
-
-def _with_changes(message: str, changes: list[str]) -> str:
-    """Append the named changes to ``message``; an empty list leaves it unchanged."""
-    return f"{message}: {', '.join(changes)}" if changes else message
 
 
 def _release_changes(
     board_dir: Path, before: dict[str, str], external_before: dict[Path, str]
 ) -> list[str]:
     """Name changed inputs relative to the original board directory."""
-    changes = _inventory_changes(before, _snapshot_inventory(board_dir))
+    return _inventory_changes(before, _snapshot_inventory(board_dir)) + _external_input_changes(
+        board_dir, external_before
+    )
+
+
+def _external_input_changes(board_dir: Path, external_before: dict[Path, str]) -> list[str]:
+    changes = []
     for path, digest in sorted(external_before.items()):
         if not path.is_file():
             kind = "removed"
@@ -4184,142 +4538,27 @@ def _release_changes(
     return changes
 
 
-def _publication_identity(path: Path) -> tuple[Any, ...] | None:
-    """Identify the actual file, including same-content inode replacements."""
-    try:
-        stat = path.lstat()
-    except FileNotFoundError:
-        return None
-    if path.is_symlink() or not path.is_file():
-        raise RuntimeError(f"Publication target is not a regular file: {path}")
-    return (
-        stat.st_dev,
-        stat.st_ino,
-        stat.st_mode,
-        stat.st_size,
-        stat.st_mtime_ns,
-        _sha256_file(path),
+def _publish_candidate(
+    candidate: Path,
+    destination: Path,
+    before: dict[str, str],
+    *,
+    sibling_release: tuple[Path, Path, dict[str, str]] | None = None,
+    receipt: Path | None = None,
+    external_before: dict[Path, str] | None = None,
+) -> None:
+    """Hold every publisher lock and backup until the whole checked release is installed."""
+    regions = [PublicationRegion(candidate, destination, before)]
+    if sibling_release is not None:
+        regions.append(PublicationRegion(*sibling_release))
+    publish_regions(
+        regions,
+        _snapshot_inventory,
+        publish_last=receipt,
+        external_changes=partial(_external_input_changes, destination, external_before)
+        if external_before
+        else None,
     )
-
-
-class ReadinessPublicationBusy(RuntimeError):
-    """Another process is installing readiness results at this destination."""
-
-
-@contextmanager
-def _publication_lock(lock: Path) -> Iterator[None]:
-    """Serialize writers. An abandoned lock requires the owner to clear it."""
-    try:
-        lock.mkdir()
-    except FileExistsError as exc:
-        raise ReadinessPublicationBusy(
-            f"Another readiness publisher holds the release lock {lock}"
-        ) from exc
-    try:
-        yield
-    finally:
-        lock.rmdir()
-
-
-def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str]) -> None:
-    """Publish a checked release and preserve observed external edits.
-
-    Per-file checks narrow external-editor races but cannot guarantee atomicity
-    against writers that ignore the lock.
-    """
-    with _publication_lock(destination.parent / f".{destination.name}.readiness-publish.lock"):
-        _publish_candidate_locked(candidate, destination, before)
-
-
-def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[str, str]) -> None:
-    current = _snapshot_inventory(destination)
-    if current != before:
-        raise RuntimeError(
-            _with_changes(
-                "Release changed during verification; refusing to overwrite concurrent work",
-                _inventory_changes(before, current),
-            )
-        )
-    after = _snapshot_inventory(candidate)
-    changed = sorted(
-        name for name in set(before) | set(after) if before.get(name) != after.get(name)
-    )
-    expected = {name: _publication_identity(destination / name) for name in changed}
-    for name, identity in expected.items():
-        digest = identity[-1] if identity is not None else None
-        if digest != before.get(name):
-            raise RuntimeError(f"Concurrent edit while identifying publication target: {name}")
-    with tempfile.TemporaryDirectory(prefix="kct-release-backup-") as temporary:
-        backup = Path(temporary)
-        installed: dict[str, tuple[Any, ...] | None] = {}
-        try:
-            for name in changed:
-                target = destination / name
-                if _publication_identity(target) != expected[name]:
-                    raise RuntimeError(f"Concurrent edit before publication: {name}")
-                if name in before:
-                    copy = backup / name
-                    copy.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(target, copy)
-                if name not in after:
-                    if _publication_identity(target) != expected[name]:
-                        raise RuntimeError(f"Concurrent edit before deletion: {name}")
-                    target.unlink()
-                    installed[name] = None
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
-                os.close(fd)
-                staged = Path(staged_name)
-                try:
-                    shutil.copy2(candidate / name, staged)
-                    identity = _publication_identity(staged)
-                    if _publication_identity(target) != expected[name]:
-                        raise RuntimeError(f"Concurrent edit before replacement: {name}")
-                    os.replace(staged, target)
-                    # Capture our staged identity, not whatever an editor may
-                    # have written to the destination immediately afterwards.
-                    installed[name] = identity
-                finally:
-                    staged.unlink(missing_ok=True)
-            current = _snapshot_inventory(destination)
-            if current != after:
-                raise RuntimeError(
-                    _with_changes(
-                        "Concurrent edit during publication",
-                        _inventory_changes(after, current),
-                    )
-                )
-        except Exception as exc:
-            conflicts = []
-            for name, identity in reversed(installed.items()):
-                target = destination / name
-                try:
-                    if _publication_identity(target) != identity:
-                        conflicts.append(name)
-                        continue
-                    if name in before:
-                        fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
-                        os.close(fd)
-                        staged = Path(staged_name)
-                        try:
-                            shutil.copy2(backup / name, staged)
-                            if _publication_identity(target) != identity:
-                                conflicts.append(name)
-                                continue
-                            os.replace(staged, target)
-                        finally:
-                            staged.unlink(missing_ok=True)
-                    else:
-                        target.unlink(missing_ok=True)
-                except Exception:
-                    conflicts.append(name)
-            if conflicts:
-                raise RuntimeError(
-                    f"{exc}; rollback preserved concurrent edits or could not restore: "
-                    + ", ".join(conflicts)
-                ) from exc
-            raise
 
 
 def _remove_fill_local_settings(evidence: Path) -> None:
@@ -4399,7 +4638,7 @@ def _preflight_failure(
 ) -> ReadinessResult:
     """Report an unresolvable dependency without touching sources or any release."""
     name = "readiness-verification" if options.operation == "verify" else "readiness-attempt"
-    diagnostics = original / "output" / name
+    diagnostics = _diagnostics_dir(options, original, name)
     report = {
         "schema_version": 1,
         "status": STATUS_BLOCKED,
@@ -4409,6 +4648,18 @@ def _preflight_failure(
     }
     report_path = _publish_diagnostics(None, diagnostics, report)
     return ReadinessResult(report, report_path, 1)
+
+
+def _diagnostics_dir(options: ReadinessOptions, original: Path, name: str) -> Path:
+    """Where a run's diagnostics (verification / attempt receipts) belong.
+
+    Board-local runs keep them under ``<board>/output/``; a project-declared
+    output root keeps them under the declared root (Issue #10106), even when
+    that root sits inside the board directory.
+    """
+    if options.output_root is not None:
+        return options.output_root / name
+    return original / "output" / name
 
 
 def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> ReadinessResult:
@@ -4422,6 +4673,17 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         options = replace(options, checked_at=_iso_now())
     original = options.board_dir.resolve()
     project_root = options.root
+    # Issue #10106: a project-declared output root publishes the release under
+    # a dedicated root.  When that root sits inside the board directory the
+    # copy of the board already carries it and the single board-region publish
+    # covers it; when it is a sibling, it is staged and published as its own
+    # region under the same publication transaction as the editable board.
+    declared_root = options.output_root.resolve() if options.output_root is not None else None
+    release_region = (
+        declared_root
+        if declared_root is not None and not declared_root.is_relative_to(original)
+        else None
+    )
     spec_file: Path | None = None
     options = replace(options, bom_spec_searched=original)
     try:
@@ -4440,10 +4702,18 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     if spec_file is not None and not spec_file.resolve().is_relative_to(original):
         external_before[spec_file.resolve()] = _sha256_file(spec_file.resolve())
     before = _snapshot_inventory(original)
+    release_before = (
+        _snapshot_inventory(release_region)
+        if release_region is not None and release_region.is_dir()
+        else {}
+    )
+    release_prefix = (
+        release_region.relative_to(project_root).as_posix() if release_region is not None else None
+    )
     diagnostic_name = (
         "readiness-verification" if options.operation == "verify" else "readiness-attempt"
     )
-    diagnostics = original / "output" / diagnostic_name
+    diagnostics = _diagnostics_dir(options, original, diagnostic_name)
     with tempfile.TemporaryDirectory(prefix="kct-readiness-candidate-") as temporary:
         candidate_root = Path(temporary) / "board"
         candidate = candidate_root / original.relative_to(project_root)
@@ -4451,9 +4721,28 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             original,
             candidate,
             ignore=shutil.ignore_patterns(
-                ".git", ".venv", "readiness-verification", "readiness-attempt"
+                ".git",
+                ".venv",
+                "readiness-verification",
+                "readiness-attempt",
+                f"{PUBLICATION_HOLD_PREFIX}*",
             ),
         )
+        candidate_release: Path | None = None
+        if release_region is not None:
+            candidate_release = candidate_root / release_region.relative_to(project_root)
+            if release_region.is_dir():
+                shutil.copytree(
+                    release_region,
+                    candidate_release,
+                    ignore=shutil.ignore_patterns(
+                        ".git",
+                        ".venv",
+                        "readiness-verification",
+                        "readiness-attempt",
+                        f"{PUBLICATION_HOLD_PREFIX}*",
+                    ),
+                )
 
         for source in externals:
             target = candidate_root / source.relative_to(project_root)
@@ -4483,6 +4772,16 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
 
         diagnostic_source = None
         try:
+            if options.output_root is not None:
+                staged_evidence = (
+                    candidate_root / options.output_root.resolve().relative_to(project_root)
+                ) / ("readiness" if options.operation == "generate" else diagnostic_name)
+            else:
+                staged_evidence = (
+                    candidate
+                    / "output"
+                    / ("readiness" if options.operation == "generate" else diagnostic_name)
+                )
             staged = replace(
                 options,
                 board_dir=candidate,
@@ -4490,12 +4789,11 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 pcb=candidate / options.pcb.resolve().relative_to(original),
                 schematic=remap(options.schematic),
                 project=remap(options.project),
-                output_dir=candidate / options.output_dir.resolve().relative_to(original),
+                output_dir=candidate_root / options.output_dir.resolve().relative_to(project_root),
+                output_root=remap(options.output_root),
                 net_class_map=remap(options.net_class_map),
                 hv_voltage_map=remap(options.hv_voltage_map),
-                evidence_dir=candidate
-                / "output"
-                / ("readiness" if options.operation == "generate" else diagnostic_name),
+                evidence_dir=staged_evidence,
             )
             copied = _snapshot_inventory(candidate)
             if copied != before:
@@ -4505,6 +4803,19 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                         _inventory_changes(before, copied),
                     )
                 )
+            if (
+                candidate_release is not None
+                and release_region is not None
+                and release_region.is_dir()
+            ):
+                copied_release = _snapshot_inventory(candidate_release)
+                if copied_release != release_before:
+                    raise RuntimeError(
+                        _with_changes(
+                            "Release changed while creating candidate snapshot",
+                            _inventory_changes(release_before, copied_release),
+                        )
+                    )
             if engines is not None and engines.package_extras is not None:
                 staged.source_pcb_bytes = staged.pcb.read_bytes()
             if options.operation == "generate" and options.output_dir.exists():
@@ -4527,15 +4838,34 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             finally:
                 _remove_fill_local_settings(diagnostic_source)
             changes = _release_changes(original, before, external_before)
+            if release_region is not None and release_region.is_dir():
+                # Concurrent edits to the published artifacts under the declared
+                # output root refuse publication, exactly like board-local ones.
+                for change in _inventory_changes(
+                    release_before, _snapshot_inventory(release_region)
+                ):
+                    kind, _, name = change.partition(" ")
+                    changes.append(f"{kind} {release_prefix}/{name}")
             if changes:
                 raise RuntimeError(
                     "Release changed while checks were running: " + ", ".join(changes)
                 )
             if options.operation == "generate" and result.exit_code == 0:
-                _publish_candidate(candidate, original, before)
-                return replace(
-                    result, report_path=original / result.report_path.relative_to(candidate)
+                sibling_release = None
+                if release_region is not None and candidate_release is not None:
+                    sibling_release = (candidate_release, release_region, release_before)
+                    report_root = release_region / result.report_path.relative_to(candidate_release)
+                else:
+                    report_root = original / result.report_path.relative_to(candidate)
+                _publish_candidate(
+                    candidate,
+                    original,
+                    before,
+                    sibling_release=sibling_release,
+                    receipt=report_root,
+                    external_before=external_before,
                 )
+                return replace(result, report_path=report_root)
             report = result.report
             if options.operation == "generate":
                 report["candidate_not_published"] = True
@@ -4551,6 +4881,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 "blockers": [f"Readiness candidate was not published: {exc}"],
                 "checks": [],
             }
+            if options.operation == "generate":
+                report["candidate_not_published"] = True
             result = ReadinessResult(report, diagnostics / "readiness.json", 1)
         report_path = _publish_diagnostics(diagnostic_source, diagnostics, report)
         return replace(result, report_path=report_path)
@@ -4745,13 +5077,16 @@ def _run_readiness_candidate(
     _write_known_issues_evidence(options)
     extra_inputs = list(engines.extra_inputs(options)) if engines.extra_inputs else []
     report = build_report(options, checks, metrics, fingerprint, extra_inputs=extra_inputs)
-    report_path = options.board_dir / "output" / _REPORT_NAME
+    report_path = _report_path(options)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2) + "\n")
 
     # Round-trip through the consumer-side validator: a report this runner
     # calls `ready` must be one the gallery accepts, or it is not ready.
-    validated = read_readiness(options.board_dir)
+    # A project-declared output root passes its trusted layout along so the
+    # receipt is read from (and its inputs resolved against) the declared
+    # locations instead of the fixed board-local ones (Issue #10106).
+    validated = read_readiness(options.board_dir, layout=readiness_layout(options))
     if report["status"] == STATUS_READY and validated.get("status") != STATUS_READY:
         report["status"] = STATUS_BLOCKED
         report["blockers"] = [
@@ -4874,8 +5209,10 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         "--output",
         default=None,
         help=(
-            "Manufacturing bundle directory (default: <pcb-dir>/manufacturing/); "
-            "must be inside the board directory and named 'manufacturing'"
+            "Manufacturing bundle directory (default: <pcb-dir>/manufacturing/, or "
+            "<declared-output-root>/manufacturing/ when the project TOML declares "
+            "[readiness] output_root); must be named 'manufacturing' and stay inside "
+            "the board directory, or inside the declared output root"
         ),
     )
     parser.add_argument(

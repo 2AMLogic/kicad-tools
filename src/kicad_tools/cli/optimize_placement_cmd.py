@@ -30,18 +30,22 @@ import contextlib
 import dataclasses
 import functools
 import json
+import math
 import os
 import shutil
 import signal
 import sys
 import tempfile
 import time
+from collections import defaultdict
+from collections.abc import Collection
 from pathlib import Path
-from typing import Callable, ParamSpec, Sequence, TypeVar
+from typing import TYPE_CHECKING, Callable, ParamSpec, Sequence, TypeVar
 
 import numpy as np
 
 from kicad_tools.cli.format_options import emit_json
+from kicad_tools.cli.placement_options import DEFAULT_DECOUPLING_RADIUS_MM
 from kicad_tools.placement.cost import (
     BoardOutline,
     ComponentPlacement,
@@ -54,9 +58,13 @@ from kicad_tools.placement.cost import (
 )
 from kicad_tools.placement.decoupling import (
     DecouplingGroup,
+    SchematicCapAssociation,
     SnapMove,
+    apply_cap_associations,
     decoupling_pairs,
     identify_decoupling_groups,
+    parse_capacitance_farads,
+    schematic_cap_associations,
     snap_decoupling_caps,
 )
 from kicad_tools.placement.geometry import (
@@ -84,6 +92,10 @@ from kicad_tools.placement.wirelength import (
     compare_wirelength_estimators,
 )
 from kicad_tools.placement.writeback import write_footprint_placements
+
+if TYPE_CHECKING:
+    from kicad_tools.cli.export_netlist import Component as NetlistComponent
+    from kicad_tools.schema.pcb import PCB
 
 # Placement grid for slide-off displacements on a ``--seed current`` warm
 # start (issue #6250). Matches the decoupling snap's grid and board 04's
@@ -163,6 +175,9 @@ def _write_placements_to_pcb_atomic(
     vector,
     components: Sequence,
     board_origin: tuple[float, float] = (0.0, 0.0),
+    *,
+    flippable_refs: Collection[str] = (),
+    validate: Callable[[Path], None] | None = None,
 ) -> None:
     """Write placements via atomic write (temp file + rename).
 
@@ -177,7 +192,11 @@ def _write_placements_to_pcb_atomic(
     )
     os.close(fd)
     try:
-        _write_placements_to_pcb(pcb_path, tmp_path, vector, components, board_origin)
+        _write_placements_to_pcb(
+            pcb_path, tmp_path, vector, components, board_origin, flippable_refs=flippable_refs
+        )
+        if validate is not None:
+            validate(Path(tmp_path))
         Path(tmp_path).replace(out)
     except BaseException:
         # Clean up the temp file on failure
@@ -220,6 +239,7 @@ def _evaluate(
     exempt_pairs: set[frozenset[str]] | None = None,
     pad_anchored: bool = False,
     decoupling_groups: Sequence[DecouplingGroup] | None = None,
+    ref_sheets: dict[str, str] | None = None,
     fixed_sides: Sequence[int] | None = None,
 ) -> PlacementScore:
     """Evaluate a single placement vector and return its score.
@@ -235,6 +255,10 @@ def _evaluate(
 
     *decoupling_groups* (issue #6020) enables the decoupling-cap affinity
     term. It always measures at pads, whatever *pad_anchored* says.
+
+    *ref_sheets* (issue #10146) enables the soft schematic-group terms:
+    per-sheet cohesion and within-sheet schematic order. ``None`` (the
+    default) or a single-sheet map keeps the score byte-identical.
 
     *fixed_sides* overrides the vector's side flags before decoding (see
     :func:`_with_sides`), so pads are scored where the writer will put them.
@@ -260,6 +284,7 @@ def _evaluate(
         pad_positions=pad_positions,
         decoupling_groups=decoupling_groups,
         decoupling_pad_positions=pad_map,
+        ref_sheets=ref_sheets,
     )
 
 
@@ -327,13 +352,9 @@ def _locked_refs(pcb_path: str) -> set[str]:
 def _with_sides(vector: PlacementVector, sides: Sequence[int]) -> PlacementVector:
     """Return a copy of *vector* with every side flag set from *sides*.
 
-    The writer (:func:`_write_placements_to_pcb`) moves and rotates
-    footprints but never flips them, so a side the optimizer picks is
-    discarded on write. Scoring a flipped candidate anyway mirrors its pads
-    (pad-anchored wirelength, decoupling affinity) and lets the slide-off
-    pass skip overlaps between parts that will in fact share a side. Pinning
-    the sides to the board's own keeps the model and the written board in
-    step (issue #6020).
+    The global search preserves the board sides for scoring and slide-off.
+    A later designated-cap snap can explicitly change its side and write the
+    corresponding footprint transform.
 
     When *sides* is a :class:`_BoardPins`, locked footprints are also pinned
     to their board position and rotation: the writer never moves them
@@ -408,6 +429,52 @@ def _read_local_courtyards(pcb_path: str) -> dict[str, tuple[float, float, float
     return out
 
 
+def _read_cap_values(pcb_path: str) -> dict[str, float]:
+    """``reference -> farads`` for every footprint whose value is a capacitance."""
+    from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+    out: dict[str, float] = {}
+    for fp in SchemaPCB.load(pcb_path).footprints:
+        farads = parse_capacitance_farads(getattr(fp, "value", "") or "")
+        if fp.reference and farads is not None:
+            out[fp.reference] = farads
+    return out
+
+
+def _schematic_designations(source: Path, *, quiet: bool) -> list[SchematicCapAssociation]:
+    schematic = source.with_suffix(".kicad_sch")
+    if not schematic.is_file():
+        return []
+    try:
+        return schematic_cap_associations(schematic)
+    except Exception as exc:  # an unreadable schematic leaves placement unconstrained
+        if not quiet:
+            print(f"  Decoupling: schematic association skipped ({schematic.name}: {exc})")
+        return []
+
+
+def _associate_from_schematic(
+    pcb_path: str,
+    groups: list[DecouplingGroup],
+    *,
+    quiet: bool,
+) -> list[DecouplingGroup]:
+    """Attach the schematic's cap -> pin designations to *groups* (issue #10142).
+
+    The schematic is the ``.kicad_sch`` beside the board (KiCad's own project
+    layout). Without one, or when it cannot be read, *groups* come back as
+    given and the pairing stays distance-greedy.
+    """
+    designations = _schematic_designations(Path(pcb_path), quiet=quiet)
+    if not designations:
+        return groups
+    associated = apply_cap_associations(groups, designations)
+    n = sum(len(g.associated) for g in associated)
+    if n and not quiet:
+        print(f"  Decoupling: {n} cap(s) paired to the pin their schematic designates")
+    return associated
+
+
 def _build_decoupling_context(
     pcb_path: str,
     nets: Sequence[Net],
@@ -425,6 +492,7 @@ def _build_decoupling_context(
     groups = identify_decoupling_groups(nets, _read_pad_pin_types(pcb_path))
     if not groups:
         return None
+    groups = _associate_from_schematic(pcb_path, groups, quiet=quiet)
     if not quiet:
         n_caps = sum(len(g.caps) for g in groups)
         n_pins = sum(len(g.pins) for g in groups)
@@ -435,6 +503,59 @@ def _build_decoupling_context(
             f"weight={cost_config.decoupling_weight:g}"
         )
     return groups
+
+
+def designated_decoupling_groups(source: Path, pcb: PCB, *, quiet: bool) -> list[DecouplingGroup]:
+    """Resolve exact cap/pin pairs, keeping missing board pads visible to validation."""
+    groups = []
+    for association in _schematic_designations(source, quiet=quiet):
+        cap, pin = association.cap, association.pin
+        if pin is None:
+            continue
+        # Escape lanes use the PCB net name, which may differ from a hierarchical label.
+        footprint = pcb.get_footprint(cap.reference)
+        net = association.net
+        if footprint:
+            net = next((p.net_name for p in footprint.pads if p.number == cap.supply_pad), net)
+        groups.append(DecouplingGroup(net, (cap,), (pin,), ((cap.reference, pin),)))
+    return groups
+
+
+def snap_and_check_designated_caps(
+    candidate: Path, groups: Sequence[DecouplingGroup], fixed_refs: set[str], radius_mm: float
+) -> list[str]:
+    """Snap only movable designated caps, then validate every designated pad on disk."""
+    if not groups:
+        return []
+    movable = {ref for group in groups for ref, _ in group.associated} - fixed_refs
+    if movable:
+        path = str(candidate)
+        components, nets, board, rules, origin = _read_board_data(path)
+        vector, moves = snap_decoupling(
+            _read_current_vector(path, components),
+            path,
+            components,
+            nets,
+            rules,
+            board,
+            PlacementCostConfig(),
+            _build_footprint_sizes(components),
+            groups,
+            fixed_refs=fixed_refs,
+            flippable_refs=movable,
+            max_radius_mm=radius_mm,
+        )
+        if moves:
+            _write_placements_to_pcb(
+                path,
+                path,
+                vector,
+                components,
+                origin,
+                flippable_refs=movable,
+                only_refs={move.cap for move in moves},
+            )
+    return _designated_cap_violations(candidate, groups, radius_mm)
 
 
 def snap_decoupling(
@@ -449,10 +570,14 @@ def snap_decoupling(
     decoupling_groups: Sequence[DecouplingGroup] | None,
     *,
     fixed_sides: Sequence[int] | None = None,
+    flippable_refs: Collection[str] = (),
+    fixed_refs: Collection[str] = (),
     ref_domains: dict[str, str] | None = None,
     required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
     exempt_pairs: set[frozenset[str]] | None = None,
+    ref_sheets: dict[str, str] | None = None,
     pad_anchored: bool = False,
+    max_radius_mm: float = DEFAULT_DECOUPLING_RADIUS_MM,
 ) -> tuple[PlacementVector, list[SnapMove]]:
     """Run the post-optimize decoupling-cap snap (issue #6020).
 
@@ -464,6 +589,13 @@ def snap_decoupling(
 
     Shared by ``kct optimize-placement`` and the MCP ``optimize_placement``
     tool (issue #6253). A no-op when *decoupling_groups* is empty/``None``.
+
+    *max_radius_mm* is the furthest a cap's supply pad may sit from its pin
+    (issue #10142; ``--decoupling-radius``). Caps sharing a pin are snapped
+    smallest value first, from the footprint values on the board.
+
+    *ref_sheets* (issue #10146) keeps the snap's acceptance scoring on the
+    same schematic-group terms as the optimizer loop.
     """
     if not decoupling_groups:
         return vector, []
@@ -480,9 +612,12 @@ def snap_decoupling(
             ref_domains=ref_domains,
             required_mm_by_domain_pair=required_mm_by_domain_pair,
             exempt_pairs=exempt_pairs,
+            ref_sheets=ref_sheets,
             pad_anchored=pad_anchored,
             decoupling_groups=decoupling_groups,
-            fixed_sides=fixed_sides,
+            # The input already pins every board side and every locked pose.
+            # The snap changes only allowed caps, whose new side must be scored.
+            fixed_sides=None if flippable_refs else fixed_sides,
         )
 
     return snap_decoupling_caps(
@@ -494,6 +629,10 @@ def snap_decoupling(
         cost_config,
         pad_nets={pin: net.name for net in nets for pin in net.pins},
         extents=_read_local_courtyards(pcb_path),
+        max_radius_mm=max_radius_mm,
+        cap_values=_read_cap_values(pcb_path),
+        allow_flip=flippable_refs,
+        fixed_refs=fixed_refs,
     )
 
 
@@ -521,6 +660,7 @@ def route_check_placement(
     snap: Callable[[PlacementVector], PlacementVector],
     *,
     fixed_sides: Sequence[int],
+    flippable_refs: Collection[str] = (),
     locked_indices: Sequence[int],
     budget: int,
     seed: int,
@@ -568,7 +708,12 @@ def route_check_placement(
                 shutil.copyfile(source, candidate)
             else:
                 _write_placements_to_pcb_atomic(
-                    pcb_path, str(candidate), vec, components, board_origin
+                    pcb_path,
+                    str(candidate),
+                    vec,
+                    components,
+                    board_origin,
+                    flippable_refs=flippable_refs,
                 )
             _strip_routing(candidate)
             # The authored project rules and DRU belong to the board; carry
@@ -729,6 +874,60 @@ def _decoupling_report(
     ]
 
 
+class _DecouplingPlacementError(ValueError):
+    """The actual candidate PCB violates a designated capacitor constraint."""
+
+
+def _designated_cap_violations(
+    pcb_path: str | Path, groups: Sequence[DecouplingGroup] | None, radius_mm: float
+) -> list[str]:
+    """Check the actual pads, sides and value order on the board to be published."""
+    from kicad_tools.schema.pcb import PCB
+
+    if not groups or not any(group.associated for group in groups):
+        return []
+    pcb = PCB.load(str(pcb_path))
+    errors: list[str] = []
+    values_by_pin: dict[str, list[tuple[float, float, str]]] = defaultdict(list)
+    for group in groups:
+        caps = {cap.reference: cap for cap in group.caps}
+        for ref, pin in group.associated:
+            name = f"{pin.reference}.{pin.pad}"
+            cap = pcb.get_footprint(ref)
+            ic = pcb.get_footprint(pin.reference)
+            cap_pad = pcb.get_pad_position(ref, caps[ref].supply_pad)
+            ic_pad = pcb.get_pad_position(pin.reference, pin.pad)
+            if cap is None or ic is None or cap_pad is None or ic_pad is None:
+                errors.append(f"{ref} to {name}: missing footprint or pad")
+                continue
+            if cap.layer != ic.layer:
+                errors.append(
+                    f"{ref} is on {cap.layer} but its designated pin {name} is on {ic.layer}"
+                )
+            supply = next(pad for pad in cap.pads if pad.number == caps[ref].supply_pad)
+            target = next(pad for pad in ic.pads if pad.number == pin.pad)
+            side_layers = {ic.layer, "*.Cu", "F&B.Cu"}
+            if side_layers.isdisjoint(supply.layers):
+                errors.append(f"{ref}.{supply.number} has no copper on {ic.layer} for {name}")
+            if side_layers.isdisjoint(target.layers):
+                errors.append(f"{name} has no copper on {ic.layer} for {ref}.{supply.number}")
+            distance = math.dist(cap_pad, ic_pad)
+            if distance > radius_mm + 1e-9:
+                errors.append(f"{ref} is {distance:.3f} mm from {name}, limit {radius_mm:g} mm")
+            value = parse_capacitance_farads(cap.value)
+            if value is not None:
+                values_by_pin[name].append((value, distance, ref))
+    for name, values in values_by_pin.items():
+        ordered = sorted(values)
+        for index, (larger, distance, ref) in enumerate(ordered):
+            for smaller, other_distance, other_ref in ordered[:index]:
+                if smaller < larger and other_distance >= distance - 1e-9:
+                    errors.append(
+                        f"{other_ref} has a smaller capacitance than {ref} but is not closer to {name}"
+                    )
+    return errors
+
+
 def _build_footprint_sizes(
     components: Sequence[ComponentDef],
 ) -> dict[str, tuple[float, float]]:
@@ -816,6 +1015,81 @@ def _build_hv_context(
     return ref_domains, required
 
 
+def _sheet_map_from_netlist_components(
+    components: Sequence[NetlistComponent],
+) -> dict[str, str] | None:
+    """Build the ``ref -> sheet_path`` map from parsed netlist components.
+
+    A schematic group is the set of footprints whose symbols sit on the same
+    schematic sheet (the netlist's ``sheetpath`` node, issue #10146). A map
+    spanning fewer than two distinct sheets carries no grouping information
+    (a single-sheet design is one whole-board group), so ``None`` comes back
+    and the schematic-group terms stay dormant. Components without a
+    reference or a sheet path are skipped.
+    """
+    ref_sheets = {
+        comp.reference: comp.sheet_path for comp in components if comp.reference and comp.sheet_path
+    }
+    if len(set(ref_sheets.values())) < 2:
+        return None
+    return ref_sheets
+
+
+def _build_sheet_map(pcb_path: str, quiet: bool = False) -> dict[str, str] | None:
+    """Resolve the ``ref -> sheet_path`` map for the board (issue #10146).
+
+    Discovers the schematic associated with the PCB
+    (:func:`kicad_tools.sync.discover.resolve_schematic_for_pcb`), exports a
+    netlist with kicad-cli into a scratch directory and parses each
+    component's ``sheetpath``. Every failure mode -- no schematic next to the
+    board, kicad-cli unavailable, a failed export -- degrades to ``None`` so
+    the objective stays byte-identical; the schematic-group terms are an
+    opt-out-by-degradation preference, never a run-breaking input.
+
+    Returns the map, or ``None`` when unavailable or the design is
+    single-sheet.
+    """
+    from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+    sch_path = resolve_schematic_for_pcb(pcb_path)
+    if sch_path is None:
+        return None
+
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    kicad_cli = find_kicad_cli()
+    if kicad_cli is None:
+        if not quiet:
+            print("  Schematic sheets: kicad-cli not found; schematic-group terms dormant")
+        return None
+
+    from kicad_tools.cli.export_netlist import export_netlist, load_netlist
+
+    with tempfile.TemporaryDirectory(prefix="kct-sheet-map-") as tmp:
+        netlist_path = Path(tmp) / "netlist.net"
+        ok, error = export_netlist(sch_path, netlist_path, kicad_cli)
+        if not ok:
+            if not quiet:
+                print(
+                    f"  WARNING: schematic-sheet grouping unavailable "
+                    f"(netlist export failed: {error}); terms dormant"
+                )
+            return None
+        netlist = load_netlist(netlist_path)
+
+    ref_sheets = _sheet_map_from_netlist_components(netlist.components)
+    if ref_sheets is None:
+        return None
+
+    if not quiet:
+        n_sheets = len(set(ref_sheets.values()))
+        print(
+            f"  Schematic sheets: {n_sheets} sheet(s) over {len(ref_sheets)} refs "
+            f"from {sch_path.name}; schematic-group terms active"
+        )
+    return ref_sheets
+
+
 def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
     """Parse a JSON string into PlacementCostConfig.
 
@@ -846,7 +1120,13 @@ def weights_to_cost_config(data: dict | None) -> PlacementCostConfig:
     convergence check (issue #2821) can use the feasibility-sentinel
     score (>= 1e12) to refuse early convergence in the infeasible region.
     The decoupling-cap affinity term (issue #6020) is on by default;
-    ``{"decoupling": 0}`` turns it (and the post-optimize snap) off.
+    ``{"decoupling": 0}`` turns it (and the post-optimize snap) off. The
+    schematic-group terms (issue #10146) -- ``group_cohesion`` (per-sheet
+    spread) and ``group_order`` (within-sheet schematic order) -- are soft
+    preferences on by default at ``1.0``; they only fire on multi-sheet
+    designs whose schematic is discoverable next to the PCB, and
+    ``{"group_cohesion": 0, "group_order": 0}`` disables both (and skips the
+    netlist export that feeds them).
 
     Callers can override the mode via the ``"mode"`` key (``"lexicographic"``
     or ``"weighted_sum"``).
@@ -863,6 +1143,8 @@ def weights_to_cost_config(data: dict | None) -> PlacementCostConfig:
         "creepage_weight": 1e5,
         "cohesion_weight": 1.0,
         "decoupling_weight": 2.0,
+        "group_cohesion_weight": 1.0,
+        "group_order_weight": 1.0,
         "mode": CostMode.LEXICOGRAPHIC,
     }
 
@@ -887,6 +1169,8 @@ def weights_to_cost_config(data: dict | None) -> PlacementCostConfig:
         creepage_weight=data.get("creepage", defaults["creepage_weight"]),
         cohesion_weight=data.get("cohesion", defaults["cohesion_weight"]),
         decoupling_weight=data.get("decoupling", defaults["decoupling_weight"]),
+        group_cohesion_weight=data.get("group_cohesion", defaults["group_cohesion_weight"]),
+        group_order_weight=data.get("group_order", defaults["group_order_weight"]),
         mode=mode,
     )
 
@@ -1015,10 +1299,13 @@ def _print_score(label: str, score: PlacementScore) -> None:
     feasible = "feasible" if score.is_feasible else "INFEASIBLE"
     creepage_str = f" crp={b.creepage:.2f}" if b.creepage else ""
     decoupling_str = f" dcp={b.decoupling:.2f}" if b.decoupling else ""
+    sheet_cohesion_str = f" sgrp={b.group_cohesion:.2f}" if b.group_cohesion else ""
+    sheet_order_str = f" sord={b.group_order:.2f}" if b.group_order else ""
     print(
         f"  {label}: {score.total:.4f} ({feasible}) "
         f"[wl={b.wirelength:.2f} ovl={b.overlap:.2f} bnd={b.boundary:.2f} "
-        f"drc={b.drc:.0f} area={b.area:.2f}{creepage_str}{decoupling_str}]"
+        f"drc={b.drc:.0f} area={b.area:.2f}{creepage_str}{decoupling_str}"
+        f"{sheet_cohesion_str}{sheet_order_str}]"
     )
 
 
@@ -1200,6 +1487,9 @@ def _write_placements_to_pcb(
     vector: PlacementVector,
     components: Sequence[ComponentDef],
     board_origin: tuple[float, float] = (0.0, 0.0),
+    *,
+    flippable_refs: Collection[str] = (),
+    only_refs: Collection[str] | None = None,
 ) -> None:
     """Write optimized placements back to a .kicad_pcb file.
 
@@ -1218,14 +1508,27 @@ def _write_placements_to_pcb(
     # board-absolute geometry -- embedded keepout zones and pad angles --
     # and edits the footprint's own ``(at ...)`` rather than the first
     # ``(at ...)`` line after the reference (Issue #6119).
+    flip_refs = {
+        p.reference
+        for p, comp in zip(placed, components, strict=True)
+        if p.reference in flippable_refs and p.side != comp.side and p.reference not in locked
+    }
+    # The optimizer mirrors local X. KiCad's physical flip mirrors local Y in
+    # the stored footprint frame. A half-turn maps the two frames' pad poses.
     write_footprint_placements(
         pcb_path,
         output_path,
         (
-            (p.reference, p.x + ox, p.y + oy, p.rotation)
+            (
+                p.reference,
+                p.x + ox,
+                p.y + oy,
+                (p.rotation + 180) % 360 if p.reference in flip_refs else p.rotation,
+            )
             for p in placed
-            if p.reference not in locked
+            if p.reference not in locked and (only_refs is None or p.reference in only_refs)
         ),
+        flip_refs=flip_refs,
     )
 
 
@@ -1296,6 +1599,7 @@ def run_optimize_placement(
     route_check_timeout: float | None = None,
     require_outline: bool = False,
     silk_fix: bool = True,
+    decoupling_radius_mm: float = DEFAULT_DECOUPLING_RADIUS_MM,
 ) -> int:
     """Run placement optimization.
 
@@ -1368,6 +1672,9 @@ def run_optimize_placement(
             route (``--per-net-iterations``), so the verdict is reproducible.
         route_check_timeout: Wall-clock safety backstop per check route in
             seconds (Python-API only; ``None`` = the module default).
+        decoupling_radius_mm: Furthest a decoupling cap's supply pad may sit
+            from the IC pin it serves in the post-optimize snap (issue #10142;
+            ``--decoupling-radius``).
         silk_fix: Run the shared silk legalisation pass (``legalize_silk``,
             #9795 phase 1) on the written board and the snap reference
             repair it augments (Issue #9799). ``False`` (the
@@ -1387,6 +1694,10 @@ def run_optimize_placement(
     if pcb_file.suffix != ".kicad_pcb":
         return _placement_error(
             pcb_path, f"expected .kicad_pcb file, got: {pcb_file.suffix}", as_json=as_json
+        )
+    if not math.isfinite(decoupling_radius_mm) or decoupling_radius_mm < 0:
+        return _placement_error(
+            pcb_path, "--decoupling-radius must be a finite nonnegative distance", as_json=as_json
         )
     if anchor_weight < 0.0:
         return _placement_error(
@@ -1497,8 +1808,8 @@ def run_optimize_placement(
 
     footprint_sizes = _build_footprint_sizes(components)
 
-    # Side flags as on the board: the writer cannot flip footprints, so every
-    # score and the final vector use these (see _with_sides).
+    # Keep every original side during the global search. Only the final snap
+    # may flip a movable capacitor onto its designated IC side.
     # Locked footprints keep their board pose too (issue #6262): the writer
     # never moves them, so neither may any score or the slide-off pass.
     locked_refs = _locked_refs(pcb_path)
@@ -1510,6 +1821,22 @@ def run_optimize_placement(
     # --weights turns it off. Boards without cap/supply-pin structure get None
     # and an unchanged objective.
     decoupling_groups = _build_decoupling_context(pcb_path, nets, cost_config, quiet=quiet)
+    designated_caps = {ref for group in decoupling_groups or () for ref, _ in group.associated}
+    flippable_refs = designated_caps - locked_refs
+
+    # Schematic-sheet grouping (issue #10146): keep the parts a sheet draws
+    # together and in schematic order. The map is resolved from the
+    # schematic next to the PCB (netlist export via kicad-cli); single-sheet
+    # and schematic-less boards, and zeroed group weights, all keep the
+    # objective byte-identical to today.
+    sheet_map: dict[str, str] | None = None
+    if cost_config.group_cohesion_weight or cost_config.group_order_weight:
+        try:
+            sheet_map = _build_sheet_map(pcb_path, quiet=quiet)
+        except Exception as e:  # pragma: no cover - defensive: never break a run
+            if not quiet:
+                print(f"  WARNING: schematic-sheet grouping unavailable ({e}); terms dormant")
+            sheet_map = None
 
     # Pad-anchored wirelength (issue #4831 M1). The pads are transformed on
     # every decode regardless; this only decides whether the objective reads
@@ -1569,6 +1896,7 @@ def run_optimize_placement(
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
             decoupling_groups=decoupling_groups,
+            ref_sheets=sheet_map,
             fixed_sides=fixed_sides,
         )
         # Report BOTH wirelength estimators for this layout (issue #4831 M5).
@@ -1581,9 +1909,14 @@ def run_optimize_placement(
             nets,
             scored="pad" if pad_anchored_wirelength else "centre",
         )
+        current_cap_errors = _designated_cap_violations(
+            pcb_path, decoupling_groups, decoupling_radius_mm
+        )
         if not quiet:
             _print_score("Current", score)
-            print(f"\n  Feasible: {score.is_feasible}")
+            print(f"\n  Feasible: {score.is_feasible and not current_cap_errors}")
+            for cap_error in current_cap_errors:
+                print(f"  {cap_error}")
             print(f"  Total score: {score.total:.4f}")
             print(f"  {estimators.summary_line()}")
             # The optimizer objective (bounding-box overlap area in mm^2 and a
@@ -1614,7 +1947,8 @@ def run_optimize_placement(
                     "scores": {"current": _score_document(score)},
                     "wirelength_estimators": estimators.as_dict(),
                     "decoupling": _decoupling_report(current_vector, components, decoupling_groups),
-                    "feasible": bool(score.is_feasible),
+                    "feasible": bool(score.is_feasible and not current_cap_errors),
+                    "infeasible_detail": ", ".join(current_cap_errors) or None,
                     "saved": False,
                     "written_to": None,
                     "objective": (
@@ -1726,6 +2060,7 @@ def run_optimize_placement(
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
             decoupling_groups=decoupling_groups,
+            ref_sheets=sheet_map,
             fixed_sides=fixed_sides,
         )
         if not quiet:
@@ -1753,6 +2088,7 @@ def run_optimize_placement(
                 exempt_pairs=hv_exempt,
                 pad_anchored=pad_anchored_wirelength,
                 decoupling_groups=decoupling_groups,
+                ref_sheets=sheet_map,
                 fixed_sides=fixed_sides,
             )
             initial_scores.append(score.total)
@@ -1775,6 +2111,7 @@ def run_optimize_placement(
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
             decoupling_groups=decoupling_groups,
+            ref_sheets=sheet_map,
             fixed_sides=fixed_sides,
         )
 
@@ -1831,6 +2168,7 @@ def run_optimize_placement(
                     exempt_pairs=hv_exempt,
                     pad_anchored=pad_anchored_wirelength,
                     decoupling_groups=decoupling_groups,
+                    ref_sheets=sheet_map,
                     fixed_sides=fixed_sides,
                 )
                 scores.append(score.total)
@@ -1927,7 +2265,10 @@ def run_optimize_placement(
             ref_domains=hv_ref_domains,
             required_mm_by_domain_pair=hv_required,
             exempt_pairs=hv_exempt,
+            ref_sheets=sheet_map,
             pad_anchored=pad_anchored_wirelength,
+            max_radius_mm=decoupling_radius_mm,
+            flippable_refs=flippable_refs,
         )
     else:
         # --- Route-check acceptance (issue #6234) ---
@@ -1954,7 +2295,10 @@ def run_optimize_placement(
                 ref_domains=hv_ref_domains,
                 required_mm_by_domain_pair=hv_required,
                 exempt_pairs=hv_exempt,
+                ref_sheets=sheet_map,
                 pad_anchored=pad_anchored_wirelength,
+                max_radius_mm=decoupling_radius_mm,
+                flippable_refs=flippable_refs,
             )
             snaps[snapped.data.tobytes()] = moves
             return snapped
@@ -1976,6 +2320,7 @@ def run_optimize_placement(
             best_vector,
             _snap,
             fixed_sides=fixed_sides,
+            flippable_refs=flippable_refs,
             locked_indices=locked_indices,
             budget=route_check_budget,
             seed=random_seed,
@@ -2020,7 +2365,8 @@ def run_optimize_placement(
         exempt_pairs=hv_exempt,
         pad_anchored=pad_anchored_wirelength,
         decoupling_groups=decoupling_groups,
-        fixed_sides=fixed_sides,
+        ref_sheets=sheet_map,
+        fixed_sides=None if flippable_refs else fixed_sides,
     )
 
     # Save final checkpoint
@@ -2061,6 +2407,10 @@ def run_optimize_placement(
             print(f"    Creepage:      {_delta(si.creepage, sf.creepage)}")
         if si.decoupling or sf.decoupling:
             print(f"    Decoupling:    {_delta(si.decoupling, sf.decoupling)}")
+        if si.group_cohesion or sf.group_cohesion:
+            print(f"    SheetCohesion: {_delta(si.group_cohesion, sf.group_cohesion)}")
+        if si.group_order or sf.group_order:
+            print(f"    SheetOrder:    {_delta(si.group_order, sf.group_order)}")
 
         # Feasibility transition (categorical, not percent)
         seed_feas = "feasible" if seed_score.is_feasible else "INFEASIBLE"
@@ -2106,14 +2456,69 @@ def run_optimize_placement(
         silk_mfr = resolve_cli_manufacturer(None, pcb_path)
     silk_repair: SnapSilkRepair | None = None
     silk_fix_doc: dict | None = None
+    cap_errors: list[str] = []
+
+    def validate_candidate(candidate: Path) -> None:
+        cap_errors.extend(
+            _designated_cap_violations(candidate, decoupling_groups, decoupling_radius_mm)
+        )
+        if cap_errors and not allow_infeasible:
+            raise _DecouplingPlacementError(", ".join(cap_errors))
+
+    def _finish(rc: int, *, infeasible_detail: str | None = None, saved: bool = True) -> int:
+        """Emit the single JSON document (if asked) and return *rc* unchanged."""
+        if as_json:
+            route_check_doc = (
+                {"route_check": route_check_report.as_dict()}
+                if route_check_report is not None
+                else {}
+            )
+            emit_json(
+                {
+                    **base_document,
+                    **route_check_doc,
+                    "mode": "optimize",
+                    "snap_silk_repair": (
+                        silk_repair.as_dict() if silk_repair is not None else None
+                    ),
+                    "silk_fix": silk_fix_doc,
+                    "scores": {
+                        "initial": _score_document(seed_score),
+                        "final": _score_document(final_score),
+                    },
+                    "decoupling": _decoupling_report(best_vector, components, decoupling_groups),
+                    "feasible": bool(final_score.is_feasible and not cap_errors),
+                    "infeasible_detail": ", ".join(filter(None, [infeasible_detail, *cap_errors]))
+                    or None,
+                    "iterations": iteration,
+                    "wall_time_s": elapsed,
+                    "interrupted": bool(_interrupt_state["interrupted"]),
+                    "overlaps_remaining": (
+                        post_slide_result.overlaps_remaining if post_slide_result is not None else 0
+                    ),
+                    "allow_infeasible": bool(allow_infeasible),
+                    "saved": saved,
+                    "written_to": output_path if saved else None,
+                    "success": rc == 0,
+                }
+            )
+        return rc
+
     try:
         if route_check_report is not None and route_check_report.accepted_stage == "incumbent":
             # Route check kept the board as read: write it untouched (the
             # vector encoding would snap any off-90-degree rotation).
+            validate_candidate(Path(pcb_path))
             _write_board_as_read_atomic(pcb_path, output_path)
         else:
             _write_placements_to_pcb_atomic(
-                pcb_path, output_path, best_vector, components, board_origin
+                pcb_path,
+                output_path,
+                best_vector,
+                components,
+                board_origin,
+                flippable_refs=flippable_refs,
+                validate=validate_candidate if designated_caps else None,
             )
             # The snap moved caps by their footprint origin only: re-anchor
             # the reference text it disturbed (issue #6256).  Issue #9799:
@@ -2121,6 +2526,9 @@ def run_optimize_placement(
             # silk text, so the opt-out leaves authored silk byte-identical.
             if silk_fix:
                 silk_repair = repair_snapped_silk_refs(output_path, snap_moves)
+    except _DecouplingPlacementError as exc:
+        print(f"Decoupling constraints unmet: {exc}", file=sys.stderr)
+        return _finish(1, saved=False)
     except Exception as e:
         rc = _placement_error(
             pcb_path,
@@ -2148,46 +2556,10 @@ def run_optimize_placement(
 
         silk_fix_doc = run_default_silk_pass(output_path, mfr=silk_mfr, quiet=quiet)
 
+    if cap_errors:
+        print(f"Accepted infeasible placement: {', '.join(cap_errors)}", file=sys.stderr)
     if not quiet:
         print("Done.")
-
-    def _finish(rc: int, *, infeasible_detail: str | None = None) -> int:
-        """Emit the single JSON document (if asked) and return *rc* unchanged."""
-        if as_json:
-            route_check_doc = (
-                {"route_check": route_check_report.as_dict()}
-                if route_check_report is not None
-                else {}
-            )
-            emit_json(
-                {
-                    **base_document,
-                    **route_check_doc,
-                    "mode": "optimize",
-                    "snap_silk_repair": (
-                        silk_repair.as_dict() if silk_repair is not None else None
-                    ),
-                    "silk_fix": silk_fix_doc,
-                    "scores": {
-                        "initial": _score_document(seed_score),
-                        "final": _score_document(final_score),
-                    },
-                    "decoupling": _decoupling_report(best_vector, components, decoupling_groups),
-                    "feasible": bool(final_score.is_feasible),
-                    "infeasible_detail": infeasible_detail,
-                    "iterations": iteration,
-                    "wall_time_s": elapsed,
-                    "interrupted": bool(_interrupt_state["interrupted"]),
-                    "overlaps_remaining": (
-                        post_slide_result.overlaps_remaining if post_slide_result is not None else 0
-                    ),
-                    "allow_infeasible": bool(allow_infeasible),
-                    "saved": True,
-                    "written_to": output_path,
-                    "success": rc == 0,
-                }
-            )
-        return rc
 
     # Exit code 2 when interrupted (partial result saved).
     if _interrupt_state["interrupted"]:

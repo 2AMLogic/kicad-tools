@@ -1981,10 +1981,34 @@ register_tool(
 # -----------------------------------------------------------------------------
 
 
+_SHEET_WEIGHT_PROPERTIES = {
+    "group_cohesion": {
+        "type": "number",
+        "description": (
+            "Schematic-sheet cohesion weight (default: 1.0). Pulls "
+            "parts whose symbols share a sheet into a compact zone."
+        ),
+    },
+    "group_order": {
+        "type": "number",
+        "description": (
+            "Schematic-order weight (default: 1.0). Penalises "
+            "same-prefix parts of a sheet placed against their "
+            "schematic order."
+        ),
+    },
+}
+
+
 def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
     """Handle optimize_placement tool call."""
     from kicad_tools.mcp.tools.optimize_placement import optimize_placement
 
+    options = {}
+    if "route_check_budget" in params:
+        options["route_check_budget"] = params["route_check_budget"]
+    if "decoupling_radius_mm" in params:
+        options["decoupling_radius_mm"] = params["decoupling_radius_mm"]
     return optimize_placement(
         pcb_path=params["pcb_path"],
         strategy=params.get("strategy", "cmaes"),
@@ -1994,11 +2018,7 @@ def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
         output_path=params.get("output_path"),
         pre_slide_off=params.get("pre_slide_off", True),
         route_check=params.get("route_check", False),
-        **(
-            {"route_check_budget": params["route_check_budget"]}
-            if "route_check_budget" in params
-            else {}
-        ),
+        **options,
     )
 
 
@@ -2013,7 +2033,9 @@ register_tool(
         "optimization is needed. Decoupling capacitors are pulled onto the IC supply "
         "pin they serve (affinity term, default weight 2.0, plus a post-optimize snap "
         'pass), same as `kct optimize-placement`; pass weights={"decoupling": 0} to '
-        "turn it off. Reports the per-cap result under 'decoupling'."
+        "turn it off. Reports per-cap distances under 'decoupling'. A designated cap on "
+        "the wrong side, outside the radius, or out of capacitance order makes 'feasible' "
+        "false, with cap and pin details in 'infeasible_detail'."
     ),
     parameters=_make_params(
         properties={
@@ -2042,7 +2064,8 @@ register_tool(
                 "type": "object",
                 "description": (
                     "Cost function weight overrides. Keys: overlap, drc, boundary, "
-                    "wirelength, area, creepage, cohesion, decoupling. Higher weights "
+                    "wirelength, area, creepage, cohesion, decoupling, "
+                    "group_cohesion, group_order. Higher weights "
                     "penalize that metric more. 'decoupling' (default 2.0) is the "
                     "decoupling-cap affinity term and its post-optimize snap pass; "
                     "set it to 0 to disable both."
@@ -2066,7 +2089,14 @@ register_tool(
                             "the term and the post-optimize snap pass."
                         ),
                     },
+                    **_SHEET_WEIGHT_PROPERTIES,
                 },
+            },
+            "decoupling_radius_mm": {
+                "type": "number",
+                "description": "Maximum supply-pad distance to a designated IC pin in mm.",
+                "minimum": 0,
+                "default": 6.0,
             },
             "seed_method": {
                 "type": "string",
@@ -2077,8 +2107,7 @@ register_tool(
             "output_path": {
                 "type": "string",
                 "description": (
-                    "Path for output .kicad_pcb file with optimized placements. "
-                    "If not specified, the result is not written to disk."
+                    "Save the selected placement here even if infeasible. Omit for a preview."
                 ),
             },
             "pre_slide_off": {
@@ -2149,7 +2178,8 @@ register_tool(
                 "type": "object",
                 "description": (
                     "Cost function weight overrides. Keys: overlap, drc, boundary, "
-                    "wirelength, area. Higher weights penalize that metric more."
+                    "wirelength, area, group_cohesion, group_order. Set both sheet "
+                    "weights to zero to skip schematic discovery."
                 ),
                 "properties": {
                     "overlap": {"type": "number", "description": "Overlap weight (default: 1e6)"},
@@ -2163,6 +2193,7 @@ register_tool(
                         "description": "Wirelength weight (default: 1.0)",
                     },
                     "area": {"type": "number", "description": "Area weight (default: 0.1)"},
+                    **_SHEET_WEIGHT_PROPERTIES,
                 },
             },
         },

@@ -1901,6 +1901,13 @@ class Footprint:
     # (#9796).
     zone_connect: int | None = None
     properties: dict[str, str] = field(default_factory=dict)
+    # Schematic symbol-instance link ``(path "/<sheet-uuid>/<symbol-uuid>")``
+    # (KiCad 8+ quoted form; KiCad 7 wrote the legacy bare hex form).  What
+    # lets KiCad's editors cross-probe this footprint back to its symbol and
+    # update it from the schematic.  Read-only: saving goes through the
+    # parsed tree, and no placement-synced field writes back into it
+    # (Issue #10109).
+    path: str = ""
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
     _board_origin: tuple[float, float] = field(
         default=(0.0, 0.0),
@@ -2239,6 +2246,14 @@ class Footprint:
         if uuid := sexp.find_child("uuid"):
             fp.uuid = uuid.get_string(0) or ""
 
+        # Schematic symbol-instance link (Issue #10109).  Direct children
+        # only: nothing below the footprint legitimately carries a
+        # ``(path ...)`` token today, but staying consistent with the
+        # direct-child rule above keeps a future descendant token from
+        # being misread as the footprint's own.
+        if path_node := sexp.find_child("path"):
+            fp.path = path_node.get_string(0) or ""
+
         # Description and tags
         if descr := sexp.find_child("descr"):
             fp.description = descr.get_string(0) or ""
@@ -2348,6 +2363,13 @@ class Footprint:
         return fp
 
 
+def _copper_item_locked(sexp: SExp) -> bool:
+    """Read a KiCad lock child or the legacy bare lock token."""
+    if (locked := sexp.find("locked")) is not None:
+        return (locked.get_string(0) or "yes") != "no"
+    return any(child.is_atom and child.value == "locked" for child in sexp.children)
+
+
 @dataclass
 class Segment:
     """PCB trace segment."""
@@ -2407,10 +2429,7 @@ class Segment:
                 seg.net_name_only = True
         if uuid := sexp.find("uuid"):
             seg.uuid = uuid.get_string(0) or ""
-        if (locked := sexp.find("locked")) is not None:
-            seg.locked = (locked.get_string(0) or "yes") != "no"
-        elif any(c.is_atom and c.value == "locked" for c in sexp.children):
-            seg.locked = True
+        seg.locked = _copper_item_locked(sexp)
 
         return seg
 
@@ -2583,6 +2602,7 @@ class Via:
     # actually reads.  Only the PCB loader consumes it (one warning per
     # board); the source S-expression is not rewritten.
     layers_read_as_through: bool = field(default=False, compare=False, repr=False)
+    locked: bool = field(default=False, compare=False)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Via:
@@ -2593,6 +2613,7 @@ class Via:
             drill=0.0,
             layers=[],
             net_number=0,
+            locked=_copper_item_locked(sexp),
         )
 
         # Issue #3124: detect the optional leading via-type token.  KiCad
@@ -2682,6 +2703,8 @@ class Via:
         via_sexp = SExp.list("via")
         if self.via_type:
             via_sexp.append(SExp.atom(self.via_type))
+        if self.locked:
+            via_sexp.append(SExp.list("locked", "yes"))
         via_sexp.append(SExp.list("at", self.position[0] + ox, self.position[1] + oy))
         via_sexp.append(SExp.list("size", self.size))
         via_sexp.append(SExp.list("drill", self.drill))

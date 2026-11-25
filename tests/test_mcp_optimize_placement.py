@@ -251,6 +251,8 @@ class TestOptimizePlacement:
         assert "total" in result["final_score"]
         assert "feasible" in result["final_score"]
         assert "breakdown" in result["final_score"]
+        for stage in ("initial_score", "final_score"):
+            assert {"group_cohesion", "group_order"} <= result[stage]["breakdown"].keys()
         assert "improvement_pct" in result
         assert isinstance(result["improvement_pct"], float)
         assert result["iterations"] >= 0
@@ -379,6 +381,7 @@ class TestRegistryIntegration:
 
     def test_optimize_placement_spec(self):
         """optimize_placement tool has correct spec."""
+        from kicad_tools.cli.optimize_placement_cmd import DEFAULT_DECOUPLING_RADIUS_MM
         from kicad_tools.mcp.tools.registry import get_tool
 
         tool = get_tool("optimize_placement")
@@ -386,7 +389,23 @@ class TestRegistryIntegration:
         assert tool.category == "placement"
         assert "pcb_path" in tool.parameters["properties"]
         assert "pcb_path" in tool.parameters["required"]
+        radius = tool.parameters["properties"]["decoupling_radius_mm"]
+        assert radius["type"] == "number" and radius["minimum"] == 0
+        assert radius["default"] == DEFAULT_DECOUPLING_RADIUS_MM
         assert callable(tool.handler)
+
+    @pytest.mark.parametrize("radius", [-1, float("inf"), -float("inf"), float("nan")])
+    def test_registered_radius_rejected_before_read_or_write(self, tmp_path, radius):
+        from kicad_tools.mcp.tools.registry import get_tool
+
+        pcb = tmp_path / "unparsed.kicad_pcb"
+        pcb.touch()
+        output = tmp_path / "output.kicad_pcb"
+        with pytest.raises(ValueError, match="decoupling_radius_mm"):
+            get_tool("optimize_placement").handler(
+                {"pcb_path": str(pcb), "output_path": str(output), "decoupling_radius_mm": radius}
+            )
+        assert not output.exists()
 
     def test_evaluate_placement_spec(self):
         """evaluate_placement tool has correct spec."""
@@ -398,6 +417,34 @@ class TestRegistryIntegration:
         assert "pcb_path" in tool.parameters["properties"]
         assert "pcb_path" in tool.parameters["required"]
         assert callable(tool.handler)
+        weights = tool.parameters["properties"]["weights"]["properties"]
+        assert weights["group_cohesion"]["type"] == weights["group_order"]["type"] == "number"
+
+    def test_evaluator_applies_each_sheet_weight(self, monkeypatch):
+        from unittest.mock import Mock
+
+        from kicad_tools.mcp.tools import optimize_placement as placement
+        from kicad_tools.mcp.tools.registry import TOOL_REGISTRY
+
+        # R5 lies between R1 and R2 on this board, reversing one pair.
+        sheet_map = Mock(return_value={"R1": "/led/", "R2": "/led/", "R5": "/led/", "U1": "/"})
+        monkeypatch.setattr(placement, "_build_sheet_map", sheet_map)
+        board = Path(__file__).resolve().parents[1] / "boards/02-charlieplex-led/output"
+        pcb = str(board / "charlieplex_3x3.kicad_pcb")
+        evaluate = TOOL_REGISTRY["evaluate_placement"].handler
+        disabled = evaluate({"pcb_path": pcb, "weights": {"group_cohesion": 0, "group_order": 0}})
+        assert disabled["success"]
+        sheet_map.assert_not_called()
+        assert disabled["breakdown"]["group_cohesion"] == disabled["breakdown"]["group_order"] == 0
+
+        for term in ("group_cohesion", "group_order"):
+            weights = {"group_cohesion": 0, "group_order": 0}
+            weights[term] = 3
+            result = evaluate({"pcb_path": pcb, "weights": weights})
+            assert result["success"]
+            distance = result["breakdown"][term]
+            assert distance > 0
+            assert result["score"] - disabled["score"] == pytest.approx(3 * distance, abs=0.001)
 
     def test_placement_tools_in_category(self):
         """Both new tools appear in placement category listing."""

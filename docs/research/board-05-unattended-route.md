@@ -469,3 +469,66 @@ pads on both forms. All 399 revised tracks are horizontal, vertical or 45
 degrees. The stored board still has 13 mask-to-copper errors, and the
 refilled board has 12. RESET and the 77 nightly warnings keep the unattended
 gate at exit 1.
+
+## RESET branch entering a via beside its trunk, 2026-11-24 (issue #9424)
+
+On the public recipe at `b66f14f47`, the optimizer introduced a 0.029810 mm
+F.Cu gap between two RESET tracks. The fabrication limit was 0.1016 mm.
+The shorter branch already ran down a longer RESET trace. Continuing along
+that trace to the level of the via and then entering its barrel removes the
+diagonal facing the neighbouring branch. Both new legs lie within the existing
+trunk and barrel. The optimizer retains a connected path between the original
+endpoints and checks for other copper that depended on the removed diagonal.
+
+| Pinned KiCad 10.0.6, C++ router build 79 | Before | After |
+| --- | ---: | ---: |
+| Nightly manufacturer check, errors / warnings | 1 / 77 | 0 / 77 |
+| Full manufacturer check on the saved board | 14 / 100 | 13 / 100 |
+| Full manufacturer check after independent refill | 13 / 104 | 12 / 104 |
+
+Seeds 42, 7 and 1337 each routed 37 of 37 nets and 143 of 143 connections
+with 121 vias. Native DRC and ERC were clean. Copper LVS matched 149 pads on
+both the saved and refilled boards. The three saved boards and a second fresh
+seed-42 run produced the same PCB bytes.
+
+The RESET slit was the sole manufacturer error removed. One existing
+mask-to-copper warning on U1/29 names a different generated UUID for the
+same neighbouring track. Its location, measurement (0.130009 mm) and limit
+(0.090 mm) are unchanged. The remaining warning records match in full. All
+checks used zero waivers. The 77 nightly warnings and the full-check
+mask findings keep Board 05 below the unattended acceptance target.
+
+## C3 and R11 silkscreen over routed vias, 2026-11-25 (issue #9424)
+
+On a fresh seed-42 board, KiCad's front silkscreen Gerber had ink inside
+three 0.30 mm via drills. C3 crossed one and R11 crossed two. The unattended
+recipe now runs `place-silk-refs --mfr jlcpcb --layers 4 --over-holes` after
+adding the fiducials and board ID. The placer uses the drills present in
+each routed board. Running `--grade-only` on the original board preserved its
+SHA-256 and reported all three overlaps.
+
+| Via centre in KiCad coordinates (mm) | Reference | Original ink inside drill (mm²) | Final ink-to-drill edge (mm) |
+| --- | --- | ---: | ---: |
+| 131.360, 102.475 | C3 | 0.02657 | 0.565 |
+| 172.245, 95.455 | R11 | 0.00849 | 1.965 |
+| 174.130, 95.715 | R11 | 0.03947 | 2.598 |
+
+KiCad 10.0.6 plotted both seed-42 boards. All four copper layers, both mask
+and paste layers, back silkscreen, board outline and all 170 Excellon drills
+matched. Only the two front reference markings moved.
+
+| Seed-42 check | Before | After |
+| --- | ---: | ---: |
+| Nightly manufacturer errors / warnings | 0 / 80 | 0 / 77 |
+| Full manufacturer errors / warnings on the saved board | 14 / 84 | 14 / 81 |
+| `silk_hole_overlap` warnings | 3 | 0 |
+
+Every other manufacturer error and warning kept its original identity and
+message. The full check used zero waivers. The 14 mask-to-copper errors and
+77 nightly warnings keep the unattended gate at exit 1.
+
+With the recipe based on `59d5121b5` and C++ router build 79, seeds 42, 7
+and 1337 produced identical saved PCBs (SHA-256
+`f6fbdbcb81a6e80e5732af89e6dec8584cfca182850c56018a266e33c35b8f27`).
+Each completed 37/37 nets and 143/143 connections with 120 vias. Native
+DRC and ERC returned zero findings, and both copper and label LVS passed.
