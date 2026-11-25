@@ -687,6 +687,73 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
     return len(vias)
 
 
+def repair_silk_over_holes(routed_path: Path) -> int:
+    """Clip silkscreen off drilled holes; move refs out from over them (#9065).
+
+    Delivers the recipe-level acceptance criteria of #9054 that PR #9061
+    left open: the routed PCB carries ``fp_line`` / ``fp_poly`` silk
+    crossing via drills (5 ``silk_hole_overlap`` findings) and reference
+    labels sitting over holes (C6, U1).  This step runs the library
+    equivalents of ``kct fix-silkscreen --clip-to-holes`` and
+    ``kct place-silk-refs --over-holes`` on ``routed_path`` -- after
+    routing so the vias exist, before the zone fill because silk edits do
+    not touch copper -- with no hand-placed coordinates, then hard-gates
+    ``silk_hole_overlap == 0`` so the ``board-03-end-to-end`` CI job keeps
+    it there on every main push.  Each save fires only when its pass
+    actually changed something, so a second recipe run is a byte-identical
+    no-op (#9065 Observed).
+
+    Returns the number of silk elements clipped plus references moved.
+    Raises RuntimeError when any ``silk_hole_overlap`` finding remains.
+    """
+    from kicad_tools.drc.repair_silkscreen import SilkscreenRepairer
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.silkscreen.place_refs import SilkRefPlacer, references_over_holes
+    from kicad_tools.validate.rules.silkscreen import check_all_silkscreen
+
+    print("\nRepairing silkscreen over drilled holes (issue #9065)...")
+
+    repairer = SilkscreenRepairer(routed_path)
+    hole_result = repairer.repair_hole_clearance()
+    if hole_result.total_fixed:
+        repairer.save()
+    for fix in hole_result.fixes:
+        print(f"   {fix.footprint_ref}: {fix.element_type} {fix.action} ({', '.join(fix.holes)})")
+
+    placer = SilkRefPlacer(routed_path)
+    moved = 0
+    over = references_over_holes(placer.pcb)
+    if over:
+        placement = placer.plan(only=over)
+        moved = placer.apply(placement)
+        if moved:
+            placer.save()
+        for p in placement.placements:
+            print(f"   {p.footprint_ref}: {p.status} -> {p.new_position}")
+
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    remaining = [
+        v
+        for v in check_all_silkscreen(PCB.load(routed_path), rules).violations
+        if v.rule_id == "silk_hole_overlap"
+    ]
+    if remaining:
+        for v in remaining:
+            print(f"   silk_hole_overlap: {v.message}")
+        raise RuntimeError(
+            f"silk hole clearance gate: {len(remaining)} silk_hole_overlap finding(s) "
+            "remain after repair_hole_clearance + place-silk-refs --over-holes; "
+            "see the messages above."
+        )
+
+    print(
+        f"   {hole_result.total_fixed} clip(s) + {moved} ref move(s); "
+        "silk_hole_overlap = 0 (jlcpcb, 4 layers)"
+    )
+    return hole_result.total_fixed + moved
+
+
 def require_saved_copper_connected(routed_path: Path) -> None:
     """Gate Board03 on native connectivity of the exact saved copper (#5358).
 
@@ -1241,6 +1308,9 @@ def main() -> int:
         # freshly-added vias and computes copper under the SAME rules
         # downstream DRC/LVS/CI/net-status check the saved bytes against.
         fill_zones_in_routed_pcb(routed_path)
+
+        # Finish silk on the filled copper before checking or exporting this board.
+        repair_silk_over_holes(routed_path)
 
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
