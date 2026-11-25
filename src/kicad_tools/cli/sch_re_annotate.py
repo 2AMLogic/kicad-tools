@@ -657,10 +657,9 @@ def run_re_annotate(
             print("All references are already sequential. No changes needed.")
         return 0
 
-    # Phase 2b: prepare the board-side rename plan when --pcb was given.
-    # The board is loaded and renamed in memory *before* any schematic
-    # write, so a load or plan failure cannot leave the pair half-synced;
-    # the board file is saved only after the schematic writes succeed.
+    # Phase 2b: prepare the board-side rename plan in memory. A failed load
+    # or plan leaves both inputs intact. Phase 5 writes the prepared board
+    # and schematics under the same rollback handling.
     pcb_board = None
     board_mapping: dict[str, str] = {}
     pcb_warnings: list[str] = []
@@ -861,9 +860,9 @@ def run_re_annotate(
 
         modified_files[sch_file] = current_text
 
-    # Phase 5: Write the board first, then the schematics, as one unit.  If
-    # any write fails, every file already written is restored from its
-    # original contents so a retry of the same command sees the original pair.
+    # Phase 5: Write the board first, then the schematics. A failed write
+    # triggers restoration from the original bytes. Report any file whose
+    # original contents could not be restored.
     written: list[tuple[Path, bytes]] = []  # (path, original bytes)
 
     def _matches_original(path: Path, original: bytes) -> bool:
