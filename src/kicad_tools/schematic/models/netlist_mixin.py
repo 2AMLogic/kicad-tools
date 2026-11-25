@@ -116,18 +116,22 @@ class SchematicNetlistMixin:
 
     power_symbols: list[PowerSymbol]
 
-    def _build_connectivity_graph(
-        self, *, connect_named_points: bool = False
-    ) -> tuple[dict, dict, dict]:
+    def _build_connectivity_graph(self) -> tuple[dict, dict, dict]:
         """Build a connectivity graph using Union-Find.
 
-        With ``connect_named_points``, equal labels join separate wire branches
-        on this sheet, including branches connected transitively through aliases.
+        Equal labels join separate wire branches on this sheet, including
+        branches connected transitively through aliases, and each electrical
+        component carries exactly one name chosen by KiCad's priority
+        (global label, power symbol, local label, hierarchical label).  Every
+        netlist API (:meth:`extract_netlist`, :meth:`get_net_for_pin`,
+        :meth:`get_all_pin_nets`) therefore shares one net identity, including
+        for a rail that carries two names (issue #10240).
 
         Returns:
             Tuple of (parent dict, point_to_net_names dict, point_to_pins dict)
             - parent: Union-Find parent mapping for connectivity
-            - point_to_net_names: Maps points to their net names (from labels/power symbols)
+            - point_to_net_names: Maps one representative point of each named
+              component to its single winning net name
             - point_to_pins: Maps points to PinRef objects at that location
         """
         parent = {}
@@ -137,10 +141,9 @@ class SchematicNetlistMixin:
 
         def add_net_name(point: tuple[float, float], name: str, priority: int) -> None:
             point_to_net_names.setdefault(point, []).append(name)
-            if connect_named_points:
-                # KiCad selects global labels, power, local labels, then
-                # hierarchical labels. Equal-priority names sort lexically.
-                name_priority[name] = min(name_priority.get(name, priority), priority)
+            # KiCad selects global labels, power, local labels, then
+            # hierarchical labels. Equal-priority names sort lexically.
+            name_priority[name] = min(name_priority.get(name, priority), priority)
 
         def find(p):
             """Find root of point p in Union-Find structure."""
@@ -307,16 +310,15 @@ class SchematicNetlistMixin:
 
             connect_to_wire(hl_pos)
 
-        if connect_named_points:
-            first_point: dict[str, tuple] = {}
-            for point, names in point_to_net_names.items():
-                for name in names:
-                    union(point, first_point.setdefault(name, point))
-            # Both physical wires and shared names are now in the same graph.
-            # Keep one representative name per electrical component.
-            point_to_net_names = {}
-            for name in sorted(first_point, key=lambda name: (name_priority[name], name)):
-                point_to_net_names.setdefault(find(first_point[name]), [name])
+        first_point: dict[str, tuple] = {}
+        for point, names in point_to_net_names.items():
+            for name in names:
+                union(point, first_point.setdefault(name, point))
+        # Both physical wires and shared names are now in the same graph.
+        # Keep one representative name per electrical component.
+        point_to_net_names = {}
+        for name in sorted(first_point, key=lambda name: (name_priority[name], name)):
+            point_to_net_names.setdefault(find(first_point[name]), [name])
 
         return parent, point_to_net_names, point_to_pins
 
