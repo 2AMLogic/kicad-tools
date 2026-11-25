@@ -478,6 +478,7 @@ class OptimizationWorkflow:
             callback=evo_callback,
         )
 
+        optimizer._apply_individual(best)
         self._optimizer = optimizer
 
         return OptimizationResult(
@@ -485,8 +486,7 @@ class OptimizationWorkflow:
             strategy="evolutionary",
             components=len(optimizer.components),
             iterations=self.config.generations,
-            wire_length_mm=optimizer.total_wire_length(),
-            energy=optimizer.compute_energy(),
+            wire_length_mm=optimizer._total_wire_length(),
             message=f"Best fitness: {best.fitness:.2f}",
         )
 
