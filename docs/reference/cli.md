@@ -169,9 +169,24 @@ kct sch <subcommand> <schematic> [options]
 | `hierarchy` | Show sheet hierarchy |
 | `validate` | Validate schematic structure |
 | `pins` | Show symbol pin positions |
+| `decoupling` | Show the supply pin designated by each schematic bypass capacitor |
 | `connections` | Check pin connections using library positions |
 | `unconnected` | Find unconnected pins and issues |
 | `tidy` | Autoplace Reference/Value fields (headless; `--refs`, `--threshold`, `--dry-run`, cosmetic-only) |
+
+Run `kct sch decoupling project.kicad_sch --format json` on the root schematic
+to inspect the capacitor, sheet, net, target pin, and the reason for each
+association. A derived association looks for a supply pin within 25.4 mm on
+the same sheet and electrical net. Pins on the same drawn wire group take
+priority. Among equally connected candidates the closest drawn pin wins.
+Equal distances and missing local targets appear as `unassociated`.
+
+To designate a pin explicitly, set the custom symbol field `KCT_Decouples`
+on the **capacitor instance** in its `.kicad_sch` file. Set its value to the
+annotated target reference and **pin number**, for example `U2.14`. A valid
+same-net designation can cross sheets or exceed the drawing distance and
+appears as `overridden`. An unresolved or wrong-net designation appears as
+`unassociated` with the original value in the reason.
 
 **Examples:**
 ```bash
