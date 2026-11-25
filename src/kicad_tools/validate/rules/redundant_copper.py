@@ -58,6 +58,11 @@ error), each with a location:
     (joints, bends near the via) and layers where a track already ends on
     the via centre are not flagged.
 
+``redundant_copper_pour_stub``
+    A track leaving a pad and its optional terminal via are redundant when
+    a private native refill preserves direct pad-to-pour contact, the
+    physical terminal groups and the plane connections (Issue #10137).
+
 ``redundant_copper_covered``
     A segment whose both ends lie on the centreline of a strictly longer,
     no-narrower, same-net, same-layer segment's centreline (within
@@ -210,6 +215,7 @@ class RedundantCopperRule(DRCRule):
             "redundant_copper_via_offcentre",
             "redundant_copper_covered",
             "redundant_copper_staircase",
+            "redundant_copper_pour_stub",
         ):
             results.rules_checked_by_rule[rid] = 1
 
@@ -235,6 +241,36 @@ class RedundantCopperRule(DRCRule):
             self._check_covered(segs, results)
 
         self._check_via_offcentre(pcb, segments, results)
+        if getattr(pcb, "path", None) and pcb.zones:
+            from kicad_tools.validate.pour_stub import verified_pour_stubs
+
+            for stub, evidence in verified_pour_stubs(pcb):
+                seg = stub.segment
+                ox, oy = self._origin
+                start = f"({seg.start[0] + ox:.3f}, {seg.start[1] + oy:.3f})"
+                end = f"({seg.end[0] + ox:.3f}, {seg.end[1] + oy:.3f})"
+                items = [stub.pad_name, seg.uuid or f"{seg.layer} {start} to {end}"]
+                via = ""
+                if stub.via:
+                    x, y = stub.via.position
+                    via = f" and via at ({x + ox:.3f}, {y + oy:.3f})"
+                    items.append(stub.via.uuid or via.strip())
+                results.add(
+                    DRCViolation(
+                        rule_id="redundant_copper_pour_stub",
+                        severity="warning",
+                        message=(
+                            f"Pad {stub.pad_name} [{stub.net}] remains connected directly "
+                            f"through its refilled pour after removing the {seg.layer} track "
+                            f"{start} to {end}{via}. All {len(evidence.terminal_uuids)} remaining "
+                            f"terminals on this net stay connected."
+                        ),
+                        location=stub.location,
+                        layer=seg.layer,
+                        items=tuple(items),
+                        nets=(stub.net,),
+                    )
+                )
         return results
 
     # ------------------------------------------------------------------

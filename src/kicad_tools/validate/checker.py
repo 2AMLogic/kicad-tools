@@ -593,6 +593,7 @@ class DRCChecker:
         "redundant_copper_detour": CATEGORY_ADVISORY,
         "redundant_copper_staircase": CATEGORY_ADVISORY,
         "redundant_copper_via_offcentre": CATEGORY_ADVISORY,
+        "redundant_copper_pour_stub": CATEGORY_ADVISORY,
         # Isolated copper (Issue #4680, second slice): orphaned zone-fill
         # islands.  Warning-severity quality advisory mirroring KiCad's
         # default severity (project_generator.py pins it to "warning") --
