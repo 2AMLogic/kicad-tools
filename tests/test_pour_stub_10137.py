@@ -114,12 +114,47 @@ def test_refilled_pour_replaces_branch_without_writing_source(tmp_path, via):
 @pytest.mark.parametrize("case", ["bridge", "island", "void", "disabled", "unanchored_plane"])
 def test_unproven_branches_remain_unreported(tmp_path, case):
     require_native_refill()
-    assert not findings(fixture_board(tmp_path, case))
+    result = check_result(fixture_board(tmp_path, case))
+    assert not any(v.rule_id == RULE for v in result.violations)
+    if case == "bridge":
+        assert result.rules_checked_by_rule[RULE] == 1
 
 
 def test_no_native_refill_no_finding(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "find_kicad_cli", lambda: None)
-    assert not findings(fixture_board(tmp_path, "connected"))
+    result = check_result(fixture_board(tmp_path, "connected"))
+    assert result.rules_checked_by_rule[RULE] == 0
+    assert not any(v.rule_id == RULE for v in result.violations)
+
+
+def test_native_reader_refusal_leaves_rule_unchecked(tmp_path):
+    require_native_refill()
+    path = fixture_board(tmp_path, "connected")
+    path.write_text(path.read_text().replace("(version 20240108)", "(version 20990101)"))
+    original = path.read_bytes()
+    result = check_result(path)
+    assert result.rules_checked_by_rule[RULE] == 0
+    assert not any(v.rule_id == RULE for v in result.violations)
+    assert path.read_bytes() == original
+
+
+def test_failed_trial_after_good_baseline_leaves_rule_unchecked(tmp_path, monkeypatch):
+    require_native_refill()
+    path = fixture_board(tmp_path, "connected")
+    refill = runner.run_refill_zones
+    calls = []
+
+    def refuse_trial(board_path, *args, **kwargs):
+        calls.append(board_path)
+        if len(calls) == 1:
+            return refill(board_path, *args, **kwargs)
+        return runner.KiCadCLIResult(success=False, stderr="trial refill failed")
+
+    monkeypatch.setattr(runner, "run_refill_zones", refuse_trial)
+    result = check_result(path)
+    assert len(calls) == 2
+    assert result.rules_checked_by_rule[RULE] == 0
+    assert not any(v.rule_id == RULE for v in result.violations)
 
 
 def test_unsaved_refill_never_reuses_cached_copper(tmp_path, monkeypatch):

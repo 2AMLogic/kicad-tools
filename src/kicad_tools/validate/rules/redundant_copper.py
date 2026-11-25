@@ -251,11 +251,11 @@ class RedundantCopperRule(DRCRule):
 
         self._check_via_offcentre(pcb, segments, results)
         if self._prove_pour_stubs and getattr(pcb, "path", None) and pcb.zones:
-            from kicad_tools.validate.pour_stub import verified_pour_stubs
+            from kicad_tools.validate.pour_stub import evaluate_pour_stubs
 
-            proven = verified_pour_stubs(pcb)
-            results.rules_checked_by_rule["redundant_copper_pour_stub"] = 1
-            for stub, evidence in proven:
+            proven = evaluate_pour_stubs(pcb)
+            results.rules_checked_by_rule["redundant_copper_pour_stub"] = int(proven is not None)
+            for stub, evidence in proven or ():
                 seg = stub.segment
                 ox, oy = self._origin
                 start = f"({seg.start[0] + ox:.3f}, {seg.start[1] + oy:.3f})"

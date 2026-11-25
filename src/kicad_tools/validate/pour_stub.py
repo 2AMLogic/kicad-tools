@@ -65,6 +65,10 @@ class PourStubEvidence:
     terminal_uuids: frozenset[str]
 
 
+class _TrialUnavailable(Exception):
+    """The candidate could not be identified, removed or refilled on the trial board."""
+
+
 def _connection_enabled(pcb: PCB, pad: CopperItem, zone_index: int) -> bool:
     fp_index, pad_index = pad.key
     fp = pcb.footprints[fp_index]
@@ -267,19 +271,19 @@ def _verify_branch(
         and candidate.segment.layer in prior.graph.items[i].layers
     ]
     if len(pad_ids) != 1:
-        return None
+        raise _TrialUnavailable("pad identity is ambiguous")
     (pad_id,) = pad_ids
     layer = candidate.segment.layer
     if not _connected_pour(baseline, prior, pad_id, layer):
         return None
     trial = PCB.load(path)
     if trial.remove_segments([candidate.segment]) != 1:
-        return None
+        raise _TrialUnavailable("candidate track could not be removed")
     if candidate.via and trial.remove_vias([candidate.via]) != 1:
-        return None
+        raise _TrialUnavailable("candidate via could not be removed")
     trial.save(path)
     if not _refill(path, cli):
-        return None
+        raise _TrialUnavailable("native KiCad did not save the trial refill")
     after = PCB.load(path)
     states = _states(after)
     if not _preserves_terminals(previous, states, candidate.via.uuid if candidate.via else ""):
@@ -291,15 +295,15 @@ def _verify_branch(
     return None
 
 
-def verified_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]]:
-    """Prove each removal independently against a refilled snapshot of the checked project."""
+def evaluate_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]] | None:
+    """Return verified branches, or None if no candidate could be evaluated."""
     source = pcb.path
     if source is None or not pcb.zones or not pcb.segments:
-        return []
+        return None
     try:
         branches = discover_pour_stubs(pcb)
         if not branches or (cli := runner.find_kicad_cli()) is None:
-            return []
+            return None
         with tempfile.TemporaryDirectory(prefix="kct-pour-stub-") as scratch:
             path = Path(scratch) / source.name
             original = source.read_bytes()
@@ -308,12 +312,13 @@ def verified_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]]:
             copy(pcb).save(path)
             rules = {p.name: p.read_bytes() for p in copy_project_sidecars(source, path)}
             if not _refill(path, cli):
-                return []
+                return None
             frozen = path.read_bytes()
             baseline = PCB.load(path)
             previous = _states(baseline)
             saved = {b._signature(): b for b in discover_pour_stubs(baseline)}
             results = []
+            exercised = False
             for branch in branches:
                 candidate = saved.get(branch._signature())
                 if candidate is None:
@@ -323,10 +328,20 @@ def verified_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]]:
                     trial.write_bytes(frozen)
                     for name, data in rules.items():
                         (trial.parent / name).write_bytes(data)
-                    evidence = _verify_branch(candidate, baseline, previous, trial, cli)
+                    try:
+                        evidence = _verify_branch(candidate, baseline, previous, trial, cli)
+                    except _TrialUnavailable as exc:
+                        logger.debug("Could not evaluate pour stub at %s: %s", branch.pad_name, exc)
+                        continue
+                    exercised = True
                     if evidence is not None:
                         results.append((branch, evidence))
-            return results if source.read_bytes() == original else []
+            return results if exercised and source.read_bytes() == original else None
     except (OSError, KeyError, ValueError, GEOSException, KiCadToolsError) as exc:
         logger.debug("Could not verify pour-connected pad branches in %s: %s", source, exc)
-        return []
+        return None
+
+
+def verified_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]]:
+    """List branches with positive removal evidence for callers that consume them."""
+    return evaluate_pour_stubs(pcb) or []
