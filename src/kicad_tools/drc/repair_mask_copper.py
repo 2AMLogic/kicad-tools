@@ -2236,7 +2236,10 @@ class MaskCopperRepairer(CopperGapRepairer):
         anchors. Every leg keeps its length and angle, so legal directions stay
         legal, and the moved corner becomes the strictly-inside end of a
         straight entry. Both corner ends translate together, preserving any
-        authored offset inside the junction tolerance. Returns ``True`` when applied.
+        authored offset inside the junction tolerance. A corner that stays outside
+        the pad is accepted when the far leg's end is inside it and the other leg
+        clears the whole opening (a stub handing a hugging track over to the pad).
+        Returns ``True`` when applied.
         """
         if required is None or opening in self._pivot_pad_bounds:
             return False
@@ -2292,7 +2295,16 @@ class MaskCopperRepairer(CopperGapRepairer):
             if min(math.dist(anchor, flipped), math.dist(other_flipped, far)) < _MIN_RUN_MM:
                 continue
             if not (inside.contains(Point(flipped)) and inside.contains(Point(other_flipped))):
-                continue
+                # The corner stays outside the pad (a stub that hands a track
+                # hugging the pad edge over to the pad, #9939): the swap is
+                # still a legal entry when the far leg now runs straight into
+                # the pad and the other leg clears the whole opening.
+                lead = LineString([anchor, flipped]).buffer(width / 2, quad_segs=16)
+                if not (
+                    inside.contains(Point(far))
+                    and lead.distance(pad) >= required + PASS_THROUGH_MARGIN_MM - 1e-9
+                ):
+                    continue
 
             moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
                 (
