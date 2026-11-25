@@ -90,6 +90,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "sch pin-map": ["{sch}"],
     "sch connections": ["{sch}"],
     "sch unconnected": ["{sch}"],
+    "sch decoupling": ["{sch}"],
     "sch replace": ["{sch}", "R1", "Device:R_Small", "--dry-run"],
     "sch set-footprint": ["{sch}", "--ref", "R1", "--footprint", "Resistor_SMD:R_0402"],
     "sch assign-footprints": ["{sch}"],
