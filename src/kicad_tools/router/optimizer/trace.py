@@ -40,7 +40,13 @@ from .geometry import (
     total_length,
 )
 from .kelvin_gate import kelvin_branch_gate
-from .pad_slits import ReplacementCheck, pad_gap_check, via_exit_doglegs, via_gap_check
+from .pad_slits import (
+    ReplacementCheck,
+    covered_via_elbow,
+    pad_gap_check,
+    via_exit_doglegs,
+    via_gap_check,
+)
 from .pcb import optimize_pcb
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
@@ -990,10 +996,23 @@ class TraceOptimizer:
 
         # Optimize each layer's segments (chain sorting happens in optimize_segments)
         optimized_segments: list[Segment] = []
-        self._via_gap_check = via_gap_check(getattr(self.collision_checker, "grid", None), route)
+        grid = getattr(self.collision_checker, "grid", None)
+        self._via_gap_check = via_gap_check(grid, route)
         try:
             for segs in segments_by_layer.values():
-                optimized_segments.extend(self.optimize_segments(segs))
+                result = self.optimize_segments(segs)
+                if result != segs and (
+                    self._via_gap_check is not None or self._pad_gap_check is not None
+                ):
+                    elbow = covered_via_elbow(result, route, grid)
+                    if (
+                        elbow is not None
+                        and all(self._path_is_clear(s) for s in elbow)
+                        and self._accepts_chain_rewrite(result, elbow)
+                        and (self._via_gap_check is None or self._via_gap_check(result, elbow, []))
+                    ):
+                        result = elbow
+                optimized_segments.extend(result)
         finally:
             self._via_gap_check = None
 

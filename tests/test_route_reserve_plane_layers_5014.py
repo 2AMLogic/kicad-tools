@@ -102,6 +102,9 @@ def _base_argv(pcb_path: Path, out_path: Path) -> list[str]:
         "python",
         "--no-cache",
         "--skip-drc",
+        # This fixture tests layer reservation in the first route. Chained
+        # completion would launch an unrelated native DRC probe afterward.
+        "--no-chain-complete",
         "--quiet",
     ]
 
