@@ -218,7 +218,7 @@ class TestRouteHonoursProjectNetclassWidths:
         }
 
     def test_explicit_cli_trace_width_overrides_project_class_widths(self, tmp_path: Path) -> None:
-        pcb = _write_unrouted_board(tmp_path, [("ASSIGN_NET", 6.0), ("PAT_1", 18.0)])
+        pcb = _write_unrouted_board(tmp_path, [("ASSIGN_NET", 6.0), ("PAT_1", 18.0), ("+5V", 12.0)])
         pro = pcb.with_suffix(".kicad_pro")
         pro.write_text(
             json.dumps(
@@ -239,7 +239,35 @@ class TestRouteHonoursProjectNetclassWidths:
         assert _widths_by_net(pcb) == {
             "ASSIGN_NET": {0.18},
             "PAT_1": {0.18},
+            "+5V": {0.5},
         }
+
+    def test_explicit_width_preserves_connected_name_classified_copper(
+        self, tmp_path: Path
+    ) -> None:
+        pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+        pcb.write_text(pcb.read_text().replace("NET_A", "+5V"))
+        project.write_text(json.dumps(_base_project()))
+        before = _geometry_signature(pcb, "+5V")
+        assert len(before) == 2
+        _route_board(pcb, ["--trace-width", "0.18", "--skip-drc"])
+        assert _geometry_signature(pcb, "+5V") == before
+
+    def test_project_width_below_manufacturer_floor_warns(self, tmp_path: Path, capsys) -> None:
+        pcb = _write_unrouted_board(tmp_path, [("BUS", 10.0)])
+        pcb.with_suffix(".kicad_pro").write_text(
+            json.dumps(
+                _base_project(
+                    classes=[{"name": "Thin", "track_width": 0.09, "clearance": 0.15}],
+                    assignments={"BUS": "Thin"},
+                )
+            )
+        )
+        _route_board(pcb, ["--manufacturer", "jlcpcb", "--skip-drc"])
+        err = capsys.readouterr().err
+        assert "Project net class Thin uses 0.09mm" in err
+        assert "dimension_trace_width" in err
+        assert _widths_by_net(pcb) == {"BUS": {0.09}}
 
     def test_load_pcb_for_routing_invalid_project_track_width_raises(self, tmp_path: Path) -> None:
         pcb = _write_unrouted_board(tmp_path, [("SIG", 10.0)])

@@ -6248,30 +6248,30 @@ def load_pcb_for_routing(
                 )
 
     # Issue #10189: honour non-``Default`` project netclass ``track_width``
-    # declarations over the router's name-classified defaults; an explicit
-    # ``--trace-width`` override still wins over both, and ``Default``-sourced
-    # widths stay excluded per ``authored_netclass_widths``.
+    # declarations over the router's name-classified defaults. An explicit
+    # ``--trace-width`` wins on nets with those declarations.
     authored_widths_by_name = _authored_net_widths(pcb_path, project_path, net_map)
     for _net_name, _nw in authored_widths_by_name.items():
         if _nw.width <= 0:
             continue
+        width = (
+            explicit_trace_width
+            if explicit_trace_width is not None and explicit_trace_width > 0
+            else _nw.width
+        )
         if _net_name in net_class_map:
             # The same map is written to the sidecar and project. Pair the
             # authored width with its class while retaining the routing options.
             net_class_map[_net_name] = replace(
-                net_class_map[_net_name], name=_nw.source_class, trace_width=_nw.width
+                net_class_map[_net_name], name=_nw.source_class, trace_width=width
             )
         else:
             net_class_map[_net_name] = NetClassRouting(
                 name=_nw.source_class,
-                trace_width=_nw.width,
+                trace_width=width,
                 clearance=rules.trace_clearance,
                 via_size=rules.via_diameter,
             )
-    if explicit_trace_width is not None and explicit_trace_width > 0:
-        _explicit_w = float(explicit_trace_width)
-        for _cls_key, _cls in list(net_class_map.items()):
-            net_class_map[_cls_key] = replace(_cls, trace_width=_explicit_w)
 
     # Issue #6427: the router's own net classes are declared in the routed
     # sidecars (#6390), so KiCad holds every foreign pair to

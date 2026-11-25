@@ -9933,6 +9933,22 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
                 f"sidecar entries{pour_note}"
             )
 
+    floor = getattr(args, "_mfr_min_trace_floor", None)
+    if floor and getattr(args, "_explicit_trace_width", None) is None:
+        # Sidecar overrides have already received their own floor diagnostic.
+        project_classes = {
+            net: router.net_class_map[net]
+            for net in getattr(router, "authored_net_widths", {})
+            if net in router.net_class_map and not (loaded and net in resolution.resolved)
+        }
+        for name, width in _sub_floor_net_class_widths(project_classes, floor):
+            print(
+                f"WARNING: Project net class {name} uses {width:.4g}mm traces, below the "
+                f"{args.manufacturer} minimum trace width {floor:.4g}mm. "
+                f"`kct check --mfr {args.manufacturer}` will report dimension_trace_width.",
+                file=sys.stderr,
+            )
+
     # Issue #4605: stash the ``spatial_keepouts`` rule-area filter block on
     # the router for the lattice keepout projection.  Runs AFTER the merge
     # above so class-name validation sees the sidecar-defined classes too;
@@ -20993,17 +21009,16 @@ def _stale_width_connected_nets(args, pcb_path: Path, connected: list[str]) -> s
     """Connected nets whose existing copper disagrees with authored width (#10189).
 
     Under an auto-selected ``preserve_existing`` re-run (no explicit
-    ``--preserve-existing`` or ``--resume``), a net whose project netclass
-    ``track_width`` (or explicit ``--trace-width`` / ``--net-class-map``) was
-    edited since the copper was laid must be re-routed at the new width rather
-    than kept verbatim at the old width, while nets whose width still matches
-    keep their existing copper untouched.
+    ``--preserve-existing`` or ``--resume``), compare copper against widths from
+    project netclasses or ``--net-class-map``. An explicit ``--trace-width``
+    overrides the project width for nets with an authored declaration.
     """
     import json
 
     from kicad_tools.core.project_clearance import ProjectClearanceError, authored_netclass_widths
     from kicad_tools.router.optimizer.pcb import locked_segment_nets, parse_segments
 
+    explicit_width = getattr(args, "trace_width", None)
     target: dict[str, float] = {}
     project_path = Path(getattr(args, "pcb", pcb_path)).with_suffix(".kicad_pro")
     if project_path.is_file():
@@ -21011,16 +21026,12 @@ def _stale_width_connected_nets(args, pcb_path: Path, connected: list[str]) -> s
             project = json.loads(project_path.read_text(encoding="utf-8"))
             for net_name, nw in authored_netclass_widths(project, connected).items():
                 if nw.width > 0:
-                    target[net_name] = nw.width
+                    target[net_name] = (
+                        explicit_width if explicit_width and explicit_width > 0 else nw.width
+                    )
         except (OSError, ValueError, ProjectClearanceError):
             # Surface canonical project errors at load_pcb_for_routing time.
             pass
-
-    explicit_width = getattr(args, "trace_width", None)
-    if explicit_width is not None and float(explicit_width) > 0:
-        ew = float(explicit_width)
-        for net_name in connected:
-            target[net_name] = ew
 
     loaded = getattr(args, "_loaded_net_class_map", None)
     if loaded:

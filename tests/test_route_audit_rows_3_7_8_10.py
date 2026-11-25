@@ -280,6 +280,8 @@ def test_row3_census_uses_authored_netclass_assignment(
     assert neck["net_name"] == "BUS"
     assert neck["min_width_mm"] == pytest.approx(0.2)
     assert neck["beyond_taper"] is True
+    assert kct_main([*command, str(board), "-o", str(tmp_path / "text.kicad_pcb")]) == 0
+    assert "long, verify intent" in capsys.readouterr().out
 
 
 def _net_segment_widths(board_path: Path, net_name: str) -> list[float]:
