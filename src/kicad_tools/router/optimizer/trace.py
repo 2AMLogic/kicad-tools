@@ -42,6 +42,7 @@ from .geometry import (
 from .kelvin_gate import kelvin_branch_gate
 from .pad_slits import (
     ReplacementCheck,
+    adds_trace_gap,
     covered_via_elbow,
     pad_gap_check,
     via_exit_doglegs,
@@ -1012,6 +1013,15 @@ class TraceOptimizer:
                         and (self._via_gap_check is None or self._via_gap_check(result, elbow, []))
                     ):
                         result = elbow
+                    elif (
+                        len(result) == 2
+                        and route.vias
+                        and adds_trace_gap(segs, result, route, grid)
+                    ):
+                        # The polygon (or another guard) vetoed the retraction and
+                        # the optimized chain itself opens a trace-to-trace slit to
+                        # retained sibling copper: keep the clean incoming chain.
+                        result = segs
                 optimized_segments.extend(result)
         finally:
             self._via_gap_check = None

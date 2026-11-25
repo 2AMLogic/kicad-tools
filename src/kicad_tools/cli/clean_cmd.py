@@ -262,13 +262,19 @@ def find_cleanable_files(
         )
     # Another board's recovery still needs its live board for discovery.
     selected_records = set(records)
-    other_boards = {
-        board
+    other_records = {
+        entry: board
         for entry in entries
         if entry not in selected_records and (board := retained_copy_board(entry)) is not None
     }
-    for board in sorted(other_boards):
+    for board in sorted(set(other_records.values())):
         result.to_keep.append(ProtectedFile(board, "board with separate recovery copies"))
+    # Report (never delete) each record this project cannot clean, so the
+    # preview does not claim a clean project while leaving it behind.
+    for record, board in sorted(other_records.items()):
+        result.to_keep.append(
+            ProtectedFile(record, f"recovery copy of {board.name} - clean that board's project")
+        )
 
     # Apply the general cleanup rules after protecting the linked sources.
     protected_names = {p.path.name for p in result.to_keep}
