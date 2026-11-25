@@ -402,6 +402,24 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
     return result
 
 
+#: Gerber creation date readiness stamps when ``SOURCE_DATE_EPOCH`` is unset
+#: (1980-01-01T00:00:00Z, the ZIP epoch).  Policy local to the Gerber plot so
+#: ``gerbers/gerbers.zip`` is a pure function of the board (Issue #10174);
+#: sign-off timestamps keep their real wall-clock meaning.
+READINESS_GERBER_EPOCH = 315532800
+
+
+def _readiness_gerber_epoch() -> datetime:
+    """Gerber creation date: a valid ``SOURCE_DATE_EPOCH``, else the constant."""
+    raw = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if raw.isdigit():
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            pass
+    return datetime.fromtimestamp(READINESS_GERBER_EPOCH, tz=timezone.utc)
+
+
 def _run_export(
     pcb: Path,
     manufacturer: str,
@@ -422,6 +440,7 @@ def _run_export(
             include_pnp=assembly,
             emit_drc_constraints=False,
             merge_lcsc_from=merge_lcsc_from,
+            gerber_source_date_epoch=_readiness_gerber_epoch(),
             preflight=PreflightConfig(
                 order_boards=quantity or PreflightConfig.order_boards,
                 inventory_covered=inventory_covered or frozenset(),
