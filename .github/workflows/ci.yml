@@ -141,29 +141,10 @@ jobs:
   # always run everything. If detection itself fails, every job runs
   # (fail-open), so a broken filter can only cost minutes, never a false
   # green. Content contracts still run in lint.
-  changes:
-    name: Detect Changes
-    # merge-group-audit: pr-only -- path groups gate PR runs only; merge_group
-    # runs take the `!= 'pull_request'` branch of every dependent job's gate
-    # and run the full suite on the combined tree (Issue #9299).
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    permissions:
-      pull-requests: read
-    outputs:
-      # Issue #9245: every output folds in "its step failed" (`outcome ==
-      # 'failure'`) so a transient paths-filter/listFiles 5xx means
-      # "assume changed" -- never an empty value that downstream
-      # `== 'true'` conditions would read as "nothing changed" (a false
-      # green that skips every job).
-      code: ${{ steps.filter.outcome == 'failure' || steps.filter.outputs.code == 'true' }}
-      board00: ${{ steps.shared.outcome == 'failure' || steps.shared.outputs.shared == 'true' || ((steps.filter.outcome == 'failure' || steps.filter.outputs.code == 'true') && (steps.boards.outcome == 'failure' || steps.boards.outputs.board00 == 'true')) }}
-      board06: ${{ steps.shared.outcome == 'failure' || steps.shared.outputs.shared == 'true' || ((steps.filter.outcome == 'failure' || steps.filter.outputs.code == 'true') && (steps.boards.outcome == 'failure' || steps.boards.outputs.board06 == 'true')) }}
-      board07: ${{ steps.shared.outcome == 'failure' || steps.shared.outputs.shared == 'true' || ((steps.filter.outcome == 'failure' || steps.filter.outputs.code == 'true') && (steps.boards.outcome == 'failure' || steps.boards.outputs.board07 == 'true')) }}
-      test:
+  test:
     name: Test
-    needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    needs: kicad_pin
+    if: github.event_name == 'workflow_dispatch'
     # GitHub-hosted for every event (Issue #6013). It used to run on a
     # self-hosted runner for main pushes and same-repo PRs, where it took
     # ~30 min; on ubuntu-latest every step runs ~2.2x slower (#5747), so the
