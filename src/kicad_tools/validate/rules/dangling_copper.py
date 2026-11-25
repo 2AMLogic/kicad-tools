@@ -34,6 +34,9 @@ committed-copper source of truth:
   :data:`~kicad_tools.validate.rules.base.DRC_TOLERANCE` of the endpoint.
   One violation is emitted per dangling *track* (at the first dangling
   endpoint), matching kicad-cli's per-track reporting so counts agree.
+  An off-center tip alongside a track already holding the other end of
+  the branch needs a separate contact. A centerline T or a contact at
+  the neighboring track's end is still a bond (issue #10269).
 * **Vias**: for every copper layer the barrel spans
   (:func:`~kicad_tools.core.layers.via_spans_layer` -- a through via is
   copper on ALL intermediate layers), the layer counts as bonded when
@@ -60,6 +63,9 @@ criteria):
   first-class copper primitives).  A dangling arc kicad-cli flags is
   therefore not reported here.
 * KiCad's "free via" / locked-item exemptions are not modeled.
+* Exact copies of a track occupy a single copper span. A free tip is
+  reported once, regardless of endpoint order. KiCad 10.0.8 can suppress
+  this finding for copies stored in the same direction (issue #10268).
 """
 
 from __future__ import annotations
@@ -70,6 +76,7 @@ from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
 from kicad_tools.core.layers import via_spans_layer
+from kicad_tools.geometry.copper import point_segment_distance
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
@@ -103,6 +110,7 @@ class _CopperItem:
     net_number: int
     net_name: str
     key: int | None = None
+    segment: Segment | None = None
 
 
 @dataclass
@@ -435,6 +443,7 @@ def build_copper_layer_indexes(
                 net_number=resolve_net(segment.net_number, segment.net_name),
                 net_name=segment.net_name,
                 key=id(segment),
+                segment=segment,
             ),
         )
 
@@ -588,7 +597,8 @@ class DanglingCopperRule(DRCRule):
     @staticmethod
     def _point_terminated(
         point_xy: tuple[float, float],
-        self_key: int,
+        other_end: tuple[float, float],
+        span_keys: set[int],
         net_number: int,
         net_name: str,
         index: _LayerIndex | None,
@@ -610,12 +620,26 @@ class DanglingCopperRule(DRCRule):
         )
         point = Point(px, py)
         for item in index.candidates(probe):
-            if item.key is not None and item.key == self_key:
+            if item.key in span_keys:
                 continue
             if item.kind == "fill" and not _fill_net_matches(net_number, net_name, item):
                 continue
-            if item.geom.distance(point) <= reach:
-                return True
+            if item.geom.distance(point) > reach:
+                continue
+            parent = item.segment
+            if parent is not None and other_end != point_xy:
+                # The side of the same parent can graze both ends of a spur.
+                # Keep true T landings, end-cap joins and independent contacts.
+                start, end = parent.start, parent.end
+                half_width = parent.width / 2.0
+                if (
+                    point_segment_distance(other_end, start, end) <= half_width + _TOUCH_TOL_MM
+                    and point_segment_distance(point_xy, start, end) > _TOUCH_TOL_MM
+                    and min(math.dist(point_xy, start), math.dist(point_xy, end))
+                    > half_width + reach
+                ):
+                    continue
+            return True
         return False
 
     # ------------------------------------------------------------------
@@ -629,10 +653,20 @@ class DanglingCopperRule(DRCRule):
         resolve_net: Any,
         results: DRCResults,
     ) -> None:
-        """One ``track_dangling`` warning per track with a free end."""
+        """One ``track_dangling`` warning per physical track with a free end."""
+        # Repeated records cannot terminate each other. Group only exactly
+        # coincident copper so a nearby cap or a partial overlap still counts.
+        spans: dict[tuple, list[Segment]] = {}
         for segment in pcb.segments:
             if segment.width <= 0 or not segment.layer:
                 continue
+            net = resolve_net(segment.net_number, segment.net_name) or segment.net_name
+            start, end = sorted((segment.start, segment.end))
+            spans.setdefault((net, segment.layer, segment.width, start, end), []).append(segment)
+
+        for copies in spans.values():
+            segment = copies[0]
+            span_keys = {id(copy) for copy in copies}
             index = indexes.get(segment.layer)
             net_number = resolve_net(segment.net_number, segment.net_name)
             endpoints = (
@@ -642,7 +676,13 @@ class DanglingCopperRule(DRCRule):
                 point
                 for point in endpoints
                 if not self._point_terminated(
-                    point, id(segment), net_number, segment.net_name, index, segment.width / 2.0
+                    point,
+                    segment.end if point == segment.start else segment.start,
+                    span_keys,
+                    net_number,
+                    segment.net_name,
+                    index,
+                    segment.width / 2.0,
                 )
             ]
             if not dangling:

@@ -142,6 +142,49 @@ _SQUARE_FILL = [(100.0, 100.0), (110.0, 100.0), (110.0, 110.0), (100.0, 110.0)]
 
 
 class TestTrackDangling:
+    def test_spur_beside_its_parent_needs_a_second_contact(self):
+        junction = (12.0, 9.0)
+        pads = [_FakePad(position=(6.0, 9.0)), _FakePad(position=(19.0, 9.0))]
+        trunk = [_FakeSegment((6.0, 9.0), junction), _FakeSegment(junction, (19.0, 9.0))]
+        for tip in ((11.8, 9.2), (11.8, 9.15)):
+            spur = _FakeSegment(tip, junction)
+            findings = _by_rule(
+                _run(segments=[*trunk, spur], footprints=[_FakeFootprint(pads)]), "track_dangling"
+            )
+            assert [v.location for v in findings] == [tip]
+            terminated = _FakeFootprint([*pads, _FakePad(position=tip)])
+            assert not _by_rule(
+                _run(segments=[*trunk, spur], footprints=[terminated]), "track_dangling"
+            )
+
+    def test_identical_spans_on_opposite_layers_have_independent_ends(self):
+        a, b = (6.0, 9.0), (12.0, 9.0)
+        tracks = [_FakeSegment(a, b), _FakeSegment(b, a, layer="B.Cu")]
+        fp = _FakeFootprint([_FakePad(position=a), _FakePad(position=b)])
+        findings = _by_rule(_run(segments=tracks, footprints=[fp]), "track_dangling")
+        assert [v.layer for v in findings] == ["B.Cu"]
+        assert "both ends dangling" in findings[0].message
+
+    def test_overlaid_branch_copies_leave_one_open_tip(self):
+        junction, tip = (12.0, 9.0), (13.0, 10.0)
+        pads = [_FakePad(position=(6.0, 9.0)), _FakePad(position=(19.0, 9.0))]
+        tracks = [
+            _FakeSegment((6.0, 9.0), junction),
+            _FakeSegment(junction, (19.0, 9.0)),
+            _FakeSegment(junction, tip),
+            _FakeSegment(tip, junction),
+            _FakeSegment(junction, tip),
+        ]
+        findings = _by_rule(
+            _run(segments=tracks, footprints=[_FakeFootprint(pads)]), "track_dangling"
+        )
+        assert [v.location for v in findings] == [tip]
+
+        pads.append(_FakePad(position=tip))
+        assert not _by_rule(
+            _run(segments=tracks, footprints=[_FakeFootprint(pads)]), "track_dangling"
+        )
+
     def test_isolated_segment_flagged_once(self):
         """A fully floating track emits ONE violation (kicad-cli parity:
         one finding per track, not per endpoint)."""
