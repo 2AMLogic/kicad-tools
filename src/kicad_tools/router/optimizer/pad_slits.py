@@ -180,6 +180,39 @@ def authored_arc_copper(
     return by_layer
 
 
+def authored_footprint_poly_copper(pcb: PCB) -> dict[str, list[BaseGeometry | None]]:
+    """Collect footprint copper polygons in the sheet coordinates used by the routing grid.
+
+    The fabrication gap check grades every ``fp_poly`` on a copper layer (a net tie joins
+    its pads with exactly this primitive, issue #5817), but the router grid models none of
+    them. A polygon the check cannot measure maps to ``None`` so callers fail closed.
+    """
+    from shapely.affinity import translate
+
+    from kicad_tools.validate.rules.physical_gap import (
+        _footprint_transform,
+        _fp_poly_geometry,
+    )
+
+    copper_layers = {layer.name for layer in pcb.copper_layers}
+    by_layer: dict[str, list[BaseGeometry | None]] = {}
+    for footprint in pcb.footprints:
+        transform = _footprint_transform(footprint)
+        for graphic in footprint.graphics:
+            if graphic.graphic_type != "poly" or graphic.layer not in copper_layers:
+                continue
+            try:
+                copper = _fp_poly_geometry(graphic, transform)
+                if copper is not None and not copper.is_empty:
+                    copper = translate(copper, *pcb.board_origin)
+                else:
+                    copper = None
+            except (TypeError, ValueError):
+                copper = None
+            by_layer.setdefault(graphic.layer, []).append(copper)
+    return by_layer
+
+
 def _band_edge(grid: RoutingGrid | None, attr: str) -> float | None:
     edge = getattr(getattr(grid, "rules", None), attr, None)
     if (
@@ -276,7 +309,7 @@ def covered_via_elbow(
     layer, net = run.layer.name, str(run.net)
     local: list[CopperSource] = []
 
-    def add(shape, source_net: int, kind: str) -> None:
+    def add(shape, source_net: int | str, kind: str) -> None:
         if shape is not None and shape.intersects(search_window):
             local.append(CopperSource(shape, layer, str(source_net), f"{kind}:{len(local)}", kind))
 
@@ -301,10 +334,19 @@ def covered_via_elbow(
             return None
         add(shape, source_net, "arc")
 
+    # Footprint copper polygons are graded under the trace band with no net (as the
+    # fabrication check records them), so they are modeled the same way here.
+    for shape in getattr(grid, "authored_footprint_poly_copper", {}).get(run.layer.kicad_name, ()):
+        if shape is None:
+            return None
+        add(shape, "", "poly")
+
     # A third branch can join the protruding arm. Removing its only contact
     # would disconnect it even when both endpoints of this route survive.
     if any(
-        s.net == net and s.geometry.intersects(diagonal) and not s.geometry.intersects(stationary)
+        (s.net == net or s.kind == "poly")
+        and s.geometry.intersects(diagonal)
+        and not s.geometry.intersects(stationary)
         for s in local
     ):
         return None
@@ -418,3 +460,61 @@ def _copper_gap_check(
         return True
 
     return replacement_is_clear
+
+
+def adds_trace_gap(
+    original: list[Segment], candidate: list[Segment], route: Route, grid: RoutingGrid | None
+) -> bool:
+    """True if *candidate* opens a trace-band slit to other copper that *original* did not.
+
+    Grades the facing edges of the candidate chain against every other route's
+    copper on its layer (the retained sibling branches), the way the fabrication
+    gap check does. A slit the incoming chain already had does not count, so the
+    caller only falls back to *original* when that is strictly cleaner (issue #10164).
+    """
+    edge = _band_edge(grid, "same_net_trace_gap_band_edge_mm") if grid is not None else None
+    if grid is None or edge is None or not candidate or candidate == original:
+        return False
+
+    from shapely.geometry import LineString
+
+    from kicad_tools.validate.rules.physical_gap import CopperSource, iter_source_gaps
+
+    first = candidate[0]
+    layer, net = first.layer.name, str(first.net)
+
+    def copper(s: Segment):
+        return LineString([s.start, s.end]).buffer(s.width / 2, quad_segs=64)
+
+    others = [
+        CopperSource(copper(s), layer, str(s.net), f"other:{i}", "track")
+        for i, s in enumerate(
+            s
+            for r in grid.routes
+            if r is not route and r.net == route.net
+            for s in r.segments
+            if s.layer == first.layer
+        )
+    ]
+    if not others:
+        return False
+
+    kept = {_leg(s) for s in original}
+
+    def worst(chain: list[Segment]) -> float:
+        # Only legs the rewrite changed are graded: a join the incoming chain
+        # already makes (a pad or via shoulder) is not modeled here.
+        own = [
+            CopperSource(copper(s), layer, net, f"own:{i}", "track") for i, s in enumerate(chain)
+        ]
+        changed = {f"own:{i}" for i, s in enumerate(chain) if _leg(s) not in kept}
+        gaps = [
+            gap.distance
+            for gap in iter_source_gaps([*others, *own], edge)
+            if gap.distance < edge
+            and changed.intersection(gap.ids)
+            and any(i.startswith("other:") for i in gap.ids)
+        ]
+        return min(gaps, default=math.inf)
+
+    return worst(candidate) < edge

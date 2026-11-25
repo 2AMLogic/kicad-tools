@@ -150,6 +150,13 @@ class ManufacturingResult:
     # Issue #7209: outer/inner copper weight the order requests, derived from the
     # board stackup (see ``preflight.resolve_ordered_copper``).
     ordered_copper: dict | None = None
+    # Issue #10109: footprint-to-symbol instance link report for the
+    # editable-project handoff (``to_dict()`` of
+    # :class:`kicad_tools.sync.instance_links.InstanceLinkReport`), or
+    # ``None`` when no project ZIP was produced or no schematic could be
+    # compared against.  Read-only: broken links are surfaced as warnings,
+    # never repaired here.
+    instance_links: dict | None = None
 
     @property
     def success(self) -> bool:
@@ -2528,6 +2535,33 @@ class ManufacturingPackage:
                 lines.append(f"  Source: {oc['source']} (verified {oc['source_verified']})")
             lines.append("")
 
+        # Issue #10109: the editable-project handoff contract.  Only written
+        # when the footprint-to-symbol instance link check found defects --
+        # a clean board's README stays byte-identical.
+        if result.instance_links and result.instance_links.get("findings"):
+            links = result.instance_links
+            lines.append("Editing handoff -- footprint to symbol links:")
+            lines.append("-" * 43)
+            lines.append("  This board's kicad_project.zip cannot be fully cross-probed or")
+            lines.append("  updated from its schematic: some footprints' symbol-instance")
+            lines.append("  links are missing, duplicated or stale.")
+            lines.append("")
+            checked = links.get("checked", 0)
+            linked = links.get("linked", 0)
+            lines.append(f"  Footprints checked: {checked}, intact links: {linked}")
+            lines.append("")
+            findings = links.get("findings", [])
+            for finding in findings:
+                lines.append(f"  {finding.get('reference', '?')}: {finding.get('category', '?')}")
+                lines.append(f"    {finding.get('detail', '')}")
+            skipped = links.get("skipped_board_only") or []
+            if skipped:
+                lines.append("")
+                lines.append(
+                    "  Board-only footprints (excluded from the check): " + ", ".join(skipped)
+                )
+            lines.append("")
+
         readme_path = out_dir / "README.txt"
         readme_path.write_text("\n".join(lines), encoding="utf-8")
         result.readme_path = readme_path
@@ -2545,6 +2579,43 @@ class ManufacturingPackage:
         except Exception as e:
             result.errors.append(f"Project ZIP creation failed: {e}")
             logger.error(f"Project ZIP creation failed: {e}")
+            return
+        # The archive above is the editable-project handoff: it carries the
+        # board and its schematics back to KiCad's editors.  Check the
+        # footprint-to-symbol instance links of exactly that pair so a
+        # user returning to the editors knows whether cross-probing and
+        # "update footprints from schematic" will work (Issue #10109).
+        self._check_symbol_links(result)
+
+    def _check_symbol_links(self, result: ManufacturingResult) -> None:
+        """Run the instance-link check for the packaged board (Issue #10109).
+
+        Uses the same root schematic the project ZIP bundles (an explicit
+        ``--sch`` wins, otherwise the sibling auto-discovery), so the report
+        always describes the archive that ships.  Read-only: findings land
+        in ``result.instance_links`` and ``result.warnings``; nothing is
+        rewritten and no finding blocks the export.
+        """
+        from kicad_tools.report.utils import find_schematic
+        from kicad_tools.sync.instance_links import check_instance_links
+
+        root_sch = self.schematic_path or find_schematic(self.pcb_path)
+        if root_sch is None or not Path(root_sch).is_file():
+            logger.info(
+                "No schematic resolved for %s; skipping footprint symbol-link check",
+                self.pcb_path,
+            )
+            return
+        try:
+            report = check_instance_links(root_sch, self.pcb_path)
+        except Exception as e:
+            logger.warning("Footprint symbol-link check failed for %s: %s", self.pcb_path, e)
+            return
+        result.instance_links = report.to_dict()
+        for line in report.warning_lines():
+            result.warnings.append(line)
+        if report.is_clean:
+            logger.info("Footprint symbol-link check: %s", report.summary_line())
 
     def _generate_manifest(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Write manifest.json with SHA256 checksums."""
