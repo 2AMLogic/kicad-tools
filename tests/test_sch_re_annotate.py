@@ -2408,3 +2408,75 @@ class TestPcbSync:
 
         assert list(tmp_path.glob("test_backup_*.kicad_pcb"))
         assert _board_refs(pcb) == {"R1", "R2", "C1"}
+
+
+class TestPcbPairedWriteSafety:
+    """Issue #10145 review: paired save must be recoverable and collision-free."""
+
+    def test_late_pcb_write_failure_is_recoverable(self, tmp_path, monkeypatch):
+        from kicad_tools.schema.pcb import PCB
+
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        def boom(self, path):
+            raise OSError("Operation not permitted")
+
+        with monkeypatch.context() as m:
+            m.setattr(PCB, "save", boom)
+            ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 1
+        # Neither file changed, so the identical command can be retried.
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 0
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+        assert '"Reference" "R2"' in sch.read_text()
+
+    def test_schematic_write_failure_rolls_back_board(self, tmp_path, monkeypatch):
+        sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R1", "R5", "C3"]))
+        sch_before = sch.read_bytes()
+        pcb_before = pcb.read_bytes()
+
+        real_write_text = Path.write_text
+
+        def fail_sch(self, *a, **kw):
+            if self.suffix == ".kicad_sch":
+                raise OSError("disk full")
+            return real_write_text(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "write_text", fail_sch)
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        monkeypatch.undo()
+
+        assert ret == 1
+        assert sch.read_bytes() == sch_before
+        assert pcb.read_bytes() == pcb_before
+
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, pcb_path=pcb)
+        assert ret == 0
+        assert _board_refs(pcb) == {"R1", "R2", "C1"}
+
+    def test_per_sheet_duplicate_board_targets_rejected_before_write(self, tmp_path, capsys):
+        parent = tmp_path / "parent.kicad_sch"
+        parent.write_text(PARENT_SCHEMATIC)
+        child = tmp_path / "sub.kicad_sch"
+        child.write_text(CHILD_SCHEMATIC)
+        pcb = _write_pcb(tmp_path, _make_pcb(["R3", "R7", "R14", "C5"]))
+        before = (parent.read_bytes(), child.read_bytes(), pcb.read_bytes())
+
+        ret = run_re_annotate(
+            schematic_path=parent,
+            dry_run=False,
+            backup=False,
+            per_sheet=True,
+            pcb_path=pcb,
+        )
+        assert ret == 1
+        assert "duplicate" in capsys.readouterr().err
+        assert (parent.read_bytes(), child.read_bytes(), pcb.read_bytes()) == before

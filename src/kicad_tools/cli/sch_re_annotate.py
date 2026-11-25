@@ -639,6 +639,24 @@ def run_re_annotate(
                 continue
             board_mapping[old_base] = new_base
 
+        # Two different footprints must never receive the same new reference
+        # (e.g. --per-sheet restarts numbering on every sheet).  Reject before
+        # any file is written.
+        by_target: dict[str, list[str]] = {}
+        for old_base, new_base in board_mapping.items():
+            by_target.setdefault(new_base, []).append(old_base)
+        dup_targets = {t: srcs for t, srcs in by_target.items() if len(srcs) > 1}
+        if dup_targets:
+            for target, srcs in sorted(dup_targets.items()):
+                print(
+                    f"Error: Footprints {', '.join(sorted(srcs))} would all be renamed "
+                    f"to '{target}' on the board; refusing to write duplicate "
+                    f"references (--per-sheet numbering cannot be paired with --pcb "
+                    f"when sheets reuse numbers). No files were modified.",
+                    file=sys.stderr,
+                )
+            return 1
+
         # A mapped old ref absent from the board is a warning, not an error.
         for old_base in [r for r in board_mapping if r not in existing_refs]:
             pcb_warnings.append(f"Reference '{old_base}' not found in PCB")
@@ -774,30 +792,51 @@ def run_re_annotate(
 
         modified_files[sch_file] = current_text
 
-    # Phase 5: Write modified files
-    if modified_files:
-        for sch_file, new_text in modified_files.items():
-            if backup:
-                bak = create_backup(sch_file)
-                if format == "text":
-                    print(f"  Backup: {bak.name}")
-            try:
-                sch_file.write_text(new_text, encoding="utf-8")
-            except OSError as e:
-                print(f"Error writing {sch_file}: {e}", file=sys.stderr)
-                return 1
+    # Phase 5: Write the board first, then the schematics, as one unit.  If
+    # any write fails, every file already written is restored from its
+    # original contents so a retry of the same command sees the original pair.
+    written: list[tuple[Path, bytes]] = []  # (path, original bytes)
 
-    # Phase 5b: Write the renamed board (only after the schematic writes
-    # succeeded).
+    def _rollback() -> None:
+        for path, original in reversed(written):
+            try:
+                path.write_bytes(original)
+            except OSError as rb_err:
+                print(
+                    f"Error: could not restore {path} after failed write: {rb_err}",
+                    file=sys.stderr,
+                )
+        if written:
+            print(
+                "Restored previously written files; no files were modified.",
+                file=sys.stderr,
+            )
+
     if pcb_path is not None and pcb_board is not None and board_mapping:
         if backup:
             bak = create_backup(pcb_path)
             if format == "text":
                 print(f"  Backup: {bak.name}")
         try:
+            original_pcb = pcb_path.read_bytes()
+            written.append((pcb_path, original_pcb))
             pcb_board.save(pcb_path)
         except Exception as e:
             print(f"Error writing {pcb_path}: {e}", file=sys.stderr)
+            _rollback()
+            return 1
+
+    for sch_file, new_text in modified_files.items():
+        if backup:
+            bak = create_backup(sch_file)
+            if format == "text":
+                print(f"  Backup: {bak.name}")
+        try:
+            written.append((sch_file, sch_file.read_bytes()))
+            sch_file.write_text(new_text, encoding="utf-8")
+        except OSError as e:
+            print(f"Error writing {sch_file}: {e}", file=sys.stderr)
+            _rollback()
             return 1
 
     if format == "text":
