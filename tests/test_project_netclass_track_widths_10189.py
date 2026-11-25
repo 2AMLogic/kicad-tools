@@ -253,6 +253,102 @@ class TestRouteHonoursProjectNetclassWidths:
         _route_board(pcb, ["--trace-width", "0.18", "--skip-drc"])
         assert _geometry_signature(pcb, "+5V") == before
 
+    @pytest.mark.parametrize("lock", ["via", "group-track", "nested-group-via"])
+    def test_reroute_preserves_locked_copper_on_stale_net(self, tmp_path: Path, lock: str) -> None:
+        from kicad_tools.core.pcb_item_locks import BoardItemLocks
+        from kicad_tools.schema.pcb import PCB
+
+        pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+        track_id = "ff956807-5f30-48b2-959c-da35080ca721"
+        via_id = "eb4a7d68-0b42-40a5-aa3b-af4eb43c3897"
+        inner_id = "fbef539f-bba5-45d6-9d82-95f0c876e0a0"
+        group_id = "ae05d1f5-c27e-41a4-9461-faca98a1347d"
+        text = (
+            pcb.read_text()
+            .replace('(uuid "a1")', f'(uuid "{track_id}")')
+            .rstrip()
+            .removesuffix(")")
+        )
+        lock_flag = "(locked yes)" if lock == "via" else ""
+        text += (
+            f" (via {lock_flag} (at 12 6) (size 0.60) (drill 0.30)"
+            f' (layers "F.Cu" "B.Cu") (net 1) (uuid "{via_id}"))'
+        )
+        if lock != "via":
+            member = track_id
+            if lock == "nested-group-via":
+                text += f' (group "inner" (uuid "{inner_id}") (members "{via_id}"))'
+                member = inner_id
+            text += f' (group "protected" (uuid "{group_id}") (locked yes) (members "{member}"))'
+        pcb.write_text(text + ")")
+        settings = json.loads(project.read_text())
+        for cls in settings["net_settings"]["classes"]:
+            if cls["name"] in {"ClassA", "ClassB"}:
+                cls["track_width"] = 0.37
+        project.write_text(json.dumps(settings))
+        original = _geometry_signature(pcb, "NET_A")
+
+        _route_board(pcb, ["--skip-drc"])
+
+        saved = PCB.load(pcb)
+        assert _geometry_signature(pcb, "NET_A") == original
+        via = next(v for v in saved.vias if v.uuid == via_id)
+        assert (via.position, via.size, via.drill) == ((12, 6), 0.6, 0.3)
+        kind, member_id = ("segment", track_id) if lock == "group-track" else ("via", via_id)
+        locks = BoardItemLocks(saved._sexp)
+        assert member_id in {
+            item["uuid"].get_string(0)
+            for item in saved._sexp.find_children(kind)
+            if locks.is_locked(item)
+        }
+        assert _widths_by_net(pcb)["NET_B"] == {0.37}
+
+    @pytest.mark.parametrize("sidecar_key", ["NET_A", "/analog/NET_A"])
+    def test_reroute_resolves_explicit_width_for_connected_sheet_net(
+        self, tmp_path: Path, sidecar_key: str
+    ) -> None:
+        pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+        for file in (pcb, project):
+            file.write_text(file.read_text().replace('"NET_A"', '"/analog/NET_A"'))
+        sidecar = tmp_path / "widths.json"
+        sidecar.write_text(json.dumps({sidecar_key: {"name": "ClassA", "trace_width": 0.37}}))
+        other = _geometry_signature(pcb, "NET_B")
+
+        _route_board(pcb, ["--net-class-map", str(sidecar), "--skip-drc"])
+
+        assert _widths_by_net(pcb)["/analog/NET_A"] == {0.37}
+        assert _geometry_signature(pcb, "NET_B") == other
+
+    @pytest.mark.parametrize("both_connected", [True, False])
+    def test_ambiguous_sidecar_width_does_not_rip_up_connected_nets(
+        self, tmp_path: Path, both_connected: bool
+    ) -> None:
+        pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+        for file in (pcb, project):
+            file.write_text(
+                file.read_text()
+                .replace('"NET_A"', '"/left/LINE"')
+                .replace('"NET_B"', '"/right/LINE"')
+            )
+        if not both_connected:
+            pcb.write_text(
+                "\n".join(
+                    line for line in pcb.read_text().splitlines() if '(uuid "b1")' not in line
+                )
+            )
+        sidecar = tmp_path / "widths.json"
+        sidecar.write_text(json.dumps({"LINE": {"name": "Override", "trace_width": 0.37}}))
+        left = _geometry_signature(pcb, "/left/LINE")
+        right = _geometry_signature(pcb, "/right/LINE")
+
+        _route_board(pcb, ["--net-class-map", str(sidecar), "--skip-drc"])
+
+        assert _geometry_signature(pcb, "/left/LINE") == left
+        if both_connected:
+            assert _geometry_signature(pcb, "/right/LINE") == right
+        else:
+            assert _widths_by_net(pcb)["/right/LINE"] == {0.37}
+
     def test_project_width_below_manufacturer_floor_warns(self, tmp_path: Path, capsys) -> None:
         pcb = _write_unrouted_board(tmp_path, [("BUS", 10.0)])
         pcb.with_suffix(".kicad_pro").write_text(

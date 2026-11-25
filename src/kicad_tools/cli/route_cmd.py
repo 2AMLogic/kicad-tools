@@ -100,6 +100,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.primitives import Pad, Route
     from kicad_tools.router.reporting import RouteAttemptResult
     from kicad_tools.router.routing_plan import OverflowReport, RoutingPlan
+    from kicad_tools.schema.pcb import PCB
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
 # ``kicad_tools.router.auto_pour.auto_skip_pour_nets`` so in-process router
@@ -21005,7 +21006,7 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
     return 0
 
 
-def _stale_width_connected_nets(args, pcb_path: Path, connected: list[str]) -> set[str]:
+def _stale_width_connected_nets(args, pcb_path: Path, pcb: "PCB", connected: list[str]) -> set[str]:
     """Connected nets whose existing copper disagrees with authored width (#10189).
 
     Under an auto-selected ``preserve_existing`` re-run (no explicit
@@ -21015,8 +21016,10 @@ def _stale_width_connected_nets(args, pcb_path: Path, connected: list[str]) -> s
     """
     import json
 
+    from kicad_tools.core.pcb_item_locks import BoardItemLocks
     from kicad_tools.core.project_clearance import ProjectClearanceError, authored_netclass_widths
-    from kicad_tools.router.optimizer.pcb import locked_segment_nets, parse_segments
+    from kicad_tools.drc.net_compat import resolve_net_atom
+    from kicad_tools.router.net_names import resolve_net_class_map_keys
 
     explicit_width = getattr(args, "trace_width", None)
     target: dict[str, float] = {}
@@ -21033,39 +21036,43 @@ def _stale_width_connected_nets(args, pcb_path: Path, connected: list[str]) -> s
             # Surface canonical project errors at load_pcb_for_routing time.
             pass
 
+    net_names = {number: net.name for number, net in pcb.nets.items()}
     loaded = getattr(args, "_loaded_net_class_map", None)
     if loaded:
-        for net_name in connected:
-            if net_name in loaded:
-                lw = float(getattr(loaded[net_name], "trace_width", 0.0) or 0.0)
-                if lw > 0:
-                    target[net_name] = lw
+        # An open net on another sheet can share a connected net's suffix.
+        # Only an unambiguous board-wide match may release preserved copper.
+        resolution = resolve_net_class_map_keys(loaded, net_names.values())
+        for net_name, key in resolution.resolved.items():
+            width = loaded[key].trace_width
+            if width > 0:
+                target[net_name] = width
 
     if not target:
         return set()
 
-    try:
-        pcb_text = pcb_path.read_text(encoding="utf-8")
-    except OSError:
-        return set()
-
-    locked = locked_segment_nets(pcb_text)
     disposition = getattr(args, "_placement_disposition", None)
     preserved_placement = (
         disposition.preserve_copper_nets if disposition is not None else frozenset()
     )
-    segs_by_net = parse_segments(pcb_text)
-    stale: set[str] = set()
-    for net_name in connected:
-        if net_name in locked or net_name in preserved_placement or net_name not in target:
-            continue
-        segs = segs_by_net.get(net_name)
-        if not segs:
-            continue
-        # Compare the trunk (maximum) width so a fine-pitch pad neck-down on an
-        # unedited class does not look like a stale class width.
-        if abs(max(s.width for s in segs) - target[net_name]) > 1e-4:
-            stale.add(net_name)
+    # Pad neck-downs may be narrower than the class's trunk.
+    trunk_widths: dict[str, float] = {}
+    for seg in pcb.segments:
+        trunk_widths[seg.net_name] = max(trunk_widths.get(seg.net_name, 0.0), seg.width)
+    candidates = target.keys() & trunk_widths.keys() & set(connected)
+    stale = {
+        name
+        for name in candidates - preserved_placement
+        if abs(trunk_widths[name] - target[name]) > 1e-4
+    }
+    if stale:
+        # Re-routing replaces the whole net, including vias and group members.
+        locks = BoardItemLocks(pcb._sexp)
+        for item in pcb._sexp.children:
+            if item.name in {"segment", "arc", "via"} and locks.is_locked(item):
+                net = item.find_child("net")
+                if net is not None:
+                    _, name = resolve_net_atom(net.get_string(0), net_names)
+                    stale.discard(name)
     return stale
 
 
@@ -21122,9 +21129,11 @@ def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
         return 0
 
     from kicad_tools.router.preserve_existing import fully_connected_nets
+    from kicad_tools.schema.pcb import PCB
 
     try:
-        connected = fully_connected_nets(pcb_path)
+        pcb = PCB.load(pcb_path)
+        connected = fully_connected_nets(pcb=pcb)
     except Exception as e:  # pragma: no cover - a detector that cannot run
         # must never widen the preserved set (and must never fail the route).
         if not getattr(args, "quiet", False):
@@ -21139,7 +21148,7 @@ def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
         return 0
 
     if getattr(args, "_auto_preserve_existing", False):
-        stale = _stale_width_connected_nets(args, pcb_path, connected)
+        stale = _stale_width_connected_nets(args, pcb_path, pcb, connected)
         if stale:
             args._stale_width_nets = frozenset(stale)
             connected = [n for n in connected if n not in stale]
