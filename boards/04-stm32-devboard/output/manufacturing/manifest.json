@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.29.0",
-  "generated_at": "2026-11-25T10:30:00+00:00",
+  "generated_at": "2026-11-25T13:37:00+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -13,23 +13,23 @@
       "size": 1057
     },
     "assembly-back.pdf": {
-      "sha256": "f301a3e96842a60be947d47a5e349fd03423ed57c1057c88a57130af07300165",
-      "size": 22347
+      "sha256": "9105187d14cf1977af3c2b18cf7316f2a86812c4afb19bb9bb98b21d02171234",
+      "size": 22383
     },
     "assembly-front.pdf": {
-      "sha256": "b5b0b379dbc3cba88c5849b9b55d47f90b048dd015958f117f50e871ae550e40",
-      "size": 67092
+      "sha256": "e4c94fd6ed98109a469a49f64850ba807fd6f953372aaf514e769bcf9eeecee7",
+      "size": 66857
     },
     "bom_jlcpcb.csv": {
       "sha256": "22f4f6e0ae921146268a6a0c94e0267283a7a8d64f24d90be807bb449873b27f",
       "size": 640
     },
     "check-report.json": {
-      "sha256": "48a26d3ad0af48ca2bb0a102903fa65d9b8e1c22ed2c1c110f78bafe577d6a1a",
-      "size": 19647
+      "sha256": "81403d9a4e14bf4ba572f10686ff07410ad1c2ac24ca7c7f16e428f0e294d112",
+      "size": 19762
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "3c3b97dfc718b161b8c50c470e36f5302a2327ac32c4f109103f924e66e72588",
+      "sha256": "5eaab518a18c6cfa01acf43562ca01b76b1649f2d60ec3db735d6aecebd529b2",
       "size": 1312
     },
     "design-source/DESIGN_REVIEW.md": {
@@ -45,11 +45,11 @@
       "size": 3393
     },
     "design-source/generate_design.py": {
-      "sha256": "fe8a6d2c640a715b17716bf35b11b8b7db329322c6a072d3f431bf876097d2d8",
-      "size": 171152
+      "sha256": "01f5de31b2c8f7d48ab69eb9f15ccbaad975e38449234b2f0f4e4f1b88a43a53",
+      "size": 172015
     },
     "design-source/manufacturing_process.py": {
-      "sha256": "7143f3ddad1146d416de1ef31d25dadedc1e67fd79f90981555988db8790f307",
+      "sha256": "983e700307ab4e3c3285bbca7ff45123492e071146b670d03e2ec0d1904092f2",
       "size": 28313
     },
     "design-source/project.kct": {
@@ -57,44 +57,44 @@
       "size": 4989
     },
     "fill-consistency.json": {
-      "sha256": "150804cc7f96dd5d25836640b0ac730a0adce8d36a21c12efc6c988112055f93",
-      "size": 44
+      "sha256": "17333b22c43216943840f32f7e7ca3f17844701e7b61682a02708563ad507346",
+      "size": 45
     },
     "gerbers/gerbers.zip": {
-      "sha256": "18b26f3e31c943624e0f4ff8e81c6ee118ac3bd3b364bf3f2f37c1232e2496fd",
-      "size": 56342
+      "sha256": "cb9d06b697370eca40a4fd1dc02719bed35c308958ebfbe98177f232f7f4d0fd",
+      "size": 56374
     },
     "images/assembly.png": {
-      "sha256": "ea213b70ffada6be605a85e8c9740001d54e59017f8cafa6eaa6f8a307519ef7",
-      "size": 212068
+      "sha256": "644628505e41145ac787435bc24bb0f42a968d753e007c10330b3ad3a07c36e0",
+      "size": 211943
     },
     "images/layer_B_Cu.png": {
-      "sha256": "af9383522b16aaad160ae1ab8cb3f4feb3c22d72c3363bd1b1b3e346aac2ea82",
-      "size": 101459
+      "sha256": "f516d37dc2ec7ac871f67101cb7c67fec4faeba9a9abf53d786df45da180220e",
+      "size": 101560
     },
     "images/layer_F_Cu.png": {
-      "sha256": "598b3ec0a76b456fc29e3182d8358cef6b0218f3dc7f07af7151244a26fe1643",
-      "size": 178912
+      "sha256": "9e95c049a041093e9ea7e9942f5180ae155e8f59af4fcac02077ae51cb5d3563",
+      "size": 178127
     },
     "images/pcb_back.png": {
-      "sha256": "60be2829d9ba4f42793410199e4b399adb0f4851bca463242c7add8a870472d5",
-      "size": 103463
+      "sha256": "bf13aac523b47566f8ec85e4cc57a3246e70650c466a6110fa9dac99df54a993",
+      "size": 103633
     },
     "images/pcb_copper.png": {
-      "sha256": "2169ebf4352c95f5da26393302f133a46ec37a6a46fe806dbbf6e29e9278241c",
-      "size": 120710
+      "sha256": "975199115981741518188c7bc0b9d6bae19874b12121beaa669a91d082785295",
+      "size": 120572
     },
     "images/pcb_front.png": {
-      "sha256": "152278e88d0d592abbbb6e54378c801d82f1e209b893a160ca5eef39b5a9c0be",
-      "size": 284443
+      "sha256": "3b922be8dfb24a203156ae1985d818c2c66c5cf08cc86ab3b8158b910946c816",
+      "size": 283319
     },
     "images/schematic_stm32_devboard.png": {
-      "sha256": "e0d58863c7071f9ef5fb2ba4940807a5fbb2a8df6f5321a377cd2f1f2c2f87ba",
-      "size": 279454
+      "sha256": "4f216d5bc7746731f20242e856b427db660b8ea8c35623abeaab1770f49a1b2b",
+      "size": 279460
     },
     "kicad_project.zip": {
-      "sha256": "f2f7f47d96ebaef7b4b7ca2ef318d2c86fbf4b03bbaa6b702da282c847b6c3f3",
-      "size": 73566
+      "sha256": "1f4fca7c744fe9e80958c81b8afce6ed39be12949a11fd53ce62768bfce9ca39",
+      "size": 73538
     },
     "manufacturing-requirements.json": {
       "sha256": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
@@ -121,8 +121,8 @@
       "size": 3491
     },
     "report.pdf": {
-      "sha256": "55ea1ad0e8e576dd21df3c2a22e11e903b6c3e54dee328fe232d771f33980ac1",
-      "size": 1383027
+      "sha256": "48c2c881d4cb1b8ed235d9c9f2c46f3a7708398a882d198b7293e1282bbf302d",
+      "size": 1364383
     }
   },
   "board": {
@@ -196,33 +196,148 @@
     },
     {
       "name": "bom_lcsc_values",
-      "status": "WARN",
-      "message": "0 of 17 assigned item(s) verified (no source); 17 unverifiable (not in parts cache or offline catalog)",
-      "details": "unverified: U1 -> C148031, C1 -> C15850, C2 -> C15850, C3 -> C49678, U2 -> C8734, C12 -> C49678, C13 -> C49678, C14 -> C49678 (and 9 more)"
+      "status": "OK",
+      "message": "17 of 17 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches"
     },
     {
       "name": "bom_lcsc_stock",
       "status": "WARN",
-      "message": "Stock not verified: 11 assigned LCSC number(s) found in neither the parts cache nor the offline catalog",
-      "details": "C114147, C131244, C148031, C15850, C17414, C17630, C1779, C1798, C37208, C49678",
+      "message": "1 LCSC part(s) show insufficient stock for 5 board(s) on unverified data (stale cache/offline catalog)",
+      "details": "D1 -> C131244: needs 5, stock 0 (unverified offline_catalog)",
       "data": {
         "order_boards": 5,
         "inventory_covered": [],
         "strict": false,
-        "parts": [],
-        "unresolved": [
-          "C114147",
-          "C131244",
-          "C148031",
-          "C15850",
-          "C17414",
-          "C17630",
-          "C1779",
-          "C1798",
-          "C37208",
-          "C49678",
-          "C8734"
-        ]
+        "parts": [
+          {
+            "lcsc": "C114147",
+            "refs": [
+              "Y1"
+            ],
+            "per_board": 1,
+            "stock": 9731,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C131244",
+            "refs": [
+              "D1"
+            ],
+            "per_board": 1,
+            "stock": 0,
+            "verified": false,
+            "source": "offline_catalog",
+            "age_days": null
+          },
+          {
+            "lcsc": "C148031",
+            "refs": [
+              "U1"
+            ],
+            "per_board": 1,
+            "stock": 4204,
+            "verified": false,
+            "source": "offline_catalog",
+            "age_days": null
+          },
+          {
+            "lcsc": "C15850",
+            "refs": [
+              "C1",
+              "C2"
+            ],
+            "per_board": 2,
+            "stock": 9159181,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C17414",
+            "refs": [
+              "R2"
+            ],
+            "per_board": 1,
+            "stock": 43959058,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C17630",
+            "refs": [
+              "R1"
+            ],
+            "per_board": 1,
+            "stock": 1874003,
+            "verified": false,
+            "source": "offline_catalog",
+            "age_days": null
+          },
+          {
+            "lcsc": "C1779",
+            "refs": [
+              "C16"
+            ],
+            "per_board": 1,
+            "stock": 2581337,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C1798",
+            "refs": [
+              "C10",
+              "C11"
+            ],
+            "per_board": 2,
+            "stock": 83326,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C37208",
+            "refs": [
+              "J1"
+            ],
+            "per_board": 1,
+            "stock": 279306,
+            "verified": false,
+            "source": "offline_catalog",
+            "age_days": null
+          },
+          {
+            "lcsc": "C49678",
+            "refs": [
+              "C12",
+              "C13",
+              "C14",
+              "C15",
+              "C3"
+            ],
+            "per_board": 5,
+            "stock": 20234171,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          },
+          {
+            "lcsc": "C8734",
+            "refs": [
+              "U2"
+            ],
+            "per_board": 1,
+            "stock": 255759,
+            "verified": true,
+            "source": "live",
+            "age_days": 0
+          }
+        ],
+        "unresolved": []
       }
     },
     {

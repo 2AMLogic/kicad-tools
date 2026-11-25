@@ -403,7 +403,7 @@
   (footprint "Capacitor_SMD:C_0805_2012Metric"
     (layer "F.Cu")
     (uuid "b8803c69-576b-548e-b864-1e8e42dd9b52")
-    (at 144.0 84.6 180)
+    (at 142.8 84.6 180)
     (fp_text reference "C15" (at 0 -1.5) (layer "F.SilkS") (uuid "a7c1c085-f636-5d07-926f-58b7c21f1fbc")
       (effects (font (size 1 1) (thickness 0.15)))
     )
