@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import shutil
 import subprocess
 import zipfile
@@ -27,10 +28,16 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.cli import readiness_cmd
+from kicad_tools.cli import export_cmd, readiness_cmd
 from kicad_tools.cli.check_cmd import _manifest_subcheck
 from kicad_tools.cli.runner import find_kicad_cli
-from kicad_tools.export.manufacturing import _create_project_zip
+from kicad_tools.export.manufacturing import (
+    ManufacturingConfig,
+    ManufacturingPackage,
+    _create_project_zip,
+    verify_manifest,
+)
+from kicad_tools.export.preflight import PreflightConfig
 from kicad_tools.export.project_identity import (
     ProjectIdentityError,
     archive_layout,
@@ -821,3 +828,139 @@ def test_exporter_refuses_when_a_child_sheet_is_not_bundled(tmp_path, child_stat
     with pytest.raises(ProjectIdentityError, match="--project-root"):
         _create_project_zip(design / CHECKED[0], bundle, schematic_path=design / ROOT)
     assert not (bundle / "kicad_project.zip").exists()
+
+
+@pytest.mark.parametrize(
+    ("matched", "failure"),
+    [(False, "outside"), (True, "outside"), (False, "publish")],
+    ids=["versioned-child", "paired-child", "archive-publication"],
+)
+def test_refused_standalone_reexport_preserves_the_verified_package(
+    tmp_path, capsys, monkeypatch, matched, failure
+):
+    design = staged_design(tmp_path, matched=matched) / "output"
+    board = design / ("board.kicad_pcb" if matched else CHECKED[0])
+    # The native parity fixture deliberately violates its 2 mm rule. Use the
+    # JLCPCB floor here so both known-good revisions export normally.
+    rules = board.with_suffix(".kicad_dru")
+    rules.write_text(rules.read_text().replace("(min 2mm)", "(min 0.2mm)"))
+    root = design / ROOT
+    bundle = tmp_path / "package"
+    args = [
+        str(board),
+        "--sch",
+        str(root),
+        "--output",
+        str(bundle),
+        "--mfr",
+        "jlcpcb",
+        "--no-gerbers",
+        "--no-report",
+        "--no-silk-fix",
+        "--no-ampacity-rules",
+        "--no-auto-lcsc",
+        "--skip-preflight",
+        "--format",
+        "json",
+    ]
+
+    assert export_cmd.main(args) == 0
+    published = json.loads(capsys.readouterr().out)
+    original = {Path(name).name: Path(name).read_bytes() for name in published["files"]}
+    assert original.keys() == {
+        "bom_jlcpcb.csv",
+        "cpl_jlcpcb.csv",
+        "kicad_project.zip",
+        "README.txt",
+        "manifest.json",
+    }
+    assert b"SENSE_1K" in original["bom_jlcpcb.csv"]
+    assert verify_manifest(bundle / "manifest.json") == []
+
+    child = design / "power.kicad_sch"
+    original_root = root.read_text()
+    for source in (child, board):
+        source.write_text(source.read_text().replace("SENSE_1K", "SENSE_2K"))
+    operator_file = bundle / "assembly-notes.txt"
+    operator_file.write_text("retain these operator notes")
+    original[operator_file.name] = operator_file.read_bytes()
+
+    with monkeypatch.context() as patch:
+        if failure == "outside":
+            shared = design.parent / "shared"
+            shared.mkdir()
+            outside = child.rename(shared / child.name)
+            root.write_text(
+                original_root.replace('"power.kicad_sch"', '"../shared/power.kicad_sch"')
+            )
+        else:
+            replace = os.replace
+
+            def refuse_zip(source, target):
+                if Path(target) == bundle / "kicad_project.zip":
+                    raise PermissionError("archive held open for inspection")
+                return replace(source, target)
+
+            patch.setattr(os, "replace", refuse_zip)
+
+        assert export_cmd.main(args) == 1
+    refused = json.loads(capsys.readouterr().out)
+    if failure == "outside":
+        assert any(
+            "power.kicad_sch" in msg and "--project-root" in msg for msg in refused["errors"]
+        )
+        outside.rename(child)
+        root.write_text(original_root)
+    else:
+        assert any("archive held open" in msg for msg in refused["errors"])
+    assert {p.name: p.read_bytes() for p in bundle.iterdir()} == original
+    assert refused["files"] == []
+    assert verify_manifest(bundle / "manifest.json") == []
+
+    assert export_cmd.main(args) == 0
+    assert operator_file.read_text() == "retain these operator notes"
+    assert b"SENSE_2K" in (bundle / "bom_jlcpcb.csv").read_bytes()
+    assert verify_manifest(bundle / "manifest.json") == []
+
+
+def test_project_package_keeps_custom_output_paths_and_manual_bom_on_retry(tmp_path):
+    design = staged_design(tmp_path) / "output"
+    bundle = tmp_path / "manufacturing"
+    archive = tmp_path / "editable" / "project.zip"
+    archive.parent.mkdir()
+    bom = bundle / "purchasing.csv"
+    config = ManufacturingConfig(
+        output_dir=bundle,
+        bom_filename=str(bom),
+        project_zip_name=str(archive),
+        include_gerbers=False,
+        include_report=False,
+        silk_fix=False,
+        emit_drc_constraints=False,
+        auto_lcsc=False,
+        preflight=PreflightConfig(skip_all=True),
+    )
+    writer = ManufacturingPackage(design / CHECKED[0], design / ROOT, config=config)
+    first = writer.export()
+    assert first.success, first.errors
+    assert first.project_zip_path == archive
+    assert first.assembly_result.bom_path == bom
+    assert all(path.is_file() for path in first.all_files)
+    with bom.open(encoding="utf-8-sig", newline="") as src:
+        reader = csv.DictReader(src)
+        headers, rows = reader.fieldnames, list(reader)
+    for row in rows:
+        if row["Designator"] == "R1":
+            row["LCSC Part #"] = "C12345"
+    with bom.open("w", encoding="utf-8", newline="") as dst:
+        updated = csv.DictWriter(dst, fieldnames=headers)
+        updated.writeheader()
+        updated.writerows(rows)
+
+    second = writer.export()
+    assert second.success, second.errors
+    assert second.project_zip_path == archive
+    assert second.assembly_result.bom_path == bom
+    assert "C12345" in bom.read_text()
+    assert str(bom) in second.assembly_result.lcsc_merge_source
+    assert all(path.is_file() for path in second.all_files)
