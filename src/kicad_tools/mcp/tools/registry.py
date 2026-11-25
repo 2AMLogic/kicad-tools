@@ -1981,6 +1981,25 @@ register_tool(
 # -----------------------------------------------------------------------------
 
 
+_SHEET_WEIGHT_PROPERTIES = {
+    "group_cohesion": {
+        "type": "number",
+        "description": (
+            "Schematic-sheet cohesion weight (default: 1.0). Pulls "
+            "parts whose symbols share a sheet into a compact zone."
+        ),
+    },
+    "group_order": {
+        "type": "number",
+        "description": (
+            "Schematic-order weight (default: 1.0). Penalises "
+            "same-prefix parts of a sheet placed against their "
+            "schematic order."
+        ),
+    },
+}
+
+
 def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
     """Handle optimize_placement tool call."""
     from kicad_tools.mcp.tools.optimize_placement import optimize_placement
@@ -2067,21 +2086,7 @@ register_tool(
                             "the term and the post-optimize snap pass."
                         ),
                     },
-                    "group_cohesion": {
-                        "type": "number",
-                        "description": (
-                            "Schematic-sheet cohesion weight (default: 1.0). Pulls "
-                            "parts whose symbols share a sheet into a compact zone."
-                        ),
-                    },
-                    "group_order": {
-                        "type": "number",
-                        "description": (
-                            "Schematic-order weight (default: 1.0). Penalises "
-                            "same-prefix parts of a sheet placed against their "
-                            "schematic order."
-                        ),
-                    },
+                    **_SHEET_WEIGHT_PROPERTIES,
                 },
             },
             "seed_method": {
@@ -2165,7 +2170,8 @@ register_tool(
                 "type": "object",
                 "description": (
                     "Cost function weight overrides. Keys: overlap, drc, boundary, "
-                    "wirelength, area. Higher weights penalize that metric more."
+                    "wirelength, area, group_cohesion, group_order. Set both sheet "
+                    "weights to zero to skip schematic discovery."
                 ),
                 "properties": {
                     "overlap": {"type": "number", "description": "Overlap weight (default: 1e6)"},
@@ -2179,6 +2185,7 @@ register_tool(
                         "description": "Wirelength weight (default: 1.0)",
                     },
                     "area": {"type": "number", "description": "Area weight (default: 0.1)"},
+                    **_SHEET_WEIGHT_PROPERTIES,
                 },
             },
         },

@@ -206,6 +206,8 @@ def _breakdown_to_dict(breakdown: CostBreakdown) -> dict[str, float]:
         "drc": round(breakdown.drc, 4),
         "area": round(breakdown.area, 4),
         "decoupling": round(breakdown.decoupling, 4),
+        "group_cohesion": round(breakdown.group_cohesion, 4),
+        "group_order": round(breakdown.group_order, 4),
     }
 
 
@@ -219,6 +221,8 @@ def _parse_weights(weights: dict[str, float] | None) -> PlacementCostConfig:
         boundary_weight=weights.get("boundary", 1e5),
         wirelength_weight=weights.get("wirelength", 1.0),
         area_weight=weights.get("area", 0.1),
+        group_cohesion_weight=weights.get("group_cohesion", 1.0),
+        group_order_weight=weights.get("group_order", 1.0),
     )
 
 
@@ -653,14 +657,15 @@ def evaluate_placement(
     Args:
         pcb_path: Absolute path to .kicad_pcb file.
         weights: Optional cost function weight overrides. Keys:
-            overlap, drc, boundary, wirelength, area.
+            overlap, drc, boundary, wirelength, area, group_cohesion, group_order.
+            Set both sheet weights to zero to skip schematic discovery.
 
     Returns:
         Dictionary with placement evaluation results:
         - success: Whether evaluation completed.
         - score: Total placement score (lower is better).
         - feasible: Whether placement is feasible (no overlaps/violations).
-        - breakdown: Per-component score breakdown (wirelength, overlap, DRC, area).
+        - breakdown: Raw cost terms, including sheet cohesion and order in mm.
         - wirelength_estimators: The centre-anchored and pad-anchored
           wirelength of this same layout side by side, with their delta and
           which one ``score`` was computed from (issue #4831 M5). Report-only:
