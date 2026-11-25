@@ -16,6 +16,48 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-25
 
+- **Issue #9019** (closed): Grid router (Python + C++): keep own-net pad-vs-trace legs and neck-down taper out of the slit band (#9011, board 06)
+- **Issue #9011** (closed): Router: keep same-net pad-vs-trace escapes out of the fab slit band (both engines, #8976 attribution)
+- **Issue #10200** (closed): Confirm readiness gerbers.zip reproducibility end-to-end with the epoch unset on the pinned KiCad image
+- **PR #10197**: test: identify where chamfer endpoints are rounded on disk
+- **Issue #10195** (closed): Test flake: track the Board 06 inner-layer microvia failure on the pre-fix revision of #10178
+- **Issue #10192** (closed): Chamfer slide: the 4 dp rounding that reaches disk is in _apply_nudge, not _slide_chamfer_between_runs.moved
+- **PR #10187**: test(drc): guard the mask chamfer slide's 4 dp rounding against off-angle copper
+- **Issue #10183** (closed): Mask chamfer slide rounds each end to 4 dp, so a diagonal-run chamfer can land off-angle
+- **PR #10181**: test: name deadline vs disconnection for RX1 connected-endpoint cases
+- **PR #10180**: fix: pin Gerber creation date so readiness gerbers.zip is reproducible
+- **Issue #10179** (closed): Test flake: Board 06 microvia endpoint intermittently has no route in hosted CI
+- **PR #10177**: fix(drc): slide a pad-edge chamfer out of the mask opening along both runs
+- **PR #10175**: fix: report other boards' recovery copies in kct clean preview
+- **Issue #10174** (closed): gerbers.zip is not reproducible: hash changes on every regeneration (creation date in the Gerbers)
+- **Issue #10170** (closed): kct clean silently leaves a non-main board's recovery copy it cannot clean
+- **PR #10168**: fix: model footprint copper polygons in the via-elbow slit guard
+- **PR #10166**: feat: write the router's net classes into the .kicad_pro net_settings on route
+- **PR #10165**: feat: add per-pin decoupling count check to detect-mistakes
+- **Issue #10164** (closed): Router elbow guard omits footprint copper polygons from its exposed-slit model
+- **PR #10162**: ci: check vendored skill Markdown in the lint job
+- **PR #10161**: feat(router): name the connection, target and fence path in per-call route traces
+- **PR #10160**: feat(sch): report which supply pin each bypass capacitor serves
+- **PR #10159**: feat: add schematic-sheet grouping terms to placement scoring
+- **PR #10158**: test: assert post-#10057 exit-3 contract for fix-drc codes 1/2 in escalation tests
+- **PR #10155**: test: stub Python fallback in no-deadline escape-fence control
+- **PR #10154**: feat: add --check order report to sch re-annotate
+- **Issue #10153** (closed): test_route_auto_fix.py: TestAutoFixNoRegressionForCodes1And2 documents a contract #10057 changed, and its fixtures no longer reach the branch
+- **Issue #10151** (closed): Escape-fence no-deadline control test spends ~42s in the Python A* fallback after its assertions are already decided
+- **PR #10150**: fix(recovery): retain readable boards across symlink rewrites
+- **Issue #10148** (closed): CI: skill-markdown-only PRs skip the tests that guard the vendored .claude/commands/kct copy
+- **Issue #10146** (closed): placer: keep schematic-group members together and in schematic order
+- **PR #10144**: fix: stitcher keeps placed copper out of the same-net trace slit band (board 06 seed-42 residual, #9019)
+- **Issue #10140** (closed): placement: derive cap-to-power-pin association from the schematic
+- **Issue #10133** (closed): netclasses: write the classes kct routes with into the KiCad project instead of a separate net_class_map.json
+- **Issue #10132** (closed): annotation: report and fix reference designators that disagree with schematic and board position order
+- **PR #10124**: fix: undo DRC sidecar writes when required named-stackup silk repair refuses
+- **PR #10118**: fix(board06): rebuild the MIPI data pad exits inside the land and retire their fixture allowances
+- **PR #10116**: feat: check footprint symbol-instance links in the editable-project handoff
+- **Issue #10113** (closed): Board 06: clear the MIPI data pad exits at J4 and U4 without new impedance warnings
+- **Issue #10109** (closed): Check footprint-to-symbol instance links when handing a routed board back to the KiCad editors
+- **Issue #10102** (closed): Retained recovery copies are invisible to recovery_copies()/kct clean when the board is a relative symlink
+- **Issue #10091** (closed): Preserve project and rules files when required named-stackup silk repair fails
 - **PR #10103**: fix(router): clear exposed gaps where a branch enters a via beside its trunk
 - **PR #10126**: fix: evaluate punctuated netclass patterns in copper clearance checks
 - **PR #10094**: fix(route): fail and report post-route DRC on the default --auto-layers path

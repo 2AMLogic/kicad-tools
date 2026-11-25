@@ -2623,10 +2623,11 @@ def test_chamfer_slide_rounding_keeps_the_angle_census_clean(
 ):
     """Measured refutation of the #10183 hypothesis, kept as a regression guard.
 
-    ``moved`` rounds each end to 4 dp on its own, so a slid chamfer can sit one
-    0.1 um quantum off its exact angle. The census accepts exactly that much
-    (``_is_quantum_aligned``) and the rounding cannot exceed it, so the slide is
-    never declined as ``would_bend_trace`` and no track is saved off angle.
+    ``moved`` supplies candidate geometry and action metadata. When writing the
+    board, ``_apply_nudge`` adds each point's shift to its original endpoint
+    and rounds each coordinate to four decimals. Independent endpoint rounding
+    can put the chamfer one 0.1 um quantum off its exact angle. The census
+    accepts that difference, so these slides preserve the angle on disk.
     """
     board, shapes = _rounding_chamfer_fixture(
         tmp_path, diagonal=diagonal, signs=signs, offset=offset, reach=reach, chamfer=chamfer
@@ -2847,3 +2848,51 @@ def test_via_waits_a_pass_when_an_elbow_flip_already_moved_a_track_that_reaches_
     assert [(u.uuid, u.reason) for u in result.unrepaired] == [
         ("anchor-via", "segment_end_already_moved")
     ]
+
+
+def _via_pad_entry(tmp_path, *, locked=False):
+    via, corner, inside = (100.4, 98.975), (100.4, 99.375), (100.0, 99.775)
+    entry = _seg("entry", corner, inside)
+    if locked:
+        entry = entry.replace("(segment ", "(segment locked ")
+    return _board(tmp_path, "\n".join([_via("fixed", via), _seg("lead", via, corner), entry]))
+
+
+def test_disjoint_via_approach_turns_outside_pad_and_undoes(tmp_path):
+    # The lead from a fixed via ends 0.025 mm from the mask. Its diagonal
+    # neighbour already enters the pad. Extend that diagonal to a perpendicular via lead.
+    board = _via_pad_entry(tmp_path)
+    repairer = MaskCopperRepairer(board)
+    original = {uid: _end(board, uid) for uid in ("lead", "entry")}
+    via, inside = original["lead"][0], original["entry"][1]
+    result = repairer.repair([_pt_finding("lead", measured=0.025)], **_ELBOW_OPTS)
+    assert result.repaired == 1
+    repairer.save(board)
+    assert _end(board, "lead") == [via, (100.6, 99.175)]
+    assert _end(board, "entry") == [(100.6, 99.175), inside]
+    assert _saved_copper(board, "fixed")[1] == via
+    assert not repairer.off_angle_tracks()
+    assert repairer.undo_action(result.actions[0])
+    repairer.save(board)
+    assert {uid: _end(board, uid) for uid in original} == original
+
+
+def test_locked_via_entry_corner_leaves_all_copper_untouched(tmp_path):
+    repairer = MaskCopperRepairer(_via_pad_entry(tmp_path, locked=True))
+    before = repairer.doc.to_string()
+    result = repairer.repair([_pt_finding("lead", measured=0.025)], **_ELBOW_OPTS)
+    assert result.repaired == 0 and result.unrepaired[0].reason == "junction_at_moved_end"
+    assert repairer.doc.to_string() == before
+
+
+def test_via_entry_recheck_veto_preserves_board_bytes(tmp_path, monkeypatch, capsys):
+    board = _via_pad_entry(tmp_path)
+    before = board.read_bytes()
+    reported = _pt_finding("lead", measured=0.025)
+    neighbour = _finding("entry")
+    _run(monkeypatch, board, [_report(reported), _report(neighbour)], extra=("--format", "json"))
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [
+        ("lead", "new_mask_finding")
+    ]
+    assert board.read_bytes() == before
