@@ -48,9 +48,9 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from shapely import get_parts
-from shapely.geometry import LineString, Polygon
-from shapely.geometry.base import BaseGeometry
+from shapely import get_parts  # type: ignore[import-untyped]
+from shapely.geometry import LineString, Polygon  # type: ignore[import-untyped]
+from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
 from kicad_tools.schema.pcb import _segment_dedup_key
 
