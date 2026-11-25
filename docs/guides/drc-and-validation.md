@@ -919,6 +919,36 @@ From the Python API, `ViaUnderBodyRule` takes `footprint_pattern` (default
 `exclude_references`, `allow_thermal_pad_vias`, `fallback_to_courtyard`
 and `severity`.
 
+### Bypass Capacitor Too Far From Its Supply Pin
+
+**Warning:** `bypass_distance` — `C1 is 41.00mm from U1 pin 1, the supply pin its schematic designates (derived: shared drawn wire, 5.08 mm on sheet); maximum 3mm ...`
+
+A decoupling cap only helps the supply pin it serves. This rule does **not**
+pair a cap with the nearest power pad on its rail (which mis-pairs when two
+ICs share a rail and their caps are swapped). It measures from the cap's
+supply pad to the pad of the pin the **schematic** designates, using the same
+cap-to-pin association as `kct detect-mistakes` (`schematic_cap_associations`;
+an explicit `KCT_Decouples` symbol field overrides the drawn inference).
+
+Findings:
+
+- `bypass_distance` (warning) — the distance exceeds the maximum
+  (`--bypass-max-distance MM`, default 3.0). A cap on the opposite board side
+  from its pin is measured in XY and the finding says so.
+- `bypass_distance_unassociated` (info) — the schematic designates no
+  defensible pin for the cap (or the cap/pin is not on the board). The distance
+  was **not** checked; that is neither a failure nor a pass.
+
+Without a resolvable schematic (and under `--drc-only`) the category does not
+run, and the coverage report lists it as `unknown (needs_input:schematic)`.
+
+**Fix:** Move the cap beside its pin, correct the drawing (or set
+`KCT_Decouples` to `REF.PAD`) if the association is wrong, or waive in
+`.kct_waivers.json` with `"items": ["C1", "U1"]`. The rules are advisory, so
+they only fail `kct check` under `--strict`; the category is on by default, so
+a board that passed `--strict` before upgrading can newly fail. To opt out run
+`kct check --strict --skip bypass_distance`.
+
 ### Missing or Hidden Pin-1 Marker
 
 **Warning:** `pin1_marker_missing` — `U2 (Package_QFP:LQFP-48_7x7mm_P0.5mm) has no silkscreen pin-1 / polarity marker within 2.5mm of pad 1`

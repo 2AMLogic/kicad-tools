@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import hashlib
 import json
 import logging
@@ -46,6 +47,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -54,9 +56,9 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from kicad_tools.analysis.routing_quality import (
     RULE_OFF_AXIS_LENGTH_WARNING,
@@ -65,7 +67,7 @@ from kicad_tools.analysis.routing_quality import (
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.sexp import ParseError, parse_file
 
-from .board_readiness import read_readiness, readiness_input_hash
+from .board_readiness import ReadinessLayout, read_readiness, readiness_input_hash
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
 from .kicad_toolchain import (
     KiCadEnvironmentError,
@@ -99,6 +101,7 @@ __all__ = [
     "build_report",
     "compare_fill_areas",
     "main",
+    "readiness_layout",
     "require_saved_fill_matches_refill",
     "resolve_options",
     "run_readiness",
@@ -139,6 +142,9 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
         "board_id_missing",
         # Issue #8884: a layer dominated (by length) by off-axis copper.
         "routing_quality_off_axis_length",
+        # Issue #10172: warning-band THT/anchor-via to SMD-pad spacing is a
+        # wave/selective-solder and rework hazard until acknowledged.
+        "tht_smd_spacing",
     }
 )
 
@@ -202,10 +208,14 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 def _sha256_file(path: Path) -> str:
     """Return the SHA256 hex digest of *path*'s bytes."""
-    digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
+        return _sha256_stream(handle)
+
+
+def _sha256_stream(handle: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: handle.read(65536), b""):
+        digest.update(chunk)
     return digest.hexdigest()
 
 
@@ -402,6 +412,24 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
     return result
 
 
+#: Gerber creation date readiness stamps when ``SOURCE_DATE_EPOCH`` is unset
+#: (1980-01-01T00:00:00Z, the ZIP epoch).  Policy local to the Gerber plot so
+#: ``gerbers/gerbers.zip`` is a pure function of the board (Issue #10174);
+#: sign-off timestamps keep their real wall-clock meaning.
+READINESS_GERBER_EPOCH = 315532800
+
+
+def _readiness_gerber_epoch() -> datetime:
+    """Gerber creation date: a valid ``SOURCE_DATE_EPOCH``, else the constant."""
+    raw = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if raw.isdigit():
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            pass
+    return datetime.fromtimestamp(READINESS_GERBER_EPOCH, tz=timezone.utc)
+
+
 def _run_export(
     pcb: Path,
     manufacturer: str,
@@ -422,6 +450,7 @@ def _run_export(
             include_pnp=assembly,
             emit_drc_constraints=False,
             merge_lcsc_from=merge_lcsc_from,
+            gerber_source_date_epoch=_readiness_gerber_epoch(),
             preflight=PreflightConfig(
                 order_boards=quantity or PreflightConfig.order_boards,
                 inventory_covered=inventory_covered or frozenset(),
@@ -932,6 +961,12 @@ class ReadinessOptions:
     # symbol/footprint libraries) may be collected from.  ``None`` keeps the
     # historical boundary (``board_dir``).
     project_root: Path | None = None
+    # Project-declared output root (Issue #10106): the directory a project-local
+    # ``[readiness] output_root`` TOML declaration resolved to.  The bundle,
+    # generated receipt, evidence and diagnostics publish under it (a sibling of
+    # ``board_dir`` for a ``kicad/`` + ``output/`` project layout) instead of the
+    # board-local tree.  ``None`` keeps the historical board-local destinations.
+    output_root: Path | None = None
     # Timestamp recorded as ``checked_at`` (and as every native DRC report's
     # ``date``, Issue #6962).  ``None`` means "now", fixed once per run.
     checked_at: str | None = None
@@ -986,6 +1021,34 @@ class ReadinessOptions:
     @property
     def assembly(self) -> bool:
         return self.mode == "assembly"
+
+
+def _input_base(options: ReadinessOptions) -> Path:
+    """The directory readiness receipt paths are keyed against.
+
+    Board-local runs (no declaration) key ``inputs`` against the board
+    directory; a project-declared output root (Issue #10106) keys them against
+    the declaring project, so board sources, sibling dependencies and the
+    released artifacts under the output root share one portable base.
+    """
+    return options.root if options.output_root is not None else options.board_dir
+
+
+def _report_path(options: ReadinessOptions) -> Path:
+    """Where this run's generated receipt belongs (``readiness.json``)."""
+    if options.output_root is not None:
+        return options.output_root / _REPORT_NAME
+    return options.board_dir / "output" / _REPORT_NAME
+
+
+def readiness_layout(options: ReadinessOptions) -> ReadinessLayout | None:
+    """The trusted receipt layout for a project-declared run (Issue #10106).
+
+    ``None`` keeps :func:`read_readiness`'s board-local contract.
+    """
+    if options.output_root is None:
+        return None
+    return ReadinessLayout(report=_report_path(options), input_base=options.root)
 
 
 @dataclass
@@ -1047,6 +1110,45 @@ def _find_sibling(pcb: Path, suffix: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _resolve_declared_output_root(
+    pcb: Path, board_dir: Path
+) -> tuple[Path | None, Path | None, str | None]:
+    """Resolve a project-local ``[readiness] output_root`` declaration (#10106).
+
+    Discovery starts at the selected PCB and resolves the declared value
+    against the declaring TOML's directory.  Returns ``(output_root,
+    declaring_project, error)``; the declaration establishes the project (used
+    as the run's root when ``--project-root`` is not given) and every run with
+    a declaration publishes under ``output_root``.  ``None`` output keeps the
+    historical board-local destinations (Issue #8766 refusals included).
+    """
+    from kicad_tools.config import ConfigError, find_readiness_output_root
+
+    try:
+        declaration = find_readiness_output_root(pcb.parent)
+    except ConfigError as exc:
+        return None, None, str(exc)
+    if declaration is None:
+        return None, None, None
+    output_root, declared_by = declaration
+    project_dir = declared_by.parent.resolve()
+    if output_root == project_dir or not output_root.is_relative_to(project_dir):
+        return (
+            None,
+            None,
+            f"[readiness] output_root in {declared_by.name} must resolve to a directory "
+            f"inside the project {project_dir}; got {output_root}",
+        )
+    if output_root == board_dir.resolve():
+        return (
+            None,
+            None,
+            f"[readiness] output_root in {declared_by.name} must not be the board directory "
+            f"itself ({output_root}); the release must not mix with the editable design",
+        )
+    return output_root, project_dir, None
+
+
 def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, str | None]:
     """Resolve CLI arguments into :class:`ReadinessOptions`.
 
@@ -1072,7 +1174,14 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         pcb = target
         board_dir = target.parent.parent if target.parent.name == "output" else target.parent
 
-    manufacturer = args.manufacturer or _discover_tier(board_dir, pcb)
+    # Project-declared output root (Issue #10106): resolve and validate the
+    # declaration before anything is read or created, so an unsafe root refuses
+    # here rather than mid-run.
+    output_root, declared_project, declaration_error = _resolve_declared_output_root(pcb, board_dir)
+    if declaration_error is not None:
+        return None, declaration_error
+
+    manufacturer = args.manufacturer or _discover_tier(board_dir, pcb, output_root=output_root)
     if manufacturer is None:
         return None, (
             "could not resolve a fabrication tier from the board recipe; "
@@ -1103,23 +1212,54 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             and pcb.resolve().is_relative_to(project_root)
         ):
             return None, f"--project-root {project_root} must contain the board {board_dir}"
+    if output_root is not None:
+        # The declaration itself establishes the project: its TOML's directory
+        # bounds sources and the declared output root when --project-root is
+        # not given (Issue #10106).  An explicit root must contain the declared
+        # output root; nothing outside the root is ever read (#5813 stands).
+        if project_root is None:
+            project_root = declared_project
+        elif not output_root.is_relative_to(project_root):
+            return None, (
+                f"--project-root {project_root} must contain the declared output root {output_root}"
+            )
     boundary = project_root or board_dir.resolve()
     if schematic is not None and not schematic.resolve().is_relative_to(boundary):
         return None, _outside_root_message(str(schematic), "schematic", project_root is not None)
     if schematic is not None and not schematic.is_file():
         return None, f"schematic not found: {schematic}"
 
-    output_dir = Path(args.output).resolve() if args.output else pcb.parent / "manufacturing"
-    if args.output and not output_dir.is_relative_to(board_dir.resolve()):
-        return None, f"--output must be inside the board directory {board_dir}; got {output_dir}"
-    if args.output and output_dir.name != "manufacturing":
-        return None, (
-            "--output must be a directory named 'manufacturing' (the readiness gate "
-            f"and tapeout-sign-off locate the bundle by that name); got {output_dir}"
-        )
-    evidence_dir = board_dir / "output" / _EVIDENCE_DIRNAME
-    if not (board_dir / "output").is_dir():
-        evidence_dir = board_dir / _EVIDENCE_DIRNAME
+    if output_root is not None:
+        # Declared layout (Issue #10106): the bundle, receipts, evidence and
+        # diagnostics publish under the project-declared output root.  An
+        # explicit --output keeps its working-directory-relative interpretation
+        # and must land inside the declared root.
+        output_dir = Path(args.output).resolve() if args.output else output_root / "manufacturing"
+        if args.output and not output_dir.is_relative_to(output_root):
+            return None, (
+                f"--output must be inside the declared output root {output_root}; got {output_dir}"
+            )
+        if output_dir.name != "manufacturing":
+            return None, (
+                "--output must be a directory named 'manufacturing' (the readiness gate "
+                f"and tapeout-sign-off locate the bundle by that name); got {output_dir}"
+            )
+        evidence_dir = output_root / _EVIDENCE_DIRNAME
+    else:
+        output_dir = Path(args.output).resolve() if args.output else pcb.parent / "manufacturing"
+        if args.output and not output_dir.is_relative_to(board_dir.resolve()):
+            return (
+                None,
+                f"--output must be inside the board directory {board_dir}; got {output_dir}",
+            )
+        if args.output and output_dir.name != "manufacturing":
+            return None, (
+                "--output must be a directory named 'manufacturing' (the readiness gate "
+                f"and tapeout-sign-off locate the bundle by that name); got {output_dir}"
+            )
+        evidence_dir = board_dir / "output" / _EVIDENCE_DIRNAME
+        if not (board_dir / "output").is_dir():
+            evidence_dir = board_dir / _EVIDENCE_DIRNAME
 
     vm_arg = getattr(args, "voltage_map", None)
     voltage_map = Path(vm_arg).resolve() if vm_arg else None
@@ -1182,7 +1322,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
     checked_at = getattr(args, "checked_at", None)
     try:
-        known_issues = _resolve_known_issues(board_dir, args, checked_at)
+        known_issues = _resolve_known_issues(board_dir, args, checked_at, output_root)
     except KnownIssueError as exc:
         return None, str(exc)
 
@@ -1214,6 +1354,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             fill_tolerance_mm2=float(args.fill_tolerance),
             operation="generate" if args.generate else "verify",
             project_root=project_root,
+            output_root=output_root,
             checked_at=checked_at,
             skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
             skip_fiducials=bool(getattr(args, "skip_fiducials", False)),
@@ -1229,13 +1370,18 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
 
 def _resolve_known_issues(
-    board_dir: Path, args: argparse.Namespace, checked_at: str | None
+    board_dir: Path,
+    args: argparse.Namespace,
+    checked_at: str | None,
+    output_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     """The board's recorded issues, updated by ``--known-issue`` / ``--resolve-known-issue``.
 
     Entries already recorded in ``output/readiness.json`` are carried forward:
     regenerating evidence must not silently drop a disclosure.  Only naming an
     issue in ``--resolve-known-issue`` removes it.  Offline and format-only.
+    A project-declared output root keeps its receipt at the declared location
+    (Issue #10106).
     """
     if checked_at:
         try:
@@ -1255,7 +1401,11 @@ def _resolve_known_issues(
             raise KnownIssueError(f"--resolve-known-issue {value!r}: expected an issue number")
         resolved.append(int(text))
     previous: list[dict[str, Any]] = []
-    report = board_dir / "output" / _REPORT_NAME
+    report = (
+        output_root / _REPORT_NAME
+        if output_root is not None
+        else board_dir / "output" / _REPORT_NAME
+    )
     if report.is_file():
         try:
             recorded_list = json.loads(report.read_text()).get("known_issues")
@@ -1268,12 +1418,15 @@ def _resolve_known_issues(
     return merge_known_issues(previous, added, resolved)
 
 
-def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
+def _discover_tier(board_dir: Path, pcb: Path, output_root: Path | None = None) -> str | None:
     """Read the fab tier from the board's own recipe/manifest, never a default."""
-    manifest = pcb.parent / "manufacturing" / "manifest.json"
-    tier = _read_json(manifest).get("manufacturer")
-    if isinstance(tier, str) and tier:
-        return tier
+    manifests = [pcb.parent / "manufacturing" / "manifest.json"]
+    if output_root is not None:
+        manifests.append(output_root / "manufacturing" / "manifest.json")
+    for manifest in manifests:
+        tier = _read_json(manifest).get("manufacturer")
+        if isinstance(tier, str) and tier:
+            return tier
     spec = board_dir / "project.kct"
     if spec.is_file():
         try:
@@ -2503,6 +2656,18 @@ def _is_transient_local(path: Path) -> bool:
     return any(part == "__pycache__" or part.endswith("-backups") for part in path.parts)
 
 
+_PRIVATE_HOLD_PREFIX = ".readiness-"
+
+
+def _is_private_hold(path: Path) -> bool:
+    """True inside a retained publication backup (Issue #10106).
+
+    A hold can live in a generated directory when that directory is its own
+    mount, so it must never become an input, package member or removal target.
+    """
+    return any(part.startswith(_PRIVATE_HOLD_PREFIX) for part in path.parts)
+
+
 def _bundle_files(output_dir: Path, exclude: Sequence[str] = ()) -> list[Path]:
     excluded = set(exclude)
     return sorted(
@@ -2510,6 +2675,7 @@ def _bundle_files(output_dir: Path, exclude: Sequence[str] = ()) -> list[Path]:
         for p in output_dir.rglob("*")
         if p.is_file()
         and p.relative_to(output_dir).as_posix() not in excluded
+        and not _is_private_hold(p.relative_to(output_dir))
         and not _is_transient_local(p.relative_to(output_dir))
     )
 
@@ -3763,21 +3929,68 @@ def _build_archive(options: ReadinessOptions) -> Path | None:
 
 
 def _rel(options: ReadinessOptions, path: Path) -> str:
-    """Board-relative POSIX path, as the readiness ``inputs`` contract requires."""
-    return path.resolve().relative_to(options.board_dir.resolve()).as_posix()
+    """Input-base-relative POSIX path, as the readiness ``inputs`` contract requires.
+
+    The base is the board directory for board-local runs and the declaring
+    project for a project-declared output root (Issue #10106).
+    """
+    base = _input_base(options).resolve()
+    return path.resolve().relative_to(base).as_posix()
 
 
-def _is_render_artifact(rel: Path) -> bool:
+def _declared_render_prefixes(options: ReadinessOptions) -> list[tuple[str, ...]]:
+    """Input-base-relative ``renders`` directories of a project-declared output root.
+
+    A declared ``[readiness] output_root`` may carry any name (Issue #10106), so
+    the render exclusion cannot rely on the literal ``output`` segment alone
+    (Issue #10163).  Returns the ``<output_root>/renders``,
+    ``<output_root>/manufacturing/renders`` and ``<output_dir>/renders`` prefixes;
+    empty for a board-local run.
+    """
+    if options.output_root is None:
+        return []
+    base = _input_base(options).resolve()
+    prefixes: list[tuple[str, ...]] = []
+    for directory, tail in (
+        (options.output_root, ("renders",)),
+        (options.output_root, ("manufacturing", "renders")),
+        (options.output_dir, ("renders",)),
+    ):
+        resolved = directory.resolve()
+        if resolved.is_relative_to(base):
+            prefix = (*resolved.relative_to(base).parts, *tail)
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+    return prefixes
+
+
+def _is_render_artifact(rel: Path, options: ReadinessOptions | None = None) -> bool:
     """True for ``kct render`` output under ``output/`` or ``output/manufacturing/``.
 
     Renders are derived presentation artifacts: the verdict depends on the PCB,
     rules and DRC/ERC reports, and a picture of the board proves nothing the PCB
     hash does not.  ``scripts/deploy-site.sh`` re-renders them, so fingerprinting
-    them made every deploy invalidate committed evidence (Issue #7678).
+    them made every deploy invalidate committed evidence (Issue #7678).  The
+    ``output/`` directory may sit at any depth: a project-declared output root
+    keys receipts against the project, so board-local renders appear as
+    ``<board>/output/renders/...`` (Issue #10106).
+
+    With ``options`` carrying a project-declared output root, renders under
+    ``<output_root>/renders``, ``<output_root>/manufacturing/renders`` and
+    ``<output_dir>/renders`` are excluded whatever the root is named
+    (Issue #10163).  ``rel`` is relative to the input base.
     """
     parts = rel.parts
-    return (len(parts) >= 3 and parts[:2] == ("output", "renders")) or (
-        len(parts) >= 4 and parts[:3] == ("output", "manufacturing", "renders")
+    if any(parts[i : i + 2] == ("output", "renders") for i in range(len(parts) - 1)) or any(
+        parts[i : i + 3] == ("output", "manufacturing", "renders") for i in range(len(parts) - 2)
+    ):
+        return True
+    if options is None:
+        return False
+    # At least one segment must follow ``renders`` (the file itself).
+    return any(
+        len(parts) > len(prefix) and parts[: len(prefix)] == prefix
+        for prefix in _declared_render_prefixes(options)
     )
 
 
@@ -3789,7 +4002,6 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     and ``output/fab_profile.json`` appear here, so evidence cannot omit the
     rule files it was computed against.
     """
-    root = options.board_dir.resolve()
     paths: set[Path] = (
         {
             p.resolve()
@@ -3800,7 +4012,6 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         if options.pcb.is_file()
         else set()
     )
-
     for candidate in (
         options.pcb,
         options.schematic,
@@ -3854,13 +4065,18 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     if rotations is not None:
         paths.add(rotations.resolve())
 
+    # Issue #10106: a project-declared output root publishes release artifacts
+    # outside the board directory; hashable inputs are then bounded by (and
+    # keyed against) the declaring project instead of the board directory.
+    base = _input_base(options).resolve()
     return sorted(
         p
         for p in paths
-        if p.is_relative_to(root)
+        if p.is_relative_to(base)
         and p.name != _REPORT_NAME
-        and not _is_transient_local(p.relative_to(root))
-        and not _is_render_artifact(p.relative_to(root))
+        and not _is_transient_local(p.relative_to(base))
+        and not _is_private_hold(p.relative_to(base))
+        and not _is_render_artifact(p.relative_to(base), options)
     )
 
 
@@ -4093,13 +4309,13 @@ def build_report(
     if metrics and status != STATUS_UNVERIFIED:
         report["metrics"] = metrics
 
-    root = options.board_dir.resolve()
+    root = _input_base(options).resolve()
     hashed = set(_hashable_inputs(options))
     for path in extra_inputs:
         resolved = Path(path).resolve()
         if not resolved.is_file() or not resolved.is_relative_to(root):
             raise ValueError(f"extra readiness input is not a board file: {path}")
-        if not _is_render_artifact(resolved.relative_to(root)):
+        if not _is_render_artifact(resolved.relative_to(root), options):
             hashed.add(resolved)
     report["inputs"] = {
         _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
@@ -4123,13 +4339,21 @@ def build_report(
     cpl_block = _cpl_rotation_report_entry(options)
     if cpl_block is not None:
         report["cpl_rotations"] = cpl_block
-    external = _external_dependencies(options)
-    if external:
-        # Hash the exact collected out-of-directory dependencies (Issue #5813).
+    if options.output_root is not None:
+        # Declared layout (Issue #10106): board sources, sibling dependencies
+        # and the released artifacts share one portable input base (the
+        # declaring project) and the receipt names both that base and the
+        # declared output root explicitly, so a moved project still verifies.
         report["project_root"] = os.path.relpath(options.root, options.board_dir.resolve())
-        report["external_inputs"] = {
-            p.relative_to(options.root).as_posix(): _sha256_file(p) for p in external
-        }
+        report["output_root"] = options.output_root.resolve().relative_to(options.root).as_posix()
+    else:
+        external = _external_dependencies(options)
+        if external:
+            # Hash the exact collected out-of-directory dependencies (Issue #5813).
+            report["project_root"] = os.path.relpath(options.root, options.board_dir.resolve())
+            report["external_inputs"] = {
+                p.relative_to(options.root).as_posix(): _sha256_file(p) for p in external
+            }
     return report
 
 
@@ -4138,15 +4362,17 @@ def build_report(
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_inventory(root: Path) -> dict[str, str]:
+def _snapshot_inventory(root: Path, held_dirs: set[Path] | None = None) -> dict[str, str]:
     return {
         path.relative_to(root).as_posix(): _sha256_file(path)
         for path in sorted(root.rglob("*"))
-        if path.is_file()
+        if (not held_dirs or path.parent not in held_dirs)
+        and path.is_file()
         and not any(
             part in {".git", ".venv", "readiness-verification", "readiness-attempt"}
             for part in path.relative_to(root).parts
         )
+        and not _is_private_hold(path.relative_to(root))
     }
 
 
@@ -4171,7 +4397,13 @@ def _release_changes(
     board_dir: Path, before: dict[str, str], external_before: dict[Path, str]
 ) -> list[str]:
     """Name changed inputs relative to the original board directory."""
-    changes = _inventory_changes(before, _snapshot_inventory(board_dir))
+    return _inventory_changes(before, _snapshot_inventory(board_dir)) + _external_input_changes(
+        board_dir, external_before
+    )
+
+
+def _external_input_changes(board_dir: Path, external_before: dict[Path, str]) -> list[str]:
+    changes = []
     for path, digest in sorted(external_before.items()):
         if not path.is_file():
             kind = "removed"
@@ -4184,22 +4416,194 @@ def _release_changes(
     return changes
 
 
+def _stream_identity(stream: BinaryIO) -> tuple[Any, ...]:
+    info = os.fstat(stream.fileno())
+    stream.seek(0)
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        _sha256_stream(stream),
+    )
+
+
 def _publication_identity(path: Path) -> tuple[Any, ...] | None:
-    """Identify the actual file, including same-content inode replacements."""
+    """Identify the opened file, including same-content inode replacements."""
     try:
-        stat = path.lstat()
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise RuntimeError(f"Publication target is not a regular file: {path}")
+        with path.open("rb") as stream:
+            return _stream_identity(stream)
     except FileNotFoundError:
         return None
-    if path.is_symlink() or not path.is_file():
-        raise RuntimeError(f"Publication target is not a regular file: {path}")
-    return (
-        stat.st_dev,
-        stat.st_ino,
-        stat.st_mode,
-        stat.st_size,
-        stat.st_mtime_ns,
-        _sha256_file(path),
-    )
+
+
+def _supports_publication_links(directory: Path) -> bool:
+    """Probe private names before moving any live file on this filesystem."""
+    with tempfile.TemporaryDirectory(prefix=".readiness-probe-", dir=directory) as scratch:
+        source = Path(scratch) / "source"
+        source.touch()
+        try:
+            os.link(source, Path(scratch) / "link")
+        except OSError as exc:
+            if exc.errno in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.ENOSYS):
+                return False
+            raise
+    return True
+
+
+def _copy_publication_file(
+    source: Path, target: Path, record: Callable[[tuple[Any, ...] | None], None] | None = None
+) -> None:
+    """Copy only into a newly created name on a filesystem without hard links."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    with source.open("rb") as staged:
+        source_info = os.fstat(staged.fileno())
+        fd = os.open(target, flags, stat.S_IMODE(source_info.st_mode))
+        with os.fdopen(fd, "r+b", buffering=0) as live:
+            if os.fstat(fd).st_size:
+                raise RuntimeError(f"Concurrent edit before publication: {target.name}")
+            digest = hashlib.sha256()
+            try:
+                for chunk in iter(lambda: staged.read(65536), b""):
+                    if os.write(fd, chunk) != len(chunk):
+                        raise OSError(errno.ENOSPC, "Incomplete publication write", target)
+                    digest.update(chunk)
+                os.fsync(fd)
+                if os.utime in os.supports_fd:
+                    os.utime(fd, ns=(source_info.st_atime_ns, source_info.st_mtime_ns))
+            except BaseException:
+                # A short write may already have changed our file. Journal the
+                # descriptor, never the pathname an atomic save may now own.
+                if record is not None:
+                    record(_stream_identity(live))
+                raise
+            identity = _stream_identity(live)
+            if identity[-1] != digest.hexdigest():
+                raise RuntimeError(f"Concurrent edit during publication: {target.name}")
+            if record is not None:
+                # FAT may assign the permanent inode only after the first write.
+                record(identity)
+            if not os.path.samestat(os.fstat(fd), target.lstat()):
+                raise RuntimeError(f"Concurrent edit during publication: {target.name}")
+
+
+def _restore_held(hold: Path, target: Path, links: bool) -> bool:
+    """Restore the captured file only if no newer save has taken its name."""
+    if links:
+        try:
+            os.link(hold, target)
+            return True
+        except FileExistsError:
+            return False
+        except OSError:
+            # Even a filesystem that passed the probe may refuse this link.
+            pass
+    try:
+        _copy_publication_file(hold, target)
+    except FileExistsError:
+        return False
+    return True
+
+
+@dataclass
+class _PublicationHold:
+    target: Path
+    path: Path
+    identity: tuple[Any, ...]
+    links: bool
+
+    @property
+    def reserve(self) -> Path:
+        return self.path.with_name("recovery-space")
+
+    def release_space(self) -> None:
+        if self.reserve.exists():
+            # Reclaim blocks even when a filesystem watcher has the file open.
+            with self.reserve.open("wb"):
+                pass
+            self.reserve.unlink()
+
+    def discard(self) -> None:
+        """Retire a private backup after its contents have been committed or restored."""
+        try:
+            self.release_space()
+            self.path.unlink(missing_ok=True)
+            self.path.parent.rmdir()
+        except OSError as error:
+            # A busy backup or an unexpected file belongs to the operator. Keep
+            # it available without changing the outcome of either public region.
+            logger.warning("Could not clean up readiness backup %s: %s", self.path.parent, error)
+
+    def restore(self) -> None:
+        self.release_space()
+        restored = _restore_held(self.path, self.target, self.links)
+        if not restored and _publication_identity(self.path) != self.identity:
+            raise RuntimeError(
+                f"Another save owns {self.target}; the displaced editor's file remains at {self.path}"
+            )
+        self.discard()
+
+
+def _claim_target(
+    target: Path,
+    expected: tuple[Any, ...] | None,
+    links: bool,
+    region_root: Path,
+    *,
+    reserve: bool = False,
+) -> _PublicationHold | None:
+    """Retain the actual displaced file so a writer with it open can finish a save."""
+    if expected is None:
+        if os.path.lexists(target):
+            raise RuntimeError(f"Concurrent edit before publication: {target.name}")
+        return None
+    # Keep retained backups outside package and evidence subdirectories. A
+    # nested mount needs a hold on its own device for the editor-preserving rename.
+    parent = target.parent
+    device = parent.stat().st_dev
+    while parent != region_root and parent.parent.stat().st_dev == device:
+        parent = parent.parent
+    private = Path(tempfile.mkdtemp(prefix=".readiness-", dir=parent))
+    hold = _PublicationHold(target, private / ".readiness-hold-original", expected, links)
+    try:
+        with ExitStack() as stack:
+            opened = None
+            if not links:
+                # Preflight access and enough recovery space before moving anything.
+                # Restoration on FAT needs a fresh file at the public name.
+                flags = os.O_RDWR if reserve else os.O_RDONLY
+                fd = os.open(target, flags | getattr(os, "O_NOFOLLOW", 0))
+                opened = stack.enter_context(os.fdopen(fd, "rb"))
+                if _stream_identity(opened) != expected:
+                    raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
+                if reserve:
+                    opened.seek(0)
+                    with hold.reserve.open("xb") as space:
+                        shutil.copyfileobj(opened, space)
+                        space.flush()
+                        os.fsync(space.fileno())
+                if os.name != "posix" or expected[3] != 0:
+                    # Windows denies a rename while our own descriptor is open.
+                    opened.close()
+                    opened = None
+            os.replace(target, hold.path)
+            if opened is not None:
+                # A zero-length FAT file can change inode at rename.
+                expected = (expected[0], os.fstat(opened.fileno()).st_ino, *expected[2:])
+            observed = _publication_identity(hold.path)
+            if observed != expected:
+                raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
+            hold.identity = expected
+    except BaseException:
+        if os.path.lexists(hold.path):
+            hold.restore()
+        else:
+            hold.discard()
+        raise
+    return hold
 
 
 class ReadinessPublicationBusy(RuntimeError):
@@ -4218,20 +4622,91 @@ def _publication_lock(lock: Path) -> Iterator[None]:
     try:
         yield
     finally:
-        lock.rmdir()
+        try:
+            lock.rmdir()
+        except OSError as error:
+            logger.warning("Could not release readiness publication lock %s: %s", lock, error)
 
 
-def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str]) -> None:
-    """Publish a checked release and preserve observed external edits.
+def _publish_candidate(
+    candidate: Path,
+    destination: Path,
+    before: dict[str, str],
+    *,
+    sibling_release: tuple[Path, Path, dict[str, str]] | None = None,
+    receipt: Path | None = None,
+    external_before: dict[Path, str] | None = None,
+) -> None:
+    """Hold every publisher lock and backup until the whole checked release is installed."""
+    regions = [(candidate, destination, before)]
+    if sibling_release is not None:
+        regions.append(sibling_release)
+    with ExitStack() as publication:
+        # All publishers take locks in the same order, including when only
+        # the release root is shared by two different board directories.
+        for root in sorted(region[1] for region in regions):
+            root.parent.mkdir(parents=True, exist_ok=True)
+            publication.enter_context(
+                _publication_lock(root.parent / f".{root.name}.readiness-publish.lock")
+            )
 
-    Per-file checks narrow external-editor races but cannot guarantee atomicity
-    against writers that ignore the lock.
-    """
-    with _publication_lock(destination.parent / f".{destination.name}.readiness-publish.lock"):
-        _publish_candidate_locked(candidate, destination, before)
+        holds: list[_PublicationHold] = []
+        with ExitStack() as installs:
+            inventories = []
+            for staged, live, snapshot in regions:
+                after = installs.enter_context(
+                    _install_candidate(staged, live, snapshot, receipt, holds)
+                )
+                inventories.append((live, after))
+            # Both regions can still roll back when we recheck an earlier file or
+            # a project dependency outside them. The consumer receipt was installed last.
+            held_dirs = {hold.path.parent for hold in holds}
+            for live, after in inventories:
+                current = _snapshot_inventory(live, held_dirs)
+                if current != after:
+                    raise RuntimeError(
+                        _with_changes(
+                            "Concurrent edit during publication", _inventory_changes(after, current)
+                        )
+                    )
+            if external_before:
+                edits = _external_input_changes(destination, external_before)
+                if edits:
+                    raise RuntimeError(_with_changes("Concurrent edit during publication", edits))
+            # An already-open editor can save to a displaced inode while we install
+            # either region. Check all originals while both journals can still unwind.
+            for hold in holds:
+                if _publication_identity(hold.path) != hold.identity:
+                    raise RuntimeError(f"Concurrent edit during publication: {hold.target.name}")
+
+        # Both regions have committed. Retire all backups under the locks.
+        for original in holds:
+            original.discard()
 
 
-def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[str, str]) -> None:
+def _make_publish_directory(directory: Path, created: list[Path]) -> None:
+    """Record only directories this installation created, for empty-directory rollback."""
+    if directory.is_dir():
+        return
+    _make_publish_directory(directory.parent, created)
+    try:
+        directory.mkdir()
+    except FileExistsError:
+        if not directory.is_dir():
+            raise
+    else:
+        created.append(directory)
+
+
+@contextmanager
+def _install_candidate(
+    candidate: Path,
+    destination: Path,
+    before: dict[str, str],
+    receipt: Path | None,
+    holds: list[_PublicationHold],
+) -> Iterator[dict[str, str]]:
+    """Install one region, retaining its rollback journal through the caller's commit."""
     current = _snapshot_inventory(destination)
     if current != before:
         raise RuntimeError(
@@ -4241,85 +4716,119 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
             )
         )
     after = _snapshot_inventory(candidate)
+    # The readiness receipt becomes visible after the artifacts it describes.
     changed = sorted(
-        name for name in set(before) | set(after) if before.get(name) != after.get(name)
+        (name for name in set(before) | set(after) if before.get(name) != after.get(name)),
+        key=lambda name: (destination / name == receipt, name),
     )
     expected = {name: _publication_identity(destination / name) for name in changed}
     for name, identity in expected.items():
         digest = identity[-1] if identity is not None else None
         if digest != before.get(name):
             raise RuntimeError(f"Concurrent edit while identifying publication target: {name}")
-    with tempfile.TemporaryDirectory(prefix="kct-release-backup-") as temporary:
-        backup = Path(temporary)
-        installed: dict[str, tuple[Any, ...] | None] = {}
-        try:
-            for name in changed:
-                target = destination / name
-                if _publication_identity(target) != expected[name]:
-                    raise RuntimeError(f"Concurrent edit before publication: {name}")
-                if name in before:
-                    copy = backup / name
-                    copy.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(target, copy)
-                if name not in after:
-                    if _publication_identity(target) != expected[name]:
-                        raise RuntimeError(f"Concurrent edit before deletion: {name}")
-                    target.unlink()
-                    installed[name] = None
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
-                os.close(fd)
-                staged = Path(staged_name)
-                try:
+    links_by_device: dict[int, bool] = {}
+
+    originals: dict[str, _PublicationHold] = {}
+    installed: dict[str, tuple[Any, ...] | None] = {}
+    created: list[Path] = []
+    try:
+        for name in changed:
+            target = destination / name
+            if _publication_identity(target) != expected[name]:
+                raise RuntimeError(f"Concurrent edit before publication: {name}")
+            _make_publish_directory(target.parent, created)
+            device = target.parent.stat().st_dev
+            if device not in links_by_device:
+                links_by_device[device] = _supports_publication_links(target.parent)
+            links = links_by_device[device]
+            with ExitStack() as preparation:
+                staged = candidate / name
+                if links and name in after:
+                    fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
+                    os.close(fd)
+                    staged = Path(staged_name)
+                    preparation.callback(staged.unlink, missing_ok=True)
                     shutil.copy2(candidate / name, staged)
-                    identity = _publication_identity(staged)
-                    if _publication_identity(target) != expected[name]:
-                        raise RuntimeError(f"Concurrent edit before replacement: {name}")
-                    os.replace(staged, target)
-                    # Capture our staged identity, not whatever an editor may
-                    # have written to the destination immediately afterwards.
-                    installed[name] = identity
-                finally:
-                    staged.unlink(missing_ok=True)
-            current = _snapshot_inventory(destination)
-            if current != after:
-                raise RuntimeError(
-                    _with_changes(
-                        "Concurrent edit during publication",
-                        _inventory_changes(after, current),
-                    )
-                )
-        except Exception as exc:
-            conflicts = []
-            for name, identity in reversed(installed.items()):
-                target = destination / name
+                hold = _claim_target(target, expected[name], links, destination, reserve=True)
+                if hold is not None:
+                    originals[name] = hold
+                    holds.append(hold)
+                    installed[name] = None
+                if name not in after:
+                    continue
+                record = partial(installed.__setitem__, name)
+                if not links:
+                    try:
+                        _copy_publication_file(staged, target, record)
+                    except FileExistsError:
+                        raise RuntimeError(f"Concurrent edit before replacement: {name}") from None
+                    continue
+                identity = _publication_identity(staged)
                 try:
-                    if _publication_identity(target) != identity:
-                        conflicts.append(name)
-                        continue
-                    if name in before:
-                        fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
-                        os.close(fd)
-                        staged = Path(staged_name)
-                        try:
-                            shutil.copy2(backup / name, staged)
-                            if _publication_identity(target) != identity:
-                                conflicts.append(name)
-                                continue
-                            os.replace(staged, target)
-                        finally:
-                            staged.unlink(missing_ok=True)
-                    else:
-                        target.unlink(missing_ok=True)
-                except Exception:
-                    conflicts.append(name)
-            if conflicts:
-                raise RuntimeError(
-                    f"{exc}; rollback preserved concurrent edits or could not restore: "
-                    + ", ".join(conflicts)
-                ) from exc
-            raise
+                    os.link(staged, target)
+                except FileExistsError:
+                    raise RuntimeError(f"Concurrent edit before replacement: {name}") from None
+                except BaseException:
+                    if staged.stat().st_nlink > 1:
+                        record(identity)
+                    raise
+                else:
+                    record(identity)
+        yield after
+    except BaseException as exc:
+        conflicts = []
+        for name, identity in reversed(installed.items()):
+            target = destination / name
+            original = originals.get(name)
+            if original is not None:
+                original.release_space()
+            links = links_by_device[target.parent.stat().st_dev]
+            try:
+                withdrawn = _claim_target(target, identity, links, destination)
+            except Exception:
+                # A newer save (or an editor's deletion) owns the public name.
+                if (
+                    original is not None
+                    and _publication_identity(original.path) == original.identity
+                ):
+                    original.discard()
+                conflicts.append(
+                    f"{name} (saved at {original.path})"
+                    if original is not None and original.path.exists()
+                    else name
+                )
+                continue
+            try:
+                if original is not None:
+                    # Restore the actual displaced inode's latest bytes, never
+                    # a backup copied before the editor completed its save.
+                    original.restore()
+            except Exception:
+                conflicts.append(
+                    f"{name} (saved at {original.path})"
+                    if original is not None and original.path.exists()
+                    else name
+                )
+                if withdrawn is not None:
+                    try:
+                        withdrawn.restore()
+                    except Exception:
+                        conflicts.append(str(withdrawn.path))
+            else:
+                if withdrawn is not None:
+                    withdrawn.discard()
+        for directory in reversed(created):
+            try:
+                directory.rmdir()
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+                    conflicts.append(str(directory))
+        if conflicts:
+            raise RuntimeError(
+                f"{exc}; rollback preserved concurrent edits or could not restore: "
+                + ", ".join(conflicts)
+            ) from exc
+        raise
 
 
 def _remove_fill_local_settings(evidence: Path) -> None:
@@ -4399,7 +4908,7 @@ def _preflight_failure(
 ) -> ReadinessResult:
     """Report an unresolvable dependency without touching sources or any release."""
     name = "readiness-verification" if options.operation == "verify" else "readiness-attempt"
-    diagnostics = original / "output" / name
+    diagnostics = _diagnostics_dir(options, original, name)
     report = {
         "schema_version": 1,
         "status": STATUS_BLOCKED,
@@ -4409,6 +4918,18 @@ def _preflight_failure(
     }
     report_path = _publish_diagnostics(None, diagnostics, report)
     return ReadinessResult(report, report_path, 1)
+
+
+def _diagnostics_dir(options: ReadinessOptions, original: Path, name: str) -> Path:
+    """Where a run's diagnostics (verification / attempt receipts) belong.
+
+    Board-local runs keep them under ``<board>/output/``; a project-declared
+    output root keeps them under the declared root (Issue #10106), even when
+    that root sits inside the board directory.
+    """
+    if options.output_root is not None:
+        return options.output_root / name
+    return original / "output" / name
 
 
 def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> ReadinessResult:
@@ -4422,6 +4943,17 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         options = replace(options, checked_at=_iso_now())
     original = options.board_dir.resolve()
     project_root = options.root
+    # Issue #10106: a project-declared output root publishes the release under
+    # a dedicated root.  When that root sits inside the board directory the
+    # copy of the board already carries it and the single board-region publish
+    # covers it; when it is a sibling, it is staged and published as its own
+    # region under the same publication transaction as the editable board.
+    declared_root = options.output_root.resolve() if options.output_root is not None else None
+    release_region = (
+        declared_root
+        if declared_root is not None and not declared_root.is_relative_to(original)
+        else None
+    )
     spec_file: Path | None = None
     options = replace(options, bom_spec_searched=original)
     try:
@@ -4440,10 +4972,18 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     if spec_file is not None and not spec_file.resolve().is_relative_to(original):
         external_before[spec_file.resolve()] = _sha256_file(spec_file.resolve())
     before = _snapshot_inventory(original)
+    release_before = (
+        _snapshot_inventory(release_region)
+        if release_region is not None and release_region.is_dir()
+        else {}
+    )
+    release_prefix = (
+        release_region.relative_to(project_root).as_posix() if release_region is not None else None
+    )
     diagnostic_name = (
         "readiness-verification" if options.operation == "verify" else "readiness-attempt"
     )
-    diagnostics = original / "output" / diagnostic_name
+    diagnostics = _diagnostics_dir(options, original, diagnostic_name)
     with tempfile.TemporaryDirectory(prefix="kct-readiness-candidate-") as temporary:
         candidate_root = Path(temporary) / "board"
         candidate = candidate_root / original.relative_to(project_root)
@@ -4451,9 +4991,28 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             original,
             candidate,
             ignore=shutil.ignore_patterns(
-                ".git", ".venv", "readiness-verification", "readiness-attempt"
+                ".git",
+                ".venv",
+                "readiness-verification",
+                "readiness-attempt",
+                f"{_PRIVATE_HOLD_PREFIX}*",
             ),
         )
+        candidate_release: Path | None = None
+        if release_region is not None:
+            candidate_release = candidate_root / release_region.relative_to(project_root)
+            if release_region.is_dir():
+                shutil.copytree(
+                    release_region,
+                    candidate_release,
+                    ignore=shutil.ignore_patterns(
+                        ".git",
+                        ".venv",
+                        "readiness-verification",
+                        "readiness-attempt",
+                        f"{_PRIVATE_HOLD_PREFIX}*",
+                    ),
+                )
 
         for source in externals:
             target = candidate_root / source.relative_to(project_root)
@@ -4483,6 +5042,16 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
 
         diagnostic_source = None
         try:
+            if options.output_root is not None:
+                staged_evidence = (
+                    candidate_root / options.output_root.resolve().relative_to(project_root)
+                ) / ("readiness" if options.operation == "generate" else diagnostic_name)
+            else:
+                staged_evidence = (
+                    candidate
+                    / "output"
+                    / ("readiness" if options.operation == "generate" else diagnostic_name)
+                )
             staged = replace(
                 options,
                 board_dir=candidate,
@@ -4490,12 +5059,11 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 pcb=candidate / options.pcb.resolve().relative_to(original),
                 schematic=remap(options.schematic),
                 project=remap(options.project),
-                output_dir=candidate / options.output_dir.resolve().relative_to(original),
+                output_dir=candidate_root / options.output_dir.resolve().relative_to(project_root),
+                output_root=remap(options.output_root),
                 net_class_map=remap(options.net_class_map),
                 hv_voltage_map=remap(options.hv_voltage_map),
-                evidence_dir=candidate
-                / "output"
-                / ("readiness" if options.operation == "generate" else diagnostic_name),
+                evidence_dir=staged_evidence,
             )
             copied = _snapshot_inventory(candidate)
             if copied != before:
@@ -4505,6 +5073,19 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                         _inventory_changes(before, copied),
                     )
                 )
+            if (
+                candidate_release is not None
+                and release_region is not None
+                and release_region.is_dir()
+            ):
+                copied_release = _snapshot_inventory(candidate_release)
+                if copied_release != release_before:
+                    raise RuntimeError(
+                        _with_changes(
+                            "Release changed while creating candidate snapshot",
+                            _inventory_changes(release_before, copied_release),
+                        )
+                    )
             if engines is not None and engines.package_extras is not None:
                 staged.source_pcb_bytes = staged.pcb.read_bytes()
             if options.operation == "generate" and options.output_dir.exists():
@@ -4527,15 +5108,34 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             finally:
                 _remove_fill_local_settings(diagnostic_source)
             changes = _release_changes(original, before, external_before)
+            if release_region is not None and release_region.is_dir():
+                # Concurrent edits to the published artifacts under the declared
+                # output root refuse publication, exactly like board-local ones.
+                for change in _inventory_changes(
+                    release_before, _snapshot_inventory(release_region)
+                ):
+                    kind, _, name = change.partition(" ")
+                    changes.append(f"{kind} {release_prefix}/{name}")
             if changes:
                 raise RuntimeError(
                     "Release changed while checks were running: " + ", ".join(changes)
                 )
             if options.operation == "generate" and result.exit_code == 0:
-                _publish_candidate(candidate, original, before)
-                return replace(
-                    result, report_path=original / result.report_path.relative_to(candidate)
+                sibling_release = None
+                if release_region is not None and candidate_release is not None:
+                    sibling_release = (candidate_release, release_region, release_before)
+                    report_root = release_region / result.report_path.relative_to(candidate_release)
+                else:
+                    report_root = original / result.report_path.relative_to(candidate)
+                _publish_candidate(
+                    candidate,
+                    original,
+                    before,
+                    sibling_release=sibling_release,
+                    receipt=report_root,
+                    external_before=external_before,
                 )
+                return replace(result, report_path=report_root)
             report = result.report
             if options.operation == "generate":
                 report["candidate_not_published"] = True
@@ -4551,6 +5151,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 "blockers": [f"Readiness candidate was not published: {exc}"],
                 "checks": [],
             }
+            if options.operation == "generate":
+                report["candidate_not_published"] = True
             result = ReadinessResult(report, diagnostics / "readiness.json", 1)
         report_path = _publish_diagnostics(diagnostic_source, diagnostics, report)
         return replace(result, report_path=report_path)
@@ -4745,13 +5347,16 @@ def _run_readiness_candidate(
     _write_known_issues_evidence(options)
     extra_inputs = list(engines.extra_inputs(options)) if engines.extra_inputs else []
     report = build_report(options, checks, metrics, fingerprint, extra_inputs=extra_inputs)
-    report_path = options.board_dir / "output" / _REPORT_NAME
+    report_path = _report_path(options)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2) + "\n")
 
     # Round-trip through the consumer-side validator: a report this runner
     # calls `ready` must be one the gallery accepts, or it is not ready.
-    validated = read_readiness(options.board_dir)
+    # A project-declared output root passes its trusted layout along so the
+    # receipt is read from (and its inputs resolved against) the declared
+    # locations instead of the fixed board-local ones (Issue #10106).
+    validated = read_readiness(options.board_dir, layout=readiness_layout(options))
     if report["status"] == STATUS_READY and validated.get("status") != STATUS_READY:
         report["status"] = STATUS_BLOCKED
         report["blockers"] = [
@@ -4874,8 +5479,10 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         "--output",
         default=None,
         help=(
-            "Manufacturing bundle directory (default: <pcb-dir>/manufacturing/); "
-            "must be inside the board directory and named 'manufacturing'"
+            "Manufacturing bundle directory (default: <pcb-dir>/manufacturing/, or "
+            "<declared-output-root>/manufacturing/ when the project TOML declares "
+            "[readiness] output_root); must be named 'manufacturing' and stay inside "
+            "the board directory, or inside the declared output root"
         ),
     )
     parser.add_argument(

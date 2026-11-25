@@ -323,6 +323,13 @@ def precheck(
             return skipped(category, "drc_only")
         if sch_path is None:
             return unknown(category, "needs_input:schematic")
+    if category == "bypass_distance":
+        # Issue #10141: the rule measures against the schematic's cap-to-pin
+        # association; with no schematic it cannot say anything.
+        if drc_only:
+            return skipped(category, "drc_only")
+        if sch_path is None:
+            return unknown(category, "needs_input:schematic")
     if category == "doc_drift" and pcb_path is None:
         return unknown(category, "needs_input:pcb_path")
     if category == "netclass_clearance_copper":
@@ -340,6 +347,14 @@ def precheck(
 
         state = coverage_for(category, pcb_path)
         return None if state.state == CHECKED else state
+    if category == "netclass_agreement":
+        # Issue #10139: advisory, sidecar-gated (like match_group_length_skew).
+        if ncm is None:
+            return skipped(category, "no_net_class_map")
+        if pcb_path is None:
+            return unknown(category, "needs_input:pcb_path")
+        if not pcb_path.with_suffix(".kicad_pro").is_file():
+            return skipped(category, "no_kicad_pro")
     if category == "netclass_floor":
         if pcb_path is None:
             return unknown(category, "needs_input:pcb_path")

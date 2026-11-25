@@ -84,3 +84,21 @@ def test_mcp_applies_decoupling_by_default(decap_pcb, tmp_path):
     assert off["decoupling"] == []
     assert off["final_score"]["breakdown"]["decoupling"] == 0
     assert on["decoupling"][0]["distance_mm"] <= 3.0
+
+
+def test_mcp_resolves_sheet_map_with_cli_weight_gate(monkeypatch):
+    """Issue #10146: group_cohesion/group_order are not inert on the MCP path."""
+    from kicad_tools.mcp.tools import optimize_placement as mcp_mod
+    from kicad_tools.placement.cost import PlacementCostConfig
+
+    calls = []
+    monkeypatch.setattr(
+        mcp_mod, "_build_sheet_map", lambda p, quiet=False: calls.append(p) or {"R1": "/a/"}
+    )
+
+    off = PlacementCostConfig(group_cohesion_weight=0.0, group_order_weight=0.0)
+    assert mcp_mod._resolve_sheet_map("b.kicad_pcb", off) is None
+    assert calls == []  # zeroed weights skip the netlist export, like the CLI
+
+    assert mcp_mod._resolve_sheet_map("b.kicad_pcb", PlacementCostConfig()) == {"R1": "/a/"}
+    assert calls == ["b.kicad_pcb"]
