@@ -1,7 +1,8 @@
 """Per-project CPL rotation corrections (issue #9322).
 
 The shipped manufacturer table (``manufacturers/data/jlcpcb_rotations.yaml``)
-keys corrections on *footprint-name globs*.  That is a weak key for connectors:
+contains footprint defaults and previewed catalog-part offsets. Footprint
+names alone are a weak key for connectors:
 the correction really belongs to the fab's library model (the LCSC part), so a
 ``PinHeader_*`` glob would rotate every other header wrongly.  A project can
 instead declare corrections in a tracked sidecar next to its ``.kicad_pcb``::
@@ -13,9 +14,9 @@ instead declare corrections in a tracked sidecar next to its ``.kicad_pcb``::
       C5156614: 90     # 1x05 pin header
       C4991872: 270    # SJ-3523-SMT audio jack
 
-Resolution per placement is ``by_reference`` > ``by_lcsc`` > the shipped
-footprint-glob table.  A sidecar entry *replaces* the glob correction for that
-part; a part the sidecar does not name keeps its shipped-table correction.
+Resolution per placement is project reference, project LCSC part, stock
+catalog part with a matching footprint, then stock footprint default. The
+first match supplies the complete offset.
 Corrections are additive to the KiCad rotation (``(kicad + correction) % 360``).
 """
 
@@ -48,6 +49,20 @@ POLARISED_PREFIXES: tuple[str, ...] = ("J", "U", "D", "Q", "LED", "SW", "Y", "JP
 SOURCE_REFERENCE = "by_reference"
 SOURCE_LCSC = "by_lcsc"
 SOURCE_GLOB = "footprint_glob"
+SOURCE_CATALOG = "catalog_lcsc"
+
+
+def placement_preview_instructions(manufacturer: str) -> tuple[str, ...]:
+    """Ordering instructions for a package containing a placement file."""
+    from ..manufacturers import get_fab_family
+
+    if get_fab_family(manufacturer) != "jlcpcb":
+        return ()
+    return (
+        "CPL rotations combine the KiCad angle with a catalog-part or footprint table offset.",
+        f"Project overrides in {SIDECAR_NAME} take precedence. Before ordering, open the JLCPCB placement preview.",
+        "Check each part's leads against its pads and verify pin 1 or polarity against the board markings.",
+    )
 
 
 class RotationOverridesError(ConfigurationError):
@@ -185,22 +200,28 @@ def resolve_rotation_correction(
     placement: PlacementData,
     glob_corrections: dict[str, float] | None,
     overrides: RotationOverrides | None,
+    catalog_corrections: dict[str, dict[str, float]] | None = None,
 ) -> tuple[float, str | None]:
     """Resolve one placement's correction and where it came from.
 
     Returns ``(degrees, source)``; ``source`` is ``"by_reference"``,
-    ``"by_lcsc"``, ``"footprint_glob"`` or ``None`` when nothing matched.
+    ``"by_lcsc"`` (project), ``"catalog_lcsc"`` (manufacturer), ``"footprint_glob"``
+    or ``None`` when nothing matched.
     A glob match whose offset is ``0`` still reports ``footprint_glob`` -- the
     part *was* reviewed by the shipped table.
     """
     from kicad_tools.manufacturers.base import match_rotation_correction
 
+    lcsc = normalize_lcsc(placement.lcsc)
     if overrides:
         if placement.reference in overrides.by_reference:
             return overrides.by_reference[placement.reference], SOURCE_REFERENCE
-        lcsc = normalize_lcsc(placement.lcsc)
         if lcsc and lcsc in overrides.by_lcsc:
             return overrides.by_lcsc[lcsc], SOURCE_LCSC
+    if catalog_corrections and lcsc in catalog_corrections:
+        for footprint, degrees in catalog_corrections[lcsc].items():
+            if _glob_matches(placement.footprint, footprint):
+                return degrees, SOURCE_CATALOG
     if glob_corrections:
         for pattern in glob_corrections:
             if _glob_matches(placement.footprint, pattern):
@@ -232,7 +253,7 @@ class RotationReview:
     """Sidecar path as given to the loader (callers relativise for reports)."""
     sidecar_sha256: str | None = None
     applied: list[dict[str, Any]] = field(default_factory=list)
-    """``{"reference", "source", "key", "degrees"}`` for every non-zero correction."""
+    """``{"reference", "source", "key", "degrees"}`` for shifted rows and explicit part or reference matches, including zero."""
     unreviewed: list[dict[str, str]] = field(default_factory=list)
     """Polarised/asymmetric placements no correction matched (review list)."""
     unmatched_overrides: list[str] = field(default_factory=list)
@@ -258,6 +279,7 @@ def review_rotations(
     transform: Any,
     glob_corrections: dict[str, float] | None,
     overrides: RotationOverrides | None,
+    catalog_corrections: dict[str, dict[str, float]] | None = None,
 ) -> RotationReview:
     """Audit *placements* against the correction sources.
 
@@ -277,16 +299,19 @@ def review_rotations(
     used_refs: set[str] = set()
     used_lcsc: set[str] = set()
     for placement in sorted(placements, key=lambda p: p.reference):
-        degrees, source = resolve_rotation_correction(placement, glob_corrections, overrides)
+        degrees, source = resolve_rotation_correction(
+            placement, glob_corrections, overrides, catalog_corrections
+        )
         review.rotations[placement.reference] = transform(placement).rotation
         if source == SOURCE_REFERENCE:
             used_refs.add(placement.reference)
         elif source == SOURCE_LCSC:
             used_lcsc.add(normalize_lcsc(placement.lcsc))
-        if degrees != 0:
+        if degrees != 0 or source in (SOURCE_CATALOG, SOURCE_REFERENCE, SOURCE_LCSC):
             key = {
                 SOURCE_REFERENCE: placement.reference,
                 SOURCE_LCSC: normalize_lcsc(placement.lcsc),
+                SOURCE_CATALOG: normalize_lcsc(placement.lcsc),
                 SOURCE_GLOB: placement.footprint,
             }[source or SOURCE_GLOB]
             review.applied.append(

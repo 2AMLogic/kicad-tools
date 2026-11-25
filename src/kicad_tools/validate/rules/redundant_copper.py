@@ -58,6 +58,13 @@ error), each with a location:
     (joints, bends near the via) and layers where a track already ends on
     the via centre are not flagged.
 
+``redundant_copper_pour_stub``
+    A track leaving a pad and its optional terminal via are redundant when
+    a private native refill preserves direct pad-to-pour contact, the
+    physical terminal groups and the plane connections (Issue #10137).
+    Opt-in (``kct check --prove-pour-stubs``): the proof runs one kicad-cli
+    refill per candidate branch, so it is skipped by default.
+
 ``redundant_copper_covered``
     A segment whose both ends lie on the centreline of a strictly longer,
     no-narrower, same-net, same-layer segment's centreline (within
@@ -181,8 +188,13 @@ class RedundantCopperRule(DRCRule):
         mask_clearance_mm: float = 0.0,
         physical_copper_gap_mm: float | None = None,
         fab_view_gap_policy: Any | None = None,
+        prove_pour_stubs: bool = False,
     ) -> None:
-        """``mask_clearance_mm``: the mask-to-copper policy clearance (mm).
+        """``prove_pour_stubs``: run the native-refill proof for
+        ``redundant_copper_pour_stub`` (Issue #10137).  Off by default: it
+        costs one kicad-cli refill per candidate branch plus a baseline.
+
+        ``mask_clearance_mm``: the mask-to-copper policy clearance (mm).
 
         A staircase shortcut may put no new copper within this distance of a
         pad's mask opening (Issue #9817).  ``0`` still keeps new copper out of
@@ -196,6 +208,7 @@ class RedundantCopperRule(DRCRule):
         neither is given (no active physical-gap pass) the gate is off.
         """
         self.mask_clearance_mm = max(0.0, float(mask_clearance_mm))
+        self._prove_pour_stubs = prove_pour_stubs
         self._gap_mm = physical_copper_gap_mm
         self._gap_policy = fab_view_gap_policy
         self._gap_oracle: Any | None = None
@@ -212,6 +225,8 @@ class RedundantCopperRule(DRCRule):
             "redundant_copper_staircase",
         ):
             results.rules_checked_by_rule[rid] = 1
+        # The pour-stub proof is opt-in; a skipped proof is a visible 0, not 1.
+        results.rules_checked_by_rule["redundant_copper_pour_stub"] = 0
 
         segments = [s for s in pcb.segments if s.layer and s.width > 0]
         self._check_duplicates(segments, results)
@@ -235,6 +250,53 @@ class RedundantCopperRule(DRCRule):
             self._check_covered(segs, results)
 
         self._check_via_offcentre(pcb, segments, results)
+        if self._prove_pour_stubs and getattr(pcb, "path", None) and pcb.zones:
+            from kicad_tools.validate.pour_stub import prove_pour_stubs
+
+            proof = prove_pour_stubs(pcb)
+            results.rules_checked_by_rule["redundant_copper_pour_stub"] = int(proof is not None)
+            if proof is not None and proof.partial:
+                # Coverage stays 0/1 (a CI-side boolean); the partial case is
+                # disclosed here so it never reads as a full proof (Issue #10211).
+                results.add(
+                    DRCViolation(
+                        rule_id="redundant_copper_pour_stub",
+                        severity="info",
+                        message=(
+                            f"Pour-stub proof evaluated {proof.evaluated} of {proof.total} "
+                            "candidate branches."
+                        ),
+                        location=None,
+                        layer="",
+                    )
+                )
+            for stub, evidence in proof.verified if proof else ():
+                seg = stub.segment
+                ox, oy = self._origin
+                start = f"({seg.start[0] + ox:.3f}, {seg.start[1] + oy:.3f})"
+                end = f"({seg.end[0] + ox:.3f}, {seg.end[1] + oy:.3f})"
+                items = [stub.pad_name, seg.uuid or f"{seg.layer} {start} to {end}"]
+                via = ""
+                if stub.via:
+                    x, y = stub.via.position
+                    via = f" and via at ({x + ox:.3f}, {y + oy:.3f})"
+                    items.append(stub.via.uuid or via.strip())
+                results.add(
+                    DRCViolation(
+                        rule_id="redundant_copper_pour_stub",
+                        severity="warning",
+                        message=(
+                            f"Pad {stub.pad_name} [{stub.net}] remains connected directly "
+                            f"through its refilled pour after removing the {seg.layer} track "
+                            f"{start} to {end}{via}. All {len(evidence.terminal_uuids)} remaining "
+                            f"terminals on this net stay connected."
+                        ),
+                        location=stub.location,
+                        layer=seg.layer,
+                        items=tuple(items),
+                        nets=(stub.net,),
+                    )
+                )
         return results
 
     # ------------------------------------------------------------------

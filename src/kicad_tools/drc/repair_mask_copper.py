@@ -112,6 +112,12 @@ _MIN_TAIL_MM = 0.005
 _SLIDE_STEP_MM = 0.005
 _RUN_AXIS_TOLERANCE_MM = 0.0002
 _MIN_RUN_MM = 0.05
+# Longest slide tried for a *disjoint* pass-through jog or chamfer (mm). Such a
+# track only needs to gain the last few hundredths of a millimetre of mask gap,
+# so a slide that has to travel further is crowding another net; the smaller
+# perpendicular nudge stays the repair for it (Board 03 J3/4: a 0.58 mm
+# chamfer slide was vetoed by native DRC where the 0.08 mm nudge passes).
+_PASS_THROUGH_SLIDE_MAX_MM = 0.25
 # The four connection line directions through the new via centre (each used
 # in both orientations): 0, 45, 90 and 135 degrees.
 _ALIGNED_TAIL_DIRS = ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0))
@@ -1326,6 +1332,29 @@ class MaskCopperRepairer(CopperGapRepairer):
             return "no_required_value", ""
 
         seg = segments.get(conductor)
+        if seg is not None and len(openings) == 1:
+            # A track that is a jog (or a chamfer) between two runs and only
+            # grazes the opening beside the pad is moved the way an own-pad
+            # entry's jog is: the junctions follow the runs, so no angle
+            # changes. Perpendicular recentring would skew the jog and the
+            # verified command then rolls it back for the finding it creates
+            # (issue #9939, Board 03 C7/1).
+            for slide in (self._slide_jog_along_runs, self._slide_chamfer_between_runs):
+                if slide(
+                    seg,
+                    conductor,
+                    openings[0],
+                    pads,
+                    result,
+                    min(max_displacement, _PASS_THROUGH_SLIDE_MAX_MM),
+                    dry_run,
+                    clearance_mm,
+                    required,
+                    margin_mm,
+                    warning_clearance_mm,
+                    touched_by_action,
+                ):
+                    return None
         if seg is not None:
             refusal = self._nudge_segment_clear(
                 seg,

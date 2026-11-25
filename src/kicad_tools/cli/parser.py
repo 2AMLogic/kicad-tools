@@ -1136,6 +1136,15 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument(
+        "--prove-pour-stubs",
+        dest="prove_pour_stubs",
+        action="store_true",
+        help=(
+            "Prove redundant_copper_pour_stub findings with a native kicad-cli "
+            "zone refill per candidate branch (Issue #10137; slow, off by default)"
+        ),
+    )
+    check_parser.add_argument(
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
@@ -2466,8 +2475,8 @@ def _add_sch_parser(subparsers) -> None:
     sch_reannotate.add_argument(
         "--check",
         action="store_true",
-        help="Report parts whose reference number order disagrees with schematic "
-        "position order; exit 1 if any disagree (files are never modified)",
+        help="Check reference numbers in schematic position order and across electrical "
+        "partners. Exit 1 on either disagreement. Files are read-only.",
     )
     sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
 
@@ -6780,6 +6789,18 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "Skip the default silk legalisation pass (legalize_silk) on the "
             "written board, and the snap reference repair it supersedes "
             "(Issue #9799). With this flag authored silk is byte-identical."
+        ),
+    )
+    op_parser.add_argument(
+        "--decoupling-radius",
+        dest="decoupling_radius",
+        type=float,
+        default=6.0,
+        metavar="MM",
+        help=(
+            "Furthest a decoupling capacitor's supply pad may sit from the IC "
+            "pin it serves in the post-optimize snap (default: 6.0 mm; "
+            "Issue #10142)."
         ),
     )
     op_parser.add_argument("-v", "--verbose", action="store_true")
