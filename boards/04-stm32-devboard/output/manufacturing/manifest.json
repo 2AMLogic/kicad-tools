@@ -353,8 +353,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC report is not bound to this PCB (stale: content changed since it was generated)",
-      "details": "output/drc_report.json records a pcb_sha256 that differs from the current PCB's; its verdict describes an older version -- re-run kct check --output or pass --drc-report"
+      "message": "DRC passed with 13 warning(s)"
     },
     {
       "name": "erc",
