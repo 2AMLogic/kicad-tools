@@ -411,3 +411,55 @@ def test_run_stitch_trace_band_disabled_keeps_today_behavior(tmp_path):
     assert off.vias_added
     seat = (off.vias_added[0].via_x, off.vias_added[0].via_y)
     assert seat == (pytest.approx(109.49), pytest.approx(110.52))
+
+
+# -- four-layer boards: the annulus spans the PHYSICAL stack ------------------
+#
+# A standard via is written F.Cu -> B.Cu whatever plane it targets
+# (``ViaPlacement`` normalizes it), so with the GND plane on In1.Cu a
+# same-net track on In2.Cu / B.Cu still forms a slit against the annulus.
+# The two-layer fixtures above cannot reach this: the plane target there IS
+# B.Cu, so the plane span is already the whole stack.
+
+
+def _four_layer_pcb_text(layer: str, track_x: float) -> str:
+    from tests.test_stitch_mfr import FOUR_LAYER_GND_ZONE_PCB
+
+    track = _GND_TRACK.format(x=track_x, y0=108.0, y1=112.0).replace(
+        '(layer "F.Cu")', f'(layer "{layer}")'
+    )
+    text = FOUR_LAYER_GND_ZONE_PCB.rstrip()
+    return text[:-1] + track + ")\n"
+
+
+@pytest.mark.parametrize("layer", ["In2.Cu", "B.Cu"])
+def test_run_stitch_four_layer_inner_plane_guards_below_plane_tracks(tmp_path, layer):
+    track_x = 109.49 + R + TRACK_HALF + 0.03
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(_four_layer_pcb_text(layer, track_x))
+    control = _stitch(pcb, 0.0)
+    assert control.vias_added
+    assert any(1e-9 < g < EDGE_TRACE - 1e-9 for g in _via_track_gaps(pcb, control, track_x)), (
+        "control must seat the slit against the track below the In1.Cu plane"
+    )
+    guard = _stitch(pcb, EDGE_TRACE)
+    assert guard.vias_added or any(
+        "same_net_trace_gap" in reason for _pad, reason in guard.pads_skipped
+    )
+    assert all(not (1e-9 < g < EDGE_TRACE - 1e-9) for g in _via_track_gaps(pcb, guard, track_x))
+
+
+def test_stub_legs_band_only_sees_tracks_on_the_leg_layer():
+    # Centreline 0.3 mm off a 0.2 mm leg leaves a 0.1 mm gap (in band).  On
+    # In1.Cu it shares no copper with an F.Cu leg: ``leg_layer`` ignores it.
+    on_in1 = [_track(0.3, layer="In1.Cu")]
+    points = [(0.0, 0.0), (0.0, 0.6)]
+
+    def ok(**kw):
+        return _stub_legs_same_net_copper_band_ok(
+            points, TRACK_HALF, on_in1, None, EDGE_TRACE, **kw
+        )
+
+    assert not ok()
+    assert ok(leg_layer="F.Cu")
+    assert not ok(leg_layer="In1.Cu")

@@ -2927,6 +2927,7 @@ def calculate_via_stub(
                     same_net_tracks,
                     same_net_vias,
                     same_net_trace_gap_mm,
+                    leg_layer=pad.layer,
                 ):
                     continue
                 corner = stub_path[1] if len(stub_path) == 3 else None
@@ -3174,6 +3175,7 @@ def _stub_legs_same_net_copper_band_ok(
     same_net_tracks: list[TrackSegment] | None,
     same_net_vias: list[tuple[float, float, float, int]] | None,
     min_gap_mm: float,
+    leg_layer: str | None = None,
 ) -> bool:
     """True iff every leg of a stub polyline keeps its copper gap to
     same-net tracks and vias out of the slit band (Issue #9019).
@@ -3186,7 +3188,14 @@ def _stub_legs_same_net_copper_band_ok(
     :func:`trace_points`).  A leg terminating on its own via is a full
     copper union (``gap <= 0``) and stays acceptable, as does a tangent
     seat (#9208).  ``min_gap_mm <= 0`` or empty pools disable the test.
+
+    ``leg_layer`` is the copper layer the legs are written on: only
+    same-net tracks on that layer can form a slit against them (the pool
+    is otherwise the via's whole span, which is for the annulus).  Vias
+    carry no layer records and stay unfiltered.
     """
+    if leg_layer is not None and same_net_tracks:
+        same_net_tracks = [t for t in same_net_tracks if t.layer == leg_layer]
     if min_gap_mm <= 0 or not (same_net_tracks or same_net_vias):
         return True
     for (ax, ay), (bx, by) in zip(points, points[1:], strict=False):
@@ -3589,6 +3598,7 @@ def calculate_dogleg_via_position(
                         same_net_tracks,
                         same_net_vias,
                         same_net_trace_gap_mm,
+                        leg_layer=pad.layer,
                     ):
                         continue
 
@@ -4089,6 +4099,7 @@ def calculate_extended_escape_position(
                             same_net_tracks,
                             same_net_vias,
                             same_net_trace_gap_mm,
+                            leg_layer=pad.layer,
                         ):
                             continue
 
@@ -4158,6 +4169,7 @@ def calculate_extended_escape_position(
                             same_net_tracks,
                             same_net_vias,
                             same_net_trace_gap_mm,
+                            leg_layer=pad.layer,
                         ):
                             continue
 
@@ -4237,6 +4249,7 @@ def calculate_extended_escape_position(
                                 same_net_tracks,
                                 same_net_vias,
                                 same_net_trace_gap_mm,
+                                leg_layer=pad.layer,
                             ):
                                 continue
 
@@ -4380,6 +4393,7 @@ def calculate_extended_escape_position(
                     same_net_tracks,
                     same_net_vias,
                     same_net_trace_gap_mm,
+                    leg_layer=pad.layer,
                 ):
                     continue
                 return (via_x, via_y, path_points[1:-1])
@@ -6788,13 +6802,17 @@ def run_stitch(
     copper_layer_order = get_copper_layers(sexp)
 
     def _same_net_trace_pools(
-        pad: PadInfo, terminus_layer: str | None
+        pad: PadInfo, via_layers: Sequence[str] | None = None
     ) -> tuple[list[TrackSegment], list[tuple[float, float, float, int]]]:
-        """Same-net tracks on the via's spanned layers + same-net vias.
+        """Same-net tracks on the via's PHYSICAL span + same-net vias.
 
-        The via annulus exists on every layer between the pad's layer and
-        the terminus plane, so a same-net track on any of those layers can
-        form a slit against it.  The vias carry no layer records
+        The via annulus exists on every layer the barrel spans, so a
+        same-net track on any of them can form a slit against it.  A
+        standard via is written F.Cu -> B.Cu whatever plane it targets
+        (``ViaPlacement`` normalizes it), so ``via_layers=None`` means the
+        whole stack; pass an explicit ``(first, last)`` span for a micro /
+        blind via.  The leg checks narrow the track pool to the leg's own
+        layer themselves.  The vias carry no layer records
         (``find_all_board_vias`` drops them), so the leg check sees them
         unfiltered -- over-rejection there only walks the ladder.
         """
@@ -6804,14 +6822,13 @@ def run_stitch(
         tracks = same_net_base_tracks.get(pad.net_number, []) + [
             t for t in placed_stitch_tracks if t.net_number == pad.net_number
         ]
+        if via_layers is None:
+            return tracks, vias_pool
         try:
-            lo = copper_layer_order.index(pad.layer)
-            hi = copper_layer_order.index(terminus_layer) if terminus_layer else lo
+            idx = [copper_layer_order.index(layer) for layer in via_layers]
         except ValueError:
             return tracks, vias_pool
-        if lo > hi:
-            lo, hi = hi, lo
-        span = set(copper_layer_order[lo : hi + 1])
+        span = set(copper_layer_order[min(idx) : max(idx) + 1])
         return [t for t in tracks if t.layer in span], vias_pool
 
     def _sibling_pools(
@@ -6946,7 +6963,7 @@ def run_stitch(
         # Issue #9019: same-net trace-population pools (pre-existing copper
         # plus stitch geometry placed earlier in this pass, tracks filtered
         # to the via's spanned layers).
-        pad_same_net_tracks, pad_same_net_vias = _same_net_trace_pools(pad, terminus_layer)
+        pad_same_net_tracks, pad_same_net_vias = _same_net_trace_pools(pad)
 
         # Calculate via position with clearance checking against all copper,
         # including the connecting trace path from pad to via
@@ -7346,10 +7363,7 @@ def run_stitch(
         # geometry placed earlier in this same pass, tracks filtered to
         # the via's spanned layers.
         if trace_band_edge_mm > 0:
-            _via_start, _via_terminus = get_via_layers(
-                placement.pad.layer, net_target_layers.get(placement.pad.net_name)
-            )
-            chk_tracks, chk_vias = _same_net_trace_pools(placement.pad, _via_terminus)
+            chk_tracks, chk_vias = _same_net_trace_pools(placement.pad, placement.layers)
             if not _via_same_net_track_band_ok(
                 placement.via_x, placement.via_y, placement.size, chk_tracks, trace_band_edge_mm
             ):
@@ -7366,6 +7380,7 @@ def run_stitch(
                 chk_tracks,
                 chk_vias,
                 trace_band_edge_mm,
+                leg_layer=placement.pad.layer,
             ):
                 result.same_net_trace_gap_filtered += 1
                 return (
