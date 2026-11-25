@@ -9,6 +9,8 @@ net merging, and handles edge cases gracefully.
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from kicad_tools.operations.netlist import (
     _collect_hierarchy_components,
     _count_hierarchy_sheets,
@@ -17,6 +19,8 @@ from kicad_tools.operations.netlist import (
     build_netlist_from_schematic,
     export_netlist,
 )
+from kicad_tools.schematic.models import Schematic
+from kicad_tools.sexp import parse_file, parse_string
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hierarchical"
 
@@ -246,6 +250,29 @@ class TestGetSheetEntries:
 
 class TestHierarchicalLabelNetMerging:
     """Tests for cross-sheet net merging via hierarchical labels and sheet pins."""
+
+    @pytest.mark.parametrize("connected", [True, False], ids=["wired-port", "isolated-port"])
+    def test_child_local_alias_follows_only_its_wired_port(self, tmp_path, connected):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        parent.write_bytes((FIXTURES / parent.name).read_bytes())
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string('(label "CHILD_ALIAS" (at 80 46.19 0))'))
+        if not connected:
+            (wire,) = doc.find_all("wire")
+            doc.remove(wire)
+        child.write_text(doc.to_string())
+
+        assert Schematic.load(child).get_net_for_pin("R5", "1") == "CHILD_ALIAS"
+        extracted = Schematic.load(parent).extract_netlist(hierarchical=True)
+        pin_nets = {str(pin): name for name, pins in extracted.items() for pin in pins}
+        exported = build_netlist_from_schematic(parent)
+        export_nets = {
+            f"{node.reference}.{node.pin}": net.name for net in exported.nets for node in net.nodes
+        }
+        for names in (pin_nets, export_nets):
+            assert names["R1.1"] == "I2C_SDA"
+            assert names["R5.1"] == ("I2C_SDA" if connected else "CHILD_ALIAS")
 
     def test_child_components_collected(self):
         """Components from child sheet with hierarchical labels are collected."""
