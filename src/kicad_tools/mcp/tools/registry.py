@@ -2013,11 +2013,11 @@ def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
         output_path=params.get("output_path"),
         pre_slide_off=params.get("pre_slide_off", True),
         route_check=params.get("route_check", False),
-        **(
-            {"route_check_budget": params["route_check_budget"]}
-            if "route_check_budget" in params
-            else {}
-        ),
+        **{
+            key: params[key]
+            for key in ("route_check_budget", "decoupling_radius_mm")
+            if key in params
+        },
     )
 
 
@@ -2032,7 +2032,9 @@ register_tool(
         "optimization is needed. Decoupling capacitors are pulled onto the IC supply "
         "pin they serve (affinity term, default weight 2.0, plus a post-optimize snap "
         'pass), same as `kct optimize-placement`; pass weights={"decoupling": 0} to '
-        "turn it off. Reports the per-cap result under 'decoupling'."
+        "turn it off. Reports per-cap distances under 'decoupling'. A designated cap on "
+        "the wrong side, outside the radius, or out of capacitance order makes 'feasible' "
+        "false, with cap and pin details in 'infeasible_detail'."
     ),
     parameters=_make_params(
         properties={
@@ -2089,6 +2091,12 @@ register_tool(
                     **_SHEET_WEIGHT_PROPERTIES,
                 },
             },
+            "decoupling_radius_mm": {
+                "type": "number",
+                "description": "Maximum supply-pad distance to a designated IC pin in mm.",
+                "minimum": 0,
+                "default": 6.0,
+            },
             "seed_method": {
                 "type": "string",
                 "description": "Initial placement seed method",
@@ -2098,8 +2106,7 @@ register_tool(
             "output_path": {
                 "type": "string",
                 "description": (
-                    "Path for output .kicad_pcb file with optimized placements. "
-                    "If not specified, the result is not written to disk."
+                    "Save the selected placement here even if infeasible. Omit for a preview."
                 ),
             },
             "pre_slide_off": {

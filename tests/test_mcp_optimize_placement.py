@@ -381,6 +381,7 @@ class TestRegistryIntegration:
 
     def test_optimize_placement_spec(self):
         """optimize_placement tool has correct spec."""
+        from kicad_tools.cli.optimize_placement_cmd import DEFAULT_DECOUPLING_RADIUS_MM
         from kicad_tools.mcp.tools.registry import get_tool
 
         tool = get_tool("optimize_placement")
@@ -388,7 +389,23 @@ class TestRegistryIntegration:
         assert tool.category == "placement"
         assert "pcb_path" in tool.parameters["properties"]
         assert "pcb_path" in tool.parameters["required"]
+        radius = tool.parameters["properties"]["decoupling_radius_mm"]
+        assert radius["type"] == "number" and radius["minimum"] == 0
+        assert radius["default"] == DEFAULT_DECOUPLING_RADIUS_MM
         assert callable(tool.handler)
+
+    @pytest.mark.parametrize("radius", [-1, float("inf"), -float("inf"), float("nan")])
+    def test_registered_radius_rejected_before_read_or_write(self, tmp_path, radius):
+        from kicad_tools.mcp.tools.registry import get_tool
+
+        pcb = tmp_path / "unparsed.kicad_pcb"
+        pcb.touch()
+        output = tmp_path / "output.kicad_pcb"
+        with pytest.raises(ValueError, match="decoupling_radius_mm"):
+            get_tool("optimize_placement").handler(
+                {"pcb_path": str(pcb), "output_path": str(output), "decoupling_radius_mm": radius}
+            )
+        assert not output.exists()
 
     def test_evaluate_placement_spec(self):
         """evaluate_placement tool has correct spec."""
