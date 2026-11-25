@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.core.schematic_uuids import UuidSequence
 from kicad_tools.dev import warn_if_stale
@@ -928,7 +929,8 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     # C15/C16 are the caps the schematic designates for U2 pin 1 (+3.3V), so
     # they sit in the open corner west of pin 1, rotated 180 deg so their
     # +3.3V pad 1 faces U2 (Issue #10194; bypass_distance max 3.0 mm).
-    C15_POS = (BOARD_ORIGIN_X + 25.5, BOARD_ORIGIN_Y + 17.1)  # 100nF (U2.1)
+    # Leave 0.30 mm between C15's pad envelope and the MCU pad envelope.
+    C15_POS = (BOARD_ORIGIN_X + 24.3, BOARD_ORIGIN_Y + 17.1)  # 100nF (U2.1)
     C16_POS = (BOARD_ORIGIN_X + 23.0, BOARD_ORIGIN_Y + 19.1)  # 4.7uF bulk (U2.1)
     CAP_PIN1_ROT = 180  # pad 1 (+3.3V) on the east side, toward U2
 
@@ -1048,7 +1050,9 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     ) -> str:
         """Generate 0805 capacitor footprint (pad 1 on the west side at rotation 0)."""
         x, y = pos
-        at = f"{x} {y} {rotation:g}" if rotation else f"{x} {y}"
+        at = f"{x:g} {y:g}"
+        if rotation:
+            at += f" {rotation:g}"
         net1_num = NETS.get(net1, 0)
         net2_num = NETS.get(net2, 0)
         # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.70,
@@ -3016,6 +3020,7 @@ def fill_zones(routed_path: Path) -> bool:
     print("Re-pouring zones (kct zones fill --net GND)...")
     print("=" * 60)
 
+    authored_uuids = uuids_in_file(routed_path)
     cmd = [
         sys.executable,
         "-m",
@@ -3038,6 +3043,10 @@ def fill_zones(routed_path: Path) -> bool:
         print(f"\n   FAILED: kct zones fill exited {result.returncode}")
         return False
 
+    # KiCad supplies missing footprint fields when it saves the refilled board.
+    # Give those fields reproducible IDs while preserving every authored ID.
+    if uuids_in_file(routed_path) - authored_uuids:
+        canonicalize_pcb_file_uuids(routed_path, keep=authored_uuids)
     print("\n   SUCCESS: kct zones fill completed")
     return True
 
@@ -3399,6 +3408,11 @@ def main() -> int:
         # BEFORE fill_zones (so the re-pour backs the GND plane off any dogleg
         # bulge); copper-LVS stays 0/0.
         quantize_success = quantize_escapes(routed_path)
+        # The reviewed via repair checks alternate escapes against the complete
+        # physical net. Refill the planes after stitching and quantization so
+        # stale GND copper cannot appear to join an oscillator pad.
+        if not fill_zones(routed_path):
+            raise RuntimeError("Could not refill the planes before checking via escapes")
         # File-relative loading also works for importlib-based recipe callers.
         process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
         process["repair"](routed_path)

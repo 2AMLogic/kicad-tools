@@ -38,7 +38,7 @@ OPTIONS = {
 # HC49-4H courtyard clears C2's; no other pad, net or footprint changed.
 # Re-pinned for Issue #10194: C15/C16 moved beside U2 pin 1 (rotated 180 deg)
 # and C11 moved 0.9 mm north; no other pad, net or footprint changed.
-PHYSICAL_SHA256 = "fb00604879edc49a0032a13104c1f7db120e74c42527d7a63d067ea8e4072400"
+PHYSICAL_SHA256 = "a8d82db272ea0b7a560e939e8bd26318bf63bec11f63e8fa65c099b02f0e75f5"
 # ref.pad, net, reviewed original via center, reviewed off-pad center (board relative).
 MOVES = [
     ("U1.2", "GND", (10.24, 11.61), (10.24, 12.55)),
