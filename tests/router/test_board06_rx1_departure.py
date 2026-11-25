@@ -1,5 +1,6 @@
 """A two-row SMD breakout with preserved copper on either side of its pad."""
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,11 @@ from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.preserved_pad_escape import find_departure, retry_preserved_departure
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
+
+# Issue #10179: wall-clock budget for the connected (positive-control) endpoint
+# cases; ~15x the ~2 s they take on an idle host, so a loaded hosted runner
+# cannot turn a routable case into a deadline exit.
+_POSITIVE_CONTROL_BUDGET_S = 30.0
 
 
 def test_positional_pad_identity_still_routes():
@@ -405,7 +411,27 @@ def test_escape_endpoint_preserves_restricted_spans_and_rejects_unconnected_laye
         requires_main_route=case != "surface_tail_beyond_via",
     )
     target = escape_endpoint_pad(bga_ball, escape, fallback_width=0.275)
-    route = Router(grid, rules).route(source, target, per_net_timeout=5.0)
+    # Issue #10179: the connected controls took ~1.9 s locally against a 5 s
+    # budget, and hosted runners returned ``None`` for them, indistinguishable
+    # from a geometric disconnection.  Give only the positive controls a
+    # budget a loaded runner cannot exhaust; the negative cases keep 5 s.
+    budget = _POSITIVE_CONTROL_BUDGET_S if expect_connected else 5.0
+    router = Router(grid, rules)
+    started = time.monotonic()
+    route = router.route(source, target, per_net_timeout=budget)
+    elapsed = time.monotonic() - started
+    if route is None and expect_connected:
+        # ``last_route_deadline_hit`` is set by the search when the wall-clock
+        # deadline (not an exhausted open set) ended it.
+        reason = (
+            "deadline expired"
+            if router.last_route_deadline_hit
+            else "no geometric path (search exhausted)"
+        )
+        pytest.fail(
+            f"{case}: route returned None -- {reason}; "
+            f"elapsed {elapsed:.2f}s of {budget:.1f}s budget"
+        )
     assert (route is not None) == expect_connected
     if route is not None:
         assert route.segments[-1].layer == open_layer
