@@ -20,7 +20,7 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 20 (18 SMD, 2 THT, 0 other) |
 | Nets | 12 |
-| Traces | 100 segments |
+| Traces | 94 segments |
 | Vias | 32 |
 | Board Size | 60.0 x 40.0 mm |
 
@@ -125,7 +125,7 @@ Demonstrates circuit blocks API
 | Errors | 0 |
 | Errors: kct (reviewed process rules, not stock `--mfr jlcpcb-tier1`) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 7 |
+| Warnings | 5 |
 | Blocking | 0 |
 
 **Status**: PASS
@@ -134,7 +134,7 @@ Demonstrates circuit blocks API
 
 | Violation Type | Count |
 |----------------|-------|
-| pour_slot | 7 |
+| pour_slot | 5 |
 
 
 
@@ -147,7 +147,7 @@ Demonstrates circuit blocks API
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 3 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 7 DRC warnings
+- **[OPTIONAL]** Review 5 DRC warnings
 
 
 \newpage

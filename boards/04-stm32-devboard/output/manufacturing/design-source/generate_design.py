@@ -3465,6 +3465,9 @@ def main() -> int:
         # a track does not need a hand-edited artifact.
         if not merge_fragment_runs(routed_path):
             raise RuntimeError("merge_fragment_runs did not pass (#9097)")
+        # Keep the rerouted GND, USER_LED and oscillator copper clear of the
+        # front mask openings introduced or affected by the bypass move (#10194).
+        process["repair_bypass_mask_escapes"](routed_path)
         if not check_silk_clear_of_holes(routed_path):
             raise RuntimeError("check_silk_clear_of_holes did not pass (#9455)")
 

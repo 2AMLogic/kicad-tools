@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.29.0",
-  "generated_at": "2026-11-25T13:37:00+00:00",
+  "generated_at": "2026-11-25T17:38:40+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -13,20 +13,20 @@
       "size": 1057
     },
     "assembly-back.pdf": {
-      "sha256": "9105187d14cf1977af3c2b18cf7316f2a86812c4afb19bb9bb98b21d02171234",
-      "size": 22383
+      "sha256": "f880eaf509fe33c9eb3deb9692d7ab376f17ef6b364f8583b9dcf52b9ead6d92",
+      "size": 22379
     },
     "assembly-front.pdf": {
-      "sha256": "e4c94fd6ed98109a469a49f64850ba807fd6f953372aaf514e769bcf9eeecee7",
-      "size": 66857
+      "sha256": "7f22502114ab3b7dcabd353a509d77eabd0d6e7682caec2067fc1aa46ea7e56b",
+      "size": 66837
     },
     "bom_jlcpcb.csv": {
       "sha256": "22f4f6e0ae921146268a6a0c94e0267283a7a8d64f24d90be807bb449873b27f",
       "size": 640
     },
     "check-report.json": {
-      "sha256": "81403d9a4e14bf4ba572f10686ff07410ad1c2ac24ca7c7f16e428f0e294d112",
-      "size": 19762
+      "sha256": "1a8fac393c29e841d5ed0d908f2d24a4eff5b2a6bbb617b01820e24a1a6b3b3a",
+      "size": 17256
     },
     "cpl_jlcpcb.csv": {
       "sha256": "5eaab518a18c6cfa01acf43562ca01b76b1649f2d60ec3db735d6aecebd529b2",
@@ -45,56 +45,56 @@
       "size": 3393
     },
     "design-source/generate_design.py": {
-      "sha256": "01f5de31b2c8f7d48ab69eb9f15ccbaad975e38449234b2f0f4e4f1b88a43a53",
-      "size": 172015
+      "sha256": "a3329c7970aa22cac5f4af9651a9d6390f8f3c45dbd712b2d17dee0d3574e17e",
+      "size": 172233
     },
     "design-source/manufacturing_process.py": {
-      "sha256": "983e700307ab4e3c3285bbca7ff45123492e071146b670d03e2ec0d1904092f2",
-      "size": 28313
+      "sha256": "f7934cb7248d2618d6432d6b3b71c7b8e1936f080cd990d71acb08aa6a443f30",
+      "size": 32235
     },
     "design-source/project.kct": {
       "sha256": "50012fb1eaf5ee3be5ece7c15c6a8833a3c42871a96c05aafcfdb483a96f9603",
       "size": 4989
     },
     "fill-consistency.json": {
-      "sha256": "17333b22c43216943840f32f7e7ca3f17844701e7b61682a02708563ad507346",
+      "sha256": "78a59ed15dac781f5cbcb9e8f6a8fa0eb3c84155dd8f86997fa1bfc071db6dd9",
       "size": 45
     },
     "gerbers/gerbers.zip": {
-      "sha256": "cb9d06b697370eca40a4fd1dc02719bed35c308958ebfbe98177f232f7f4d0fd",
-      "size": 56374
+      "sha256": "447ea6461039dd528fe564b57696f1f6c7c1a44d67fe83df9f46a96040e56973",
+      "size": 56435
     },
     "images/assembly.png": {
-      "sha256": "644628505e41145ac787435bc24bb0f42a968d753e007c10330b3ad3a07c36e0",
-      "size": 211943
+      "sha256": "0ef062207b87becd911981fc0cb1d2901e61682bc38de6f5400d4d3d0f67b937",
+      "size": 212073
     },
     "images/layer_B_Cu.png": {
-      "sha256": "f516d37dc2ec7ac871f67101cb7c67fec4faeba9a9abf53d786df45da180220e",
+      "sha256": "79d53395602cff88d5ba27b37e1283b0edc2699a81e26c6931fdb9cc7b37a293",
       "size": 101560
     },
     "images/layer_F_Cu.png": {
-      "sha256": "9e95c049a041093e9ea7e9942f5180ae155e8f59af4fcac02077ae51cb5d3563",
-      "size": 178127
+      "sha256": "36e00cd538b4c5d049b2297739cc538219895d173a8e474df59027c61eedde7b",
+      "size": 177022
     },
     "images/pcb_back.png": {
-      "sha256": "bf13aac523b47566f8ec85e4cc57a3246e70650c466a6110fa9dac99df54a993",
-      "size": 103633
+      "sha256": "9f30852a8cb32aead4e0c9e80de3e07383662385fcca638dd06d8727212bd983",
+      "size": 103635
     },
     "images/pcb_copper.png": {
-      "sha256": "975199115981741518188c7bc0b9d6bae19874b12121beaa669a91d082785295",
-      "size": 120572
+      "sha256": "7c1ef16d948b7871905982ce99b1ca6bb5b02d86c799b66366e0944d82475e43",
+      "size": 120637
     },
     "images/pcb_front.png": {
-      "sha256": "3b922be8dfb24a203156ae1985d818c2c66c5cf08cc86ab3b8158b910946c816",
-      "size": 283319
+      "sha256": "5103e1b410ffa85cd80d6a1aa1dfc99bb2a65775ef5e73f4f4b4c8ad66f88eeb",
+      "size": 282276
     },
     "images/schematic_stm32_devboard.png": {
       "sha256": "4f216d5bc7746731f20242e856b427db660b8ea8c35623abeaab1770f49a1b2b",
       "size": 279460
     },
     "kicad_project.zip": {
-      "sha256": "1f4fca7c744fe9e80958c81b8afce6ed39be12949a11fd53ce62768bfce9ca39",
-      "size": 73538
+      "sha256": "56d2c1977bd8d6534bceb294bfb6a3c98bc38434ef949786c3ba4f624ea46082",
+      "size": 73430
     },
     "manufacturing-requirements.json": {
       "sha256": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
@@ -117,12 +117,12 @@
       "size": 3329
     },
     "report.md": {
-      "sha256": "8b65565257bef7c02d0977c34d9cd93a6f41533a963b5eb6c8cf53d44898ac0a",
-      "size": 3491
+      "sha256": "5ac63031b3e7814a71b80ef397ab516d372f0190dcb9ace18ebb4a7879412ec8",
+      "size": 3490
     },
     "report.pdf": {
-      "sha256": "48c2c881d4cb1b8ed235d9c9f2c46f3a7708398a882d198b7293e1282bbf302d",
-      "size": 1364383
+      "sha256": "958ea921cd0d4c51890eb4d3ac5d3b7337f14e77baecadd4e39c5191a3cffe1c",
+      "size": 1363146
     }
   },
   "board": {
@@ -215,7 +215,7 @@
               "Y1"
             ],
             "per_board": 1,
-            "stock": 9731,
+            "stock": 9725,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -249,7 +249,7 @@
               "C2"
             ],
             "per_board": 2,
-            "stock": 9159181,
+            "stock": 9380166,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -260,7 +260,7 @@
               "R2"
             ],
             "per_board": 1,
-            "stock": 43959058,
+            "stock": 43943854,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -282,7 +282,7 @@
               "C16"
             ],
             "per_board": 1,
-            "stock": 2581337,
+            "stock": 2633391,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -294,7 +294,7 @@
               "C11"
             ],
             "per_board": 2,
-            "stock": 83326,
+            "stock": 83432,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -320,7 +320,7 @@
               "C3"
             ],
             "per_board": 5,
-            "stock": 20234171,
+            "stock": 20226430,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -331,7 +331,7 @@
               "U2"
             ],
             "per_board": 1,
-            "stock": 255759,
+            "stock": 255710,
             "verified": true,
             "source": "live",
             "age_days": 0
@@ -353,7 +353,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 13 warning(s)"
+      "message": "DRC passed with 11 warning(s)"
     },
     {
       "name": "erc",

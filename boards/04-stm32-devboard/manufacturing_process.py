@@ -107,6 +107,106 @@ SINGLE_LAYER_WELDS = [
 ]
 
 
+# Reviewed front-copper paths in board-relative millimetres. The bypass placement
+# changes the autorouter's escapes at two MCU pads and its C15 ground-plane bond.
+# Match the original tracks, independent of UUID, so other routing variants keep
+# their own copper. The generator verifies the finished board after refilling it.
+_MASK_ESCAPE_PATHS = {
+    # End the C15 ground tail at its own tented via, before it passes C16.2.
+    "GND": (
+        [(23.3, 17.1), (23.3, 18.25), (21.7, 18.25)],
+        [(23.3, 17.1), (23.3, 18.15)],
+    ),
+    # Leave U2.25 along its long axis, then rejoin the existing diagonal before
+    # the SWO and BOOT0 vias. Moving that entire diagonal would crowd both vias.
+    "USER_LED": (
+        [
+            (35.1625, 24.75),
+            (35.1625, 25.45),
+            (35.2, 25.4125),
+            (35.2, 25.4),
+            (35.95, 24.65),
+            (36.05, 24.65),
+            (48.15, 12.55),
+        ],
+        [(35.1625, 24.75), (36.25, 24.75), (36.55, 24.45), (36.55, 24.15), (48.15, 12.55)],
+    ),
+    # A straight exit 0.05 mm north of U2.5's centre clears the neighbouring
+    # OSC_OUT via and keeps the trace inside the 0.30 mm wide SMT land.
+    "OSC_IN": (
+        [
+            (26.8375, 21.25),
+            (26.1375, 21.25),
+            (26.1, 21.2125),
+            (26.1, 21.2),
+            (25.9, 21.2),
+            (24.75, 20.05),
+            (21.25, 20.05),
+        ],
+        [(26.8375, 21.2), (25.89, 21.2), (24.74, 20.05), (21.25, 20.05)],
+    ),
+}
+
+
+def repair_bypass_mask_escapes(pcb_path):
+    """Replace the three reviewed paths and retain the widths and UUIDs of the surviving tracks."""
+    doc = parse_file(pcb_path)
+    pcb = PCB(doc)
+    ox, oy = pcb.board_origin
+
+    def point(xy):
+        return round(xy[0], 6), round(xy[1], 6)
+
+    def update(node, field, xy):
+        at = node.find_child(field)
+        at.set_atom(0, round(ox + xy[0], 6))
+        at.set_atom(1, round(oy + xy[1], 6))
+
+    nodes = {
+        node.find_child("uuid").get_string(0): node
+        for kind in ("segment", "via")
+        for node in doc.find_children(kind)
+    }
+    changed = False
+    for net, (old, new) in _MASK_ESCAPE_PATHS.items():
+        local = [seg for seg in pcb.segments if seg.net_name == net]
+        edges = {
+            frozenset((point(s.start), point(s.end))): s
+            for s in local
+            if s.layer == "F.Cu" and s.width == 0.2 and not s.locked
+        }
+        keys = [frozenset(pair) for pair in zip(old, old[1:], strict=False)]
+        if not all(key in edges for key in keys):
+            continue
+        tracks = [edges[k] for k in keys]
+        interior = set(old[1:-1])
+        if net == "GND":
+            interior.add(old[-1])
+        other_tracks = [s for s in local if s not in tracks]
+        other_tracks.extend(arc for arc in pcb.arcs if arc.net_name == net)
+        if any(
+            (s.layer == "F.Cu" and p in interior) or (net == "GND" and p == old[-1])
+            for s in other_tracks
+            for p in (point(s.start), point(s.end))
+        ):
+            raise ValueError(f"Board04 {net} mask repair would disconnect a track branch")
+        vias = [v for v in pcb.vias if v.net_name == net and point(v.position) in interior]
+        if net == "GND":
+            if len(vias) != 1 or point(vias[0].position) != old[-1]:
+                raise ValueError("Board04 C15 mask repair requires its unbranched ground via")
+            update(nodes[vias[0].uuid], "at", new[-1])
+        elif vias:
+            raise ValueError(f"Board04 {net} mask repair would disconnect a via")
+        for seg, a, b in zip(tracks, new, new[1:], strict=False):
+            update(nodes[seg.uuid], "start", a)
+            update(nodes[seg.uuid], "end", b)
+        for seg in tracks[len(new) - 1 :]:
+            doc.remove(nodes[seg.uuid])
+        changed = True
+    if changed:
+        Path(pcb_path).write_text(serialize_sexp(doc))
+
+
 def physical_fingerprint(path):
     pcb = PCB.load(path)
 
