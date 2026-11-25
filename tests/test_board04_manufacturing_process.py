@@ -50,6 +50,36 @@ def process():
     return module
 
 
+@pytest.mark.parametrize("back_track", [False, True])
+def test_bypass_ground_via_moves_only_with_its_unbranched_front_tail(tmp_path, process, back_track):
+    from kicad_tools.schema.pcb import PCB
+
+    path = tmp_path / "ground.kicad_pcb"
+    pcb = PCB.create(60, 40)
+    pcb.add_net("GND")
+    old_via = (21.7, 18.25)
+    pcb.add_via(*old_via, size=0.3, drill=0.15, net="GND")
+    pcb.add_trace((23.3, 17.1), old_via, waypoints=[(23.3, 18.25)], width=0.2, net="GND")
+    if back_track:
+        pcb.add_trace(old_via, (21.7, 20.25), width=0.2, net="GND", layer="B.Cu")
+    pcb.save(path)
+    original = path.read_bytes()
+
+    if back_track:
+        with pytest.raises(ValueError, match="disconnect a track branch"):
+            process.repair_bypass_mask_escapes(path)
+        assert path.read_bytes() == original
+    else:
+        process.repair_bypass_mask_escapes(path)
+        repaired = PCB.load(path)
+        assert len(repaired.segments) == len(repaired.vias) == 1
+        assert repaired.vias[0].position == pytest.approx((23.3, 18.15))
+        assert repaired.segments[0].end == pytest.approx(repaired.vias[0].position)
+        once = path.read_bytes()
+        process.repair_bypass_mask_escapes(path)
+        assert path.read_bytes() == once
+
+
 @pytest.fixture
 def repaired(tmp_path):
     for name in [
