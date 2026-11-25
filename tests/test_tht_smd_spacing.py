@@ -424,3 +424,100 @@ def test_checker_only_under_fab_view():
     pcb = board(tht(), smd(1.5))
     assert not DRCChecker(pcb).check_tht_smd_spacing().violations
     assert DRCChecker(pcb, fab_view=True).check_tht_smd_spacing().violations
+
+
+@pytest.mark.parametrize(
+    ("gap", "layer", "severity"),
+    [
+        (1.85, "F.Cu", "error"),
+        (2.06, "F.Cu", "warning"),
+        (1.85, "B.Cu", "error"),
+    ],
+)
+def test_message_names_both_component_pads_and_preserves_stable_items(gap, layer, severity):
+    """Issue #10172: readable pad names in message, stable UUID items preserved."""
+    (v,) = check_tht_smd_spacing(board(tht(), smd(gap, layer))).violations
+    assert v.severity == severity
+    assert v.layer == layer
+    assert "J1.1" in v.message
+    assert "R1.1" in v.message
+    assert layer in v.message
+    assert v.actual_value == pytest.approx(gap, abs=0.002)
+    assert v.items == ("smd", "tht")
+
+
+def test_anchor_via_message_names_via_and_smd_pad():
+    """Issue #10172: anchor-via findings name the via reference and SMD pad."""
+    pcb = board(via(drill=1.4), smd_at(0.95, 1.5))
+    (v,) = check_tht_smd_spacing(pcb).violations
+    expected_via = via_ref(pcb.vias[0], (0.0, 0.0))
+    assert expected_via in v.message
+    assert "R1.1" in v.message
+    assert set(v.items) == {expected_via, "smd"}
+
+
+@pytest.mark.parametrize(
+    ("gap", "layer", "expected_severity"),
+    [
+        (1.85, "F.Cu", "error"),
+        (2.06, "F.Cu", "warning"),
+        (3.06, "F.Cu", None),
+        (1.85, "B.Cu", "error"),
+    ],
+)
+def test_cli_reports_named_pads_bands_and_stable_items(
+    tmp_path, capsys, gap, layer, expected_severity
+):
+    """Issue #10172: CLI JSON output preserves stable UUID items and names both pads."""
+    import json
+
+    from kicad_tools.cli.check_cmd import main
+
+    pcb_path = tmp_path / f"tht_smd_{gap}_{layer}.kicad_pcb"
+    # THT pad at (5, 5), size 1.6 -> copper edge at x=5.8.
+    # SMD pad 1x1 square centred at x = 5.8 + gap + 0.5 -> copper edge gap == gap.
+    smd_x = 5.8 + gap + 0.5
+    pcb_path.write_text(
+        f"""(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "") (net 1 "A") (net 2 "B")
+  (gr_rect (start 0 0) (end 20 20) (stroke (width 0.05) (type solid)) (fill none) (layer "Edge.Cuts"))
+  (footprint "T" (layer "F.Cu") (at 5 5) (property "Reference" "J1")
+    (pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.9)
+      (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "uuid-j1-1")))
+  (footprint "S" (layer "{layer}") (at {smd_x} 5) (property "Reference" "R1")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "{layer}") (net 2 "B") (uuid "uuid-r1-1")))
+)"""
+    )
+
+    main(
+        [
+            str(pcb_path),
+            "--mfr",
+            "jlcpcb",
+            "--only",
+            "tht_smd_spacing",
+            "--format",
+            "json",
+        ]
+    )
+    out = capsys.readouterr().out
+    report = json.loads(out[out.index("{") :])
+    found = [v for v in report["violations"] if v["rule_id"] == "tht_smd_spacing"]
+    if expected_severity is None:
+        assert not found
+    else:
+        assert len(found) == 1
+        v = found[0]
+        assert v["severity"] == expected_severity
+        assert v["layer"] == layer
+        assert v["actual_value"] == pytest.approx(gap, abs=0.002)
+        assert "J1.1" in v["message"]
+        assert "R1.1" in v["message"]
+        assert layer in v["message"]
+        assert v["items"] == ["uuid-j1-1", "uuid-r1-1"]

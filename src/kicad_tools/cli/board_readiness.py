@@ -5,12 +5,30 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from .known_issues import KNOWN_ISSUES_FILENAME, defects, validate_known_issues
 
 MANUFACTURING_MANIFEST = "output/manufacturing/manifest.json"
+
+
+@dataclass(frozen=True)
+class ReadinessLayout:
+    """Trusted receipt and input-base locations for one readiness record.
+
+    A project-declared output root (Issue #10106) moves the receipt out of
+    ``<board>/output/readiness.json`` into the declared root and keys its
+    ``inputs`` against the declaring project instead of the board directory.
+    The producer passes the layout it resolved; the board-local entry point
+    (:func:`read_readiness` without a layout) keeps its historical contract.
+    """
+
+    #: The ``readiness.json`` record to read.
+    report: Path
+    #: Directory the record's ``inputs`` paths resolve against.
+    input_base: Path
 
 
 def is_manufacturing_manifest(rel_name: str) -> bool:
@@ -61,15 +79,22 @@ def _input_hash_matches(name: str, raw: bytes, expected: object) -> bool:
     return is_manufacturing_manifest(name) and hashlib.sha256(raw).hexdigest() == expected
 
 
-def read_readiness(board_dir: Path) -> dict:
+def read_readiness(board_dir: Path, *, layout: ReadinessLayout | None = None) -> dict:
     """Load the v1 sidecar, failing closed on missing or changed evidence.
 
     Paths and hashes are relative to the board directory, never timestamps.
     This validates evidence provenance; the report writer runs the checks.
+    A *layout* names a project-declared receipt location and input base
+    (Issue #10106); without one the board-local ``output/readiness.json``
+    contract is unchanged.
     """
     unknown = {"status": "unverified", "blockers": ["Readiness has not been verified."]}
     try:
-        data = json.loads((board_dir / "output/readiness.json").read_text())
+        data = json.loads(
+            (
+                layout.report if layout is not None else board_dir / "output/readiness.json"
+            ).read_text()
+        )
         if not isinstance(data, dict):
             raise ValueError("report must be an object")
         if (
@@ -113,7 +138,7 @@ def read_readiness(board_dir: Path) -> dict:
         inputs = data.get("inputs")
         if not isinstance(inputs, dict) or not inputs:
             raise ValueError("missing input hashes")
-        root = board_dir.resolve()
+        root = layout.input_base.resolve() if layout is not None else board_dir.resolve()
         for name, expected in inputs.items():
             path = Path(name)
             if path.is_absolute() or ".." in path.parts or "\\" in name:
@@ -141,16 +166,20 @@ def read_readiness(board_dir: Path) -> dict:
                 if hashlib.sha256(target.read_bytes()).hexdigest() != expected:
                     raise ValueError(f"Evidence is stale: {name} changed")
         output = board_dir / "output"
-        required = {
-            p.relative_to(board_dir).as_posix()
-            for p in output.iterdir()
-            if p.is_file()
-            and (
-                p.suffix in {".kicad_pro", ".kicad_dru"}
-                or p.name.endswith("net_class_map.json")
-                or p.name.endswith("fab_profile.json")
-            )
-        }
+        required = (
+            {
+                p.resolve().relative_to(root).as_posix()
+                for p in output.iterdir()
+                if p.is_file()
+                and (
+                    p.suffix in {".kicad_pro", ".kicad_dru"}
+                    or p.name.endswith("net_class_map.json")
+                    or p.name.endswith("fab_profile.json")
+                )
+            }
+            if output.is_dir()
+            else set()
+        )
         # Issue #9006: a waivers sidecar the check gate auto-loads for a
         # hashed PCB is evidence like the rule files, so require it here.
         from kicad_tools.validate.rules.waivers import discover_waivers_sidecar

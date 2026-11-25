@@ -7,7 +7,8 @@ Creates complete manufacturing packages including BOM, CPL, and Gerbers.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
@@ -70,6 +71,10 @@ class AssemblyConfig:
     include_gerbers: bool = True
     gerbers_subdir: str = "gerbers"
     gerber_config: GerberConfig | None = None
+    # Issue #10174: UTC time stamped into the Gerbers instead of the plot time
+    # (callers needing a reproducible upload ZIP); ``None`` follows
+    # ``SOURCE_DATE_EPOCH``.
+    gerber_source_date_epoch: datetime | None = None
 
     # LCSC auto-matching
     auto_lcsc: bool = True
@@ -829,10 +834,15 @@ class AssemblyPackage:
             # opt-in (Issue #6193) still applies on top of it.
             gc = self.config.gerber_config
             return exporter.export_for_manufacturer(
-                self.fab_family, gerber_dir, vscore_layers=gc.vscore_layers if gc else None
+                self.fab_family,
+                gerber_dir,
+                vscore_layers=gc.vscore_layers if gc else None,
+                source_date_epoch=self.config.gerber_source_date_epoch,
             )
         else:
             config = self.config.gerber_config or GerberConfig()
+            if self.config.gerber_source_date_epoch is not None:
+                config = replace(config, source_date_epoch=self.config.gerber_source_date_epoch)
             return exporter.export(config, gerber_dir)
 
     def _resolve_auto_bom_source(self) -> list:
