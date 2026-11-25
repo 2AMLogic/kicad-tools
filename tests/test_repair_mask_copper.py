@@ -2623,10 +2623,11 @@ def test_chamfer_slide_rounding_keeps_the_angle_census_clean(
 ):
     """Measured refutation of the #10183 hypothesis, kept as a regression guard.
 
-    ``moved`` rounds each end to 4 dp on its own, so a slid chamfer can sit one
-    0.1 um quantum off its exact angle. The census accepts exactly that much
-    (``_is_quantum_aligned``) and the rounding cannot exceed it, so the slide is
-    never declined as ``would_bend_trace`` and no track is saved off angle.
+    ``moved`` supplies candidate geometry and action metadata. When writing the
+    board, ``_apply_nudge`` adds each point's shift to its original endpoint
+    and rounds each coordinate to four decimals. Independent endpoint rounding
+    can put the chamfer one 0.1 um quantum off its exact angle. The census
+    accepts that difference, so these slides preserve the angle on disk.
     """
     board, shapes = _rounding_chamfer_fixture(
         tmp_path, diagonal=diagonal, signs=signs, offset=offset, reach=reach, chamfer=chamfer
