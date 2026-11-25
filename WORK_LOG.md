@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-25
 
+- **Issue #10220** (closed): Board 03 mask repair aborted with "could not verify mask openings" on a second host — establish whether it is host-specific
+- **PR #10207**: fix(drc): slide a disjoint pass-through jog along its runs before recentring it
 - **Issue #10142** (closed): placement: use schematic cap-pin association as optimizer constraint
 - **PR #10184**: feat(placement): pair decoupling caps by their schematic designation
 - **Issue #10106** (closed): Resolve a project-declared output directory during readiness staging and publication
