@@ -264,8 +264,7 @@ class RedundantCopperRule(DRCRule):
                         severity="info",
                         message=(
                             f"Pour-stub proof evaluated {proof.evaluated} of {proof.total} "
-                            f"candidate branches; the other {proof.total - proof.evaluated} "
-                            f"could not be refilled and were not checked."
+                            "candidate branches."
                         ),
                         location=None,
                         layer="",

@@ -304,3 +304,23 @@ def test_partial_candidate_evaluation_is_disclosed_not_reported_as_full(
     assert "1 of 2" in notice.message
     assert len([v for v in result.violations if v.severity == "warning" and v.rule_id == RULE]) == 1
     assert any("Could not evaluate pour stub" in r.message for r in caplog.records)
+
+
+def test_skipped_branch_reports_coverage_when_native_refill_succeeded(tmp_path, caplog):
+    require_native_refill()
+    path = fixture_board(tmp_path, "connected")
+    # KiCad rounds this width to 0.25 mm on save. The other branch keeps its identity.
+    extra = (
+        '(segment (start 15 5) (end 15 7) (width 0.2500001) (layer "F.Cu") '
+        f"(net 1) (uuid {uid('rounded-track')}))"
+    )
+    path.write_text(path.read_text().replace("(segment ", extra + "\n(segment ", 1))
+
+    result = check_result(path)
+
+    (notice,) = [v for v in result.infos if v.rule_id == RULE]
+    assert notice.message == "Pour-stub proof evaluated 1 of 2 candidate branches."
+    assert result.rules_checked_by_rule[RULE] == 1
+    assert any(
+        "J1.1: candidate not found after baseline refill" in r.message for r in caplog.records
+    )
