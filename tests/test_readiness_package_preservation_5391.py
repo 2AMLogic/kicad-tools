@@ -345,7 +345,7 @@ def test_rollback_preserves_editor_change_to_published_file(tmp_path, monkeypatc
     for name in ("a", "b"):
         (old / name).write_text("old " + name)
         (new / name).write_text("new " + name)
-    real_replace = cmd.os.replace
+    real_link = cmd.os.link
     calls = 0
 
     def edit_then_fail(source, destination):
@@ -353,14 +353,14 @@ def test_rollback_preserves_editor_change_to_published_file(tmp_path, monkeypatc
         calls += 1
         if calls == 2:
             raise OSError("injected second replacement failure")
-        real_replace(source, destination)
+        real_link(source, destination)
         if calls == 1:
             if deleted:
                 (old / "a").unlink()
             else:
                 (old / "a").write_text("human edit")
 
-    monkeypatch.setattr(cmd.os, "replace", edit_then_fail)
+    monkeypatch.setattr(cmd.os, "link", edit_then_fail)
     with pytest.raises(RuntimeError, match="rollback preserved concurrent edits"):
         cmd._publish_candidate(new, old, cmd._snapshot_inventory(old))
     if deleted:

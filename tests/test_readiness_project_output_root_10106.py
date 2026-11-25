@@ -266,9 +266,11 @@ def test_group_publication_failure_preserves_release_and_editor(
     real_replace = os.replace
     triggered = False
 
-    def interrupt_install(src, dst):
+    real_link = os.link
+
+    def interrupt_install(src, dst, _real=None):
         nonlocal triggered
-        real_replace(src, dst)
+        (_real or real_replace)(src, dst)
         target = board if fault == "board-write" else receipt
         if triggered or Path(dst) != target:
             return
@@ -282,6 +284,9 @@ def test_group_publication_failure_preserves_release_and_editor(
             raise OSError("late installation failure")
 
     monkeypatch.setattr(readiness_cmd.os, "replace", interrupt_install)
+    monkeypatch.setattr(
+        readiness_cmd.os, "link", lambda src, dst: interrupt_install(src, dst, real_link)
+    )
     code, _ = run(project, "--generate", "--checked-at", "2026-11-24T00:00:00Z", fake=fake)
     assert triggered
     assert code == 1
@@ -297,6 +302,67 @@ def test_group_publication_failure_preserves_release_and_editor(
         if fault == "published-artifact":
             expected_directories.add("manufacturing")
         assert {p.name for p in (project / "output").iterdir()} == expected_directories
+
+
+@pytest.mark.parametrize("prior", [False, True], ids=["first", "prior"])
+@pytest.mark.parametrize("target_name", ["board", "readme"])
+@pytest.mark.parametrize("moment", ["before-claim", "in-gap"])
+def test_same_target_editor_save_survives_publication(
+    tmp_path, monkeypatch, prior, target_name, moment
+):
+    """An editor save that lands at the exact file being replaced is never overwritten."""
+    import os
+
+    project = make_project(tmp_path)
+    if prior:
+        assert run(project, "--generate", "--checked-at", "2026-11-23T00:00:00Z")[0] == 0
+    target = (
+        project / "kicad" / "board.kicad_pcb"
+        if target_name == "board"
+        else project / "output/manufacturing/README.txt"
+    )
+    if target_name == "readme" and not prior:
+        pytest.skip("no released README exists before the first publication")
+    before = _live_files(project)
+    fake = FakeEngines(target.parent)
+    refill = fake.refill
+
+    def revised_refill(pcb):
+        result = refill(pcb)
+        pcb.write_text("(kicad_pcb refilled candidate revision)\n")
+        return result
+
+    fake.refill = revised_refill
+    real_replace, real_link = os.replace, os.link
+    saved = False
+
+    def editor_save():
+        nonlocal saved
+        saved = True
+        tmp = target.with_name("editor-save")
+        tmp.write_bytes(b"independent editor revision\n")
+        real_replace(tmp, target)
+
+    def claim_hook(src, dst):
+        # The claim moves the live file to a hidden hold name.
+        if not saved and Path(src) == target and ".readiness-hold-" in Path(dst).name:
+            if moment == "before-claim":
+                editor_save()
+        real_replace(src, dst)
+
+    def link_hook(src, dst):
+        if not saved and Path(dst) == target and moment == "in-gap":
+            editor_save()
+        real_link(src, dst)
+
+    monkeypatch.setattr(readiness_cmd.os, "replace", claim_hook)
+    monkeypatch.setattr(readiness_cmd.os, "link", link_hook)
+    code, _ = run(project, "--generate", "--checked-at", "2026-11-24T00:00:00Z", fake=fake)
+    assert saved
+    assert code == 1
+    before[target.relative_to(project)] = b"independent editor revision\n"
+    assert _live_files(project) == before
+    assert not list(project.rglob(".readiness-hold-*"))
 
 
 def test_concurrent_source_edit_refuses_and_preserves_release(tmp_path, monkeypatch):

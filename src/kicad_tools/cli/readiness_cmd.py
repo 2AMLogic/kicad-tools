@@ -52,7 +52,7 @@ import sys
 import tempfile
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -4352,6 +4352,57 @@ def _publication_identity(path: Path) -> tuple[Any, ...] | None:
     )
 
 
+def _claim_target(target: Path, expected: tuple[Any, ...] | None) -> Path | None:
+    """Atomically move ``target`` aside and prove it is the file we planned to replace.
+
+    Checking identity and then renaming leaves a window in which an editor can
+    finish a save that the rename would overwrite. Moving the live file aside
+    first makes the verification apply to the exact inode taken. If an editor
+    saved first, the file is linked back (never over a newer save) and the
+    caller refuses. Returns the held path, or None when no file was expected.
+    """
+    if expected is None:
+        if os.path.lexists(target):
+            raise RuntimeError(f"Concurrent edit before publication: {target.name}")
+        return None
+    fd, hold_name = tempfile.mkstemp(prefix=".readiness-hold-", dir=target.parent)
+    os.close(fd)
+    hold = Path(hold_name)
+    try:
+        os.replace(target, hold)
+    except BaseException:
+        hold.unlink(missing_ok=True)
+        raise
+    if _publication_identity(hold) != expected:
+        with suppress(FileExistsError):  # an even newer save already holds the name
+            os.link(hold, target)
+        hold.unlink(missing_ok=True)
+        raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
+    return hold
+
+
+def _install_claimed(
+    staged: Path, target: Path, hold: Path | None, on_linked: Callable[[], None] | None = None
+) -> None:
+    """Link ``staged`` into the vacated name; an editor that took the name keeps it."""
+    try:
+        os.link(staged, target)
+    except FileExistsError:
+        if hold is not None:
+            hold.unlink(missing_ok=True)
+        raise RuntimeError(f"Concurrent edit before replacement: {target.name}") from None
+    except BaseException:
+        if hold is not None:
+            with suppress(FileExistsError):
+                os.link(hold, target)
+            hold.unlink(missing_ok=True)
+        raise
+    if on_linked is not None:
+        on_linked()
+    if hold is not None:
+        hold.unlink(missing_ok=True)
+
+
 class ReadinessPublicationBusy(RuntimeError):
     """Another process is installing readiness results at this destination."""
 
@@ -4465,17 +4516,10 @@ def _install_candidate(
                     copy.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(target, copy)
                 if name not in after:
-                    if _publication_identity(target) != expected[name]:
-                        raise RuntimeError(f"Concurrent edit before deletion: {name}")
-                    try:
-                        target.unlink()
-                    except FileNotFoundError:
-                        raise
-                    except OSError:
-                        if not os.path.lexists(target):
-                            installed[name] = None
-                        raise
+                    hold = _claim_target(target, expected[name])
                     installed[name] = None
+                    if hold is not None:
+                        hold.unlink(missing_ok=True)
                     continue
                 _make_publish_directory(target.parent, created)
                 fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
@@ -4484,14 +4528,16 @@ def _install_candidate(
                 try:
                     shutil.copy2(candidate / name, staged)
                     identity = _publication_identity(staged)
-                    if _publication_identity(target) != expected[name]:
-                        raise RuntimeError(f"Concurrent edit before replacement: {name}")
+                    hold = _claim_target(target, expected[name])
                     try:
-                        os.replace(staged, target)
+                        _install_claimed(
+                            staged, target, hold, lambda: installed.__setitem__(name, identity)
+                        )
                     finally:
-                        # A filesystem can finish a rename and then report an error.
-                        # Record our staged identity even if an editor already took the name.
-                        if not os.path.lexists(staged):
+                        # A filesystem can finish a link and then report an error, and an
+                        # editor may already have taken the name: a second link to our
+                        # staged inode means our link landed.
+                        if staged.stat().st_nlink > 1:
                             installed[name] = identity
                 finally:
                     staged.unlink(missing_ok=True)
@@ -4501,23 +4547,20 @@ def _install_candidate(
             for name, identity in reversed(installed.items()):
                 target = destination / name
                 try:
-                    if _publication_identity(target) != identity:
-                        conflicts.append(name)
-                        continue
                     if name in before:
                         fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
                         os.close(fd)
                         staged = Path(staged_name)
                         try:
                             shutil.copy2(backup / name, staged)
-                            if _publication_identity(target) != identity:
-                                conflicts.append(name)
-                                continue
-                            os.replace(staged, target)
+                            hold = _claim_target(target, identity)
+                            _install_claimed(staged, target, hold)
                         finally:
                             staged.unlink(missing_ok=True)
                     else:
-                        target.unlink(missing_ok=True)
+                        hold = _claim_target(target, identity)
+                        if hold is not None:
+                            hold.unlink(missing_ok=True)
                 except Exception:
                     conflicts.append(name)
             for directory in reversed(created):
