@@ -508,7 +508,7 @@ def test_receiver_checks_every_rule_area_with_the_same_name(
     ("pattern", "expected"),
     [
         ("J3 *", 0),
-        ("J3 conn??? exit", 0),
+        ("J3 conn????? exit", 0),
         ("J3 connector exit", 0),
         ("Q9 *", 0),
     ],  # a pattern naming no area is undecided: preserve
@@ -544,3 +544,44 @@ def test_receiver_treats_intersects_area_argument_as_a_wildcard(
     assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
     if expected == 0:
         assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("literal_first", [True, False], ids=["literal-first", "literal-last"])
+@pytest.mark.parametrize(
+    "pattern",
+    ["j3 *", "J3 *", "j3 conn????? exit", "J3 conn????? exit"],
+)
+def test_receiver_preserves_pair_under_negated_area_wildcard(
+    tmp_path, repair, literal_first, pattern
+):
+    # `!A.intersectsArea('j3 *')`: a name matching only after case-folding must
+    # not decide the negation false and drop KiCad's enforced width rule. The
+    # uppercase controls match exactly, so the rule is decided inactive there.
+    board = tmp_path / "pcie.kicad_pcb"
+    _taper_board(board, "J3", pair="RX")
+    roi = _rule_area("ROI", 9.3, 9.8, 9.4, 9.9, tracks="allowed")
+    front = _rule_area(
+        "J3 connector exit",
+        9.3,
+        9.8,
+        9.4,
+        9.9,
+        tracks="allowed",
+        uid="00000000-0000-0000-0000-0000000009c1",
+    )
+    for area in (roi, front) if literal_first else (front, roi):
+        _add_area(board, area)
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "test" (layer "F.Cu")
+  (condition "A.NetName == 'PCIE_RX+' && A.intersectsArea('ROI') && !A.intersectsArea('{pattern}')")
+  (constraint track_width (max 0.2mm)))
+"""
+    )
+    before = board.read_bytes()
+    result = repair(board, get_profile("jlcpcb").get_design_rules(layers=4))
+    if pattern.startswith("j3"):
+        assert result == 0
+        assert board.read_bytes() == before
+    else:
+        assert result == 2

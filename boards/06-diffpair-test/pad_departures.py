@@ -848,14 +848,17 @@ def _dru_rule_applies(condition, track, copper, areas, project) -> bool:
         pattern = match.group(1)
         if "*" in pattern or "?" in pattern:
             # KiCad matches the argument as a wildcard pattern, so every
-            # on-layer area whose name fits it counts. Case-insensitive is the
-            # safe superset; no fitting name leaves the condition undecided.
-            regex = re.compile(
-                re.escape(pattern.casefold()).replace(r"\*", ".*").replace(r"\?", "."),
-                re.DOTALL,
-            )
-            hits = [shapes for name, shapes in areas.items() if regex.fullmatch(name.casefold())]
-            shapes = [shape for group in hits for shape in group] if hits else None
+            # on-layer area whose name fits it counts. KiCad's case handling is
+            # not modelled: a name that fits only after case-folding makes the
+            # match uncertain (and a `!` would invert a wrong guess), so the
+            # condition stays undecided and the pair is preserved.
+            body = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+            exact = re.compile(body, re.DOTALL)
+            folded = re.compile(body, re.DOTALL | re.IGNORECASE)
+            hits = [name for name in areas if exact.fullmatch(name)]
+            if hits != [name for name in areas if folded.fullmatch(name)]:
+                return match.group(0)
+            shapes = [shape for name in hits for shape in areas[name]] if hits else None
         else:
             shapes = areas.get(pattern)
         if shapes is None:
