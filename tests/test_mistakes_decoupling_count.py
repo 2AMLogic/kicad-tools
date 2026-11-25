@@ -10,7 +10,13 @@ import pytest
 from kicad_tools.cli import mistakes_cmd
 from kicad_tools.explain.checks.decoupling_count import DecouplingCountCheck
 from kicad_tools.explain.mistake_waivers import annotate_mistakes
-from kicad_tools.explain.mistakes import MistakeCategory, MistakeDetector, get_default_checks
+from kicad_tools.explain.mistakes import (
+    CheckIncomplete,
+    Mistake,
+    MistakeCategory,
+    MistakeDetector,
+    get_default_checks,
+)
 from kicad_tools.schema.pcb import PCB
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -568,3 +574,22 @@ def test_detector_reports_inventory_from_registered_check(tmp_path: Path) -> Non
     # Without a reports dict nothing is collected and nothing is kept.
     plain, _ = MistakeDetector([check]).detect_with_coverage(pcb)
     assert [m.title for m in plain] == [m.title for m in mistakes]
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_reports_preserve_registered_check_override(tmp_path: Path, incomplete: bool) -> None:
+    class CustomDecoupling(DecouplingCountCheck):
+        def check(self, pcb: PCB) -> list[Mistake]:
+            if incomplete:
+                raise CheckIncomplete("Designated schematic missing")
+            return super().check(pcb)[:1]
+
+    pcb = PCB.load(str(_two_ic_board(tmp_path, "U1.1", "U1.1")))
+    detector = MistakeDetector([CustomDecoupling()])
+    findings, coverage = detector.detect_with_coverage(pcb)
+    assert len(findings) == (0 if incomplete else 1)
+    assert coverage[0].status == ("incomplete" if incomplete else "ran")
+
+    reports: dict = {}
+    assert detector.detect_with_coverage(pcb, reports) == (findings, coverage)
+    assert reports == {}

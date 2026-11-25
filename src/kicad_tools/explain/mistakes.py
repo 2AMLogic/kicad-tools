@@ -378,26 +378,30 @@ class MistakeDetector:
     ) -> tuple[list[Mistake], list[CheckCoverage]]:
         """Run *checks* against *pcb*, catching :class:`CheckIncomplete` per-check.
 
-        When *reports* is given, a check that has ``check_with_inventory``
-        (Issue #10241) is run through it and its inventory is stored under the
-        check's class name, so the caller reports from the same instance and
-        the same schematic parse as the findings.  The dict is the caller's and
-        scoped to this one run; nothing is kept on the detector.
+        When *reports* is given, collect the built-in decoupling check's
+        inventory alongside its findings in one pass (Issue #10241). A
+        registered check with a custom ``check`` method always runs through
+        that method, including when the caller requests reports.
 
         A check that raises ``CheckIncomplete`` contributes a ``"incomplete"``
         :class:`CheckCoverage` entry (and no mistakes); every other check
         -- including one that ran cleanly and found nothing -- contributes a
         ``"ran"`` entry.
         """
+        from .checks.decoupling_count import DecouplingCountCheck
+
         mistakes: list[Mistake] = []
         coverage: list[CheckCoverage] = []
         for check in checks:
             check_name = type(check).__name__
             rule_id = mistake_rule_id(check)
             try:
-                with_report = getattr(check, "check_with_inventory", None)
-                if reports is not None and with_report is not None:
-                    found, reports[check_name] = with_report(pcb)
+                if (
+                    reports is not None
+                    and isinstance(check, DecouplingCountCheck)
+                    and getattr(check.check, "__func__", None) is DecouplingCountCheck.check
+                ):
+                    found, reports[check_name] = check.check_with_inventory(pcb)
                 else:
                     found = check.check(pcb)
             except CheckIncomplete as exc:
