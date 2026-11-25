@@ -14,6 +14,8 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli import readiness_cmd
 from kicad_tools.cli.board_readiness import read_readiness, readiness_input_hash
 from kicad_tools.cli.readiness_cmd import ReadinessLayout
@@ -204,6 +206,97 @@ def test_failed_generate_preserves_prior_release_and_writes_attempt_diagnostics(
     attempt = json.loads((project / "output" / "readiness-attempt" / "readiness.json").read_text())
     assert attempt["status"] == "blocked"
     assert attempt["candidate_not_published"] is True
+
+
+def _live_files(project):
+    return {
+        p.relative_to(project): p.read_bytes()
+        for p in project.rglob("*")
+        if p.is_file() and "readiness-attempt" not in p.relative_to(project).parts
+    }
+
+
+@pytest.mark.parametrize("prior", [False, True], ids=["first", "prior"])
+@pytest.mark.parametrize("lock_region", ["kicad", "output"])
+def test_both_publication_locks_precede_any_install(tmp_path, prior, lock_region):
+    project = make_project(tmp_path)
+    if prior:
+        assert run(project, "--generate", "--checked-at", "2026-11-23T00:00:00Z")[0] == 0
+    before = _live_files(project)
+    with readiness_cmd._publication_lock(project / f".{lock_region}.readiness-publish.lock"):
+        assert run(project, "--generate", "--checked-at", "2026-11-24T00:00:00Z")[0] == 1
+    assert _live_files(project) == before
+    attempt = json.loads((project / "output/readiness-attempt/readiness.json").read_bytes())
+    assert attempt["candidate_not_published"] is True
+    if prior:
+        assert read_readiness(project / "kicad", layout=layout_for(project))["status"] == "ready"
+    else:
+        assert sorted(p.name for p in (project / "output").iterdir()) == ["readiness-attempt"]
+
+
+@pytest.mark.parametrize("prior", [False, True], ids=["first", "prior"])
+@pytest.mark.parametrize(
+    "fault", ["board-write", "receipt-write", "editor", "published-artifact", "external-input"]
+)
+def test_group_publication_failure_preserves_release_and_editor(
+    tmp_path, monkeypatch, prior, fault
+):
+    import os
+
+    project = make_project(tmp_path)
+    if prior:
+        assert run(project, "--generate", "--checked-at", "2026-11-23T00:00:00Z")[0] == 0
+    before = _live_files(project)
+    board = project / "kicad" / "board.kicad_pcb"
+    receipt = project / "output" / "readiness.json"
+    edited = {
+        "editor": board,
+        "published-artifact": project / "output/manufacturing/README.txt",
+        "external-input": project / "schematics/board.kicad_sch",
+    }.get(fault)
+    fake = FakeEngines(board.parent)
+    refill = fake.refill
+
+    def revised_refill(pcb):
+        result = refill(pcb)
+        pcb.write_text("(kicad_pcb refilled candidate revision)\n")
+        return result
+
+    fake.refill = revised_refill
+    real_replace = os.replace
+    triggered = False
+
+    def interrupt_install(src, dst):
+        nonlocal triggered
+        real_replace(src, dst)
+        target = board if fault == "board-write" else receipt
+        if triggered or Path(dst) != target:
+            return
+        triggered = True
+        if edited is not None:
+            editor_tmp = edited.with_name("editor-save")
+            editor_tmp.write_bytes(b"independent editor revision\n")
+            real_replace(editor_tmp, edited)
+        else:
+            # The file has genuinely been installed before the error is reported.
+            raise OSError("late installation failure")
+
+    monkeypatch.setattr(readiness_cmd.os, "replace", interrupt_install)
+    code, _ = run(project, "--generate", "--checked-at", "2026-11-24T00:00:00Z", fake=fake)
+    assert triggered
+    assert code == 1
+    if edited is not None:
+        before[edited.relative_to(project)] = b"independent editor revision\n"
+    assert _live_files(project) == before
+    attempt = json.loads((project / "output/readiness-attempt/readiness.json").read_bytes())
+    assert attempt["candidate_not_published"] is True
+    if prior and edited is None:
+        assert read_readiness(board.parent, layout=layout_for(project))["status"] == "ready"
+    if not prior:
+        expected_directories = {"readiness-attempt"}
+        if fault == "published-artifact":
+            expected_directories.add("manufacturing")
+        assert {p.name for p in (project / "output").iterdir()} == expected_directories
 
 
 def test_concurrent_source_edit_refuses_and_preserves_release(tmp_path, monkeypatch):

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import hashlib
 import json
 import logging
@@ -4314,7 +4315,13 @@ def _release_changes(
     board_dir: Path, before: dict[str, str], external_before: dict[Path, str]
 ) -> list[str]:
     """Name changed inputs relative to the original board directory."""
-    changes = _inventory_changes(before, _snapshot_inventory(board_dir))
+    return _inventory_changes(before, _snapshot_inventory(board_dir)) + _external_input_changes(
+        board_dir, external_before
+    )
+
+
+def _external_input_changes(board_dir: Path, external_before: dict[Path, str]) -> list[str]:
+    changes = []
     for path, digest in sorted(external_before.items()):
         if not path.is_file():
             kind = "removed"
@@ -4364,18 +4371,67 @@ def _publication_lock(lock: Path) -> Iterator[None]:
         lock.rmdir()
 
 
-def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str]) -> None:
-    """Publish a checked release and preserve observed external edits.
+def _publish_candidate(
+    candidate: Path,
+    destination: Path,
+    before: dict[str, str],
+    *,
+    sibling_release: tuple[Path, Path, dict[str, str]] | None = None,
+    receipt: Path | None = None,
+    external_before: dict[Path, str] | None = None,
+) -> None:
+    """Hold every publisher lock and backup until the whole checked release is installed."""
+    regions = [(candidate, destination, before)]
+    if sibling_release is not None:
+        regions.append(sibling_release)
+    with ExitStack() as publication:
+        # All publishers take locks in the same order, including when only
+        # the release root is shared by two different board directories.
+        for root in sorted(region[1] for region in regions):
+            root.parent.mkdir(parents=True, exist_ok=True)
+            publication.enter_context(
+                _publication_lock(root.parent / f".{root.name}.readiness-publish.lock")
+            )
 
-    Per-file checks narrow external-editor races but cannot guarantee atomicity
-    against writers that ignore the lock.
-    """
-    destination.mkdir(parents=True, exist_ok=True)
-    with _publication_lock(destination.parent / f".{destination.name}.readiness-publish.lock"):
-        _publish_candidate_locked(candidate, destination, before)
+        inventories = []
+        for staged, live, snapshot in regions:
+            after = publication.enter_context(_install_candidate(staged, live, snapshot, receipt))
+            inventories.append((live, after))
+        # Both regions can still roll back when we recheck an earlier file or
+        # a project dependency outside them. The consumer receipt was installed last.
+        for live, after in inventories:
+            current = _snapshot_inventory(live)
+            if current != after:
+                raise RuntimeError(
+                    _with_changes(
+                        "Concurrent edit during publication", _inventory_changes(after, current)
+                    )
+                )
+        if external_before:
+            edits = _external_input_changes(destination, external_before)
+            if edits:
+                raise RuntimeError(_with_changes("Concurrent edit during publication", edits))
 
 
-def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[str, str]) -> None:
+def _make_publish_directory(directory: Path, created: list[Path]) -> None:
+    """Record only directories this installation created, for empty-directory rollback."""
+    if directory.is_dir():
+        return
+    _make_publish_directory(directory.parent, created)
+    try:
+        directory.mkdir()
+    except FileExistsError:
+        if not directory.is_dir():
+            raise
+    else:
+        created.append(directory)
+
+
+@contextmanager
+def _install_candidate(
+    candidate: Path, destination: Path, before: dict[str, str], receipt: Path | None
+) -> Iterator[dict[str, str]]:
+    """Install one region, retaining its rollback journal through the caller's commit."""
     current = _snapshot_inventory(destination)
     if current != before:
         raise RuntimeError(
@@ -4385,8 +4441,10 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
             )
         )
     after = _snapshot_inventory(candidate)
+    # The readiness receipt becomes visible after the artifacts it describes.
     changed = sorted(
-        name for name in set(before) | set(after) if before.get(name) != after.get(name)
+        (name for name in set(before) | set(after) if before.get(name) != after.get(name)),
+        key=lambda name: (destination / name == receipt, name),
     )
     expected = {name: _publication_identity(destination / name) for name in changed}
     for name, identity in expected.items():
@@ -4396,6 +4454,7 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
     with tempfile.TemporaryDirectory(prefix="kct-release-backup-") as temporary:
         backup = Path(temporary)
         installed: dict[str, tuple[Any, ...] | None] = {}
+        created: list[Path] = []
         try:
             for name in changed:
                 target = destination / name
@@ -4408,10 +4467,17 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
                 if name not in after:
                     if _publication_identity(target) != expected[name]:
                         raise RuntimeError(f"Concurrent edit before deletion: {name}")
-                    target.unlink()
+                    try:
+                        target.unlink()
+                    except FileNotFoundError:
+                        raise
+                    except OSError:
+                        if not os.path.lexists(target):
+                            installed[name] = None
+                        raise
                     installed[name] = None
                     continue
-                target.parent.mkdir(parents=True, exist_ok=True)
+                _make_publish_directory(target.parent, created)
                 fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
                 os.close(fd)
                 staged = Path(staged_name)
@@ -4420,21 +4486,17 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
                     identity = _publication_identity(staged)
                     if _publication_identity(target) != expected[name]:
                         raise RuntimeError(f"Concurrent edit before replacement: {name}")
-                    os.replace(staged, target)
-                    # Capture our staged identity, not whatever an editor may
-                    # have written to the destination immediately afterwards.
-                    installed[name] = identity
+                    try:
+                        os.replace(staged, target)
+                    finally:
+                        # A filesystem can finish a rename and then report an error.
+                        # Record our staged identity even if an editor already took the name.
+                        if not os.path.lexists(staged):
+                            installed[name] = identity
                 finally:
                     staged.unlink(missing_ok=True)
-            current = _snapshot_inventory(destination)
-            if current != after:
-                raise RuntimeError(
-                    _with_changes(
-                        "Concurrent edit during publication",
-                        _inventory_changes(after, current),
-                    )
-                )
-        except Exception as exc:
+            yield after
+        except BaseException as exc:
             conflicts = []
             for name, identity in reversed(installed.items()):
                 target = destination / name
@@ -4458,6 +4520,13 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
                         target.unlink(missing_ok=True)
                 except Exception:
                     conflicts.append(name)
+            for directory in reversed(created):
+                try:
+                    directory.rmdir()
+                except OSError as error:
+                    # An editor or the diagnostics writer may now own entries here.
+                    if error.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+                        conflicts.append(str(directory))
             if conflicts:
                 raise RuntimeError(
                     f"{exc}; rollback preserved concurrent edits or could not restore: "
@@ -4582,7 +4651,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     # a dedicated root.  When that root sits inside the board directory the
     # copy of the board already carries it and the single board-region publish
     # covers it; when it is a sibling, it is staged and published as its own
-    # region with the same change detection and rollback guarantees.
+    # region under the same publication transaction as the editable board.
     declared_root = options.output_root.resolve() if options.output_root is not None else None
     release_region = (
         declared_root
@@ -4748,13 +4817,20 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                     "Release changed while checks were running: " + ", ".join(changes)
                 )
             if options.operation == "generate" and result.exit_code == 0:
-                report_root: Path
+                sibling_release = None
                 if release_region is not None and candidate_release is not None:
-                    _publish_candidate(candidate_release, release_region, release_before)
+                    sibling_release = (candidate_release, release_region, release_before)
                     report_root = release_region / result.report_path.relative_to(candidate_release)
                 else:
                     report_root = original / result.report_path.relative_to(candidate)
-                _publish_candidate(candidate, original, before)
+                _publish_candidate(
+                    candidate,
+                    original,
+                    before,
+                    sibling_release=sibling_release,
+                    receipt=report_root,
+                    external_before=external_before,
+                )
                 return replace(result, report_path=report_root)
             report = result.report
             if options.operation == "generate":
@@ -4771,6 +4847,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 "blockers": [f"Readiness candidate was not published: {exc}"],
                 "checks": [],
             }
+            if options.operation == "generate":
+                report["candidate_not_published"] = True
             result = ReadinessResult(report, diagnostics / "readiness.json", 1)
         report_path = _publish_diagnostics(diagnostic_source, diagnostics, report)
         return replace(result, report_path=report_path)
