@@ -5512,6 +5512,350 @@ def _write_net_class_map_sidecar(
             print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
+#: ``meta`` key recording the exact-name ``netclass_assignments`` the route
+#: step wrote into the sibling ``.kicad_pro`` (Issue #10133): a ``{net_name:
+#: class_name}`` mapping.  A re-run drops an entry only when it still names
+#: the class kct recorded -- an entry the user re-pointed at another class in
+#: KiCad is authored intent and survives untouched.
+KCT_NETCLASS_ASSIGNMENTS_META_KEY = "kct_netclass_assignments"
+
+
+def _assignment_targets(value: object) -> list[str] | None:
+    """Normalise a schema-3 string or schema-4/5 array assignment to ``[cls, ...]``."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    return None
+
+
+def _project_min_clearance_floor(project: dict) -> float:
+    """Minimum clearance floor declared in ``board.design_settings`` (0.0 if unset)."""
+    import math
+
+    board = project.get("board")
+    ds = board.get("design_settings") if isinstance(board, dict) else None
+    if not isinstance(ds, dict):
+        return 0.0
+    floors: list[float] = []
+    rules = ds.get("rules")
+    if isinstance(rules, dict):
+        val = rules.get("min_clearance")
+        if (
+            not isinstance(val, bool)
+            and isinstance(val, (int, float))
+            and math.isfinite(val)
+            and val > 0
+        ):
+            floors.append(float(val))
+    defaults = ds.get("defaults")
+    if isinstance(defaults, dict):
+        val = defaults.get("clearance_min")
+        if (
+            not isinstance(val, bool)
+            and isinstance(val, (int, float))
+            and math.isfinite(val)
+            and val > 0
+        ):
+            floors.append(float(val))
+    return max(floors, default=0.0)
+
+
+def _write_netclasses_to_project(
+    output_path: Path,
+    net_class_map: dict | None,
+    quiet: bool = False,
+    loaded_net_class_map: dict | None = None,
+    via_drill: float | None = None,
+) -> None:
+    """Declare the classes the router routed with in the sibling ``.kicad_pro``.
+
+    Issue #10133: the router classifies every net and serializes the result
+    to the ``<stem>.net_class_map.json`` sidecar, but nothing told KiCad --
+    the project's ``net_settings`` kept a flat ``Default``, so Board Setup
+    showed classes unrelated to the copper and KiCad's own DRC did not know
+    the intended widths.  This writes one ``net_settings.classes`` entry per
+    router class actually used -- ``track_width``, ``clearance`` (floored at
+    the project's ``board.design_settings`` minimum clearance, matching what
+    ``ClearanceResolver`` actually enforces) and ``via_diameter`` from the
+    router's :class:`~kicad_tools.router.rules.NetClassRouting` -- and assigns
+    each routed net by exact name in ``net_settings.netclass_assignments``
+    (never ``netclass_patterns``, where KiCad's regex/wildcard evaluation
+    causes ``.``, ``+``, ``(``, ``)``, ``*`` and ``?`` in net names to match
+    unrelated nets or fail pattern validation; see #10122).  GND and power
+    rails land in their own dedicated classes because the classifier gives
+    them non-``Default`` classes ("Ground", "Power", ...).
+
+    Authored intent always wins, through the existing merge helpers:
+
+    * :func:`~kicad_tools.core.project_file.add_netclass_definition` merges
+      into a same-named class -- only the passed keys are written and the
+      four floor keys keep the larger value (#7385) -- so hand-authored
+      classes, colours and diff-pair keys survive verbatim.  Note that
+      ``keep_stricter=True`` is one-directional: if a user lowers a floor key
+      on a kct-declared class below the router's value, a later route raises
+      it back to the router's floor;
+    * a net a hand-authored pattern or explicit assignment already
+      classifies keeps its authored class (the #6390 rule).  Provenance under
+      ``meta.kct_netclass_assignments`` records ``{net: class_name}`` so a
+      re-run drops only assignments that still carry kct's own class (along
+      with unedited #6390 ``meta.kct_router_netclasses`` assignments) -- an
+      entry the user re-pointed at another class in KiCad survives untouched,
+      while unedited kct assignments are refreshed idempotently.
+
+    Non-fatal exactly like the sidecar writes: a missing ``.kicad_pro``, a
+    read-only directory, an unreadable project or an authored netclass block
+    that cannot be evaluated safely each degrade to a warning and never fail
+    the route.  A kct-stamped project (#6390 AC5) is re-stamped after the
+    merge so the renamed-output conflict check still recognises it; a
+    hand-authored project is never stamped here.  A no-op merge (identical
+    bytes) leaves the file untouched.
+
+    Args:
+        output_path: Path to the routed PCB file; the project is its
+            ``.kicad_pro`` sibling.
+        net_class_map: The autorouter's ``{net_name: NetClassRouting}`` map.
+            Empty/``None`` writes nothing, mirroring the sidecar writer.
+        quiet: If True, suppress the confirmation and warning lines.
+        loaded_net_class_map: The user's loaded ``--net-class-map`` entries,
+            merged over ``net_class_map`` -- the same effective map the
+            sidecar and DRC-constraint writes use (#4428 round-trip
+            fidelity).
+        via_drill: The board-wide via drill the router actually drills
+            (``router.rules.via_drill``; ``NetClassRouting`` carries only the
+            diameter), written as newly-created classes' ``via_drill``.
+            ``None`` leaves the helper default / authored value in place.
+    """
+    import json
+    import math
+
+    from kicad_tools.core.project_clearance import netclass_assignment_value
+    from kicad_tools.core.project_file import (
+        add_netclass_definition,
+        get_net_settings,
+        load_project,
+        save_project,
+    )
+
+    effective_map = dict(net_class_map or {})
+    if loaded_net_class_map:
+        effective_map.update(loaded_net_class_map)
+    if not effective_map:
+        return
+
+    project_path = output_path.with_suffix(".kicad_pro")
+    if not project_path.exists():
+        if not quiet:
+            print(
+                f"  Warning: no {project_path.name} beside the routed board; "
+                "net classes not written to the project"
+            )
+        return
+
+    try:
+        project = load_project(project_path)
+    except (OSError, ValueError) as e:
+        if not quiet:
+            print(f"  Warning: could not read {project_path.name}: {e}")
+        return
+
+    from kicad_tools.manufacturers.project_generator import (
+        _authored_netclass_members,
+        board_net_names,
+        is_kct_owned_project,
+        router_netclass_provenance,
+        stamp_kct_project,
+    )
+
+    # Re-stamp decision taken BEFORE mutating: only a project whose stamp
+    # currently validates stays kct-owned across this write.  Stamping a
+    # hand-authored project here would let a later renamed-output route
+    # overwrite the user's project silently.
+    restamp = is_kct_owned_project(project)
+
+    # Drop the exact-name assignments a previous route recorded ONLY when they
+    # still carry the class kct wrote; an entry whose target class the user
+    # changed in KiCad stays in place so _authored_netclass_members preserves it.
+    meta = project.get("meta")
+    raw_record = (
+        meta.pop(KCT_NETCLASS_ASSIGNMENTS_META_KEY, None) if isinstance(meta, dict) else None
+    )
+    recorded: dict[str, str] = (
+        {
+            net: cls_name
+            for net, cls_name in raw_record.items()
+            if isinstance(net, str) and isinstance(cls_name, str) and cls_name
+        }
+        if isinstance(raw_record, dict)
+        else {}
+    )
+
+    settings_raw = project.get("net_settings")
+    raw_assignments = (
+        settings_raw.get("netclass_assignments") if isinstance(settings_raw, dict) else None
+    )
+    assignments_mutated = False
+    if isinstance(raw_assignments, dict):
+        for net, recorded_cls in recorded.items():
+            if net in raw_assignments and _assignment_targets(raw_assignments[net]) == [
+                recorded_cls
+            ]:
+                raw_assignments.pop(net, None)
+                assignments_mutated = True
+
+        # kct's own #6390 assignments (_write_drc_constraint_sidecars) are not
+        # authored intent either, provided they were not hand-edited to a
+        # different class.
+        r_classes, r_nets = router_netclass_provenance(project)
+        r_owned_classes = set(r_classes)
+        for net in r_nets:
+            if net in recorded or net not in raw_assignments:
+                continue
+            targets = _assignment_targets(raw_assignments[net])
+            expected_cls = str(getattr(effective_map.get(net), "name", "") or "")
+            if (
+                targets is not None
+                and len(targets) == 1
+                and (targets[0] in r_owned_classes or (expected_cls and targets[0] == expected_cls))
+            ):
+                raw_assignments.pop(net, None)
+                assignments_mutated = True
+
+    # Only nets the board actually carries (the #6390 filter): a loaded user
+    # map may name nets that are not on this board.
+    board_nets = board_net_names(output_path)
+    names = set(effective_map) if board_nets is None else set(effective_map) & board_nets
+    names.discard("")
+
+    assigned: dict[str, str] = {}
+    declared: list[str] = []
+    if names:
+        try:
+            authored = _authored_netclass_members(project, sorted(names))
+        except ValueError as e:
+            # The authored netclass block cannot be evaluated safely: kct
+            # must not guess which nets it classifies (#6390 rule).  Leave
+            # the existing project untouched on disk.
+            if not quiet:
+                print(
+                    f"  Warning: net classes not assigned in {project_path.name}: "
+                    f"authored netclasses cannot be evaluated safely ({e})"
+                )
+            return
+
+        min_clearance_floor = _project_min_clearance_floor(project)
+        existing_classes_list = (
+            settings_raw.get("classes") if isinstance(settings_raw, dict) else None
+        ) or []
+        existing_class_names = {
+            c.get("name")
+            for c in existing_classes_list
+            if isinstance(c, dict) and isinstance(c.get("name"), str)
+        }
+        default_cls = next(
+            (
+                c
+                for c in existing_classes_list
+                if isinstance(c, dict) and c.get("name") == "Default"
+            ),
+            None,
+        )
+        default_via_drill: float | None = None
+        if isinstance(default_cls, dict):
+            vd = default_cls.get("via_drill")
+            if (
+                not isinstance(vd, bool)
+                and isinstance(vd, (int, float))
+                and math.isfinite(vd)
+                and vd > 0
+            ):
+                default_via_drill = float(vd)
+
+        # A class the map gives two values keeps the stricter (larger) one --
+        # the #6390 clearance rule, applied to every floor this write owns.
+        classes: dict[str, dict[str, float]] = {}
+        members: dict[str, list[str]] = {}
+        for net in sorted(names):
+            routing = effective_map[net]
+            class_name = str(getattr(routing, "name", "") or "")
+            if not class_name or class_name == "Default":
+                continue
+            if net in authored:
+                continue
+            agg = classes.setdefault(class_name, {"width": 0.0, "clearance": 0.0, "via": 0.0})
+            agg["width"] = max(agg["width"], float(getattr(routing, "trace_width", 0.0) or 0.0))
+            agg["clearance"] = max(
+                agg["clearance"], float(getattr(routing, "clearance", 0.0) or 0.0)
+            )
+            agg["via"] = max(agg["via"], float(getattr(routing, "via_size", 0.0) or 0.0))
+            members.setdefault(class_name, []).append(net)
+
+        if classes:
+            settings = get_net_settings(project)
+            current_assignments = settings.get("netclass_assignments")
+            assignments: dict[str, object] = (
+                dict(current_assignments) if isinstance(current_assignments, dict) else {}
+            )
+            for class_name in sorted(classes):
+                agg = classes[class_name]
+                cls_via_drill = (
+                    via_drill
+                    if via_drill is not None
+                    else (None if class_name in existing_class_names else default_via_drill)
+                )
+                clearance_val = max(agg["clearance"], min_clearance_floor)
+                add_netclass_definition(
+                    project,
+                    class_name,
+                    track_width=agg["width"] if agg["width"] > 0 else None,
+                    clearance=clearance_val if clearance_val > 0 else None,
+                    via_diameter=agg["via"] if agg["via"] > 0 else None,
+                    via_drill=cls_via_drill,
+                )
+                declared.append(class_name)
+                for net in members[class_name]:
+                    assignments[net] = netclass_assignment_value(settings, class_name)
+                    assigned[net] = class_name
+            settings["netclass_assignments"] = dict(sorted(assignments.items()))
+        elif (
+            assignments_mutated
+            and isinstance(settings_raw, dict)
+            and isinstance(raw_assignments, dict)
+        ):
+            settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
+    elif (
+        assignments_mutated and isinstance(settings_raw, dict) and isinstance(raw_assignments, dict)
+    ):
+        settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
+
+    if assigned:
+        project.setdefault("meta", {})[KCT_NETCLASS_ASSIGNMENTS_META_KEY] = dict(
+            sorted(assigned.items())
+        )
+    if restamp:
+        stamp_kct_project(project)
+
+    payload = json.dumps(project, indent=2)
+    try:
+        if payload == project_path.read_text(encoding="utf-8"):
+            return  # nothing changed -- leave the file (and its mtime) alone
+    except OSError:
+        pass
+    try:
+        save_project(project, project_path)
+    except OSError as e:
+        # Non-fatal: a blocked / read-only output directory must not fail
+        # the route.
+        if not quiet:
+            print(f"  Warning: could not write net classes to {project_path.name}: {e}")
+        return
+    if not quiet and assigned:
+        print(
+            f"  Net classes written to project: {project_path.name} "
+            f"({', '.join(sorted(set(declared)))})"
+        )
+
+
 def _write_routing_plan_sidecar(
     output_path: Path,
     routing_plan: "RoutingPlan | None",
@@ -6684,6 +7028,21 @@ def run_post_route_drc(
         coupled_pairs=_coupled_pairs,
         pair_gaps=_router_pair_gaps(_coupled_pairs, _effective_class_map or None, router),
         edge_clearance=edge_clearance,
+    )
+
+    # Issue #10133: declare the classes the router routed with in the
+    # project's ``net_settings`` (one class per used router class plus one
+    # exact-name ``netclass_assignments`` entry per routed net), so KiCad's
+    # Board Setup and native DRC see the widths the copper actually uses.
+    # Deliberately AFTER the constraint sidecars above: they create / stage /
+    # merge the destination ``.kicad_pro``, and this merge must land in the
+    # final file rather than be clobbered by -- or trip the conflict check of
+    # -- the staged regeneration.
+    _write_netclasses_to_project(
+        output_path,
+        _effective_class_map or None,
+        quiet=quiet,
+        via_drill=getattr(getattr(router, "rules", None), "via_drill", None),
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
