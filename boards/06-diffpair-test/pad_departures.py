@@ -1536,6 +1536,7 @@ class _J1UsbEscape:
     old_via_branch: tuple[XY, ...]
     old_inner_tie: tuple[XY, ...]
     new_trunk: tuple[XY, ...]
+    new_inner_tie: tuple[XY, ...]
 
 
 _J1_USB_EXITS = (
@@ -1548,7 +1549,9 @@ _J1_USB_EXITS = (
         ((0, 0), (0.2975, 0.2975), (0.2975, 0.8161), (-0.5025, 1.6161), (-0.5025, 8.8525)),
         ((0, 0), (0, 0.15), (-0.3, 0.45), (-0.3, 0.50)),
         ((-0.3, 0.50), (0.2, 0.50), (1.15, 1.45), (1.55, 1.45)),
-        ((0, 0), (0, 0.70), (0.15, 0.85), (-0.5025, 1.5025), (-0.5025, 8.8525)),
+        ((0, 0), (0, 0.70), (0.12, 0.82), (-0.5025, 1.4425), (-0.5025, 8.8525)),
+        # Leave the positive barrel horizontally on In1 to clear the negative barrel.
+        ((0, 0.70), (0.80, 0.70), (1.55, 1.45)),
     ),
     _J1UsbEscape(
         "A7",
@@ -1578,13 +1581,14 @@ _J1_USB_EXITS = (
         (
             (0, 0),
             (0, 0.70),
-            (-0.445, 1.145),
-            (-0.445, 1.445),
+            (-0.54, 1.24),
+            (-0.54, 1.54),
             (-1, 2),
             (-1, 2.65),
             (-1.0975, 2.7475),
             (-1.0975, 9.0225),
         ),
+        ((-0.54, 1.24), (-0.45, 1.33), (-0.45, 2.55)),
     ),
 )
 
@@ -1592,7 +1596,7 @@ _J1_USB_EXITS = (
 def _stage_j1_usb_escape(
     pcb: PCB, escape: _J1UsbEscape, protected: set[str], rules: DesignRules
 ) -> tuple[list[Segment], Via] | None:
-    """Move the A barrel into its straight launch while keeping every external contact."""
+    """Move the A barrel onto the front escape while keeping every external contact."""
     fp = pcb.get_footprint("J1")
     if (
         fp is None
@@ -1696,17 +1700,17 @@ def _stage_j1_usb_escape(
     if len(before.components()) != 1:
         return None
     contacts, ends = _external_contacts(before, original, edited, via_index)
-    new_seat = at(escape.new_trunk[1])
+    new_seat = at(escape.new_inner_tie[0])
     if pcb.remove_segments(edited) != len(edited) or not pcb.relocate_via(via, new_seat):
         return None
     size.set_value(0, 0.45)
     via.size = 0.45
     added: list[Segment] = []
-    for layer, points in (
-        ("F.Cu", [at(p) for p in escape.new_trunk]),
-        (escape.layer, dogleg_points(*new_seat, *mirror_seat)),
+    for layer, offsets in (
+        ("F.Cu", escape.new_trunk),
+        (escape.layer, escape.new_inner_tie),
     ):
-        for a, b in pairwise(points):
+        for a, b in pairwise(at(p) for p in offsets):
             added.extend(pcb.add_trace(a, b, width=0.25, layer=layer, net=escape.net))
     after = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
     current, current_ends = _external_contacts(after, pcb.segments, added, via_index)

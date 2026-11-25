@@ -294,7 +294,7 @@ def test_j1_usb2_reroutes_both_orientations(mirrored_connector, repair):
     barrels = {(v.net_name, v.position, v.size, v.drill) for v in pcb.vias}
     assert barrels == {
         ("USB2_D+", (14.5, 8.7), 0.45, 0.25),
-        ("USB2_D-", (15.5, 8.7), 0.45, 0.25),
+        ("USB2_D-", (14.96, 9.24), 0.45, 0.25),
         ("USB2_D+", (16.05, 9.45), 0.45, 0.25),
         ("USB2_D-", (15.05, 10.55), 0.45, 0.25),
     }
@@ -346,12 +346,12 @@ def test_j1_usb2_rejects_a_changed_partner(mirrored_connector, repair, control):
     elif control == "foreign copper":
         board = (
             board.rstrip()[:-1]
-            + '(segment (start 15.5 8.7) (end 16.5 8.7) (width 0.2) (layer "In1.Cu") (net 3)))'
+            + '(segment (start 14.96 9.24) (end 15.3 9.24) (width 0.2) (layer "In1.Cu") (net 3)))'
         )
     elif control == "inner tap":
         board = (
             board.rstrip()[:-1]
-            + '(segment (start 14.75 9.2) (end 14.4 9.2) (width 0.15) (layer "In2.Cu") (net 2)))'
+            + '(segment (start 15.55 8.75) (end 15.90 8.75) (width 0.15) (layer "In2.Cu") (net 2)))'
         )
     elif control == "moved B7":
         board = board.replace('(pad "B7" smd rect (at 14.5 10)', '(pad "B7" smd rect (at 14.55 10)')
