@@ -1565,8 +1565,12 @@ class MaskCopperRepairer(CopperGapRepairer):
                 return "exceeds_max_displacement", f"needs {displacement:.4f}mm"
             moving_uuids = {seg_uuid, *(member[0] for member in joined)}
 
-            new_start = start if start == fixed else (start[0] + dx, start[1] + dy)
-            new_end = end if end == fixed else (end[0] + dx, end[1] + dy)
+            # Check the same coordinates that _apply_nudge will write.
+            def shifted(point: tuple[float, float]) -> tuple[float, float]:
+                return round(point[0] + dx, 4), round(point[1] + dy, 4)
+
+            new_start = start if start == fixed else shifted(start)
+            new_end = end if end == fixed else shifted(end)
             moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
                 (
                     copper,
@@ -1589,12 +1593,9 @@ class MaskCopperRepairer(CopperGapRepairer):
                 moves.append(
                     (
                         LineString([join_other, join_end]).buffer(join_width / 2, quad_segs=16),
-                        LineString(
-                            [
-                                join_other,
-                                (join_end[0] + dx, join_end[1] + dy),
-                            ]
-                        ).buffer(join_width / 2, quad_segs=16),
+                        LineString([join_other, shifted(join_end)]).buffer(
+                            join_width / 2, quad_segs=16
+                        ),
                         layer,
                     )
                 )
@@ -2506,12 +2507,14 @@ class MaskCopperRepairer(CopperGapRepairer):
         declines the whole grouped edit. An arc or pad whose shape cannot be
         modelled declines when it is anywhere near a reshaped leg.
         """
-        olds = [old for old, _new, _layer in moves]
-        news = [new for _old, new, _layer in moves]
-        reach = unary_union([old.buffer(_TOLERANCE_MM) for old in olds])
-        # Contact kept only if the new copper still overlaps by more than the
-        # editor's four-decimal rounding grid.
-        shrunk = [new.buffer(-0.0002) for new in news]
+        # Extending a straight leg can retain its entire old copper polygon,
+        # including a tangent contact at the fixed end. Shrinking that cap
+        # would manufacture a gap. Apply the rounding margin to legs that
+        # actually give up copper.
+        receding = [(old, new.buffer(-0.0002)) for old, new, _layer in moves if not new.covers(old)]
+        if not receding:
+            return False
+        reach = unary_union([old.buffer(_TOLERANCE_MM) for old, _kept in receding])
         neighbours: list[BaseGeometry] = []
         for uuid, node in self._segment_nodes().items():
             if uuid in moving or self._net_name(node) != net_name:
@@ -2576,7 +2579,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         for neighbour in neighbours:
             if not reach.intersects(neighbour):
                 continue
-            for old, kept in zip(olds, shrunk, strict=True):
+            for old, kept in receding:
                 if old.intersects(neighbour) and not kept.intersects(neighbour):
                     return True
         return False
