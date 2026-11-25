@@ -382,6 +382,10 @@ def run_check_command(args) -> int:
     # guard in tests/test_cli_parser_drift.py now pins all three.
     if getattr(args, "refill_zones", False):
         sub_argv.append("--refill-zones")
+    # Issue #10137: forward the pour-stub proof opt-in (inner parser only
+    # otherwise; the parser-drift guard pins it).
+    if getattr(args, "prove_pour_stubs", False):
+        sub_argv.append("--prove-pour-stubs")
     if getattr(args, "courtyard_waivers", None):
         sub_argv.extend(["--courtyard-waivers", args.courtyard_waivers])
     if getattr(args, "waivers", None):
@@ -396,6 +400,9 @@ def run_check_command(args) -> int:
         sub_argv.append("--pad-grid-strict")
     if getattr(args, "pad_grid_tolerance", None) is not None:
         sub_argv.extend(["--pad-grid-tolerance", str(args.pad_grid_tolerance)])
+    # Issue #10141: forward the bypass_distance maximum (None -> inner default).
+    if getattr(args, "bypass_max_distance", None) is not None:
+        sub_argv.extend(["--bypass-max-distance", str(args.bypass_max_distance)])
     # Issue #4595: forward the sch_fields lint threshold.  The outer parser
     # defaults it to None so the inner check_cmd parser's default (15.0mm)
     # stays the single source of truth.

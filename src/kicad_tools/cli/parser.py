@@ -1136,6 +1136,15 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument(
+        "--prove-pour-stubs",
+        dest="prove_pour_stubs",
+        action="store_true",
+        help=(
+            "Prove redundant_copper_pour_stub findings with a native kicad-cli "
+            "zone refill per candidate branch (Issue #10137; slow, off by default)"
+        ),
+    )
+    check_parser.add_argument(
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
@@ -1398,6 +1407,20 @@ def _add_check_parser(subparsers) -> None:
             "Override the pad_grid L2 tolerance with an explicit value "
             "in mm (e.g. ``--pad-grid-tolerance 0.02``).  Disables "
             "auto-derivation."
+        ),
+    )
+    # Issue #10141: bypass_distance maximum cap-to-designated-pin distance.
+    # Declared on BOTH parsers + forwarded by the shim (parser-drift guard).
+    check_parser.add_argument(
+        "--bypass-max-distance",
+        dest="bypass_max_distance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Maximum distance in mm between a decoupling capacitor's supply "
+            "pad and the pad of the supply pin its schematic designates "
+            "before bypass_distance warns (default 3.0; issue #10141)."
         ),
     )
     # Issue #4595: sch_fields schematic field-geometry lint threshold.
