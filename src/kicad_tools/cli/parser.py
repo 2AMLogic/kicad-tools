@@ -1136,6 +1136,15 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument(
+        "--prove-pour-stubs",
+        dest="prove_pour_stubs",
+        action="store_true",
+        help=(
+            "Prove redundant_copper_pour_stub findings with a native kicad-cli "
+            "zone refill per candidate branch (Issue #10137; slow, off by default)"
+        ),
+    )
+    check_parser.add_argument(
         "--mfr",
         "-m",
         choices=get_all_manufacturer_names(),
