@@ -14,7 +14,12 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.core.atomic_write import remove_retained_copy, retained_copy_board
+from kicad_tools.core.atomic_write import (
+    recovery_copies,
+    recovery_link_target,
+    remove_retained_copy,
+    retained_copy_board,
+)
 
 __all__ = ["main", "CleanResult", "find_cleanable_files"]
 
@@ -234,29 +239,40 @@ def find_cleanable_files(
     # Protect the project file itself
     result.to_keep.append(ProtectedFile(project_path, "project file"))
 
-    # Scan directory for cleanable files
-    protected_names = {p.path.name for p in result.to_keep}
-
-    for file_path in project_dir.iterdir():
-        if file_path.is_dir():
-            # Retained recovery copies of checked rewrites (#10056): the
-            # displaced previous board, kept recoverable beside the live file.
-            recovery = retained_copy_board(file_path)
-            if recovery is not None:
-                try:
-                    size = _recovery_size(file_path)
-                except OSError:
-                    size = 0
-                result.to_delete.append(
-                    CleanableFile(
-                        path=file_path,
-                        category="recovery_copy",
-                        reason=f"retained PCB recovery for {recovery.name}",
-                        size_bytes=size,
-                    )
-                )
+    entries = list(project_dir.iterdir())
+    records = recovery_copies(project_dir / main_pcb) if main_pcb else []
+    linked_sources = set()
+    if main_pcb and (main_board := project_dir / main_pcb).is_symlink() and main_board.is_file():
+        linked_sources.add(main_board.resolve())
+    for record in records:
+        recovery = retained_copy_board(record)
+        if recovery is None:
             continue
+        source = recovery_link_target(record)
+        if source is not None and source.is_file():
+            linked_sources.add(source.resolve())
+        try:
+            size = _recovery_size(record)
+        except OSError:
+            size = 0
+        result.to_delete.append(
+            CleanableFile(
+                record, "recovery_copy", f"retained PCB recovery for {recovery.name}", size
+            )
+        )
+    # Another board's recovery still needs its live board for discovery.
+    selected_records = set(records)
+    other_boards = {
+        board
+        for entry in entries
+        if entry not in selected_records and (board := retained_copy_board(entry)) is not None
+    }
+    for board in sorted(other_boards):
+        result.to_keep.append(ProtectedFile(board, "board with separate recovery copies"))
 
+    # Apply the general cleanup rules after protecting the linked sources.
+    protected_names = {p.path.name for p in result.to_keep}
+    for file_path in entries:
         if not file_path.is_file():
             continue
 
@@ -264,6 +280,9 @@ def find_cleanable_files(
 
         # Skip protected files
         if filename in protected_names:
+            continue
+        if linked_sources and file_path.resolve() in linked_sources:
+            result.to_keep.append(ProtectedFile(file_path, "source of linked PCB"))
             continue
 
         # Check for old PCB versions
@@ -516,13 +535,21 @@ def delete_files(result: CleanResult, verbose: bool = False) -> tuple[int, int]:
     """
     deleted = 0
     freed = 0
+    selected = result.project_dir / (result.project_name + ".kicad_pcb")
 
     for f in result.to_delete:
         try:
             if f.category == "recovery_copy":
-                if not remove_retained_copy(f.path):
+                # A linked board can change between preview and deletion.
+                if not remove_retained_copy(f.path, selected_board=selected):
                     continue
             else:
+                if (
+                    f.category == "pcb_version"
+                    and selected.is_symlink()
+                    and f.path.resolve() == selected.resolve()
+                ):
+                    continue
                 f.path.unlink()
             deleted += 1
             freed += f.size_bytes

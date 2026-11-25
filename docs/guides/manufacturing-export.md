@@ -619,7 +619,14 @@ kct clean boards/04-stm32-devboard/04-stm32-devboard.kicad_pro --force
 ```
 
 `kct clean` lists completed recovery copies in its default dry run and
-deletes them with `--force` while the board exists. The writer reserves
+deletes them with `--force` while the board exists. If the project's PCB
+is a symlink, export retains the previous version beside the source board.
+Cleanup from the project finds that source's copies when the source is
+inside the project directory tree. For a source outside the project,
+run cleanup on the source project. The recovery API and cleanup preview
+order copies by their marker timestamps, with names breaking ties.
+
+The writer reserves
 the `complete` marker before moving the board. The copy becomes eligible
 for cleanup once the writer verifies the new board and removes its working
 link, `repaired`. A completed rollback renames that link to `provisional`
