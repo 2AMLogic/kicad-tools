@@ -5034,6 +5034,22 @@ class TestCopperDedup:
         assert before == after
 
 
+@pytest.mark.parametrize(
+    "token,locked", [("(locked yes)", True), ("locked", True), ("(locked no)", False), ("", False)]
+)
+def test_via_lock_survives_rebuilding_the_node(token, locked):
+    from kicad_tools.schema.pcb import Via
+    from kicad_tools.sexp import parse_string
+
+    via = Via.from_sexp(
+        parse_string(
+            f'(via {token} (at 6 5) (size 0.7) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))'
+        )
+    )
+    assert via.locked is locked
+    assert Via.from_sexp(via.to_sexp()).locked is locked
+
+
 class TestViaTentingRoundTrip:
     """Per-via and setup-level ``(tenting ...)`` parsing + round-trip (#4624).
 
