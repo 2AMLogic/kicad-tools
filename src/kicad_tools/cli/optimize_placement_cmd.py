@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Callable, ParamSpec, Sequence, TypeVar
 import numpy as np
 
 from kicad_tools.cli.format_options import emit_json
+from kicad_tools.cli.placement_options import DEFAULT_DECOUPLING_RADIUS_MM
 from kicad_tools.placement.cost import (
     BoardOutline,
     ComponentPlacement,
@@ -57,6 +58,7 @@ from kicad_tools.placement.cost import (
 )
 from kicad_tools.placement.decoupling import (
     DecouplingGroup,
+    SchematicCapAssociation,
     SnapMove,
     apply_cap_associations,
     decoupling_pairs,
@@ -93,6 +95,7 @@ from kicad_tools.placement.writeback import write_footprint_placements
 
 if TYPE_CHECKING:
     from kicad_tools.cli.export_netlist import Component as NetlistComponent
+    from kicad_tools.schema.pcb import PCB
 
 # Placement grid for slide-off displacements on a ``--seed current`` warm
 # start (issue #6250). Matches the decoupling snap's grid and board 04's
@@ -426,10 +429,6 @@ def _read_local_courtyards(pcb_path: str) -> dict[str, tuple[float, float, float
     return out
 
 
-DEFAULT_DECOUPLING_RADIUS_MM = 6.0
-"""Furthest supply-pad-to-pin distance the decoupling snap tries (mm)."""
-
-
 def _read_cap_values(pcb_path: str) -> dict[str, float]:
     """``reference -> farads`` for every footprint whose value is a capacitance."""
     from kicad_tools.schema.pcb import PCB as SchemaPCB
@@ -440,6 +439,18 @@ def _read_cap_values(pcb_path: str) -> dict[str, float]:
         if fp.reference and farads is not None:
             out[fp.reference] = farads
     return out
+
+
+def _schematic_designations(source: Path, *, quiet: bool) -> list[SchematicCapAssociation]:
+    schematic = source.with_suffix(".kicad_sch")
+    if not schematic.is_file():
+        return []
+    try:
+        return schematic_cap_associations(schematic)
+    except Exception as exc:  # an unreadable schematic leaves placement unconstrained
+        if not quiet:
+            print(f"  Decoupling: schematic association skipped ({schematic.name}: {exc})")
+        return []
 
 
 def _associate_from_schematic(
@@ -454,15 +465,10 @@ def _associate_from_schematic(
     layout). Without one, or when it cannot be read, *groups* come back as
     given and the pairing stays distance-greedy.
     """
-    schematic = Path(pcb_path).with_suffix(".kicad_sch")
-    if not schematic.is_file():
+    designations = _schematic_designations(Path(pcb_path), quiet=quiet)
+    if not designations:
         return groups
-    try:
-        associated = apply_cap_associations(groups, schematic_cap_associations(schematic))
-    except Exception as exc:  # a schematic we cannot read must not stop placement
-        if not quiet:
-            print(f"  Decoupling: schematic association skipped ({schematic.name}: {exc})")
-        return groups
+    associated = apply_cap_associations(groups, designations)
     n = sum(len(g.associated) for g in associated)
     if n and not quiet:
         print(f"  Decoupling: {n} cap(s) paired to the pin their schematic designates")
@@ -499,6 +505,59 @@ def _build_decoupling_context(
     return groups
 
 
+def designated_decoupling_groups(source: Path, pcb: PCB, *, quiet: bool) -> list[DecouplingGroup]:
+    """Resolve exact cap/pin pairs, keeping missing board pads visible to validation."""
+    groups = []
+    for association in _schematic_designations(source, quiet=quiet):
+        cap, pin = association.cap, association.pin
+        if pin is None:
+            continue
+        # Escape lanes use the PCB net name, which may differ from a hierarchical label.
+        footprint = pcb.get_footprint(cap.reference)
+        net = association.net
+        if footprint:
+            net = next((p.net_name for p in footprint.pads if p.number == cap.supply_pad), net)
+        groups.append(DecouplingGroup(net, (cap,), (pin,), ((cap.reference, pin),)))
+    return groups
+
+
+def snap_and_check_designated_caps(
+    candidate: Path, groups: Sequence[DecouplingGroup], fixed_refs: set[str], radius_mm: float
+) -> list[str]:
+    """Snap only movable designated caps, then validate every designated pad on disk."""
+    if not groups:
+        return []
+    movable = {ref for group in groups for ref, _ in group.associated} - fixed_refs
+    if movable:
+        path = str(candidate)
+        components, nets, board, rules, origin = _read_board_data(path)
+        vector, moves = snap_decoupling(
+            _read_current_vector(path, components),
+            path,
+            components,
+            nets,
+            rules,
+            board,
+            PlacementCostConfig(),
+            _build_footprint_sizes(components),
+            groups,
+            fixed_refs=fixed_refs,
+            flippable_refs=movable,
+            max_radius_mm=radius_mm,
+        )
+        if moves:
+            _write_placements_to_pcb(
+                path,
+                path,
+                vector,
+                components,
+                origin,
+                flippable_refs=movable,
+                only_refs={move.cap for move in moves},
+            )
+    return _designated_cap_violations(candidate, groups, radius_mm)
+
+
 def snap_decoupling(
     vector: PlacementVector,
     pcb_path: str,
@@ -512,6 +571,7 @@ def snap_decoupling(
     *,
     fixed_sides: Sequence[int] | None = None,
     flippable_refs: Collection[str] = (),
+    fixed_refs: Collection[str] = (),
     ref_domains: dict[str, str] | None = None,
     required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
     exempt_pairs: set[frozenset[str]] | None = None,
@@ -572,6 +632,7 @@ def snap_decoupling(
         max_radius_mm=max_radius_mm,
         cap_values=_read_cap_values(pcb_path),
         allow_flip=flippable_refs,
+        fixed_refs=fixed_refs,
     )
 
 
@@ -843,6 +904,13 @@ def _designated_cap_violations(
                 errors.append(
                     f"{ref} is on {cap.layer} but its designated pin {name} is on {ic.layer}"
                 )
+            supply = next(pad for pad in cap.pads if pad.number == caps[ref].supply_pad)
+            target = next(pad for pad in ic.pads if pad.number == pin.pad)
+            side_layers = {ic.layer, "*.Cu", "F&B.Cu"}
+            if side_layers.isdisjoint(supply.layers):
+                errors.append(f"{ref}.{supply.number} has no copper on {ic.layer} for {name}")
+            if side_layers.isdisjoint(target.layers):
+                errors.append(f"{name} has no copper on {ic.layer} for {ref}.{supply.number}")
             distance = math.dist(cap_pad, ic_pad)
             if distance > radius_mm + 1e-9:
                 errors.append(f"{ref} is {distance:.3f} mm from {name}, limit {radius_mm:g} mm")
@@ -853,9 +921,9 @@ def _designated_cap_violations(
         ordered = sorted(values)
         for index, (larger, distance, ref) in enumerate(ordered):
             for smaller, other_distance, other_ref in ordered[:index]:
-                if smaller < larger and other_distance > distance + 1e-9:
+                if smaller < larger and other_distance >= distance - 1e-9:
                     errors.append(
-                        f"{other_ref} has a smaller capacitance than {ref} but is farther from {name}"
+                        f"{other_ref} has a smaller capacitance than {ref} but is not closer to {name}"
                     )
     return errors
 
@@ -1421,6 +1489,7 @@ def _write_placements_to_pcb(
     board_origin: tuple[float, float] = (0.0, 0.0),
     *,
     flippable_refs: Collection[str] = (),
+    only_refs: Collection[str] | None = None,
 ) -> None:
     """Write optimized placements back to a .kicad_pcb file.
 
@@ -1457,7 +1526,7 @@ def _write_placements_to_pcb(
                 (p.rotation + 180) % 360 if p.reference in flip_refs else p.rotation,
             )
             for p in placed
-            if p.reference not in locked
+            if p.reference not in locked and (only_refs is None or p.reference in only_refs)
         ),
         flip_refs=flip_refs,
     )

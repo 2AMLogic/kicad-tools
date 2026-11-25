@@ -701,6 +701,7 @@ def snap_decoupling_caps(
     escape_halo_mm: float = 0.35,
     cap_values: Mapping[str, float] | None = None,
     allow_flip: bool | Collection[str] = False,
+    fixed_refs: Collection[str] = (),
 ) -> tuple[PlacementVector, list[SnapMove]]:
     """Move each decoupling cap to the nearest free spot beside its pin.
 
@@ -725,23 +726,16 @@ def snap_decoupling_caps(
       blocks the trace that has to leave that pin; pads on the cap's own
       supply net, on ground, or on no net have nothing to escape; and
     * adds no hard-constraint violation under *score_fn* (overlap, DRC,
-      boundary, block, creepage), lowers the decoupling term, and does not
-      worsen :func:`compute_pin_coverage` -- moving a cap onto its assigned
-      pin must not strand a neighbouring pin it was already serving.
+      boundary, block, creepage). Ordinary moves lower the decoupling term
+      and preserve :func:`compute_pin_coverage`.
 
-    Side and value order (issue #10142): a cap belongs on its IC's side of the
-    board. With *allow_flip* a cap on the other side is moved onto the IC's
-    side (the one case a cap may end farther from the pin than it started, as
-    long as the decoupling term does not get worse). With a collection, only its named caps may flip.
-    Other caps keep their side. With *cap_values*, caps sharing a pin are
-    snapped smallest first and a larger
-    cap never ends nearer to the pin than a smaller one on it.
+    With *allow_flip*, a cap can move onto its IC's side. A collection limits
+    flips to the named caps. With *cap_values*, caps sharing a pin are snapped
+    smallest first. Fixing a required side or value order can increase distance.
 
     Wirelength is deliberately not a gate: a cap that moves onto its pin
     stretches the ground net's bounding box a little, and that trade is the
-    point of the rule. A cap only ever moves closer to its pin; one with no
-    such candidate stays where it is, so the pass never adds a violation
-    and never undoes a tight hand placement.
+    point of the rule. A cap stays in place when no legal candidate is found.
 
     Args:
         vector: :class:`~kicad_tools.placement.vector.PlacementVector`.
@@ -773,6 +767,7 @@ def snap_decoupling_caps(
         cap_values: ``cap reference -> farads``. Enables the smallest-closest
             ordering; caps missing from the map are not ordered.
         allow_flip: Allow all caps, or only the named caps, to flip to their IC side.
+        fixed_refs: Leave these caps in place and include them in value ordering.
 
     Returns:
         ``(new_vector, moves)``.
@@ -827,14 +822,19 @@ def snap_decoupling_caps(
             for i, t in zip(idxs, ordered, strict=True):
                 reordered[i] = t
         pairs = reordered
-    # (value, final distance) of every cap already handled, per pin.
+    # Seed value ordering with the caps that cannot move.
     handled: dict[SupplyPin, list[tuple[float, float]]] = defaultdict(list)
 
-    radii = [i * step_mm for i in range(int(round(max_radius_mm / step_mm)) + 1)]
+    for _, cap, pin, distance in pairs:
+        if cap.reference in fixed_refs and cap_values and cap.reference in cap_values:
+            handled[pin].append((cap_values[cap.reference], distance))
+
     angles = [2 * math.pi * k / directions for k in range(directions)]
     moves: list[SnapMove] = []
 
     for net, cap, pin, before in pairs:
+        if cap.reference in fixed_refs:
+            continue
         ci = index.get(cap.reference)
         pin_i = index.get(pin.reference)
         if ci is None or pin_i is None:
@@ -908,10 +908,25 @@ def snap_decoupling_caps(
             (dist for v, dist in handled[pin] if value is not None and v < value),
             default=None,
         )
+        ceiling = min(
+            (dist for v, dist in handled[pin] if value is not None and v > value),
+            default=None,
+        )
+        named = cap.reference in designated
+        # Meeting a required side or value order can mean moving farther away.
+        move_outward = flip or (named and floor is not None and before <= floor + 1e-6)
         accepted = False
         final = before
-        for d in radii:
-            if d >= before and not flip:
+        # No legal supply pad lies beyond the farthest corner of the board.
+        # Bound the search even when the CLI radius is a very large finite value.
+        farthest = math.hypot(
+            max(abs(pin_pad.x - board.min_x), abs(pin_pad.x - board.max_x)),
+            max(abs(pin_pad.y - board.min_y), abs(pin_pad.y - board.max_y)),
+        )
+        search_radius = min(max_radius_mm, farthest + grid_mm)
+        for step in range(round(search_radius / step_mm) + 1):
+            d = step * step_mm
+            if d >= before and not move_outward:
                 break
             for rot_idx, rot in enumerate(ROTATION_STEPS):
                 off = _transform_pad(supply, 0.0, 0.0, rot, side ^ cap_def.side)
@@ -922,11 +937,13 @@ def snap_decoupling_caps(
                         cx = round(cx / grid_mm) * grid_mm
                         cy = round(cy / grid_mm) * grid_mm
                     after = math.hypot(cx + off.x - pin_pad.x, cy + off.y - pin_pad.y)
-                    if cap.reference in designated and after > max_radius_mm + 1e-9:
+                    if named and after > max_radius_mm + 1e-9:
                         continue
-                    if after >= before and not flip:
+                    if after >= before and not move_outward:
                         continue
                     if floor is not None and after <= floor + 1e-6:
+                        continue
+                    if ceiling is not None and after >= ceiling - 1e-6:
                         continue
                     bb = _pad_bbox(
                         [_transform_pad(p, cx, cy, rot, side ^ cap_def.side) for p in cap_def.pads]
@@ -944,11 +961,10 @@ def snap_decoupling_caps(
                         if flip
                         else score.breakdown.decoupling < best_score.breakdown.decoupling
                     )
-                    if (
-                        violation <= best_violation
-                        and improved
-                        and (cov := coverage(trial)) <= best_coverage + 1e-9
-                    ):
+                    if violation > best_violation or not (improved or (named and move_outward)):
+                        continue
+                    cov = coverage(trial)
+                    if (named and move_outward) or cov <= best_coverage + 1e-9:
                         data, best_score, best_violation = trial, score, violation
                         best_coverage = cov
                         accepted = True

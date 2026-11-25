@@ -89,6 +89,8 @@ def run_placement_command(args) -> int:
             sub_argv.extend(["--population", str(args.population)])
         if args.grid != 0.0:
             sub_argv.extend(["--grid", str(args.grid)])
+        if getattr(args, "decoupling_radius", None) is not None:
+            sub_argv.extend(["--decoupling-radius", str(args.decoupling_radius)])
         if args.fixed:
             sub_argv.extend(["--fixed", args.fixed])
         if getattr(args, "cluster", False):

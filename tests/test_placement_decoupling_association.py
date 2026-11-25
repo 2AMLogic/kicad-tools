@@ -364,3 +364,324 @@ def test_optimize_writes_only_a_feasible_designated_cap(tmp_path, capsys, radius
         row = next(item for item in report["decoupling"] if item["cap"] == "C1")
         assert distance <= radius
         assert row["distance_mm"] == pytest.approx(distance, abs=0.001)
+
+
+@pytest.fixture
+def swapped_board(tmp_path):
+    from tests.test_bypass_distance_rule import _board
+
+    def make(*, c1=61.5, c2=21.5, c1_layer="B.Cu", c1_group_locked=None, u1_pad1=None, **kwargs):
+        path = _board(tmp_path, c1=c1, c2=c2, c1_layer=c1_layer, **kwargs)
+        board = path.read_text().rstrip()[:-1]
+        if u1_pad1 is not None:
+            start = board.index('(pad "1"', board.index('(property "Reference" "U1")'))
+            end = board.index('(pad "2"', start)
+            board = board[:start] + f'(pad "1" {u1_pad1} (net 1 "+3V3"))\n    ' + board[end:]
+        if c1_group_locked is not None:
+            cap = "00000000-0000-4000-8000-000000000001"
+            inner = "00000000-0000-4000-8000-000000000002"
+            outer = "00000000-0000-4000-8000-000000000003"
+            ref = '(property "Reference" "C1")'
+            board = board.replace(ref, f'(uuid "{cap}") {ref}', 1)
+            lock = "(locked yes)" if c1_group_locked else ""
+            board += f'\n(group "inner" (uuid "{inner}") (members "{cap}"))'
+            board += f'\n(group "outer" (uuid "{outer}") {lock} (members "{inner}"))'
+        # Keep U1 locked at a non-cardinal angle and U2 explicitly fixed.
+        board = board.replace("(at 20 10)", "(locked yes) (at 20 10 17)")
+        board = board.replace("(at 60 10)", "(at 60 10 -23)")
+        marker = board.index('(property "Reference" "C2")')
+        board = board[:marker] + board[marker:].replace('"100nF"', '"10uF"')
+        # A resistor at the board edge gives the routing-aware fixer real work.
+        path.write_text(
+            board
+            + """
+          (footprint "R" (layer "F.Cu") (at 0.85 15)
+            (property "Reference" "R1") (property "Value" "10k")
+            (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu")))
+          (gr_rect (start 0 0) (end 80 30) (stroke (width 0.05) (type default))
+            (fill none) (layer "Edge.Cuts")))
+        """
+        )
+        return path
+
+    return make
+
+
+@pytest.fixture(params=[False, True], ids=["ordinary", "routing-aware"])
+def placement_mode(request, monkeypatch):
+    from types import SimpleNamespace
+
+    from kicad_tools.optim.place_route import PlaceRouteOptimizer
+
+    if request.param:
+        # Exercise the real placement/fixer iteration while controlling routing
+        # and DRC outcomes, which are independent of the CLI save contract.
+        def route(self):
+            print("Routing progress")
+            return [], []
+
+        monkeypatch.setattr(PlaceRouteOptimizer, "_run_routing_phase", route)
+        monkeypatch.setattr(
+            PlaceRouteOptimizer, "_run_drc_phase", lambda self: SimpleNamespace(passed=True)
+        )
+        return ["--routing-aware"]
+    return []
+
+
+def _placement_result(capsys, source, mode, *options, fixed="U2"):
+    import json
+
+    from kicad_tools.cli import main
+
+    rc = main(
+        [
+            "placement",
+            "optimize",
+            str(source),
+            "--fixed",
+            fixed,
+            "--iterations",
+            "1",
+            "--format",
+            "json",
+            *mode,
+            *options,
+        ]
+    )
+    return rc, json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("override", [None, "U2.1"])
+def test_placement_optimize_saves_designated_pads(
+    swapped_board, placement_mode, tmp_path, capsys, override
+):
+    from kicad_tools.schema.pcb import PCB
+
+    source = swapped_board(override=override)
+    original = source.read_bytes()
+    before = PCB.load(str(source))
+    output = tmp_path / "placed.kicad_pcb"
+    radius = 4.0 if override else 6.0
+    options = ["--decoupling-radius", str(radius)] if override else []
+    rc, result = _placement_result(capsys, source, placement_mode, "-o", str(output), *options)
+    assert rc == 0 and result["success"], result
+    assert source.read_bytes() == original
+    placed = PCB.load(str(output))
+    distances = []
+    for cap, ic in [("C1", "U2" if override else "U1"), ("C2", "U2")]:
+        fp = placed.get_footprint(cap)
+        assert fp.layer == placed.get_footprint(ic).layer == "F.Cu"
+        assert "F.Cu" in next(p for p in fp.pads if p.number == "1").layers
+        distance = math.dist(placed.get_pad_position(cap, "1"), placed.get_pad_position(ic, "1"))
+        assert distance <= radius
+        distances.append(distance)
+    if override:
+        assert distances[0] < distances[1]
+    for ref in ("U1", "U2"):
+        old, new = before.get_footprint(ref), placed.get_footprint(ref)
+        assert (new.position, new.rotation, new.layer) == (old.position, old.rotation, old.layer)
+    if placement_mode:
+        assert placed.get_footprint("R1").position != before.get_footprint("R1").position
+
+
+@pytest.mark.parametrize("in_place,dry_run", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("constraint", ["fixed-cap", "locked-group", "back-only-pin"])
+def test_placement_optimize_infeasible_preserves_files(
+    swapped_board, placement_mode, tmp_path, capsys, in_place, dry_run, constraint
+):
+    fixed = "C1,U2"
+    if constraint == "locked-group":
+        source = swapped_board(c1_group_locked=True)
+        fixed = "U2"
+    elif constraint == "back-only-pin":
+        source = swapped_board(
+            c1=23, c1_layer="F.Cu", u1_pad1='smd rect (at 0 0) (size 1 1) (layers "B.Cu")'
+        )
+    else:
+        source = swapped_board()
+    original = source.read_bytes()
+    output = tmp_path / "previous.kicad_pcb"
+    output.write_bytes(b"previous destination")
+    options = [] if in_place else ["-o", str(output)]
+    if dry_run:
+        options.append("--dry-run")
+    rc, result = _placement_result(capsys, source, placement_mode, *options, fixed=fixed)
+    assert rc == 1 and not result["success"]
+    assert any("C1" in error and "U1.1" in error for error in result["constraint_violations"])
+    assert result["output_path"] is None
+    assert source.read_bytes() == original
+    assert output.read_bytes() == b"previous destination"
+
+
+def test_placement_optimize_moves_unlocked_group_member_to_through_pin(
+    swapped_board, placement_mode, tmp_path, capsys
+):
+    from kicad_tools.schema.pcb import PCB
+
+    source = swapped_board(
+        c1_group_locked=False,
+        u1_pad1='thru_hole circle (at 0 0) (size 1 1) (drill 0.4) (layers "*.Cu" "*.Mask")',
+    )
+    original = PCB.load(str(source)).get_footprint("C1").position
+    output = tmp_path / "placed.kicad_pcb"
+    rc, result = _placement_result(capsys, source, placement_mode, "-o", str(output))
+    assert rc == 0 and result["success"], result
+    placed = PCB.load(str(output))
+    assert placed.get_footprint("C1").position != original
+    assert math.dist(placed.get_pad_position("C1", "1"), placed.get_pad_position("U1", "1")) <= 6
+
+
+def test_placement_optimize_feasible_dry_run(swapped_board, placement_mode, tmp_path, capsys):
+    source = swapped_board()
+    original = source.read_bytes()
+    output = tmp_path / "absent.kicad_pcb"
+    rc, result = _placement_result(
+        capsys,
+        source,
+        placement_mode,
+        "--dry-run",
+        "-o",
+        str(output),
+        "--decoupling-radius",
+        "1e300",
+    )
+    assert rc == 0 and result["success"]
+    assert source.read_bytes() == original and not output.exists()
+
+
+@pytest.mark.parametrize("aligned", [False, True], ids=["swapped", "feasible"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["save", "dry-run"])
+def test_placement_optimize_keeps_routed_bypass_connections(
+    swapped_board, placement_mode, tmp_path, capsys, aligned, dry_run
+):
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    source = swapped_board(c1=23 if aligned else 66, c2=26, c1_layer="F.Cu")
+    board = PCB.load(str(source))
+    # Only the return pad of C1 is routed. C2 shares both nets but is still free to move.
+    ic = "U1" if aligned else "U2"
+    start = board.get_pad_position("C1", "2")
+    end = board.get_pad_position(ic, "2")
+    board.add_trace(start, end, net="GND", waypoints=[(start[0], 15), (end[0], 15)])
+    board.save(str(source))
+    original = source.read_bytes()
+    output = tmp_path / "placed.kicad_pcb"
+    output.write_bytes(b"previous destination")
+    options = ["--dry-run"] if dry_run else []
+    rc, result = _placement_result(capsys, source, placement_mode, "-o", str(output), *options)
+
+    assert source.read_bytes() == original
+    if not aligned:
+        assert rc == 1 and not result["success"], result
+        assert any("C1" in error and "U1.1" in error for error in result["constraint_violations"])
+    else:
+        assert rc == 0 and result["success"], result
+    if dry_run or not aligned:
+        assert output.read_bytes() == b"previous destination"
+    else:
+        written = PCB.load(str(output))
+        assert written.get_pad_position("C1", "2") == start
+        assert any(
+            {"C1.2", "U1.2"} <= g for g in ConnectivityValidator(written).extract_pad_partition()
+        )
+        assert (
+            math.dist(written.get_pad_position("C2", "1"), written.get_pad_position("U2", "1")) <= 6
+        )
+
+
+def test_placement_optimize_checks_routing_on_the_serialized_candidate(
+    swapped_board, placement_mode, tmp_path, capsys, monkeypatch
+):
+    from kicad_tools.cli import optimize_placement_cmd
+    from kicad_tools.schema.pcb import PCB
+
+    source = swapped_board(c1=23, c2=63, c1_layer="F.Cu")
+    pcb = PCB.load(str(source))
+    pcb.add_trace(("C1", "1"), ("U1", "1"), net="+3V3")
+    pcb.save(str(source))
+    original = source.read_bytes()
+    output = tmp_path / "placed.kicad_pcb"
+    output.write_bytes(b"previous destination")
+    check_pads = optimize_placement_cmd.snap_and_check_designated_caps
+
+    def break_trace(candidate, *args):
+        errors = check_pads(candidate, *args)
+        assert not errors
+        placed = PCB.load(str(candidate))
+        assert placed.remove_segments(placed.segments) == 1
+        placed.save(str(candidate))
+        return errors
+
+    monkeypatch.setattr(optimize_placement_cmd, "snap_and_check_designated_caps", break_trace)
+    rc, result = _placement_result(capsys, source, placement_mode, "-o", str(output))
+    assert rc == 1 and not result["success"]
+    assert any(
+        "routed copper" in error and "C1 to U1.1" in error
+        for error in result["constraint_violations"]
+    )
+    assert source.read_bytes() == original
+    assert output.read_bytes() == b"previous destination"
+
+
+def test_placement_optimize_no_designations(swapped_board, placement_mode, tmp_path, capsys):
+    from kicad_tools.schema.pcb import PCB
+
+    source = swapped_board(with_schematic=False)
+    output = tmp_path / "placed.kicad_pcb"
+    rc, result = _placement_result(
+        capsys, source, placement_mode, "-o", str(output), "--decoupling-radius", "0"
+    )
+    assert rc == 0 and result["success"]
+    placed = PCB.load(str(output))
+    assert placed.get_footprint("C1").layer == "B.Cu"
+    assert math.dist(placed.get_pad_position("C1", "1"), placed.get_pad_position("U1", "1")) > 6
+
+
+def test_placement_optimize_larger_cap_clears_fixed_smaller_cap(
+    swapped_board, placement_mode, tmp_path, capsys
+):
+    from kicad_tools.schema.pcb import PCB
+
+    # The 100 nF cap is fixed 3 mm from U2.1. The 10 uF cap must move outward.
+    source = swapped_board(override="U2.1", c1=63.5, c2=61.5, c1_layer="F.Cu")
+    output = tmp_path / "placed.kicad_pcb"
+    rc, result = _placement_result(capsys, source, placement_mode, "-o", str(output), fixed="C1,U2")
+    assert rc == 0 and result["success"], result
+    placed = PCB.load(str(output))
+    pin = placed.get_pad_position("U2", "1")
+    assert math.dist(placed.get_pad_position("C1", "1"), pin) == pytest.approx(3.0)
+    assert 3 < math.dist(placed.get_pad_position("C2", "1"), pin) <= 6
+
+
+@pytest.mark.parametrize("radius", ["nan", "inf", "-1"])
+def test_placement_optimize_rejects_invalid_radius(swapped_board, capsys, radius):
+    source = swapped_board()
+    original = source.read_bytes()
+    rc, result = _placement_result(capsys, source, [], "--decoupling-radius", radius)
+    assert rc == 1 and not result["success"]
+    assert "finite nonnegative" in result["message"]
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("problem", ["radius", "missing-pad", "pad-layer"])
+def test_placement_optimize_reports_unusable_supply_pad(
+    swapped_board, placement_mode, capsys, problem
+):
+    source = swapped_board(c1=23, c1_layer="F.Cu")
+    # Keep C1 in place to isolate the candidate-board check.
+    text = source.read_text()
+    start = text.index('(property "Reference" "C1")')
+    end = text.index("(footprint", start)
+    cap = text[start:end]
+    if problem == "missing-pad":
+        cap = cap.replace('(pad "1"', '(pad "9"')
+    elif problem == "pad-layer":
+        cap = cap.replace('(layers "F.Cu")', '(layers "B.Cu")', 1)
+    source.write_text(text[:start] + cap + text[end:])
+    original = source.read_bytes()
+    options = ["--decoupling-radius", "0"] if problem == "radius" else []
+    rc, result = _placement_result(capsys, source, placement_mode, *options, fixed="C1,U2")
+    assert rc == 1 and not result["success"]
+    assert any("C1" in error and "U1.1" in error for error in result["constraint_violations"])
+    assert source.read_bytes() == original
