@@ -648,6 +648,10 @@ def test_clock_with_unverifiable_rules_keeps_the_original_file(tmp_path, departu
     assert board.read_bytes() == before
 
 
+# Constrained moves stop after the parent DRC. Permitted moves also run
+# the fill child, whose native-slot waits count against the parent's deadline.
+# Permitted width reached the 60 s bulk timeout, so CI runs this module in
+# the serial board06 lane with a 120 s budget (Issue #10125).
 @pytest.mark.parametrize("constraint", ["keepout", "width"])
 @pytest.mark.parametrize("permitted", [False, True], ids=["constrained", "permitted"])
 def test_final_clock_copper_obeys_j4_rule_area(tmp_path, departures, capsys, constraint, permitted):
