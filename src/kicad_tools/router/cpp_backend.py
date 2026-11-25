@@ -2138,11 +2138,13 @@ class CppPathfinder:
 
         Args:
             enabled: True to start recording; False to stop and drop any
-                accumulated records.
+                accumulated records and fallback trace history. Draining the
+                records while timing stays enabled preserves that history.
         """
         self._per_call_timing_enabled = bool(enabled)
         if not enabled:
             self._per_call_timings = []
+            self._python_attempt_history.clear()
 
     def get_and_clear_per_call_timings(self) -> list[dict]:
         """Drain and return the recorded per-A*-call timing records.
@@ -4830,6 +4832,7 @@ class CppPathfinder:
         diag = getattr(self, "_attempt_diagnostic", None)
         if diag is not None:
             diag["python_fallback"] = {
+                "request": "unclassified",
                 "reason": str(reason),
                 "cpp_failure_reason": (
                     _failure_reason_token_for_int(cpp_failure_reason)
@@ -4839,6 +4842,7 @@ class CppPathfinder:
             }
         py_grid = self._grid._py_grid
         if py_grid is None:
+            self._note_fallback_trace(action="skipped_no_python_grid")
             return None
 
         net_name = getattr(start, "net_name", "?")

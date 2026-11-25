@@ -22,7 +22,7 @@ from unittest import mock
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, router_cpp
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
@@ -173,6 +173,65 @@ def test_a_search_that_did_not_drain_is_not_traced_as_one(stub, outcome) -> None
     assert second["outcome"] == outcome
     # The second attempt is already bounded by the #8485 repeat budget.
     assert second["reduced_budget"] is True
+
+
+def test_reenabled_trace_starts_fresh_but_reuses_an_untraced_proof(monkeypatch) -> None:
+    monkeypatch.setenv("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "0")
+    pathfinder = _pathfinder(_walled_grid(), traced=True)
+    with mock.patch.object(Router, "route", autospec=True, side_effect=_deadline_stub):
+        (first,) = _route_traces(pathfinder, 1)
+    assert first["outcome"] == "deadline"
+
+    pathfinder.enable_per_call_timing(False)
+    assert pathfinder.route(*_pads()) is None
+    pathfinder.enable_per_call_timing(True)
+    (fresh,) = _route_traces(pathfinder, 1)
+    assert fresh["action"] == "skipped_proven_unreachable"
+    assert fresh["request"] == "first"
+    assert "prior_outcome" not in fresh and "grid" not in fresh
+
+
+@pytest.mark.parametrize(
+    ("code", "action"),
+    [
+        ("FAILURE_TIMEOUT", "skipped_cpp_timeout"),
+        ("FAILURE_ITERATION_LIMIT", "skipped_iteration_cap"),
+        ("FAILURE_NO_PATH", "skipped_resume_repeat"),
+    ],
+)
+def test_skips_before_classification_report_unclassified(code, action, monkeypatch) -> None:
+    pathfinder = _pathfinder(_walled_grid(), traced=True)
+    (first,) = _route_traces(pathfinder, 1)
+    assert first["outcome"] == "drained"
+    start, end = _pads()
+    pathfinder._per_net_iteration_cap_active = True
+    monkeypatch.setenv("KICAD_ROUTER_SKIP_RESUME_FALLBACK", "1")
+    pathfinder._resume_clearance_exhaustions[(start.net, start.net_name)] = 1
+    for goal_y in (3.0, 4.0):
+        end.y = goal_y
+        pathfinder._attempt_diagnostic = {}
+        assert (
+            pathfinder._try_python_fallback(
+                start,
+                end,
+                cpp_failure_reason=getattr(router_cpp, code),
+                reason="exhausted resume attempts",
+            )
+            is None
+        )
+        trace = pathfinder._attempt_diagnostic["python_fallback"]
+        assert (trace["action"], trace["request"]) == (action, "unclassified")
+        assert "grid" not in trace and "prior_outcome" not in trace and "outcome" not in trace
+
+
+def test_missing_python_grid_returns_an_unclassified_skip() -> None:
+    pathfinder = _pathfinder(_walled_grid(), traced=True)
+    pathfinder._grid._py_grid = None
+    pathfinder._attempt_diagnostic = {}
+    assert pathfinder._try_python_fallback(*_pads()) is None
+    trace = pathfinder._attempt_diagnostic["python_fallback"]
+    assert (trace["action"], trace["request"]) == ("skipped_no_python_grid", "unclassified")
+    assert "grid" not in trace and "prior_outcome" not in trace
 
 
 def test_tracing_leaves_routing_decisions_and_counters_unchanged() -> None:
