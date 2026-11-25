@@ -10,7 +10,9 @@ anything is read or written.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -216,6 +218,19 @@ def _live_files(project):
     }
 
 
+def _changed_candidate(project):
+    fake = FakeEngines(project / "kicad")
+    refill = fake.refill
+
+    def revised_refill(pcb):
+        result = refill(pcb)
+        pcb.write_text("(kicad_pcb refilled candidate revision)\n")
+        return result
+
+    fake.refill = revised_refill
+    return fake
+
+
 @pytest.mark.parametrize("prior", [False, True], ids=["first", "prior"])
 @pytest.mark.parametrize("lock_region", ["kicad", "output"])
 def test_both_publication_locks_precede_any_install(tmp_path, prior, lock_region):
@@ -254,15 +269,7 @@ def test_group_publication_failure_preserves_release_and_editor(
         "published-artifact": project / "output/manufacturing/README.txt",
         "external-input": project / "schematics/board.kicad_sch",
     }.get(fault)
-    fake = FakeEngines(board.parent)
-    refill = fake.refill
-
-    def revised_refill(pcb):
-        result = refill(pcb)
-        pcb.write_text("(kicad_pcb refilled candidate revision)\n")
-        return result
-
-    fake.refill = revised_refill
+    fake = _changed_candidate(project)
     real_replace = os.replace
     triggered = False
 
@@ -324,15 +331,7 @@ def test_same_target_editor_save_survives_publication(
     if target_name == "readme" and not prior:
         pytest.skip("no released README exists before the first publication")
     before = _live_files(project)
-    fake = FakeEngines(target.parent)
-    refill = fake.refill
-
-    def revised_refill(pcb):
-        result = refill(pcb)
-        pcb.write_text("(kicad_pcb refilled candidate revision)\n")
-        return result
-
-    fake.refill = revised_refill
+    fake = _changed_candidate(project)
     real_replace, real_link = os.replace, os.link
     saved = False
 
@@ -363,6 +362,145 @@ def test_same_target_editor_save_survives_publication(
     before[target.relative_to(project)] = b"independent editor revision\n"
     assert _live_files(project) == before
     assert not list(project.rglob(".readiness-hold-*"))
+
+
+@pytest.fixture
+def linkless_volume(monkeypatch):
+    def unsupported(source, destination):
+        raise OSError(errno.ENOTSUP, "Hard links are unavailable", destination)
+
+    monkeypatch.setattr(os, "link", unsupported)
+
+
+def test_linkless_volume_generates_and_verifies_first_and_revised_package(
+    tmp_path, linkless_volume
+):
+    project = make_project(tmp_path)
+    pcb = project / "kicad/board.kicad_pcb"
+    archive = project / "output/manufacturing.zip"
+    for fake in (FakeEngines(pcb.parent), _changed_candidate(project)):
+        old_board = pcb.read_bytes()
+        old_zip = archive.read_bytes() if archive.exists() else None
+        assert run(project, "--generate", fake=fake)[0] == 0
+        assert pcb.read_bytes() != old_board
+        assert archive.read_bytes() != old_zip
+        assert read_readiness(pcb.parent, layout=layout_for(project))["status"] == "ready"
+        assert run(project, "--verify")[0] == 0
+        assert not list(project.rglob(".readiness-*"))
+
+
+@pytest.mark.parametrize("prior", [False, True], ids=["first", "prior"])
+@pytest.mark.parametrize("name", ["kicad/board.kicad_pcb", "output/manufacturing.zip"])
+@pytest.mark.parametrize(
+    "fault", ["denied", "short-write", "editor-before-open", "editor-after-open"]
+)
+def test_linkless_refusal_retains_public_files(
+    tmp_path, monkeypatch, linkless_volume, prior, name, fault
+):
+    project = make_project(tmp_path)
+    board_dir = project / "kicad"
+    if prior:
+        assert run(project, "--generate")[0] == 0
+        assert read_readiness(board_dir, layout=layout_for(project))["status"] == "ready"
+    before = _live_files(project)
+    target = project / name
+    editor_bytes = b"independent editor revision\n"
+    real_open, real_write = os.open, os.write
+    target_fd = None
+    triggered = False
+
+    def save():
+        replacement = project / "editor-save"
+        replacement.write_bytes(editor_bytes)
+        os.replace(replacement, target)
+
+    def open_target(path, flags, *args, **kwargs):
+        nonlocal triggered, target_fd
+        if path != target or not flags & os.O_RDWR:
+            return real_open(path, flags, *args, **kwargs)
+        if fault == "denied":
+            triggered = True
+            raise PermissionError(errno.EACCES, "Refusing all writes to target", path)
+        if not triggered and fault == "editor-before-open":
+            triggered = True
+            save()
+        target_fd = real_open(path, flags, *args, **kwargs)
+        if not triggered and fault == "editor-after-open":
+            triggered = True
+            save()
+        return target_fd
+
+    def write_target(fd, data):
+        nonlocal triggered
+        if fd == target_fd and not triggered and fault == "short-write":
+            triggered = True
+            return real_write(fd, data[:7])
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "open", open_target)
+    monkeypatch.setattr(os, "write", write_target)
+    assert run(project, "--generate", fake=_changed_candidate(project))[0] == 1
+    assert triggered
+    if fault.startswith("editor"):
+        before[Path(name)] = editor_bytes
+    assert _live_files(project) == before
+    attempt = json.loads((project / "output/readiness-attempt/readiness.json").read_bytes())
+    assert attempt["candidate_not_published"] is True
+    assert not list(project.rglob(".readiness-*"))
+    if prior and not fault.startswith("editor"):
+        assert read_readiness(board_dir, layout=layout_for(project))["status"] == "ready"
+
+
+def test_linkless_rollback_restores_removed_empty_file(tmp_path, monkeypatch, linkless_volume):
+    live, candidate = tmp_path / "live", tmp_path / "candidate"
+    live.mkdir()
+    candidate.mkdir()
+    (live / "a").touch()
+    (live / "b").write_bytes(b"original")
+    (candidate / "b").write_bytes(b"revised")
+    real_open = os.open
+
+    def refuse_second(path, flags, *args, **kwargs):
+        if path == live / "b" and flags & os.O_RDWR:
+            raise PermissionError(errno.EACCES, "Write refused", path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refuse_second)
+    with pytest.raises(PermissionError):
+        readiness_cmd._publish_candidate(candidate, live, readiness_cmd._snapshot_inventory(live))
+    assert (live / "a").read_bytes() == b""
+    assert (live / "b").read_bytes() == b"original"
+    assert not list(live.rglob(".readiness-*"))
+
+
+@pytest.mark.parametrize("fault", ["late-rename-error", "target-link-refused"])
+def test_failed_claim_restores_captured_file(tmp_path, monkeypatch, fault):
+    live, candidate = tmp_path / "live", tmp_path / "candidate"
+    live.mkdir()
+    candidate.mkdir()
+    if not readiness_cmd._supports_publication_links(live):
+        pytest.skip("the move-aside installation path requires a hard-link-capable volume")
+    target = live / "board.kicad_pcb"
+    target.write_bytes(b"original")
+    (candidate / target.name).write_bytes(b"revised")
+    real_replace, real_link = os.replace, os.link
+
+    def replace(source, destination):
+        real_replace(source, destination)
+        if source == target and fault == "late-rename-error":
+            raise OSError(errno.EIO, "Rename reported an error after moving the file")
+
+    def link(source, destination):
+        if destination == target and fault == "target-link-refused":
+            raise OSError(errno.ENOTSUP, "Links refused at the live name")
+        return real_link(source, destination)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(os, "link", link)
+    with pytest.raises(OSError):
+        readiness_cmd._publish_candidate(candidate, live, readiness_cmd._snapshot_inventory(live))
+    assert target.read_bytes() == b"original"
+    assert not list(live.rglob(".readiness-*"))
 
 
 def test_concurrent_source_edit_refuses_and_preserves_release(tmp_path, monkeypatch):

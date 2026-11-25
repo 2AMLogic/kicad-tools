@@ -350,6 +350,8 @@ def test_rollback_preserves_editor_change_to_published_file(tmp_path, monkeypatc
 
     def edit_then_fail(source, destination):
         nonlocal calls
+        if destination not in (old / "a", old / "b"):
+            return real_link(source, destination)
         calls += 1
         if calls == 2:
             raise OSError("injected second replacement failure")

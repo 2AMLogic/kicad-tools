@@ -47,6 +47,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -55,9 +56,9 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from kicad_tools.analysis.routing_quality import (
     RULE_OFF_AXIS_LENGTH_WARNING,
@@ -204,10 +205,14 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 def _sha256_file(path: Path) -> str:
     """Return the SHA256 hex digest of *path*'s bytes."""
-    digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
+        return _sha256_stream(handle)
+
+
+def _sha256_stream(handle: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: handle.read(65536), b""):
+        digest.update(chunk)
     return digest.hexdigest()
 
 
@@ -4334,73 +4339,151 @@ def _external_input_changes(board_dir: Path, external_before: dict[Path, str]) -
     return changes
 
 
-def _publication_identity(path: Path) -> tuple[Any, ...] | None:
-    """Identify the actual file, including same-content inode replacements."""
-    try:
-        stat = path.lstat()
-    except FileNotFoundError:
-        return None
-    if path.is_symlink() or not path.is_file():
-        raise RuntimeError(f"Publication target is not a regular file: {path}")
+def _stream_identity(stream: BinaryIO) -> tuple[Any, ...]:
+    info = os.fstat(stream.fileno())
+    stream.seek(0)
     return (
-        stat.st_dev,
-        stat.st_ino,
-        stat.st_mode,
-        stat.st_size,
-        stat.st_mtime_ns,
-        _sha256_file(path),
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        _sha256_stream(stream),
     )
 
 
-def _claim_target(target: Path, expected: tuple[Any, ...] | None) -> Path | None:
-    """Atomically move ``target`` aside and prove it is the file we planned to replace.
+def _publication_identity(path: Path) -> tuple[Any, ...] | None:
+    """Identify the opened file, including same-content inode replacements."""
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise RuntimeError(f"Publication target is not a regular file: {path}")
+        with path.open("rb") as stream:
+            return _stream_identity(stream)
+    except FileNotFoundError:
+        return None
 
-    Checking identity and then renaming leaves a window in which an editor can
-    finish a save that the rename would overwrite. Moving the live file aside
-    first makes the verification apply to the exact inode taken. If an editor
-    saved first, the file is linked back (never over a newer save) and the
-    caller refuses. Returns the held path, or None when no file was expected.
+
+def _supports_publication_links(directory: Path) -> bool:
+    """Probe private names before moving any live file on this filesystem."""
+    with tempfile.TemporaryDirectory(prefix=".readiness-probe-", dir=directory) as scratch:
+        source = Path(scratch) / "source"
+        source.touch()
+        try:
+            os.link(source, Path(scratch) / "link")
+        except OSError as exc:
+            if exc.errno in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.ENOSYS):
+                return False
+            raise
+    return True
+
+
+def _copy_publication_file(
+    source: Path,
+    target: Path,
+    expected: tuple[Any, ...] | None,
+    record: Callable[[tuple[Any, ...] | None], None] | None = None,
+) -> None:
+    """Write through a checked descriptor on filesystems without hard links.
+
+    An existing PCB or artifact keeps its public name. An editor's atomic
+    replacement either wins before open (identity mismatch) or installs a
+    different file our descriptor cannot overwrite. New names are exclusive.
     """
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    if expected is None:
+        flags |= os.O_CREAT | os.O_EXCL
+    with source.open("rb") as staged:
+        source_info = os.fstat(staged.fileno())
+        fd = os.open(target, flags, stat.S_IMODE(source_info.st_mode))
+        with os.fdopen(fd, "r+b", buffering=0) as live:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RuntimeError(f"Publication target is not a regular file: {target}")
+            if expected is None:
+                if os.fstat(fd).st_size:
+                    raise RuntimeError(f"Concurrent edit before publication: {target.name}")
+            elif _stream_identity(live) != expected:
+                raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
+            elif os.fstat(fd).st_nlink > 1:
+                raise RuntimeError(f"Cannot replace a multiply-linked file in place: {target.name}")
+            live.seek(0)
+            digest = hashlib.sha256()
+            try:
+                for chunk in iter(lambda: staged.read(65536), b""):
+                    if os.write(fd, chunk) != len(chunk):
+                        raise OSError(errno.ENOSPC, "Incomplete publication write", target)
+                    digest.update(chunk)
+                live.truncate()
+                os.fsync(fd)
+                if os.utime in os.supports_fd:
+                    os.utime(fd, ns=(source_info.st_atime_ns, source_info.st_mtime_ns))
+            except BaseException:
+                # A short write may already have changed our file. Journal the
+                # descriptor, never the pathname an atomic save may now own.
+                if record is not None:
+                    record(_stream_identity(live))
+                raise
+            identity = _stream_identity(live)
+            if identity[-1] != digest.hexdigest():
+                raise RuntimeError(f"Concurrent edit during publication: {target.name}")
+            if record is not None:
+                # FAT may assign the permanent inode only after the first write.
+                record(identity)
+            if not os.path.samestat(os.fstat(fd), target.lstat()):
+                raise RuntimeError(f"Concurrent edit during publication: {target.name}")
+
+
+def _restore_held(hold: Path, target: Path, links: bool) -> None:
+    """Restore the captured file only if no newer save has taken its name."""
+    if links:
+        try:
+            os.link(hold, target)
+            return
+        except FileExistsError:
+            return
+        except OSError:
+            # Even a filesystem that passed the probe may refuse this link.
+            pass
+    with suppress(FileExistsError):
+        _copy_publication_file(hold, target, None)
+
+
+@contextmanager
+def _claim_target(target: Path, expected: tuple[Any, ...] | None, links: bool) -> Iterator[None]:
+    """Move aside and verify the exact file removed; restore it on failure."""
     if expected is None:
         if os.path.lexists(target):
             raise RuntimeError(f"Concurrent edit before publication: {target.name}")
-        return None
-    fd, hold_name = tempfile.mkstemp(prefix=".readiness-hold-", dir=target.parent)
-    os.close(fd)
-    hold = Path(hold_name)
-    try:
-        os.replace(target, hold)
-    except BaseException:
-        hold.unlink(missing_ok=True)
-        raise
-    if _publication_identity(hold) != expected:
-        with suppress(FileExistsError):  # an even newer save already holds the name
-            os.link(hold, target)
-        hold.unlink(missing_ok=True)
-        raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
-    return hold
-
-
-def _install_claimed(
-    staged: Path, target: Path, hold: Path | None, on_linked: Callable[[], None] | None = None
-) -> None:
-    """Link ``staged`` into the vacated name; an editor that took the name keeps it."""
-    try:
-        os.link(staged, target)
-    except FileExistsError:
-        if hold is not None:
-            hold.unlink(missing_ok=True)
-        raise RuntimeError(f"Concurrent edit before replacement: {target.name}") from None
-    except BaseException:
-        if hold is not None:
-            with suppress(FileExistsError):
-                os.link(hold, target)
-            hold.unlink(missing_ok=True)
-        raise
-    if on_linked is not None:
-        on_linked()
-    if hold is not None:
-        hold.unlink(missing_ok=True)
+        yield
+        return
+    with ExitStack() as stack:
+        # On FAT a zero-length file's inode can change when renamed. Holding its
+        # descriptor across the move identifies it even if an editor saves first.
+        opened = None
+        if not links and expected[3] == 0 and os.name == "posix":
+            opened = stack.enter_context(target.open("rb"))
+            if _stream_identity(opened) != expected:
+                raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
+        private = Path(tempfile.mkdtemp(prefix=".readiness-", dir=target.parent))
+        hold = private / ".readiness-hold-original"
+        try:
+            os.replace(target, hold)
+            observed = _publication_identity(hold)
+            if opened is not None:
+                expected = (expected[0], os.fstat(opened.fileno()).st_ino, *expected[2:])
+            if observed != expected:
+                raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
+            yield
+        except BaseException:
+            if os.path.lexists(hold):
+                # If restoration itself fails, retain the captured original.
+                _restore_held(hold, target, links)
+                hold.unlink()
+            raise
+        else:
+            hold.unlink()
+        finally:
+            if not os.path.lexists(hold):
+                private.rmdir()
 
 
 class ReadinessPublicationBusy(RuntimeError):
@@ -4502,6 +4585,53 @@ def _install_candidate(
         digest = identity[-1] if identity is not None else None
         if digest != before.get(name):
             raise RuntimeError(f"Concurrent edit while identifying publication target: {name}")
+    links_by_device: dict[int, bool] = {}
+
+    def install(
+        source: Path | None,
+        target: Path,
+        prior: tuple[Any, ...] | None,
+        record: Callable[[tuple[Any, ...] | None], None] | None = None,
+    ) -> None:
+        device = target.parent.stat().st_dev
+        if device not in links_by_device:
+            links_by_device[device] = _supports_publication_links(target.parent)
+        links = links_by_device[device]
+        if source is None:
+            with _claim_target(target, prior, links):
+                if record is not None:
+                    record(None)
+            return
+        if not links:
+            try:
+                _copy_publication_file(source, target, prior, record)
+            except (FileExistsError, FileNotFoundError) as exc:
+                raise RuntimeError(f"Concurrent edit during publication: {target.name}") from exc
+            return
+        fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
+        os.close(fd)
+        staged = Path(staged_name)
+        try:
+            shutil.copy2(source, staged)
+            identity = _publication_identity(staged)
+            with _claim_target(target, prior, links):
+                try:
+                    os.link(staged, target)
+                except FileExistsError:
+                    raise RuntimeError(
+                        f"Concurrent edit before replacement: {target.name}"
+                    ) from None
+                except BaseException:
+                    # The link may have landed even if the filesystem reported an error.
+                    if record is not None and staged.stat().st_nlink > 1:
+                        record(identity)
+                    raise
+                else:
+                    if record is not None:
+                        record(identity)
+        finally:
+            staged.unlink(missing_ok=True)
+
     with tempfile.TemporaryDirectory(prefix="kct-release-backup-") as temporary:
         backup = Path(temporary)
         installed: dict[str, tuple[Any, ...] | None] = {}
@@ -4515,52 +4645,20 @@ def _install_candidate(
                     copy = backup / name
                     copy.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(target, copy)
-                if name not in after:
-                    hold = _claim_target(target, expected[name])
-                    installed[name] = None
-                    if hold is not None:
-                        hold.unlink(missing_ok=True)
-                    continue
                 _make_publish_directory(target.parent, created)
-                fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
-                os.close(fd)
-                staged = Path(staged_name)
-                try:
-                    shutil.copy2(candidate / name, staged)
-                    identity = _publication_identity(staged)
-                    hold = _claim_target(target, expected[name])
-                    try:
-                        _install_claimed(
-                            staged, target, hold, lambda: installed.__setitem__(name, identity)
-                        )
-                    finally:
-                        # A filesystem can finish a link and then report an error, and an
-                        # editor may already have taken the name: a second link to our
-                        # staged inode means our link landed.
-                        if staged.stat().st_nlink > 1:
-                            installed[name] = identity
-                finally:
-                    staged.unlink(missing_ok=True)
+                install(
+                    candidate / name if name in after else None,
+                    target,
+                    expected[name],
+                    partial(installed.__setitem__, name),
+                )
             yield after
         except BaseException as exc:
             conflicts = []
             for name, identity in reversed(installed.items()):
                 target = destination / name
                 try:
-                    if name in before:
-                        fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
-                        os.close(fd)
-                        staged = Path(staged_name)
-                        try:
-                            shutil.copy2(backup / name, staged)
-                            hold = _claim_target(target, identity)
-                            _install_claimed(staged, target, hold)
-                        finally:
-                            staged.unlink(missing_ok=True)
-                    else:
-                        hold = _claim_target(target, identity)
-                        if hold is not None:
-                            hold.unlink(missing_ok=True)
+                    install(backup / name if name in before else None, target, identity)
                 except Exception:
                     conflicts.append(name)
             for directory in reversed(created):
