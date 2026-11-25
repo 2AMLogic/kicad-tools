@@ -45,12 +45,12 @@
       "size": 3393
     },
     "design-source/generate_design.py": {
-      "sha256": "a3329c7970aa22cac5f4af9651a9d6390f8f3c45dbd712b2d17dee0d3574e17e",
-      "size": 172233
+      "sha256": "b65bdeae2b86f8432f8ea4e7143bf092a4bc486562096370134f188f0e01cbaf",
+      "size": 172290
     },
     "design-source/manufacturing_process.py": {
-      "sha256": "f7934cb7248d2618d6432d6b3b71c7b8e1936f080cd990d71acb08aa6a443f30",
-      "size": 32235
+      "sha256": "ef4f0c259a93cd234afab7ec0e8d7ff3d530bc5f52a9989f1612adbbbbded2ef",
+      "size": 34287
     },
     "design-source/project.kct": {
       "sha256": "50012fb1eaf5ee3be5ece7c15c6a8833a3c42871a96c05aafcfdb483a96f9603",

@@ -110,7 +110,8 @@ SINGLE_LAYER_WELDS = [
 # Reviewed front-copper paths in board-relative millimetres. The bypass placement
 # changes the autorouter's escapes at two MCU pads and its C15 ground-plane bond.
 # Match the original tracks, independent of UUID, so other routing variants keep
-# their own copper. The generator verifies the finished board after refilling it.
+# their own copper. Before export, validate_bypass_mask_escapes checks the
+# resulting openings on the refilled board, including routes that match no path.
 _MASK_ESCAPE_PATHS = {
     # End the C15 ground tail at its own tented via, before it passes C16.2.
     "GND": (
@@ -205,6 +206,53 @@ def repair_bypass_mask_escapes(pcb_path):
         changed = True
     if changed:
         Path(pcb_path).write_text(serialize_sexp(doc))
+
+
+def validate_bypass_mask_escapes(pcb_path):
+    """Check the three reviewed front mask openings on the board being packaged."""
+    from kicad_tools.validate.mask_copper import (
+        assess_attributed_geometry,
+        default_request_for_manufacturer,
+    )
+    from kicad_tools.validate.mask_copper_geometry import inspect_attributed_mask_geometry
+
+    policy = default_request_for_manufacturer("jlcpcb-tier1").policy
+    geometry = inspect_attributed_mask_geometry(pcb_path)
+    assessment = assess_attributed_geometry(geometry, policy)
+    if assessment.coverage != "complete":
+        raise ValueError("Board04 front mask check incomplete: " + ", ".join(assessment.reasons))
+
+    reviewed = {"C16/2", "U2/25", "U2/5"}
+    film = geometry.exported.layers.get("F.Mask")
+    openings = {}
+    for uid, item in geometry.objects.items():
+        ref = item.get("pad_ref")
+        aperture = item["layers_geometry"].get("F.Mask")
+        if (
+            ref in reviewed
+            and aperture is not None
+            and film is not None
+            and film.intersection(aperture).area > 0
+        ):
+            openings[uid] = ref
+    missing = reviewed.difference(openings.values())
+    if missing:
+        raise ValueError("Board04 missing front mask opening: " + ", ".join(sorted(missing)))
+
+    for measurement in assessment.measurements:
+        if measurement.mask_side != "F.Mask" or measurement.disposition not in (
+            "violation",
+            "uncertain",
+        ):
+            continue
+        refs = sorted(openings[uid] for uid in measurement.opening_uuids if uid in openings)
+        if refs:
+            raise ValueError(
+                f"Board04 front mask {', '.join(refs)} to {measurement.conductor_net} "
+                f"{measurement.conductor_kind} {measurement.conductor_uuid}: "
+                f"{measurement.clearance_mm:.4f} mm ({measurement.disposition}, "
+                f"required {policy.clearance_mm:.3f} mm)"
+            )
 
 
 def physical_fingerprint(path):
