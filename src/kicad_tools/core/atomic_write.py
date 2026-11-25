@@ -25,13 +25,118 @@ design were adopted vs. declined for this codebase.
 from __future__ import annotations
 
 import hashlib
+import io
+import logging
 import os
+import re
+import shutil
 import tempfile
+from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 class SourceChangedError(ValueError):
     """The board no longer contains the bytes validated for export."""
+
+
+def _recovery_prefix(name: str) -> str:
+    """Staging-directory prefix that marks it as a retained recovery copy."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f".{name}.recovery-{stamp}-"
+
+
+_RECOVERY_NAME = re.compile(r"^\.(?P<board>.+)\.recovery-\d{8}T\d{6}Z-[^/]+$")
+
+
+def retained_copy_board(directory: Path) -> Path | None:
+    """Return the live board for a completed, cleanup-eligible copy."""
+    match = _RECOVERY_NAME.fullmatch(directory.name)
+    if match is None or directory.is_symlink():
+        return None
+    board = directory.parent / match["board"]
+    if (
+        (directory / "complete").is_file()
+        and (directory / "original").is_file()
+        and board.is_file()
+        and not os.path.lexists(directory / "repaired")
+    ):
+        return board
+    return None
+
+
+def remove_retained_copy(directory: Path) -> bool:
+    """Recheck eligibility when applying a cleanup preview."""
+    if retained_copy_board(directory) is None:
+        return False
+    shutil.rmtree(directory)
+    return True
+
+
+def recovery_copies(path: str | Path) -> list[Path]:
+    """Retention directories left beside ``path`` by checked rewrites (#10056).
+
+    Each successful checked rewrite keeps the displaced previous file as a
+    recoverable copy in a private sibling directory named
+    ``.<name>.recovery-<utc-stamp>-<random>/original``. A rollback after
+    publication also retains the briefly public inode as ``provisional``
+    and any live entry displaced during rollback as ``withdrawn``. An interrupted
+    publication's working directory is reserved for manual recovery.
+    Returns the completed directories, oldest
+    first, so callers can inspect the retained versions in rewrite order.
+    """
+    path = Path(path)
+    return sorted(
+        (entry for entry in path.parent.iterdir() if retained_copy_board(entry) == path),
+        key=lambda entry: entry.name,
+    )
+
+
+def clear_recovery_copies(path: str | Path) -> list[Path]:
+    """Delete every retained recovery copy beside ``path`` (#10056).
+
+    The live file is never touched. Returns the removed directories, oldest
+    first, so callers can report what was reclaimed.
+    """
+    removed = []
+    for copy_dir in recovery_copies(path):
+        if remove_retained_copy(copy_dir):
+            removed.append(copy_dir)
+    return removed
+
+
+def _withdraw_published(
+    path: Path, repaired: Path, content: str, encoding: str | None, newline: str | None
+) -> None:
+    """Capture the live entry and restore it if it already contains another save."""
+    withdrawn = repaired.with_name("withdrawn")
+    try:
+        path.rename(withdrawn)
+    except FileNotFoundError:
+        return
+    # Test the entry we actually moved. Checking the live name before unlinking
+    # it could delete a different writer's save between those two operations.
+    try:
+        matches_repair = os.path.samestat(withdrawn.lstat(), repaired.lstat())
+    except OSError:
+        matches_repair = False
+    if matches_repair:
+        # An editor can also save in place on our inode. Recreate the exact
+        # text encoding and newline translation only on this rollback path.
+        expected = io.BytesIO()
+        with io.TextIOWrapper(expected, encoding=encoding, newline=newline) as stream:
+            stream.write(content)
+            stream.flush()
+            try:
+                matches_repair = withdrawn.read_bytes() == expected.getvalue()
+            except OSError:
+                matches_repair = False
+    # This comparison selects the live board only. Retain the captured link:
+    # a handle can still change its bytes after read_bytes() returns.
+    if not matches_repair:
+        # A newer save that already took the live name stays there.
+        with suppress(FileExistsError):
+            os.link(withdrawn, path, follow_symlinks=False)
 
 
 def _publish_checked(
@@ -40,9 +145,11 @@ def _publish_checked(
     # A digest check followed by os.replace() can still erase a save between
     # the two calls. Move the current entry aside, verify that exact file,
     # then link into the vacant name. link() never overwrites a racing save.
-    staging = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
+    staging = Path(tempfile.mkdtemp(prefix=_recovery_prefix(path.name), dir=path.parent))
     original = staging / "original"
     repaired = staging / "repaired"
+    complete = staging / "complete"
+    linked = False
     try:
         with repaired.open("w", encoding=encoding, newline=newline) as stream:
             stream.write(content)
@@ -52,6 +159,9 @@ def _publish_checked(
         probe = staging / "link-test"
         os.link(repaired, probe)
         probe.unlink()
+        # Reserve recovery metadata while the live board is still untouched.
+        # The repaired link keeps cleanup out until the final unlink commits.
+        complete.touch()
         try:
             path.rename(original)
         except FileNotFoundError as exc:
@@ -63,30 +173,60 @@ def _publish_checked(
             if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
                 raise SourceChangedError("PCB changed during manufacturing export")
             os.link(repaired, path)
-            # A writer holding the original file open (not re-opening the
-            # pathname) writes into the displaced inode, which the link above
-            # does not see. Re-verify it now: if it changed, that save is
-            # the newer drawing, so give it its name back instead of deleting.
+            linked = True
+            # An editor holding the displaced inode can still save to it.
             if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
-                if os.path.samestat(os.lstat(path), os.lstat(repaired)):
-                    path.unlink()
                 raise SourceChangedError("PCB changed during manufacturing export")
+            try:
+                repaired.unlink()
+            except OSError:
+                # A filesystem may complete the removal before returning an
+                # error. Only an absent link confirms that it committed.
+                try:
+                    repaired.lstat()
+                except FileNotFoundError:
+                    return
+                raise
         except BaseException as exc:
+            if linked:
+                _withdraw_published(path, repaired, content, encoding, newline)
             try:
                 os.link(original, path, follow_symlinks=False)
             except FileExistsError:
+                restored_original = False
+            else:
+                restored_original = True
+            if linked:
+                # Both inodes were public. Preserve every open handle across
+                # rollback, even if the public name had been replaced before
+                # withdrawal. Renaming the working link also makes this record
+                # eligible for explicit cleanup after the live name is settled.
+                try:
+                    repaired.rename(staging / "provisional")
+                except OSError as recovery_error:
+                    # The working link still preserves the inode for manual
+                    # recovery. Propagate the publication failure below so
+                    # callers still distinguish a concurrent save from an I/O error.
+                    logging.getLogger(__name__).warning(
+                        "Could not finalize rollback recovery at %s: %s", staging, recovery_error
+                    )
+            if not restored_original:
                 # Another save owns the live name. Keep the displaced version
                 # available too, including when it was itself an editor save.
                 raise SourceChangedError(
                     f"PCB changed during manufacturing export (previous file at {original})"
                 ) from exc
-            original.unlink()
+            if not linked:
+                original.unlink()
             raise
-        original.unlink()
-    finally:
-        repaired.unlink(missing_ok=True)
-        if not os.path.lexists(original):
+    except BaseException:
+        # A competing save can leave the displaced board here for manual
+        # recovery. Keep its working link so cleanup cannot take it.
+        if not linked and not os.path.lexists(original):
+            repaired.unlink(missing_ok=True)
+            complete.unlink(missing_ok=True)
             staging.rmdir()
+        raise
 
 
 def atomic_write_text(
@@ -102,12 +242,20 @@ def atomic_write_text(
     With ``expected_sha256``, reserve the destination by moving it into a
     private sibling directory, check the displaced bytes, and publish with
     a hard link that fails if another writer takes the name. The path is
-    briefly vacant. An interruption in that interval leaves the displaced
-    board in ``.<filename>.<random>/original`` for recovery.
-    After linking, the displaced file is re-verified: a save through a
-    handle that was already open on it fails the call and gets the live
-    name back. A write landing after that re-check, before the displaced
-    file is unlinked, is not detectable.
+    briefly vacant. After linking, the displaced file is re-verified: a
+    save through a handle that was already open on it fails the call and
+    gets the live name back.
+
+    A successful checked rewrite retains the displaced previous file as a
+    recoverable copy in ``.<filename>.recovery-<utc-stamp>-<random>/original``
+    beside the destination (#10056): a write landing after that re-check,
+    through a handle still open on the previous file, stays recoverable
+    there instead of being lost. If the new file was briefly published and
+    then rolled back, its inode remains available as ``provisional`` in the
+    same directory. Each rewrite adds one such directory;
+    ``recovery_copies()`` lists them, ``clear_recovery_copies()`` (or
+    ``kct clean``) removes them. An interruption also leaves the displaced
+    file in that directory for recovery.
 
     Without a digest, use the ordinary atomic replacement described below.
 

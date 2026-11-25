@@ -259,3 +259,303 @@ def test_via_fence_layer_is_not_a_trace_cost() -> None:
     rects = _rects([("U1", "2")], net=2)
     assert any(layer == PAD_VIA_FENCE_LAYER for _, layer, _ in rects)
     assert all(math.isfinite(v) for v in (TRACE_BAND, VIA_BAND))
+
+
+# ---------------------------------------------------------------------------
+# Issue #8486: a provably fence-covered goal skips the hopeless fenced search
+# ---------------------------------------------------------------------------
+
+
+def test_trace_fences_cover_goal_table() -> None:
+    from kicad_tools.router.pad_lanes import trace_fences_cover_goal
+
+    full = [(0, 0, 9, 9, 0)]
+    goal = (2, 2, 5, 5)
+    away = (20, 20, 25, 25)
+    # Every goal cell on the only legal layer is covered.
+    assert trace_fences_cover_goal(
+        full, end_metal=goal, end_layers=[0], start_metal=away, start_layers=[0]
+    )
+    # One uncovered goal cell keeps the fenced search.
+    assert not trace_fences_cover_goal(
+        [(0, 0, 9, 4, 0)], end_metal=goal, end_layers=[0], start_metal=away, start_layers=[0]
+    )
+    # A via fence refuses via drops only -- it never covers a goal.
+    assert not trace_fences_cover_goal(
+        [(0, 0, 9, 9, PAD_VIA_FENCE_LAYER)],
+        end_metal=goal,
+        end_layers=[0],
+        start_metal=away,
+        start_layers=[0],
+    )
+    # A start seed inside the goal box on a shared legal layer is accepted at
+    # pop without any step, fences notwithstanding.
+    assert not trace_fences_cover_goal(
+        full, end_metal=goal, end_layers=[0], start_metal=(4, 4, 8, 8), start_layers=[0]
+    )
+    # ... but a seed on a layer the goal does not accept changes nothing.
+    assert trace_fences_cover_goal(
+        full, end_metal=goal, end_layers=[0], start_metal=(4, 4, 8, 8), start_layers=[1]
+    )
+    # Every LEGAL goal layer must be covered (a through-hole goal).
+    assert not trace_fences_cover_goal(
+        full, end_metal=goal, end_layers=[0, 1], start_metal=away, start_layers=[0]
+    )
+    # An empty goal box is never provably covered.
+    assert not trace_fences_cover_goal(
+        full, end_metal=(5, 5, 4, 4), end_layers=[0], start_metal=away, start_layers=[0]
+    )
+
+
+class _CountingImpl:
+    """Delegate proxy counting native ``route_resumable`` launches."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.calls: list[tuple[tuple, dict]] = []
+
+    def route_resumable(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self._inner.route_resumable(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def timeouts(self) -> list[float]:
+        # ``timeout_s`` is the 19th positional argument of the binding (the
+        # wall-clock budget ``_run_fresh_search`` passes).
+        return [float(a[18]) for a, _ in self.calls]
+
+
+@requires_cpp
+def test_covered_goal_runs_one_unfenced_search_with_the_full_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The forced-recovery target is fence-covered: skip the doomed search.
+
+    Old behaviour: the fenced search drained its whole budget failing, then
+    the unfenced retry connected.  On the reported 97-net board the drained
+    first budgets of those pairs cost 942.72 s of duplicate timeouts.  The
+    pre-emption must keep the connection AND the full budget for the one
+    search that runs.
+    """
+    router, _nb_y = _build_router((8.6, Y0 + PITCH))
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    proxy = _CountingImpl(pathfinder._impl)
+    pathfinder._impl = proxy
+    preempted_before = getattr(pathfinder, "_escape_fence_preempted", 0)
+    routes = router.route_net(1, per_net_timeout=2.0)
+    assert routes, "WIDE must still route into the lane"
+    assert len(proxy.calls) == 1, "the hopeless fenced search must be skipped"
+    assert proxy.timeouts()[0] == pytest.approx(2.0, abs=0.1)
+    assert pathfinder._escape_fence_preempted == preempted_before + 1
+
+
+@requires_cpp
+def test_covered_goal_with_no_deadline_still_runs_one_search() -> None:
+    """``per_net_timeout=None`` (no deadline) keeps the single-search shape."""
+    router, _nb_y = _build_router((8.6, Y0 + PITCH))
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    proxy = _CountingImpl(pathfinder._impl)
+    pathfinder._impl = proxy
+    routes = router.route_net(1)
+    assert routes, "WIDE must still route into the lane"
+    assert len(proxy.calls) == 1
+    assert proxy.timeouts()[0] == 0.0  # 0.0 is the binding's "no deadline"
+    assert pathfinder._escape_fence_preempted == 1
+
+
+@requires_cpp
+def test_repeated_timeout_pays_one_budget_not_two() -> None:
+    """A covered goal whose unfenced search also fails times out once.
+
+    This is the duplicate-timeout shape measured on the reported board:
+    fenced search times out, unfenced retry times out again.  With the
+    pre-emption only the unfenced search runs, so one budget is spent.
+    The D1 target is fenced-covered (pre-empted) and enclosed by a keepout
+    ring, so the single unfenced search drains its whole budget.
+    """
+    router, _nb_y = _build_router((8.6, Y0 + PITCH))
+    tx, ty = 8.6, Y0 + PITCH
+    router.add_component(
+        "RING",
+        [
+            {
+                "number": str(i + 1),
+                "x": x,
+                "y": y,
+                "width": w,
+                "height": h,
+                "net": 0,
+                "net_name": "",
+                "through_hole": True,
+            }
+            for i, (x, y, w, h) in enumerate(
+                [
+                    (tx - 0.4, ty, 0.2, 1.6),
+                    (tx + 0.4, ty, 0.2, 1.6),
+                    (tx, ty + 0.4, 1.6, 0.2),
+                    (tx, ty - 0.4, 1.6, 0.2),
+                ]
+            )
+        ],
+    )
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    proxy = _CountingImpl(pathfinder._impl)
+    pathfinder._impl = proxy
+    routes = router.route_net(1, per_net_timeout=0.02)
+    assert not routes  # the ring makes the connection unreachable
+    assert len(proxy.calls) == 1, "no second, duplicate timeout search"
+    assert proxy.timeouts()[0] == pytest.approx(0.02, abs=0.005)
+    assert pathfinder._escape_fence_preempted == 1
+
+
+@requires_cpp
+def test_normal_escape_is_never_preempted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A goal that is not fence-covered keeps the fenced search (and its shape)."""
+    router, _nb_y = _build_router((6.5, 12.6))
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    preempted_before = getattr(pathfinder, "_escape_fence_preempted", 0)
+    fallbacks_before = getattr(pathfinder, "_escape_fence_fallbacks", 0)
+    routes = router.route_net(1)
+    assert routes, "WIDE must route"
+    assert pathfinder._escape_fence_preempted == preempted_before
+    assert pathfinder._escape_fence_fallbacks == fallbacks_before
+
+
+# ---------------------------------------------------------------------------
+# Issue #8486: search-budget controls for the escape-fence pair
+#
+# The November 24 trace measured 43 unfenced retries after escape-fence
+# timeouts draining 942.72 s again (one retry connected in 23.29 s), and the
+# deadline-policy matrix on these fixtures showed a fixed fraction either
+# starves that recovery (4 ms cap, 3/3 -> 2/3) or, small enough, changes the
+# produced copper (the neighbour lane is entered).  A cap sweep on the
+# clear-lane fixture pins the reason: the fenced success itself needs
+# ~35 ms of native search, so at a 30 ms cap even the CURRENT policy cuts it
+# and the retry enters the lane -- every fraction only moves that break to a
+# larger cap.  Both budgets of the pair are load-bearing; no reserve policy
+# passes its own controls.  These tests pin the two controls any future
+# change to this budget must confront: the unfenced retry keeps a fresh FULL
+# budget, and a fenced success under a deadline keeps the full budget too.
+# ---------------------------------------------------------------------------
+
+
+def _ring_around(router, tx: float, ty: float) -> None:
+    """A through-hole keepout ring enclosing (tx, ty): the connection dies."""
+    router.add_component(
+        "RING",
+        [
+            {
+                "number": str(i + 1),
+                "x": x,
+                "y": y,
+                "width": w,
+                "height": h,
+                "net": 0,
+                "net_name": "",
+                "through_hole": True,
+            }
+            for i, (x, y, w, h) in enumerate(
+                [
+                    (tx - 0.4, ty, 0.2, 1.6),
+                    (tx + 0.4, ty, 0.2, 1.6),
+                    (tx, ty + 0.4, 1.6, 0.2),
+                    (tx, ty - 0.4, 1.6, 0.2),
+                ]
+            )
+        ],
+    )
+
+
+@requires_cpp
+def test_uncovered_pair_pays_two_budgets_and_the_retry_keeps_the_full_cap() -> None:
+    """The recovery control: the unfenced retry must not be starved.
+
+    This is the two-search shape the covered-goal pre-emption cannot reach:
+    the goal is NOT fence-covered (the ring sits clear of every lane), so the
+    fenced search runs, fails, and the unfenced retry runs.  The retry is the
+    search that connected in 23.29 s on the reported board and in the
+    matrix's 4 ms recovery cell -- it keeps a fresh FULL budget, never the
+    remainder of a shared allowance.
+    """
+    router, _nb_y = _build_router((6.5, 12.6))
+    _ring_around(router, 6.5, 12.6)
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    proxy = _CountingImpl(pathfinder._impl)
+    pathfinder._impl = proxy
+    preempted_before = getattr(pathfinder, "_escape_fence_preempted", 0)
+    routes = router.route_net(1, per_net_timeout=0.05)
+    assert not routes  # the ring makes the connection unreachable
+    assert len(proxy.calls) == 2
+    assert proxy.timeouts() == pytest.approx([0.05, 0.05], abs=0.001)
+    assert pathfinder._escape_fence_fallbacks == 1
+    assert pathfinder._escape_fence_preempted == preempted_before
+
+
+@requires_cpp
+def test_fenced_success_under_a_deadline_keeps_the_full_budget_and_the_lane() -> None:
+    """The copper control: a fenced success must not be silently cut.
+
+    The clear-lane escape succeeds fenced in ~35 ms of native search; with a
+    2 s cap the whole budget is available to it.  Any reserve carved out of
+    the fenced budget risks cutting a slower fenced success and replacing
+    its copper with the unfenced retry's (which enters the neighbour lane).
+    """
+    router, nb_y = _build_router((6.5, 12.6))
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    proxy = _CountingImpl(pathfinder._impl)
+    pathfinder._impl = proxy
+    routes = router.route_net(1, per_net_timeout=2.0)
+    assert routes, "WIDE must route"
+    assert len(proxy.calls) == 1
+    assert proxy.timeouts()[0] == pytest.approx(2.0, abs=0.01)
+    crossings = _fcu_crossings(routes, nb_y)
+    assert not crossings or min(crossings) >= LANE_LENGTH_MM, crossings
+
+
+@requires_cpp
+def test_no_fences_keeps_the_single_full_budget_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without fences there is no pair, so the one search keeps the full cap."""
+    monkeypatch.setenv(ESCAPE_FENCE_DISABLE_ENV, "1")
+    router, _nb_y = _build_router((6.5, 12.6))
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    proxy = _CountingImpl(pathfinder._impl)
+    pathfinder._impl = proxy
+    routes = router.route_net(1, per_net_timeout=2.0)
+    assert routes, "WIDE must route"
+    assert len(proxy.calls) == 1
+    assert proxy.timeouts()[0] == pytest.approx(2.0, abs=0.01)
+    assert getattr(pathfinder, "_escape_fence_fallbacks", 0) == 0
+
+
+@requires_cpp
+def test_no_deadline_keeps_the_two_search_recovery_shape() -> None:
+    """``per_net_timeout=None`` (deterministic arm) is untouched: 0.0 budgets."""
+    router, _nb_y = _build_router((6.5, 12.6))
+    _ring_around(router, 6.5, 12.6)
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    proxy = _CountingImpl(pathfinder._impl)
+    pathfinder._impl = proxy
+    routes = router.route_net(1)
+    assert not routes
+    assert len(proxy.calls) == 2
+    assert proxy.timeouts() == [0.0, 0.0]  # 0.0 is the binding's "no deadline"

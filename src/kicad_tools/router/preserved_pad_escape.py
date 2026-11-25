@@ -8,6 +8,8 @@ from dataclasses import replace
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.types import copper_layers_in_span
+
 from . import wall_deadline
 from .escape import EscapeDirection, EscapeRoute, EscapeRouter, escape_endpoint_pad
 from .kelvin_escape import kelvin_access_candidate_clear
@@ -178,10 +180,22 @@ def retry_preserved_departure(
         ),
         None,
     )
+    routable = set(owner.grid.get_routable_indices())
+    landing_idx = owner.grid._layer_to_index.get(landing.value)
     if (
         target_barrel is None
-        or owner.grid.layer_to_index(landing.value) not in owner.grid.get_routable_indices()
+        or landing_idx is None
+        or landing_idx not in routable
+        or (
+            owner.grid.rules.allowed_layers is not None
+            and not router._is_layer_allowed(landing_idx, router._get_net_class(source.net_name))
+        )
     ):
+        return None
+    barrel_span = copper_layers_in_span(*target_barrel.drilled_layers)
+    if target.terminal_layers is not None:
+        barrel_span &= set(target.terminal_layers)
+    if landing not in barrel_span:
         return None
     candidate = find_departure(
         owner._escape,
@@ -198,11 +212,20 @@ def retry_preserved_departure(
     remaining = None if deadline is None else deadline - time.monotonic()
     if wall_deadline.expired() or (remaining is not None and remaining <= 0):
         return None
-    endpoint = escape_endpoint_pad(source, candidate, fallback_width=candidate.segments[0].width)
+    endpoint = replace(
+        escape_endpoint_pad(source, candidate, fallback_width=candidate.segments[0].width),
+        layer=landing,
+        terminal_layers=(landing,),
+    )
+    goal_layers = (
+        landing,
+        *sorted((lyr for lyr in barrel_span if lyr != landing), key=lambda lyr: lyr.stack_order),
+    )
     diameter = target_barrel.diameter / math.sqrt(2)
     goal = replace(
         target,
         layer=landing,
+        terminal_layers=goal_layers,
         width=min(target.width, diameter),
         height=min(target.height, diameter),
         rotation=0.0,
