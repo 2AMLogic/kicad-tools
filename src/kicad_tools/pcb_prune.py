@@ -2569,7 +2569,6 @@ def _plan_pour_stubs(
     *,
     rule_files: Sequence[Path] | None,
     nets: Collection[str] | None,
-    region: Region | None,
 ) -> list[NetPlan]:
     """One plan per net removing pad branches proven redundant on the refilled pour.
 
@@ -2581,15 +2580,7 @@ def _plan_pour_stubs(
     from kicad_tools.validate.pour_stub import PourStub, select_pour_stubs
 
     def include(branch: PourStub) -> bool:
-        if nets is not None and branch.net not in nets:
-            return False
-        if region is None:
-            return True
-        x1, y1, x2, y2 = region
-        pts = [branch.segment.start, branch.segment.end]
-        if branch.via:
-            pts.append(branch.via.position)
-        return all(x1 <= x <= x2 and y1 <= y <= y2 for x, y in pts)
+        return nets is None or branch.net in nets
 
     staged = PCB.load(pcb_path)
     if accepted:
@@ -2629,6 +2620,30 @@ def _plan_pour_stubs(
         if via_i is not None:
             plan.remove_vias.append(via_i)
     return [by_net[n] for n in sorted(by_net)]
+
+
+def _pour_plans_outside_region(
+    pcb: PCB, region: Region, plans: list[NetPlan], pours: list[NetPlan]
+) -> list[NetPlan]:
+    """Report all edits for each net whose newly proven pour plan crosses the box."""
+    ordinary = {p.net_number: p for p in plans}
+    skipped = []
+    for pour in pours:
+        if plan_in_region(pcb, pour, region):
+            continue
+        other = ordinary.get(pour.net_number)
+        if other is None:
+            skipped.append(pour)
+        else:
+            skipped.append(
+                replace(
+                    other,
+                    remove=[*other.remove, *pour.remove],
+                    remove_vias=[*other.remove_vias, *pour.remove_vias],
+                    reasons={**other.reasons, **pour.reasons},
+                )
+            )
+    return skipped
 
 
 def prune_board(
@@ -2718,35 +2733,54 @@ def prune_board(
                     after = _trial_sig(group)
                     return after is not None and not _worse(after, base)
 
-                if plans:
-                    # One DRC for everything; fall back to per-net only if it fails.
-                    if _trial_ok(plans):
-                        accepted, rejected = list(plans), []
-                    else:
-                        accepted, rejected = [], []
-                        for plan in plans:
-                            if _trial_ok([*accepted, plan]):
-                                accepted.append(plan)
-                            else:
-                                rejected.append(plan)
+                def _verify_ordinary(group: list[NetPlan]) -> tuple[list[NetPlan], list[NetPlan]]:
+                    if not group or _trial_ok(group):
+                        return list(group), []
+                    kept: list[NetPlan] = []
+                    dropped: list[NetPlan] = []
+                    for plan in group:
+                        if _trial_ok([*kept, plan]):
+                            kept.append(plan)
+                        else:
+                            dropped.append(plan)
+                    return kept, dropped
 
-                # Issue #10138: a pour-redundant branch needs a native refill proof
-                # as well as the DRC comparison. Without either it stays on the board.
-                if wants_pour:
-                    proposed = _plan_pour_stubs(
+                # An ordinary edit outside the box already excludes that whole net.
+                # A refill may prove another edit on a net whose ordinary edits fit.
+                # If that edit crosses the box, keep the net's original copper in
+                # every subsequent DRC and connectivity trial.
+                excluded = {plan.net_name for plan in region_skipped}
+                while True:
+                    accepted, rejected = _verify_ordinary(plans)
+                    if not wants_pour:
+                        break
+                    selected_nets = nets
+                    if excluded:
+                        names = (n.name for n in pcb.nets.values()) if nets is None else nets
+                        selected_nets = set(names) - excluded
+                        if not selected_nets:
+                            pour_all = []
+                            break
+                    pour_all = _plan_pour_stubs(
                         Path(pcb_path),
                         accepted,
                         rule_files=list(rules),
-                        nets=nets,
-                        region=region,
+                        nets=selected_nets,
                     )
-                    pour_all = list(proposed)
-                    pour_base: Counter | None = baseline
-                    if proposed and accepted:
-                        # Compare against the board the ordinary edits leave behind.
-                        pour_base = _trial_sig(accepted)
+                    if region is None or not pour_all:
+                        break
+                    skipped = _pour_plans_outside_region(pcb, region, plans, pour_all)
+                    if not skipped:
+                        break
+                    region_skipped.extend(skipped)
+                    excluded.update(p.net_name for p in skipped)
+                    plans = [p for p in plans if p.net_name not in excluded]
+
+                if pour_all:
+                    # Compare against the board the ordinary edits leave behind.
+                    pour_base = _trial_sig(accepted) if accepted else baseline
                     if pour_base is not None:
-                        for plan in proposed:
+                        for plan in pour_all:
                             if _trial_ok([*accepted, *pour_plans, plan], pour_base):
                                 pour_plans.append(plan)
                             else:

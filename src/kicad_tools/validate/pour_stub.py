@@ -111,6 +111,8 @@ def _candidates(pcb: PCB, graph: CopperContactGraph) -> list[PourStub]:
         via = None
         if vias:
             via = pcb.vias[graph.items[vias[0]].key]
+            if via.locked:
+                continue
             if len(adjacency[vias[0]]) != 1 or math.dist(via.position, outer_ends[0]) > 1e-6:
                 continue
         if not any(

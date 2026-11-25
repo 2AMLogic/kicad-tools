@@ -2918,6 +2918,67 @@ def test_prune_keeps_sole_plane_bridge(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["removed"] == {"segments": 0, "vias": 0}
 
 
+def test_prune_preserves_pour_branch_with_locked_via(tmp_path, capsys):
+    from tests.test_pour_stub_10137 import require_native_refill
+
+    require_native_refill()
+    path = _pour_board(tmp_path, "connected")
+    path.write_text(path.read_text().replace("(via (at 6 5)", "(via (locked yes) (at 6 5)"))
+    original = path.read_bytes()
+    for apply in (False, True):
+        assert _pour_run(path, apply=apply) == 0
+        assert json.loads(capsys.readouterr().out)["removed"] == {"segments": 0, "vias": 0}
+        assert path.read_bytes() == original
+
+
+def test_region_applies_all_or_none_of_a_nets_pour_branches(tmp_path, capsys):
+    from tests.test_pour_stub_10137 import require_native_refill
+
+    require_native_refill()
+    path = _pour_board(tmp_path, "connected", twin=True)
+    original = path.read_bytes()
+    for apply in (False, True):
+        assert _pour_run(path, "--region", "2,4,7,6", apply=apply) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result["removed"] == {"segments": 0, "vias": 0}
+        assert [
+            (p["net"], p["segments_removed"], p["vias_removed"]) for p in result["region_skipped"]
+        ] == [("GND", 2, 2)]
+        assert path.read_bytes() == original
+
+    assert _pour_run(path, "--region", "2,4,7,9") == 0
+    complete = json.loads(capsys.readouterr().out)
+    assert complete["removed"] == {"segments": 2, "vias": 2}
+    assert complete["region_skipped"] == []
+
+
+@pytest.mark.parametrize("region", ["2,4,7,6", "14,4,18,6"])
+def test_region_keeps_ordinary_and_pour_edits_on_one_net_together(tmp_path, capsys, region):
+    from tests.test_pour_stub_10137 import require_native_refill
+
+    require_native_refill()
+    path = _pour_board(tmp_path, "connected")
+    # The J1--J2 pad-to-pad track has a collinear merge at x=16. It stays
+    # pad-to-pad after merging. U1 has a separate redundant pour branch at x=3.
+    run = "".join(
+        f'(segment (start {x} 5) (end {x + 1} 5) (width 0.25) (layer "F.Cu") '
+        f"(net 1) (uuid {_pour_uid(f'run{x}')}))"
+        for x in (15, 16)
+    )
+    terminal = f"""(footprint "Test:J2" (layer "F.Cu") (at 17 5) (uuid {_pour_uid("J2")})
+      (property "Reference" "J2" (at 0 -2 0) (layer "F.SilkS"))
+      (pad "1" smd rect (layers "F.Cu" "F.Mask") (at 0 0) (size 1.4 1.4)
+        (net 1 "GND") (uuid {_pour_uid("J2pad")})))"""
+    text = path.read_text().rstrip()
+    path.write_text(text[:-1] + run + terminal + ")")
+    original = path.read_bytes()
+    assert _pour_run(path, "--region", region, apply=True) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["removed"] == {"segments": 0, "vias": 0}
+    assert [plan["net"] for plan in result["region_skipped"]] == ["GND"]
+    assert path.read_bytes() == original
+
+
 def test_prune_never_removes_both_branches_that_jointly_bridge_the_plane(tmp_path, capsys):
     from kicad_tools.cli import runner
     from tests.test_pour_stub_10137 import require_native_refill
