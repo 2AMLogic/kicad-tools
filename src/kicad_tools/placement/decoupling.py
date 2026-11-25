@@ -38,6 +38,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from collections import Counter, defaultdict
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
@@ -699,7 +700,7 @@ def snap_decoupling_caps(
     escape_mm: float = 3.0,
     escape_halo_mm: float = 0.35,
     cap_values: Mapping[str, float] | None = None,
-    allow_flip: bool = False,
+    allow_flip: bool | Collection[str] = False,
 ) -> tuple[PlacementVector, list[SnapMove]]:
     """Move each decoupling cap to the nearest free spot beside its pin.
 
@@ -731,9 +732,9 @@ def snap_decoupling_caps(
     Side and value order (issue #10142): a cap belongs on its IC's side of the
     board. With *allow_flip* a cap on the other side is moved onto the IC's
     side (the one case a cap may end farther from the pin than it started, as
-    long as the decoupling term does not get worse). Without it -- the CLI,
-    whose writer cannot flip footprints -- caps keep their side. With
-    *cap_values*, caps sharing a pin are snapped smallest first and a larger
+    long as the decoupling term does not get worse). With a collection, only its named caps may flip.
+    Other caps keep their side. With *cap_values*, caps sharing a pin are
+    snapped smallest first and a larger
     cap never ends nearer to the pin than a smaller one on it.
 
     Wirelength is deliberately not a gate: a cap that moves onto its pin
@@ -771,8 +772,7 @@ def snap_decoupling_caps(
             package is harder for the router to reach.
         cap_values: ``cap reference -> farads``. Enables the smallest-closest
             ordering; caps missing from the map are not ordered.
-        allow_flip: Let a cap on the opposite side from its IC be flipped
-            onto the IC's side.
+        allow_flip: Allow all caps, or only the named caps, to flip to their IC side.
 
     Returns:
         ``(new_vector, moves)``.
@@ -788,6 +788,9 @@ def snap_decoupling_caps(
     from .wirelength import build_pad_position_map
 
     index = {c.reference: i for i, c in enumerate(components)}
+    designated = {ref for group in groups for ref, _ in group.associated}
+    if isinstance(allow_flip, bool):
+        allow_flip = set(index) if allow_flip else set()
     data = vector.data.copy()
     current = PlacementVector(data=data.copy())
     best_score = score_fn(current)
@@ -896,7 +899,7 @@ def snap_decoupling_caps(
         base = ci * FIELDS_PER_COMPONENT
         side = int(round(float(data[base + 3])))
         ic_side = int(round(float(data[pin_i * FIELDS_PER_COMPONENT + 3])))
-        flip = allow_flip and side != ic_side
+        flip = side != ic_side and cap.reference in allow_flip
         if flip:
             side = ic_side
         value = cap_values.get(cap.reference) if cap_values else None
@@ -919,6 +922,8 @@ def snap_decoupling_caps(
                         cx = round(cx / grid_mm) * grid_mm
                         cy = round(cy / grid_mm) * grid_mm
                     after = math.hypot(cx + off.x - pin_pad.x, cy + off.y - pin_pad.y)
+                    if cap.reference in designated and after > max_radius_mm + 1e-9:
+                        continue
                     if after >= before and not flip:
                         continue
                     if floor is not None and after <= floor + 1e-6:

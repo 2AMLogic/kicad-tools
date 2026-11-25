@@ -303,3 +303,58 @@ class TestSchematicDiscovery:
         pcb.write_text("")
         (tmp_path / "board.kicad_sch").write_text("not a schematic")
         assert _associate_from_schematic(str(pcb), groups, quiet=True) is groups
+
+
+@pytest.mark.parametrize("radius", [6.0, 0.25])
+def test_optimize_writes_only_a_feasible_designated_cap(tmp_path, capsys, radius):
+    """Read the placement and pads back from the output of the public command."""
+    import json
+
+    from kicad_tools.cli.optimize_placement_cmd import run_optimize_placement
+    from kicad_tools.schema.pcb import PCB
+    from tests.test_decoupling_association import make_sheet
+    from tests.test_placement_decoupling import _silk_board
+
+    source = tmp_path / "design.kicad_pcb"
+    board = _silk_board()
+    start = board.index('(footprint "C_0805"')
+    end = board.index("(footprint", start + 1)
+    source.write_text(board[:start] + board[start:end].replace('"F.', '"B.') + board[end:])
+    make_sheet(
+        source.with_suffix(".kicad_sch"),
+        [("U1", 50.8, 50.8, "+3V3", ""), ("C1", 55.88, 50.8, "+3V3", "")],
+        [(50.8, 50.8, 55.88, 50.8)],
+    )
+    original = source.read_bytes()
+    output = tmp_path / "result.kicad_pcb"
+    output.write_bytes(original)
+
+    rc = run_optimize_placement(
+        str(source),
+        output_path=str(output),
+        seed_method="current",
+        max_iterations=0,
+        decoupling_radius_mm=radius,
+        as_json=True,
+        silk_fix=False,
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert source.read_bytes() == original
+    if radius == 0.25:
+        assert rc == 1
+        assert not report["feasible"] and not report["saved"] and not report["success"]
+        assert "C1" in report["infeasible_detail"] and "U1.1" in report["infeasible_detail"]
+        assert "0.25" in report["infeasible_detail"]
+        assert output.read_bytes() == original
+    else:
+        assert rc == 0 and report["saved"] and report["feasible"]
+        written = PCB.load(str(output))
+        cap = written.get_footprint("C1")
+        assert cap.layer == written.get_footprint("U1").layer == "F.Cu"
+        assert all("F.Cu" in pad.layers for pad in cap.pads)
+        distance = math.dist(
+            written.get_pad_position("C1", "1"), written.get_pad_position("U1", "1")
+        )
+        row = next(item for item in report["decoupling"] if item["cap"] == "C1")
+        assert distance <= radius
+        assert row["distance_mm"] == pytest.approx(distance, abs=0.001)
