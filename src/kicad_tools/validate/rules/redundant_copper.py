@@ -223,9 +223,10 @@ class RedundantCopperRule(DRCRule):
             "redundant_copper_via_offcentre",
             "redundant_copper_covered",
             "redundant_copper_staircase",
-            "redundant_copper_pour_stub",
         ):
             results.rules_checked_by_rule[rid] = 1
+        # The pour-stub proof is opt-in; a skipped proof is a visible 0, not 1.
+        results.rules_checked_by_rule["redundant_copper_pour_stub"] = 0
 
         segments = [s for s in pcb.segments if s.layer and s.width > 0]
         self._check_duplicates(segments, results)
@@ -252,7 +253,9 @@ class RedundantCopperRule(DRCRule):
         if self._prove_pour_stubs and getattr(pcb, "path", None) and pcb.zones:
             from kicad_tools.validate.pour_stub import verified_pour_stubs
 
-            for stub, evidence in verified_pour_stubs(pcb):
+            proven = verified_pour_stubs(pcb)
+            results.rules_checked_by_rule["redundant_copper_pour_stub"] = 1
+            for stub, evidence in proven:
                 seg = stub.segment
                 ox, oy = self._origin
                 start = f"({seg.start[0] + ox:.3f}, {seg.start[1] + oy:.3f})"

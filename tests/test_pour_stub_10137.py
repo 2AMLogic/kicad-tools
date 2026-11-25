@@ -74,11 +74,14 @@ def require_native_refill():
         pytest.skip("requires native KiCad refill and save support")
 
 
-def findings(path, prove=True):
-    result = DRCChecker(
+def check_result(path, prove=True):
+    return DRCChecker(
         PCB.load(path), manufacturer="jlcpcb", layers=4, prove_pour_stubs=prove
     ).check_redundant_copper()
-    return [v for v in result.violations if v.rule_id == RULE]
+
+
+def findings(path, prove=True):
+    return [v for v in check_result(path, prove).violations if v.rule_id == RULE]
 
 
 def test_proof_is_opt_in_and_skips_refill_by_default(tmp_path, monkeypatch):
@@ -88,6 +91,7 @@ def test_proof_is_opt_in_and_skips_refill_by_default(tmp_path, monkeypatch):
         raise AssertionError("kicad-cli refill must not run without --prove-pour-stubs")
 
     monkeypatch.setattr(runner, "run_refill_zones", boom)
+    assert check_result(path, prove=False).rules_checked_by_rule[RULE] == 0
     assert findings(path, prove=False) == []
 
 
@@ -96,6 +100,7 @@ def test_refilled_pour_replaces_branch_without_writing_source(tmp_path, via):
     require_native_refill()
     path = fixture_board(tmp_path, "connected", via=via)
     original = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    assert check_result(path).rules_checked_by_rule[RULE] == 1
     (hit,) = findings(path)
     assert hit.severity == "warning"
     assert hit.location == pytest.approx((3, 5))
