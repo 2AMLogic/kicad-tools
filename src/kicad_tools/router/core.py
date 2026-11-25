@@ -14272,6 +14272,7 @@ class Autorouter:
                 # Issue #6008: the net-aware keepout rule areas (the static
                 # ones rode across with ``_blocked`` / ``_net`` above).
                 self.grid._rule_area_keepouts = old_grid._rule_area_keepouts
+                self.grid.authored_arc_copper = old_grid.authored_arc_copper
                 self.grid._pads = old_grid._pads.copy()
                 self.grid._component_hole_index = old_grid._component_hole_index.refreshed()
                 # Issue #4794: the occupancy planes were replaced wholesale

@@ -192,7 +192,7 @@ def fab_gap_policy_from_entry(entry) -> FabGapPolicy:
     )
 
 
-def _arc_geometry(node, origin=(0.0, 0.0)):
+def track_arc_copper_geometry(node, origin=(0.0, 0.0)):
     """Flatten a modern start/mid/end track arc with <=0.1um chord error.
 
     The raw s-expression is in sheet coordinates while the loaded ``PCB``
@@ -593,7 +593,7 @@ def _collect(pcb):
         if layer not in layer_names:
             continue
         try:
-            geom = _arc_geometry(node, tuple(getattr(pcb, "board_origin", (0.0, 0.0))))
+            geom = track_arc_copper_geometry(node, tuple(getattr(pcb, "board_origin", (0.0, 0.0))))
         except (ValueError, TypeError) as exc:
             unsupported.append(str(exc))
             continue
