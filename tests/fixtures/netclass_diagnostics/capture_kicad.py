@@ -1,7 +1,18 @@
-"""Run with KiCad 10.0.5's pcbnew Python to regenerate oracle.json.
+"""Run with KiCad 10.0.6's pcbnew Python to regenerate oracle.json.
 
 Each pattern has an isolated Probe class: membership cannot be masked by
 another assignment or by precedence. This script does not load/save projects.
+
+The capture runs on the repository's CI-pinned image
+(``kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec``,
+the exact build ``kicad/kicad:10.0`` resolved to when CI pinned it), so the
+recorded membership is native evidence from the same release ``kct``'s native
+verifications use (issue #10122)::
+
+    docker run --rm -v "$PWD:/work" -w /work \
+      kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec \
+      python3 tests/fixtures/netclass_diagnostics/capture_kicad.py \
+      > tests/fixtures/netclass_diagnostics/oracle.json
 """
 
 import json
@@ -9,8 +20,8 @@ import json
 import pcbnew
 
 version = pcbnew.GetBuildVersion()
-if version != "10.0.5":
-    raise SystemExit(f"Expected KiCad 10.0.5, got {version}")
+if version != "10.0.6":
+    raise SystemExit(f"Expected KiCad 10.0.6, got {version}")
 patterns = [
     "",
     "USB",
@@ -31,6 +42,23 @@ patterns = [
     "^USB$",
     "/USB/",
     "a**",
+    # Supply rails and generated names with punctuation (issue #10122).
+    "+3.3V",
+    "+5V",
+    "Net-(U5-CAPP)",
+    "Net-U5-CAPP",
+    # Regex-any and one-or-more controls distinguishing the union contract
+    # from a blanket literal treatment of punctuation.
+    "A.B",
+    "C+P",
+    "A.+B",
+    "USB.X",
+    # Deliberately unsupported syntax: boundary evidence only.
+    "A|B",
+    "(AB)*",
+    "((A))",
+    "A{2}",
+    "Net-(U5-CAP)?",
 ]
 nets = [
     "é",
@@ -66,6 +94,26 @@ nets = [
     "b",
     "XYZ",
     "/USB/",
+    # Issue #10122 nets: supply spellings, parenthesized and unparenthesized
+    # generated spellings, and similarly named negatives.
+    "+3.3V",
+    "+3x3V",
+    "+5V",
+    "Net-(U5-CAPP)",
+    "Net-U5-CAPP",
+    "Net-(U5-CAPX)",
+    "Net-U5-CAPX",
+    "AXB",
+    "AXYB",
+    "AB",
+    "A.B",
+    "CCP",
+    "CPP",
+    "CP",
+    "CCCCCP",
+    "C+P",
+    "USBX",
+    "USB.X",
 ]
 cases = []
 for pattern in patterns:
@@ -80,4 +128,4 @@ for pattern in patterns:
                 "matches": settings.GetEffectiveNetClass(net).GetName() == "Probe",
             }
         )
-print(json.dumps({"kicad_version": version, "source_tag": "10.0.5", "cases": cases}, indent=2))
+print(json.dumps({"kicad_version": version, "source_tag": "10.0.6", "cases": cases}, indent=2))

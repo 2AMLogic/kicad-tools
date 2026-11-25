@@ -553,6 +553,9 @@ def test_no_deadline_keeps_the_two_search_recovery_shape() -> None:
     router._install_pad_lane_budgets()
     pathfinder = router.router
     assert isinstance(pathfinder, CppPathfinder)
+    # The native two-search shape is the subject; the Python fallback is
+    # out of scope for this control.
+    pathfinder._try_python_fallback = lambda *a, **k: None
     proxy = _CountingImpl(pathfinder._impl)
     pathfinder._impl = proxy
     routes = router.route_net(1)

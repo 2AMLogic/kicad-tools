@@ -22,6 +22,10 @@ their original centerlines, retaining each rail's length and contacts.
 The MIPI clock pair's four exits (J4/U4, #10083) are staged together: trunk-width
 copper, both negative-rail barrels moved clear of the mask, published only if the
 staged copper clears the project gaps and the pair stays inside its skew budget.
+The MIPI data pair's three offending exits (J4.4, U4.3, U4.4, #10113) are staged
+the same way: each rebuilt as one straight axis piece whose corner sits inside the
+pad copper plus one 45-degree rejoin, with the trunk extended along its own line
+so both rails shorten equally and the pair keeps its measured skew.
 
 Every repair is guarded: the departure is derived from the actual pad and its
 connected copper, and anything locked, branched off the recognized shape, or
@@ -65,7 +69,11 @@ from kicad_tools.router.rules import net_class_map_from_path
 from kicad_tools.schema.pcb import PCB, Segment, Via
 from kicad_tools.sidecars import copy_project_sidecars
 from kicad_tools.validate.connectivity import ConnectivityValidator
-from kicad_tools.validate.copper_contact import CopperContactGraph, build_copper_contact_graph
+from kicad_tools.validate.copper_contact import (
+    CopperContactGraph,
+    build_copper_contact_graph,
+    collect_copper_items,
+)
 from kicad_tools.validate.diffpair_skew import derive_pair_skews
 from kicad_tools.validate.mask_copper import default_request_for_manufacturer
 from kicad_tools.validate.mask_geometry import board_mask_margin, pad_mask_margin, pad_mask_shapes
@@ -708,7 +716,7 @@ def _copper_gap_ok(
                 ),
             )
         )
-    for item in build_copper_contact_graph(ConnectivityValidator(pcb), None).items:
+    for item in collect_copper_items(ConnectivityValidator(pcb), include_all_pads=True):
         # The enclosing producer regenerates and grades all pours after the edit.
         if item.kind == "fill":
             continue
@@ -1133,7 +1141,9 @@ def _stage_clock_exit(
     return added, [via] if via is not None else []
 
 
-def _clock_authored_rules_ok(pcb: PCB, path: Path, tracks: list[Segment], vias: list[Via]) -> bool:
+def _authored_rules_ok(
+    pcb: PCB, path: Path, tracks: list[Segment], vias: list[Via], label: str
+) -> bool:
     """Have KiCad evaluate authored rules on the replacement copper before publishing it."""
     if not path.with_suffix(".kicad_dru").exists() and not all_rule_area_zones(pcb):
         return True
@@ -1141,7 +1151,7 @@ def _clock_authored_rules_ok(pcb: PCB, path: Path, tracks: list[Segment], vias: 
     if not all(changed):
         return False
     try:
-        with TemporaryDirectory(prefix="board06-clock-") as tmp:
+        with TemporaryDirectory(prefix="board06-staged-") as tmp:
             candidate = Path(tmp) / path.name
             pcb.save(candidate)
             copy_project_sidecars(path, candidate)
@@ -1162,17 +1172,17 @@ def _clock_authored_rules_ok(pcb: PCB, path: Path, tracks: list[Segment], vias: 
                     refill_zones=True,
                 )
             if not result.success:
-                print(f"   MIPI clock exits kept: {result.stderr}")
+                print(f"   {label} kept: {result.stderr}")
                 return False
             native = load_native_connectivity_report(report)
     except (OSError, ValueError, KiCadEnvironmentError) as exc:
-        print(f"   MIPI clock exits kept: {exc}")
+        print(f"   {label} kept: {exc}")
         return False
     for finding in [*native.violations, *native.unconnected_items]:
         if finding.is_error and (
             not any(finding.item_uuids) or changed.intersection(finding.item_uuids)
         ):
-            print(f"   MIPI clock exits kept: {finding.message}")
+            print(f"   {label} kept: {finding.message}")
             return False
     return True
 
@@ -1197,11 +1207,223 @@ def _clear_clock_pair(path: Path, rules: DesignRules) -> int:
         return 0
     if not _copper_gap_ok(pcb, path, tracks, vias, rules):
         return 0
-    if not _clock_authored_rules_ok(pcb, path, tracks, vias):
+    if not _authored_rules_ok(pcb, path, tracks, vias, "MIPI clock exits"):
         return 0
     pcb.save(path)
     print(f"   pad departure MIPI clock pair: {len(_CLK_EXITS)} exits widened to {_CLK_WIDTH} mm")
     return len(_CLK_EXITS)
+
+
+_DATA_NETS = ("MIPI_D0+", "MIPI_D0-")
+_DATA_WIDTH = 0.225
+
+
+@dataclass(frozen=True)
+class _DataExit:
+    """One MIPI data pad exit as measured on seed 42, and its replacement.
+
+    Offsets are from the pad centre.  ``old`` is the corner list of today's
+    trunk-width run, pad to the trunk junction; ``new`` replaces it with one
+    straight axis piece whose corner sits inside the pad copper, plus one
+    45-degree rejoin, so both pieces enter the land and neither runs beside
+    the opening (#10113).  Where the rejoin lands short of the old junction,
+    ``trunk_shift`` extends the trunk endpoint along its own line to meet it;
+    the two rails' length changes then cancel, keeping the pair's measured
+    skew (3.6 ps against the 20.1 ps budget).
+    """
+
+    ref: str
+    footprint: str
+    pad: str
+    pad_size: XY
+    net: str
+    old: tuple[XY, ...]
+    new: tuple[XY, ...]
+    trunk_shift: XY = (0.0, 0.0)
+
+
+_DATA_EXITS = (
+    # J4.4: the diagonal from the pad corner doubles back through a jog; the
+    # rebuilt exit runs straight up the pad axis to (0, -0.3672) -- inside the
+    # 0.8 mm land -- then rejoins the original diagonal line at the trunk.
+    _DataExit(
+        "J4",
+        _J4,
+        "4",
+        (0.3, 0.8),
+        "MIPI_D0-",
+        old=((0, 0), (-0.2, -0.2), (-0.2, -0.1672), (0.3828, -0.75)),
+        new=((0, 0), (0, -0.3672), (0.3828, -0.75)),
+    ),
+    # U4.3: the approach diagonal, jog and entry pass beside the opening; the
+    # rebuilt exit leaves the land straight to (-0.29, 0) and rejoins at 45
+    # degrees, the trunk growing 0.0772 mm to meet it.
+    _DataExit(
+        "U4",
+        _U4,
+        "3",
+        (0.7, 0.3),
+        "MIPI_D0+",
+        old=((0, 0), (-0.2, 0.2), (-0.1672, 0.2), (-1.1172, -0.75)),
+        new=((0, 0), (-0.29, 0), (-1.04, -0.75)),
+        trunk_shift=(0.0772, 0.0),
+    ),
+    # U4.4: same shape on the negative rail, its corner at (-0.095, 0) inside
+    # the land and the trunk growing 0.0378 mm.
+    _DataExit(
+        "U4",
+        _U4,
+        "4",
+        (0.7, 0.3),
+        "MIPI_D0-",
+        old=((0, 0), (-0.2, -0.2), (-0.3328, -0.2), (-1.2828, -1.15)),
+        new=((0, 0), (-0.095, 0), (-1.245, -1.15)),
+        trunk_shift=(0.0378, 0.0),
+    ),
+)
+
+
+def _data_run(
+    pcb: PCB, ex: _DataExit, center: XY, junction: XY, protected: set[str]
+) -> tuple[list[Segment], Segment] | None:
+    """The measured escape run and its trunk, or ``None`` to decline.
+
+    The walk follows the unique continuation from the pad centre, consuming
+    only same-width F.Cu pieces of the pad's net; a branch, a stray landing,
+    a lock or a group member declines it.  The consumed corner list must
+    match the measured control, and exactly one trunk piece must remain
+    attached at the junction.
+    """
+    at: dict[XY, list[Segment]] = defaultdict(list)
+    for seg in pcb.segments:
+        if seg.layer == "F.Cu" and seg.net_name == ex.net:
+            at[_xy(seg.start)].append(seg)
+            at[_xy(seg.end)].append(seg)
+    landings = {_xy(v.position) for v in pcb.vias if v.net_name == ex.net}
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name == ex.net:
+                position = pcb.get_pad_position(fp.reference, pad.number)
+                if position is not None:
+                    landings.add(_xy(position))
+    chain: list[Segment] = []
+    points = [center]
+    incoming: Segment | None = None
+    for _ in range(64):
+        point = points[-1]
+        if point == junction:
+            break
+        choices = {id(s): s for s in at.get(point, []) if s is not incoming}
+        if len(choices) != 1:
+            return None
+        seg = next(iter(choices.values()))
+        if (
+            seg.locked
+            or (seg.uuid or "").lower() in protected
+            or abs(seg.width - _DATA_WIDTH) > _EPS
+        ):
+            return None
+        far = _xy(seg.end) if _xy(seg.start) == point else _xy(seg.start)
+        if far != junction and (far in landings or far in points):
+            return None
+        chain.append(seg)
+        points.append(far)
+        incoming = seg
+    else:
+        return None
+    if not _matches_measured(points, center, ex.old):
+        return None
+    consumed = {id(s) for s in chain}
+    trunk = {
+        id(s): s
+        for s in at.get(junction, [])
+        if id(s) not in consumed
+        and s.layer == "F.Cu"
+        and s.net_name == ex.net
+        and not s.locked
+        and (s.uuid or "").lower() not in protected
+    }
+    if len(trunk) != 1 or abs(next(iter(trunk.values())).width - _DATA_WIDTH) > _EPS:
+        return None
+    return chain, next(iter(trunk.values()))
+
+
+def _stage_data_exit(pcb: PCB, ex: _DataExit, protected: set[str]) -> list[Segment] | None:
+    """Rebuild one data exit in memory; ``None`` leaves the caller to abandon the pair."""
+    fp = pcb.get_footprint(ex.ref)
+    if fp is None or fp.name != ex.footprint or fp.rotation or fp.layer != "F.Cu":
+        return None
+    pad = next((p for p in fp.pads if p.number == ex.pad), None)
+    position = pcb.get_pad_position(ex.ref, ex.pad)
+    if (
+        pad is None
+        or position is None
+        or pad.net_name != ex.net
+        or pad.shape != "rect"
+        or pad.rotation
+        or pad.size != ex.pad_size
+    ):
+        return None
+    center = _xy(position)
+    junction = _xy((center[0] + ex.old[-1][0], center[1] + ex.old[-1][1]))
+    walked = _data_run(pcb, ex, center, junction, protected)
+    if walked is None:
+        return None
+    chain, trunk = walked
+    target = _xy((center[0] + ex.new[-1][0], center[1] + ex.new[-1][1]))
+    far = _xy(trunk.end) if _xy(trunk.start) == junction else _xy(trunk.start)
+    # The trunk only ever stays or grows along its own line to meet the rejoin.
+    if not _on_line(far, junction, target):
+        return None
+    if dist(far, target) < dist(far, junction) - _EPS:
+        return None
+    if abs(dist(far, target) - dist(far, junction) - dist(junction, target)) > _CLK_TOL:
+        return None
+    edited = [*chain, trunk]
+    original = list(pcb.segments)
+    validator = ConnectivityValidator(pcb)
+    before = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    if len(before.components()) != 1:
+        return None
+    contacts, ends = _external_contacts(before, original, edited, None)
+    if pcb.remove_segments(edited) != len(edited):
+        return None
+    added: list[Segment] = []
+    for a, b in pairwise(_xy((center[0] + o[0], center[1] + o[1])) for o in ex.new):
+        if a != b:
+            added.extend(pcb.add_trace(a, b, width=_DATA_WIDTH, layer="F.Cu", net=ex.net))
+    added.extend(pcb.add_trace(far, target, width=_DATA_WIDTH, layer="F.Cu", net=ex.net))
+    after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    current, current_ends = _external_contacts(after, pcb.segments, added, None)
+    if len(after.components()) != 1 or not contacts <= current or not ends <= current_ends:
+        return None
+    return added
+
+
+def _clear_data_pair(path: Path, rules: DesignRules) -> int:
+    """Publish the MIPI data exits together, or leave the file untouched.
+
+    Both rails are staged in memory, then must keep the pair inside its skew
+    budget, clear other copper under the project rules and survive the
+    authored-rules DRC before anything is written.
+    """
+    pcb = PCB.load(path)
+    protected = _protected_ids(pcb)
+    tracks: list[Segment] = []
+    for ex in _DATA_EXITS:
+        staged = _stage_data_exit(pcb, ex, protected)
+        if staged is None:
+            return 0
+        tracks.extend(staged)
+    if not _within_project_skew_budget(pcb, path, _DATA_NETS):
+        return 0
+    if not _copper_gap_ok(pcb, path, tracks, [], rules):
+        return 0
+    if not _authored_rules_ok(pcb, path, tracks, [], "MIPI data exits"):
+        return 0
+    pcb.save(path)
+    print(f"   pad departure MIPI data pair: {len(_DATA_EXITS)} exits rebuilt at {_DATA_WIDTH} mm")
+    return len(_DATA_EXITS)
 
 
 def clear_pad_departures(path: Path, rules: DesignRules) -> int:
@@ -1280,4 +1502,5 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
             ("9", ((-0.15, -0.15), (-0.15, -0.20), (-0.9798, -0.20))),
         ),
     )
-    return edits + _clear_clock_pair(path, rules)
+    edits += _clear_clock_pair(path, rules)
+    return edits + _clear_data_pair(path, rules)
