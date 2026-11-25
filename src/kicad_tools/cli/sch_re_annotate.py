@@ -22,10 +22,14 @@ Usage:
 
     # Restart numbering per sheet
     kicad-tools sch re-annotate board.kicad_sch --per-sheet
+
+    # Report parts whose reference order disagrees with position order
+    kicad-tools sch re-annotate board.kicad_sch --check
 """
 
 import re
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from kicad_tools.cli.modify_schematic import create_backup
@@ -42,6 +46,11 @@ _POWER_PREFIXES = {"#PWR", "#FLG"}
 
 # Whitespace token for regex: matches one or more tabs or spaces
 _WS = r"[ \t]+"
+
+_PARTNER_SCOPE = (
+    "Each partner pair connects two-pin parts of different prefixes on the same sheet. "
+    "Power and ground rails, shared nets and parts with multiple candidate connections are skipped."
+)
 
 
 def _format_reference(prefix: str, number: int, unit_suffix: str = "") -> str:
@@ -488,6 +497,7 @@ def run_re_annotate(
     format: str = "text",
     unannotated_only: bool = False,
     include_power: bool = False,
+    check: bool = False,
 ) -> int:
     """Run the re-annotate operation.
 
@@ -503,6 +513,10 @@ def run_re_annotate(
             references, leaving already-assigned references unchanged.
         include_power: If True, also annotate ``#PWR?`` and ``#FLG?`` power
             symbols (excluded by default).
+        check: If True, report reference numbers out of schematic position
+            order and reversed reference ordering between electrical partners.
+            Either finding returns exit code 1.
+            Files are never modified under ``--check``.
 
     Returns:
         0 on success, 1 on error.
@@ -556,6 +570,59 @@ def run_re_annotate(
             unannotated_only=unannotated_only,
             include_power=include_power,
         )
+
+    if check:
+        import json
+
+        uuid_to_file: dict[str, Path] = {}
+        for sch_file, syms in file_symbols.items():
+            for sym in syms:
+                uid = sym.get("uuid")
+                if uid:
+                    uuid_to_file[uid] = sch_file
+        flagged = _out_of_order_parts(uuid_mapping, uuid_to_file, per_sheet)
+        partners = None
+        if not unannotated_only and (prefixes is None or len(set(prefixes)) >= 2):
+            try:
+                partners = _partner_inversions(schematic_path, prefixes, per_sheet)
+            except (OSError, ValueError) as exc:
+                message = f"Cannot check schematic connectivity: {exc}"
+                if format == "json":
+                    print(json.dumps({"check": True, "error": message}))
+                else:
+                    print(message, file=sys.stderr)
+                return 1
+        if format == "json":
+            report: dict = {"check": True, "out_of_order": flagged, "total": len(flagged)}
+            if partners is not None:
+                report.update(partner_inversions=partners, partner_scope=_PARTNER_SCOPE)
+                report["total"] += len(partners)
+            print(json.dumps(report, indent=2))
+        elif flagged:
+            print(
+                f"Reference order check: {len(flagged)} part(s) disagree "
+                "with schematic position order:"
+            )
+            print()
+            check_by_prefix: dict[str, list[tuple[str, str]]] = {}
+            for item in flagged:
+                check_by_prefix.setdefault(item["prefix"], []).append((item["old"], item["new"]))
+            for prefix in sorted(check_by_prefix):
+                print(f"  {prefix}:")
+                for old, new in check_by_prefix[prefix]:
+                    print(f"    {old} -> {new}")
+            print()
+        else:
+            print("All reference numbers agree with schematic position order.")
+        if format != "json" and partners is not None:
+            if partners:
+                print("Electrical partners with reversed reference order:")
+                for pair in partners:
+                    print(f"  {'/'.join(pair['parts'])} on {pair['net']}")
+            else:
+                print("Electrical partners agree in reference order.")
+            print(_PARTNER_SCOPE)
+        return 1 if flagged or partners else 0
 
     # Filter out identity mappings
     effective_mapping = {
@@ -694,6 +761,153 @@ def run_re_annotate(
         )
 
     return 0
+
+
+def _inversion_indices(numbers: list[int]) -> list[int]:
+    """Indices that have a greater number before them or a smaller number after."""
+    prefix_max = numbers.copy()
+    suffix_min = numbers.copy()
+    for i in range(1, len(numbers)):
+        prefix_max[i] = max(prefix_max[i - 1], numbers[i])
+    for i in range(len(numbers) - 2, -1, -1):
+        suffix_min[i] = min(suffix_min[i + 1], numbers[i])
+    return [i for i, n in enumerate(numbers) if prefix_max[i] > n or suffix_min[i] < n]
+
+
+def _partner_inversions(
+    schematic_path: Path, prefixes: list[str] | None, per_sheet: bool
+) -> list[dict] | None:
+    """Report each electrical pair whose two prefixes rank it in opposite order.
+
+    None preserves the original position-only report when there are no
+    eligible pairs. An empty list means eligible partners agreed in order.
+    """
+    from kicad_tools.operations.netlist import build_netlist_from_schematic
+    from kicad_tools.router.net_class import (
+        is_ground_rail_name,
+        is_power_rail_name,
+        is_power_rail_pin,
+    )
+
+    netlist = build_netlist_from_schematic(schematic_path, include_symbol_pins=True)
+    occurrences = Counter(comp.reference for comp in netlist.components)
+    sheets = {comp.reference: comp.sheet_path for comp in netlist.components}
+    # Count library pins even when a wire or an entire unit is unplaced.
+    # Duplicate references cannot identify an unambiguous partner.
+    refs = {
+        comp.reference: _parse_reference(comp.reference)
+        for comp in netlist.components
+        if occurrences[comp.reference] == 1
+        and not comp.reference.startswith("#")
+        and len({pin.number for pin in comp.pins}) == 2
+    }
+    supply_pins = {
+        (comp.reference, pin.number)
+        for comp in netlist.components
+        for pin in comp.pins
+        if is_power_rail_pin(pin.pin_type, pin.name)
+    }
+    candidates: list[tuple[str, str, str]] = []
+    candidate_counts: Counter[str] = Counter()
+    for net in netlist.nets:
+        if len(net.nodes) != 2 or is_ground_rail_name(net.name) or is_power_rail_name(net.name):
+            continue
+        if any((node.reference, node.pin) in supply_pins for node in net.nodes):
+            continue
+        left, right = (node.reference for node in net.nodes)
+        if left not in refs or right not in refs or refs[left][0] == refs[right][0]:
+            continue
+        if refs[left][0] > refs[right][0]:
+            left, right = right, left
+        candidates.append((left, right, net.name))
+        candidate_counts.update((left, right))
+
+    groups: dict[tuple[str, str, str], list[tuple[int, int, str, str, str]]] = defaultdict(list)
+    for left, right, net_name in candidates:
+        # Count every candidate before applying the user's prefix filter.
+        if candidate_counts[left] != 1 or candidate_counts[right] != 1:
+            continue
+        if sheets[left] != sheets[right]:
+            continue
+        left_prefix, left_number, left_unit = refs[left]
+        right_prefix, right_number, right_unit = refs[right]
+        if left_number is None or right_number is None or left_unit or right_unit:
+            continue
+        if prefixes is not None and (left_prefix not in prefixes or right_prefix not in prefixes):
+            continue
+        scope = sheets[left] if per_sheet else ""
+        groups[scope, left_prefix, right_prefix].append(
+            (left_number, right_number, left, right, net_name)
+        )
+
+    if not groups:
+        return None
+    result = []
+    for group in sorted(groups):
+        pairs = sorted(groups[group])
+        # Sort by both numbers so ties in either prefix do not create an inversion.
+        for index in _inversion_indices([pair[1] for pair in pairs]):
+            _, _, left, right, net_name = pairs[index]
+            result.append({"parts": [left, right], "net": net_name})
+    return result
+
+
+def _out_of_order_parts(
+    uuid_mapping: dict[str, dict],
+    uuid_to_file: dict[str, Path],
+    per_sheet: bool,
+) -> list[dict]:
+    """Return mapping entries whose number order disagrees with position order.
+
+    Walks the mapping in insertion order — the same order the mapping
+    builders enumerated the symbols (file order, then top-to-bottom,
+    left-to-right position), which is also the order the new numbers are
+    assigned in — and, per prefix, flags every part that participates in an
+    inversion: a part whose current number is strictly greater than a later
+    part's number, or strictly less than an earlier part's number.  Parts
+    with equal numbers (multi-unit components sharing a base) and
+    unannotated references (``R?``) are not ranked.
+
+    Under *per_sheet* the comparison is scoped per file, because per-sheet
+    numbering restarts and cross-sheet number comparisons are meaningless.
+
+    Returns:
+        List of ``{"prefix", "old", "new", "uuid"}`` dicts in mapping
+        (position) order, reusing the mapping builders' assignment — no
+        second ordering implementation.
+    """
+    entries: list[tuple[str, str, int]] = []  # (uuid, prefix, old_number)
+    for uid, info in uuid_mapping.items():
+        if not uid:
+            continue
+        prefix, number, _ = _parse_reference(info["old"])
+        if number is None:
+            continue
+        entries.append((uid, prefix, number))
+
+    if per_sheet:
+        scopes: list[list[tuple[str, str, int]]] = []
+        by_file: dict[Path, list[tuple[str, str, int]]] = {}
+        for uid, prefix, number in entries:
+            by_file.setdefault(uuid_to_file.get(uid, Path("")), []).append((uid, prefix, number))
+        scopes.extend(by_file.values())
+    else:
+        scopes = [entries]
+
+    flagged: set[str] = set()
+    for scope in scopes:
+        by_prefix: dict[str, list[tuple[str, int]]] = {}
+        for uid, prefix, number in scope:
+            by_prefix.setdefault(prefix, []).append((uid, number))
+        for seq in by_prefix.values():
+            flagged.update(seq[i][0] for i in _inversion_indices([n for _, n in seq]))
+
+    results = []
+    for uid, info in uuid_mapping.items():
+        if uid in flagged:
+            prefix, _, _ = _parse_reference(info["old"])
+            results.append({"prefix": prefix, "old": info["old"], "new": info["new"], "uuid": uid})
+    return results
 
 
 def _build_continuous_mapping(
@@ -973,6 +1187,12 @@ def main(argv: list[str] | None = None):
         help="Also annotate unannotated #PWR? and #FLG? power symbols",
     )
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check reference numbers in schematic position order and across electrical "
+        "partners. Exit 1 on either disagreement. Files are read-only.",
+    )
+    parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
@@ -995,6 +1215,7 @@ def main(argv: list[str] | None = None):
         format=args.format,
         unannotated_only=args.unannotated_only,
         include_power=args.include_power,
+        check=args.check,
     )
 
 

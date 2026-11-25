@@ -1901,6 +1901,13 @@ class Footprint:
     # (#9796).
     zone_connect: int | None = None
     properties: dict[str, str] = field(default_factory=dict)
+    # Schematic symbol-instance link ``(path "/<sheet-uuid>/<symbol-uuid>")``
+    # (KiCad 8+ quoted form; KiCad 7 wrote the legacy bare hex form).  What
+    # lets KiCad's editors cross-probe this footprint back to its symbol and
+    # update it from the schematic.  Read-only: saving goes through the
+    # parsed tree, and no placement-synced field writes back into it
+    # (Issue #10109).
+    path: str = ""
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
     _board_origin: tuple[float, float] = field(
         default=(0.0, 0.0),
@@ -2238,6 +2245,14 @@ class Footprint:
         # UUID
         if uuid := sexp.find_child("uuid"):
             fp.uuid = uuid.get_string(0) or ""
+
+        # Schematic symbol-instance link (Issue #10109).  Direct children
+        # only: nothing below the footprint legitimately carries a
+        # ``(path ...)`` token today, but staying consistent with the
+        # direct-child rule above keeps a future descendant token from
+        # being misread as the footprint's own.
+        if path_node := sexp.find_child("path"):
+            fp.path = path_node.get_string(0) or ""
 
         # Description and tags
         if descr := sexp.find_child("descr"):

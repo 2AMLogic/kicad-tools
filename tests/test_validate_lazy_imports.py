@@ -101,6 +101,7 @@ PUBLIC_EXPORTS = {
         "DimensionRules": ".dimensions",
         "EdgeClearanceRule": ".edge",
         "BoardIdRule": ".board_id",
+        "BypassDistanceRule": ".bypass_distance",
         "FiducialsRule": ".fiducials",
         "ImpedanceRule": ".impedance",
         "NetImpedanceSpec": ".impedance",

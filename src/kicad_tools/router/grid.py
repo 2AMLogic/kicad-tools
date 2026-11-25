@@ -1451,6 +1451,8 @@ class RoutingGrid:
 
         self.fixed_fills = FixedFillObstacles()
         self.authored_arc_copper: dict[str, list[tuple[int, BaseGeometry | None]]] = {}
+        # Issue #10164: footprint copper polygons (``fp_poly``) by layer name, in sheet frame.
+        self.authored_footprint_poly_copper: dict[str, list[BaseGeometry | None]] = {}
 
         # PR #4078 Path B: (layer, y, x) keys reserved with mirror_to_cpp=False
         # (the single-ended #2983 inner-corner / #4053 bundle-river byte-lane
