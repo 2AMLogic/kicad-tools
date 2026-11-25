@@ -395,6 +395,7 @@ def test_both_caps_designated_for_u1_is_duplicate_and_leaves_u2_empty(tmp_path: 
     assert len(redundant) == 1
     assert "C1 (100nF, 1.0mm)" in redundant[0].explanation
     assert "C2 (100nF, 19.0mm)" in redundant[0].explanation
+    assert "nearby" not in redundant[0].explanation
     assert any(m.components[0] == "U2" for m in found if not m.title.startswith("Redundant"))
 
 
@@ -404,8 +405,30 @@ def test_crossed_designation_shows_both_caps_at_19mm(tmp_path: Path) -> None:
         ("U1", "1"): [("C2", 19.0, "schematic")],
         ("U2", "1"): [("C1", 19.0, "schematic")],
     }
-    titles = {m.title for m in DecouplingCountCheck().check(PCB.load(str(board)))}
-    assert titles == {"Power pin has no decoupling capacitor nearby"}
+    by_ref = {m.components[0]: m for m in DecouplingCountCheck().check(PCB.load(str(board)))}
+    assert set(by_ref) == {"U1", "U2"}
+    for ref, distant, nearby, owner in (("U1", "C2", "C1", "U2.1"), ("U2", "C1", "C2", "U1.1")):
+        finding = by_ref[ref]
+        assert "assigned" in finding.title
+        assert f"{distant} at 19.0mm" in finding.explanation
+        assert f"{nearby} at 1.0mm away, assigned to {owner}" in finding.explanation
+        assert "has no decoupling capacitor within" not in finding.explanation
+        assert finding.measurements["nearest_rail_cap_mm"] == 1.0
+
+
+@pytest.mark.parametrize("distance,warn", [(5.0, False), (5.004, True), (5.006, True)])
+def test_designated_cap_uses_measured_distance_at_radius(tmp_path: Path, capsys, distance, warn):
+    board = _two_ic_board(tmp_path, "U1.1", "U2.1")
+    board.write_text(board.read_text().replace("(at 1 10)", f"(at {distance} 10)"))
+    assert mistakes_cmd.main([str(board), "--category", "decoupling", "--format", "json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    findings = [m for m in result["mistakes"] if m["rule_id"] == "mistake.decoupling_count"]
+    assert len(findings) == int(warn)
+    pin = next(p for p in result["decoupling_inventory"] if (p["ic"], p["pin"]) == ("U1", "1"))
+    assert pin["caps"][0]["ref"] == "C1"
+    assert (pin["caps"][0]["distance_mm"] > 5.0) == warn
+    if warn:
+        assert findings[0]["measurements"]["nearest_rail_cap_mm"] > 5.0
 
 
 def test_without_schematic_the_geometric_rule_is_used(tmp_path: Path) -> None:

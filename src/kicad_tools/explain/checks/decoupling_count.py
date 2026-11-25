@@ -93,6 +93,7 @@ class PinDecoupling:
     nearest_rail_cap_ref: str | None = None
     nearest_rail_cap_value: str | None = None
     nearest_rail_cap_assigned_to: tuple[str, str] | None = None
+    radius_mm: float = field(default=DEFAULT_RADIUS_MM, kw_only=True)
 
     def to_dict(self) -> dict[str, object]:
         """JSON-serialisable form of the inventory row."""
@@ -101,7 +102,7 @@ class PinDecoupling:
             nearest = {
                 "ref": self.nearest_rail_cap_ref,
                 "value": self.nearest_rail_cap_value,
-                "distance_mm": round(self.nearest_rail_cap_mm, 2),
+                "distance_mm": _format_distance(self.nearest_rail_cap_mm, self.radius_mm, 2)[1],
                 "assigned_to": (
                     _format_owner(self.nearest_rail_cap_assigned_to)
                     if self.nearest_rail_cap_assigned_to is not None
@@ -118,7 +119,7 @@ class PinDecoupling:
                 {
                     "ref": c.reference,
                     "value": c.value,
-                    "distance_mm": c.distance_mm,
+                    "distance_mm": _format_distance(c.distance_mm, self.radius_mm, 2)[1],
                     "source": c.source,
                 }
                 for c in self.caps
@@ -143,16 +144,14 @@ def _format_owner(owner: tuple[str, str] | None) -> str:
     return f"{owner[0]}.{owner[1]}"
 
 
-def _format_distance(distance_mm: float, radius_mm: float) -> tuple[str, float]:
-    """Format a measured distance so a value just above ``radius_mm`` never rounds onto it."""
-    rounded_1 = round(distance_mm, 1)
-    if distance_mm > radius_mm and rounded_1 <= radius_mm:
-        rounded_2 = round(distance_mm, 2)
-        if rounded_2 > radius_mm:
-            return f"{rounded_2:.2f}", rounded_2
-        rounded_3 = round(distance_mm, 3)
-        return f"{rounded_3:.3f}", rounded_3
-    return f"{rounded_1:.1f}", rounded_1
+def _format_distance(distance_mm: float, radius_mm: float, places: int = 1) -> tuple[str, float]:
+    """Round for display without changing which side of the radius a measurement is on."""
+    within_radius = distance_mm <= radius_mm
+    for precision in range(places, 7):
+        rounded = round(distance_mm, precision)
+        if (rounded <= radius_mm) == within_radius:
+            return f"{rounded:.{precision}f}", rounded
+    return str(distance_mm), distance_mm
 
 
 def _pad_position(fp: Footprint, pad: Pad) -> tuple[float, float]:
@@ -269,6 +268,7 @@ class DecouplingCountCheck:
                     pad_number=str(pad.number),
                     net_name=pad.net_name,
                     position=_pad_position(fp, pad),
+                    radius_mm=self.radius_mm,
                 )
                 pins.append(pin)
                 by_net.setdefault(pad.net_name, []).append((pin, fp))
@@ -304,9 +304,7 @@ class DecouplingCountCheck:
                 ]
                 if designated:
                     d, owner = min(designated, key=lambda e: (e[0], e[1].pad_number))
-                    owner.caps.append(
-                        AssignedCap(cap.reference, cap.value, round(d, 2), "schematic")
-                    )
+                    owner.caps.append(AssignedCap(cap.reference, cap.value, d, "schematic"))
                     cap_owner[id(cap)] = (owner.ic_reference, owner.pad_number)
                     continue
             best: tuple[float, str, str, PinDecoupling] | None = None
@@ -317,7 +315,7 @@ class DecouplingCountCheck:
                     best = cand
             if best is not None and best[0] <= self.radius_mm:
                 owner = best[3]
-                owner.caps.append(AssignedCap(cap.reference, cap.value, round(best[0], 2)))
+                owner.caps.append(AssignedCap(cap.reference, cap.value, best[0]))
                 cap_owner[id(cap)] = (owner.ic_reference, owner.pad_number)
 
         for net, entries in by_net.items():
@@ -348,14 +346,9 @@ class DecouplingCountCheck:
         mistakes: list[Mistake] = []
         inventory = self.pin_inventory(pcb)
 
-        # Uncovered pins on an otherwise-decoupled rail fall into two distinct
-        # situations:
-        # 1. A same-rail capacitor sits within ``radius_mm`` of the pin, but
-        #    the geometric rule assigned it to another closer (or tie-broken)
-        #    power pin.  Saying "no decoupling capacitor within 5mm" here
-        #    contradicts the measured distance.
-        # 2. Every decoupling capacitor on the rail really is outside
-        #    ``radius_mm``.
+        # An empty pin can have another pin's capacitor nearby. A pin with
+        # distant designated capacitors can also have one nearby. For the
+        # latter report both the designation and the nearest physical part.
         # Each situation is grouped once per (IC, net) so per-pin findings do
         # not collide on the waiver key; the nearby-cap case includes the
         # nearby capacitor reference(s) in ``components`` so the two shapes
@@ -486,18 +479,26 @@ class DecouplingCountCheck:
                     f", assigned to {_format_owner(nearest_pin.nearest_rail_cap_assigned_to)}"
                 )
             noun = "pin" if len(pins) == 1 else "pins"
+            designated = ", ".join(
+                f"{cap.reference} at {_format_distance(cap.distance_mm, self.radius_mm)[0]}mm "
+                f"from {ic_ref}.{pin.pad_number}"
+                for pin in pins
+                for cap in pin.caps
+            )
+            qualifier = "assigned " if designated else ""
+            designation_note = f" Designated capacitors include {designated}." if designated else ""
             mistakes.append(
                 Mistake(
                     category=MistakeCategory.DECOUPLING,
                     severity="warning",
-                    title="Power pin has no decoupling capacitor nearby",
+                    title=f"Power pin has no {qualifier}decoupling capacitor nearby",
                     components=[ic_ref, net],
                     location=pins[0].position,
                     explanation=(
                         f"{ic_ref} {noun} {pin_list} ({net}) "
-                        f"{'has' if len(pins) == 1 else 'have'} no decoupling "
-                        f"capacitor within {self.radius_mm:g}mm, although other "
-                        f"capacitors decouple {net} ({nearest_cap_note}). Each "
+                        f"{'has' if len(pins) == 1 else 'have'} no {qualifier}decoupling "
+                        f"capacitor within {self.radius_mm:g}mm.{designation_note} "
+                        f"For {ic_ref}.{nearest_pin.pad_number} on {net}, the {nearest_cap_note}. Each "
                         "supply pin should have its own local bypass capacitor."
                     ),
                     fix_suggestion=(
@@ -530,7 +531,7 @@ class DecouplingCountCheck:
                         location=pin.position,
                         explanation=(
                             f"{where} has {len(caps)} capacitors of the same value "
-                            f"nearby: {listing}. More than {self.max_same_value} "
+                            f"assigned to it: {listing}. More than {self.max_same_value} "
                             "of one value on a single pin adds cost and board "
                             "area without improving decoupling."
                         ),
