@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import errno
 import hashlib
 import json
 import logging
@@ -47,22 +46,44 @@ import math
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 import zipfile
-from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.analysis.routing_quality import (
     RULE_OFF_AXIS_LENGTH_WARNING,
     off_axis_layer_warning_count,
+)
+from kicad_tools.core.package_publication import (
+    PUBLICATION_HOLD_PREFIX,
+    PublicationRegion,
+    publish_regions,
+)
+from kicad_tools.core.package_publication import (
+    PublicationBusy as ReadinessPublicationBusy,
+)
+from kicad_tools.core.package_publication import (
+    inventory_changes as _inventory_changes,
+)
+from kicad_tools.core.package_publication import (
+    is_publication_hold as _is_private_hold,
+)
+from kicad_tools.core.package_publication import (
+    publication_lock as _publication_lock,
+)
+from kicad_tools.core.package_publication import (
+    sha256_file as _sha256_file,
+)
+from kicad_tools.core.package_publication import (
+    with_changes as _with_changes,
 )
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.sexp import ParseError, parse_file
@@ -85,6 +106,9 @@ from .known_issues import (
     parse_known_issue,
     validate_known_issues,
 )
+
+if TYPE_CHECKING:
+    from kicad_tools.export.project_identity import ArchiveLayout
 
 logger = logging.getLogger(__name__)
 
@@ -204,19 +228,6 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
-
-
-def _sha256_file(path: Path) -> str:
-    """Return the SHA256 hex digest of *path*'s bytes."""
-    with path.open("rb") as handle:
-        return _sha256_stream(handle)
-
-
-def _sha256_stream(handle: BinaryIO) -> str:
-    digest = hashlib.sha256()
-    for chunk in iter(lambda: handle.read(65536), b""):
-        digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _iso_now() -> str:
@@ -463,11 +474,14 @@ def _run_export(
         if not result.success:
             return EngineRun(False, "Generic manufacturing export failed")
         archive = output_dir / "kicad_project.zip"
+        sidecars = {pcb.with_suffix(".kicad_pro"), pcb.with_suffix(".kicad_dru")}
         with zipfile.ZipFile(archive, "a", zipfile.ZIP_DEFLATED) as zf:
             present = set(zf.namelist())
             for source in _project_dependencies(pcb, Path(pcb.anchor)):  # bounded upstream
                 if not source.is_relative_to(pcb.parent):
                     continue  # Collected later by _normalize_project_archive (#5813).
+                if source in sidecars:
+                    continue  # Already archived under the project identity's name.
                 relative = source.relative_to(pcb.parent).as_posix()
                 if relative not in present:
                     zf.write(source, relative)
@@ -2656,18 +2670,6 @@ def _is_transient_local(path: Path) -> bool:
     return any(part == "__pycache__" or part.endswith("-backups") for part in path.parts)
 
 
-_PRIVATE_HOLD_PREFIX = ".readiness-"
-
-
-def _is_private_hold(path: Path) -> bool:
-    """True inside a retained publication backup (Issue #10106).
-
-    A hold can live in a generated directory when that directory is its own
-    mount, so it must never become an input, package member or removal target.
-    """
-    return any(part.startswith(_PRIVATE_HOLD_PREFIX) for part in path.parts)
-
-
 def _bundle_files(output_dir: Path, exclude: Sequence[str] = ()) -> list[Path]:
     excluded = set(exclude)
     return sorted(
@@ -2864,8 +2866,12 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
     """Every (resolved) file the archived project must contain to be the checked design.
 
     This is the single inventory shared by archive collection and provenance, so
-    nothing provenance requires can be missing from ``kicad_project.zip``.
+    nothing provenance requires can be missing from ``kicad_project.zip``. The
+    ``VERSION.md`` kept beside the board is part of it, so the revision record
+    travels with the editable project (Issue #10108).
     """
+    from kicad_tools.export.project_identity import VERSION_FILE
+
     explicit = options.project_root is not None
     sources: set[Path] = set()
     if options.pcb.is_file():
@@ -2873,6 +2879,9 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
         sources.update(
             p.resolve() for p in _project_dependencies(options.pcb, options.root, explicit)
         )
+        version = options.pcb.parent / VERSION_FILE
+        if version.is_file():
+            sources.add(version.resolve())
     if options.schematic is not None and options.schematic.is_file():
         sources.update(_schematic_hierarchy(options.schematic, options.root, explicit))
     if options.project is not None:
@@ -2886,43 +2895,119 @@ def _external_dependencies(options: ReadinessOptions) -> list[Path]:
     return [p for p in _required_sources(options) if not p.is_relative_to(board)]
 
 
-def _archive_names(options: ReadinessOptions, sources: Sequence[Path]) -> dict[Path, str]:
-    """Archive member names: PCB-directory relative, or root relative with externals."""
+def _archive_layout(options: ReadinessOptions, sources: Sequence[Path]) -> ArchiveLayout:
+    """Member names of the ``kicad_project.zip`` these inputs must deliver.
+
+    Names are PCB-directory relative, or project-root relative once any required
+    file lies outside the PCB directory (Issue #5813), so ``${KIPRJMOD}/../``
+    references keep working inside the archive. The board, its rules, the
+    project file and the root sheet are delivered under the project identity's
+    basename (Issue #10108).
+    """
+    from kicad_tools.export.project_identity import archive_layout, project_identity
+
+    identity = project_identity(options.pcb, options.project, options.schematic)
     base = options.pcb.parent.resolve()
-    if all(s.resolve().is_relative_to(base) for s in sources):
-        return {s: s.resolve().relative_to(base).as_posix() for s in sources}
-    return {s: s.resolve().relative_to(options.root).as_posix() for s in sources}
+
+    def in_board_directory(real: Path) -> str:
+        return real.parent.relative_to(base).as_posix()
+
+    def in_project_root(real: Path) -> str:
+        return real.parent.relative_to(options.root).as_posix()
+
+    directory_of = (
+        in_board_directory
+        if all(source.resolve().is_relative_to(base) for source in sources)
+        else in_project_root
+    )
+    return archive_layout(identity, sources, directory_of)
 
 
 def _normalize_project_archive(options: ReadinessOptions) -> None:
-    """Make kicad_project.zip contain every file provenance requires (#5813).
+    """Make kicad_project.zip the editable project provenance requires (#5813, #10108).
 
     The exporter only archives the PCB directory's top level and its library
     folders.  Sub-sheets in a subdirectory, ``${KIPRJMOD}/../`` libraries and
     out-of-directory schematics are added here.  When any required file lies
     outside the PCB directory, members are re-rooted relative to the project
     root so that ``${KIPRJMOD}/../x`` references keep working inside the archive.
-    Members the exporter already wrote are never overwritten: provenance must
-    still see (and reject) an export that archived the wrong bytes.
+
+    The board, its rules, the project file and the root sheet then take the
+    project identity's basename so KiCad opens them as one project.  A member
+    the exporter already wrote is moved, never re-read, and a ``VERSION.md``
+    member records the renaming: provenance must still see (and reject) an
+    export that archived the wrong bytes.  When another file already occupies
+    the delivered name, nothing is renamed and :class:`ProjectIdentityError`
+    names both files.
     """
+    from kicad_tools.export.project_identity import ProjectIdentityError
+
     archive = options.output_dir / "kicad_project.zip"
     if not archive.is_file():
         return
-    required = _required_sources(options)
-    names_for = _archive_names(options, required)
+    layout = _archive_layout(options, _required_sources(options))
     base = options.pcb.parent.resolve()
-    rerooted = not all(s.is_relative_to(base) for s in required)
+    rerooted = not all(source.is_relative_to(base) for source in layout.names)
+    members = {}
     with zipfile.ZipFile(archive) as zf:
-        members = {
-            info.filename: zf.read(info.filename) for info in zf.infolist() if not info.is_dir()
-        }
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            if info.filename in members:
+                raise ProjectIdentityError(
+                    f"duplicate file identities in kicad_project.zip: {info.filename}"
+                )
+            members[info.filename] = zf.read(info)
     prefix = base.relative_to(options.root).as_posix() if rerooted else "."
-    rebuilt = {(f"{prefix}/{n}" if prefix != "." else n): d for n, d in members.items()}
-    missing = [s for s in required if names_for[s] not in rebuilt]
-    if not missing and not rerooted:
+    board = options.pcb.resolve()
+    board_names = {layout.checked(board), layout.names[board]}
+    if prefix != "." and board_names.isdisjoint(members):
+        rebuilt = {f"{prefix}/{name}": data for name, data in members.items()}
+    else:
+        if prefix != "." and any(Path(name).name in members for name in board_names):
+            raise ProjectIdentityError(
+                "kicad_project.zip contains the selected board under both PCB-relative and "
+                "project-root paths; keep only one editable project"
+            )
+        rebuilt = members.copy()
+    version = layout.identity.version_source
+    if version is not None and layout.record_name in rebuilt:
+        if rebuilt[layout.record_name] not in (version.read_bytes(), layout.record):
+            raise ProjectIdentityError(
+                f"{layout.record_name} inside kicad_project.zip differs from the checked "
+                "revision record; regenerate the export with the current VERSION.md"
+            )
+    for source, delivered in layout.names.items():
+        checked = layout.checked(source)
+        if delivered == checked:
+            continue
+        if delivered in rebuilt:
+            if checked in rebuilt:
+                raise ProjectIdentityError(
+                    f"kicad_project.zip cannot deliver {checked} as {delivered}: another file "
+                    "is already archived under that name. Keep only the selected board's "
+                    "project beside it, or rename one of the two files"
+                )
+            continue
+        if checked in rebuilt:
+            rebuilt[delivered] = rebuilt.pop(checked)
+    for source, delivered in layout.names.items():
+        if delivered not in rebuilt:
+            rebuilt[delivered] = source.read_bytes()
+        rebuilt[delivered] = layout.member_bytes(source, rebuilt[delivered])
+    if layout.record is not None:
+        rebuilt[layout.record_name] = layout.record
+    else:
+        rebuilt.pop(layout.record_name, None)
+    delivered_names = set(layout.names.values())
+    for name in [
+        name
+        for name in rebuilt
+        if name.endswith((".kicad_pcb", ".kicad_pro", ".kicad_dru")) and name not in delivered_names
+    ]:
+        del rebuilt[name]
+    if rebuilt == members:
         return
-    for source in missing:
-        rebuilt[names_for[source]] = source.read_bytes()
     tmp = archive.with_suffix(".zip.tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in sorted(rebuilt):
@@ -2947,9 +3032,14 @@ def _is_project_local_library_member(relative: str) -> bool:
 def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     """Match PCB and native dependencies by relative path, not basename.
 
-    When every problem is a project-local library member missing from the zip,
-    one extra line says the bundle predates the exporter writing them (#8749).
-    Pass/fail is unchanged.
+    The board, its rules, the project file and the root sheet must appear under
+    the delivered project's basename (Issue #10108), byte-equal to the checked
+    sources once the declared packaging transforms are applied. A bundle
+    written before that rule is accepted while it keeps every renamed file
+    under its checked name, even when another archived file already holds the
+    delivered name; mixing the two is not. When every problem is a
+    project-local library member missing from the zip, one extra line says the
+    bundle predates the exporter writing them (#8749). Pass/fail is unchanged.
     """
     archive = options.output_dir / "kicad_project.zip"
     problems: list[str] = []
@@ -2958,19 +3048,60 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
         sources = set(_required_sources(options)) | {options.pcb.resolve()}
         if options.schematic is not None:
             sources.add(options.schematic.resolve())
-        names_for = _archive_names(options, sorted(sources))
+        layout = _archive_layout(options, sorted(sources))
         with zipfile.ZipFile(archive) as zf:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
             if len(names) != len(set(names)):
                 problems.append("duplicate file identities in kicad_project.zip")
+            delivered_layout = False
+            checked_layout: list[str] = []
             for source in sorted(sources):
-                relative = names_for[source]
-                if relative not in names:
-                    problems.append(f"{relative} is absent from kicad_project.zip")
-                    missing_members.append(relative)
-                elif zf.read(relative) != source.read_bytes():
+                delivered, checked = layout.names[source], layout.checked(source)
+                if delivered in names and zf.read(delivered) == layout.member_bytes(
+                    source, source.read_bytes()
+                ):
+                    delivered_layout = delivered_layout or delivered != checked
+                elif checked in names and (delivered not in names or options.operation == "verify"):
+                    if zf.read(checked) == source.read_bytes():
+                        checked_layout.append(checked)
+                    else:
+                        problems.append(
+                            f"{checked} inside kicad_project.zip differs from the checked source"
+                        )
+                elif delivered in names:
                     problems.append(
-                        f"{relative} inside kicad_project.zip differs from the checked source"
+                        f"{delivered} inside kicad_project.zip differs from the checked source"
+                    )
+                else:
+                    problems.append(f"{delivered} is absent from kicad_project.zip")
+                    missing_members.append(delivered)
+            if checked_layout and (delivered_layout or options.operation == "generate"):
+                problems.append(
+                    "kicad_project.zip keeps checked file names instead of forming the "
+                    f"{layout.identity.name} project ({', '.join(checked_layout[:3])}); "
+                    "regenerate the package"
+                )
+            if delivered_layout:
+                extra = sorted(
+                    layout.checked(source)
+                    for source, delivered in layout.names.items()
+                    if layout.checked(source) != delivered
+                    and layout.checked(source) in names
+                    and delivered in names
+                )
+                if extra:
+                    problems.append(
+                        f"kicad_project.zip also contains checked file names beside the "
+                        f"delivered {layout.identity.name} project ({', '.join(extra)}); "
+                        "regenerate the package"
+                    )
+            if delivered_layout and layout.record is not None:
+                record = layout.record_name
+                if record not in names:
+                    problems.append(f"{record} is absent from kicad_project.zip")
+                elif zf.read(record) != layout.record:
+                    problems.append(
+                        f"{record} inside kicad_project.zip does not match the checked sources"
                     )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         problems.append(f"Project provenance could not be verified: {exc}")
@@ -4384,23 +4515,6 @@ def _snapshot_inventory(root: Path, held_dirs: set[Path] | None = None) -> dict[
     }
 
 
-def _inventory_changes(before: dict[str, str], after: dict[str, str]) -> list[str]:
-    """Name each path that was added, removed or modified between two inventories."""
-    changes = [f"added {name}" for name in sorted(after.keys() - before.keys())]
-    changes.extend(f"removed {name}" for name in sorted(before.keys() - after.keys()))
-    changes.extend(
-        f"modified {name}"
-        for name in sorted(before.keys() & after.keys())
-        if after[name] != before[name]
-    )
-    return changes
-
-
-def _with_changes(message: str, changes: list[str]) -> str:
-    """Append the named changes to ``message``; an empty list leaves it unchanged."""
-    return f"{message}: {', '.join(changes)}" if changes else message
-
-
 def _release_changes(
     board_dir: Path, before: dict[str, str], external_before: dict[Path, str]
 ) -> list[str]:
@@ -4424,218 +4538,6 @@ def _external_input_changes(board_dir: Path, external_before: dict[Path, str]) -
     return changes
 
 
-def _stream_identity(stream: BinaryIO) -> tuple[Any, ...]:
-    info = os.fstat(stream.fileno())
-    stream.seek(0)
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_mode,
-        info.st_size,
-        info.st_mtime_ns,
-        _sha256_stream(stream),
-    )
-
-
-def _publication_identity(path: Path) -> tuple[Any, ...] | None:
-    """Identify the opened file, including same-content inode replacements."""
-    try:
-        if not stat.S_ISREG(path.lstat().st_mode):
-            raise RuntimeError(f"Publication target is not a regular file: {path}")
-        with path.open("rb") as stream:
-            return _stream_identity(stream)
-    except FileNotFoundError:
-        return None
-
-
-def _supports_publication_links(directory: Path) -> bool:
-    """Probe private names before moving any live file on this filesystem."""
-    with tempfile.TemporaryDirectory(prefix=".readiness-probe-", dir=directory) as scratch:
-        source = Path(scratch) / "source"
-        source.touch()
-        try:
-            os.link(source, Path(scratch) / "link")
-        except OSError as exc:
-            if exc.errno in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.ENOSYS):
-                return False
-            raise
-    return True
-
-
-def _copy_publication_file(
-    source: Path, target: Path, record: Callable[[tuple[Any, ...] | None], None] | None = None
-) -> None:
-    """Copy only into a newly created name on a filesystem without hard links."""
-    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    with source.open("rb") as staged:
-        source_info = os.fstat(staged.fileno())
-        fd = os.open(target, flags, stat.S_IMODE(source_info.st_mode))
-        with os.fdopen(fd, "r+b", buffering=0) as live:
-            if os.fstat(fd).st_size:
-                raise RuntimeError(f"Concurrent edit before publication: {target.name}")
-            digest = hashlib.sha256()
-            try:
-                for chunk in iter(lambda: staged.read(65536), b""):
-                    if os.write(fd, chunk) != len(chunk):
-                        raise OSError(errno.ENOSPC, "Incomplete publication write", target)
-                    digest.update(chunk)
-                os.fsync(fd)
-                if os.utime in os.supports_fd:
-                    os.utime(fd, ns=(source_info.st_atime_ns, source_info.st_mtime_ns))
-            except BaseException:
-                # A short write may already have changed our file. Journal the
-                # descriptor, never the pathname an atomic save may now own.
-                if record is not None:
-                    record(_stream_identity(live))
-                raise
-            identity = _stream_identity(live)
-            if identity[-1] != digest.hexdigest():
-                raise RuntimeError(f"Concurrent edit during publication: {target.name}")
-            if record is not None:
-                # FAT may assign the permanent inode only after the first write.
-                record(identity)
-            if not os.path.samestat(os.fstat(fd), target.lstat()):
-                raise RuntimeError(f"Concurrent edit during publication: {target.name}")
-
-
-def _restore_held(hold: Path, target: Path, links: bool) -> bool:
-    """Restore the captured file only if no newer save has taken its name."""
-    if links:
-        try:
-            os.link(hold, target)
-            return True
-        except FileExistsError:
-            return False
-        except OSError:
-            # Even a filesystem that passed the probe may refuse this link.
-            pass
-    try:
-        _copy_publication_file(hold, target)
-    except FileExistsError:
-        return False
-    return True
-
-
-@dataclass
-class _PublicationHold:
-    target: Path
-    path: Path
-    identity: tuple[Any, ...]
-    links: bool
-
-    @property
-    def reserve(self) -> Path:
-        return self.path.with_name("recovery-space")
-
-    def release_space(self) -> None:
-        if self.reserve.exists():
-            # Reclaim blocks even when a filesystem watcher has the file open.
-            with self.reserve.open("wb"):
-                pass
-            self.reserve.unlink()
-
-    def discard(self) -> None:
-        """Retire a private backup after its contents have been committed or restored."""
-        try:
-            self.release_space()
-            self.path.unlink(missing_ok=True)
-            self.path.parent.rmdir()
-        except OSError as error:
-            # A busy backup or an unexpected file belongs to the operator. Keep
-            # it available without changing the outcome of either public region.
-            logger.warning("Could not clean up readiness backup %s: %s", self.path.parent, error)
-
-    def restore(self) -> None:
-        self.release_space()
-        restored = _restore_held(self.path, self.target, self.links)
-        if not restored and _publication_identity(self.path) != self.identity:
-            raise RuntimeError(
-                f"Another save owns {self.target}; the displaced editor's file remains at {self.path}"
-            )
-        self.discard()
-
-
-def _claim_target(
-    target: Path,
-    expected: tuple[Any, ...] | None,
-    links: bool,
-    region_root: Path,
-    *,
-    reserve: bool = False,
-) -> _PublicationHold | None:
-    """Retain the actual displaced file so a writer with it open can finish a save."""
-    if expected is None:
-        if os.path.lexists(target):
-            raise RuntimeError(f"Concurrent edit before publication: {target.name}")
-        return None
-    # Keep retained backups outside package and evidence subdirectories. A
-    # nested mount needs a hold on its own device for the editor-preserving rename.
-    parent = target.parent
-    device = parent.stat().st_dev
-    while parent != region_root and parent.parent.stat().st_dev == device:
-        parent = parent.parent
-    private = Path(tempfile.mkdtemp(prefix=".readiness-", dir=parent))
-    hold = _PublicationHold(target, private / ".readiness-hold-original", expected, links)
-    try:
-        with ExitStack() as stack:
-            opened = None
-            if not links:
-                # Preflight access and enough recovery space before moving anything.
-                # Restoration on FAT needs a fresh file at the public name.
-                flags = os.O_RDWR if reserve else os.O_RDONLY
-                fd = os.open(target, flags | getattr(os, "O_NOFOLLOW", 0))
-                opened = stack.enter_context(os.fdopen(fd, "rb"))
-                if _stream_identity(opened) != expected:
-                    raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
-                if reserve:
-                    opened.seek(0)
-                    with hold.reserve.open("xb") as space:
-                        shutil.copyfileobj(opened, space)
-                        space.flush()
-                        os.fsync(space.fileno())
-                if os.name != "posix" or expected[3] != 0:
-                    # Windows denies a rename while our own descriptor is open.
-                    opened.close()
-                    opened = None
-            os.replace(target, hold.path)
-            if opened is not None:
-                # A zero-length FAT file can change inode at rename.
-                expected = (expected[0], os.fstat(opened.fileno()).st_ino, *expected[2:])
-            observed = _publication_identity(hold.path)
-            if observed != expected:
-                raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
-            hold.identity = expected
-    except BaseException:
-        if os.path.lexists(hold.path):
-            hold.restore()
-        else:
-            hold.discard()
-        raise
-    return hold
-
-
-class ReadinessPublicationBusy(RuntimeError):
-    """Another process is installing readiness results at this destination."""
-
-
-@contextmanager
-def _publication_lock(lock: Path) -> Iterator[None]:
-    """Serialize writers. An abandoned lock requires the owner to clear it."""
-    try:
-        lock.mkdir()
-    except FileExistsError as exc:
-        raise ReadinessPublicationBusy(
-            f"Another readiness publisher holds the release lock {lock}"
-        ) from exc
-    try:
-        yield
-    finally:
-        try:
-            lock.rmdir()
-        except OSError as error:
-            logger.warning("Could not release readiness publication lock %s: %s", lock, error)
-
-
 def _publish_candidate(
     candidate: Path,
     destination: Path,
@@ -4646,197 +4548,17 @@ def _publish_candidate(
     external_before: dict[Path, str] | None = None,
 ) -> None:
     """Hold every publisher lock and backup until the whole checked release is installed."""
-    regions = [(candidate, destination, before)]
+    regions = [PublicationRegion(candidate, destination, before)]
     if sibling_release is not None:
-        regions.append(sibling_release)
-    with ExitStack() as publication:
-        # All publishers take locks in the same order, including when only
-        # the release root is shared by two different board directories.
-        for root in sorted(region[1] for region in regions):
-            root.parent.mkdir(parents=True, exist_ok=True)
-            publication.enter_context(
-                _publication_lock(root.parent / f".{root.name}.readiness-publish.lock")
-            )
-
-        holds: list[_PublicationHold] = []
-        with ExitStack() as installs:
-            inventories = []
-            for staged, live, snapshot in regions:
-                after = installs.enter_context(
-                    _install_candidate(staged, live, snapshot, receipt, holds)
-                )
-                inventories.append((live, after))
-            # Both regions can still roll back when we recheck an earlier file or
-            # a project dependency outside them. The consumer receipt was installed last.
-            held_dirs = {hold.path.parent for hold in holds}
-            for live, after in inventories:
-                current = _snapshot_inventory(live, held_dirs)
-                if current != after:
-                    raise RuntimeError(
-                        _with_changes(
-                            "Concurrent edit during publication", _inventory_changes(after, current)
-                        )
-                    )
-            if external_before:
-                edits = _external_input_changes(destination, external_before)
-                if edits:
-                    raise RuntimeError(_with_changes("Concurrent edit during publication", edits))
-            # An already-open editor can save to a displaced inode while we install
-            # either region. Check all originals while both journals can still unwind.
-            for hold in holds:
-                if _publication_identity(hold.path) != hold.identity:
-                    raise RuntimeError(f"Concurrent edit during publication: {hold.target.name}")
-
-        # Both regions have committed. Retire all backups under the locks.
-        for original in holds:
-            original.discard()
-
-
-def _make_publish_directory(directory: Path, created: list[Path]) -> None:
-    """Record only directories this installation created, for empty-directory rollback."""
-    if directory.is_dir():
-        return
-    _make_publish_directory(directory.parent, created)
-    try:
-        directory.mkdir()
-    except FileExistsError:
-        if not directory.is_dir():
-            raise
-    else:
-        created.append(directory)
-
-
-@contextmanager
-def _install_candidate(
-    candidate: Path,
-    destination: Path,
-    before: dict[str, str],
-    receipt: Path | None,
-    holds: list[_PublicationHold],
-) -> Iterator[dict[str, str]]:
-    """Install one region, retaining its rollback journal through the caller's commit."""
-    current = _snapshot_inventory(destination)
-    if current != before:
-        raise RuntimeError(
-            _with_changes(
-                "Release changed during verification; refusing to overwrite concurrent work",
-                _inventory_changes(before, current),
-            )
-        )
-    after = _snapshot_inventory(candidate)
-    # The readiness receipt becomes visible after the artifacts it describes.
-    changed = sorted(
-        (name for name in set(before) | set(after) if before.get(name) != after.get(name)),
-        key=lambda name: (destination / name == receipt, name),
+        regions.append(PublicationRegion(*sibling_release))
+    publish_regions(
+        regions,
+        _snapshot_inventory,
+        publish_last=receipt,
+        external_changes=partial(_external_input_changes, destination, external_before)
+        if external_before
+        else None,
     )
-    expected = {name: _publication_identity(destination / name) for name in changed}
-    for name, identity in expected.items():
-        digest = identity[-1] if identity is not None else None
-        if digest != before.get(name):
-            raise RuntimeError(f"Concurrent edit while identifying publication target: {name}")
-    links_by_device: dict[int, bool] = {}
-
-    originals: dict[str, _PublicationHold] = {}
-    installed: dict[str, tuple[Any, ...] | None] = {}
-    created: list[Path] = []
-    try:
-        for name in changed:
-            target = destination / name
-            if _publication_identity(target) != expected[name]:
-                raise RuntimeError(f"Concurrent edit before publication: {name}")
-            _make_publish_directory(target.parent, created)
-            device = target.parent.stat().st_dev
-            if device not in links_by_device:
-                links_by_device[device] = _supports_publication_links(target.parent)
-            links = links_by_device[device]
-            with ExitStack() as preparation:
-                staged = candidate / name
-                if links and name in after:
-                    fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
-                    os.close(fd)
-                    staged = Path(staged_name)
-                    preparation.callback(staged.unlink, missing_ok=True)
-                    shutil.copy2(candidate / name, staged)
-                hold = _claim_target(target, expected[name], links, destination, reserve=True)
-                if hold is not None:
-                    originals[name] = hold
-                    holds.append(hold)
-                    installed[name] = None
-                if name not in after:
-                    continue
-                record = partial(installed.__setitem__, name)
-                if not links:
-                    try:
-                        _copy_publication_file(staged, target, record)
-                    except FileExistsError:
-                        raise RuntimeError(f"Concurrent edit before replacement: {name}") from None
-                    continue
-                identity = _publication_identity(staged)
-                try:
-                    os.link(staged, target)
-                except FileExistsError:
-                    raise RuntimeError(f"Concurrent edit before replacement: {name}") from None
-                except BaseException:
-                    if staged.stat().st_nlink > 1:
-                        record(identity)
-                    raise
-                else:
-                    record(identity)
-        yield after
-    except BaseException as exc:
-        conflicts = []
-        for name, identity in reversed(installed.items()):
-            target = destination / name
-            original = originals.get(name)
-            if original is not None:
-                original.release_space()
-            links = links_by_device[target.parent.stat().st_dev]
-            try:
-                withdrawn = _claim_target(target, identity, links, destination)
-            except Exception:
-                # A newer save (or an editor's deletion) owns the public name.
-                if (
-                    original is not None
-                    and _publication_identity(original.path) == original.identity
-                ):
-                    original.discard()
-                conflicts.append(
-                    f"{name} (saved at {original.path})"
-                    if original is not None and original.path.exists()
-                    else name
-                )
-                continue
-            try:
-                if original is not None:
-                    # Restore the actual displaced inode's latest bytes, never
-                    # a backup copied before the editor completed its save.
-                    original.restore()
-            except Exception:
-                conflicts.append(
-                    f"{name} (saved at {original.path})"
-                    if original is not None and original.path.exists()
-                    else name
-                )
-                if withdrawn is not None:
-                    try:
-                        withdrawn.restore()
-                    except Exception:
-                        conflicts.append(str(withdrawn.path))
-            else:
-                if withdrawn is not None:
-                    withdrawn.discard()
-        for directory in reversed(created):
-            try:
-                directory.rmdir()
-            except OSError as error:
-                if error.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
-                    conflicts.append(str(directory))
-        if conflicts:
-            raise RuntimeError(
-                f"{exc}; rollback preserved concurrent edits or could not restore: "
-                + ", ".join(conflicts)
-            ) from exc
-        raise
 
 
 def _remove_fill_local_settings(evidence: Path) -> None:
@@ -5003,7 +4725,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 ".venv",
                 "readiness-verification",
                 "readiness-attempt",
-                f"{_PRIVATE_HOLD_PREFIX}*",
+                f"{PUBLICATION_HOLD_PREFIX}*",
             ),
         )
         candidate_release: Path | None = None
@@ -5018,7 +4740,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                         ".venv",
                         "readiness-verification",
                         "readiness-attempt",
-                        f"{_PRIVATE_HOLD_PREFIX}*",
+                        f"{PUBLICATION_HOLD_PREFIX}*",
                     ),
                 )
 

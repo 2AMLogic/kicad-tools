@@ -333,7 +333,12 @@ def write_deterministic_zip(archive: Path, members: dict[str, bytes]) -> None:
 
 
 def rebuild_archive(
-    archive: Path, search: list[Path], *, additional_members: tuple[str, ...] = ()
+    archive: Path,
+    search: list[Path],
+    *,
+    additional_members: tuple[str, ...] = (),
+    derived: dict[str, bytes] | None = None,
+    replaces: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Refresh existing and explicitly requested members from current files.
 
@@ -343,11 +348,23 @@ def rebuild_archive(
     with different zip metadata, and re-encoding identical members would make
     every refresh rewrite the archive, the manifest that hashes it and the
     outer bundle.  Otherwise it is rewritten with ``write_deterministic_zip``.
+
+    *derived* carries the current bytes of members that are not a same-named
+    file under *search*: the project ``kct`` delivers under the root sheet's
+    basename and its ``VERSION.md`` record (Issue #10108).  It applies only
+    while none of *replaces* -- the checked file names those members displaced
+    -- is still archived under its own name: such a bundle was written before
+    the renaming and keeps refreshing member by member.
     """
     with zipfile.ZipFile(archive) as existing:
         old = {name: existing.read(name) for name in existing.namelist() if not name.endswith("/")}
+    if replaces & old.keys():
+        derived = None
     members: dict[str, bytes] = {}
     for name in sorted(old.keys() | set(additional_members)):
+        if derived and name in derived:
+            members[name] = derived[name]
+            continue
         for base in search:
             candidate = base / name
             if candidate.is_file():
@@ -359,6 +376,36 @@ def rebuild_archive(
     if changed:
         write_deterministic_zip(archive, members)
     return changed
+
+
+def delivered_project_members(
+    pcb: Path, schematic: Path | None
+) -> tuple[dict[str, bytes], frozenset[str]]:
+    """Current bytes of the ``kicad_project.zip`` members filed under another name.
+
+    Returns those bytes and the checked file names they displaced.  ``kct
+    export`` and ``kct readiness`` deliver the board, its rules and the project
+    file under the root sheet's basename when the checked names differ, and
+    record the renaming in a ``VERSION.md`` member beside them (Issue #10108).
+    A board whose names already agree yields ``({}, frozenset())``.
+    """
+    from kicad_tools.export.project_identity import (
+        archived_member,
+        project_identity,
+        version_record,
+    )
+
+    project = pcb.with_suffix(".kicad_pro")
+    identity = project_identity(pcb, project if project.is_file() else None, schematic)
+    if not identity.renamed:
+        return {}, frozenset()
+    record = version_record(identity) or b""
+    derived = {
+        delivered: archived_member(source, source.read_bytes(), identity, record)
+        for source, delivered in identity.renamed
+    }
+    derived["VERSION.md"] = record
+    return derived, frozenset(source.name for source, _ in identity.renamed)
 
 
 def refresh_manifest_files(destination: Path) -> None:
@@ -822,8 +869,17 @@ def repin_staged(
 
     for archive, search in cfg.archives:
         extra = cfg.additional_design_sources if Path(archive).name == "design-source.zip" else ()
+        derived, replaces = (
+            delivered_project_members(staged / cfg.routed_pcb, staged / cfg.schematic)
+            if Path(archive).name == "kicad_project.zip"
+            else ({}, frozenset())
+        )
         changed = rebuild_archive(
-            staged / archive, [staged / s for s in search], additional_members=extra
+            staged / archive,
+            [staged / s for s in search],
+            additional_members=extra,
+            derived=derived or None,
+            replaces=replaces,
         )
         log(f"  {archive}: rebuilt; members with new content {changed}")
 

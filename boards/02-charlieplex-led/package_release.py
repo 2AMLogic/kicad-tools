@@ -311,8 +311,13 @@ def _render_provenance(options: ReadinessOptions) -> bytes | None:
     """Verify the render set against this PCB or a content-equivalent published PCB."""
     renders = options.board_dir / "output" / "renders"
     path = renders / RENDER_PROVENANCE
+    from kicad_tools.export.project_identity import archived_pcb_member
+
     with zipfile.ZipFile(io.BytesIO(RELEASE.old("kicad_project.zip"))) as archive:
-        archived_pcb = archive.read(options.pcb.name)
+        member = archived_pcb_member(archive.namelist(), options.pcb)
+        if member is None:
+            raise RuntimeError(f"previous kicad_project.zip does not contain {options.pcb.name}")
+        archived_pcb = archive.read(member)
     current_pcb = options.pcb.read_bytes()
 
     def artwork(pcb: bytes) -> str:

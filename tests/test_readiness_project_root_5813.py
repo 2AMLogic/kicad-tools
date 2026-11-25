@@ -75,7 +75,7 @@ def test_sibling_schematic_and_symbols_are_collected_with_project_root(tmp_path)
         "pcb/output/board.kicad_pcb",
         "pcb/output/sym-lib-table",
         "symbols/custom.kicad_sym",
-        "schematics/board.kicad_sch",
+        "pcb/output/board.kicad_sch",
     } <= names
     # Sources outside the generated package are untouched.
     for name, data in sources.items():

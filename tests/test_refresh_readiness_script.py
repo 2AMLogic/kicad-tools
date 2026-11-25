@@ -297,6 +297,84 @@ def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
         )
 
 
+def test_rebuild_archive_refreshes_the_delivered_project_members(mod, tmp_path):
+    """A package filed under the root sheet's basename refreshes from the routed board (#10108)."""
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "board.kicad_sch").write_text("sch")
+    (out / "board.kicad_pcb").write_bytes(b"unrouted placement")
+    (out / "board.kicad_pro").write_bytes(b'{"unrouted": true}')
+    (out / "board_routed.kicad_pcb").write_bytes(b"routed v2")
+    (out / "board_routed.kicad_pro").write_bytes(
+        b'{"meta": {"filename": "board_routed.kicad_pro"}}'
+    )
+    (out / "board_routed.kicad_dru").write_bytes(b"(version 1)")
+    pcb = out / "board_routed.kicad_pcb"
+    derived, replaces = mod.delivered_project_members(pcb, out / "board.kicad_sch")
+    assert sorted(derived) == [
+        "VERSION.md",
+        "board.kicad_dru",
+        "board.kicad_pcb",
+        "board.kicad_pro",
+    ]
+    assert replaces == {
+        "board_routed.kicad_dru",
+        "board_routed.kicad_pcb",
+        "board_routed.kicad_pro",
+    }
+    archive = tmp_path / "kicad_project.zip"
+    mod.write_deterministic_zip(
+        archive,
+        {
+            "VERSION.md": derived["VERSION.md"],
+            "board.kicad_dru": derived["board.kicad_dru"],
+            "board.kicad_pcb": b"routed v1",
+            "board.kicad_pro": derived["board.kicad_pro"],
+            "board.kicad_sch": b"sch",
+        },
+    )
+
+    assert mod.rebuild_archive(archive, [out], derived=derived, replaces=replaces) == [
+        "board.kicad_pcb"
+    ]
+    with zipfile.ZipFile(archive) as z:
+        assert z.read("board.kicad_pcb") == b"routed v2"
+        assert z.read("board.kicad_pro") == b'{"meta": {"filename": "board.kicad_pro"}}'
+    assert mod.rebuild_archive(archive, [out], derived=derived, replaces=replaces) == []
+
+    # A bundle written before the renaming -- boards 05-07 file the unrouted
+    # original project beside the routed one -- refreshes member by member.
+    legacy = tmp_path / "legacy.zip"
+    mod.write_deterministic_zip(
+        legacy,
+        {
+            "board.kicad_pro": b'{"unrouted": true}',
+            "board.kicad_sch": b"sch",
+            "board_routed.kicad_pcb": b"routed v1",
+            "board_routed.kicad_pro": b'{"meta": {"filename": "older.kicad_pro"}}',
+        },
+    )
+    assert mod.rebuild_archive(legacy, [out], derived=derived, replaces=replaces) == [
+        "board_routed.kicad_pcb",
+        "board_routed.kicad_pro",
+    ]
+    with zipfile.ZipFile(legacy) as z:
+        assert z.read("board.kicad_pro") == b'{"unrouted": true}'
+        assert z.read("board_routed.kicad_pcb") == b"routed v2"
+        assert (
+            z.read("board_routed.kicad_pro") == b'{"meta": {"filename": "board_routed.kicad_pro"}}'
+        )
+
+    (out / "board.kicad_pcb").rename(out / "placement.kicad_pcb")
+    (out / "board_routed.kicad_pcb").rename(out / "board.kicad_pcb")
+    (out / "board_routed.kicad_pro").rename(out / "board.kicad_pro")
+    (out / "board_routed.kicad_dru").rename(out / "board.kicad_dru")
+    assert mod.delivered_project_members(out / "board.kicad_pcb", out / "board.kicad_sch") == (
+        {},
+        frozenset(),
+    )
+
+
 # ---------------------------------------------------------------- known issues (#7323)
 CHECKED_AT = "2026-10-18T00:00:00+00:00"
 ADVISORY = "7220:one-sided thermal:advisory"

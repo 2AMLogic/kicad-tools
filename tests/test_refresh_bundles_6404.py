@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -473,9 +474,7 @@ def _board07_release_board(
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(
-        mod.rr, "rebuild_archive", lambda archive, search, *, additional_members=(): []
-    )
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda archive, search, **kwargs: [])
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"refilled": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
@@ -625,9 +624,7 @@ def test_bundle_unpacks_gate_native_drc_tuple(mod, tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(
-        mod.rr, "rebuild_archive", lambda archive, search, *, additional_members=(): []
-    )
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda archive, search, **kwargs: [])
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"native": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
@@ -684,9 +681,7 @@ def _repin_board(mod, tmp_path, monkeypatch, *, warnings: int | None = None) -> 
     monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda s, c: b"{}")
     monkeypatch.setattr(mod, "bundle_is_stale", lambda s, c: False)
     monkeypatch.setattr(mod.rr, "load_refresher", lambda *a: lambda mfg: None)
-    monkeypatch.setattr(
-        mod.rr, "rebuild_archive", lambda archive, search, *, additional_members=(): []
-    )
+    monkeypatch.setattr(mod.rr, "rebuild_archive", lambda archive, search, **kwargs: [])
     monkeypatch.setattr(mod.rr, "gate_native_drc", lambda *a: (0, b'{"refilled": true}'))
     monkeypatch.setattr(mod.rr, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod.rr, "gate_net_status", lambda *a: 100.0)
@@ -840,6 +835,86 @@ def test_replot_plots_schematic_pdf_from_the_published_schematic(mod, tmp_path, 
 
 
 # --------------------------------------------------------------------------- board 04 (#7357)
+def test_board04_published_drc_preflight_matches_the_final_report(mod):
+    from kicad_tools.export.preflight import PreflightChecker
+
+    board = REPO / "boards/04-stm32-devboard"
+    cfg = mod.rr.BOARDS[board.name]
+    routed = board / cfg.routed_pcb
+    report = json.loads((routed.parent / "drc_report.json").read_bytes())
+    assert report["pcb_sha256"] == mod.sha256(routed)
+    expected = PreflightChecker(routed, manufacturer=cfg.tier)._check_drc().to_dict()
+    manifest = routed.parent / "manufacturing/manifest.json"
+    with zipfile.ZipFile(routed.parent / "manufacturing.zip") as archive:
+        for raw in (manifest.read_bytes(), archive.read("manifest.json")):
+            entries = json.loads(raw)["preflight"]
+            assert [entry for entry in entries if entry["name"] == "drc"] == [expected]
+
+
+def test_board04_stale_report_cannot_validate_its_own_preflight(mod, tmp_path):
+    from kicad_tools.export.preflight import PreflightChecker
+
+    board = REPO / "boards/04-stm32-devboard"
+    cfg = mod.rr.BOARDS[board.name]
+    routed = tmp_path / cfg.routed_pcb
+    routed.parent.mkdir()
+    shutil.copyfile(board / cfg.routed_pcb, routed)
+    current_report = (board / "output/drc_report.json").read_bytes()
+    report = json.loads(current_report)
+    report["pcb_sha256"] = "0" * 64
+    (routed.parent / "drc_report.json").write_text(json.dumps(report))
+    manifest = routed.parent / "manufacturing/manifest.json"
+    manifest.parent.mkdir()
+    stale = PreflightChecker(routed, manufacturer=cfg.tier)._check_drc().to_dict()
+    assert "stale" in stale["message"]
+    erc = {"name": "erc", "status": "OK", "message": "ERC passed"}
+    manifest.write_text(json.dumps({"preflight": [erc, stale]}))
+    assert not mod.check_recipe_drc_preflight(tmp_path, cfg, refresh=True)
+    assert json.loads(manifest.read_bytes())["preflight"] == [erc, stale]
+
+    (routed.parent / "drc_report.json").write_bytes(current_report)
+    assert not mod.check_recipe_drc_preflight(tmp_path, cfg)
+    assert mod.check_recipe_drc_preflight(tmp_path, cfg, refresh=True)
+    expected = PreflightChecker(routed, manufacturer=cfg.tier)._check_drc().to_dict()
+    assert json.loads(manifest.read_bytes())["preflight"] == [erc, expected]
+    before = manifest.read_bytes()
+    assert mod.check_recipe_drc_preflight(tmp_path, cfg, refresh=True)
+    assert manifest.read_bytes() == before
+
+
+def test_board04_refresh_measures_new_copper_before_export(mod, tmp_path, monkeypatch):
+    board = tmp_path / "04-stm32-devboard"
+    cfg = mod.rr.BOARDS[board.name]
+    routed = board / cfg.routed_pcb
+    routed.parent.mkdir(parents=True)
+    routed.write_text(PCB)
+    report = routed.parent / "drc_report.json"
+    report.write_text(json.dumps({"pcb_sha256": "0" * 64}))
+    monkeypatch.setattr(mod, "stage_refill", lambda *a: {})
+    monkeypatch.setattr(mod, "gate_saved_fill_drc", lambda *a: b"{}")
+    monkeypatch.setattr(mod, "gate_parity_drc", lambda *a: None)
+
+    def measure(command, **kwargs):
+        pcb = Path(command[-1])
+        data = {"pcb_sha256": mod.sha256(pcb), "meta_checks": {"manifest": {"status": "FAILED"}}}
+        (pcb.parent / "drc_report.json").write_text(json.dumps(data))
+        return subprocess.CompletedProcess(command, 0, stdout="run_drc: False", stderr="")
+
+    class ExportReached(Exception):
+        pass
+
+    def export(staged, cfg, bundle):
+        pcb = staged / cfg.routed_pcb
+        measured = json.loads((pcb.parent / "drc_report.json").read_bytes())
+        assert measured["pcb_sha256"] == mod.sha256(pcb)
+        raise ExportReached
+
+    monkeypatch.setattr(mod, "run", measure)
+    monkeypatch.setattr(mod, "stage_recipe_manufacturing", export)
+    with pytest.raises(ExportReached):
+        mod.refresh_bundle(board, "2026-11-25T13:37:00+00:00", force_replot=True)
+
+
 def test_board04_config_reuses_the_shared_pipeline(mod):
     bundle, cfg = mod.BUNDLES["04-stm32-devboard"], mod.rr.BOARDS["04-stm32-devboard"]
     # The board-local check hook is what repin_staged's gate runs, not bare kct check.
