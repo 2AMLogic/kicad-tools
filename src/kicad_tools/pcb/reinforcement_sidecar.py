@@ -225,6 +225,51 @@ def load_wires(path: Path) -> list[dict[str, Any]]:
     return wires
 
 
+def _shift_pt(pt: dict[str, float], dx_mm: float, dy_mm: float) -> dict[str, float]:
+    """A copy of point ``pt`` moved by (dx, dy), rounded to the sidecar precision."""
+    return _pt(pt["x"] + dx_mm, pt["y"] + dy_mm)
+
+
+def translate_sidecar_wires(
+    wires: list[dict[str, Any]], dx_mm: float, dy_mm: float
+) -> list[dict[str, Any]]:
+    """Wire records rigidly translated by (``dx_mm``, ``dy_mm``) (Issue #10250).
+
+    Only the sheet-absolute coordinate points move: ``leg_start``,
+    ``leg_end``, ``anchors`` and, on parallel-copy records, ``polyline``,
+    ``copy_segments[].start/.end`` and ``stitch_vias``. Lengths, gauges, nets
+    and every other field are translation-invariant and copied unchanged.
+    The input is not modified; the result is re-sorted like every sidecar
+    write.
+    """
+    out: list[dict[str, Any]] = []
+    for wire in wires:
+        moved = dict(wire)
+        for key in ("leg_start", "leg_end"):
+            if isinstance(wire.get(key), dict):
+                moved[key] = _shift_pt(wire[key], dx_mm, dy_mm)
+        for key in ("anchors", "polyline", "stitch_vias"):
+            if isinstance(wire.get(key), list):
+                moved[key] = [_shift_pt(p, dx_mm, dy_mm) for p in wire[key]]
+        if isinstance(wire.get("copy_segments"), list):
+            moved["copy_segments"] = [
+                {
+                    **seg,
+                    "start": _shift_pt(seg["start"], dx_mm, dy_mm),
+                    "end": _shift_pt(seg["end"], dx_mm, dy_mm),
+                }
+                for seg in wire["copy_segments"]
+            ]
+        out.append(moved)
+    return sort_wires(out)
+
+
+def render_sidecar(wires: list[dict[str, Any]]) -> str:
+    """The deterministic sidecar file text for ``wires``."""
+    text = json.dumps({"version": SIDECAR_VERSION, "wires": wires}, indent=2, sort_keys=True)
+    return text + "\n"
+
+
 def load_wires_if_present(board: Path) -> list[dict[str, Any]]:
     """Wires of the board's sidecar; empty when absent or unreadable (#8746)."""
     path = sidecar_path(board)

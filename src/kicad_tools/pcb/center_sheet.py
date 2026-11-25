@@ -445,6 +445,9 @@ class CenterReport:
     dy_mm: float
     translated_items: int
     usable_area: tuple[float, float, float, float]
+    #: Reinforcement sidecar that was (or, in a dry run, would be) written
+    #: alongside the PCB (Issue #10250); ``None`` when the board has none.
+    sidecar: Path | None = None
 
     @property
     def paper_changed(self) -> bool:
@@ -608,6 +611,13 @@ def center_pcb_text(
     return new_text, report
 
 
+def _atomic_write(dest: Path, text: str, tmp_suffix: str) -> Path:
+    """Write *text* to a temp file beside *dest*; the caller ``os.replace`` s it."""
+    tmp = dest.with_name(dest.name + tmp_suffix)
+    tmp.write_text(text)
+    return tmp
+
+
 def center_on_sheet(
     pcb_path: Path | str,
     *,
@@ -624,13 +634,76 @@ def center_on_sheet(
     See :func:`center_pcb_text` for parameter semantics.  When *dry_run* is
     True nothing is written; otherwise the result is written to
     *output_path* (default: in place) only if something changed.
+
+    A ``<board>.reinforcement.json`` sidecar beside the input holds
+    sheet-absolute wire coordinates, so it is translated by the same (dx, dy)
+    and written beside the output (Issue #10250).  Both files are staged
+    before either is replaced and a failure restores the previous state, so
+    the PCB and its record never disagree.  An unreadable sidecar raises
+    before anything is written.
     """
+    import os
+
+    from kicad_tools.pcb.reinforcement_sidecar import (
+        load_wires,
+        render_sidecar,
+        sidecar_path,
+        translate_sidecar_wires,
+    )
+
     pcb_path = Path(pcb_path)
     text = pcb_path.read_text()
     new_text, report = center_pcb_text(
         text, paper=paper, margin=margin, title_block=title_block, slack=slack, grid=grid
     )
-    if report.changed and not dry_run:
-        dest = Path(output_path) if output_path is not None else pcb_path
-        dest.write_text(new_text)
+    if not report.changed:
+        return report
+
+    dest = Path(output_path) if output_path is not None else pcb_path
+    src_sidecar = sidecar_path(pcb_path)
+    dest_sidecar = sidecar_path(dest)
+    moved = report.dx_mm != 0.0 or report.dy_mm != 0.0
+    # A paper-only change leaves the coordinates alone, so an in-place run has
+    # nothing to rewrite; a copy to a new path still carries the record along.
+    sidecar_text: str | None = None
+    if src_sidecar.is_file() and (moved or dest_sidecar != src_sidecar):
+        wires = load_wires(src_sidecar)  # raises on unreadable / wrong version
+        sidecar_text = render_sidecar(translate_sidecar_wires(wires, report.dx_mm, report.dy_mm))
+        report.sidecar = dest_sidecar
+
+    if dry_run:
+        return report
+
+    suffix = f".tmp-{os.getpid()}"
+    staged: list[Path] = []
+    try:
+        pcb_tmp = _atomic_write(dest, new_text, suffix)
+        staged.append(pcb_tmp)
+        sidecar_tmp = None
+        if sidecar_text is not None:
+            sidecar_tmp = _atomic_write(dest_sidecar, sidecar_text, suffix)
+            staged.append(sidecar_tmp)
+    except BaseException:
+        for tmp in staged:
+            tmp.unlink(missing_ok=True)
+        raise
+
+    prior_sidecar: bytes | None = None
+    sidecar_replaced = False
+    try:
+        if sidecar_tmp is not None:
+            if dest_sidecar.is_file():
+                prior_sidecar = dest_sidecar.read_bytes()
+            os.replace(sidecar_tmp, dest_sidecar)
+            sidecar_replaced = True
+        os.replace(pcb_tmp, dest)
+    except BaseException:
+        if sidecar_replaced:
+            if prior_sidecar is None:
+                dest_sidecar.unlink(missing_ok=True)
+            else:
+                dest_sidecar.write_bytes(prior_sidecar)
+        for tmp in staged:
+            tmp.unlink(missing_ok=True)
+        raise
     return report

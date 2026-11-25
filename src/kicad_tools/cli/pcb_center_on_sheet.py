@@ -91,6 +91,7 @@ def run_center_on_sheet(
         "dx_mm": report.dx_mm,
         "dy_mm": report.dy_mm,
         "translated_items": report.translated_items,
+        "sidecar": str(report.sidecar) if report.sidecar is not None else None,
     }
 
     if output_format == "json":
@@ -119,6 +120,9 @@ def run_center_on_sheet(
             print(f"  New bbox: ({ba[0]:g}, {ba[1]:g}) - ({ba[2]:g}, {ba[3]:g})")
             if report.translated_items:
                 print(f"  Items translated: {report.translated_items}")
+            if report.sidecar is not None:
+                sverb = "Would update" if dry_run else "Updated"
+                print(f"  {sverb} reinforcement sidecar: {report.sidecar}")
             if not dry_run:
                 print()
                 print(f"  Saved to: {dest}")
