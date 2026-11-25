@@ -405,6 +405,22 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("fiducials_missing",),
         "checked; no finding on the board.",
     ),
+    ParityRow(
+        "trace_width",
+        ("dimension_trace_width",),
+        "partial",
+        True,
+        ("dimension_trace_width",),
+        "JLCDFM rated 0.1016 mm outer-layer tracks Danger (listed as 0.1 mm) and "
+        "0.1524 mm Good on one 4-layer board (#10173; the Danger count was not "
+        "recorded, so no recorded-board fixture carries this row). The published "
+        "capability still allows 0.1016 mm, so the `dimension_trace_width` ERROR "
+        "floor is unchanged; kct adds a WARNING for outer-layer tracks below the "
+        "stackup's optional `trace_width` dfm_thresholds `warning_mm` (0.1524 mm "
+        "on 4layer_1oz only). Stackups without that entry, and inner layers, get "
+        "no warning. Partial because the fab's Danger edge between the two "
+        "observed widths is unknown and only one stackup has evidence.",
+    ),
 )
 
 
