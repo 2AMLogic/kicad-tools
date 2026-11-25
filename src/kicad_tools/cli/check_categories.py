@@ -29,6 +29,7 @@ CHECK_CATEGORIES = [
     "dimensions",
     "doc_drift",
     "board_id",
+    "bypass_distance",
     "edge",
     "fiducials",
     "impedance",

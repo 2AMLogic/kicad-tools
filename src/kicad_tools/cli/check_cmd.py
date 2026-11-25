@@ -73,6 +73,9 @@ from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
 from kicad_tools.validate.coverage import collapse_reasons, coverage_to_dict
+from kicad_tools.validate.rules.bypass_distance import (
+    DEFAULT_MAX_DISTANCE_MM as DEFAULT_BYPASS_MAX_DISTANCE_MM,
+)
 from kicad_tools.validate.rules.reinforcement_incomplete import reinforcement_waived_nets
 from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
 
@@ -1988,6 +1991,21 @@ def main(argv: list[str] | None = None) -> int:
             "auto-derivation."
         ),
     )
+    # Issue #10141: bypass_distance maximum cap-to-designated-pin distance.
+    parser.add_argument(
+        "--bypass-max-distance",
+        dest="bypass_max_distance",
+        type=float,
+        default=DEFAULT_BYPASS_MAX_DISTANCE_MM,
+        metavar="MM",
+        help=(
+            "Maximum distance in mm between a decoupling capacitor's supply "
+            "pad and the pad of the supply pin its schematic designates "
+            "before bypass_distance warns (default 3.0; issue #10141).  "
+            "Needs a resolvable schematic; without one the category is "
+            "reported as not run."
+        ),
+    )
     # Issue #4595: sch_fields schematic field-geometry lint threshold.
     parser.add_argument(
         "--sch-field-threshold",
@@ -2857,11 +2875,11 @@ def main(argv: list[str] | None = None) -> int:
     # schematic-sourced findings must not appear there; documented decision).
     # No schematic resolved => the closure emits nothing and never fails
     # (the #4350 loud missing-schematic stderr warning covers visibility).
-    sch_fields_active = (
-        (only_set is None or "sch_fields" in only_set)
-        and "sch_fields" not in skip_set
-        and not getattr(args, "drc_only", False)
-    )
+    # ``bypass_distance`` (Issue #10141) consumes the same resolved schematic.
+    sch_fields_active = any(
+        (only_set is None or name in only_set) and name not in skip_set
+        for name in ("sch_fields", "bypass_distance")
+    ) and not getattr(args, "drc_only", False)
     sch_path: Path | None = None
     if sch_fields_active:
         sch_path = _resolve_check_schematic(getattr(args, "schematic", None), pcb_path)
@@ -2877,6 +2895,7 @@ def main(argv: list[str] | None = None) -> int:
         pad_grid_auto_derive=pad_grid_auto_derive,
         sch_path=sch_path,
         sch_field_threshold=args.sch_field_threshold,
+        bypass_max_distance=args.bypass_max_distance,
         pcb_path=pcb_path,
         layers=layers,
         coverage=coverage,
@@ -3952,6 +3971,7 @@ def run_selected_checks(
     pad_grid_auto_derive: bool = True,
     sch_path: Path | None = None,
     sch_field_threshold: float = DEFAULT_SCH_FIELD_THRESHOLD_MM,
+    bypass_max_distance: float = DEFAULT_BYPASS_MAX_DISTANCE_MM,
     pcb_path: Path | None = None,
     layers: int | None = None,
     coverage: dict | None = None,
@@ -3978,6 +3998,8 @@ def run_selected_checks(
             (the #4350 missing-schematic stderr warning already covers
             visibility).  Must default to ``None`` so library callers
             that only exercise PCB-scoped checks are unaffected.
+        bypass_max_distance: ``bypass_distance`` maximum cap-pad-to-pin-pad
+            distance in mm (Issue #10141).
         sch_field_threshold: ``sch_field_offset`` distance threshold in
             mm (issue #4595; strictly-greater-than comparison).
         pcb_path: Path of the ``.kicad_pcb`` under check, used by the
@@ -4043,6 +4065,15 @@ def run_selected_checks(
         results = check_schematic_fields(sch_path, threshold_mm=sch_field_threshold)
         results.merge(check_schematic_wire_symbol(sch_path))
         return results
+
+    # Issue #10141: bypass-cap distance to the schematic-designated pin.  A
+    # closure so the resolved schematic path reaches the checker method; it
+    # always calls that method (which no-ops without a schematic) and coverage
+    # records the missing input as ``unknown``, never a pass.
+    def _bypass_distance_check() -> DRCResults:
+        return checker.check_bypass_distance(
+            schematic_path=sch_path, max_distance_mm=bypass_max_distance
+        )
 
     # Issue #4540: LLM-free doc-drift lint (kct:doc-pin markers vs
     # machine ground truth).  Dispatched as a CLI-level closure (like
@@ -4212,6 +4243,7 @@ def run_selected_checks(
         "dimensions": checker.check_dimensions,
         "doc_drift": _doc_drift_check,
         "board_id": checker.check_board_id,
+        "bypass_distance": _bypass_distance_check,
         "edge": checker.check_edge_clearances,
         "fiducials": checker.check_fiducials,
         "sharp_trace_corner": checker.check_sharp_trace_corner,

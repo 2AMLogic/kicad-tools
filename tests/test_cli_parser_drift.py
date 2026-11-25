@@ -801,6 +801,8 @@ CHECK_DEFAULT_DRIFT_ALLOWLIST: dict[str, str] = {
     # Outer None sentinel; the shim forwards only when set so the inner
     # parser's 15.0mm default stays the single source of truth (#4595).
     "--sch-field-threshold": "outer None sentinel, inner 15.0; forwarded only when set",
+    # Same sentinel pattern: inner 3.0mm default is the single source (#10141).
+    "--bypass-max-distance": "outer None sentinel, inner 3.0; forwarded only when set",
 }
 
 
