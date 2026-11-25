@@ -2004,6 +2004,11 @@ def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
     """Handle optimize_placement tool call."""
     from kicad_tools.mcp.tools.optimize_placement import optimize_placement
 
+    options = {}
+    if "route_check_budget" in params:
+        options["route_check_budget"] = params["route_check_budget"]
+    if "decoupling_radius_mm" in params:
+        options["decoupling_radius_mm"] = params["decoupling_radius_mm"]
     return optimize_placement(
         pcb_path=params["pcb_path"],
         strategy=params.get("strategy", "cmaes"),
@@ -2013,11 +2018,7 @@ def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
         output_path=params.get("output_path"),
         pre_slide_off=params.get("pre_slide_off", True),
         route_check=params.get("route_check", False),
-        **{
-            key: params[key]
-            for key in ("route_check_budget", "decoupling_radius_mm")
-            if key in params
-        },
+        **options,
     )
 
 

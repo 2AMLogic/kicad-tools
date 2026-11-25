@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from kicad_tools.mcp.server import create_server
 from kicad_tools.mcp.tools.registry import get_tool
+from kicad_tools.native_concurrency import ENV_SLOT_DIR, _slot_directory
 from kicad_tools.schema.pcb import PCB
 from tests.test_placement_decoupling import _DECAP_PCB
 from tests.test_placement_decoupling_association import make_designated_back_side_board
@@ -127,17 +130,20 @@ def test_designated_cap_preview_and_save_match_cli(
         )
     original = pcb.read_bytes()
     options = {} if radius is None else {"decoupling_radius_mm": radius}
-    tool = get_tool("optimize_placement")
+    server = create_server()
     params = {"pcb_path": str(pcb), "max_iterations": ITERATIONS, **options}
     scratch = tmp_path / "preview"
     scratch.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
-    preview = tool.handler(params)
+    with monkeypatch.context() as patch:
+        # Keep using the workers' shared lock directory while observing preview files.
+        patch.setenv(ENV_SLOT_DIR, str(_slot_directory(os.environ)))
+        patch.setattr(tempfile, "tempdir", str(scratch))
+        preview = server.call_tool("optimize_placement", params)
     assert not list(scratch.iterdir())
     assert "output_path" not in preview
 
     output = tmp_path / "mcp.kicad_pcb"
-    saved = tool.handler({**params, "output_path": str(output)})
+    saved = server.call_tool("optimize_placement", {**params, "output_path": str(output)})
     cli_out = tmp_path / "cli.kicad_pcb"
     cli = _run_cli(pcb, cli_out, None, capsys, **options)
     assert preview["success"] and saved["success"] and cli["saved"]
@@ -172,7 +178,8 @@ def test_designated_cap_preview_and_save_match_cli(
 
 
 @pytest.mark.parametrize("accept_snap", [True, False])
-def test_designated_cap_checks_route_selected_board(tmp_path, monkeypatch, accept_snap):
+@pytest.mark.parametrize("budget", [None, 1234])
+def test_designated_cap_checks_route_selected_board(tmp_path, monkeypatch, accept_snap, budget):
     from kicad_tools.placement import route_check
     from tests.test_optimize_placement_route_check import _outcome
 
@@ -180,15 +187,19 @@ def test_designated_cap_checks_route_selected_board(tmp_path, monkeypatch, accep
     original = pcb.read_bytes()
     output = tmp_path / "result.kicad_pcb"
     routed_layers = []
+    expected_budget = route_check.DEFAULT_ROUTE_CHECK_BUDGET if budget is None else budget
 
-    def measure(candidate, **kwargs):
+    def measure(candidate, *, budget, **kwargs):
+        assert budget == expected_budget
         routed_layers.append(PCB.load(str(candidate)).get_footprint("C1").layer)
         return _outcome(3 if accept_snap or len(routed_layers) == 1 else 2, requested=3)
 
     monkeypatch.setattr(route_check, "bounded_route", measure)
     params = {"pcb_path": str(pcb), "max_iterations": ITERATIONS, "route_check": True}
-    tool = get_tool("optimize_placement")
-    saved = tool.handler({**params, "output_path": str(output)})
+    if budget is not None:
+        params["route_check_budget"] = budget
+    server = create_server()
+    saved = server.call_tool("optimize_placement", {**params, "output_path": str(output)})
     assert saved["success"] and saved["output_path"] == str(output)
     assert routed_layers == ["B.Cu", "B.Cu", "F.Cu"]
     assert saved["feasible"] == accept_snap
@@ -200,7 +211,7 @@ def test_designated_cap_checks_route_selected_board(tmp_path, monkeypatch, accep
         assert output.read_bytes() == original
         assert "C1 is on B.Cu but its designated pin U1.1 is on F.Cu" in saved["infeasible_detail"]
     routed_layers.clear()
-    preview = tool.handler(params)
+    preview = server.call_tool("optimize_placement", params)
     assert preview["success"] and "output_path" not in preview
     assert preview["feasible"] == saved["feasible"]
     assert preview.get("infeasible_detail") == saved.get("infeasible_detail")
