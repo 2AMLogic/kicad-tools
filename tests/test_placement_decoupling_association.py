@@ -543,6 +543,81 @@ def test_placement_optimize_feasible_dry_run(swapped_board, placement_mode, tmp_
     assert source.read_bytes() == original and not output.exists()
 
 
+@pytest.mark.parametrize("aligned", [False, True], ids=["swapped", "feasible"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["save", "dry-run"])
+def test_placement_optimize_keeps_routed_bypass_connections(
+    swapped_board, placement_mode, tmp_path, capsys, aligned, dry_run
+):
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    source = swapped_board(c1=23 if aligned else 66, c2=26, c1_layer="F.Cu")
+    board = PCB.load(str(source))
+    # Only the return pad of C1 is routed. C2 shares both nets but is still free to move.
+    ic = "U1" if aligned else "U2"
+    start = board.get_pad_position("C1", "2")
+    end = board.get_pad_position(ic, "2")
+    board.add_trace(start, end, net="GND", waypoints=[(start[0], 15), (end[0], 15)])
+    board.save(str(source))
+    original = source.read_bytes()
+    output = tmp_path / "placed.kicad_pcb"
+    output.write_bytes(b"previous destination")
+    options = ["--dry-run"] if dry_run else []
+    rc, result = _placement_result(capsys, source, placement_mode, "-o", str(output), *options)
+
+    assert source.read_bytes() == original
+    if not aligned:
+        assert rc == 1 and not result["success"], result
+        assert any("C1" in error and "U1.1" in error for error in result["constraint_violations"])
+    else:
+        assert rc == 0 and result["success"], result
+    if dry_run or not aligned:
+        assert output.read_bytes() == b"previous destination"
+    else:
+        written = PCB.load(str(output))
+        assert written.get_pad_position("C1", "2") == start
+        assert any(
+            {"C1.2", "U1.2"} <= g for g in ConnectivityValidator(written).extract_pad_partition()
+        )
+        assert (
+            math.dist(written.get_pad_position("C2", "1"), written.get_pad_position("U2", "1")) <= 6
+        )
+
+
+def test_placement_optimize_checks_routing_on_the_serialized_candidate(
+    swapped_board, placement_mode, tmp_path, capsys, monkeypatch
+):
+    from kicad_tools.cli import optimize_placement_cmd
+    from kicad_tools.schema.pcb import PCB
+
+    source = swapped_board(c1=23, c2=63, c1_layer="F.Cu")
+    pcb = PCB.load(str(source))
+    pcb.add_trace(("C1", "1"), ("U1", "1"), net="+3V3")
+    pcb.save(str(source))
+    original = source.read_bytes()
+    output = tmp_path / "placed.kicad_pcb"
+    output.write_bytes(b"previous destination")
+    check_pads = optimize_placement_cmd.snap_and_check_designated_caps
+
+    def break_trace(candidate, *args):
+        errors = check_pads(candidate, *args)
+        assert not errors
+        placed = PCB.load(str(candidate))
+        assert placed.remove_segments(placed.segments) == 1
+        placed.save(str(candidate))
+        return errors
+
+    monkeypatch.setattr(optimize_placement_cmd, "snap_and_check_designated_caps", break_trace)
+    rc, result = _placement_result(capsys, source, placement_mode, "-o", str(output))
+    assert rc == 1 and not result["success"]
+    assert any(
+        "routed copper" in error and "C1 to U1.1" in error
+        for error in result["constraint_violations"]
+    )
+    assert source.read_bytes() == original
+    assert output.read_bytes() == b"previous destination"
+
+
 def test_placement_optimize_no_designations(swapped_board, placement_mode, tmp_path, capsys):
     from kicad_tools.schema.pcb import PCB
 

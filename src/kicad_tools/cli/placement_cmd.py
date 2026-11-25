@@ -16,6 +16,7 @@ import json
 import math
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
@@ -23,6 +24,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kicad_tools.optim import OptimizationResult, OptimizationWorkflow
     from kicad_tools.placement.decoupling import DecouplingGroup
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.copper_contact import CopperContactGraph
 
 from kicad_tools.cli.format_options import add_format_flag, emit_json, stdout_to_stderr_when
 from kicad_tools.cli.placement_options import add_decoupling_radius_argument
@@ -1139,11 +1142,67 @@ def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, i
         return (1.0, 0, 0)
 
 
+@dataclass(frozen=True)
+class _RoutedBypassNet:
+    number: int
+    pairs: str
+    copper: CopperContactGraph
+
+
+def _protect_routed_bypass_parts(
+    pcb: PCB, groups: list[DecouplingGroup], fixed_refs: list[str]
+) -> list[_RoutedBypassNet]:
+    """Keep designated parts attached to routed copper fixed and record their net connectivity."""
+    if not groups:
+        return []
+    routed_nets = {segment.net_number for segment in pcb.segments}
+    routed_nets.update(arc.net_number for arc in pcb.arcs)
+    routed_nets.update(via.net_number for via in pcb.vias)
+    routed_nets.update(zone.net_number for zone in pcb.zones if zone.filled_polygons)
+    if not routed_nets:
+        return []
+
+    pairs_by_net: dict[int, set[str]] = {}
+    designated_refs: set[str] = set()
+    for group in groups:
+        for ref, pin in group.associated:
+            designated_refs.update((ref, pin.reference))
+            cap = pcb.get_footprint(ref)
+            if cap is not None:
+                for pad in cap.pads:
+                    if pad.net_number and pad.net_number in routed_nets:
+                        pairs_by_net.setdefault(pad.net_number, set()).add(
+                            f"{ref} to {pin.reference}.{pin.pad}"
+                        )
+    if not pairs_by_net:
+        return []
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+    from kicad_tools.validate.copper_contact import PAD, build_copper_contact_graph
+
+    routes = []
+    validator = ConnectivityValidator(pcb)
+    attached: set[str] = set()
+    footprints = pcb.footprints
+    for number, pairs in pairs_by_net.items():
+        graph = build_copper_contact_graph(validator, number)
+        for component in graph.components():
+            items = [graph.items[index] for index in component]
+            if any(item.kind != PAD for item in items):
+                attached.update(
+                    footprints[item.key[0]].reference for item in items if item.kind == PAD
+                )
+        routes.append(_RoutedBypassNet(number, ", ".join(sorted(pairs)), graph))
+    fixed_refs.extend(sorted((attached & designated_refs) - set(fixed_refs)))
+    return routes
+
+
 def _finish_placement_candidate(
     candidate: Path,
     destination: Path | None,
     groups: list[DecouplingGroup],
     fixed_refs: list[str],
+    routes: list[_RoutedBypassNet],
     radius: float,
     result: dict,
 ) -> None:
@@ -1151,6 +1210,18 @@ def _finish_placement_candidate(
     from kicad_tools.cli.optimize_placement_cmd import snap_and_check_designated_caps
 
     errors = snap_and_check_designated_caps(candidate, groups, set(fixed_refs), radius)
+    if routes and not errors:
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+        written = ConnectivityValidator(candidate)
+        for route in routes:
+            if not build_copper_contact_graph(written, route.number).preserves_connections(
+                route.copper
+            ):
+                errors.append(
+                    f"Placement would disconnect existing routed copper for {route.pairs}"
+                )
     result.setdefault("constraint_violations", []).extend(errors)
     if errors:
         raise ValueError("; ".join(errors))
@@ -1226,6 +1297,7 @@ def _cmd_optimize_routing_aware(
     try:
         with spinner("Loading PCB...", quiet=quiet):
             pcb = PCB.load(str(pcb_path))
+            routes = _protect_routed_bypass_parts(pcb, groups, fixed_refs)
     except Exception as e:
         if output_format != "json":
             print(f"Error loading PCB: {e}", file=sys.stderr)
@@ -1277,7 +1349,7 @@ def _cmd_optimize_routing_aware(
     output_path = None if args.dry_run else Path(args.output or args.pcb)
     try:
         _finish_placement_candidate(
-            pcb_path, output_path, groups, fixed_refs, args.decoupling_radius, result
+            pcb_path, output_path, groups, fixed_refs, routes, args.decoupling_radius, result
         )
     except Exception as e:
         if output_format != "json":
@@ -1382,6 +1454,7 @@ def cmd_optimize(args) -> int:
                     fixed_refs=fixed_refs,
                     groups=groups,
                 )
+        routes = _protect_routed_bypass_parts(pcb, groups, fixed_refs)
     except Exception as e:
         if output_format != "json":
             print(f"Error preparing PCB: {e}", file=sys.stderr)
@@ -1538,6 +1611,7 @@ def cmd_optimize(args) -> int:
                         None if args.dry_run else output_path,
                         groups,
                         fixed_refs,
+                        routes,
                         args.decoupling_radius,
                         result,
                     )
