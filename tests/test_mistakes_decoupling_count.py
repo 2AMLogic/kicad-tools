@@ -441,3 +441,31 @@ def test_json_report_lists_every_pin_with_caps_and_distances(
     # Other categories do not carry the inventory.
     assert mistakes_cmd.main([str(board), "--category", "bom_health", "--format", "json"]) == 0
     assert "decoupling_inventory" not in json.loads(capsys.readouterr().out)
+
+
+def test_stage_suffixed_board_resolves_project_schematic(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ``board_routed.kicad_pcb`` finds ``board.kicad_sch`` through the project resolver."""
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    routed = tmp_path / "board_routed.kicad_pcb"
+    board.rename(routed)
+    assert mistakes_cmd.main([str(routed), "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {(r["ic"], r["pin"]): r for r in payload["decoupling_inventory"] if r["net"] == "VCC"}
+    assert [(c["ref"], c["distance_mm"], c["source"]) for c in rows[("U1", "1")]["caps"]] == [
+        ("C1", 1.0, "schematic"),
+        ("C2", 19.0, "schematic"),
+    ]
+    assert rows[("U2", "1")]["caps"] == []
+
+
+def test_stage_suffixed_board_without_schematic_keeps_geometric_fallback(tmp_path: Path) -> None:
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    (tmp_path / "board.kicad_sch").unlink()
+    routed = tmp_path / "board_routed.kicad_pcb"
+    board.rename(routed)
+    assert {k: [c[2] for c in v] for k, v in _rows(routed).items()} == {
+        ("U1", "1"): ["geometric"],
+        ("U2", "1"): ["geometric"],
+    }

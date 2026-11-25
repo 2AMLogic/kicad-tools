@@ -175,7 +175,8 @@ class DecouplingCountCheck:
             geometric fallback only; a schematic-designated cap is inventoried
             at any distance).
         schematic_path: Schematic whose cap designations to use.  Defaults to
-            the ``.kicad_sch`` next to the PCB file, when one exists.
+            schematic the project resolver finds for the PCB (``project.kct``,
+            stage-suffix-stripped sibling), when one exists.
     """
 
     category = MistakeCategory.DECOUPLING
@@ -201,8 +202,13 @@ class DecouplingCountCheck:
         board_path = getattr(pcb, "_path", None)
         if board_path is None:
             return None
-        sibling = Path(board_path).with_suffix(".kicad_sch")
-        return sibling if sibling.is_file() else None
+        try:
+            from ...sync.discover import resolve_schematic_for_pcb
+
+            return resolve_schematic_for_pcb(board_path)
+        except Exception as exc:  # discovery must not break detect-mistakes
+            logger.debug("decoupling count: schematic discovery failed for %s (%s)", board_path, exc)
+            return None
 
     def schematic_associations(self, pcb: PCB) -> dict[str, SchematicCapAssociation] | None:
         """Schematic designations by cap reference, or None when unavailable.
