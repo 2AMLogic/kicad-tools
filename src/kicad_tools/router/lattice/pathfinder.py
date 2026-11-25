@@ -74,7 +74,16 @@ from ..rules import DesignRules, layer_permitted
 from ..via_clearance import SameNetPadBox, same_net_pad_gap_acceptable, via_annulus_trace_band_ok
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
-from .geometry import Pt, Rect, dist, pt_in_rect, seg_pt_dist, seg_seg_dist
+from .geometry import (
+    DEFAULT_FINE_PITCH_MM,
+    Pt,
+    Rect,
+    dist,
+    pad_stub_radius,
+    pt_in_rect,
+    seg_pt_dist,
+    seg_seg_dist,
+)
 from .guide import PartnerGuide
 from .history import PhysicalHistory
 from .kernel_adapter import LATTICE_CLEARANCE_EPSILON_MM
@@ -887,7 +896,7 @@ class LatticePathfinder:
         layer_stack: LayerStack | None = None,
         *,
         coarse: float = 3.2,
-        fine: float = 0.4,
+        fine: float = DEFAULT_FINE_PITCH_MM,
         margin: float = 0.8,
         via_cost: float = 3.0,
     ) -> None:
@@ -1769,7 +1778,7 @@ class LatticePathfinder:
             committed = self._fresh_committed()
         fat = extra_clearance > 0.0 or partner_net is not None
         if search_radius is None:
-            search_radius = max(3.0 * lattice.fine + max(pad.width, pad.height), 2.0)
+            search_radius = pad_stub_radius(lattice.fine, pad.width, pad.height)
             if fat:
                 # A fat agent may need to gather farther out of a dense pad
                 # cluster.  The stub is part of the coupled centerline, so a
@@ -2067,7 +2076,7 @@ class LatticePathfinder:
         can push the first usable landing node out by its own reach, so the
         radius grows by the widest such reach on the footprint.
         """
-        base = max(3.0 * self.build().fine + max(pad.width, pad.height), 2.0)
+        base = pad_stub_radius(self.build().fine, pad.width, pad.height)
         reach = max(
             (
                 self.obstacles._pad_reach[idx]
@@ -2291,7 +2300,7 @@ class LatticePathfinder:
             return dead_end, body_w
 
         lattice = self.build()
-        base_sr = max(3.0 * lattice.fine + max(pad.width, pad.height), 2.0)
+        base_sr = pad_stub_radius(lattice.fine, pad.width, pad.height)
         # Reach past the full-width keep-out ring that blocked the body escape:
         # a thin neck can clear a node close to the pad, but the widened body
         # must then EGRESS at full width, so the useful escape node is often
@@ -2684,7 +2693,7 @@ class LatticePathfinder:
         if edge_mm <= 0.0:
             return stubs
         lattice = self.build()
-        radius = max(3.0 * lattice.fine + max(pad.width, pad.height), 2.0) + edge_mm
+        radius = pad_stub_radius(lattice.fine, pad.width, pad.height) + edge_mm
         far = self._scan_stubs(
             pad,
             net,
