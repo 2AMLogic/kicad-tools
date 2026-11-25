@@ -21101,9 +21101,11 @@ def _stale_width_connected_nets(args, pcb_path: Path, pcb: "PCB", connected: lis
         # Only an unambiguous board-wide match may release preserved copper.
         resolution = resolve_net_class_map_keys(loaded, net_names.values())
         for net_name, key in resolution.resolved.items():
-            width = loaded[key].trace_width
-            if width > 0:
-                target[net_name] = width
+            routing = loaded[key]
+            if routing.route_via == "manual":
+                target.pop(net_name, None)
+            elif routing.trace_width > 0:
+                target[net_name] = routing.trace_width
 
     if not target:
         return set()
@@ -21344,6 +21346,11 @@ def _extend_skip_for_preserved_nets(args, skip_nets: list[str]) -> list[str]:
     preserved = list(getattr(args, "_preserved_connected_nets", None) or [])
     added = [n for n in preserved if n not in skip_nets]
     skip_nets.extend(added)
+    # Only a net the pathfinder will route can replace its input copper.
+    # This list includes both explicit exclusions and automatically skipped pours.
+    stale = getattr(args, "_stale_width_nets", None)
+    if stale:
+        args._stale_width_nets = stale.difference(skip_nets)
     return added
 
 

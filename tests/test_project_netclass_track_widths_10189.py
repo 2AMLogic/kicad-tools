@@ -667,6 +667,50 @@ def _arc_geometry(arc):
     return arc.net_name, arc.uuid, arc.start, arc.mid, arc.end, arc.width, arc.layer
 
 
+@pytest.mark.parametrize("skip", ["explicit", "manual", "pour"])
+def test_width_edit_preserves_skipped_net_and_reroutes_its_classmate(tmp_path: Path, skip: str):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+    text = _arc_fixture_ids(pcb.read_text()).replace(
+        "(segment (start 4 6)", "(arc (start 4 6) (mid 8 6.2)"
+    )
+    via = (
+        '(via (at 12 6) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")'
+        ' (net 1) (uuid "eb4a7d68-0b42-40a5-aa3b-af4eb43c3897"))'
+    )
+    zone = ""
+    if skip == "pour":
+        zone = (
+            '(zone (net 1) (net_name "NET_A") (layer "B.Cu") (hatch edge 0.5)'
+            " (polygon (pts (xy 15 12) (xy 19 12) (xy 19 15) (xy 15 15))))"
+        )
+    pcb.write_text(text.rstrip().removesuffix(")") + via + zone + ")")
+    before = PCB.load(pcb)
+    original_tracks = _geometry_signature(pcb, "NET_A")
+    assert len(before.arcs) == len(before.vias) == len(original_tracks) == 1
+
+    project_data = json.loads(project.read_text())
+    settings = project_data["net_settings"]
+    settings["netclass_assignments"]["NET_B"] = "ClassA"
+    next(cls for cls in settings["classes"] if cls["name"] == "ClassA")["track_width"] = 0.37
+    project.write_text(json.dumps(project_data))
+    args = ["--skip-nets", " NET_A "]
+    if skip != "explicit":
+        sidecar = tmp_path / "routing.json"
+        sidecar.write_text(
+            json.dumps({"NET_A": {"name": "ClassA", "route_via": skip, "trace_width": 0.37}})
+        )
+        args = ["--net-class-map", str(sidecar)]
+    _route_board(pcb, [*args, "--skip-drc"])
+
+    saved = PCB.load(pcb)
+    assert _geometry_signature(pcb, "NET_A") == original_tracks
+    assert [_arc_geometry(a) for a in saved.arcs] == [_arc_geometry(a) for a in before.arcs]
+    assert saved.vias == before.vias
+    assert _widths_by_net(pcb)["NET_B"] == {0.37}
+
+
 @pytest.mark.parametrize("command", ["route", "optimize-traces"])
 @pytest.mark.parametrize("dialect", ["numeric", "name-only", "name-with-no-net"])
 def test_class_edit_on_arcs_preserves_other_copper(tmp_path, command, dialect):
