@@ -113,10 +113,20 @@ def test_native_oracle():
     corpus = json.loads(
         (Path(__file__).parent / "fixtures/netclass_diagnostics/oracle.json").read_text()
     )
-    assert corpus["kicad_version"] == "10.0.5"
-    # "/USB/" left this set in #6262: slash is literal, so its row is now
-    # evaluated and must agree with every native result below.
-    unsupported = {"USB.1", r"USB\*", "USB[0-9]", "^USB$", "a**"}
+    assert corpus["kicad_version"] == "10.0.6"
+    # Rows whose syntax stays outside the verified subset (#6262 kept "/USB/"
+    # evaluated): native results are boundary evidence, never implemented.
+    unsupported = {
+        r"USB\*",
+        "USB[0-9]",
+        "^USB$",
+        "a**",
+        "A|B",
+        "(AB)*",
+        "((A))",
+        "A{2}",
+        "Net-(U5-CAP)?",
+    }
     for case in corpus["cases"]:
         p = {"pattern": case["pattern"], "netclass": "Power"}
         r = diagnose_netclasses(project([p]), [case["net"]])
@@ -134,6 +144,36 @@ def test_unsupported_pattern_retains_undefined_target_and_original_fields():
     assert r["patterns"][0]["entry"] == data["net_settings"]["netclass_patterns"][0]
     assert {"unsupported_pattern", "undefined_class"} <= set(codes(r))
     assert "no_matches" not in codes(r)
+
+
+def test_punctuated_supply_and_generated_names_issue_10122():
+    """The five #10122 rows: exact spellings, both generated spellings, negatives.
+
+    Native DRC on pinned KiCad flagged the 0.450 mm gap against a 0.500 mm
+    class for the three positive rows only; the similarly named negatives
+    keep the default class. ``A.B``/``AXB`` and ``C+P``/``CCP`` pin that a
+    blanket literal treatment of punctuation would miss real memberships.
+    """
+    nets = ["+3.3V", "+3x3V", "Net-(U5-CAPP)", "Net-U5-CAPP", "Net-(U5-CAPX)"]
+    expectations = {
+        "+3.3V": ["+3.3V"],
+        "Net-(U5-CAPP)": ["Net-(U5-CAPP)", "Net-U5-CAPP"],
+    }
+    for pattern, expected in expectations.items():
+        r = diagnose_netclasses(project([{"pattern": pattern, "netclass": "Power"}]), nets)
+        assert r["patterns"][0]["status"] == "supported"
+        assert r["patterns"][0]["matches"] == expected
+    for pattern, net in [("A.B", "AXB"), ("C+P", "CCP"), ("C+P", "CP")]:
+        r = diagnose_netclasses(project([{"pattern": pattern, "netclass": "Power"}]), [net])
+        assert r["patterns"][0]["matches"] == [net], (pattern, net)
+
+
+def test_group_and_quantifier_boundary_syntax_stays_unsupported():
+    for pattern in ["A|B", "(AB)*", "((A))", "A{2}", "Net-(U5-CAP)?", "A(", "A)", "()", "(*)"]:
+        r = diagnose_netclasses(project([{"pattern": pattern, "netclass": "Power"}]), ["AB"])
+        assert r["patterns"][0]["status"] == "unsupported", pattern
+        assert r["patterns"][0]["matches"] is None
+        assert "unsupported_pattern" in codes(r)
 
 
 def test_explicit_assignment_membership_empty_and_legacy_forms():
