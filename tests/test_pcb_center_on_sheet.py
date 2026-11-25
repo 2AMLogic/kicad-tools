@@ -602,6 +602,93 @@ class TestReinforcementSidecar:
         assert report.sidecar is None
         assert not sidecar_path(pcb).exists()
 
+    def test_plain_input_cannot_inherit_existing_output_wires(self, tmp_path: Path):
+        pcb = tmp_path / "plain.kicad_pcb"
+        pcb.write_text(make_pcb())
+        out = _write_reinforced(tmp_path, "out.kicad_pcb")
+        before = (out.read_bytes(), sidecar_path(out).read_bytes())
+        with pytest.raises(ValueError, match="reinforcement"):
+            center_on_sheet(pcb, output_path=out)
+        assert (out.read_bytes(), sidecar_path(out).read_bytes()) == before
+
+    @pytest.mark.parametrize("alias", ["input-record", "output-record", "hardlink"])
+    def test_output_alias_keeps_input_pair_intact(self, tmp_path: Path, alias: str):
+        pcb = _write_reinforced(tmp_path)
+        out = tmp_path / "out.kicad_pcb"
+        if alias == "input-record":
+            out = sidecar_path(pcb)
+        elif alias == "output-record":
+            sidecar_path(out).symlink_to(pcb)
+        else:
+            out.hardlink_to(sidecar_path(pcb))
+        before = (pcb.read_bytes(), sidecar_path(pcb).read_bytes())
+        with pytest.raises(ValueError, match="overlap"):
+            center_on_sheet(pcb, output_path=out)
+        assert (pcb.read_bytes(), sidecar_path(pcb).read_bytes()) == before
+
+    @pytest.mark.parametrize("fail_second_write", [False, True])
+    def test_in_place_links_and_private_modes_survive(
+        self, tmp_path: Path, monkeypatch, fail_second_write: bool
+    ):
+        import os
+        from stat import S_IMODE
+
+        pcb = _write_reinforced(tmp_path)
+        side = sidecar_path(pcb)
+        alias = tmp_path / "alias.kicad_pcb"
+        alias.symlink_to(pcb)
+        sidecar_path(alias).symlink_to(side)
+        pcb.chmod(0o600)
+        side.chmod(0o640)
+        before = (pcb.read_bytes(), side.read_bytes())
+        if fail_second_write:
+            replace = os.replace
+
+            def fail_board(src, dst):
+                if Path(dst).resolve() == pcb:
+                    raise OSError("forced PCB write failure")
+                return replace(src, dst)
+
+            monkeypatch.setattr(os, "replace", fail_board)
+            with pytest.raises(OSError, match="forced PCB"):
+                center_on_sheet(alias)
+            assert (pcb.read_bytes(), side.read_bytes()) == before
+        else:
+            center_on_sheet(alias)
+            assert pcb.read_bytes() != before[0]
+            assert side.read_bytes() != before[1]
+        assert alias.is_symlink() and sidecar_path(alias).is_symlink()
+        assert (S_IMODE(pcb.stat().st_mode), S_IMODE(side.stat().st_mode)) == (0o600, 0o640)
+
+    def test_paper_only_change_validates_existing_sidecar(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        center_on_sheet(pcb, paper="A3")
+        pcb.write_text(pcb.read_text().replace('(paper "A3")', '(paper "A4")'))
+        sidecar_path(pcb).write_text('{"version": 99, "wires": []}')
+        before = pcb.read_bytes()
+        with pytest.raises(ValueError):
+            center_on_sheet(pcb, paper="A3")
+        assert pcb.read_bytes() == before
+
+    def test_centering_board_link_uses_its_canonical_record(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        alias = tmp_path / "alias.kicad_pcb"
+        alias.symlink_to(pcb.name)
+        before = sidecar_path(pcb).read_bytes()
+        report = center_on_sheet(alias)
+        assert alias.is_symlink() and report.sidecar == sidecar_path(pcb)
+        assert sidecar_path(pcb).read_bytes() != before
+        assert not sidecar_path(alias).exists()
+
+    def test_already_centered_copy_writes_both_files(self, tmp_path: Path):
+        pcb = _write_reinforced(tmp_path)
+        center_on_sheet(pcb)
+        out = tmp_path / "copy.kicad_pcb"
+        report = center_on_sheet(pcb, output_path=out)
+        assert not report.changed and report.output == out and report.sidecar == sidecar_path(out)
+        assert pcb.read_bytes() == out.read_bytes()
+        assert sidecar_path(pcb).read_bytes() == sidecar_path(out).read_bytes()
+
     def test_cli_json_lists_sidecar(self, tmp_path: Path, capsys):
         from kicad_tools.cli.pcb_center_on_sheet import run_center_on_sheet
 
