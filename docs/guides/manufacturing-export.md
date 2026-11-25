@@ -555,8 +555,11 @@ by_lcsc:             # every placement of that LCSC part
 For each placement, the exporter first checks the project's `by_reference`
 and then `by_lcsc`. It next checks the manufacturer's catalog entry for the
 part and footprint, then the footprint default. It uses the first matching
-offset. The generated BOM supplies the LCSC number when available. The PCB
-footprint's `LCSC` property is the fallback.
+offset. The selected BOM part supplies the LCSC number when available. The PCB
+footprint's `LCSC` property is the fallback. With `--no-bom`, a JLCPCB export
+still reads part assignments from the design, project spec and any existing
+BOM selected for merging. To reuse catalog selections from an earlier export
+in another directory, pass `--merge-lcsc-from path/to/bom_jlcpcb.csv`.
 
 | JLCPCB part | KiCad footprint | Total offset |
 | --- | --- | ---: |

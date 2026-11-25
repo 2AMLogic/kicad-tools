@@ -660,6 +660,76 @@ def test_catalog_rotations_use_the_selected_parts_and_project_precedence(catalog
     assert all(row["source"] != "catalog_lcsc" for row in other.applied)
 
 
+@pytest.mark.parametrize("manufacturer", ["jlcpcb", "jlcpcb-tier1"])
+def test_cpl_only_uses_the_same_project_catalog_parts_as_full_export(catalog_board, manufacturer):
+    from kicad_tools.cli import export_cmd
+
+    pcb = catalog_board(0)
+    parts = {"U1": "C51118", "U2": "C19829593", "D1": "C2286", "D2": "C12624"}
+    board_text = pcb.read_text()
+    for part in parts.values():
+        board_text = board_text.replace(f'(property "LCSC" "{part}")', '(property "LCSC" "")')
+    pcb.write_text(board_text)
+    (pcb.parent / "project.kct").write_text(
+        "kct_version: '1.0'\nproject:\n  name: Catalog rotations\nbom_entries:\n"
+        + "".join(f"- ref: {ref}\n  part: device\n  lcsc: {part}\n" for ref, part in parts.items())
+    )
+    args = [
+        str(pcb),
+        "--mfr",
+        manufacturer,
+        "--no-auto-lcsc",
+        "--no-gerbers",
+        "--no-report",
+        "--no-project-zip",
+        "--skip-preflight",
+    ]
+    full = pcb.parent / "complete"
+    assert export_cmd.main([*args, "--bom-source", "pcb", "-o", str(full)]) == 0
+    expected = (full / "cpl_jlcpcb.csv").read_bytes()
+    angles = _rotations(expected.decode())
+    assert {ref: angles[ref] for ref in parts} == {"U1": 270, "U2": 270, "D1": 0, "D2": 0}
+    only = pcb.parent / "placements"
+    # No schematic is required when only the placements are requested.
+    assert export_cmd.main([*args, "--no-bom", "-o", str(only)]) == 0
+    assert (only / "cpl_jlcpcb.csv").read_bytes() == expected
+    assert not (only / "bom_jlcpcb.csv").exists()
+
+
+def test_cpl_only_reuses_the_selected_bom_without_searching_for_new_parts(
+    catalog_board, monkeypatch
+):
+    pcb = catalog_board(0)
+    pcb.write_text(
+        pcb.read_text().replace(
+            '(property "Reference" "U3") (property "Value" "test")',
+            '(property "Reference" "U3") (property "Value" "AP2112K-3.3")',
+        )
+    )
+    previous = pcb.parent / "previous.csv"
+    content = "Comment,Designator,Footprint,LCSC Part #\nAP2112K-3.3,U3,Package_TO_SOT_SMD:SOT-23-5,C51118\n"
+    previous.write_text(content)
+    monkeypatch.setattr(
+        "kicad_tools.export.assembly.enrich_bom_lcsc",
+        lambda *a, **k: pytest.fail("unexpected catalog search"),
+    )
+    result = _package(pcb, merge_lcsc_from=previous).export(pcb.parent / "placements")
+    assert result.success, result.errors
+    assert result.bom_path is None
+    assert _rotations(result.pnp_path.read_text())["U3"] == 270
+    assert previous.read_text() == content
+
+
+def test_rotation_counter_matches_catalog_offsets_in_the_default_python_export(catalog_board):
+    from kicad_tools.export.pnp import count_rotation_corrections
+
+    footprints = list(PCB.load(catalog_board(0)).footprints)
+    angles = _rotations(export_pnp(footprints, "jlcpcb"))
+    changed = [fp.reference for fp in footprints if angles[fp.reference] != fp.rotation]
+    assert set(changed) == {"U1", "U2"}
+    assert count_rotation_corrections(footprints, "jlcpcb") == len(changed)
+
+
 def test_readiness_detects_stale_catalog_rotations_without_a_sidecar(catalog_board, tmp_path):
     from kicad_tools.cli.readiness_cmd import _verify_cpl_rotations
 

@@ -719,14 +719,17 @@ def count_rotation_corrections(
 
     Uses the same effective config and placement filters as :func:`export_pnp`
     (THT/DNP/layer filtering), so the count covers exactly the rows written to
-    the CPL where the resolved correction (sidecar or footprint table) is
-    non-zero.
+    the CPL where the resolved sidecar, catalog or footprint correction is non-zero.
     """
     from .rotation_overrides import resolve_rotation_correction
 
-    if not rotation_corrections and not rotation_overrides:
-        return 0
     formatter = get_pnp_formatter(manufacturer, config, rotation_corrections, rotation_overrides)
+    if not (
+        formatter.rotation_corrections
+        or formatter.rotation_overrides
+        or formatter.catalog_corrections
+    ):
+        return 0
     placements = formatter.filter_placements(
         extract_placements(footprints, formatter.config, lcsc_by_reference=lcsc_by_reference)
     )
@@ -734,7 +737,10 @@ def count_rotation_corrections(
         1
         for p in placements
         if resolve_rotation_correction(
-            p, rotation_corrections, rotation_overrides, formatter.catalog_corrections
+            p,
+            formatter.rotation_corrections,
+            formatter.rotation_overrides,
+            formatter.catalog_corrections,
         )[0]
         != 0
     )

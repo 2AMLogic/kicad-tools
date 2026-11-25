@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 
@@ -46,6 +47,9 @@ from .rotation_overrides import (
     load_rotation_overrides,
     review_rotations,
 )
+
+if TYPE_CHECKING:
+    from ..schema.bom import BOMItem
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +384,8 @@ class AssemblyPackage:
         # Generate CPL
         if self.config.include_pnp:
             try:
+                if not self.config.include_bom and self.fab_family == "jlcpcb":
+                    self._prepare_assembly_parts(out_dir, result, placement_only=True)
                 result.pnp_path = self._generate_pnp(out_dir, result)
             except Exception as e:
                 result.errors.append(f"CPL generation failed: {e}")
@@ -395,32 +401,21 @@ class AssemblyPackage:
 
         return result
 
-    def _generate_bom(self, output_dir: Path, result: AssemblyPackageResult | None = None) -> Path:
-        """Generate BOM file.
+    def _prepare_assembly_parts(
+        self,
+        output_dir: Path,
+        result: AssemblyPackageResult | None,
+        *,
+        placement_only: bool = False,
+    ) -> list[BOMItem]:
+        """Resolve the selected parts and footprint names used by the BOM and CPL.
 
-        When ``auto_lcsc`` is enabled (the default) and the target
-        manufacturer is ``jlcpcb``, missing LCSC part numbers are
-        populated automatically via :func:`enrich_bom_lcsc` before
-        the BOM CSV is written.
-
-        The ``bom_source`` config field controls where BOM data is
-        sourced from:
-
-        - ``"schematic"`` (default): extract from schematic symbols
-        - ``"pcb"``: extract from PCB footprints (no schematic needed)
-        - ``"auto"``: use schematic by default, fall back to PCB when
-          reference sets diverge significantly
-
-        Args:
-            output_dir: Directory to write the BOM CSV into.
-            result: Optional result object to attach enrichment report.
-
-        Returns:
-            Path to the written BOM CSV.
+        A placement-only export reads the available source, project assignments and
+        existing BOM. It can run without a schematic or a catalog search for new parts.
         """
         bom_source = self.config.bom_source
 
-        if bom_source == "pcb":
+        if bom_source == "pcb" or (placement_only and self.schematic_path is None):
             from ..schema.bom import extract_bom_from_pcb
 
             bom = extract_bom_from_pcb(str(self.pcb_path))
@@ -612,7 +607,7 @@ class AssemblyPackage:
         logger.info(merge_source)
 
         # LCSC auto-matching for JLCPCB exports
-        if self.config.auto_lcsc and self.fab_family == "jlcpcb":
+        if not placement_only and self.config.auto_lcsc and self.fab_family == "jlcpcb":
             try:
                 enrichment = enrich_bom_lcsc(
                     items,
@@ -658,7 +653,11 @@ class AssemblyPackage:
             if getattr(i, "lcsc", "") and i.lcsc.strip() and not getattr(i, "is_virtual", False)
         }
 
-        # Generate BOM
+        return items
+
+    def _generate_bom(self, output_dir: Path, result: AssemblyPackageResult | None = None) -> Path:
+        """Prepare the selected parts and write their manufacturing BOM."""
+        items = self._prepare_assembly_parts(output_dir, result)
         bom_config = self.config.bom_config or BOMExportConfig()
         bom_csv = export_bom(items, self.fab_family, bom_config)
         if result is not None:
