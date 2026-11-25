@@ -14,9 +14,9 @@ that proof. It leaves the shipping path alone:
    (:data:`PROTOCOL_FLAGS`) at each ``--seed``. Since #7831 it chains the
    ``--complete`` lattice pass itself; ``--reserve-pour-only-passives`` has
    been on by default since #7835, so it is not passed.
-3. The graded board gets the #8532 preparation the shipping recipe applies
-   after its copper (``pcb add-fiducials`` + ``pcb add-board-info``), then is
-   graded with the pinned toolchain
+3. The routed board gets the shipping recipe's fiducials and board ID (#8532).
+   ``place-silk-refs --over-holes`` moves references that cross drills in this
+   routing result (#9424). The prepared board is graded with the pinned toolchain
    (:func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain`, so
    ``KCT_KICAD_DOCKER=1`` works on a host):
 
@@ -229,26 +229,18 @@ def route_flags(seed: int) -> list[str]:
 
 
 def prepare_for_grading(routed: Path) -> dict[str, list[str]]:
-    """Add the #8532 global fiducials + board-ID silk the shipping recipe adds.
-
-    ``redesign/build.py`` runs ``pcb add-fiducials`` and ``pcb add-board-info``
-    after applying the reviewed copper, so the release board passes the
-    ``fiducials_missing`` / ``board_id_missing`` DFM warnings.  The unattended
-    path routes from scratch and wrote neither, so without this step its board
-    alone fails the recipe's own 0-warning bar (issue #9424).  Fixed geometry
-    on the board, never a waiver.
-    """
+    """Add assembly markings and move reference text clear of the routed drill pattern."""
     from kicad_tools.cli.pcb_add_board_info import run_add_board_info
     from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+    from kicad_tools.cli.place_silk_refs_cmd import main as place_silk_refs
 
-    prep: list[str] = []
     if run_add_fiducials(routed, sides="populated") != 0:
         raise RuntimeError("pcb add-fiducials failed")
-    prep.append("fiducials")
     if run_add_board_info(routed, auto=True) != 0:
         raise RuntimeError("pcb add-board-info failed")
-    prep.append("board_info")
-    return {"prep": prep}
+    if place_silk_refs([str(routed), "--mfr", MANUFACTURER, "--layers", "4", "--over-holes"]) != 0:
+        raise RuntimeError("place-silk-refs --over-holes failed")
+    return {"prep": ["fiducials", "board_info", "silk_refs_over_holes"]}
 
 
 def run_kicad_drc(routed: Path, evidence: Path) -> dict:
