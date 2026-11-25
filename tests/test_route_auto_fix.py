@@ -665,6 +665,13 @@ def _make_success_router(nets_routed: int = 3, nets_to_route: int = 3):
     }
     router.power_stall_abort = False
     router._pour_nets_without_zones = set()
+    # Issue #10153: a real callable, not an auto-attr.  _routable_multi_pad_nets
+    # strips pour-served nets via router._is_pour_net(net), and a truthy
+    # MagicMock would empty the routing denominator -- nets_to_route collapses
+    # to 0, the escalation result never carries nets_routed == nets_to_route,
+    # and _post_route_drc_only_failure's all_nets_routed leg short-circuits
+    # before fix_result is ever consulted.
+    router._is_pour_net = lambda net_id: False
     router.routes = []
     router.rules.via_diameter = 0.6
     router.rules.min_drill_clearance = 0.0
@@ -935,6 +942,11 @@ class TestAutoFixSuccessKeepsZeroExitCode:
 
     The propagation logic must be rollback-only; it must NOT downgrade
     a successful auto-fix run to a non-zero exit.
+
+    Since #10057 this test also guards the ``fix_result == 0`` arm of
+    ``_post_route_drc_only_failure``: the fixture reaches the predicate
+    (Issue #10153), and only fix-drc actually clearing the DRC errors
+    keeps a fully connected board at exit 0.
     """
 
     def test_layer_escalation_returns_zero_on_auto_fix_success(self, tmp_path):
@@ -966,23 +978,28 @@ class TestAutoFixSuccessKeepsZeroExitCode:
         )
 
 
-class TestAutoFixNoRegressionForCodes1And2:
-    """Issue #2852: fix-drc exit 1 (no progress) and 2 (partial) must NOT override.
+class TestAutoFixCodes1And2ExitThreeOnConnectedBoard:
+    """Issues #2852/#10057: fix-drc exit 1 or 2 on a fully routed board exits 3.
 
-    Only exit 3 (connectivity rollback) triggers the new override.  Exit
-    codes 1 and 2 must preserve the existing routing-driven exit code --
-    i.e. exit 0 for the success-then-DRC-errors-remain path (because the
-    routing flows other than main() don't consult ``drc_errors`` at all).
+    Since #10057 the escalation tails consult the post-route DRC via
+    ``_post_route_drc_only_failure``: a fully connected board whose every
+    non-DRC gate passed and whose *verified* post-route DRC still reports
+    errors exits 3 whenever fix-drc did not clear them.  Exit 1 (no
+    progress) and 2 (partial repair) both leave the DRC dirty, so both
+    surface as exit 3 -- only fix-drc exit 0 (repaired) and exit 3
+    (connectivity rollback, which has its own #2852 exit path) do not.
 
-    Note: ``route_with_layer_escalation`` (and siblings) derive their
-    exit code purely from ``final_result.success`` -- so a successful
-    routing run with fix-drc returning 1 or 2 returns 0.  Only main()
-    has separate DRC bookkeeping that surfaces exit 3 from a positive
-    ``drc_errors`` count.
+    Before Issue #10153 this class (as ``TestAutoFixNoRegressionForCodes1And2``)
+    asserted the pre-#10057 contract (exit 0) and its fixture never reached
+    the branch: the mocked router's auto-attr ``_is_pour_net`` returned a
+    truthy MagicMock, so ``_routable_multi_pad_nets`` classified every net
+    as pour-served, ``nets_to_route`` collapsed to 0, and the predicate's
+    ``all_nets_routed`` leg short-circuited before ``fix_result`` was ever
+    consulted.
     """
 
-    def test_layer_escalation_exit1_preserves_routing_exit_code(self, tmp_path):
-        """fix-drc exit 1 (no progress) does not override route exit code."""
+    def test_layer_escalation_exit1_surfaces_drc_only_failure(self, tmp_path):
+        """fix-drc exit 1 (no progress) exits 3 on a fully connected board."""
         from contextlib import ExitStack
 
         from kicad_tools.cli.route_cmd import route_with_layer_escalation
@@ -1005,14 +1022,15 @@ class TestAutoFixNoRegressionForCodes1And2:
             stack.enter_context(patch("kicad_tools.cli.route_cmd._run_auto_fix", return_value=1))
             result = route_with_layer_escalation(pcb, out, args, quiet=True)
 
-        # success=True path: fix-drc exit 1 must NOT promote to 3.
-        assert result == 0, (
-            f"fix-drc exit 1 (no progress) must not override route exit "
-            f"in route_with_layer_escalation, got {result}"
+        # Issue #10057: fix-drc made no progress, so verified DRC errors
+        # remain the run's sole failure on a connected board -> exit 3.
+        assert result == 3, (
+            f"fix-drc exit 1 (no progress) must surface the DRC-only failure "
+            f"as exit 3 in route_with_layer_escalation, got {result}"
         )
 
-    def test_layer_escalation_exit2_preserves_routing_exit_code(self, tmp_path):
-        """fix-drc exit 2 (partial repair) does not override route exit code."""
+    def test_layer_escalation_exit2_surfaces_drc_only_failure(self, tmp_path):
+        """fix-drc exit 2 (partial repair) exits 3 on a fully connected board."""
         from contextlib import ExitStack
 
         from kicad_tools.cli.route_cmd import route_with_layer_escalation
@@ -1035,10 +1053,11 @@ class TestAutoFixNoRegressionForCodes1And2:
             stack.enter_context(patch("kicad_tools.cli.route_cmd._run_auto_fix", return_value=2))
             result = route_with_layer_escalation(pcb, out, args, quiet=True)
 
-        # success=True path: fix-drc exit 2 must NOT promote to 3.
-        assert result == 0, (
-            f"fix-drc exit 2 (partial) must not override route exit "
-            f"in route_with_layer_escalation, got {result}"
+        # Issue #10057: fix-drc's partial repair left DRC errors behind, so
+        # the fully connected board still exits 3.
+        assert result == 3, (
+            f"fix-drc exit 2 (partial repair) must surface the DRC-only failure "
+            f"as exit 3 in route_with_layer_escalation, got {result}"
         )
 
 

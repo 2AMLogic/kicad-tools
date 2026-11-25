@@ -291,3 +291,54 @@ Each detected tap prints a guard advisory (unless `--quiet`), e.g.
 trace/ring`. This path is voltage-map only: the `--hv-domains` declaration has
 no per-net data, so no taps are auto-exempted there. Generating the actual guard
 trace/ring copper remains out of scope (see #4372).
+
+## Schematic-sheet grouping (issue #10146)
+
+The HV terms group footprints by *voltage*; the schematic-group terms group
+them by *where the schematic draws them*. A **schematic group** is the set of
+footprints whose symbols sit on the same schematic sheet — the one grouping
+the schematic encodes unambiguously (via the netlist's `sheetpath` node).
+Hierarchical labels and reference prefixes alone were rejected as heuristics.
+
+`optimize-placement` resolves the schematic next to the PCB (the same
+discovery `kct check` uses), exports a netlist with kicad-cli into a scratch
+directory and builds a `ref -> sheet_path` map. Two soft terms consume it:
+
+- **Sheet cohesion** (`compute_sheet_cohesion`, weight `group_cohesion`,
+  default `1.0`): for each sheet with three or more placed members, the
+  radius-of-gyration spread around the sheet centroid — the identical
+  formulation as the voltage-domain cohesion term, partitioned by sheet.
+  Minimizing it packs each sheet's circuit into a compact zone.
+- **Sheet order** (`compute_sheet_order`, weight `group_order`, default
+  `1.0`): within a sheet, parts sharing a reference prefix (`R1`, `R2`, …)
+  are read along that prefix bucket's dominant axis (the axis of the bucket's larger extent)
+  and every pair placed opposite to its schematic (annotation) order
+  contributes the depth of the inversion (mm); each bucket's total is divided
+  by its pair count (mean inversion depth), so a weight of `1.0` carries the
+  same scale at any number of same-prefix parts. A correctly ordered group
+  scores zero however far it is spread — ordering never fights compactness.
+
+Both are soft preferences exactly like cohesion: excluded from `is_feasible`
+and from the infeasible branch of the lexicographic score, and dormant
+whenever no map is available, the design has a single sheet, or a sheet has
+fewer than three members — so single-sheet and schematic-less boards keep the
+historical objective **byte-identical**, and a failed netlist export degrades
+to the same dormant state instead of failing the run. The netlist export is skipped only when
+**both** weights are 0. `--weights '{"group_cohesion": 0,
+"group_order": 0}'` turns both off.
+
+Composability note: the MCP `optimize_placement` and `evaluate_placement`
+tools build the same sheet map with the same weight gate, so MCP-driven runs
+score the schematic-group terms exactly like the CLI.
+
+### Tuning knobs
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--weights '{"group_cohesion": …}'` | `1.0` | Weight applied to the per-sheet spread penalty (a soft preference). |
+| `--weights '{"group_order": …}'` | `1.0` | Weight applied to the within-sheet schematic-order penalty (a soft preference). |
+
+The axis used by the order term is picked per reference-prefix bucket within a
+sheet, and the pick flips discontinuously when a bucket's x-extent crosses its
+y-extent, so the order term is piecewise-linear but not continuous overall;
+the optimizer (CMA-ES) is derivative-free and tolerates this.

@@ -157,7 +157,8 @@ class MaskNudgeAction:
     """One applied (or, in a dry run, predicted) pass-through nudge.
 
     A nudge can translate the conductor or keep one segment end fixed at a
-    via. Every moved point shares the same ``(dx, dy)``. The grouped edit
+    via. Every moved point shares the same ``(dx, dy)`` unless ``shifts`` gives
+    each point its own displacement. The grouped edit
     records each point and its pre-move coordinates in ``points`` (a via's own
     point carries ``tag=None``). ``openings`` lists every opening UUID to clear.
     The reported reference point is the moving junction, translated segment
@@ -182,6 +183,14 @@ class MaskNudgeAction:
     openings: list[str] = field(default_factory=list)
     points: list[tuple[str, str, str | None, float, float]] = field(default_factory=list)
     bends: list[MaskTraceBend] = field(default_factory=list)
+    #: Optional ``(dx, dy)`` per entry of ``points`` for an edit whose ends move
+    #: along different lines (a chamfer between perpendicular runs); empty
+    #: means every point shares ``(dx, dy)``.
+    shifts: list[tuple[float, float]] = field(default_factory=list)
+
+    def shift(self, index: int) -> tuple[float, float]:
+        """The displacement applied to ``points[index]``."""
+        return self.shifts[index] if index < len(self.shifts) else (self.dx, self.dy)
 
     def __str__(self) -> str:
         return (
@@ -823,6 +832,28 @@ class MaskCopperRepairer(CopperGapRepairer):
                 if isinstance(action, MaskNudgeAction):
                     touched_by_action.update(point[1] for point in action.points)
                 continue
+            if self._slide_chamfer_between_runs(
+                seg,
+                conductor,
+                openings[0],
+                pads,
+                result,
+                max_displacement,
+                dry_run,
+                clearance_mm,
+                violation.required_value_mm,
+                margin_mm,
+                warning_clearance_mm,
+                touched_by_action,
+            ):
+                # A chamfer between two perpendicular runs slides out of the
+                # opening keeping every angle; recentring it instead skews the
+                # chamfer into the pad (#9939).
+                moved.add(conductor)
+                action = result.actions[-1]
+                if isinstance(action, MaskNudgeAction):
+                    touched_by_action.update(point[1] for point in action.points)
+                continue
             reason = self._repair_one(
                 seg, conductor, openings[0], pads, result, max_displacement, dry_run, clearance_mm
             )
@@ -1442,94 +1473,152 @@ class MaskCopperRepairer(CopperGapRepairer):
             push = self._shift_junction_clear(
                 fixed, reference, [entry[0] for entry in entries], required + margin_mm + width / 2
             )
-        if push is None:
-            return "infeasible", ""
-        dx, dy = push
-        displacement = math.hypot(dx, dy)
-        if displacement < _TOLERANCE_MM / 2:
-            return "already_cleared", ""
-        if displacement > max_displacement:
-            return "exceeds_max_displacement", f"needs {displacement:.4f}mm"
-        moving_uuids = {seg_uuid, *(member[0] for member in joined)}
 
-        new_start = start if start == fixed else (start[0] + dx, start[1] + dy)
-        new_end = end if end == fixed else (end[0] + dx, end[1] + dy)
-        moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
-            (
-                copper,
-                LineString([new_start, new_end]).buffer(width / 2, quad_segs=16),
-                layer,
-            )
-        ]
-        points: list[tuple[str, str, str | None, float, float]] = [
-            ("segment", seg_uuid, tag, point[0], point[1])
-            for tag, point in (("start", start), ("end", end))
-            if point != fixed
-        ]
-        for join_uuid, join_node, join_tag in joined:
-            join_width_node = join_node.find("width")
-            join_end = self._xy(join_node.find(join_tag)) if join_tag else None
-            join_other = self._xy(join_node.find("end" if join_tag == "start" else "start"))
-            if join_width_node is None or join_end is None or join_other is None:
-                return "malformed_segment", ""
-            join_width = _num(join_width_node) or width
-            moves.append(
+        def try_push(dx: float, dy: float, floor: float | None) -> tuple[str, str] | None:
+            displacement = math.hypot(dx, dy)
+            if displacement < _TOLERANCE_MM / 2:
+                return "already_cleared", ""
+            if displacement > max_displacement:
+                return "exceeds_max_displacement", f"needs {displacement:.4f}mm"
+            moving_uuids = {seg_uuid, *(member[0] for member in joined)}
+
+            new_start = start if start == fixed else (start[0] + dx, start[1] + dy)
+            new_end = end if end == fixed else (end[0] + dx, end[1] + dy)
+            moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
                 (
-                    LineString([join_other, join_end]).buffer(join_width / 2, quad_segs=16),
-                    LineString(
-                        [
-                            join_other,
-                            (join_end[0] + dx, join_end[1] + dy),
-                        ]
-                    ).buffer(join_width / 2, quad_segs=16),
+                    copper,
+                    LineString([new_start, new_end]).buffer(width / 2, quad_segs=16),
                     layer,
                 )
+            ]
+            points: list[tuple[str, str, str | None, float, float]] = [
+                ("segment", seg_uuid, tag, point[0], point[1])
+                for tag, point in (("start", start), ("end", end))
+                if point != fixed
+            ]
+            for join_uuid, join_node, join_tag in joined:
+                join_width_node = join_node.find("width")
+                join_end = self._xy(join_node.find(join_tag)) if join_tag else None
+                join_other = self._xy(join_node.find("end" if join_tag == "start" else "start"))
+                if join_width_node is None or join_end is None or join_other is None:
+                    return "malformed_segment", ""
+                join_width = _num(join_width_node) or width
+                moves.append(
+                    (
+                        LineString([join_other, join_end]).buffer(join_width / 2, quad_segs=16),
+                        LineString(
+                            [
+                                join_other,
+                                (join_end[0] + dx, join_end[1] + dy),
+                            ]
+                        ).buffer(join_width / 2, quad_segs=16),
+                        layer,
+                    )
+                )
+                points.append(("segment", join_uuid, join_tag, join_end[0], join_end[1]))
+
+            if fixed is not None and self._loses_same_net_contact(
+                moves, layer, net_name, moving_uuids, pads
+            ):
+                return "would_break_same_net_contact", ""
+            refusal = self._copper_floor_reason(moves, layer, net_name, seg_uuid, pads, floor)
+            if refusal is not None:
+                return refusal
+            refusal = self._other_opening_reason(
+                openings,
+                moves,
+                [(start, new_start, frozenset({layer})), (end, new_end, frozenset({layer}))],
+                pads,
+                required,
+                displacement,
             )
-            points.append(("segment", join_uuid, join_tag, join_end[0], join_end[1]))
+            if refusal is not None:
+                return refusal
 
-        if fixed is not None and self._loses_same_net_contact(
-            moves, layer, net_name, moving_uuids, pads
+            first = pads[openings[0]]
+            refs = ", ".join(pads[o][4] for o in openings)
+            action = MaskNudgeAction(
+                action="nudge_clear",
+                uuid=seg_uuid,
+                kind="segment",
+                pad_uuid=openings[0],
+                pad_ref=first[4],
+                net_name=net_name,
+                layer=layer,
+                old_x=reference[0],
+                old_y=reference[1],
+                new_x=reference[0] + dx,
+                new_y=reference[1] + dy,
+                dx=dx,
+                dy=dy,
+                displacement_mm=displacement,
+                detail=(
+                    f"moved {displacement:.4f}mm clear of {refs}"
+                    + (f", dragging {len(joined)} joined end(s)" if joined else "")
+                ),
+                openings=list(openings),
+                points=points,
+            )
+            return self._apply_nudge(action, result, dry_run)
+
+        # Keep the line entering the pad and take the shortest perpendicular
+        # lead from the fixed via to its extension. The original pivot remains
+        # available if this corner fails a clearance or contact check.
+        if fixed is not None and len(joined) == 1 and len(openings) == 1:
+            uid, neighbour, tag = joined[0]
+            far = self._xy(neighbour.find("end" if tag == "start" else "start"))
+            opening = entries[0][0]
+            if (
+                far is not None
+                and self._xy(neighbour.find(tag)) == reference
+                and opening.buffer(-_INSIDE_EPS_MM).contains(Point(far))
+                and openings[0] not in self._pivot_pad_bounds
+                and uid not in touched_by_action
+                and not self._locks.is_generator_owned(neighbour)
+                and not self._locks.is_generator_owned(seg)
+                and not self._board_rules.dru_error
+            ):
+                shift = self._extend_pad_entry(
+                    far, reference, fixed, opening, width / 2 + required + margin_mm
+                )
+                if shift is not None:
+                    floor = max(
+                        clearance_mm or 0.0,
+                        self._board_rules.net_requirement(net_name, self.net_names),
+                    )
+                    if try_push(*shift, floor) is None:
+                        return None
+        if push is None:
+            return "infeasible", ""
+        return try_push(*push, clearance_mm)
+
+    @staticmethod
+    def _extend_pad_entry(
+        pad_end: tuple[float, float],
+        corner: tuple[float, float],
+        via: tuple[float, float],
+        opening: BaseGeometry,
+        centreline_gap: float,
+    ) -> tuple[float, float] | None:
+        """Project the via onto the continuation of the entry beyond its corner."""
+        from kicad_tools.router.quantize import is_45_aligned
+
+        vx, vy = corner[0] - pad_end[0], corner[1] - pad_end[1]
+        length = math.hypot(vx, vy)
+        if length < _MIN_RUN_MM:
+            return None
+        scale = ((via[0] - corner[0]) * vx + (via[1] - corner[1]) * vy) / length**2
+        if scale <= 0:
+            return None
+        new = round(corner[0] + scale * vx, 4), round(corner[1] + scale * vy, 4)
+        if (
+            math.dist(via, new) < _MIN_RUN_MM
+            or LineString([via, new]).distance(opening) < centreline_gap
         ):
-            return "would_break_same_net_contact", ""
-        refusal = self._copper_floor_reason(moves, layer, net_name, seg_uuid, pads, clearance_mm)
-        if refusal is not None:
-            return refusal
-        refusal = self._other_opening_reason(
-            openings,
-            moves,
-            [(start, new_start, frozenset({layer})), (end, new_end, frozenset({layer}))],
-            pads,
-            required,
-            displacement,
-        )
-        if refusal is not None:
-            return refusal
-
-        first = pads[openings[0]]
-        refs = ", ".join(pads[o][4] for o in openings)
-        action = MaskNudgeAction(
-            action="nudge_clear",
-            uuid=seg_uuid,
-            kind="segment",
-            pad_uuid=openings[0],
-            pad_ref=first[4],
-            net_name=net_name,
-            layer=layer,
-            old_x=reference[0],
-            old_y=reference[1],
-            new_x=reference[0] + dx,
-            new_y=reference[1] + dy,
-            dx=dx,
-            dy=dy,
-            displacement_mm=displacement,
-            detail=(
-                f"moved {displacement:.4f}mm clear of {refs}"
-                + (f", dragging {len(joined)} joined end(s)" if joined else "")
-            ),
-            openings=list(openings),
-            points=points,
-        )
-        return self._apply_nudge(action, result, dry_run)
+            return None
+        if not all(is_45_aligned(new[0] - x, new[1] - y) for x, y in (pad_end, via)):
+            return None
+        return new[0] - corner[0], new[1] - corner[1]
 
     def _slide_shared_pad_exit(
         self,
@@ -1864,6 +1953,236 @@ class MaskCopperRepairer(CopperGapRepairer):
                 return self._apply_nudge(action, result, dry_run) is None
         return False
 
+    @staticmethod
+    def _run_keeps_length(
+        runs: list[tuple[str, SExp, str, tuple[float, float], tuple[float, float]]],
+        axis: tuple[float, float],
+        amount: float,
+    ) -> bool:
+        """Whether sliding every run's joint ``amount`` along ``axis`` keeps each
+        run's direction and a minimum length."""
+        for _uid, _node, _tag, point, other in runs:
+            along = (point[0] - other[0]) * axis[0] + (point[1] - other[1]) * axis[1]
+            if along > 0 and along + amount < _MIN_RUN_MM:
+                return False
+            if along <= 0 and along + amount > -_MIN_RUN_MM:
+                return False
+        return True
+
+    def _slide_chamfer_between_runs(
+        self,
+        seg: SExp,
+        seg_uuid: str,
+        opening: str,
+        pads: dict,
+        result: MaskRepairResult,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        required: float | None,
+        margin_mm: float,
+        warning_clearance_mm: float | None,
+        touched: set[str],
+    ) -> bool:
+        """Slide a chamfer between two perpendicular runs out of a pad opening.
+
+        The conductor is a straight track (and any coincident copies) whose
+        near end joins only same-net tracks along the pad lead's line and
+        whose far end joins only same-net tracks along one other line. The
+        near end slides outward along the lead, and the far end slides along
+        its own run by the amount that keeps the chamfer parallel to itself:
+        every angle is kept, the runs' far ends stay fixed, and the chamfer
+        leaves the opening it grazed. The two ends move by different amounts,
+        so the nudge action records one shift per point. An end at a via, an
+        arc or a crossing track is never moved. Returns ``True`` when applied.
+        """
+        if required is None or opening in self._pivot_pad_bounds:
+            return False
+        pad, _, pad_layers, net, ref, shape = pads[opening]
+        if shape == "unsupported" or not net or self._net_name(seg) != net:
+            return False
+        if self._locks.is_locked(seg):
+            return False
+        layer_node, width_node = seg.find("layer"), seg.find("width")
+        if layer_node is None or width_node is None:
+            return False
+        layer = _bare(layer_node.get_first_atom())
+        if layer not in pad_layers and "*.Cu" not in pad_layers:
+            return False
+        width = _num(width_node)
+        start, end = self._xy(seg.find("start")), self._xy(seg.find("end"))
+        if start is None or end is None or width <= 0 or math.dist(start, end) < _TOLERANCE_MM:
+            return False
+        near, far = (
+            (end, start) if pad.distance(Point(end)) < pad.distance(Point(start)) else (start, end)
+        )
+
+        copies: dict[str, SExp] = {seg_uuid: seg}
+        side_runs: list[list[tuple[str, SExp, str, tuple[float, float], tuple[float, float]]]] = []
+        for point, opposite in ((near, far), (far, near)):
+            members, blocked = self._junction(layer, point, seg_uuid, net)
+            if blocked or self._has_fixed_junction_contact(point, layer, net):
+                return False
+            runs = []
+            for uid, node, tag in members:
+                other = self._xy(node.find("end" if tag == "start" else "start"))
+                if other is None or node.find("width") is None:
+                    return False
+                if math.dist(other, opposite) < _TOLERANCE_MM:
+                    copies[uid] = node
+                    continue
+                runs.append((uid, node, tag, point, other))
+            if not runs:
+                return False
+            side_runs.append(runs)
+        if set(copies) & touched or any(
+            self._locks.is_generator_owned(node) for node in copies.values()
+        ):
+            return False
+
+        # Each side's runs share one axis, pointing from their far end to the joint.
+        axes: list[tuple[float, float]] = []
+        for runs in side_runs:
+            _, _, _, point0, other0 = runs[0]
+            length = math.dist(point0, other0)
+            if length < _TOLERANCE_MM:
+                return False
+            ux, uy = (point0[0] - other0[0]) / length, (point0[1] - other0[1]) / length
+            for uid, node, _tag, point, other in runs:
+                vx, vy = point[0] - other[0], point[1] - other[1]
+                if abs(vx * uy - vy * ux) > _RUN_AXIS_TOLERANCE_MM or self._locks.is_locked(node):
+                    return False
+                if self._locks.is_generator_owned(node) or uid in touched:
+                    return False
+            axes.append((ux, uy))
+        (unx, uny), (ufx, ufy) = axes
+        cx, cy = far[0] - near[0], far[1] - near[1]
+        clen = math.hypot(cx, cy)
+        det = cx * ufy - cy * ufx
+        # The two runs and the chamfer must all point in different directions.
+        if (
+            abs(det) < 0.1 * clen
+            or abs(unx * cy - uny * cx) < 0.1 * clen
+            or abs(unx * ufy - uny * ufx) < 0.1
+        ):
+            return False
+
+        rules = self._board_rules
+        if rules.dru_error:
+            return False
+        copper_floor = max(clearance_mm or 0.0, rules.net_requirement(net, self.net_names))
+
+        def moved(point: tuple[float, float], shift: tuple[float, float]) -> tuple[float, float]:
+            return round(point[0] + shift[0], 4), round(point[1] + shift[1], 4)
+
+        for gap in dict.fromkeys((max(warning_clearance_mm or 0.0, required), required)):
+            for sign in (1.0, -1.0):
+                found = None
+                for step in range(1, int(max_displacement / _SLIDE_STEP_MM + 1e-9) + 1):
+                    lead = sign * step * _SLIDE_STEP_MM
+                    # The far end follows its own run so the chamfer stays parallel.
+                    follow = lead * (cx * uny - cy * unx) / det
+                    scale = 1.0 + lead * (ufx * uny - ufy * unx) / det
+                    if max(abs(lead), abs(follow)) > max_displacement:
+                        break
+                    if scale * clen < _MIN_RUN_MM:
+                        break
+                    shifts = ((lead * unx, lead * uny), (follow * ufx, follow * ufy))
+                    if not all(
+                        self._run_keeps_length(runs, axis, amount)
+                        for runs, axis, amount in zip(side_runs, axes, (lead, follow), strict=True)
+                    ):
+                        break
+                    candidate = LineString([moved(near, shifts[0]), moved(far, shifts[1])]).buffer(
+                        width / 2, quad_segs=16
+                    )
+                    if candidate.distance(pad) >= gap + margin_mm - 1e-9:
+                        found = shifts
+                        break
+                if found is None:
+                    continue
+                near_shift, far_shift = found
+                moves: list[tuple[BaseGeometry, BaseGeometry, str]] = []
+                points: list[tuple[str, str, str | None, float, float]] = []
+                shifts_by_point: list[tuple[float, float]] = []
+                moved_points: list[
+                    tuple[tuple[float, float], tuple[float, float], frozenset[str]]
+                ] = []
+
+                def shift_at(point: tuple[float, float]) -> tuple[float, float]:
+                    return (
+                        near_shift if math.dist(point, near) <= math.dist(point, far) else far_shift
+                    )
+
+                for uid, node in copies.items():
+                    s, e = self._xy(node.find("start")), self._xy(node.find("end"))
+                    w = _num(node.find("width")) or width
+                    if s is None or e is None:
+                        return False
+                    new_s, new_e = moved(s, shift_at(s)), moved(e, shift_at(e))
+                    moves.append(
+                        (
+                            LineString([s, e]).buffer(w / 2, quad_segs=16),
+                            LineString([new_s, new_e]).buffer(w / 2, quad_segs=16),
+                            layer,
+                        )
+                    )
+                    for tag, old, new in (("start", s, new_s), ("end", e, new_e)):
+                        points.append(("segment", uid, tag, *old))
+                        shifts_by_point.append(shift_at(old))
+                        moved_points.append((old, new, frozenset({layer})))
+                for runs, shift in zip(side_runs, (near_shift, far_shift), strict=True):
+                    for uid, node, tag, point, other in runs:
+                        w = _num(node.find("width")) or width
+                        new_point = moved(point, shift)
+                        moves.append(
+                            (
+                                LineString([other, point]).buffer(w / 2, quad_segs=16),
+                                LineString([other, new_point]).buffer(w / 2, quad_segs=16),
+                                layer,
+                            )
+                        )
+                        points.append(("segment", uid, tag, *point))
+                        shifts_by_point.append(shift)
+                        moved_points.append((point, new_point, frozenset({layer})))
+                if not self._slide_keeps_connections(
+                    points, near_shift[0], near_shift[1], net, shifts_by_point
+                ):
+                    continue
+                if self._copper_floor_reason(moves, layer, net, seg_uuid, pads, copper_floor):
+                    continue
+                displacement = max(math.hypot(*near_shift), math.hypot(*far_shift))
+                if self._other_opening_reason(
+                    [opening], moves, moved_points, pads, required, displacement
+                ):
+                    continue
+                new_near = moved(near, near_shift)
+                action = MaskNudgeAction(
+                    action="nudge_clear",
+                    uuid=seg_uuid,
+                    kind="segment",
+                    pad_uuid=opening,
+                    pad_ref=ref,
+                    net_name=net,
+                    layer=layer,
+                    old_x=near[0],
+                    old_y=near[1],
+                    new_x=new_near[0],
+                    new_y=new_near[1],
+                    dx=near_shift[0],
+                    dy=near_shift[1],
+                    displacement_mm=displacement,
+                    detail=(
+                        f"slid a chamfer of {len(copies)} track(s) {displacement:.4f}mm "
+                        f"along its perpendicular runs clear of {ref}"
+                    ),
+                    openings=[opening],
+                    points=points,
+                    shifts=shifts_by_point,
+                )
+                return self._apply_nudge(action, result, dry_run) is None
+        return False
+
     def _flip_elbow_into_pad(
         self,
         seg: SExp,
@@ -2006,6 +2325,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         dx: float,
         dy: float,
         net_name: str,
+        shifts: list[tuple[float, float]] | None = None,
     ) -> bool:
         """Whether translating ``points`` leaves every same-net contact group joined.
 
@@ -2024,14 +2344,15 @@ class MaskCopperRepairer(CopperGapRepairer):
         previous = ConnectivityValidator(pcb)._contact_graph(net.number)
         original: list[tuple[SExp, list]] = []
         try:
-            for _kind, uuid, tag, old_x, old_y in points:
+            for index, (_kind, uuid, tag, old_x, old_y) in enumerate(points):
                 node = self._segment_by_uuid(uuid)
                 end_node = None if node is None or tag is None else node.find(tag)
                 if end_node is None:
                     return False
                 original.append((end_node, list(end_node.children)))
-                end_node.set_value(0, round(old_x + dx, 4))
-                end_node.set_value(1, round(old_y + dy, 4))
+                pdx, pdy = shifts[index] if shifts else (dx, dy)
+                end_node.set_value(0, round(old_x + pdx, 4))
+                end_node.set_value(1, round(old_y + pdy, 4))
             current = ConnectivityValidator(PCB(self.doc))._contact_graph(net.number)
             return bool(current.preserves_connections(previous))
         finally:
@@ -3025,18 +3346,18 @@ class MaskCopperRepairer(CopperGapRepairer):
         if not dry_run:
             # Resolve every point first so a lookup miss can neither leave
             # the document half-translated nor record an unapplied action.
-            targets: list[tuple[SExp, float, float]] = []
-            for kind, uuid, tag, old_x, old_y in action.points:
+            targets: list[tuple[SExp, float, float, float, float]] = []
+            for index, (kind, uuid, tag, old_x, old_y) in enumerate(action.points):
                 node = self._segment_by_uuid(uuid) if kind == "segment" else self._via_by_uuid(uuid)
                 end_node = None if node is None else node.find(tag) if tag else node.find("at")
                 if end_node is None:
                     return "malformed_segment", ""
-                targets.append((end_node, old_x, old_y))
+                targets.append((end_node, old_x, old_y, *action.shift(index)))
         result.actions.append(action)
         if not dry_run:
-            for end_node, old_x, old_y in targets:
-                end_node.set_value(0, round(old_x + action.dx, 4))
-                end_node.set_value(1, round(old_y + action.dy, 4))
+            for end_node, old_x, old_y, dx, dy in targets:
+                end_node.set_value(0, round(old_x + dx, 4))
+                end_node.set_value(1, round(old_y + dy, 4))
             self.modified = True
         result.repaired += 1
         return None
@@ -3346,15 +3667,15 @@ class MaskCopperRepairer(CopperGapRepairer):
         its post-move position (callers fall back to a snapshot restore).
         """
         restore: list[tuple[SExp, float, float]] = []
-        for kind, uuid, tag, old_x, old_y in action.points:
+        for index, (kind, uuid, tag, old_x, old_y) in enumerate(action.points):
             node = self._segment_by_uuid(uuid) if kind == "segment" else self._via_by_uuid(uuid)
             end_node = None if node is None else node.find(tag) if tag else node.find("at")
             xy = self._xy(end_node)
+            dx, dy = action.shift(index)
             if (
                 end_node is None
                 or xy is None
-                or math.dist(xy, (round(old_x + action.dx, 4), round(old_y + action.dy, 4)))
-                > _TOLERANCE_MM
+                or math.dist(xy, (round(old_x + dx, 4), round(old_y + dy, 4))) > _TOLERANCE_MM
             ):
                 return False
             restore.append((end_node, old_x, old_y))

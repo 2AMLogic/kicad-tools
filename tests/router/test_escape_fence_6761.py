@@ -553,9 +553,187 @@ def test_no_deadline_keeps_the_two_search_recovery_shape() -> None:
     router._install_pad_lane_budgets()
     pathfinder = router.router
     assert isinstance(pathfinder, CppPathfinder)
+    # The native two-search shape is the subject; the Python fallback is
+    # out of scope for this control.
+    pathfinder._try_python_fallback = lambda *a, **k: None
     proxy = _CountingImpl(pathfinder._impl)
     pathfinder._impl = proxy
     routes = router.route_net(1)
     assert not routes
     assert len(proxy.calls) == 2
     assert proxy.timeouts() == [0.0, 0.0]  # 0.0 is the binding's "no deadline"
+
+
+# ---------------------------------------------------------------------------
+# Issue #8486: the per-attempt diagnostic in the native-call timing record
+#
+# The November 24 private-board trace could not attribute its three
+# unexplained 30 s attempts: the per-call timing record carried only net /
+# elapsed / budget / success, which cannot distinguish an uncovered
+# unreachable target (fenced timeout, then unfenced timeout) from a covered
+# one (pre-empted, single unfenced timeout).  Where tracing is enabled the
+# record now also carries the chosen pad pair, the legal goal bounds and
+# layers, the fence decision, and each native search's duration and outcome.
+# These four public fixtures are the acceptance test the reporter's table
+# defined: ordinary exit (fenced success), exit inside the neighbouring lane
+# (covered goal, pre-empted -> unfenced success), and both ring-enclosed
+# unreachable variants.  The diagnostic is purely observational -- the copper
+# must be identical with tracing off and on.
+# ---------------------------------------------------------------------------
+
+_DIAG_SHAPES = [
+    # (name, wide_target, ring)
+    ("ordinary-exit", (6.5, 12.6), False),
+    ("covered-exit", (8.6, Y0 + PITCH), False),
+    ("ordinary-ring", (6.5, 12.6), True),
+    ("covered-ring", (8.6, Y0 + PITCH), True),
+]
+
+
+def _build_diag_shape(wide_target: tuple[float, float], ring: bool):
+    router, _nb_y = _build_router(wide_target)
+    if ring:
+        _ring_around(router, wide_target[0], wide_target[1])
+    router._install_pad_lane_budgets()
+    pathfinder = router.router
+    assert isinstance(pathfinder, CppPathfinder)
+    return router, pathfinder
+
+
+def _copper_signature(routes) -> tuple:
+    """Comparable signature of a route list: every segment and via."""
+    return tuple(
+        (
+            route.net,
+            tuple(route.segments),
+            tuple(route.vias),
+        )
+        for route in routes
+    )
+
+
+@requires_cpp
+@pytest.mark.parametrize("name,wide_target,ring", _DIAG_SHAPES)
+def test_per_attempt_diagnostic_distinguishes_the_four_public_targets(
+    name: str, wide_target: tuple[float, float], ring: bool
+) -> None:
+    """One drained record per attempt names the pair, target and fence path.
+
+    Expected per shape (the reporter's table, now asserted):
+
+    ============== ============== ============= ==========================
+    shape           fence_decision goal_covered searches
+    ============== ============== ============= ==========================
+    ordinary-exit   applied        False         1 fenced success
+    covered-exit    skipped-       True          1 unfenced success
+                    covered
+    ordinary-ring   applied        False         fenced timeout, then
+                                                 unfenced timeout
+    covered-ring    skipped-       True          1 unfenced timeout
+                    covered
+    ============== ============== ============= ==========================
+    """
+    router, pathfinder = _build_diag_shape(wide_target, ring)
+    pathfinder.enable_per_call_timing(True)
+    routes = router.route_net(1, per_net_timeout=0.08 if ring else 2.0)
+    records = pathfinder.get_and_clear_per_call_timings()
+    assert len(records) == 1, "one route() attempt for the two-pad net"
+    record = records[0]
+    # Historical fields stay intact (Issue #2929 shape).
+    assert record["net"] == 1
+    assert record["net_name"] == "WIDE"
+    for key in ("elapsed", "per_net_timeout", "deadline_violated", "succeeded"):
+        assert key in record
+    # The chosen pad pair -- the actual connection considered.
+    assert record["start_pad"] == "U1.1"
+    assert record["end_pad"] == "D1.1"
+    # The legal target bounds (grid cells) and layers, so an observer can
+    # independently recompute fence coverage from a saved trace.
+    gx1, gy1, gx2, gy2 = record["end_bounds"]
+    assert all(isinstance(v, int) for v in (gx1, gy1, gx2, gy2))
+    assert gx1 <= gx2 and gy1 <= gy2
+    assert record["end_layers"], "the SMD goal must name its legal layer"
+    assert all(isinstance(l, int) and l >= 0 for l in record["end_layers"])
+    assert isinstance(record["start_bounds"], tuple) and record["start_layers"]
+
+    searches = record["searches"]
+    if name == "ordinary-exit":
+        assert routes, "WIDE must route"
+        assert record["succeeded"] is True
+        assert record["fence_decision"] == "applied"
+        assert record["goal_covered"] is False
+        assert len(searches) == 1
+        assert searches[0]["fenced"] is True
+        assert searches[0]["succeeded"] is True
+        assert searches[0]["failure_reason"] == "none"
+        assert searches[0]["elapsed"] > 0.0
+    elif name == "covered-exit":
+        assert routes, "WIDE must route"
+        assert record["succeeded"] is True
+        assert record["fence_decision"] == "skipped-covered"
+        assert record["goal_covered"] is True
+        assert len(searches) == 1, "the hopeless fenced search was skipped"
+        assert searches[0]["fenced"] is False
+        assert searches[0]["succeeded"] is True
+    elif name == "ordinary-ring":
+        assert not routes, "the ring makes the connection unreachable"
+        assert record["succeeded"] is False
+        assert record["fence_decision"] == "applied"
+        assert record["goal_covered"] is False
+        assert len(searches) == 2, "fenced timeout, then the unfenced retry"
+        assert searches[0]["fenced"] is True
+        assert searches[1]["fenced"] is False
+        assert all(s["succeeded"] is False for s in searches)
+        assert all(s["failure_reason"] == "timeout" for s in searches)
+    else:  # covered-ring
+        assert not routes, "the ring makes the connection unreachable"
+        assert record["succeeded"] is False
+        assert record["fence_decision"] == "skipped-covered"
+        assert record["goal_covered"] is True
+        assert len(searches) == 1, "no duplicate second timeout search"
+        assert searches[0]["fenced"] is False
+        assert searches[0]["succeeded"] is False
+        assert searches[0]["failure_reason"] == "timeout"
+
+
+@requires_cpp
+@pytest.mark.parametrize("name,wide_target,ring", _DIAG_SHAPES)
+def test_per_attempt_diagnostic_leaves_the_copper_unchanged(
+    name: str, wide_target: tuple[float, float], ring: bool
+) -> None:
+    """Tracing is pure observation: identical copper off and on."""
+    router_off, pathfinder_off = _build_diag_shape(wide_target, ring)
+    assert not pathfinder_off._per_call_timing_enabled
+    copper_off = _copper_signature(router_off.route_net(1, per_net_timeout=2.0))
+    assert pathfinder_off.get_and_clear_per_call_timings() == []
+
+    router_on, pathfinder_on = _build_diag_shape(wide_target, ring)
+    pathfinder_on.enable_per_call_timing(True)
+    copper_on = _copper_signature(router_on.route_net(1, per_net_timeout=2.0))
+    assert pathfinder_on.get_and_clear_per_call_timings()
+
+    assert copper_on == copper_off, "the diagnostic must not steer the search"
+
+
+@requires_cpp
+def test_early_return_attempt_carries_no_stale_diagnostic() -> None:
+    """An attempt that returns before a native search records no diagnostic.
+
+    ``_route_impl`` returns early when ``allowed_layers`` leaves no legal
+    start layer; the record for that attempt must not inherit the previous
+    traced attempt's pad pair / searches (Issue #8486 review).
+    """
+    router, pathfinder = _build_diag_shape((6.5, 12.6), False)
+    pathfinder.enable_per_call_timing(True)
+    assert router.route_net(1, per_net_timeout=2.0), "WIDE must route"
+    first = pathfinder.get_and_clear_per_call_timings()
+    assert len(first) == 1 and first[0]["searches"]
+
+    router.rules.allowed_layers = {"In1.Cu"}  # F.Cu pads: no legal start layer
+    router.route_net(2, per_net_timeout=2.0)
+    second = pathfinder.get_and_clear_per_call_timings()
+    assert second, "the attempt still produces a timing record"
+    for record in second:
+        assert record["net"] == 2
+        assert "start_pad" not in record
+        assert "searches" not in record
