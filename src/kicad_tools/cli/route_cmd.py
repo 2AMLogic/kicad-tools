@@ -5481,20 +5481,53 @@ def _write_net_class_map_sidecar(
             print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
-#: ``meta`` key recording the exact-name ``netclass_patterns`` the route step
-#: wrote into the sibling ``.kicad_pro`` (Issue #10133).  Same provenance
-#: contract as the #6390 ``meta.kct_router_netclasses`` record: a re-run drops
-#: exactly these patterns before re-adding the current route's set, so a net
-#: whose class changed between routes never keeps a stale assignment, while a
-#: hand-authored pattern is never touched.
-KCT_NETCLASS_PATTERNS_META_KEY = "kct_netclass_patterns"
+#: ``meta`` key recording the exact-name ``netclass_assignments`` the route
+#: step wrote into the sibling ``.kicad_pro`` (Issue #10133): a ``{net_name:
+#: class_name}`` mapping.  A re-run drops an entry only when it still names
+#: the class kct recorded -- an entry the user re-pointed at another class in
+#: KiCad is authored intent and survives untouched.
+KCT_NETCLASS_ASSIGNMENTS_META_KEY = "kct_netclass_assignments"
 
-#: Net-name characters KiCad's netclass-pattern matching treats as wildcards.
-#: A net whose name carries one cannot be assigned through an exact-name
-#: pattern -- the pattern would reach beyond the net itself (#10133; the
-#: pattern-evaluation hazards of #10122) -- so the net is skipped with a
-#: warning while its class is still declared for its sibling nets.
-_NETCLASS_PATTERN_WILDCARD_CHARS = ("*", "?")
+
+def _assignment_targets(value: object) -> list[str] | None:
+    """Normalise a schema-3 string or schema-4/5 array assignment to ``[cls, ...]``."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    return None
+
+
+def _project_min_clearance_floor(project: dict) -> float:
+    """Minimum clearance floor declared in ``board.design_settings`` (0.0 if unset)."""
+    import math
+
+    board = project.get("board")
+    ds = board.get("design_settings") if isinstance(board, dict) else None
+    if not isinstance(ds, dict):
+        return 0.0
+    floors: list[float] = []
+    rules = ds.get("rules")
+    if isinstance(rules, dict):
+        val = rules.get("min_clearance")
+        if (
+            not isinstance(val, bool)
+            and isinstance(val, (int, float))
+            and math.isfinite(val)
+            and val > 0
+        ):
+            floors.append(float(val))
+    defaults = ds.get("defaults")
+    if isinstance(defaults, dict):
+        val = defaults.get("clearance_min")
+        if (
+            not isinstance(val, bool)
+            and isinstance(val, (int, float))
+            and math.isfinite(val)
+            and val > 0
+        ):
+            floors.append(float(val))
+    return max(floors, default=0.0)
 
 
 def _write_netclasses_to_project(
@@ -5511,29 +5544,33 @@ def _write_netclasses_to_project(
     the project's ``net_settings`` kept a flat ``Default``, so Board Setup
     showed classes unrelated to the copper and KiCad's own DRC did not know
     the intended widths.  This writes one ``net_settings.classes`` entry per
-    router class actually used -- ``track_width``, ``clearance`` and
-    ``via_diameter`` from the router's
-    :class:`~kicad_tools.router.rules.NetClassRouting` -- and one
-    ``netclass_patterns`` entry per routed net, spelled with the net's exact
-    name (never a wildcard; the evaluation hazards of #10122).  GND and
-    power rails land in their own dedicated classes because the classifier
-    gives them non-``Default`` classes ("Ground", "Power", ...).
+    router class actually used -- ``track_width``, ``clearance`` (floored at
+    the project's ``board.design_settings`` minimum clearance, matching what
+    ``ClearanceResolver`` actually enforces) and ``via_diameter`` from the
+    router's :class:`~kicad_tools.router.rules.NetClassRouting` -- and assigns
+    each routed net by exact name in ``net_settings.netclass_assignments``
+    (never ``netclass_patterns``, where KiCad's regex/wildcard evaluation
+    causes ``.``, ``+``, ``(``, ``)``, ``*`` and ``?`` in net names to match
+    unrelated nets or fail pattern validation; see #10122).  GND and power
+    rails land in their own dedicated classes because the classifier gives
+    them non-``Default`` classes ("Ground", "Power", ...).
 
     Authored intent always wins, through the existing merge helpers:
 
     * :func:`~kicad_tools.core.project_file.add_netclass_definition` merges
       into a same-named class -- only the passed keys are written and the
       four floor keys keep the larger value (#7385) -- so hand-authored
-      classes, colours and diff-pair keys survive verbatim;
+      classes, colours and diff-pair keys survive verbatim.  Note that
+      ``keep_stricter=True`` is one-directional: if a user lowers a floor key
+      on a kct-declared class below the router's value, a later route raises
+      it back to the router's floor;
     * a net a hand-authored pattern or explicit assignment already
-      classifies keeps its authored class (the #6390 rule).  The kct-owned
-      assignments ``_write_drc_constraint_sidecars`` recorded moments
-      earlier under ``meta.kct_router_netclasses`` do NOT count as authored
-      -- every routed net is re-stated as a pattern (#10133 AC) -- and the
-      exact-name patterns a previous kct route recorded under
-      ``meta.kct_netclass_patterns`` are dropped first, so a re-run states
-      the current route's classes instead of going stale (and is
-      idempotent).
+      classifies keeps its authored class (the #6390 rule).  Provenance under
+      ``meta.kct_netclass_assignments`` records ``{net: class_name}`` so a
+      re-run drops only assignments that still carry kct's own class (along
+      with unedited #6390 ``meta.kct_router_netclasses`` assignments) -- an
+      entry the user re-pointed at another class in KiCad survives untouched,
+      while unedited kct assignments are refreshed idempotently.
 
     Non-fatal exactly like the sidecar writes: a missing ``.kicad_pro``, a
     read-only directory, an unreadable project or an authored netclass block
@@ -5559,11 +5596,12 @@ def _write_netclasses_to_project(
             ``None`` leaves the helper default / authored value in place.
     """
     import json
+    import math
 
+    from kicad_tools.core.project_clearance import netclass_assignment_value
     from kicad_tools.core.project_file import (
         add_netclass_definition,
-        add_netclass_pattern,
-        get_netclass_patterns,
+        get_net_settings,
         load_project,
         save_project,
     )
@@ -5604,18 +5642,53 @@ def _write_netclasses_to_project(
     # overwrite the user's project silently.
     restamp = is_kct_owned_project(project)
 
-    # Drop the exact-name patterns a previous route recorded (ours to
-    # replace); a hand-authored pattern never carries this provenance.
+    # Drop the exact-name assignments a previous route recorded ONLY when they
+    # still carry the class kct wrote; an entry whose target class the user
+    # changed in KiCad stays in place so _authored_netclass_members preserves it.
     meta = project.get("meta")
-    record = meta.pop(KCT_NETCLASS_PATTERNS_META_KEY, []) if isinstance(meta, dict) else []
-    recorded = (
-        {net for net in record if isinstance(net, str)} if isinstance(record, list) else set()
+    raw_record = (
+        meta.pop(KCT_NETCLASS_ASSIGNMENTS_META_KEY, None) if isinstance(meta, dict) else None
     )
-    if recorded:
-        patterns = get_netclass_patterns(project)
-        patterns[:] = [
-            p for p in patterns if not (isinstance(p, dict) and p.get("pattern") in recorded)
-        ]
+    recorded: dict[str, str] = (
+        {
+            net: cls_name
+            for net, cls_name in raw_record.items()
+            if isinstance(net, str) and isinstance(cls_name, str) and cls_name
+        }
+        if isinstance(raw_record, dict)
+        else {}
+    )
+
+    settings_raw = project.get("net_settings")
+    raw_assignments = (
+        settings_raw.get("netclass_assignments") if isinstance(settings_raw, dict) else None
+    )
+    assignments_mutated = False
+    if isinstance(raw_assignments, dict):
+        for net, recorded_cls in recorded.items():
+            if net in raw_assignments and _assignment_targets(raw_assignments[net]) == [
+                recorded_cls
+            ]:
+                raw_assignments.pop(net, None)
+                assignments_mutated = True
+
+        # kct's own #6390 assignments (_write_drc_constraint_sidecars) are not
+        # authored intent either, provided they were not hand-edited to a
+        # different class.
+        r_classes, r_nets = router_netclass_provenance(project)
+        r_owned_classes = set(r_classes)
+        for net in r_nets:
+            if net in recorded or net not in raw_assignments:
+                continue
+            targets = _assignment_targets(raw_assignments[net])
+            expected_cls = str(getattr(effective_map.get(net), "name", "") or "")
+            if (
+                targets is not None
+                and len(targets) == 1
+                and (targets[0] in r_owned_classes or (expected_cls and targets[0] == expected_cls))
+            ):
+                raw_assignments.pop(net, None)
+                assignments_mutated = True
 
     # Only nets the board actually carries (the #6390 filter): a loaded user
     # map may name nets that are not on this board.
@@ -5623,71 +5696,111 @@ def _write_netclasses_to_project(
     names = set(effective_map) if board_nets is None else set(effective_map) & board_nets
     names.discard("")
 
-    assigned: list[str] = []
+    assigned: dict[str, str] = {}
     declared: list[str] = []
     if names:
         try:
             authored = _authored_netclass_members(project, sorted(names))
         except ValueError as e:
             # The authored netclass block cannot be evaluated safely: kct
-            # must not guess which nets it classifies (#6390 rule).  Only
-            # the provenance cleanup above is persisted.
+            # must not guess which nets it classifies (#6390 rule).  Leave
+            # the existing project untouched on disk.
             if not quiet:
                 print(
                     f"  Warning: net classes not assigned in {project_path.name}: "
                     f"authored netclasses cannot be evaluated safely ({e})"
                 )
-            authored = None
-        if authored is not None:
-            # kct's own #6390 assignments are not authored intent: subtract
-            # them so every routed net is still re-stated as a pattern.
-            authored -= set(router_netclass_provenance(project)[1])
-            # A class the map gives two values keeps the stricter (larger)
-            # one -- the #6390 clearance rule, applied to every floor this
-            # write owns.
-            classes: dict[str, dict[str, float]] = {}
-            members: dict[str, list[str]] = {}
-            skipped: list[str] = []
-            for net in sorted(names):
-                routing = effective_map[net]
-                class_name = str(getattr(routing, "name", "") or "")
-                if not class_name or class_name == "Default":
-                    continue
-                if any(ch in net for ch in _NETCLASS_PATTERN_WILDCARD_CHARS):
-                    skipped.append(net)
-                    continue
-                if net in authored:
-                    continue
-                agg = classes.setdefault(class_name, {"width": 0.0, "clearance": 0.0, "via": 0.0})
-                agg["width"] = max(agg["width"], float(getattr(routing, "trace_width", 0.0) or 0.0))
-                agg["clearance"] = max(
-                    agg["clearance"], float(getattr(routing, "clearance", 0.0) or 0.0)
-                )
-                agg["via"] = max(agg["via"], float(getattr(routing, "via_size", 0.0) or 0.0))
-                members.setdefault(class_name, []).append(net)
+            return
+
+        min_clearance_floor = _project_min_clearance_floor(project)
+        existing_classes_list = (
+            settings_raw.get("classes") if isinstance(settings_raw, dict) else None
+        ) or []
+        existing_class_names = {
+            c.get("name")
+            for c in existing_classes_list
+            if isinstance(c, dict) and isinstance(c.get("name"), str)
+        }
+        default_cls = next(
+            (
+                c
+                for c in existing_classes_list
+                if isinstance(c, dict) and c.get("name") == "Default"
+            ),
+            None,
+        )
+        default_via_drill: float | None = None
+        if isinstance(default_cls, dict):
+            vd = default_cls.get("via_drill")
+            if (
+                not isinstance(vd, bool)
+                and isinstance(vd, (int, float))
+                and math.isfinite(vd)
+                and vd > 0
+            ):
+                default_via_drill = float(vd)
+
+        # A class the map gives two values keeps the stricter (larger) one --
+        # the #6390 clearance rule, applied to every floor this write owns.
+        classes: dict[str, dict[str, float]] = {}
+        members: dict[str, list[str]] = {}
+        for net in sorted(names):
+            routing = effective_map[net]
+            class_name = str(getattr(routing, "name", "") or "")
+            if not class_name or class_name == "Default":
+                continue
+            if net in authored:
+                continue
+            agg = classes.setdefault(class_name, {"width": 0.0, "clearance": 0.0, "via": 0.0})
+            agg["width"] = max(agg["width"], float(getattr(routing, "trace_width", 0.0) or 0.0))
+            agg["clearance"] = max(
+                agg["clearance"], float(getattr(routing, "clearance", 0.0) or 0.0)
+            )
+            agg["via"] = max(agg["via"], float(getattr(routing, "via_size", 0.0) or 0.0))
+            members.setdefault(class_name, []).append(net)
+
+        if classes:
+            settings = get_net_settings(project)
+            current_assignments = settings.get("netclass_assignments")
+            assignments: dict[str, object] = (
+                dict(current_assignments) if isinstance(current_assignments, dict) else {}
+            )
             for class_name in sorted(classes):
                 agg = classes[class_name]
+                cls_via_drill = (
+                    via_drill
+                    if via_drill is not None
+                    else (None if class_name in existing_class_names else default_via_drill)
+                )
+                clearance_val = max(agg["clearance"], min_clearance_floor)
                 add_netclass_definition(
                     project,
                     class_name,
-                    track_width=agg["width"],
-                    clearance=agg["clearance"],
-                    via_diameter=agg["via"],
-                    via_drill=via_drill,
+                    track_width=agg["width"] if agg["width"] > 0 else None,
+                    clearance=clearance_val if clearance_val > 0 else None,
+                    via_diameter=agg["via"] if agg["via"] > 0 else None,
+                    via_drill=cls_via_drill,
                 )
                 declared.append(class_name)
                 for net in members[class_name]:
-                    add_netclass_pattern(project, class_name, net)
-                    assigned.append(net)
-            if skipped and not quiet:
-                print(
-                    "  Warning: nets named with wildcard characters "
-                    f"({', '.join(skipped)}) not assigned to a class: an "
-                    "exact-name pattern would match more than the net"
-                )
+                    assignments[net] = netclass_assignment_value(settings, class_name)
+                    assigned[net] = class_name
+            settings["netclass_assignments"] = dict(sorted(assignments.items()))
+        elif (
+            assignments_mutated
+            and isinstance(settings_raw, dict)
+            and isinstance(raw_assignments, dict)
+        ):
+            settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
+    elif (
+        assignments_mutated and isinstance(settings_raw, dict) and isinstance(raw_assignments, dict)
+    ):
+        settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
 
     if assigned:
-        project.setdefault("meta", {})[KCT_NETCLASS_PATTERNS_META_KEY] = sorted(assigned)
+        project.setdefault("meta", {})[KCT_NETCLASS_ASSIGNMENTS_META_KEY] = dict(
+            sorted(assigned.items())
+        )
     if restamp:
         stamp_kct_project(project)
 
@@ -6888,12 +7001,12 @@ def run_post_route_drc(
 
     # Issue #10133: declare the classes the router routed with in the
     # project's ``net_settings`` (one class per used router class plus one
-    # exact-name pattern per routed net), so KiCad's Board Setup and native
-    # DRC see the widths the copper actually uses.  Deliberately AFTER the
-    # constraint sidecars above: they create / stage / merge the destination
-    # ``.kicad_pro``, and this merge must land in the final file rather
-    # than be clobbered by -- or trip the conflict check of -- the staged
-    # regeneration.
+    # exact-name ``netclass_assignments`` entry per routed net), so KiCad's
+    # Board Setup and native DRC see the widths the copper actually uses.
+    # Deliberately AFTER the constraint sidecars above: they create / stage /
+    # merge the destination ``.kicad_pro``, and this merge must land in the
+    # final file rather than be clobbered by -- or trip the conflict check of
+    # -- the staged regeneration.
     _write_netclasses_to_project(
         output_path,
         _effective_class_map or None,

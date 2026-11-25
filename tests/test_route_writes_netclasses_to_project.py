@@ -6,8 +6,10 @@ The router classifies every net and serializes the result only to the
 Setup and native DRC never saw the widths the copper actually uses.  These
 tests pin the route-step write (``_write_netclasses_to_project``): one
 ``net_settings.classes`` entry per used router class with the router's
-width / clearance / via size, one exact-name ``netclass_patterns`` entry per
-routed net, GND and power rails in dedicated classes, hand-authored content
+width / clearance (floored at the project's minimum clearance) / via size, one
+exact-name ``netclass_assignments`` entry per routed net (no pattern
+metacharacter spillover across ``.``, ``+``, ``()``, ``*``, ``?``), GND and
+power rails in dedicated classes, hand-authored content and edited assignments
 preserved, and the non-fatal degradation paths.
 """
 
@@ -16,18 +18,28 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli import route_cmd
+from kicad_tools.core.netclass_diagnostics import diagnose_netclasses
+from kicad_tools.core.project_clearance import (
+    authored_netclass_clearances,
+    resolve_project_clearances,
+)
 from kicad_tools.core.project_file import default_netclass_definition
+from kicad_tools.manufacturers import get_profile
 from kicad_tools.router.rules import NetClassRouting
+from kicad_tools.validate.rules.netclass_floor import check_netclass_floor
 
 GROUND = NetClassRouting(name="Ground", priority=1, trace_width=0.5, clearance=0.2, via_size=0.8)
 POWER = NetClassRouting(name="Power", priority=1, trace_width=0.5, clearance=0.2, via_size=0.8)
 DIGITAL = NetClassRouting(name="Digital", priority=5, trace_width=0.2, clearance=0.2, via_size=0.6)
+PROBE = NetClassRouting(name="Probe", priority=1, trace_width=0.3, clearance=0.5, via_size=0.7)
 
 
 def _write_pcb(tmp_path: Path, nets: list[str], name: str = "board") -> Path:
     """A minimal ``.kicad_pcb`` declaring the given net names."""
-    decls = "".join(f'(net {i} "{n}")' for i, n in enumerate(nets))
+    decls = "".join(f'(net {i} "{n}")' for i, n in enumerate(["", *nets]))
     pcb = tmp_path / f"{name}.kicad_pcb"
     pcb.write_text(f"(kicad_pcb (version 20241229) {decls})", encoding="utf-8")
     return pcb
@@ -39,17 +51,23 @@ def _write_project(tmp_path: Path, project: dict, name: str = "board") -> Path:
     return path
 
 
-def _minimal_project() -> dict:
+def _minimal_project(*, schema_version: int | None = 3) -> dict:
+    net_settings: dict = {
+        "classes": [default_netclass_definition()],
+        "net_colors": None,
+        "netclass_assignments": None,
+        "netclass_patterns": [],
+    }
+    if schema_version is not None:
+        net_settings["meta"] = {"version": schema_version}
+        if schema_version >= 4:
+            net_settings["classes"][0]["priority"] = 2**31 - 1
+    else:
+        net_settings["classes"][0]["priority"] = 2**31 - 1
     return {
         "board": {"design_settings": {}},
         "meta": {"version": 1},
-        "net_settings": {
-            "classes": [default_netclass_definition()],
-            "meta": {"version": 3},
-            "net_colors": None,
-            "netclass_assignments": None,
-            "netclass_patterns": [],
-        },
+        "net_settings": net_settings,
     }
 
 
@@ -61,12 +79,16 @@ def _classes(project: dict) -> dict[str, dict]:
     return {c["name"]: c for c in project["net_settings"]["classes"] if isinstance(c, dict)}
 
 
+def _assignments(project: dict) -> dict | None:
+    return project["net_settings"].get("netclass_assignments")
+
+
 def _patterns(project: dict) -> list[dict]:
-    return project["net_settings"]["netclass_patterns"]
+    return project["net_settings"].get("netclass_patterns") or []
 
 
-class TestClassesAndPatternsWritten:
-    def test_classes_with_router_values_and_exact_name_patterns(self, tmp_path: Path):
+class TestClassesAndAssignmentsWritten:
+    def test_classes_with_router_values_and_exact_name_assignments(self, tmp_path: Path):
         pcb = _write_pcb(tmp_path, ["GND", "+3V3", "SDA"])
         pro = _write_project(tmp_path, _minimal_project())
 
@@ -83,12 +105,38 @@ class TestClassesAndPatternsWritten:
         assert classes["Ground"]["via_diameter"] == 0.8
         assert classes["Power"]["track_width"] == 0.5
         assert classes["Digital"]["track_width"] == 0.2
-        # AC1: one exact-name pattern per routed net.
-        assert {"netclass": "Ground", "pattern": "GND"} in _patterns(project)
-        assert {"netclass": "Power", "pattern": "+3V3"} in _patterns(project)
-        assert {"netclass": "Digital", "pattern": "SDA"} in _patterns(project)
+        # AC1: exact-name netclass_assignments (schema 3 strings), no patterns.
+        assert _assignments(project) == {"+3V3": "Power", "GND": "Ground", "SDA": "Digital"}
+        assert _patterns(project) == []
         # The Default class is untouched.
         assert classes["Default"]["track_width"] == 0.25
+
+    @pytest.mark.parametrize("schema_version", [5, None])
+    def test_v5_and_unversioned_projects_get_array_assignments(
+        self, tmp_path: Path, schema_version: int | None
+    ):
+        pcb = _write_pcb(tmp_path, ["GND", "+3V3", "SDA"])
+        pro = _write_project(tmp_path, _minimal_project(schema_version=schema_version))
+
+        route_cmd._write_netclasses_to_project(
+            pcb,
+            {"GND": GROUND, "+3V3": POWER, "SDA": DIGITAL},
+            quiet=True,
+        )
+
+        project = _load(pro)
+        assert _assignments(project) == {
+            "+3V3": ["Power"],
+            "GND": ["Ground"],
+            "SDA": ["Digital"],
+        }
+        report = diagnose_netclasses(project, ["GND", "+3V3", "SDA"])
+        assert report["diagnostics"] == []
+        assert {(r["net"], r["target"]) for r in report["assignments"]} == {
+            ("+3V3", "Power"),
+            ("GND", "Ground"),
+            ("SDA", "Digital"),
+        }
 
     def test_gnd_and_power_nets_not_in_default(self, tmp_path: Path):
         """AC3: GND and power rails land in dedicated classes, not Default."""
@@ -100,11 +148,11 @@ class TestClassesAndPatternsWritten:
         )
 
         project = _load(pro)
-        by_pattern = {p["pattern"]: p["netclass"] for p in _patterns(project)}
-        assert by_pattern["GND"] == "Ground"
-        assert by_pattern["+3V3"] == "Power"
-        assert by_pattern["GND"] != "Default"
-        assert by_pattern["+3V3"] != "Default"
+        resolved = resolve_project_clearances(project, ["GND", "+3V3", "SDA"])
+        assert resolved["GND"].source_class == "Ground"
+        assert resolved["+3V3"].source_class == "Power"
+        assert resolved["GND"].source_class != "Default"
+        assert resolved["+3V3"].source_class != "Default"
 
     def test_via_drill_threaded_from_router_rules(self, tmp_path: Path):
         pcb = _write_pcb(tmp_path, ["SDA"])
@@ -142,8 +190,148 @@ class TestClassesAndPatternsWritten:
         route_cmd._write_netclasses_to_project(pcb, {"SDA": DIGITAL, "GHOST": GROUND}, quiet=True)
 
         project = _load(pro)
-        assert "GHOST" not in {p["pattern"] for p in _patterns(project)}
+        assert "GHOST" not in (_assignments(project) or {})
         assert "Ground" not in _classes(project)
+
+    def test_sub_floor_class_clearance_floored_at_project_min_clearance(self, tmp_path: Path):
+        """Board 07 regression: a NetClassRouting clearance below the project's
+        min_clearance (0.10 mm vs JLCPCB 4-layer 0.1016 mm) is floored at
+        min_clearance so check_netclass_floor reports zero errors."""
+        rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1.0)
+        assert rules.min_clearance_mm == pytest.approx(0.1016)
+
+        pcb = _write_pcb(tmp_path, ["DQ0", "DQS_P", "MIPI_CLK_P", "TMDS_D0_P"])
+        project = _minimal_project()
+        project["board"]["design_settings"]["rules"] = {"min_clearance": rules.min_clearance_mm}
+        project["net_settings"]["classes"][0]["clearance"] = rules.min_clearance_mm
+        project["net_settings"]["classes"][0]["via_drill"] = rules.min_via_drill_mm
+        pro = _write_project(tmp_path, project)
+
+        ncm = {
+            "DQ0": NetClassRouting(name="DDR_DATA_BYTE_0", trace_width=0.15, clearance=0.10),
+            "DQS_P": NetClassRouting(name="DDR_DQS", trace_width=0.225, clearance=0.10),
+            "MIPI_CLK_P": NetClassRouting(name="MIPI_CSI_LANES", trace_width=0.225, clearance=0.10),
+            "TMDS_D0_P": NetClassRouting(name="HDMI_TMDS_LANES", trace_width=0.225, clearance=0.10),
+        }
+        route_cmd._write_netclasses_to_project(pcb, ncm, quiet=True, via_drill=0.2)
+
+        saved = _load(pro)
+        for cls_name in ("DDR_DATA_BYTE_0", "DDR_DQS", "MIPI_CSI_LANES", "HDMI_TMDS_LANES"):
+            assert _classes(saved)[cls_name]["clearance"] == pytest.approx(0.1016)
+        floor_results = check_netclass_floor(pcb, rules, copper_layers=4)
+        assert floor_results.errors == []
+
+
+class TestMetacharacterNameControls:
+    """Blocker 1 (#10166): exact-name assignments never spill onto lookalike nets."""
+
+    @pytest.mark.parametrize(
+        ("target_net", "lookalike_net"),
+        [
+            ("A.B", "AXB"),
+            ("A.B", "A B"),
+            ("C+P", "CCP"),
+            ("D+", "DD"),
+            ("Net-(U5-CAPP)", "Net-U5-CAPP"),
+            ("USB*", "USB1"),
+            ("D?", "D1"),
+            ("+3.3V", "+3x3V"),
+            ("SDA", "SDA1"),
+            ("SPI CLK", "SPI_CLK"),
+        ],
+    )
+    def test_metacharacter_net_assigns_only_itself_and_never_lookalike(
+        self, tmp_path: Path, target_net: str, lookalike_net: str
+    ):
+        board_nets = [target_net, lookalike_net]
+        pcb = _write_pcb(tmp_path, board_nets)
+        pro = _write_project(tmp_path, _minimal_project(schema_version=5))
+
+        route_cmd._write_netclasses_to_project(pcb, {target_net: PROBE}, quiet=True)
+
+        project = _load(pro)
+        # 1. diagnose_netclasses verifies structural/syntax support & membership:
+        #    zero unsupported_pattern diagnostics, zero patterns added, and only
+        #    target_net appears in assignments.
+        report = diagnose_netclasses(project, board_nets)
+        assert report["diagnostics"] == []
+        assert report["patterns"] == []
+        assert [
+            (row["net"], row["target"], row["status"], row["net_present"])
+            for row in report["assignments"]
+        ] == [(target_net, "Probe", "supported", True)]
+
+        # 2. Effective membership via resolve_project_clearances &
+        #    authored_netclass_clearances: target_net gets Probe (0.5 mm) while
+        #    lookalike_net stays on Default (0.15 mm).
+        resolved = resolve_project_clearances(project, board_nets)
+        assert resolved[target_net].source_class == "Probe"
+        assert resolved[target_net].clearance == pytest.approx(0.5)
+        assert resolved[lookalike_net].source_class == "Default"
+        assert resolved[lookalike_net].clearance == pytest.approx(0.15)
+        assert set(authored_netclass_clearances(project, board_nets)) == {target_net}
+
+    @pytest.mark.parametrize(
+        ("target_net", "lookalike_net"),
+        [
+            ("A.B", "AXB"),
+            ("C+P", "CCP"),
+            ("Net-(U5-CAPP)", "Net-U5-CAPP"),
+        ],
+    )
+    def test_native_kicad_cli_no_clearance_spillover_onto_lookalike(
+        self, tmp_path: Path, target_net: str, lookalike_net: str
+    ):
+        import subprocess
+
+        from kicad_tools.cli.runner import find_kicad_cli
+
+        cli = find_kicad_cli()
+        if cli is None:
+            pytest.skip("kicad-cli not installed")
+
+        # target_net (Probe, 0.50 mm) is isolated at y=15; lookalike_net sits
+        # 0.25 mm from GND (y=5 vs y=5.45 with 0.2 mm tracks -> 0.25 mm gap):
+        # legal under Default (0.15 mm) and illegal if Probe (0.50 mm) spills over.
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(
+            f"""(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "") (net 1 "{target_net}") (net 2 "{lookalike_net}") (net 3 "GND")
+  (gr_rect (start 0 0) (end 25 25) (stroke (width 0.1) (type default))
+    (fill none) (layer "Edge.Cuts"))
+  (segment (start 5 15) (end 10 15) (width 0.3) (layer "F.Cu") (net 1))
+  (segment (start 5 5) (end 10 5) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 5 5.45) (end 10 5.45) (width 0.2) (layer "F.Cu") (net 3)))
+""",
+            encoding="utf-8",
+        )
+        _write_project(tmp_path, _minimal_project())
+        route_cmd._write_netclasses_to_project(pcb, {target_net: PROBE}, quiet=True)
+
+        report_path = pcb.with_suffix(".drc.json")
+        proc = subprocess.run(
+            [
+                str(cli),
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--severity-error",
+                "-o",
+                str(report_path),
+                str(pcb),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        drc_data = json.loads(report_path.read_text(encoding="utf-8"))
+        clearance_violations = [v for v in drc_data["violations"] if v["type"] == "clearance"]
+        assert clearance_violations == []
 
 
 class TestHandAuthoredContentPreserved:
@@ -169,34 +357,38 @@ class TestHandAuthoredContentPreserved:
         assert cls["wire_width"] == 42
 
     def test_net_already_classified_by_authored_pattern_keeps_its_class(self, tmp_path: Path):
-        pcb = _write_pcb(tmp_path, ["AUX1", "GND"])
+        pcb = _write_pcb(tmp_path, ["AUX1", "AUX2", "GND"])
         project = _minimal_project()
         project["net_settings"]["classes"].append(
-            {"name": "Audio", "track_width": 0.25, "clearance": 0.2}
+            {"name": "Audio", "track_width": 0.25, "clearance": 0.25}
         )
         project["net_settings"]["netclass_patterns"].append(
             {"netclass": "Audio", "pattern": "AUX*"}
         )
         pro = _write_project(tmp_path, project)
 
-        route_cmd._write_netclasses_to_project(pcb, {"AUX1": DIGITAL, "GND": GROUND}, quiet=True)
+        route_cmd._write_netclasses_to_project(
+            pcb, {"AUX1": DIGITAL, "AUX2": DIGITAL, "GND": GROUND}, quiet=True
+        )
 
-        patterns = _patterns(_load(pro))
-        # The authored wildcard pattern is untouched and is the only
-        # classification of AUX1 (no competing exact-name pattern).
-        assert {"netclass": "Audio", "pattern": "AUX*"} in patterns
-        assert "AUX1" not in {p["pattern"] for p in patterns}
-        # The un-classified net still gets its pattern.
-        assert {"netclass": "Ground", "pattern": "GND"} in patterns
+        saved = _load(pro)
+        # Authored wildcard pattern retains its KiCad behaviour across AUX1/AUX2,
+        # with no competing netclass_assignments overriding it.
+        assert _patterns(saved) == [{"netclass": "Audio", "pattern": "AUX*"}]
+        assert _assignments(saved) == {"GND": "Ground"}
+        resolved = resolve_project_clearances(saved, ["AUX1", "AUX2", "GND"])
+        assert resolved["AUX1"].source_class == "Audio"
+        assert resolved["AUX2"].source_class == "Audio"
+        assert resolved["GND"].source_class == "Ground"
 
-    def test_kct_recorded_6390_assignments_do_not_block_patterns(self, tmp_path: Path):
+    def test_kct_recorded_6390_assignments_upgrade_class_definition(self, tmp_path: Path):
         """The #6390 assignments kct itself wrote moments earlier (recorded
-        under ``meta.kct_router_netclasses``) are not authored intent: every
-        routed net is still re-stated as an exact-name pattern."""
+        under ``meta.kct_router_netclasses``) are not authored intent: the
+        class still receives the router's full track_width and via_diameter."""
         pcb = _write_pcb(tmp_path, ["GND"])
         project = _minimal_project()
         project["net_settings"]["classes"].append(
-            {"name": "Ground", "track_width": 0.25, "clearance": 0.2}
+            {"name": "Ground", "track_width": 0.25, "clearance": 0.2, "via_diameter": 0.6}
         )
         project["net_settings"]["netclass_assignments"] = {"GND": "Ground"}
         project["meta"]["kct_router_netclasses"] = {
@@ -207,7 +399,66 @@ class TestHandAuthoredContentPreserved:
 
         route_cmd._write_netclasses_to_project(pcb, {"GND": GROUND}, quiet=True)
 
-        assert {"netclass": "Ground", "pattern": "GND"} in _patterns(_load(pro))
+        saved = _load(pro)
+        assert _classes(saved)["Ground"]["track_width"] == 0.5
+        assert _classes(saved)["Ground"]["via_diameter"] == 0.8
+        assert _assignments(saved) == {"GND": "Ground"}
+
+    def test_hand_edited_kct_assignment_survives_rerun(self, tmp_path: Path):
+        """Blocker 2 (#10166): if the user re-points a kct-written assignment to
+        another class in KiCad (SDA: Probe -> EditorSignal), re-running the
+        writer preserves EditorSignal instead of reverting to Probe."""
+        pcb = _write_pcb(tmp_path, ["SDA", "GND"])
+        pro = _write_project(tmp_path, _minimal_project())
+        ncm = {"SDA": PROBE, "GND": GROUND}
+
+        route_cmd._write_netclasses_to_project(pcb, ncm, quiet=True)
+
+        # User edits SDA -> EditorSignal in KiCad.
+        edited = _load(pro)
+        edited["net_settings"]["classes"].append(
+            {"name": "EditorSignal", "track_width": 0.25, "clearance": 0.18, "via_diameter": 0.6}
+        )
+        edited["net_settings"]["netclass_assignments"]["SDA"] = "EditorSignal"
+        _write_project(tmp_path, edited)
+
+        # Re-run the production writer with the same router map.
+        route_cmd._write_netclasses_to_project(pcb, ncm, quiet=True)
+
+        saved = _load(pro)
+        assert _assignments(saved) == {"GND": "Ground", "SDA": "EditorSignal"}
+        assert saved["meta"][route_cmd.KCT_NETCLASS_ASSIGNMENTS_META_KEY] == {"GND": "Ground"}
+        resolved = resolve_project_clearances(saved, ["SDA", "GND"])
+        assert resolved["SDA"].source_class == "EditorSignal"
+        assert resolved["SDA"].clearance == pytest.approx(0.18)
+        assert resolved["GND"].source_class == "Ground"
+
+    def test_hand_edited_assignment_replaced_with_pattern_survives_rerun(self, tmp_path: Path):
+        """If the user removes kct's assignment and classifies the net via a
+        pattern in KiCad, re-running preserves that pattern's effective class."""
+        pcb = _write_pcb(tmp_path, ["SDA", "GND"])
+        pro = _write_project(tmp_path, _minimal_project())
+        ncm = {"SDA": PROBE, "GND": GROUND}
+
+        route_cmd._write_netclasses_to_project(pcb, ncm, quiet=True)
+
+        edited = _load(pro)
+        edited["net_settings"]["classes"].append(
+            {"name": "EditorSignal", "track_width": 0.25, "clearance": 0.18, "via_diameter": 0.6}
+        )
+        edited["net_settings"]["netclass_assignments"].pop("SDA")
+        edited["net_settings"]["netclass_patterns"].append(
+            {"netclass": "EditorSignal", "pattern": "SDA"}
+        )
+        _write_project(tmp_path, edited)
+
+        route_cmd._write_netclasses_to_project(pcb, ncm, quiet=True)
+
+        saved = _load(pro)
+        assert _assignments(saved) == {"GND": "Ground"}
+        assert _patterns(saved) == [{"netclass": "EditorSignal", "pattern": "SDA"}]
+        resolved = resolve_project_clearances(saved, ["SDA", "GND"])
+        assert resolved["SDA"].source_class == "EditorSignal"
 
 
 class TestIdempotency:
@@ -221,11 +472,8 @@ class TestIdempotency:
         route_cmd._write_netclasses_to_project(pcb, ncm, quiet=True)
 
         assert pro.read_text(encoding="utf-8") == first
-        # No duplicate patterns after the re-run.
-        patterns = _patterns(_load(pro))
-        assert len(patterns) == len({(p["netclass"], p["pattern"]) for p in patterns})
 
-    def test_changed_classification_replaces_the_stale_pattern(self, tmp_path: Path):
+    def test_changed_classification_replaces_the_stale_assignment(self, tmp_path: Path):
         pcb = _write_pcb(tmp_path, ["SDA"])
         pro = _write_project(tmp_path, _minimal_project())
 
@@ -234,9 +482,21 @@ class TestIdempotency:
         route_cmd._write_netclasses_to_project(pcb, {"SDA": clock}, quiet=True)
 
         project = _load(pro)
-        by_pattern = {p["pattern"]: p["netclass"] for p in _patterns(project)}
-        assert by_pattern == {"SDA": "Clock"}
-        assert project["meta"][route_cmd.KCT_NETCLASS_PATTERNS_META_KEY] == ["SDA"]
+        assert _assignments(project) == {"SDA": "Clock"}
+        assert project["meta"][route_cmd.KCT_NETCLASS_ASSIGNMENTS_META_KEY] == {"SDA": "Clock"}
+
+    def test_net_reclassified_to_default_drops_stale_assignment(self, tmp_path: Path):
+        pcb = _write_pcb(tmp_path, ["SDA"])
+        pro = _write_project(tmp_path, _minimal_project())
+
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": DIGITAL}, quiet=True)
+        route_cmd._write_netclasses_to_project(
+            pcb, {"SDA": NetClassRouting(name="Default")}, quiet=True
+        )
+
+        project = _load(pro)
+        assert _assignments(project) == {}
+        assert route_cmd.KCT_NETCLASS_ASSIGNMENTS_META_KEY not in project.get("meta", {})
 
 
 class TestNonFatalDegradation:
@@ -287,33 +547,18 @@ class TestNonFatalDegradation:
         self, tmp_path: Path, capsys
     ):
         """An authored netclass block that cannot be evaluated safely must
-        not be guessed at (#6390 rule): no patterns are added."""
+        not be guessed at (#6390 rule): no assignments are added."""
         pcb = _write_pcb(tmp_path, ["SDA"])
         project = _minimal_project()
         project["net_settings"]["meta"] = {"version": 99}  # unsupported schema
         pro = _write_project(tmp_path, project)
+        before = pro.read_text(encoding="utf-8")
 
         route_cmd._write_netclasses_to_project(pcb, {"SDA": DIGITAL}, quiet=False)
 
         out = capsys.readouterr().out
         assert "cannot be evaluated safely" in out
-        assert _patterns(_load(pro)) == []
-
-    def test_wildcard_named_nets_skipped_from_patterns(self, tmp_path: Path, capsys):
-        """A net whose name contains a wildcard character cannot be assigned
-        through an exact-name pattern (#10122 hazard); its class is still
-        declared for its sibling nets."""
-        pcb = _write_pcb(tmp_path, ["USB*", "GND"])
-        pro = _write_project(tmp_path, _minimal_project())
-
-        route_cmd._write_netclasses_to_project(pcb, {"USB*": DIGITAL, "GND": GROUND}, quiet=False)
-
-        out = capsys.readouterr().out
-        assert "wildcard" in out
-        project = _load(pro)
-        assert "USB*" not in {p["pattern"] for p in _patterns(project)}
-        assert "Digital" not in _classes(project)  # no assignable member
-        assert {"netclass": "Ground", "pattern": "GND"} in _patterns(project)
+        assert pro.read_text(encoding="utf-8") == before
 
 
 class TestKctStampInterop:
@@ -349,7 +594,7 @@ class TestRunPostRouteDrcIntegration:
         """The shared post-route DRC entry (all three route flows) declares
         the classes in the project, after -- and into the file produced by
         -- the DRC-constraint sidecar write."""
-        pcb = _write_pcb(tmp_path, ["GND", "+3V3", "SDA"])
+        pcb = _write_pcb(tmp_path, ["GND", "+3V3", "SDA", "A.B", "AXB"])
 
         # The DRC verification itself is skipped for time (#6273): the
         # sidecars (including this write) still ship with the board.
@@ -357,7 +602,7 @@ class TestRunPostRouteDrcIntegration:
             output_path=pcb,
             manufacturer="jlcpcb",
             layers=2,
-            net_class_map={"GND": GROUND, "+3V3": POWER, "SDA": DIGITAL},
+            net_class_map={"GND": GROUND, "+3V3": POWER, "SDA": DIGITAL, "A.B": PROBE},
             time_left=20.0,
             drc_cost_estimate=40.0,
         )
@@ -365,15 +610,64 @@ class TestRunPostRouteDrcIntegration:
 
         project = _load(tmp_path / "board.kicad_pro")
         classes = _classes(project)
-        # The constraint step created the project; this write declared the
-        # router's classes in it.
         assert classes["Ground"]["track_width"] == 0.5
         assert classes["Ground"]["via_diameter"] == 0.8
         assert classes["Power"]["track_width"] == 0.5
         assert classes["Digital"]["track_width"] == 0.2
-        by_pattern = {p["pattern"]: p["netclass"] for p in _patterns(project)}
-        assert by_pattern["GND"] == "Ground"
-        assert by_pattern["+3V3"] == "Power"
-        assert by_pattern["SDA"] == "Digital"
+        assert classes["Probe"]["clearance"] == 0.5
+        assert _assignments(project) == {
+            "+3V3": "Power",
+            "A.B": "Probe",
+            "GND": "Ground",
+            "SDA": "Digital",
+        }
+        assert _patterns(project) == []
+        resolved = resolve_project_clearances(project, ["GND", "+3V3", "SDA", "A.B", "AXB"])
+        assert resolved["A.B"].source_class == "Probe"
+        assert resolved["AXB"].source_class == "Default"
         out = capsys.readouterr().out
         assert "Net classes written to project" in out
+
+    def test_post_route_drc_rerun_preserves_hand_edited_stricter_class_assignment(
+        self, tmp_path: Path
+    ):
+        """Full post-route pipeline rerun (constraint sidecars + project
+        netclass writer) preserves an edited SDA: Probe -> EditorSignal
+        assignment even though Probe > Default was also in #6390 provenance."""
+        pcb = _write_pcb(tmp_path, ["SDA", "GND"])
+        ncm = {"SDA": PROBE, "GND": GROUND}
+
+        route_cmd.run_post_route_drc(
+            output_path=pcb,
+            manufacturer="jlcpcb",
+            layers=2,
+            net_class_map=ncm,
+            time_left=20.0,
+            drc_cost_estimate=40.0,
+            quiet=True,
+        )
+
+        pro = tmp_path / "board.kicad_pro"
+        edited = _load(pro)
+        edited["net_settings"]["classes"].append(
+            {"name": "EditorSignal", "track_width": 0.25, "clearance": 0.18, "via_diameter": 0.6}
+        )
+        edited["net_settings"]["netclass_assignments"]["SDA"] = "EditorSignal"
+        _write_project(tmp_path, edited)
+
+        route_cmd.run_post_route_drc(
+            output_path=pcb,
+            manufacturer="jlcpcb",
+            layers=2,
+            net_class_map=ncm,
+            time_left=20.0,
+            drc_cost_estimate=40.0,
+            quiet=True,
+        )
+
+        saved = _load(pro)
+        assert _assignments(saved) == {"GND": "Ground", "SDA": "EditorSignal"}
+        resolved = resolve_project_clearances(saved, ["SDA", "GND"])
+        assert resolved["SDA"].source_class == "EditorSignal"
+        assert resolved["SDA"].clearance == pytest.approx(0.18)
+        assert resolved["GND"].source_class == "Ground"
