@@ -53,7 +53,7 @@ import sys
 import tempfile
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache, partial
@@ -4287,11 +4287,12 @@ def build_report(
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_inventory(root: Path) -> dict[str, str]:
+def _snapshot_inventory(root: Path, held_dirs: set[Path] | None = None) -> dict[str, str]:
     return {
         path.relative_to(root).as_posix(): _sha256_file(path)
         for path in sorted(root.rglob("*"))
-        if path.is_file()
+        if (not held_dirs or path.parent not in held_dirs)
+        and path.is_file()
         and not any(
             part in {".git", ".venv", "readiness-verification", "readiness-attempt"}
             for part in path.relative_to(root).parts
@@ -4378,41 +4379,22 @@ def _supports_publication_links(directory: Path) -> bool:
 
 
 def _copy_publication_file(
-    source: Path,
-    target: Path,
-    expected: tuple[Any, ...] | None,
-    record: Callable[[tuple[Any, ...] | None], None] | None = None,
+    source: Path, target: Path, record: Callable[[tuple[Any, ...] | None], None] | None = None
 ) -> None:
-    """Write through a checked descriptor on filesystems without hard links.
-
-    An existing PCB or artifact keeps its public name. An editor's atomic
-    replacement either wins before open (identity mismatch) or installs a
-    different file our descriptor cannot overwrite. New names are exclusive.
-    """
-    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    if expected is None:
-        flags |= os.O_CREAT | os.O_EXCL
+    """Copy only into a newly created name on a filesystem without hard links."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     with source.open("rb") as staged:
         source_info = os.fstat(staged.fileno())
         fd = os.open(target, flags, stat.S_IMODE(source_info.st_mode))
         with os.fdopen(fd, "r+b", buffering=0) as live:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise RuntimeError(f"Publication target is not a regular file: {target}")
-            if expected is None:
-                if os.fstat(fd).st_size:
-                    raise RuntimeError(f"Concurrent edit before publication: {target.name}")
-            elif _stream_identity(live) != expected:
-                raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
-            elif os.fstat(fd).st_nlink > 1:
-                raise RuntimeError(f"Cannot replace a multiply-linked file in place: {target.name}")
-            live.seek(0)
+            if os.fstat(fd).st_size:
+                raise RuntimeError(f"Concurrent edit before publication: {target.name}")
             digest = hashlib.sha256()
             try:
                 for chunk in iter(lambda: staged.read(65536), b""):
                     if os.write(fd, chunk) != len(chunk):
                         raise OSError(errno.ENOSPC, "Incomplete publication write", target)
                     digest.update(chunk)
-                live.truncate()
                 os.fsync(fd)
                 if os.utime in os.supports_fd:
                     os.utime(fd, ns=(source_info.st_atime_ns, source_info.st_mtime_ns))
@@ -4432,58 +4414,103 @@ def _copy_publication_file(
                 raise RuntimeError(f"Concurrent edit during publication: {target.name}")
 
 
-def _restore_held(hold: Path, target: Path, links: bool) -> None:
+def _restore_held(hold: Path, target: Path, links: bool) -> bool:
     """Restore the captured file only if no newer save has taken its name."""
     if links:
         try:
             os.link(hold, target)
-            return
+            return True
         except FileExistsError:
-            return
+            return False
         except OSError:
             # Even a filesystem that passed the probe may refuse this link.
             pass
-    with suppress(FileExistsError):
-        _copy_publication_file(hold, target, None)
+    try:
+        _copy_publication_file(hold, target)
+    except FileExistsError:
+        return False
+    return True
 
 
-@contextmanager
-def _claim_target(target: Path, expected: tuple[Any, ...] | None, links: bool) -> Iterator[None]:
-    """Move aside and verify the exact file removed; restore it on failure."""
+@dataclass
+class _PublicationHold:
+    target: Path
+    path: Path
+    identity: tuple[Any, ...]
+    links: bool
+
+    @property
+    def reserve(self) -> Path:
+        return self.path.with_name("recovery-space")
+
+    def release_space(self) -> None:
+        if self.reserve.exists():
+            # Reclaim blocks even when a filesystem watcher has the file open.
+            with self.reserve.open("wb"):
+                pass
+            self.reserve.unlink()
+
+    def discard(self) -> None:
+        self.release_space()
+        self.path.unlink(missing_ok=True)
+        self.path.parent.rmdir()
+
+    def restore(self) -> None:
+        self.release_space()
+        restored = _restore_held(self.path, self.target, self.links)
+        if not restored and _publication_identity(self.path) != self.identity:
+            raise RuntimeError(
+                f"Another save owns {self.target}; the displaced editor's file remains at {self.path}"
+            )
+        self.discard()
+
+
+def _claim_target(
+    target: Path, expected: tuple[Any, ...] | None, links: bool, *, reserve: bool = False
+) -> _PublicationHold | None:
+    """Retain the actual displaced file so a writer with it open can finish a save."""
     if expected is None:
         if os.path.lexists(target):
             raise RuntimeError(f"Concurrent edit before publication: {target.name}")
-        yield
-        return
-    with ExitStack() as stack:
-        # On FAT a zero-length file's inode can change when renamed. Holding its
-        # descriptor across the move identifies it even if an editor saves first.
-        opened = None
-        if not links and expected[3] == 0 and os.name == "posix":
-            opened = stack.enter_context(target.open("rb"))
-            if _stream_identity(opened) != expected:
-                raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
-        private = Path(tempfile.mkdtemp(prefix=".readiness-", dir=target.parent))
-        hold = private / ".readiness-hold-original"
-        try:
-            os.replace(target, hold)
-            observed = _publication_identity(hold)
+        return None
+    private = Path(tempfile.mkdtemp(prefix=".readiness-", dir=target.parent))
+    hold = _PublicationHold(target, private / ".readiness-hold-original", expected, links)
+    try:
+        with ExitStack() as stack:
+            opened = None
+            if not links:
+                # Preflight access and enough recovery space before moving anything.
+                # Restoration on FAT needs a fresh file at the public name.
+                flags = os.O_RDWR if reserve else os.O_RDONLY
+                fd = os.open(target, flags | getattr(os, "O_NOFOLLOW", 0))
+                opened = stack.enter_context(os.fdopen(fd, "rb"))
+                if _stream_identity(opened) != expected:
+                    raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
+                if reserve:
+                    opened.seek(0)
+                    with hold.reserve.open("xb") as space:
+                        shutil.copyfileobj(opened, space)
+                        space.flush()
+                        os.fsync(space.fileno())
+                if os.name != "posix" or expected[3] != 0:
+                    # Windows denies a rename while our own descriptor is open.
+                    opened.close()
+                    opened = None
+            os.replace(target, hold.path)
             if opened is not None:
+                # A zero-length FAT file can change inode at rename.
                 expected = (expected[0], os.fstat(opened.fileno()).st_ino, *expected[2:])
+            observed = _publication_identity(hold.path)
             if observed != expected:
                 raise RuntimeError(f"Concurrent edit before replacement: {target.name}")
-            yield
-        except BaseException:
-            if os.path.lexists(hold):
-                # If restoration itself fails, retain the captured original.
-                _restore_held(hold, target, links)
-                hold.unlink()
-            raise
+            hold.identity = expected
+    except BaseException:
+        if os.path.lexists(hold.path):
+            hold.restore()
         else:
-            hold.unlink()
-        finally:
-            if not os.path.lexists(hold):
-                private.rmdir()
+            hold.discard()
+        raise
+    return hold
 
 
 class ReadinessPublicationBusy(RuntimeError):
@@ -4528,13 +4555,17 @@ def _publish_candidate(
             )
 
         inventories = []
+        holds: list[_PublicationHold] = []
         for staged, live, snapshot in regions:
-            after = publication.enter_context(_install_candidate(staged, live, snapshot, receipt))
+            after = publication.enter_context(
+                _install_candidate(staged, live, snapshot, receipt, holds)
+            )
             inventories.append((live, after))
         # Both regions can still roll back when we recheck an earlier file or
         # a project dependency outside them. The consumer receipt was installed last.
+        held_dirs = {hold.path.parent for hold in holds}
         for live, after in inventories:
-            current = _snapshot_inventory(live)
+            current = _snapshot_inventory(live, held_dirs)
             if current != after:
                 raise RuntimeError(
                     _with_changes(
@@ -4545,6 +4576,11 @@ def _publish_candidate(
             edits = _external_input_changes(destination, external_before)
             if edits:
                 raise RuntimeError(_with_changes("Concurrent edit during publication", edits))
+        # An already-open editor can save to a displaced inode while we install
+        # either region. Check all originals while both journals can still unwind.
+        for hold in holds:
+            if _publication_identity(hold.path) != hold.identity:
+                raise RuntimeError(f"Concurrent edit during publication: {hold.target.name}")
 
 
 def _make_publish_directory(directory: Path, created: list[Path]) -> None:
@@ -4563,7 +4599,11 @@ def _make_publish_directory(directory: Path, created: list[Path]) -> None:
 
 @contextmanager
 def _install_candidate(
-    candidate: Path, destination: Path, before: dict[str, str], receipt: Path | None
+    candidate: Path,
+    destination: Path,
+    before: dict[str, str],
+    receipt: Path | None,
+    holds: list[_PublicationHold],
 ) -> Iterator[dict[str, str]]:
     """Install one region, retaining its rollback journal through the caller's commit."""
     current = _snapshot_inventory(destination)
@@ -4587,93 +4627,110 @@ def _install_candidate(
             raise RuntimeError(f"Concurrent edit while identifying publication target: {name}")
     links_by_device: dict[int, bool] = {}
 
-    def install(
-        source: Path | None,
-        target: Path,
-        prior: tuple[Any, ...] | None,
-        record: Callable[[tuple[Any, ...] | None], None] | None = None,
-    ) -> None:
-        device = target.parent.stat().st_dev
-        if device not in links_by_device:
-            links_by_device[device] = _supports_publication_links(target.parent)
-        links = links_by_device[device]
-        if source is None:
-            with _claim_target(target, prior, links):
-                if record is not None:
-                    record(None)
-            return
-        if not links:
-            try:
-                _copy_publication_file(source, target, prior, record)
-            except (FileExistsError, FileNotFoundError) as exc:
-                raise RuntimeError(f"Concurrent edit during publication: {target.name}") from exc
-            return
-        fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
-        os.close(fd)
-        staged = Path(staged_name)
-        try:
-            shutil.copy2(source, staged)
-            identity = _publication_identity(staged)
-            with _claim_target(target, prior, links):
+    originals: dict[str, _PublicationHold] = {}
+    installed: dict[str, tuple[Any, ...] | None] = {}
+    created: list[Path] = []
+    try:
+        for name in changed:
+            target = destination / name
+            if _publication_identity(target) != expected[name]:
+                raise RuntimeError(f"Concurrent edit before publication: {name}")
+            _make_publish_directory(target.parent, created)
+            device = target.parent.stat().st_dev
+            if device not in links_by_device:
+                links_by_device[device] = _supports_publication_links(target.parent)
+            links = links_by_device[device]
+            with ExitStack() as preparation:
+                staged = candidate / name
+                if links and name in after:
+                    fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
+                    os.close(fd)
+                    staged = Path(staged_name)
+                    preparation.callback(staged.unlink, missing_ok=True)
+                    shutil.copy2(candidate / name, staged)
+                hold = _claim_target(target, expected[name], links, reserve=True)
+                if hold is not None:
+                    originals[name] = hold
+                    holds.append(hold)
+                    installed[name] = None
+                if name not in after:
+                    continue
+                record = partial(installed.__setitem__, name)
+                if not links:
+                    try:
+                        _copy_publication_file(staged, target, record)
+                    except FileExistsError:
+                        raise RuntimeError(f"Concurrent edit before replacement: {name}") from None
+                    continue
+                identity = _publication_identity(staged)
                 try:
                     os.link(staged, target)
                 except FileExistsError:
-                    raise RuntimeError(
-                        f"Concurrent edit before replacement: {target.name}"
-                    ) from None
+                    raise RuntimeError(f"Concurrent edit before replacement: {name}") from None
                 except BaseException:
-                    # The link may have landed even if the filesystem reported an error.
-                    if record is not None and staged.stat().st_nlink > 1:
+                    if staged.stat().st_nlink > 1:
                         record(identity)
                     raise
                 else:
-                    if record is not None:
-                        record(identity)
-        finally:
-            staged.unlink(missing_ok=True)
-
-    with tempfile.TemporaryDirectory(prefix="kct-release-backup-") as temporary:
-        backup = Path(temporary)
-        installed: dict[str, tuple[Any, ...] | None] = {}
-        created: list[Path] = []
-        try:
-            for name in changed:
-                target = destination / name
-                if _publication_identity(target) != expected[name]:
-                    raise RuntimeError(f"Concurrent edit before publication: {name}")
-                if name in before:
-                    copy = backup / name
-                    copy.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(target, copy)
-                _make_publish_directory(target.parent, created)
-                install(
-                    candidate / name if name in after else None,
-                    target,
-                    expected[name],
-                    partial(installed.__setitem__, name),
+                    record(identity)
+        yield after
+    except BaseException as exc:
+        conflicts = []
+        for name, identity in reversed(installed.items()):
+            target = destination / name
+            original = originals.get(name)
+            if original is not None:
+                original.release_space()
+            links = links_by_device[target.parent.stat().st_dev]
+            try:
+                withdrawn = _claim_target(target, identity, links)
+            except Exception:
+                # A newer save (or an editor's deletion) owns the public name.
+                if (
+                    original is not None
+                    and _publication_identity(original.path) == original.identity
+                ):
+                    original.discard()
+                conflicts.append(
+                    f"{name} (saved at {original.path})"
+                    if original is not None and original.path.exists()
+                    else name
                 )
-            yield after
-        except BaseException as exc:
-            conflicts = []
-            for name, identity in reversed(installed.items()):
-                target = destination / name
-                try:
-                    install(backup / name if name in before else None, target, identity)
-                except Exception:
-                    conflicts.append(name)
-            for directory in reversed(created):
-                try:
-                    directory.rmdir()
-                except OSError as error:
-                    # An editor or the diagnostics writer may now own entries here.
-                    if error.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
-                        conflicts.append(str(directory))
-            if conflicts:
-                raise RuntimeError(
-                    f"{exc}; rollback preserved concurrent edits or could not restore: "
-                    + ", ".join(conflicts)
-                ) from exc
-            raise
+                continue
+            try:
+                if original is not None:
+                    # Restore the actual displaced inode's latest bytes, never
+                    # a backup copied before the editor completed its save.
+                    original.restore()
+            except Exception:
+                conflicts.append(
+                    f"{name} (saved at {original.path})"
+                    if original is not None and original.path.exists()
+                    else name
+                )
+                if withdrawn is not None:
+                    try:
+                        withdrawn.restore()
+                    except Exception:
+                        conflicts.append(str(withdrawn.path))
+            else:
+                if withdrawn is not None:
+                    withdrawn.discard()
+        for directory in reversed(created):
+            try:
+                directory.rmdir()
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+                    conflicts.append(str(directory))
+        if conflicts:
+            raise RuntimeError(
+                f"{exc}; rollback preserved concurrent edits or could not restore: "
+                + ", ".join(conflicts)
+            ) from exc
+        raise
+    else:
+        for original in originals.values():
+            original.discard()
 
 
 def _remove_fill_local_settings(evidence: Path) -> None:

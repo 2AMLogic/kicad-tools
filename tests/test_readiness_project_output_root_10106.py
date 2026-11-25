@@ -14,6 +14,8 @@ import errno
 import json
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -449,6 +451,95 @@ def test_linkless_refusal_retains_public_files(
     assert not list(project.rglob(".readiness-*"))
     if prior and not fault.startswith("editor"):
         assert read_readiness(board_dir, layout=layout_for(project))["status"] == "ready"
+
+
+@pytest.mark.parametrize("use_links", [True, False], ids=["hard-links", "exclusive-copy"])
+@pytest.mark.parametrize("name", ["kicad/board.kicad_pcb", "output/manufacturing.zip"])
+@pytest.mark.parametrize("moment", ["before-move", "install", "after-receipt"])
+def test_publication_preserves_save_through_preopened_descriptor(
+    tmp_path, monkeypatch, use_links, name, moment
+):
+    project = make_project(tmp_path)
+    board_dir = project / "kicad"
+    target = project / name
+    if use_links and not readiness_cmd._supports_publication_links(board_dir):
+        pytest.skip("this volume cannot exercise the hard-link installation")
+    if not use_links:
+        monkeypatch.setattr(readiness_cmd, "_supports_publication_links", lambda directory: False)
+    assert run(project, "--generate")[0] == 0
+    assert read_readiness(board_dir, layout=layout_for(project))["status"] == "ready"
+    before = _live_files(project)
+    revision = b"saved through the descriptor opened before generation\n"
+    # This editor never reopens the board to save. Only its timing is controlled.
+    script = """import os, sys
+with open(sys.argv[1], 'r+b', buffering=0) as board:
+    print('opened', flush=True)
+    data = sys.stdin.buffer.readline()
+    board.seek(0)
+    assert board.write(data) == len(data)
+    board.truncate()
+    os.fsync(board.fileno())
+"""
+    editor = subprocess.Popen(
+        [sys.executable, "-c", script, str(target)], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+    )
+    saved = False
+
+    def save():
+        nonlocal saved
+        assert editor.stdin is not None
+        editor.stdin.write(revision)
+        editor.stdin.flush()
+        assert editor.wait(timeout=10) == 0
+        saved = True
+
+    real_replace, real_link, real_open = os.replace, os.link, os.open
+    real_inventory = readiness_cmd._snapshot_inventory
+
+    def replace(source, destination):
+        if not saved and moment == "before-move" and source == target:
+            save()
+            assert target.read_bytes() == revision
+        return real_replace(source, destination)
+
+    def link(source, destination):
+        if not saved and moment == "install" and destination == target:
+            save()
+        return real_link(source, destination)
+
+    def open_target(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if not saved and moment == "install" and path == target and flags & os.O_EXCL:
+            save()
+        return fd
+
+    def inventory(path, held_dirs=None):
+        if not saved and moment == "after-receipt" and held_dirs and path == board_dir:
+            save()
+        return real_inventory(path, held_dirs)
+
+    try:
+        assert editor.stdout is not None and editor.stdout.readline() == b"opened\n"
+        monkeypatch.setattr(os, "replace", replace)
+        monkeypatch.setattr(os, "link", link)
+        monkeypatch.setattr(os, "open", open_target)
+        monkeypatch.setattr(readiness_cmd, "_snapshot_inventory", inventory)
+        code, _ = run(project, "--generate", fake=_changed_candidate(project))
+        # Some filesystems already refuse to rename a file that is open for writing.
+        if not saved and os.name == "nt":
+            assert code == 1 and target.read_bytes() == before[target.relative_to(project)]
+            save()
+    finally:
+        if editor.poll() is None:
+            editor.kill()
+        editor.communicate()
+    assert saved and code == 1
+    before[target.relative_to(project)] = revision
+    assert _live_files(project) == before
+    assert read_readiness(board_dir, layout=layout_for(project))["status"] == "unverified"
+    attempt = json.loads((project / "output/readiness-attempt/readiness.json").read_bytes())
+    assert attempt["candidate_not_published"] is True
+    assert not list(project.rglob(".readiness-*"))
 
 
 def test_linkless_rollback_restores_removed_empty_file(tmp_path, monkeypatch, linkless_volume):

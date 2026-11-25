@@ -410,8 +410,8 @@ def test_edit_after_inventory_does_not_become_expected_state(tmp_path, monkeypat
     before = cmd._snapshot_inventory(old)
     real_inventory = cmd._snapshot_inventory
 
-    def edit_after_inventory(root):
-        result = real_inventory(root)
+    def edit_after_inventory(root, *args):
+        result = real_inventory(root, *args)
         if root == old:
             (old / "a").write_text("human edit")
         return result
