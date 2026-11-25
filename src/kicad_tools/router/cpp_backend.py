@@ -1792,6 +1792,13 @@ class CppPathfinder:
         self._python_fallback_stage_budget: float | None = None
         self._python_fallback_stage_spent: float = 0.0
         self._python_fallback_stage_budget_skips: int = 0
+        # Issue #8486: tracing-only history of Python fallback attempts, so a
+        # per-call trace can say whether a repeat saw the same request on an
+        # unchanged or a changed grid and how the earlier search ended.  Key:
+        # :meth:`_python_unreachable_key`.  Value: ``(grid state stamp,
+        # outcome)``.  Filled and read only while a per-attempt diagnostic is
+        # being collected, never consulted by a routing decision.
+        self._python_attempt_history: dict[tuple, tuple[tuple, str]] = {}
         # Issue #6329: nets whose search was ended by a per-net WALL-CLOCK
         # deadline while the tuned per-net iteration cap was active (i.e.
         # under ``--deterministic-budget``).  Net name -> what bound.  Each
@@ -4860,6 +4867,7 @@ class CppPathfinder:
                 "hard (issue #3876)",
                 net_name,
             )
+            self._note_fallback_trace(action="skipped_cpp_timeout")
             return None
 
         # Issue #3881: when a TUNED per-net iteration cap is active, a
@@ -4888,6 +4896,7 @@ class CppPathfinder:
                 net_name,
                 self._effective_search_iterations,
             )
+            self._note_fallback_trace(action="skipped_iteration_cap")
             return None
 
         # Issue #3923: resume-exhaustion cascade.  The C++ resumable
@@ -4982,6 +4991,7 @@ class CppPathfinder:
                     _seen + 1,
                     reason,
                 )
+                self._note_fallback_trace(action="skipped_resume_repeat")
                 return None
 
         # Issue #6098: the Python A* already PROVED this exact request
@@ -5002,6 +5012,7 @@ class CppPathfinder:
             extra_goal_cells=extra_goal_cells,
         )
         _memo_key = _pair_key if _memo_enabled else None
+        _trace_stamp = self._trace_fallback_lineage(py_grid, start, _pair_key)
         _proof = self._python_unreachable.get(_memo_key) if _memo_key is not None else None
         if _proof is not None and _proof[0] == self._py_grid_state_stamp(py_grid):
             self._python_fallback_proven_skips += 1
@@ -5013,6 +5024,7 @@ class CppPathfinder:
                 net_name,
                 reason,
             )
+            self._note_fallback_trace(action="skipped_proven_unreachable")
             return None
 
         # Issue #8370: repeat-only skip.  The first NO_PATH / PAIRWISE_BLOCKED
@@ -5043,6 +5055,7 @@ class CppPathfinder:
                 net_name,
                 reason,
             )
+            self._note_fallback_trace(action="skipped_drained_repeat")
             return None
 
         # Issue #3456: the silent C++ -> Python downgrade is the bug.
@@ -5065,6 +5078,7 @@ class CppPathfinder:
                     "skipping Python fallback (issue #3474)",
                     net_name,
                 )
+                self._note_fallback_trace(action="skipped_deadline_spent")
                 return None
             per_net_timeout = (
                 min(per_net_timeout, remaining) if per_net_timeout is not None else remaining
@@ -5113,6 +5127,7 @@ class CppPathfinder:
                     self._python_fallback_stage_spent,
                     self._python_fallback_stage_budget,
                 )
+                self._note_fallback_trace(action="skipped_stage_budget")
                 return None
             if per_net_timeout is not None and per_net_timeout > 0:
                 _reduced_budget = max(
@@ -5297,6 +5312,16 @@ class CppPathfinder:
         ):
             self._python_unreachable[_memo_key] = (self._py_grid_state_stamp(py_grid), dt)
 
+        if _trace_stamp is not None:
+            self._record_fallback_trace(
+                _pair_key,
+                _trace_stamp,
+                route,
+                dt,
+                budget_s=per_net_timeout,
+                reduced=_reduced_budget is not None or _reduced_iterations is not None,
+            )
+
         if route is not None:
             self._fallback_count += 1
             self._fallback_nets.append(net_name)
@@ -5313,6 +5338,81 @@ class CppPathfinder:
             )
 
         return route
+
+    def _note_fallback_trace(self, **fields: object) -> None:
+        """Add fields to the current attempt's ``python_fallback`` diagnostic (#8486).
+
+        A no-op unless a per-attempt diagnostic is being collected, so the
+        untraced fast path is untouched.
+        """
+        diag = getattr(self, "_attempt_diagnostic", None)
+        if diag is not None:
+            diag.setdefault("python_fallback", {}).update(fields)
+
+    def _trace_fallback_lineage(self, py_grid, start: Pad, pair_key: tuple) -> tuple | None:
+        """Trace how this fallback request relates to earlier ones (#8486).
+
+        Records ``request`` (``first`` for a never-searched pad, ``repeat``
+        for the exact request already searched, ``changed_request`` for the
+        same start pad with a different goal, net class or mode), and for a
+        repeat ``grid`` (``unchanged`` / ``changed`` against the grid state the
+        earlier search read, by the same fingerprint the #6098 proof uses) and
+        ``prior_outcome`` (how that search ended).  Returns the current grid
+        fingerprint for :meth:`_record_fallback_trace`, or ``None`` when no
+        diagnostic is being collected -- nothing is computed then, so routing
+        decisions and untraced timing are unchanged.
+        """
+        if getattr(self, "_attempt_diagnostic", None) is None:
+            return None
+        stamp = self._py_grid_state_stamp(py_grid)
+        prior = self._python_attempt_history.get(pair_key)
+        fields: dict[str, object] = {}
+        if prior is not None:
+            fields["request"] = "repeat"
+            fields["grid"] = "unchanged" if prior[0] == stamp else "changed"
+            fields["prior_outcome"] = prior[1]
+        elif any(key[:2] == pair_key[:2] for key in self._python_attempt_history):
+            fields["request"] = "changed_request"
+        else:
+            fields["request"] = "first"
+        self._note_fallback_trace(**fields)
+        return stamp
+
+    def _record_fallback_trace(
+        self,
+        pair_key: tuple,
+        stamp: tuple,
+        route: Route | None,
+        seconds: float,
+        *,
+        budget_s: float | None,
+        reduced: bool,
+    ) -> None:
+        """Trace how a Python fallback search that ran ended, and remember it (#8486).
+
+        ``outcome`` separates a route found, an open set that ``drained``
+        (every reachable cell expanded: a proof for this grid) and a search
+        stopped by its wall-clock ``deadline`` (not a proof), from any other
+        stop (``stopped``: the expansion cap, a goal rejected after reaching
+        it).
+        """
+        router = self._py_router
+        if route is not None:
+            outcome = "found"
+        elif getattr(router, "last_route_exhausted", False) is True:
+            outcome = "drained"
+        elif getattr(router, "last_route_deadline_hit", False) is True:
+            outcome = "deadline"
+        else:
+            outcome = "stopped"
+        self._python_attempt_history[pair_key] = (stamp, outcome)
+        self._note_fallback_trace(
+            action="ran",
+            outcome=outcome,
+            seconds=seconds,
+            budget_s=budget_s,
+            reduced_budget=reduced,
+        )
 
     def _note_wall_bound_under_cap(self, net_name: str, detail: str) -> None:
         """Record a per-net wall-clock bind under the tuned iteration cap.
