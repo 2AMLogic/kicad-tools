@@ -402,13 +402,27 @@ def test_retained_evidence_backup_is_private_on_retry(tmp_path, monkeypatch):
     assert note.read_text() == "external directory metadata"
 
 
-@pytest.mark.parametrize("region", ["readiness", "."], ids=["evidence", "manufacturing"])
+@pytest.mark.parametrize(
+    "region",
+    ["readiness", "manufacturing", "."],
+    ids=["evidence-directory", "manufacturing-directory", "output-root"],
+)
 def test_retained_hold_in_generated_directory_is_not_an_input(tmp_path, region):
-    """A hold left inside a generated directory is never hashed, packaged or removed."""
+    """A hold left inside a generated directory is never hashed, packaged or removed.
+
+    ``evidence-directory`` and ``manufacturing-directory`` place the hold inside
+    ``output/readiness/`` and ``output/manufacturing/`` (the mounted-directory
+    layouts the hold exists for) and fail without the hold filter.  The
+    ``output-root`` case holds it at the declared root, which already passed
+    before that filter existed.
+    """
+    import zipfile
+
     project = make_project(tmp_path)
     output = project / "output"
     assert run(project, "--generate", "--checked-at", "2026-11-23T00:00:00Z")[0] == 0
     hold = (output / region / ".readiness-retained").resolve()
+    assert hold.parent == (output if region == "." else output / region).resolve()
     hold.mkdir()
     note = hold / ".indexer-note"
     note.write_text("external directory metadata")
@@ -424,6 +438,8 @@ def test_retained_hold_in_generated_directory_is_not_an_input(tmp_path, region):
         assert note.read_text() == "external directory metadata"
         report = json.loads((output / "readiness.json").read_bytes())
         assert not any(".readiness-retained" in name for name in report["inputs"])
+        with zipfile.ZipFile(output / "manufacturing.zip") as archive:
+            assert not any(".readiness-retained" in name for name in archive.namelist())
     assert read_readiness(project / "kicad", layout=layout_for(project))["status"] == "ready"
     note.unlink()
     hold.rmdir()

@@ -15,6 +15,12 @@ from collections.abc import Iterator
 
 Pt = tuple[float, float]
 Rect = tuple[float, float, float, float]  # (xmin, ymin, xmax, ymax)
+DEFAULT_FINE_PITCH_MM = 0.4
+
+
+def pad_stub_radius(fine: float, width: float, height: float) -> float:
+    """Maximum landing distance from the attachment before clearance expansion."""
+    return max(3.0 * fine + max(width, height), 2.0)
 
 
 def dist(a: Pt, b: Pt) -> float:

@@ -63,6 +63,7 @@ from kicad_tools.manufacturers.resolve import (  # noqa: F401  (re-exported; sha
     _resolve_effective_check_mfr,
 )
 from kicad_tools.pcb.reinforcement_sidecar import load_wires_if_present
+from kicad_tools.physics.stackup import stackup_copper_oz
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     current_paths_sidecar_candidates,
@@ -3715,19 +3716,6 @@ def resolve_net_class_map_for_board(net_class_map: dict, pcb: PCB) -> tuple[dict
     return rekeyed, resolution
 
 
-def stackup_copper_oz(pcb: PCB) -> tuple[float | None, float | None]:
-    """Outer/inner copper weight (oz) from the board's declared stackup, if any."""
-    try:
-        from kicad_tools.physics.stackup import Stackup
-
-        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
-    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
-        return (None, None)
-    if derived is None:
-        return (None, None)
-    return derived
-
-
 @dataclass
 class CheckRuleSet:
     """The rule set ``kct check --mfr <mfr>`` applies to a board (Issue #6431).
@@ -4117,6 +4105,22 @@ def run_selected_checks(
             copper_layers=effective_layers,
         )
 
+    # Issue #10139: sidecar vs project vs copper agreement on net classes.
+    # CLI-level closure (like ``netclass_floor``) because it needs the PCB
+    # *path* to locate the sibling ``.kicad_pro``.  The sidecar is the map
+    # ``kct check`` already discovered (stem-keyed probe, #4601/#4634) and
+    # resolved onto board net names -- ``--no-net-class-map`` therefore
+    # disables it too.  No map -> silent no-op.
+    def _netclass_agreement_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.rules.netclass_agreement import check_netclass_agreement
+
+        # Board-relative -> sheet-absolute like every ``checker.check_*`` (#8493).
+        return checker._absolutize(
+            check_netclass_agreement(pcb_path, checker.pcb, checker.net_class_map)
+        )
+
     # Issue #6249: authored ``.kicad_pro`` netclass clearances on routed copper
     # (parity with ``kicad-cli pcb drc`` after #6243).  CLI-level closure for
     # the same reason as ``netclass_floor``: it needs the PCB *path*.
@@ -4262,6 +4266,7 @@ def run_selected_checks(
         "match_group_length_skew": checker.check_match_group_length_skew,
         "model_coverage": _model_coverage_check,
         "routing_policy": checker.check_routing_policy,
+        "netclass_agreement": _netclass_agreement_check,
         "netclass_clearance_copper": _netclass_clearance_copper_check,
         "netclass_floor": _netclass_floor_check,
         "netlist": checker.check_netlist,
@@ -4685,6 +4690,7 @@ def _apply_dfm_table(
     if assumed:
         stackup += " (assumed: no stackup/--copper weight declared)"
     table_version = profile.dfm_thresholds.version
+    checker.design_rules = profile.apply_dfm_floors(checker.design_rules, entry)
     if entry is None:
         copper_weights["dfm_table"] = {
             "version": table_version,
@@ -4699,7 +4705,6 @@ def _apply_dfm_table(
         )
         return True
     t = entry.thresholds
-    checker.design_rules = profile.apply_dfm_floors(checker.design_rules, entry)
     copper_weights["dfm_table"] = {
         "version": table_version,
         "stackup": stackup,

@@ -140,11 +140,11 @@ BOARD06_GAP_NETS: tuple[str, ...] = ()
 
 # The seed-42 fixture originally measured 22 mask error nets (#8858).
 # The sideband, PCIe and MIPI clock repairs retired nine of those net
-# identities; the data repair (#10113) retired the MIPI_D0 pair as well.
+# identities; the data repair (#10113) retired the MIPI_D0 pair as well, and
+# the U1.32 ground repair (#9891) retired the GND identity.
 BOARD06_MASK_NETS = (
     "+1V2",
     "+3V3",
-    "GND",
     "USB2_D+",
     "USB2_D-",
     "USB3_RX1+",
@@ -536,6 +536,27 @@ def test_board06_unmodified_clock_exits_are_rejected():
     assert gate.unexpected_baseline_errors(
         BOARD06_KEY, rule_counts(unmodified), identities_of(unmodified)
     ) == {"mask_to_copper": 2}  # the two newly unallowed net identities
+
+
+def test_board06_unmodified_ground_entry_is_rejected():
+    """Issue #9891: the U1.32 ground entry's GND allowance is gone, so a fixture
+    that still carries the original two GND findings fails the committed gate
+    on exactly those two errors, while the repaired fixture passes."""
+    gate = load("check_diffpair_coverage")
+    assert not {
+        (rule, net)
+        for rule, net in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+        if net == "GND" and rule == "mask_to_copper"
+    }
+    repaired = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, repaired) == []
+    unmodified = repaired + [mask_violation("GND")] * 2
+    assert sorted(gate.unallowed_blocking(BOARD06_KEY, unmodified)) == sorted(
+        [("mask_to_copper", "GND")] * 2
+    )
+    assert gate.unexpected_baseline_errors(
+        BOARD06_KEY, rule_counts(unmodified), identities_of(unmodified)
+    ) == {"mask_to_copper": 1}  # the one newly unallowed net identity
 
 
 def test_board06_unmodified_data_exits_are_rejected():

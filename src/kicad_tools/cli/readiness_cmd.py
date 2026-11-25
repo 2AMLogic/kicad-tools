@@ -3191,7 +3191,10 @@ def _write_readme(
         "",
     ]
     if options.assembly:
+        from kicad_tools.export.rotation_overrides import placement_preview_instructions
+
         lines.append("Assembly package: BOM and CPL are included.")
+        lines.extend(placement_preview_instructions(options.manufacturer))
     else:
         lines.append("Bare-board package: BOM and CPL are intentionally absent.")
     lines.extend(["", "Contents", "--------"])
@@ -3938,7 +3941,33 @@ def _rel(options: ReadinessOptions, path: Path) -> str:
     return path.resolve().relative_to(base).as_posix()
 
 
-def _is_render_artifact(rel: Path) -> bool:
+def _declared_render_prefixes(options: ReadinessOptions) -> list[tuple[str, ...]]:
+    """Input-base-relative ``renders`` directories of a project-declared output root.
+
+    A declared ``[readiness] output_root`` may carry any name (Issue #10106), so
+    the render exclusion cannot rely on the literal ``output`` segment alone
+    (Issue #10163).  Returns the ``<output_root>/renders``,
+    ``<output_root>/manufacturing/renders`` and ``<output_dir>/renders`` prefixes;
+    empty for a board-local run.
+    """
+    if options.output_root is None:
+        return []
+    base = _input_base(options).resolve()
+    prefixes: list[tuple[str, ...]] = []
+    for directory, tail in (
+        (options.output_root, ("renders",)),
+        (options.output_root, ("manufacturing", "renders")),
+        (options.output_dir, ("renders",)),
+    ):
+        resolved = directory.resolve()
+        if resolved.is_relative_to(base):
+            prefix = (*resolved.relative_to(base).parts, *tail)
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+    return prefixes
+
+
+def _is_render_artifact(rel: Path, options: ReadinessOptions | None = None) -> bool:
     """True for ``kct render`` output under ``output/`` or ``output/manufacturing/``.
 
     Renders are derived presentation artifacts: the verdict depends on the PCB,
@@ -3948,10 +3977,23 @@ def _is_render_artifact(rel: Path) -> bool:
     ``output/`` directory may sit at any depth: a project-declared output root
     keys receipts against the project, so board-local renders appear as
     ``<board>/output/renders/...`` (Issue #10106).
+
+    With ``options`` carrying a project-declared output root, renders under
+    ``<output_root>/renders``, ``<output_root>/manufacturing/renders`` and
+    ``<output_dir>/renders`` are excluded whatever the root is named
+    (Issue #10163).  ``rel`` is relative to the input base.
     """
     parts = rel.parts
-    return any(parts[i : i + 2] == ("output", "renders") for i in range(len(parts) - 1)) or any(
+    if any(parts[i : i + 2] == ("output", "renders") for i in range(len(parts) - 1)) or any(
         parts[i : i + 3] == ("output", "manufacturing", "renders") for i in range(len(parts) - 2)
+    ):
+        return True
+    if options is None:
+        return False
+    # At least one segment must follow ``renders`` (the file itself).
+    return any(
+        len(parts) > len(prefix) and parts[: len(prefix)] == prefix
+        for prefix in _declared_render_prefixes(options)
     )
 
 
@@ -4037,7 +4079,7 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         and p.name != _REPORT_NAME
         and not _is_transient_local(p.relative_to(base))
         and not _is_private_hold(p.relative_to(base))
-        and not _is_render_artifact(p.relative_to(base))
+        and not _is_render_artifact(p.relative_to(base), options)
     )
 
 
@@ -4135,15 +4177,8 @@ def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
 
 
 def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
-    """Problems between the retained CPL and the project's rotation sidecar (#9322).
-
-    Re-derives each sidecar-corrected placement's rotation from the PCB and the
-    sidecar *as they are now* and compares it with the retained CPL row, so an
-    edited sidecar (or one removed since generation) fails verification instead
-    of being waved through on a stale bundle.  Boards without a sidecar are not
-    touched.
-    """
-    from kicad_tools.export.rotation_overrides import SOURCE_GLOB
+    """Compare the retained CPL with project overrides and previewed catalog offsets."""
+    from kicad_tools.export.rotation_overrides import SOURCE_CATALOG, SOURCE_GLOB
 
     if not options.assembly:
         return []
@@ -4152,7 +4187,10 @@ def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
         # An invalid sidecar, or a re-derivation that could not run (issue
         # #9346): report it instead of letting the check pass by omission.
         return [problem]
-    if review is None or review.sidecar is None:
+    if review is None:
+        return []
+    reviewed_parts = [entry for entry in review.applied if entry["source"] != SOURCE_GLOB]
+    if not reviewed_parts:
         return []
     cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
     if cpl is None:
@@ -4171,15 +4209,24 @@ def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
         if max(ref_col, rot_col) < len(row)
     }
     problems: list[str] = []
-    for entry in review.applied:
-        if entry["source"] == SOURCE_GLOB:
-            continue
+    for entry in reviewed_parts:
         ref = entry["reference"]
         expected = f"{review.rotations[ref]:.1f}"
-        if ref in retained and retained[ref] != expected:
+        if ref not in retained:
+            continue
+        try:
+            same_angle = float(retained[ref]) == float(expected)
+        except ValueError:
+            same_angle = False
+        if not same_angle:
+            source = (
+                f"JLCPCB catalog correction for {entry['key']}"
+                if entry["source"] == SOURCE_CATALOG
+                else Path(review.sidecar).name
+            )
             problems.append(
                 f"CPL rotation for {ref} is {retained[ref]} but the current "
-                f"{Path(review.sidecar).name} gives {expected}; regenerate the bundle"
+                f"{source} gives {expected}; regenerate the bundle"
             )
     return problems
 
@@ -4276,7 +4323,7 @@ def build_report(
         resolved = Path(path).resolve()
         if not resolved.is_file() or not resolved.is_relative_to(root):
             raise ValueError(f"extra readiness input is not a board file: {path}")
-        if not _is_render_artifact(resolved.relative_to(root)):
+        if not _is_render_artifact(resolved.relative_to(root), options):
             hashed.add(resolved)
     report["inputs"] = {
         _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
