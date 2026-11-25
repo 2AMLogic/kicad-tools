@@ -2634,6 +2634,18 @@ def _is_transient_local(path: Path) -> bool:
     return any(part == "__pycache__" or part.endswith("-backups") for part in path.parts)
 
 
+_PRIVATE_HOLD_PREFIX = ".readiness-"
+
+
+def _is_private_hold(path: Path) -> bool:
+    """True inside a retained publication backup (Issue #10106).
+
+    A hold can live in a generated directory when that directory is its own
+    mount, so it must never become an input, package member or removal target.
+    """
+    return any(part.startswith(_PRIVATE_HOLD_PREFIX) for part in path.parts)
+
+
 def _bundle_files(output_dir: Path, exclude: Sequence[str] = ()) -> list[Path]:
     excluded = set(exclude)
     return sorted(
@@ -2641,6 +2653,7 @@ def _bundle_files(output_dir: Path, exclude: Sequence[str] = ()) -> list[Path]:
         for p in output_dir.rglob("*")
         if p.is_file()
         and p.relative_to(output_dir).as_posix() not in excluded
+        and not _is_private_hold(p.relative_to(output_dir))
         and not _is_transient_local(p.relative_to(output_dir))
     )
 
@@ -4001,6 +4014,7 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         if p.is_relative_to(base)
         and p.name != _REPORT_NAME
         and not _is_transient_local(p.relative_to(base))
+        and not _is_private_hold(p.relative_to(base))
         and not _is_render_artifact(p.relative_to(base))
     )
 
@@ -4297,6 +4311,7 @@ def _snapshot_inventory(root: Path, held_dirs: set[Path] | None = None) -> dict[
             part in {".git", ".venv", "readiness-verification", "readiness-attempt"}
             for part in path.relative_to(root).parts
         )
+        and not _is_private_hold(path.relative_to(root))
     }
 
 
@@ -4915,7 +4930,11 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             original,
             candidate,
             ignore=shutil.ignore_patterns(
-                ".git", ".venv", "readiness-verification", "readiness-attempt"
+                ".git",
+                ".venv",
+                "readiness-verification",
+                "readiness-attempt",
+                f"{_PRIVATE_HOLD_PREFIX}*",
             ),
         )
         candidate_release: Path | None = None
@@ -4926,7 +4945,11 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                     release_region,
                     candidate_release,
                     ignore=shutil.ignore_patterns(
-                        ".git", ".venv", "readiness-verification", "readiness-attempt"
+                        ".git",
+                        ".venv",
+                        "readiness-verification",
+                        "readiness-attempt",
+                        f"{_PRIVATE_HOLD_PREFIX}*",
                     ),
                 )
 

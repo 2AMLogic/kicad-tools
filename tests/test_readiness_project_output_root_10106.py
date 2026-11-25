@@ -402,6 +402,34 @@ def test_retained_evidence_backup_is_private_on_retry(tmp_path, monkeypatch):
     assert note.read_text() == "external directory metadata"
 
 
+@pytest.mark.parametrize("region", ["readiness", "."], ids=["evidence", "manufacturing"])
+def test_retained_hold_in_generated_directory_is_not_an_input(tmp_path, region):
+    """A hold left inside a generated directory is never hashed, packaged or removed."""
+    project = make_project(tmp_path)
+    output = project / "output"
+    assert run(project, "--generate", "--checked-at", "2026-11-23T00:00:00Z")[0] == 0
+    hold = (output / region / ".readiness-retained").resolve()
+    hold.mkdir()
+    note = hold / ".indexer-note"
+    note.write_text("external directory metadata")
+    for day in ("24", "25"):
+        code, _ = run(
+            project,
+            "--generate",
+            "--checked-at",
+            f"2026-11-{day}T00:00:00Z",
+            fake=_changed_candidate(project) if day == "24" else None,
+        )
+        assert code == 0
+        assert note.read_text() == "external directory metadata"
+        report = json.loads((output / "readiness.json").read_bytes())
+        assert not any(".readiness-retained" in name for name in report["inputs"])
+    assert read_readiness(project / "kicad", layout=layout_for(project))["status"] == "ready"
+    note.unlink()
+    hold.rmdir()
+    assert read_readiness(project / "kicad", layout=layout_for(project))["status"] == "ready"
+
+
 @pytest.mark.parametrize("prior", [False, True], ids=["first", "prior"])
 @pytest.mark.parametrize("target_name", ["board", "readme"])
 @pytest.mark.parametrize("moment", ["before-claim", "in-gap"])
