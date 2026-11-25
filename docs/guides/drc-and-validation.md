@@ -637,6 +637,23 @@ Parts Library                     LCSC        None       Global   Seeed OPL
 
 Note: 2-layer boards typically have slightly relaxed via constraints compared to 4-layer, but may have stricter trace width requirements when using 2oz copper.
 
+### JLCPCB 4-layer 1 oz: JLCDFM grades 0.1 mm outer tracks Danger
+
+The JLCPCB profile's 4-layer 1 oz minimum trace width is 0.1016 mm (4 mil), the
+published capability, and `kct check` still reports it as an **error** only below
+that floor. On the reported four-layer board, JLCDFM rated every 0.1016 mm
+outer-layer track **Danger** (listed as "0.1 mm") and every 0.1524 mm (6 mil)
+track Good. The report did not specify copper weights. The profile applies this
+advisory to the four-layer 1 oz outer / 0.5 oz inner stackup. `kct check --mfr jlcpcb` therefore adds a
+**warning** (`dimension_trace_width`) for outer-layer tracks (`F.Cu` / `B.Cu`)
+narrower than 0.1524 mm on that stackup, so the finding is visible before upload.
+
+Limits of the evidence: only those two widths were observed, so JLCDFM's exact
+Danger/Warning/Good edges between them are unknown; inner layers and other
+stackups have no recorded observation and get no warning. The threshold and its
+provenance are the optional `trace_width` entry of `4layer_1oz` in
+`src/kicad_tools/manufacturers/data/jlcpcb.yaml` (`dfm_thresholds`, issue #10173).
+
 ## Python API: Get Manufacturer Rules
 
 ```python

@@ -295,8 +295,32 @@ def _verify_branch(
     return None
 
 
+@dataclass(frozen=True)
+class PourStubProof:
+    """Verified branches plus how many discovered candidates were actually evaluated."""
+
+    verified: list[tuple[PourStub, PourStubEvidence]]
+    evaluated: int
+    total: int
+
+    @property
+    def partial(self) -> bool:
+        return self.evaluated < self.total
+
+
 def evaluate_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]] | None:
     """Return verified branches, or None if no candidate could be evaluated."""
+    proof = prove_pour_stubs(pcb)
+    return None if proof is None else proof.verified
+
+
+def prove_pour_stubs(pcb: PCB) -> PourStubProof | None:
+    """Like :func:`evaluate_pour_stubs`, but also report per-candidate coverage (Issue #10211).
+
+    A candidate that raises ``_TrialUnavailable`` (or cannot be matched on the
+    refilled baseline) is not evaluated; ``evaluated < total`` lets callers say
+    so instead of implying every candidate was proven.
+    """
     source = pcb.path
     if source is None or not pcb.zones or not pcb.segments:
         return None
@@ -318,10 +342,14 @@ def evaluate_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]] | N
             previous = _states(baseline)
             saved = {b._signature(): b for b in discover_pour_stubs(baseline)}
             results = []
-            exercised = False
+            evaluated = 0
             for branch in branches:
                 candidate = saved.get(branch._signature())
                 if candidate is None:
+                    logger.warning(
+                        "Could not evaluate pour stub at %s: candidate not found after baseline refill",
+                        branch.pad_name,
+                    )
                     continue
                 with tempfile.TemporaryDirectory(dir=scratch) as trial_dir:
                     trial = Path(trial_dir) / path.name
@@ -331,12 +359,16 @@ def evaluate_pour_stubs(pcb: PCB) -> list[tuple[PourStub, PourStubEvidence]] | N
                     try:
                         evidence = _verify_branch(candidate, baseline, previous, trial, cli)
                     except _TrialUnavailable as exc:
-                        logger.debug("Could not evaluate pour stub at %s: %s", branch.pad_name, exc)
+                        logger.warning(
+                            "Could not evaluate pour stub at %s: %s", branch.pad_name, exc
+                        )
                         continue
-                    exercised = True
+                    evaluated += 1
                     if evidence is not None:
                         results.append((branch, evidence))
-            return results if exercised and source.read_bytes() == original else None
+            if evaluated and source.read_bytes() == original:
+                return PourStubProof(results, evaluated, len(branches))
+            return None
     except (OSError, KeyError, ValueError, GEOSException, KiCadToolsError) as exc:
         logger.debug("Could not verify pour-connected pad branches in %s: %s", source, exc)
         return None

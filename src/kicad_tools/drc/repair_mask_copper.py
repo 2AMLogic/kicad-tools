@@ -193,6 +193,8 @@ class MaskNudgeAction:
     #: along different lines (a chamfer between perpendicular runs); empty
     #: means every point shares ``(dx, dy)``.
     shifts: list[tuple[float, float]] = field(default_factory=list)
+    # An outside elbow's lead must keep this gap to the plotted pad opening.
+    minimum_mask_gap_mm: float | None = field(default=None, kw_only=True)
 
     def shift(self, index: int) -> tuple[float, float]:
         """The displacement applied to ``points[index]``."""
@@ -349,6 +351,47 @@ class MaskCopperRepairer(CopperGapRepairer):
         from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 
         return BoardClearanceRules.from_board(self._project_pcb_path)
+
+    @cached_property
+    def _elbow_mask_apertures(self) -> dict[tuple[str, str], BaseGeometry]:
+        """Standard pad mask outlines in the same file coordinates as the track ends."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.mask_geometry import (
+            ADVANCED_PAD_FEATURES,
+            board_mask_margin,
+            pad_mask_margin,
+            pad_mask_shapes,
+            pad_mask_sides,
+        )
+
+        pcb = PCB(self.doc)
+        board_margin, declared = board_mask_margin(pcb)
+        apertures: dict[tuple[str, str], BaseGeometry] = {}
+        if board_margin is None:
+            return apertures
+        version = pcb._file_version()
+        for fp in pcb.footprints:
+            for index, pad in enumerate(fp.pads):
+                sides = pad_mask_sides(pad)
+                node = pad._sexp_node
+                if not sides or (
+                    node is not None
+                    and any(node.find(name) is not None for name in ADVANCED_PAD_FEATURES)
+                ):
+                    continue
+                margin, _ = pad_mask_margin(pad, fp, board_margin, declared, board_version=version)
+                if margin is None or not math.isfinite(margin):
+                    continue
+                try:
+                    _copper, aperture = pad_mask_shapes(pad, fp, margin)
+                except ValueError:
+                    continue
+                if not aperture.is_empty:
+                    aperture = translate(aperture, *pcb._board_origin)
+                    identity = _bare(pad.uuid) if pad.uuid else f"{fp.reference}:pad:{index}"
+                    for side in sides:
+                        apertures[identity, f"{side}.Cu"] = aperture
+        return apertures
 
     # ------------------------------------------------------------------
     # Board model (absolute file coordinates throughout)
@@ -744,6 +787,8 @@ class MaskCopperRepairer(CopperGapRepairer):
             warning_clearance_mm: Preferred mask gap for a shared pad exit
                 when the manufacturer's policy includes an advisory tier.
         """
+        if not math.isfinite(margin_mm) or margin_mm < 0:
+            raise ValueError("Mask clearance margin must be a finite, nonnegative distance")
         result = MaskRepairResult()
         findings = mask_copper_violations(violations)
         result.total_violations = len(findings)
@@ -795,6 +840,7 @@ class MaskCopperRepairer(CopperGapRepairer):
                         dry_run,
                         clearance_mm,
                         violation.required_value_mm,
+                        margin_mm,
                         touched_by_action,
                     )
                 ):
@@ -2223,9 +2269,10 @@ class MaskCopperRepairer(CopperGapRepairer):
         dry_run: bool,
         clearance_mm: float | None,
         required: float | None,
+        margin_mm: float,
         touched: set[str],
     ) -> bool:
-        """Swap the two legs of an elbow so its corner lands inside the pad.
+        """Swap the two legs of an elbow to make a straight entry into the pad.
 
         An overlapping pass-through track that runs along a pad's edge and
         turns into the pad at the corner is half under the pad's own opening
@@ -2236,7 +2283,10 @@ class MaskCopperRepairer(CopperGapRepairer):
         anchors. Every leg keeps its length and angle, so legal directions stay
         legal, and the moved corner becomes the strictly-inside end of a
         straight entry. Both corner ends translate together, preserving any
-        authored offset inside the junction tolerance. Returns ``True`` when applied.
+        authored offset inside the junction tolerance. A corner that stays outside
+        the pad is accepted when the far leg's end is inside it and the other leg
+        clears the whole opening (a stub handing a hugging track over to the pad).
+        Returns ``True`` when applied.
         """
         if required is None or opening in self._pivot_pad_bounds:
             return False
@@ -2291,8 +2341,21 @@ class MaskCopperRepairer(CopperGapRepairer):
                 continue
             if min(math.dist(anchor, flipped), math.dist(other_flipped, far)) < _MIN_RUN_MM:
                 continue
+            minimum_mask_gap = None
             if not (inside.contains(Point(flipped)) and inside.contains(Point(other_flipped))):
-                continue
+                # The corner stays outside the pad (a stub that hands a track
+                # hugging the pad edge over to the pad, #9939): the swap is
+                # still a legal entry when the far leg now runs straight into
+                # the pad and the other leg clears the whole opening.
+                aperture = self._elbow_mask_apertures.get((opening, layer))
+                minimum_mask_gap = required + margin_mm
+                if not (
+                    inside.contains(Point(far))
+                    and aperture is not None
+                    and LineString([anchor, flipped]).distance(aperture) - width / 2
+                    >= minimum_mask_gap - 1e-9
+                ):
+                    continue
 
             moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
                 (
@@ -2341,9 +2404,10 @@ class MaskCopperRepairer(CopperGapRepairer):
                 dx=dx,
                 dy=dy,
                 displacement_mm=displacement,
-                detail=f"flipped a two-leg elbow {displacement:.4f}mm so its corner enters {ref}",
+                detail=f"flipped a two-leg elbow {displacement:.4f}mm for a straight entry into {ref}",
                 openings=[opening],
                 points=points,
+                minimum_mask_gap_mm=minimum_mask_gap,
             )
             return self._apply_nudge(action, result, dry_run) is None
         return False

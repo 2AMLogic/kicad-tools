@@ -271,6 +271,8 @@ design_rules:
 #                       board (not a published spec; re-check before relying on it)
 # ``danger_mm`` is the floor ``kct check`` enforces (it can only tighten the
 # design_rules values above, never relax them); ``warning_mm`` is recorded data.
+# ``trace_width`` is the one OPTIONAL name (#10173): a stackup without it simply
+# gets no trace-width warning.
 # A stackup with NO entry here fails closed: ``kct check`` reports verdict
 # ``incomplete`` instead of falling back to another copper weight.
 #
@@ -284,7 +286,7 @@ design_rules:
 # (1.26-1.85 mm danger, ~2.06 mm warning, >= 3.05 mm good) corroborate both
 # bands.
 dfm_thresholds:
-  version: 3
+  version: 4
   entries:
     2layer_1oz:
       layers: 2
@@ -318,6 +320,13 @@ dfm_thresholds:
         annular_ring_via: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
         annular_ring_pth: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
         mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        # OPTIONAL (#10173): outer-layer track width.  danger_mm is the published
+        # floor and is NOT applied by apply_dfm_floors (the error floor stays
+        # design_rules min_trace_width_mm).  warning_mm is what kct warns below:
+        # JLCDFM rated 0.1016 mm outer tracks Danger (listed as 0.1 mm) and 0.1524 mm
+        # Good on a 4-layer board. Its copper weight was not reported. The
+        # advisory is scoped to this stackup; grades between those widths are unknown.
+        trace_width: {danger_mm: 0.1016, warning_mm: 0.1524, warning_basis: observed_jlcdfm, basis: capability_page, source_url: https://github.com/2AMLogic/kicad-tools/issues/10173, retrieved: '2026-11-25'}
         tht_smd_spacing: {danger_mm: 2.032, warning_mm: 3.05, basis: observed_jlcdfm, source_url: https://github.com/2AMLogic/kicad-tools/issues/9421, retrieved: '2026-11-18'}
     4layer_1oz_inner1oz:
       layers: 4
