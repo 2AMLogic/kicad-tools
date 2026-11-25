@@ -460,3 +460,61 @@ def _copper_gap_check(
         return True
 
     return replacement_is_clear
+
+
+def adds_trace_gap(
+    original: list[Segment], candidate: list[Segment], route: Route, grid: RoutingGrid | None
+) -> bool:
+    """True if *candidate* opens a trace-band slit to other copper that *original* did not.
+
+    Grades the facing edges of the candidate chain against every other route's
+    copper on its layer (the retained sibling branches), the way the fabrication
+    gap check does. A slit the incoming chain already had does not count, so the
+    caller only falls back to *original* when that is strictly cleaner (issue #10164).
+    """
+    edge = _band_edge(grid, "same_net_trace_gap_band_edge_mm") if grid is not None else None
+    if grid is None or edge is None or not candidate or candidate == original:
+        return False
+
+    from shapely.geometry import LineString
+
+    from kicad_tools.validate.rules.physical_gap import CopperSource, iter_source_gaps
+
+    first = candidate[0]
+    layer, net = first.layer.name, str(first.net)
+
+    def copper(s: Segment):
+        return LineString([s.start, s.end]).buffer(s.width / 2, quad_segs=64)
+
+    others = [
+        CopperSource(copper(s), layer, str(s.net), f"other:{i}", "track")
+        for i, s in enumerate(
+            s
+            for r in grid.routes
+            if r is not route and r.net == route.net
+            for s in r.segments
+            if s.layer == first.layer
+        )
+    ]
+    if not others:
+        return False
+
+    kept = {_leg(s) for s in original}
+
+    def worst(chain: list[Segment]) -> float:
+        # Only legs the rewrite changed are graded: a join the incoming chain
+        # already makes (a pad or via shoulder) is not modeled here.
+        own = [
+            CopperSource(copper(s), layer, net, f"own:{i}", "track") for i, s in enumerate(chain)
+        ]
+        changed = {f"own:{i}" for i, s in enumerate(chain) if _leg(s) not in kept}
+        gaps = [
+            gap.distance
+            for gap in iter_source_gaps([*others, *own], edge)
+            if gap.distance < edge
+            and changed.intersection(gap.ids)
+            and any(i.startswith("other:") for i in gap.ids)
+        ]
+        return min(gaps, default=math.inf)
+
+    return worst(candidate) < edge

@@ -346,25 +346,35 @@ def test_reset_branch_enters_via_from_its_existing_trunk(
     assert saved.vias == [via]
     actual = [s for s in saved.segments if s.layer == Layer.F_CU]
     blocks_repair = extra_pad or arc_layer == "F.Cu" or poly_layer == "F.Cu"
-    corner = (160.1, 94.35) if nearby and not blocks_repair else (160.1, 94.685)
-    assert [(s.start, s.end) for s in actual] == [(start, corner), (corner, barrel)]
-
-    output = tmp_path / "saved.kicad_pcb"
-    _write_routed_pcb(source, output, saved.to_sexp() + "\n" + sibling.to_sexp(), layer_count=4)
-    pcb = PCB.load(output)
-    assert len(pcb.arcs) == int(arc_layer is not None)
-    findings = [
-        v
-        for v in check_physical_copper_gap_fab_view(pcb, policy).violations
-        if v.rule_id == "physical_copper_gap"
-    ]
-    pad_findings = [v for v in findings if v.fab_band == "pad"]
-    trace_findings = [v for v in findings if v.fab_band == "trace"]
-    assert pad_findings == []
-    if blocks_repair:
-        assert [v.actual_value for v in trace_findings] == pytest.approx([0.029810], abs=1e-6)
+    if nearby and blocks_repair:
+        # The polygon/pad/arc vetoes the retraction and the optimized corner would
+        # open a trace-to-trace slit to the sibling: the clean incoming chain stays.
+        assert [(s.start, s.end) for s in actual] == [(s.start, s.end) for s in front]
     else:
-        assert trace_findings == []
+        corner = (160.1, 94.35) if nearby else (160.1, 94.685)
+        assert [(s.start, s.end) for s in actual] == [(start, corner), (corner, barrel)]
+
+    def grade(route, name):
+        output = tmp_path / name
+        _write_routed_pcb(source, output, route.to_sexp() + "\n" + sibling.to_sexp(), layer_count=4)
+        pcb = PCB.load(output)
+        assert len(pcb.arcs) == int(arc_layer is not None)
+        return [
+            v
+            for v in check_physical_copper_gap_fab_view(pcb, policy).violations
+            if v.rule_id == "physical_copper_gap"
+        ]
+
+    # The route the optimizer started with is clean; the saved result must be too.
+    if nearby:
+        assert (
+            grade(
+                Route(net=20, net_name="RESET", segments=[*front, *back], vias=[via]),
+                "in.kicad_pcb",
+            )
+            == []
+        )
+    assert grade(saved, "saved.kicad_pcb") == []
 
 
 @pytest.mark.parametrize(
