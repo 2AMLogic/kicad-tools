@@ -685,6 +685,29 @@ jobs:
         # Issue #9340: the pytest selection lives in scripts/ci/jobs/test.sh.
         run: python3 scripts/ci/run_observed.py board05 -- bash scripts/ci/jobs/test.sh board05
 
+      - name: Run Board06 pad-departure regression
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
+        # Issue #10125: permitted clock and data moves each took about 20 s
+        # in the hosted serial lane. Permitted clock width reached the 60 s
+        # bulk deadline, so run this module serially with a 120 s budget.
+        # Issue #9340: the pytest selection lives in scripts/ci/jobs/test.sh.
+        run: |
+          mkdir -p "$RUNNER_TEMP/board06-native"
+          python3 scripts/ci/run_observed.py board06 -- bash scripts/ci/jobs/test.sh board06 \
+            --basetemp "$RUNNER_TEMP/board06-native/pytest" \
+            --junitxml "$RUNNER_TEMP/board06-native/junit.xml" \
+            2>&1 | tee "$RUNNER_TEMP/board06-native/pytest.log"
+
+      - name: Retain Board06 pad-departure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: board06-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/board06-native/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run native mask-to-copper gate
         env:
           KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}

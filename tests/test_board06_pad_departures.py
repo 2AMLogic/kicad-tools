@@ -49,6 +49,8 @@ def _write_board(
     locked_index=None,
     neighbor=True,
     extra="",
+    footprint="QFP",
+    net_name="USB_CC2",
 ):
     """One sideband pad, its F.Cu departure, a far pad and an edge outline.
 
@@ -60,17 +62,17 @@ def _write_board(
         "(kicad_pcb (version 20240108) (generator test)",
         '(general (thickness 1.6)) (layers (0 "F.Cu" signal) (2 "In1.Cu" power)'
         ' (4 "In2.Cu" power) (31 "B.Cu" signal))',
-        '(setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "USB_CC2")',
+        f'(setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "{net_name}")',
         "(gr_rect (start 5 4) (end 16 14) (stroke (width 0.05) (type default))"
         ' (fill none) (layer "Edge.Cuts"))',
-        f'(footprint "QFP" (layer "F.Cu") (at {pad_at[0]} {pad_at[1]})'
+        f'(footprint "{footprint}" (layer "F.Cu") (at {pad_at[0]} {pad_at[1]})'
         f' (property "Reference" "{pad_ref}")'
         f' (pad "{pad_number}" smd rect (at 0 0) (size {pad_size[0]} {pad_size[1]})'
-        ' (layers "F.Cu" "F.Mask") (net 1 "USB_CC2")))',
+        f' (layers "F.Cu" "F.Mask") (net 1 "{net_name}")))',
         f'(footprint "Hdr" (layer "F.Cu") (at {far_at[0]} {far_at[1]})'
         f' (property "Reference" "{far_ref}")'
         ' (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4)'
-        ' (layers "*.Cu" "*.Mask") (net 1 "USB_CC2")))',
+        f' (layers "*.Cu" "*.Mask") (net 1 "{net_name}")))',
     ]
     if neighbor:
         low = min(pad_at[1], far_at[1]) - 1.5
@@ -98,6 +100,66 @@ def _write_board(
             f' (net 1) (uuid "{_uid("via", i)}"))'
         )
     path.write_text("\n".join([*items, extra, ")"]))
+
+
+@pytest.mark.parametrize("control", ["ordinary", "locked", "tap", "clearance"])
+def test_u1_ground_departure_keeps_its_barrel_and_branch(tmp_path, departures, control):
+    board = tmp_path / "ground.kicad_pcb"
+    center, branch, tip, via = (10, 10), (9.3, 10.15), (9.8, 10.15), (9.25, 10.15)
+    segments = [
+        ("F.Cu", branch, tip, 0.20),
+        ("F.Cu", tip, via, 0.15),
+        ("F.Cu", branch, (9.3, 11.5), 0.20),
+        ("F.Cu", center, (10, 11.5), 0.20),
+        ("F.Cu", (10, 11.5), (9.3, 11.5), 0.20),
+    ]
+    if control == "tap":
+        # This branch contacts the side of the old run, away from its endpoints.
+        segments.append(("F.Cu", (9.68, 10.29), (9.68, 10.9), 0.15))
+    extra = ""
+    if control == "clearance":
+        extra = (
+            '(net 2 "OTHER") (segment (start 9.6 9.64) (end 9.6 9.70)'
+            ' (width 0.20) (layer "F.Cu") (net 2))'
+        )
+    _write_board(
+        board,
+        pad_number="32",
+        footprint="Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm",
+        net_name="GND",
+        segments=segments,
+        far_at=(9.3, 11.5),
+        vias=[via],
+        locked_index=0 if control == "locked" else None,
+        neighbor=False,
+        extra=extra,
+    )
+    before = board.read_bytes()
+    original = PCB.load(board)
+    via_positions = [(v.uuid, v.position) for v in original.vias]
+    origin_x, origin_y = original.board_origin
+    edited = departures.clear_pad_departures(board, _rules())
+    if control != "ordinary":
+        assert edited == 0
+        assert board.read_bytes() == before
+        return
+
+    assert edited == 1
+    pcb = PCB.load(board)
+    assert [(v.uuid, v.position) for v in pcb.vias] == via_positions
+    assert {_uid("seg", n) for n in (2, 3, 4)} <= {s.uuid for s in pcb.segments}
+    new = [s for s in pcb.segments if s.uuid not in {_uid("seg", n) for n in (2, 3, 4)}]
+
+    def absolute(point):
+        return round(point[0] + origin_x, 6), round(point[1] + origin_y, 6)
+
+    assert {(absolute(s.start), absolute(s.end), s.width) for s in new} == {
+        (center, (9.4, 10), 0.2),
+        ((9.4, 10), via, 0.2),
+    }
+    repaired = board.read_bytes()
+    assert departures.clear_pad_departures(board, _rules()) == 0
+    assert board.read_bytes() == repaired
 
 
 def _taper(depth=1.0, step=0.05, top=0.1016):
@@ -648,6 +710,10 @@ def test_clock_with_unverifiable_rules_keeps_the_original_file(tmp_path, departu
     assert board.read_bytes() == before
 
 
+# Constrained moves stop after the parent DRC. Permitted moves also run
+# the fill child, whose native-slot waits count against the parent's deadline.
+# Permitted width reached the 60 s bulk timeout, so CI runs this module in
+# the serial board06 lane with a 120 s budget (Issue #10125).
 @pytest.mark.parametrize("constraint", ["keepout", "width"])
 @pytest.mark.parametrize("permitted", [False, True], ids=["constrained", "permitted"])
 def test_final_clock_copper_obeys_j4_rule_area(tmp_path, departures, capsys, constraint, permitted):

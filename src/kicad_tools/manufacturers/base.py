@@ -64,6 +64,7 @@ DFM_THRESHOLD_NAMES: tuple[str, ...] = (
     "annular_ring_via",
     "annular_ring_pth",
     "mask_bridge",
+    "tht_smd_spacing",
 )
 
 
@@ -206,6 +207,20 @@ class FileNamingConvention:
     gerber_zip_name: str = "gerbers.zip"
 
 
+def _rotation_tables(manufacturer_id: str) -> dict[str, Any]:
+    path = _DATA_DIR / f"{manufacturer_id}_rotations.yaml"
+    return _load_yaml(path) if path.exists() else {}
+
+
+def load_catalog_rotation_corrections(manufacturer_id: str) -> dict[str, dict[str, float]]:
+    """Previewed offsets by catalog part and KiCad footprint pattern."""
+    catalog = _rotation_tables(manufacturer_id).get("catalog_rotation_corrections", {})
+    return {
+        part: {pattern: float(degrees) for pattern, degrees in rows.items()}
+        for part, rows in catalog.items()
+    }
+
+
 def load_rotation_corrections(manufacturer_id: str) -> dict[str, float]:
     """Load rotation corrections from a YAML data file.
 
@@ -216,12 +231,7 @@ def load_rotation_corrections(manufacturer_id: str) -> dict[str, float]:
         Dict mapping footprint glob pattern to rotation offset in degrees.
         Empty dict if no rotation corrections file exists.
     """
-    yaml_path = _DATA_DIR / f"{manufacturer_id}_rotations.yaml"
-    if not yaml_path.exists():
-        return {}
-
-    data = _load_yaml(yaml_path)
-    return data.get("rotation_corrections", {})
+    return _rotation_tables(manufacturer_id).get("rotation_corrections", {})
 
 
 def match_rotation_correction(
@@ -413,6 +423,13 @@ class DesignRules:
     # existing profiles' shared annular-ring behavior.
     min_pth_annular_ring_mm: float | None = None
 
+    # Two-tier THT/anchor-via to SMD-pad spacing bands (Issues #8843, #9421, #10172):
+    # error strictly below ``danger``, warning strictly below ``warning``.
+    # None uses the rule's calibrated defaults. New fields go at the end to
+    # preserve the public constructor's positional arguments.
+    tht_smd_danger_mm: float | None = None
+    tht_smd_warning_mm: float | None = None
+
     def __post_init__(self) -> None:
         """Enforce ``min_inner_clearance_mm <= min_clearance_mm`` (Issue #9113).
 
@@ -489,6 +506,8 @@ class DesignRules:
             "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
             "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
             "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,
+            "tht_smd_danger_mm": self.tht_smd_danger_mm,
+            "tht_smd_warning_mm": self.tht_smd_warning_mm,
             "min_inner_clearance_mm": self.min_inner_clearance_mm,
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
@@ -723,6 +742,11 @@ class ManufacturerProfile:
         from dataclasses import replace
 
         t = entry.thresholds
+        tht_smd = t["tht_smd_spacing"]
+        tht_smd_danger_mm = max(rules.tht_smd_danger_mm or 0.0, tht_smd.danger_mm)
+        tht_smd_warning_mm = rules.tht_smd_warning_mm
+        if tht_smd.warning_mm is not None:
+            tht_smd_warning_mm = max(tht_smd_warning_mm or 0.0, tht_smd.warning_mm)
         return replace(
             rules,
             min_clearance_mm=max(rules.min_clearance_mm, t["trace_spacing"].danger_mm),
@@ -734,6 +758,8 @@ class ManufacturerProfile:
                 rules.min_pth_annular_ring_mm or 0.0, t["annular_ring_pth"].danger_mm
             ),
             min_solder_mask_dam_mm=max(rules.min_solder_mask_dam_mm, t["mask_bridge"].danger_mm),
+            tht_smd_danger_mm=tht_smd_danger_mm,
+            tht_smd_warning_mm=tht_smd_warning_mm,
         )
 
     def get_design_rules(
