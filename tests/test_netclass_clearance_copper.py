@@ -159,6 +159,67 @@ def test_unsupported_declaration_is_explicit(tmp_path: Path, capsys) -> None:
     assert "NOT checked" in hits[0]["message"]
 
 
+def _renamed_board(tmp_path: Path, net: str, project: dict | None = None) -> Path:
+    """The corridor board with net 1 (the straight HV run) renamed (issue #10122)."""
+    pcb = tmp_path / "hv.kicad_pcb"
+    text = wall.board_text().replace('(net 1 "HV")', f'(net 1 "{net}")').rstrip()
+    assert text.endswith(")")
+    pcb.write_text(text[:-1] + STRAIGHT + ")\n")
+    pcb.with_suffix(".kicad_pro").write_text(json.dumps(project or wall.project("hv")))
+    return pcb
+
+
+@pytest.mark.parametrize(
+    ("pattern", "net", "expect_violation"),
+    [
+        ("+3.3V", "+3.3V", True),
+        ("+3.3V", "+3x3V", False),
+        ("Net-(U5-CAPP)", "Net-(U5-CAPP)", True),
+        ("Net-(U5-CAPP)", "Net-U5-CAPP", True),
+        ("Net-(U5-CAPP)", "Net-(U5-CAPX)", False),
+    ],
+    ids=[
+        "supply-exact",
+        "supply-near-miss",
+        "generated-paren",
+        "generated-plain",
+        "generated-miss",
+    ],
+)
+def test_punctuated_patterns_reach_the_copper_check(
+    tmp_path: Path, capsys, pattern: str, net: str, expect_violation: bool
+) -> None:
+    """Issue #10122: the five native-verified rows on the 0.45 mm corridor gap.
+
+    Pinned KiCad's own DRC flags the 0.450 mm gap against the 0.500 mm class
+    for the three positive rows only; the similarly named negatives fall back
+    to ``Default`` and stay silent.  Before #10122 every row reported
+    ``netclass_clearance_unsupported`` and the copper was not checked at all.
+    """
+    project = copy.deepcopy(wall.project("hv"))
+    project["net_settings"]["netclass_patterns"] = [{"netclass": "HV", "pattern": pattern}]
+    code, report = _check(_renamed_board(tmp_path, net, project), tmp_path, capsys)
+    assert _hits(report, "netclass_clearance_unsupported") == []
+    hits = _hits(report)
+    if expect_violation:
+        assert code != 0
+        assert hits and all(h["severity"] == "error" for h in hits)
+        assert min(h["actual_value"] for h in hits) == pytest.approx(0.45, abs=1e-3)
+        assert all(h["required_value"] == pytest.approx(0.5) for h in hits)
+    else:
+        assert code == 0 and hits == []
+
+
+def test_explicit_assignment_still_governs_punctuated_names(tmp_path: Path, capsys) -> None:
+    """The issue's control: explicit membership on the same copper keeps working."""
+    project = copy.deepcopy(wall.project("hv"))
+    project["net_settings"]["netclass_patterns"] = []
+    project["net_settings"]["netclass_assignments"] = {"+3.3V": ["HV"]}
+    code, report = _check(_renamed_board(tmp_path, "+3.3V", project), tmp_path, capsys)
+    assert code != 0
+    assert min(h["actual_value"] for h in _hits(report)) == pytest.approx(0.45, abs=1e-3)
+
+
 def test_opt_out_mode_still_reports_and_says_why(tmp_path: Path, capsys) -> None:
     project = copy.deepcopy(wall.project("hv"))
     project["text_variables"] = {"KCT_PRESERVE_BOARD_RULES": "0"}

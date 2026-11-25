@@ -584,6 +584,54 @@ An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is no
 
 The hand-edited-CSV route is not an option: it breaks the manifest checksums.
 
+## Retained recovery copies beside the board
+
+Export sometimes rewrites the source board itself under a verified-bytes
+check: refreshing the saved zone fills to match the generated DRC rules,
+and the default silk legalisation pass. Each successful checked rewrite
+keeps the displaced previous file as a recoverable copy in a sibling
+directory named
+`.<board>.kicad_pcb.recovery-<UTC timestamp>-<random>/original` (issue
+#10056). If KiCad or another editor still had the previous file open and
+saves into it after the export published, that save stays recoverable in
+the retained copy rather than being lost.
+
+If the exporter rolls back after the repaired board appeared at the live
+filename, the recovery directory also contains `provisional`, the file an
+editor could have opened during that interval. `withdrawn`, when present,
+is the file found at the live name during rollback. It can be another hard
+link to `provisional` or a separate file saved by an editor. Compare these
+files with the live PCB before discarding a recovery. Close any editors
+still writing those versions before cleanup.
+
+Inspect the retained versions with any diff tool:
+
+```bash
+diff boards/04-stm32-devboard/04-stm32-devboard.kicad_pcb \
+     boards/04-stm32-devboard/.04-stm32-devboard.kicad_pcb.recovery-*/original
+```
+
+One copy is kept per rewrite, so the directories accumulate until you
+remove them:
+
+```bash
+kct clean boards/04-stm32-devboard/04-stm32-devboard.kicad_pro --force
+```
+
+`kct clean` lists completed recovery copies in its default dry run and
+deletes them with `--force` while the board exists. If the project's PCB
+is a symlink, export retains the previous version beside the source board.
+Cleanup from the project finds that source's copies when the source is
+inside the project directory tree. For a source outside the project,
+run cleanup on the source project. The recovery API and cleanup preview
+order copies by their marker timestamps, with names breaking ties.
+
+The writer reserves
+the `complete` marker before moving the board. The copy becomes eligible
+for cleanup once the writer verifies the new board and removes its working
+link, `repaired`. A completed rollback renames that link to `provisional`
+after restoring the live name. Interrupted writes remain available for manual recovery.
+
 ## Next Steps
 
 - **[Query API](query-api.md)** - Advanced filtering for design analysis

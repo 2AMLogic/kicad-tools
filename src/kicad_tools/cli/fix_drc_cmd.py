@@ -1578,19 +1578,15 @@ def _run_mask_pass(
                 if not args.no_connectivity_check
                 else {}
             )
-            # KiCad can join an annulus and a trace at the edge of contact
-            # even when the strict pad-island graph considers them separate.
-            check_nudges = not args.no_connectivity_check and any(
-                isinstance(action, MaskNudgeAction) for action in result.actions
+            # Nudges and pull-ins change copper subject to KiCad's project and
+            # item-specific clearance rules, even when pad connectivity is skipped.
+            check_copper = any(
+                isinstance(action, MaskNudgeAction) or action.action == "pull_in"
+                for action in result.actions
             )
-            # A pull-in extends track copper. Enforce the project's native
-            # electrical and physical rules even when connectivity checks are disabled.
-            has_pull_in = any(action.action == "pull_in" for action in result.actions)
             has_bends = any(action.bends for action in result.actions)
             before_native = (
-                _mask_native_state(candidate)
-                if has_zones or check_nudges or has_pull_in or has_bends
-                else None
+                _mask_native_state(candidate) if has_zones or check_copper or has_bends else None
             )
             # On a partially connected board one new contact can hide a split,
             # even on the same net. Keep KiCad's actual pad groups for that case.
