@@ -620,6 +620,7 @@ class TestUntentedViaMaskMargin:
     @pytest.mark.parametrize(
         ("mask_clearance", "fallback", "expected_width"),
         [
+            (-0.1, 0.05, 0.4),  # shrunk opening still flashes on both sides
             (0.0, 0.05, 0.6),  # flashed C,0.600000
             (0.4, 0.05, 1.4),  # flashed C,1.400000
             # Nothing declared: KiCad flashes C,0.600000; kct keeps its fallback.
@@ -638,6 +639,17 @@ class TestUntentedViaMaskMargin:
         assert [side for side, _geom, _label in apertures] == ["F", "B"]
         for _side, geom, _label in apertures:
             assert _opening_size(geom) == pytest.approx((expected_width, expected_width))
+
+    @pytest.mark.parametrize("mask_clearance", [-0.3, -0.8])
+    def test_closed_via_has_no_mask_aperture(self, mask_clearance):
+        pcb = _via_probe_pcb(
+            setup_tenting=("no", "no"),
+            via_tenting=None,
+            mask_clearance=mask_clearance,
+            silk=((10.46, 9.8), (10.46, 10.2), 0.2),
+        )
+        assert list(_iter_via_apertures(pcb, 0.05)) == []
+        assert check_silk_over_copper(pcb, _rules()).violations == []
 
     @pytest.mark.parametrize(
         ("mask_clearance", "expected_width"),
