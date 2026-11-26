@@ -1,5 +1,6 @@
 """Tests for the pre-flight validation checker."""
 
+import csv
 import json
 from pathlib import Path
 
@@ -660,6 +661,76 @@ class TestPreflightLeadFit:
         for finding in (override, other):
             assert finding["status"] == "unassessed"
             assert reason in finding["reason"]
+
+    @pytest.mark.parametrize(
+        ("overrides", "manufacturing", "pad_error", "tolerance_error"),
+        [
+            (
+                "{1: {shape: round, diameter_mm: 1, source: drawing}}",
+                _LEAD_FIT_TOLERANCE_YAML,
+                None,
+                None,
+            ),
+            ("[]", _LEAD_FIT_TOLERANCE_YAML, "pad_leads", None),
+            ("{1: {shape: oval, source: drawing}}", _LEAD_FIT_TOLERANCE_YAML, "shape", None),
+            (
+                '{"1": {shape: round, diameter_mm: 1, source: drawing}}',
+                "    finished_hole_tolerance_mm: -0.08\n",
+                None,
+                "finished_hole_tolerance_source",
+            ),
+            (
+                "[]",
+                "    finished_hole_tolerance_mm: 0.08\n",
+                "pad_leads",
+                "finished_hole_tolerance_mm",
+            ),
+        ],
+    )
+    def test_preserve_nominal_fit_and_exported_assignment(
+        self, tmp_path, overrides, manufacturing, pad_error, tolerance_error
+    ):
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        pcb = _create_pcb_with_lead_pads(
+            tmp_path, {ref: [_tht_pad("1", 1.5)] for ref in ("Q1", "Q2")}
+        )
+        _write_lead_spec(
+            tmp_path,
+            _RECT_LEAD_YAML
+            + "    lcsc: C12345\n  - ref: Q2\n    part: SECOND\n"
+            + "    lead: {shape: round, diameter_mm: 2, source: drawing}\n"
+            + f"    pad_leads: {overrides}\n",
+            manufacturing,
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "FAIL"
+        q1, q2 = result.data["pads"]
+        assert q1["mpn"] == "STW70N60DM2"
+        assert q1["nominal_status"] == "fail"
+        assert q1["nominal_margin_mm"] == -0.112
+        if tolerance_error:
+            assert q1["tolerance"]["status"] == "unassessed"
+            assert tolerance_error in q1["tolerance"]["reason"]
+            assert "minimum_margin_mm" not in q1["tolerance"]
+        else:
+            assert q1["tolerance"]["minimum_margin_mm"] == -0.192
+        assert q2["mpn"] == "SECOND"
+        if pad_error:
+            assert q2["status"] == "unassessed"
+            assert pad_error in q2["reason"]
+        else:
+            assert q2["nominal_margin_mm"] == 0.5
+
+        package = AssemblyPackage(
+            pcb_path=pcb,
+            schematic_path=None,
+            config=AssemblyConfig(bom_source="pcb", auto_lcsc=False),
+        )
+        exported = package.export(tmp_path / "assembly")
+        with exported.bom_path.open(newline="", encoding="utf-8-sig") as bom:
+            assignments = {row["Designator"]: row["LCSC Part #"] for row in csv.DictReader(bom)}
+        assert assignments["Q1"] == "C12345"
 
     @pytest.mark.parametrize(
         ("fab", "status"), [("pcbway", "unassessed"), ("jlcpcb-tier1", "pass")]

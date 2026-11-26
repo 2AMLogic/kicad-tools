@@ -19,7 +19,14 @@ from enum import Enum
 from typing import Any, Literal
 
 try:
-    from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+    from pydantic import (
+        BaseModel,
+        ConfigDict,
+        Field,
+        ValidationInfo,
+        field_validator,
+        model_validator,
+    )
 except ImportError as e:
     raise ImportError(
         "pydantic is required for the spec module. "
@@ -681,6 +688,7 @@ class ManufacturingRequirements(SpecModel):
     )
     finished_hole_tolerance_source: str | None = Field(
         default=None,
+        validate_default=True,
         description=(
             "Issue #10299: where the finished-hole tolerance was published "
             "(e.g. 'JLCPCB capabilities, through-hole tolerances').  "
@@ -696,23 +704,16 @@ class ManufacturingRequirements(SpecModel):
             return None
         return _parse_copper_weight_oz(v)
 
-    @model_validator(mode="after")
-    def validate_finished_hole_tolerance_source(self) -> ManufacturingRequirements:
-        """Issue #10299: a declared finished-hole tolerance must name its source.
-
-        A tolerance without provenance cannot be traced back to the fab's
-        published capability, so the lead-fit finding would cite a number
-        nobody can verify -- the same contract ``LeadProfile`` applies to
-        lead dimensions.
-        """
-        if self.finished_hole_tolerance_mm is None:
-            return self
-        if not (self.finished_hole_tolerance_source or "").strip():
+    @field_validator("finished_hole_tolerance_source")
+    @classmethod
+    def validate_finished_hole_tolerance_source(
+        cls, source: str | None, info: ValidationInfo
+    ) -> str | None:
+        if info.data.get("finished_hole_tolerance_mm") is not None and not (source or "").strip():
             raise ValueError(
-                "manufacturing.finished_hole_tolerance_mm requires a non-empty "
-                "finished_hole_tolerance_source (where the tolerance was published)"
+                "a declared finished-hole tolerance requires a non-empty finished_hole_tolerance_source"
             )
-        return self
+        return source
 
     @field_validator("silkscreen_min_reference_height_mm", mode="before")
     @classmethod
@@ -987,6 +988,20 @@ class BOMEntry(SpecModel):
             "precedence over ``lead`` for that pad number only."
         ),
     )
+
+    @field_validator("pad_leads", mode="before")
+    @classmethod
+    def normalize_pad_numbers(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = {}
+        for key, profile in value.items():
+            if type(key) is int:
+                key = str(key)
+            if not isinstance(key, str) or key in normalized:
+                raise ValueError("pad numbers must be unique strings or integers")
+            normalized[key] = profile
+        return normalized
 
     @model_validator(mode="after")
     def _validate_exemption(self) -> BOMEntry:

@@ -31,6 +31,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from .bom_spec_overlay import AssemblySpecErrors
 from .pnp import _ref_sort_key, is_through_hole_footprint
 
 if TYPE_CHECKING:
@@ -1270,19 +1271,19 @@ class PreflightChecker:
     # Through-hole lead fit (Issue #10299)
     # ------------------------------------------------------------------
 
-    def _load_project_spec(self) -> tuple[ProjectSpec | None, dict[tuple[int, str | None], str]]:
+    def _load_project_spec(self) -> tuple[ProjectSpec | None, AssemblySpecErrors]:
         """Use the BOM export's spec selection and retain per-profile errors."""
         from .bom_spec_overlay import find_spec_file, load_assembly_spec
 
         if self.no_spec:
-            return None, {}
+            return None, AssemblySpecErrors()
         try:
             path = self.spec_path or find_spec_file(self.pcb_path.parent)
             if path is not None:
                 return load_assembly_spec(path)
         except (ImportError, OSError, ValueError) as exc:
             logger.warning("Project spec load failed: %s", exc)
-        return None, {}
+        return None, AssemblySpecErrors()
 
     def _check_assembly_lead_fit(self) -> PreflightResult:
         """Compare declared maximum lead dimensions with the finished hole.
@@ -1314,8 +1315,11 @@ class PreflightChecker:
                 data={"pads": [], "summary": {"pads": 0}},
             )
 
-        spec, profile_errors = self._load_project_spec()
-        tolerance_reason = "no finished-hole tolerance declared in requirements.manufacturing"
+        spec, spec_errors = self._load_project_spec()
+        tolerance_reason = (
+            spec_errors.tolerance
+            or "no finished-hole tolerance declared in requirements.manufacturing"
+        )
         tolerance_mm: float | None = None
         tolerance_source: str | None = None
         entries: dict[str, tuple[int, BOMEntry]] = {}
@@ -1349,11 +1353,13 @@ class PreflightChecker:
                 profile: LeadProfile | None = None
                 if fp.reference in entries:
                     row, entry = entries[fp.reference]
-                    profile_error = profile_errors.get((row, pad.number))
+                    profile_error = spec_errors.pad_containers.get(row) or spec_errors.profiles.get(
+                        (row, pad.number)
+                    )
                     if profile_error is None:
                         profile = (entry.pad_leads or {}).get(pad.number) or entry.lead
                         if profile is None:
-                            profile_error = profile_errors.get((row, None))
+                            profile_error = spec_errors.profiles.get((row, None))
                 findings.append(
                     _lead_fit_finding(
                         fp.reference,
