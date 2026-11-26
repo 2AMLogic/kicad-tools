@@ -1,7 +1,7 @@
 """DRC violation data structures."""
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -646,6 +646,30 @@ class Location:
         return f"({self.x_mm:.2f}, {self.y_mm:.2f}) mm{layer_str}"
 
 
+@dataclass(frozen=True)
+class WireEnd:
+    """Board and sidecar evidence for one native dangling-via finding."""
+
+    wire_index: int  # zero-based, as in the reinforcement wire list
+    net: str
+    layer: str
+    endpoint: str
+    x_mm: float  # sheet-absolute
+    y_mm: float
+    via_uuid: str
+    wire_gauge_awg: int
+    drill_mm: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "description": str(self)}
+
+    def __str__(self) -> str:
+        return (
+            f"Intentional wire-end hole on wire {self.wire_index} ({self.net}, {self.layer}), "
+            f"{self.endpoint} anchor at ({self.x_mm:.6f}, {self.y_mm:.6f}) mm"
+        )
+
+
 @dataclass
 class DRCViolation:
     """Represents a single DRC violation.
@@ -687,6 +711,7 @@ class DRCViolation:
     waived: bool = False
     waiver_reason: str | None = None
     waiver_issue: str | None = None
+    wire_end: WireEnd | None = None
 
     @property
     def category(self) -> ViolationCategory:
@@ -849,6 +874,8 @@ class DRCViolation:
             result["waived"] = True
             result["waiver_reason"] = self.waiver_reason
             result["waiver_issue"] = self.waiver_issue
+        if self.wire_end is not None:
+            result["wire_end"] = self.wire_end.to_dict()
         if self.source_position:
             result["source_position"] = self.source_position.to_dict()
         if self.suggestions:
