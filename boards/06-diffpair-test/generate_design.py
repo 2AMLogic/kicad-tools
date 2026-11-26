@@ -5223,8 +5223,6 @@ def main() -> int:
                     "in route_pcb() if this recurs on an unloaded host."
                 )
 
-            drc_ok = run_drc(routed_path)
-
             # LVS (#3779, re-enabled by #4012): the fixture schematic is
             # now FULLY WIRED (generate_schematic.py emits a wire stub +
             # global label for all 198 pins, PIN_NETS mirroring
@@ -5255,10 +5253,33 @@ def main() -> int:
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
             # reports ``ship_ready=true`` (the bundle's manifest mtime must
-            # be newer than the freshly routed PCB).  Run unconditionally:
-            # routing is allowed to be PARTIAL on this board, and a current
-            # bundle still clears the ``"artifacts stale"`` blocker.
+            # be newer than the freshly routed PCB).  Runs after the clean
+            # LVS verdict above: a partial route already fast-failed at the
+            # #4066 gate and a copper/label divergence raised, so the
+            # exported package always describes a fully routed, LVS-clean
+            # board.  The default silk legalisation pass inside ``kct
+            # export`` finalises the routed PCB's silkscreen, and the
+            # manifest binds those final bytes -- which is why the full
+            # check below must run on the post-export board (#10308).
             mfg_ok = export_manufacturing_bundle(routed_path, output_dir)
+
+            # Issue #10308: grade the artifact this recipe DELIVERS, not an
+            # earlier snapshot.  ``run_drc`` used to run before the export,
+            # so it graded a different board from the one shipped: the
+            # export's silk legalisation pass rewrites the routed PCB
+            # afterwards, and the manufacturing manifest the full checker
+            # verifies (bundle hashes, archived project copy) did not exist
+            # yet -- the checker exited 2 (INCOMPLETE, "no manufacturing
+            # bundle") on every fresh run, so the recipe failed even when
+            # the delivered package was clean.  Run once, after export, on
+            # the PCB export just finalised; its existing command picks up
+            # the net-class sidecar and the fresh manifest.  It runs
+            # unconditionally (a failed export too): a missing or stale
+            # bundle then fails this check as well, and the ``export_ok``
+            # leg of the gate below independently fails the recipe even
+            # when an older, still-hash-matching package lets the check
+            # pass.
+            drc_ok = run_drc(routed_path)
 
             # Issue #3912: the exit code and the SUMMARY are now BOTH derived
             # from one shared PipelineGateResult so they cannot diverge.  The
@@ -5267,8 +5288,11 @@ def main() -> int:
             # while the process exited 0.  ``run_drc`` here uses
             # ``kct check --net-class-map``; that engine is the ONLY one that
             # can see the diffpair / match-group length-skew rule families
-            # (kicad-cli has no native expression for them), so its verdict is
-            # threaded in as ``supplemental_drc_ok``.  The gate's authoritative
+            # (kicad-cli has no native expression for them), and -- since it
+            # now runs after the export (#10308) -- its verdict also carries
+            # the manufacturing-bundle verification (manifest hashes,
+            # archived-board match), so it is threaded in as
+            # ``supplemental_drc_ok``.  The gate's authoritative
             # geometric leg (``kicad-cli pcb drc --refill-zones``) catches the
             # shorts / clearance defects kicad-cli owns; the union of the two
             # is the real DRC verdict.  Board-06 routes fully by design, so
@@ -5281,8 +5305,9 @@ def main() -> int:
                 export_ok=mfg_ok,
                 supplemental_drc_ok=drc_ok,
                 supplemental_reason=(
-                    "kct check --net-class-map reported diffpair / match-group "
-                    "errors (see DRC output above)"
+                    "kct check --mfr jlcpcb reported errors -- diffpair / "
+                    "match-group rules via --net-class-map and/or "
+                    "manufacturing-bundle verification (see DRC output above)"
                 ),
             )
 

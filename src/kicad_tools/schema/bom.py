@@ -16,6 +16,18 @@ from kicad_tools.sexp.power import is_power_lib_symbol, is_power_symbol, lib_sym
 from .schematic import Schematic
 from .symbol import SymbolInstance
 
+# Purchasing fields understood by both the schematic and board BOM readers.
+PURCHASING_FIELDS = {
+    "Manufacturer": ("manufacturer", "mfr", "mfg"),
+    "MPN": ("mpn", "mfr_pn", "manufacturer_pn", "pn"),
+    "LCSC": ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"),
+}
+
+
+def _purchasing_value(previous: str, candidate: str) -> str:
+    """Keep the last populated alias in KiCad's property order."""
+    return candidate if candidate.strip() else previous
+
 
 @dataclass
 class BOMItem:
@@ -290,12 +302,12 @@ def _bom_item_from_symbol(
         # Map common property names
         if name.lower() in ("description", "desc"):
             item.description = value
-        elif name.lower() in ("manufacturer", "mfr", "mfg"):
-            item.manufacturer = value
-        elif name.lower() in ("mpn", "mfr_pn", "manufacturer_pn", "pn"):
-            item.mpn = value
-        elif name.lower() in ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"):
-            item.lcsc = value
+        elif name.lower() in PURCHASING_FIELDS["Manufacturer"]:
+            item.manufacturer = _purchasing_value(item.manufacturer, value)
+        elif name.lower() in PURCHASING_FIELDS["MPN"]:
+            item.mpn = _purchasing_value(item.mpn, value)
+        elif name.lower() in PURCHASING_FIELDS["LCSC"]:
+            item.lcsc = _purchasing_value(item.lcsc, value)
         else:
             item.properties[name] = value
 
@@ -447,12 +459,12 @@ def extract_bom_from_pcb(pcb_path: str) -> BOM:
             name_lower = name.lower()
             if name_lower in ("description", "desc"):
                 description = value
-            elif name_lower in ("manufacturer", "mfr", "mfg"):
-                manufacturer = value
-            elif name_lower in ("mpn", "mfr_pn", "manufacturer_pn", "pn"):
-                mpn = value
-            elif name_lower in ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"):
-                lcsc = value
+            elif name_lower in PURCHASING_FIELDS["Manufacturer"]:
+                manufacturer = _purchasing_value(manufacturer, value)
+            elif name_lower in PURCHASING_FIELDS["MPN"]:
+                mpn = _purchasing_value(mpn, value)
+            elif name_lower in PURCHASING_FIELDS["LCSC"]:
+                lcsc = _purchasing_value(lcsc, value)
             else:
                 extra_props[name] = value
 

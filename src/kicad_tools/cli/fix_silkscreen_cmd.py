@@ -48,116 +48,42 @@ from kicad_tools.drc.repair_silkscreen import (
     SilkscreenRepairResult,
     TextHeightRepairResult,
 )
-from kicad_tools.manufacturers import get_all_manufacturer_names
-from kicad_tools.manufacturers.base import DesignRules, load_design_rules_from_yaml
-
-
-def _get_min_width(
-    mfr: str | None,
-    layers: int,
-    copper: float,
-    explicit_width: float | None,
-) -> float:
-    """Resolve the target minimum silkscreen width.
-
-    If *explicit_width* is given it takes precedence.  Otherwise the value is
-    loaded from the manufacturer YAML profile.
-    """
-    if explicit_width is not None:
-        return explicit_width
-
-    if mfr:
-        try:
-            rules_dict = load_design_rules_from_yaml(mfr)
-            key = f"{layers}layer_{int(copper)}oz"
-            if key in rules_dict:
-                return rules_dict[key].min_silkscreen_width_mm
-            # Try without copper weight
-            key = f"{layers}layer_1oz"
-            if key in rules_dict:
-                return rules_dict[key].min_silkscreen_width_mm
-            # Fall back to first available
-            first = next(iter(rules_dict.values()))
-            return first.min_silkscreen_width_mm
-        except FileNotFoundError:
-            print(
-                f"Warning: No configuration found for manufacturer '{mfr}'",
-                file=sys.stderr,
-            )
-
-    # Sensible default matching JLCPCB minimum
-    return 0.15
-
-
-def _get_min_height(
-    mfr: str | None,
-    layers: int,
-    copper: float,
-    explicit_height: float | None,
-) -> float:
-    """Resolve the target minimum silkscreen text height.
-
-    If *explicit_height* is given it takes precedence.  Otherwise the value is
-    loaded from the manufacturer YAML profile.
-    """
-    if explicit_height is not None:
-        return explicit_height
-
-    if mfr:
-        try:
-            rules_dict = load_design_rules_from_yaml(mfr)
-            key = f"{layers}layer_{int(copper)}oz"
-            if key in rules_dict:
-                return rules_dict[key].min_silkscreen_height_mm
-            # Try without copper weight
-            key = f"{layers}layer_1oz"
-            if key in rules_dict:
-                return rules_dict[key].min_silkscreen_height_mm
-            # Fall back to first available
-            first = next(iter(rules_dict.values()))
-            return first.min_silkscreen_height_mm
-        except FileNotFoundError:
-            print(
-                f"Warning: No configuration found for manufacturer '{mfr}'",
-                file=sys.stderr,
-            )
-
-    # Sensible default matching JLCPCB minimum
-    return 1.0
-
-
-def _get_min_pad_clearance(mfr: str | None, layers: int, copper: float) -> float | None:
-    """Resolve the manufacturer's minimum silk-to-pad clearance (mm), if defined."""
-    if not mfr:
-        return None
-    try:
-        rules_dict = load_design_rules_from_yaml(mfr)
-    except FileNotFoundError:
-        print(f"Warning: No configuration found for manufacturer '{mfr}'", file=sys.stderr)
-        return None
-    for key in (f"{layers}layer_{int(copper)}oz", f"{layers}layer_1oz"):
-        if key in rules_dict:
-            return rules_dict[key].min_silk_to_pad_clearance_mm
-    return next(iter(rules_dict.values())).min_silk_to_pad_clearance_mm
+from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
+from kicad_tools.manufacturers.base import DesignRules
 
 
 def _resolve_design_rules(mfr: str | None, layers: int, copper: float) -> DesignRules | None:
-    """Resolve the whole manufacturer ruleset for the shared legalisation pass.
-
-    Issue #9797: ``legalize_silk`` reads every silk value (width, height,
-    pad and hole clearance, solder-mask margin) from one :class:`DesignRules`
-    instead of the per-value lookups above.
-    """
     if not mfr:
         return None
     try:
-        rules_dict = load_design_rules_from_yaml(mfr)
-    except FileNotFoundError:
+        profile = get_profile(mfr)
+    except ValueError:
+        print(f"Warning: No configuration found for manufacturer '{mfr}'", file=sys.stderr)
         return None
-    for key in (f"{layers}layer_{int(copper)}oz", f"{layers}layer_1oz"):
-        if key in rules_dict:
-            return rules_dict[key]
-    return next(iter(rules_dict.values()))
+    return profile.get_design_rules(layers=layers, copper_oz=copper)
+
+
+def _get_min_width(
+    mfr: str | None, layers: int, copper: float, explicit_width: float | None
+) -> float:
+    if explicit_width is not None:
+        return explicit_width
+    rules = _resolve_design_rules(mfr, layers, copper)
+    return rules.min_silkscreen_width_mm if rules else 0.15
+
+
+def _get_min_height(
+    mfr: str | None, layers: int, copper: float, explicit_height: float | None
+) -> float:
+    if explicit_height is not None:
+        return explicit_height
+    rules = _resolve_design_rules(mfr, layers, copper)
+    return rules.min_silkscreen_height_mm if rules else 1.0
+
+
+def _get_min_pad_clearance(mfr: str | None, layers: int, copper: float) -> float | None:
+    rules = _resolve_design_rules(mfr, layers, copper)
+    return rules.min_silk_to_pad_clearance_mm if rules else None
 
 
 def _print_results(

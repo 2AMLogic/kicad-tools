@@ -6034,6 +6034,8 @@ def _add_parts_parser(subparsers) -> None:
 
 def _add_datasheet_parser(subparsers) -> None:
     """Add datasheet subcommand parser with its subcommands."""
+    from .commands.datasheet import add_package_parsers
+
     datasheet_parser = subparsers.add_parser(
         "datasheet", help="Datasheet search, download, and PDF parsing"
     )
@@ -6102,6 +6104,8 @@ def _add_datasheet_parser(subparsers) -> None:
     ds_info = datasheet_subparsers.add_parser("info", help="Show PDF information")
     ds_info.add_argument("pdf", help="Path to PDF file")
     ds_info.add_argument("--format", choices=["text", "json"], default="text")
+
+    add_package_parsers(datasheet_subparsers)
 
 
 def _add_decisions_parser(subparsers) -> None:
