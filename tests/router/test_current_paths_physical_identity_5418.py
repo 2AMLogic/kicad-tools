@@ -13,7 +13,19 @@ from kicad_tools.router.current_paths import (
 )
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schema.physical_identity import footprint_keys
+from kicad_tools.validate.connectivity import ConnectivityValidator
+from kicad_tools.validate.copper_contact import build_copper_contact_graph
 from tests.test_current_paths import _add_pad_footprint
+
+
+def _graph_for_net(pcb, name):
+    net = pcb.get_net_by_name(name)
+    assert net is not None
+
+    def physical_contacts():
+        return build_copper_contact_graph(ConnectivityValidator(pcb), net.number, with_bonds=True)
+
+    return _build_graph(pcb.segments, pcb, name, physical_contacts=physical_contacts)
 
 
 @pytest.mark.parametrize("ref", ["DUP", ""])
@@ -34,7 +46,7 @@ def test_same_net_duplicate_footprints_keep_distinct_contacts(ref, uuid):
     pcb.add_trace((10, 20), (19.7, 20), width=0.2, layer="F.Cu", net="N")
     pcb.add_trace((20.3, 20), (30, 20), width=0.2, layer="F.Cu", net="N")
     pcb.add_trace((40, 20), (45, 20), width=0.2, layer="F.Cu", net="N")
-    graph = _build_graph(pcb.segments, pcb, "N")
+    graph = _graph_for_net(pcb, "N")
     keys = footprint_keys(pcb.footprints)
     assert len(graph.pads) == 4
     assert graph.pads[(keys[2], "1", 0)] != graph.pads[(keys[3], "1", 0)]
@@ -58,7 +70,7 @@ def test_graph_retains_each_same_number_shape_without_inventing_copper_between_t
     fp.pads.append(second)
     pcb.add_trace((10, 20), (5, 20), width=0.2, layer="F.Cu", net="N")
     pcb.add_trace((20, 20), (25, 20), width=0.2, layer="F.Cu", net="N")
-    graph = _build_graph(pcb.segments, pcb, "N")
+    graph = _graph_for_net(pcb, "N")
     assert len(graph.pads) == 2
     assert graph.pads[("J1", "1", 0)] != graph.pads[("J1", "1", 1)]
     assert not _pad_covers(pcb, "J1", "1", (10, 20))

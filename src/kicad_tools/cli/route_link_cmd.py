@@ -29,9 +29,14 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kicad_tools.manufacturers import DesignRules
+    from kicad_tools.router.current_paths import CurrentPathSpec
 
 from .format_options import FORMAT_JSON, emit_json, stdout_to_stderr_when
 
@@ -79,6 +84,17 @@ class LinkSpec:
     #: ``--net-clearance NET=MM`` entries that follow this ``--link`` (Issue #8546).
     net_clearance: list[str] = field(default_factory=list)
     text: str = field(default="", compare=False)
+    current_path: str | None = None
+    branch: _BranchSizing | None = field(default=None, compare=False)
+
+
+@dataclass
+class _BranchSizing:
+    spec: CurrentPathSpec
+    design_rules: DesignRules
+    widths: dict[str, float]
+    drill: float
+    diameter: float
 
 
 def _parse_xy(text: str) -> tuple[float, float]:
@@ -147,6 +163,16 @@ class ViaAtAction(_ModifierAction):
             link.via_at = _parse_xy(values)
         except LinkSpecError as exc:
             parser.error(f"{option_string}: {exc}")
+
+
+class CurrentPathAction(_ModifierAction):
+    """Select the current-carrying branch for the preceding link."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        link = self._last(parser, namespace, option_string)
+        if link.current_path is not None:
+            parser.error("only one --current-path may be selected per --link")
+        link.current_path = values
 
 
 class LinkLayersAction(_ModifierAction):
@@ -241,6 +267,21 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("-o", "--output", help="Write to this file instead of editing in place")
     parser.add_argument("--trace-width", type=float, default=0.2, help="Track width (mm)")
+    parser.add_argument(
+        "--current-path",
+        action=CurrentPathAction,
+        metavar="NAME",
+        help="Size the preceding link for this declared branch.",
+    )
+    parser.add_argument(
+        "--current-paths",
+        type=Path,
+        metavar="JSON",
+        help="Read branch declarations from this file (default: discover beside board).",
+    )
+    parser.add_argument(
+        "--copper", metavar="OZ", help="Branch copper weight override, e.g. 1 or outer=2,inner=0.5."
+    )
     parser.add_argument("--clearance", type=float, default=0.2, help="Clearance floor (mm)")
     parser.add_argument("--via-diameter", type=float, default=0.6, help="Via diameter (mm)")
     parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill (mm)")
@@ -362,6 +403,79 @@ def _authored_floors(args: argparse.Namespace) -> dict[str, float]:
     return found
 
 
+def _ceil_dimension(mm: float) -> float:
+    """Round up to a board-writer increment, preserving exact hundredths."""
+    if not math.isfinite(mm):
+        raise ValueError("branch copper dimensions must be finite")
+    rounded = round(mm, 2)
+    return rounded if rounded >= mm else round(rounded + 0.01, 2)
+
+
+def _resolve_branches(args: argparse.Namespace, pcb: Any, links: list[LinkSpec]) -> None:
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.physics.ampacity import required_widths_for, via_drill_for_current
+    from kicad_tools.physics.stackup import stackup_copper_oz
+    from kicad_tools.router.current_paths import (
+        discover_current_paths_sidecar,
+        load_current_path_specs,
+    )
+
+    from .copper_weight import parse_copper_weight_arg
+
+    path = args.current_paths or discover_current_paths_sidecar(args.pcb)
+    if path is None:
+        raise LinkSpecError(
+            "--current-path needs a current_paths.json sidecar or --current-paths FILE"
+        )
+    try:
+        specs = load_current_path_specs(path)
+        outer, inner = stackup_copper_oz(pcb)
+        cli_outer, cli_inner = (
+            parse_copper_weight_arg(args.copper) if args.copper is not None else (None, None)
+        )
+        outer = cli_outer if cli_outer is not None else outer
+        inner = cli_inner if cli_inner is not None else inner
+        if not all(math.isfinite(x) for x in (outer, inner) if x is not None):
+            raise ValueError("copper weights must be finite")
+        # Use the same manufacturer defaults as check for undeclared layers.
+        profile = get_profile("jlcpcb").get_design_rules(
+            len(pcb.copper_layers), outer or 1.0, strict=False
+        )
+        design = replace(
+            profile,
+            outer_copper_oz=outer or profile.outer_copper_oz,
+            inner_copper_oz=inner or profile.inner_copper_oz,
+        )
+        for link in links:
+            if link.current_path is None:
+                continue
+            matches = [s for s in specs if s.name == link.current_path]
+            if not matches:
+                raise ValueError(f"unknown current path {link.current_path!r}")
+            if len(matches) != 1:
+                raise ValueError(f"ambiguous current path {link.current_path!r}")
+            branch = matches[0]
+            if branch.net_name != link.net:
+                raise ValueError(
+                    f"current path {branch.name!r} is on {branch.net_name!r}, link is on {link.net!r}"
+                )
+            amps = branch.thermal_design_current().current_a
+            if not math.isfinite(amps):
+                raise ValueError(f"current path {branch.name!r} requires a finite current")
+            required = required_widths_for(pcb, amps, design)
+            # The board writer rounds dimensions to hundredths of a millimetre.
+            # Size the search for the actual copper and preserve the annular ring.
+            widths = {
+                layer: _ceil_dimension(max(args.trace_width, mm)) for layer, mm in required.items()
+            }
+            drill = _ceil_dimension(max(args.via_drill, via_drill_for_current(amps)))
+            ring = max(profile.min_annular_ring_mm, (args.via_diameter - args.via_drill) / 2)
+            diameter = _ceil_dimension(max(args.via_diameter, round(drill + 2 * ring, 12)))
+            link.branch = _BranchSizing(branch, design, widths, drill, diameter)
+    except (OSError, ValueError, OverflowError, AttributeError) as exc:
+        raise LinkSpecError(f"--current-path: {exc}") from exc
+
+
 def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpec) -> Any:
     """``base`` plus this link's voltage-map-derived and ``--net-clearance`` floors.
 
@@ -371,6 +485,13 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
     """
     required = getattr(args, "_pairwise_required", None)
     voltages = getattr(args, "_pairwise_voltages", None)
+    if spec.branch is not None:
+        base = replace(
+            base,
+            width_by_layer=spec.branch.widths,
+            via_drill=spec.branch.drill,
+            via_size=spec.branch.diameter,
+        )
     args._pcb_for_floors = pcb
     # Project rules (netclass + .kicad_dru) are resolved per pair by
     # ``board_rules``; authored netclass floors would override a lower pair exception.
@@ -522,7 +643,7 @@ def _commit_to_model(model: Any, route: Any, net_number: int) -> None:
 
     for x1, y1, x2, y2, layer in route.segments:
         line = LineString([(x1, y1), (x2, y2)]) if (x1, y1) != (x2, y2) else Point(x1, y1)
-        model.items.append(_Item(net_number, {layer: line.buffer(route.width / 2)}))
+        model.items.append(_Item(net_number, {layer: line.buffer(route.width_for(layer) / 2)}))
     for vx, vy in route.vias:
         disk = Point(vx, vy).buffer(route.via_size / 2)
         model.items.append(_Item(net_number, dict.fromkeys(model.copper, disk)))
@@ -552,6 +673,13 @@ def _route_one(
         "net": spec.net,
         "routable": False,
     }
+    if spec.branch is not None:
+        entry.update(
+            current_path=spec.current_path,
+            widths_mm=spec.branch.widths,
+            via_diameter_mm=rules.via_size,
+            via_drill_mm=rules.via_drill,
+        )
     net_number = net_ids.get(spec.net)
     if net_number is None:
         entry["reason"] = f"net {spec.net!r} not on the board"
@@ -582,9 +710,22 @@ def _route_one(
         if site_why is not None:
             entry["reason"] = site_why
             return entry, None
+        failure: dict[str, Any] = {}
         route = route_link_via(
-            pcb, net_number, spec.net, ta, tb, site, rules, model=model, allowed_layers=allowed
+            pcb,
+            net_number,
+            spec.net,
+            ta,
+            tb,
+            site,
+            rules,
+            model=model,
+            allowed_layers=allowed,
+            failure=failure,
         )
+        if failure:
+            entry.update(failure)
+            return entry, None
     else:
         route = route_link(
             pcb, net_number, spec.net, ta, tb, rules, model=model, allowed_layers=allowed
@@ -603,7 +744,7 @@ def _route_one(
     return entry, route
 
 
-def _drc_finding_counts(pcb_path: Path) -> Any:
+def _drc_finding_counts(pcb_path: Path, opens: Counter[str] | None = None) -> Any:
     """Counter of ``(type, severity, items)`` DRC findings for ``pcb_path``.
 
     Runs kicad-cli on the pinned evidence toolchain (the caller holds
@@ -611,7 +752,8 @@ def _drc_finding_counts(pcb_path: Path) -> Any:
     """
     import json
     import tempfile
-    from collections import Counter
+
+    from kicad_tools.drc.report import load_native_connectivity_report
 
     from .kicad_toolchain import KiCadEnvironmentError, require_library_environment
     from .runner import run_drc
@@ -624,6 +766,11 @@ def _drc_finding_counts(pcb_path: Path) -> Any:
         if not result.success or not report.is_file():
             raise RuntimeError((result.stderr or "kicad-cli DRC failed").strip())
         data = json.loads(report.read_text())
+        if opens is not None:
+            for finding in load_native_connectivity_report(report).connectivity_items():
+                if len(finding.nets) != 1:
+                    raise ValueError("cannot identify net of a refilled-board missing connection")
+                opens[finding.nets[0]] += 1
     try:
         require_library_environment(data, source=f"native DRC of {pcb_path.name}")
     except KiCadEnvironmentError as exc:
@@ -789,9 +936,12 @@ def _new_census_failures(
 
 
 def _gate_state(
-    pcb_path: Path, args: argparse.Namespace
+    pcb_path: Path, args: argparse.Namespace, *, opens: Counter[str] | None = None
 ) -> tuple[Any, dict[tuple[str, str, str, str], float] | None]:
-    return _drc_finding_counts(pcb_path), _census_failures(pcb_path, args)
+    counts = (
+        _drc_finding_counts(pcb_path) if opens is None else _drc_finding_counts(pcb_path, opens)
+    )
+    return counts, _census_failures(pcb_path, args)
 
 
 def _refuse(as_json: bool, message: str) -> int:
@@ -820,13 +970,21 @@ def _commit_links(
     Returns ``(written path | None, refusal message | None)``.
     """
     created = out_path != pcb_path and not out_path.exists()
+    previous = (
+        out_path.read_bytes()
+        if out_path != pcb_path and not created and any(link.branch for link in links)
+        else None
+    )
     if out_path != pcb_path:
         out_path.write_bytes(pcb_path.read_bytes())
     staged = _stage_project_files(pcb_path, out_path)
     try:
-        return _commit_links_gated(
+        written, refusal = _commit_links_gated(
             args, links, pcb, model, rules, origin, net_ids, pcb_path, out_path, entries, created
         )
+        if previous is not None and written is None:
+            out_path.write_bytes(previous)
+        return written, refusal
     finally:
         for f in staged:
             f.unlink(missing_ok=True)
@@ -850,6 +1008,51 @@ def _stage_project_files(pcb_path: Path, out_path: Path) -> list[Path]:
     return staged
 
 
+def _check_branch_candidate(
+    path: Path,
+    project_path: Path,
+    link: LinkSpec,
+    accepted: dict[str, _BranchSizing],
+    before: Counter[str],
+    after: Counter[str],
+) -> tuple[str | None, str]:
+    from kicad_tools.pcb.reinforcement_sidecar import load_wires_if_present
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.checker import DRCChecker
+
+    # Ratsnest anchors can move after a refill. Compare counts by net.
+    new_opens = after - before
+    if new_opens:
+        return "connectivity", "new refilled-board missing connections on " + ", ".join(new_opens)
+    if link.branch and after[link.net] and after[link.net] >= before[link.net]:
+        return "connectivity", (
+            f"refilled board still has {after[link.net]} missing connection(s) on {link.net}"
+        )
+
+    # A later link on the same net may change a previously accepted path.
+    branches = {name: b for name, b in accepted.items() if b.spec.net_name == link.net}
+    if link.branch:
+        branches[link.branch.spec.name] = link.branch
+    if branches:
+        relevant = list(branches.values())
+        pcb = PCB.load(str(path))
+        design = relevant[0].design_rules
+        checker = DRCChecker(
+            pcb,
+            layers=len(pcb.copper_layers),
+            copper_oz=design.outer_copper_oz or 1.0,
+            copper_oz_outer=design.outer_copper_oz,
+            copper_oz_inner=design.inner_copper_oz,
+            strict_copper=False,
+            current_path_specs=[b.spec for b in relevant],
+            reinforcement_wires=load_wires_if_present(project_path),
+        )
+        result = checker.check_path_ampacity()
+        if result.error_count:
+            return "path_ampacity", "; ".join(v.message for v in result.violations if v.is_error)
+    return None, ""
+
+
 def _commit_links_gated(
     args: argparse.Namespace,
     links: list[LinkSpec],
@@ -869,14 +1072,26 @@ def _commit_links_gated(
         route_clears_floors,
     )
 
+    check_connectivity = any(link.branch is not None for link in links)
+
+    def read_state() -> tuple[Any, Any, Counter[str]]:
+        opens: Counter[str] = Counter()
+        state = (
+            _gate_state(out_path, args, opens=opens)
+            if check_connectivity
+            else _gate_state(out_path, args)
+        )
+        return state[0], state[1], opens
+
     try:
-        base_drc, base_census = _gate_state(out_path, args)
+        base_drc, base_census, base_opens = read_state()
     except Exception as exc:  # the gate cannot run: refuse, leave nothing behind
         if created:
             out_path.unlink(missing_ok=True)
         return None, f"cannot establish the DRC/creepage baseline: {exc}"
 
     n_committed = 0
+    accepted_branches: dict[str, _BranchSizing] = {}
     for spec in links:
         entry, route = _route_one(args, pcb, model, rules, spec, origin, net_ids)
         entry["status"] = "unroutable"
@@ -895,7 +1110,9 @@ def _commit_links_gated(
         # not know --net-clearance, so re-check it against the per-net floors.
         link_rules = _rules_for_link(args, pcb, rules, spec)
         if (
-            link_rules.clearance_by_net or link_rules.board_rules is not None
+            link_rules.clearance_by_net
+            or link_rules.board_rules is not None
+            or spec.branch is not None
         ) and not route_clears_floors(collapsed, model, link_rules):
             collapsed = route
         candidates = [collapsed, route] if collapsed.segments != route.segments else [route]
@@ -904,7 +1121,7 @@ def _commit_links_gated(
             out_path.write_bytes(snapshot)
             try:
                 append_link_routes(out_path, [candidate], origin)
-                drc, census = _gate_state(out_path, args)
+                drc, census, opens = read_state()
                 new_drc = drc - base_drc
                 if new_drc:
                     failed = "drc"
@@ -925,6 +1142,10 @@ def _commit_links_gated(
                             f"{len(new_pairs)} new/worse failing creepage pair(s): "
                             + ", ".join(f"{a}/{b} ({rel})" for a, b, _k, rel in new_pairs)
                         )
+                if failed is None and (spec.branch or accepted_branches):
+                    failed, reason = _check_branch_candidate(
+                        out_path, pcb_path, spec, accepted_branches, base_opens, opens
+                    )
             except Exception as exc:
                 failed = "gate-error"
                 reason = f"gate could not run: {exc}"
@@ -936,7 +1157,9 @@ def _commit_links_gated(
             entry.update(routable=False, status="rolled-back", failed_check=failed, reason=reason)
             continue
         entry["status"] = "committed"
-        base_drc, base_census = drc, census
+        base_drc, base_census, base_opens = drc, census, opens
+        if spec.branch is not None:
+            accepted_branches[spec.branch.spec.name] = spec.branch
         _commit_to_model(model, route, net_ids[spec.net])
         n_committed += 1
     if not n_committed and created:
@@ -965,22 +1188,26 @@ def run_route_link_command(args: argparse.Namespace) -> int:
     if not pcb_path.is_file():
         return fail(f"board not found: {pcb_path}")
 
-    with stdout_to_stderr_when(as_json):
-        from kicad_tools.router.link_router import _build_model
-        from kicad_tools.schema.pcb import PCB
+    try:
+        with stdout_to_stderr_when(as_json):
+            from kicad_tools.router.link_router import _build_model
+            from kicad_tools.schema.pcb import PCB
 
-        pcb = PCB.load(str(pcb_path))
-        origin = pcb.board_origin
-        from .route_cmd import _preload_voltage_map
+            pcb = PCB.load(str(pcb_path))
+            origin = pcb.board_origin
+            from .route_cmd import _preload_voltage_map
 
-        if _preload_voltage_map(args) != 0:
-            return 1
-        try:
+            if _preload_voltage_map(args) != 0:
+                return 1
+            if any(link.current_path is not None for link in links):
+                _resolve_branches(args, pcb, links)
             rules = _rules_from_args(args, pcb)
             for spec in links:  # validate link-scoped --net-clearance up front
                 _rules_for_link(args, pcb, rules, spec)
-        except LinkSpecError as exc:
-            return fail(str(exc))
+    except LinkSpecError as exc:
+        return fail(str(exc))
+
+    with stdout_to_stderr_when(as_json):
         model = _build_model(pcb)
         net_ids = {net.name: num for num, net in pcb.nets.items() if net.name}
 
@@ -1034,6 +1261,11 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                     f"  {verb}: {e['link']}  {e['length_mm']:.3f} mm, {e['vias']} via(s), "
                     f"layers {','.join(e['layers'])}"
                 )
+                if "current_path" in e:
+                    sizes = ", ".join(
+                        f"{layer} {e['widths_mm'][layer]:.2f} mm" for layer in e["layers"]
+                    )
+                    print(f"    {e['current_path']}: {sizes}")
             else:
                 print(f"  UNROUTABLE: {e['link']}: {e['reason']}")
                 b = e.get("blocker")
