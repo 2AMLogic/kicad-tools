@@ -663,6 +663,23 @@ def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_co
     assert _end(board, "trk-a")[1] == (100.7, 100.3)
 
 
+def test_guard_rejects_unattributed_mask_warning_at_proposal(tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    target = _finding("trk-a")
+    warning = replace(target, items=["unrelated-opening", "zone-uuid"], severity=Severity.WARNING)
+    _run(
+        monkeypatch,
+        board,
+        [_report(target), _report(warning), _report()],
+        extra=["--no-new-warnings"],
+    )
+    assert "new_mask_finding" in capsys.readouterr().out
+    assert board.read_bytes() == original
+
+
 def test_a_new_mask_warning_on_the_moved_conductor_reverts_the_move(tmp_path, monkeypatch, capsys):
     board = _board(tmp_path, ENTRY)
     before = _report(_finding("trk-a"))

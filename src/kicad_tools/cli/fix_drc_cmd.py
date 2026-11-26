@@ -2066,7 +2066,7 @@ def _verify_mask_actions(
         if after is not None
         else set()
     )
-    unattributed = guard_baseline is not None and any(
+    unattributed_mask_finding = guard_baseline is not None and any(
         not any(_mask_action_touches(act, set(key)) for act in result.actions) for key in new_keys
     )
     touched = {u for key in new_keys for u in key}
@@ -2088,10 +2088,10 @@ def _verify_mask_actions(
     disconnected.update(lost_contacts or ())
     # A refill can split another net's pour. No action on that net can be
     # individually undone, so discard the private candidate as a whole.
-    unattributed = disconnected - {act.net_name for act in result.actions}
-    if unattributed:
+    disconnected_other_nets = disconnected - {act.net_name for act in result.actions}
+    if disconnected_other_nets:
         raise _MaskPadConnectionLost(
-            f"repair disconnected copper on {', '.join(sorted(unattributed))}"
+            f"repair disconnected copper on {', '.join(sorted(disconnected_other_nets))}"
         )
     keep = []
     revert = []
@@ -2102,7 +2102,7 @@ def _verify_mask_actions(
             revert.append((act, "pad_connection_lost"))
         elif act.uuid in persisting:
             revert.append((act, "finding_not_cleared"))
-        elif unattributed or _mask_action_touches(act, touched):
+        elif unattributed_mask_finding or _mask_action_touches(act, touched):
             revert.append((act, "new_mask_finding"))
         elif act.uuid in gaps.missed:
             revert.append((act, "mask_margin_not_met"))
