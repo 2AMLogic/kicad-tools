@@ -105,9 +105,9 @@ class TestClassesAndAssignmentsWritten:
         assert classes["Ground"]["via_diameter"] == 0.8
         assert classes["Power"]["track_width"] == 0.5
         assert classes["Digital"]["track_width"] == 0.2
-        # AC1: exact-name netclass_assignments (schema 3 strings), no patterns.
+        # AC1: exact-name netclass_assignments (schema 3 strings), with matching schematic patterns.
         assert _assignments(project) == {"+3V3": "Power", "GND": "Ground", "SDA": "Digital"}
-        assert _patterns(project) == []
+        assert {r["pattern"] for r in _patterns(project)} >= {"GND", "SDA"}
         # The Default class is untouched.
         assert classes["Default"]["track_width"] == 0.25
 
@@ -251,11 +251,11 @@ class TestMetacharacterNameControls:
 
         project = _load(pro)
         # 1. diagnose_netclasses verifies structural/syntax support & membership:
-        #    zero unsupported_pattern diagnostics, zero patterns added, and only
+        #    zero unsupported_pattern diagnostics and only
         #    target_net appears in assignments.
         report = diagnose_netclasses(project, board_nets)
         assert report["diagnostics"] == []
-        assert report["patterns"] == []
+        assert [r["matches"] for r in report["patterns"]] == [[target_net]]
         assert [
             (row["net"], row["target"], row["status"], row["net_present"])
             for row in report["assignments"]
@@ -334,6 +334,52 @@ class TestMetacharacterNameControls:
         assert clearance_violations == []
 
 
+@pytest.mark.parametrize("schema_version", [3, 5])
+def test_schematic_export_reads_router_classes(tmp_path, schema_version):
+    import subprocess
+    import xml.etree.ElementTree as ET
+
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    cli = find_kicad_cli()
+    if not cli:
+        pytest.skip("kicad-cli not installed")
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "boards/01-voltage-divider/output/voltage_divider.kicad_sch"
+    )
+    pcb = _write_pcb(tmp_path, ["GND", "/S.D+", "VIN"])
+    sch = pcb.with_suffix(".kicad_sch")
+    sch.write_text(fixture.read_text().replace('(label "VOUT"', '(label "S.D+"'))
+    _write_project(tmp_path, _minimal_project(schema_version=schema_version))
+    route_cmd._write_netclasses_to_project(pcb, {"GND": GROUND, "/S.D+": PROBE})
+    xml = tmp_path / "nets.xml"
+    subprocess.run(
+        [str(cli), "sch", "export", "netlist", "--format", "kicadxml", "-o", str(xml), str(sch)],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    assert {net.get("name"): net.get("class") for net in ET.parse(xml).findall(".//nets/net")} == {
+        "GND": "Ground",
+        "/S.D+": "Probe",
+        "VIN": "Default",
+    }
+
+
+def test_literal_pattern_avoids_encoded_alias_and_final_newline():
+    from kicad_tools.core.netclass_diagnostics import literal_netclass_pattern
+
+    for net in ("A.B", "SDA", "D?", "USB*", "N(α)", "N" + chr(0x1F642)):
+        names = {net, net + "\n"}
+        alias = literal_netclass_pattern(net, names)
+        names.update([alias, alias + "\n"])
+        pattern = literal_netclass_pattern(net, names)
+        project = _minimal_project(schema_version=5)
+        project["net_settings"]["netclass_patterns"] = [{"pattern": pattern, "netclass": "Default"}]
+        assert diagnose_netclasses(project, names)["patterns"][0]["matches"] == [net]
+
+
 class TestHandAuthoredContentPreserved:
     def test_authored_class_merged_not_replaced(self, tmp_path: Path):
         pcb = _write_pcb(tmp_path, ["SDA"])
@@ -374,7 +420,10 @@ class TestHandAuthoredContentPreserved:
         saved = _load(pro)
         # Authored wildcard pattern retains its KiCad behaviour across AUX1/AUX2,
         # with no competing netclass_assignments overriding it.
-        assert _patterns(saved) == [{"netclass": "Audio", "pattern": "AUX*"}]
+        assert _patterns(saved) == [
+            {"netclass": "Audio", "pattern": "AUX*"},
+            {"netclass": "Ground", "pattern": "GND"},
+        ]
         assert _assignments(saved) == {"GND": "Ground"}
         resolved = resolve_project_clearances(saved, ["AUX1", "AUX2", "GND"])
         assert resolved["AUX1"].source_class == "Audio"
@@ -456,7 +505,10 @@ class TestHandAuthoredContentPreserved:
 
         saved = _load(pro)
         assert _assignments(saved) == {"GND": "Ground"}
-        assert _patterns(saved) == [{"netclass": "EditorSignal", "pattern": "SDA"}]
+        assert _patterns(saved) == [
+            {"netclass": "EditorSignal", "pattern": "SDA"},
+            {"netclass": "Ground", "pattern": "GND"},
+        ]
         resolved = resolve_project_clearances(saved, ["SDA", "GND"])
         assert resolved["SDA"].source_class == "EditorSignal"
 
@@ -500,6 +552,29 @@ class TestIdempotency:
 
 
 class TestNonFatalDegradation:
+    @pytest.mark.parametrize(
+        ("path", "value"),
+        [
+            (("net_settings", "netclass_patterns"), "SDA*"),
+            (("net_settings",), []),
+            (("meta", "kct_netclass_patterns"), None),
+        ],
+    )
+    def test_malformed_reroute_warns_and_preserves_project(self, tmp_path, capsys, path, value):
+        pcb = _write_pcb(tmp_path, ["SDA"])
+        pro = _write_project(tmp_path, _minimal_project())
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": PROBE}, quiet=True)
+        project = _load(pro)
+        target = project if len(path) == 1 else project[path[0]]
+        target[path[-1]] = value
+        _write_project(tmp_path, project)
+        before = pro.read_bytes()
+
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": PROBE})
+
+        assert "cannot be evaluated safely" in capsys.readouterr().out
+        assert pro.read_bytes() == before
+
     def test_missing_project_is_a_warning(self, tmp_path: Path, capsys):
         pcb = _write_pcb(tmp_path, ["GND"])
         # No .kicad_pro beside the board.
@@ -590,6 +665,34 @@ class TestKctStampInterop:
 
 
 class TestRunPostRouteDrcIntegration:
+    @pytest.mark.parametrize("schema_version", [3, 5])
+    def test_reroute_preserves_class_of_edited_pattern(self, tmp_path, schema_version):
+        pcb = _write_pcb(tmp_path, ["SDA", "SDA1"])
+        pro = _write_project(tmp_path, _minimal_project(schema_version=schema_version))
+
+        def reroute():
+            route_cmd.run_post_route_drc(
+                output_path=pcb,
+                manufacturer="jlcpcb",
+                layers=2,
+                net_class_map={"SDA": PROBE},
+                time_left=20.0,
+                drc_cost_estimate=40.0,
+            )
+
+        reroute()
+        edited = _load(pro)
+        _patterns(edited)[0]["pattern"] = "SDA*"
+        _write_project(tmp_path, edited)
+        reroute()
+
+        saved = _load(pro)
+        assert _patterns(saved) == [{"netclass": "Probe", "pattern": "SDA*"}]
+        resolved = resolve_project_clearances(saved, ["SDA", "SDA1"])
+        for net in ("SDA", "SDA1"):
+            assert resolved[net].source_class == "Probe"
+            assert resolved[net].clearance == pytest.approx(0.5)
+
     def test_project_netclasses_written_after_constraint_sidecars(self, tmp_path: Path, capsys):
         """The shared post-route DRC entry (all three route flows) declares
         the classes in the project, after -- and into the file produced by
@@ -621,7 +724,7 @@ class TestRunPostRouteDrcIntegration:
             "GND": "Ground",
             "SDA": "Digital",
         }
-        assert _patterns(project) == []
+        assert {r["pattern"] for r in _patterns(project)} >= {"GND", "SDA"}
         resolved = resolve_project_clearances(project, ["GND", "+3V3", "SDA", "A.B", "AXB"])
         assert resolved["A.B"].source_class == "Probe"
         assert resolved["AXB"].source_class == "Default"
