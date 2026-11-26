@@ -473,7 +473,13 @@ it finds every recorded copy segment on the board. Re-running replaces a wire wi
 keeps other nets' wires and never duplicates; output is sorted and has no
 timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
 embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
-[--format json]` prints it read-only from the sidecar.
+[--format json]` prints it read-only from the sidecar. An entry of `wires` that
+is not a JSON object (a hand-edited `null`, number, string, array or boolean)
+makes every pass that reads the list as records -- one that records wires,
+`--clear`, `--replace`, `--adopt`, and `--list-wires` in text or with `--net`
+-- exit 1 with `<sidecar>: wires[<i>] is <type>, not a JSON object` and write
+nothing, the `-o` output board included; `--list-wires --format json` without
+`--net` still prints the file as it stands (#10401).
 
 `kct pcb reinforce BOARD --adopt [--net NET] [--dry-run]` records wires that are
 already on the board (e.g. hand-adjusted after a Gerber review) without moving
