@@ -1034,6 +1034,8 @@ class ReadinessOptions:
     # the staged candidate cannot see a spec above ``board_dir``.
     bom_spec_file: Path | None = None
     bom_spec_error: str | None = None
+    # In-project declaration that selected the implicit schematic, staged with its inputs.
+    schematic_spec: Path | None = None
     # The ORIGINAL board directory the spec lookup started from (#8764); the
     # staged candidate's ``board_dir`` is a temp dir deleted when the run ends.
     bom_spec_searched: Path | None = None
@@ -1199,15 +1201,21 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         )
 
     schematic: Path | None
+    schematic_spec = None
     if args.schematic:
         schematic = Path(args.schematic).resolve()
     else:
         from kicad_tools.sync.discover import (
-            resolve_schematic_for_pcb,
+            SOURCE_PROJECT_KCT,
+            project_spec_for_pcb,
+            resolve_schematic_with_spec,
             unresolved_schematic_candidates,
         )
 
-        schematic = resolve_schematic_for_pcb(pcb)
+        spec = project_spec_for_pcb(pcb)
+        schematic, source = resolve_schematic_with_spec(pcb, spec)
+        if source == SOURCE_PROJECT_KCT and spec is not None:
+            schematic_spec = spec.resolve()
         if schematic is None:
             candidates = unresolved_schematic_candidates(pcb)
             if len(candidates) > 1:
@@ -1234,6 +1242,10 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
                 f"--project-root {project_root} must contain the declared output root {output_root}"
             )
     boundary = project_root or board_dir.resolve()
+    if schematic_spec is not None and not schematic_spec.is_relative_to(boundary):
+        if project_root is not None:
+            return None, _outside_root_message(str(schematic_spec), "schematic declaration", True)
+        schematic_spec = None  # Board-local receipts only track in-board declarations.
     if schematic is not None and not schematic.resolve().is_relative_to(boundary):
         return None, _outside_root_message(str(schematic), "schematic", project_root is not None)
     if schematic is not None and not schematic.is_file():
@@ -1341,6 +1353,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             board_dir=board_dir,
             pcb=pcb,
             schematic=schematic,
+            schematic_spec=schematic_spec,
             project=project,
             manufacturer=manufacturer,
             mode="pcb_only" if args.pcb_only else "assembly",
@@ -2919,7 +2932,10 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
 def _external_dependencies(options: ReadinessOptions) -> list[Path]:
     """Collected files that live outside ``board_dir`` but inside the project root."""
     board = options.board_dir.resolve()
-    return [p for p in _required_sources(options) if not p.is_relative_to(board)]
+    sources = set(_required_sources(options))
+    if options.schematic_spec is not None:
+        sources.add(options.schematic_spec)
+    return sorted(p for p in sources if not p.is_relative_to(board))
 
 
 def _archive_layout(options: ReadinessOptions, sources: Sequence[Path]) -> ArchiveLayout:
@@ -4189,6 +4205,7 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         options.project,
         options.net_class_map,
         options.hv_voltage_map,
+        options.schematic_spec,
     ):
         if candidate is not None and candidate.is_file():
             paths.add(candidate.resolve())
@@ -4513,6 +4530,7 @@ def build_report(
     # produced was computed from, so report binding can tell "produced for
     # this PCB" from merely "pinned beside it".
     if options.pcb.is_file():
+        report["source_pcb"] = _rel(options, options.pcb)
         pcb_sha = _sha256_file(options.pcb)
         produced = {
             _rel(options, path): pcb_sha
@@ -4842,6 +4860,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 declared_project_root=candidate_root if options.declared_project_root else None,
                 pcb=candidate / options.pcb.resolve().relative_to(original),
                 schematic=remap(options.schematic),
+                schematic_spec=remap(options.schematic_spec),
                 project=remap(options.project),
                 output_dir=candidate_root / options.output_dir.resolve().relative_to(project_base),
                 output_root=remap(options.output_root),

@@ -87,6 +87,31 @@ class ReadinessLayout:
         return roots[0]
 
 
+def validate_source_pcb(data: dict, pcb: Path, base: Path, output: Path) -> None:
+    """Match the selected board to the editable PCB identified by the producer."""
+    inputs = data["inputs"]
+    selected = pcb.relative_to(base).as_posix()
+    if "source_pcb" in data:
+        source = data["source_pcb"]
+    else:
+        # Older receipts list the two diagnostic copies alongside the design.
+        # Only infer the source when one PCB remains outside the snapshot trees.
+        snapshots = [
+            output / evidence / kind
+            for evidence in ("readiness", "readiness-verification")
+            for kind in ("fill-saved", "fill-refilled")
+        ]
+        candidates = [
+            name
+            for name in inputs
+            if name.endswith(".kicad_pcb")
+            and not any((base / name).is_relative_to(tree) for tree in snapshots)
+        ]
+        source = candidates[0] if len(candidates) == 1 else None
+    if source != selected or selected not in inputs:
+        raise ValueError("Readiness receipt was not produced for this --board")
+
+
 def board_directory_for_pcb(pcb: Path) -> Path:
     """Locate a board's directory for either an editable PCB or a board under output/."""
     return pcb.parent.parent if pcb.parent.name == "output" else pcb.parent
@@ -232,8 +257,8 @@ def read_readiness(board_dir: Path, *, layout: ReadinessLayout | None = None) ->
         if not isinstance(inputs, dict) or not inputs:
             raise ValueError("missing input hashes")
         root = layout.input_base.resolve() if layout is not None else board_dir.resolve()
-        if pcb is not None and pcb.relative_to(root).as_posix() not in inputs:
-            raise ValueError("Readiness receipt was not produced for this board")
+        if pcb is not None:
+            validate_source_pcb(data, pcb, root, report.parent)
         for name, expected in inputs.items():
             path = Path(name)
             if path.is_absolute() or ".." in path.parts or "\\" in name:

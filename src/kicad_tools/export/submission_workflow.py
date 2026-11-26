@@ -55,6 +55,7 @@ from ..cli.board_readiness import (
     ReadinessLayout,
     board_directory_for_pcb,
     declared_readiness_layout,
+    validate_source_pcb,
 )
 from ..parts.jlcpcb_api import JLCCredentials, JLCNoInventorySourceError
 from .submission_plan import (
@@ -349,6 +350,10 @@ def _load_readiness(
     if not isinstance(inputs, dict) or not inputs:
         raise WorkflowError("Readiness receipt has no 'inputs' hash map")
     input_base = layout.input_base if layout is not None else board_dir
+    try:
+        validate_source_pcb(data, board, input_base, generated.parent)
+    except ValueError as exc:
+        raise WorkflowError(str(exc)) from exc
     exempt = (bundle_root / "manifest.json").resolve()
     _rehash_receipt_inputs(input_base, inputs, exempt, "inputs", relative_to="board-relative")
     external = data.get("external_inputs")
@@ -421,6 +426,7 @@ def _check_declared_submission_sources(
                 f"The signed readiness receipt does not cover the selected {role} path and sha256"
             )
     try:
+        validate_source_pcb(record, board, layout.input_base, layout.report.parent)
         root = layout.checked_schematic_root(record)
     except (OSError, ValueError) as exc:
         raise WorkflowError(str(exc)) from exc

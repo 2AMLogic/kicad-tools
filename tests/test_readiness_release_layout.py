@@ -441,3 +441,111 @@ def test_legacy_receipt_with_only_the_parent_requires_fresh_verification(hierarc
         assert read_readiness(board)["status"] == "unverified"
         with pytest.raises(WorkflowError):
             sign_off_bundle(output / "manufacturing", board, "local test", readiness=receipt)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_snapshots_are_evidence_only(tmp_path, monkeypatch, legacy):
+    project = make_project(tmp_path, '[readiness]\noutput_root = "fabrication"\n')
+    nested = project / "boards/controller"
+    nested.mkdir(parents=True)
+    pcb = (project / "kicad").rename(nested / "kicad") / "board.kicad_pcb"
+    pcb.write_text(PCB)
+    sch = project / "schematics/board.kicad_sch"
+    engines = HandoffEngines(
+        pcb.parent, part_numbers={"R1": "C17630"}, tht_refs=(), cpl_refs=("R1",)
+    )
+    for mode in ("--generate", "--verify"):
+        args = [str(pcb), "--mfr", "jlcpcb", "--sch", str(sch), mode]
+        assert readiness_cmd.main(args, engines=engines.bundle()) == 0
+    output = project / "fabrication"
+    bundle = output / "manufacturing"
+    _no_browser(monkeypatch)
+    _stock(monkeypatch, {"C17630": 100})
+    for receipt in (output / "readiness.json", output / "readiness-verification/readiness.json"):
+        data = json.loads(receipt.read_bytes())
+        assert data["source_pcb"] == pcb.relative_to(project).as_posix()
+        if legacy:
+            del data["source_pcb"]
+            receipt.write_text(json.dumps(data))
+        sign_off_bundle(bundle, pcb, "local test", readiness=receipt)
+        assert read_readiness(pcb)["status"] == "ready"
+        manifest = bundle / "manifest.json"
+        before = manifest.read_bytes()
+        snapshots = [
+            project / key
+            for key in data["inputs"]
+            if key.endswith(".kicad_pcb") and project / key != pcb
+        ]
+        assert len(snapshots) == 2
+        for snapshot in snapshots:
+            assert snapshot.read_bytes() == pcb.read_bytes()
+            assert read_readiness(snapshot)["status"] == "unverified"
+            with pytest.raises(WorkflowError, match="not produced for this --board"):
+                sign_off_bundle(bundle, snapshot, "local test", readiness=receipt)
+            assert _submission_preview(bundle, snapshot, sch, tmp_path / "preview") == 2
+            assert not (tmp_path / "preview").exists()
+            assert manifest.read_bytes() == before
+
+
+def test_parent_schematic_declaration_is_freshness_evidence(tmp_path):
+    project = make_project(tmp_path)
+    pcb = project / "kicad/board.kicad_pcb"
+    pcb.write_text(PCB)
+    spec = project / "project.kct"
+    spec.write_text(
+        'kct_version: "1.0"\nproject:\n  name: board\n  artifacts:\n'
+        "    schematic: schematics/board.kicad_sch\n    pcb: kicad/board.kicad_pcb\n"
+    )
+    (project / "schematics/rev_b.kicad_sch").write_text("(kicad_sch rev_b)")
+    engines = HandoffEngines(
+        pcb.parent, part_numbers={"R1": "C17630"}, tht_refs=(), cpl_refs=("R1",)
+    )
+    for mode in ("--generate", "--verify"):
+        assert (
+            readiness_cmd.main([str(pcb), "--mfr", "jlcpcb", mode], engines=engines.bundle()) == 0
+        )
+    output = project / "output"
+    assert read_readiness(pcb)["status"] == "ready"
+    spec.write_text(spec.read_text().replace("schematics/board", "schematics/rev_b"))
+    result = read_readiness(pcb)
+    assert result["status"] == "unverified"
+    assert "project.kct" in str(result["blockers"])
+    manifest = output / "manufacturing/manifest.json"
+    before = manifest.read_bytes()
+    for receipt in (output / "readiness.json", output / "readiness-verification/readiness.json"):
+        assert "project.kct" in json.loads(receipt.read_bytes())["inputs"]
+        with pytest.raises(WorkflowError, match="project.kct"):
+            sign_off_bundle(manifest.parent, pcb, "local test", readiness=receipt)
+        assert manifest.read_bytes() == before
+
+
+def test_ambiguous_legacy_source_requires_fresh_verification(project):
+    output = project / "fabrication"
+    receipt = output / "readiness.json"
+    data = json.loads(receipt.read_bytes())
+    board = project / data.pop("source_pcb")
+    history = project / "history/board.kicad_pcb"
+    shutil.copyfile(board, history)
+    data["inputs"]["history/board.kicad_pcb"] = data["inputs"]["kicad/board.kicad_pcb"]
+    receipt.write_text(json.dumps(data))
+    for selected in (board, history):
+        assert read_readiness(selected)["status"] == "unverified"
+        with pytest.raises(WorkflowError, match="not produced for this --board"):
+            sign_off_bundle(output / "manufacturing", selected, "local test", readiness=receipt)
+
+
+def test_implicit_declaration_must_fit_explicit_source_boundary(tmp_path, capsys):
+    project = make_project(tmp_path, '[readiness]\noutput_root = "kicad/fabrication"\n')
+    pcb = project / "kicad/board.kicad_pcb"
+    sch = pcb.with_suffix(".kicad_sch")
+    sch.write_text("(kicad_sch)")
+    (project / "project.kct").write_text(
+        'kct_version: "1.0"\nproject:\n  name: board\n  artifacts:\n'
+        "    schematic: kicad/board.kicad_sch\n    pcb: kicad/board.kicad_pcb\n"
+    )
+    args = [str(pcb), "--mfr", "jlcpcb", "--generate", "--project-root", str(pcb.parent)]
+    engines = HandoffEngines(pcb.parent)
+    assert readiness_cmd.main(args, engines=engines.bundle()) == 2
+    assert "schematic declaration" in capsys.readouterr().err
+    assert not (pcb.parent / "fabrication").exists()
+    assert readiness_cmd.main([*args, "--sch", str(sch)], engines=engines.bundle()) == 0
