@@ -10,6 +10,7 @@ exec uv run --extra dev --frozen pytest -q -o addopts= --no-cov --timeout=60 \
   tests/test_docs_reachability.py \
   tests/test_diffpair_docs.py \
   tests/test_match_group_docs.py \
+  tests/test_current_paths_docs.py \
   tests/test_agent_skills_package.py::test_repo_copy_matches_package_data \
   tests/test_agent_skills_package.py::test_packaged_text_has_no_demo_board_paths \
   tests/test_kct_skills_consumer_generic.py \

@@ -16,6 +16,69 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-26
 
+- **Issue #10364** (closed): Identify verified reinforcement wire-end holes when reviewing native KiCad dangling-via warnings
+- **PR #10378**: feat: identify verified wire ends in native dangling-via reports
+- **Issue #10479** (closed): Loom role scripts exit 126: config-resolver.sh passes the 208 KB private defaults as a single jq --argjson argument
+- **Issue #10417** (closed): Pin-1 check misses the visible positive mark on stock radial electrolytics
+- **PR #10418**: fix: recognize visible pin-one marks at the rim of radial capacitors
+- **Issue #10461** (closed): create-pr.sh exits 126 on the dispatch host: private Loom defaults exceed the kernel's per-argument limit
+- **Issue #10442** (closed): Lock the radial positive-lead-mark exemption bounds with regression cases, and cite the issue in changelog.d/10411.fixed.md
+- **PR #10453**: test: pin radial lead-mark exemption bounds, fix fragment citation
+- **Issue #10436** (closed): Expose an exact package filter on live and offline parts search
+- **PR #10438**: feat: filter supplier search results by exact catalogue package
+- **Issue #10317** (closed): creepage: support reviewed per-pad-pair exceptions alongside the global same-footprint waiver
+- **PR #10320**: feat: add scoped per-pad-pair creepage exceptions to kct creepage
+- **Issue #10343** (closed): route-link should use conditional KiCad net-pair clearance rules while searching for a path
+- **PR #10344**: fix: respect project copper spacing in route-link search
+- **Issue #10386** (closed): Readiness evidence silently downgrades parts/stock verification when the producing host has no offline catalog
+- **PR #10414**: chore(board01): restore catalog-backed manufacturing evidence
+- **PR #10452**: fix(drc): slide an unclean swapped pad-edge elbow out along the pad lead
+- **Issue #10396** (closed): Document the current-paths sidecar's `cases` key in docs/reference/cli.md
+- **PR #10434**: docs(reference): document the current-paths sidecar's cases key
+- **Issue #9891** (closed): Board 06: repair the seed-42 recipe to reproduce its strict release DRC result
+- **Issue #10420** (closed): Differential skew check treats declared DC power terminals as a POS/NEG signal pair
+- **PR #10423**: Keep DC power terminal pairs out of differential-skew inference
+- **Issue #10294** (closed): Board 06: clear the J1/B2 USB3_TX2+ mask overlap at its connector exit
+- **PR #10298**: fix(board06): clear the USB3_TX2+ connector exit at J1/B2
+- **Issue #10321** (closed): Wire courtyard DRC treats copper-only legs of a partially wire-reinforced current path as fitted wire
+- **PR #10322**: fix: check fitted wire spans on mixed copper and wire paths
+- **Issue #10405** (closed): Bypass distance depends on footprint pad order for regulators with a repeated pin number
+- **PR #10406**: fix: measure bypass distance across repeated pin lands
+- **Issue #10401** (closed): kct pcb reinforce raises a raw traceback on a sidecar entry that is not an object
+- **PR #10439**: fix: refuse non-object entries in the reinforce wire-list sidecar
+- **Issue #10433** (closed): parts search --in-stock returns a live zero-stock charge indicator
+- **PR #10437**: Honor in-stock searches when the supplier returns zero-stock parts
+- **Issue #10345** (closed): Verify copper repairs against each selected operating-state voltage map
+- **PR #10363**: feat: verify mask repairs against named voltage maps
+- **Issue #10411** (closed): Silk overlap flags the two strokes of a radial capacitor positive-lead mark
+- **PR #10415**: fix: recognize radial capacitor positive-lead marks in silk overlap
+- **Issue #10440** (closed): Current-path graph: no test covers an offset via landing together with a bonded-cap joint
+- **Issue #10355** (closed): PCBA export preflight: correlate plated via drills with plotted mask and stencil openings
+- **Issue #10338** (closed): path_ampacity reports an open where a wide trace ends off-centre on a connected via
+- **PR #10339**: Fix false current-path opens at offset via landings
+- **Issue #10357** (closed): Report plated via overlaps with same-face assembly lands in PCBA exports
+- **PR #10403**: feat: add opt-in via land overlap measurement to kct export
+- **Issue #10441** (closed): create-issue.sh fails on this host: config-resolver.sh passes a 208 KB defaults.json as a single jq argument (E2BIG)
+- **Issue #10408** (closed): Readiness fails on a symlinked TMPDIR when staging the selected schematic
+- **PR #10413**: fix(readiness): resolve staging paths when TMPDIR is a symlink
+- **Issue #10404** (closed): fix-drc dry run describes unsupported and skipped candidates as repairable
+- **PR #10407**: fix: report unplanned findings in DRC repair previews
+- **Issue #10384** (closed): Untented via mask apertures ignore the board's declared pad_to_mask_clearance
+- **PR #10392**: fix: expand untented via mask openings by pad_to_mask_clearance
+- **Issue #10398** (closed): Reinforcement courtyard rule reads sidecar records without the isinstance guard its siblings use
+- **PR #10402**: fix: drop non-object entries from the read-only reinforcement sidecar loader
+- **Issue #10387** (closed): Recognize Kelvin sense taps that exit a through via on an inner layer
+- **PR #10400**: fix: recognise Kelvin sense taps leaving a through via on an inner layer
+- **Issue #10284** (closed): Report project DRC settings rewritten by manufacturing export
+- **PR #10286**: Report project DRC settings changed by manufacturing export
+- **Issue #10334** (closed): Hierarchical net names are qualified only on collision, so an unrelated sheet's label renames a net
+- **PR #10373**: fix: qualify sheet-local net names independently of sibling sheets
+- **Issue #10368** (closed): Summarize nominal Gerber mask exposure separately from near-pad fabrication findings
+- **PR #10381**: feat: report nominal mask exposure per plotted opening
+- **Issue #10362** (closed): Datasheet pitch extraction truncates a measurement when a letter follows the number or unit
+- **PR #10377**: fix: treat datasheet pitch tokens with an attached letter as ambiguous
+- **Issue #10299** (closed): Assembly preflight should compare through-hole lead dimensions with the finished plated hole
+- **PR #10309**: feat: compare through-hole lead dimensions with the finished hole in preflight
 - **PR #10289**: fix(drc): add orthogonal elbow fallback and refill-safe bend checks
 - **Issue #10325** (closed): Schematic generation shadows the library Datasheet with an empty instance field
 - **PR #10327**: Preserve datasheets on generated schematic instances

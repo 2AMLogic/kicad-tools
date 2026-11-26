@@ -290,6 +290,24 @@ class MaskRepairResult:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class _SwappedElbow:
+    """A two-leg elbow after its legs traded places, before anything moves."""
+
+    uuid: str  # the reported conductor
+    tag: str  # its end at the elbow
+    elbow: tuple[float, float]  # that end as authored
+    anchor: tuple[float, float]  # its other end, which stays
+    width: float
+    other_uuid: str
+    other_tag: str
+    other_elbow: tuple[float, float]  # as authored; may sit a hair off ``elbow``
+    other_width: float
+    far: tuple[float, float]  # the other leg's far end, which stays
+    corner: tuple[float, float]  # where the swap puts the reported end
+    other_corner: tuple[float, float]  # and the other, keeping their offset
+
+
 def _num(node: SExp | None) -> float:
     """First atom of ``node`` as a number (0.0 when absent)."""
     atom = node.get_first_atom() if node is not None else None
@@ -964,6 +982,7 @@ class MaskCopperRepairer(CopperGapRepairer):
                         margin_mm,
                         touched_by_action,
                         reported_vias,
+                        warning_clearance_mm,
                     )
                 ):
                     moved.add(conductor)
@@ -2594,6 +2613,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         margin_mm: float,
         touched: set[str],
         reported_vias: set[str] | None = None,
+        warning_clearance_mm: float | None = None,
     ) -> bool:
         """Swap the two legs of an elbow to make a straight entry into the pad.
 
@@ -2609,7 +2629,13 @@ class MaskCopperRepairer(CopperGapRepairer):
         authored offset inside the junction tolerance. A corner that stays outside
         the pad is accepted when the far leg's end is inside it and the other leg
         clears the whole opening (a stub handing a hugging track over to the pad).
-        Returns ``True`` when applied.
+
+        The swap is also held to the mask rule before anything moves: a swapped
+        leg that overlaps the opening has to be one clean entry, and one that
+        misses it has to clear it by the policy gap plus margin.  A swap whose
+        entry leg is not clean is slid out along the pad's lead instead
+        (:meth:`_slide_swapped_elbow_along_lead`) when a lead continues from
+        the entry leg's far end.  Returns ``True`` when applied.
         """
         if required is None or opening in self._pivot_pad_bounds:
             return False
@@ -2750,6 +2776,38 @@ class MaskCopperRepairer(CopperGapRepairer):
                     displacement,
                 ):
                     continue
+                swap = _SwappedElbow(
+                    uuid=seg_uuid,
+                    tag=tag,
+                    elbow=elbow,
+                    anchor=anchor,
+                    width=width,
+                    other_uuid=other_uuid,
+                    other_tag=other_tag,
+                    other_elbow=other_elbow,
+                    other_width=other_width,
+                    far=far,
+                    corner=saved_flipped,
+                    other_corner=other_flipped,
+                )
+                if self._swapped_elbow_unclear(swap, opening, layer, pads, required, margin_mm):
+                    if self._slide_swapped_elbow_along_lead(
+                        swap,
+                        opening,
+                        layer,
+                        net,
+                        pads,
+                        result,
+                        max_displacement,
+                        dry_run,
+                        clearance_mm,
+                        required,
+                        margin_mm,
+                        warning_clearance_mm,
+                        touched,
+                    ):
+                        return True
+                    continue
                 action = MaskNudgeAction(
                     action="nudge_clear",
                     uuid=seg_uuid,
@@ -2769,6 +2827,233 @@ class MaskCopperRepairer(CopperGapRepairer):
                     openings=[opening],
                     points=points,
                     minimum_mask_gap_mm=minimum_mask_gap,
+                )
+                return self._apply_nudge(action, result, dry_run) is None
+        return False
+
+    def _swapped_elbow_unclear(
+        self,
+        swap: _SwappedElbow,
+        opening: str,
+        layer: str,
+        pads: dict,
+        required: float,
+        margin_mm: float,
+    ) -> bool:
+        """Whether the mask rule would still report a leg of a swapped elbow.
+
+        A leg that overlaps the pad's opening has to be one clean entry by the
+        rule's own measure: an authored end strictly inside the pad, and no
+        more copper beside the opening than one crossing leaves.  A leg that
+        misses the opening has to clear it by the policy gap plus ``margin_mm``.
+        Nothing is refused without a modelled opening; the verified re-check
+        judges that swap instead.
+        """
+        from ..validate.mask_copper import clean_own_pad_entry
+
+        aperture = self._pad_mask_openings.get((opening, layer))
+        if aperture is None:
+            return False
+        pad, _centre, _layers, _net, _ref, shape = pads[opening]
+        for start, end, width in (
+            (swap.anchor, swap.corner, swap.width),
+            (swap.other_corner, swap.far, swap.other_width),
+        ):
+            copper = LineString([start, end]).buffer(width / 2, quad_segs=16)
+            gap = copper.distance(aperture.geometry)
+            if gap > 0:
+                if gap < required + margin_mm - 1e-9:
+                    return True
+                continue
+            if not clean_own_pad_entry(
+                aperture.geometry,
+                copper,
+                pad,
+                f"pad:{shape}",
+                width,
+                (start, end),
+                clearance_mm=required,
+                uncertainty_mm=_MASK_UNCERTAINTY_MM,
+                margin_mm=aperture.margin_mm,
+            ):
+                return True
+        return False
+
+    def _slide_swapped_elbow_along_lead(
+        self,
+        swap: _SwappedElbow,
+        opening: str,
+        layer: str,
+        net: str,
+        pads: dict,
+        result: MaskRepairResult,
+        max_displacement: float,
+        dry_run: bool,
+        clearance_mm: float | None,
+        required: float,
+        margin_mm: float,
+        warning_clearance_mm: float | None,
+        touched: set[str],
+    ) -> bool:
+        """Slide a swapped elbow out along the pad's lead until its legs clear the opening.
+
+        The swap ends its second leg at ``far``, where a pad lead carries on
+        into the pad.  Carrying that joint out along the lead leaves the lead
+        as the pad's only entry.  The swapped corner follows along its own
+        leg's line, so the second leg stays parallel to itself and every angle
+        is kept; the first leg may double back past its anchor, but no leg may
+        shrink to a point.  The smallest slide that puts both swapped legs
+        outside the opening by the policy gap plus ``margin_mm`` -- the
+        manufacturer's advisory band first, when a slide fits it -- is taken
+        behind the same connection, clearance and opening gates as the swap,
+        and the lead itself has to be one clean entry.  Returns ``True`` when
+        applied.
+        """
+        from ..validate.mask_copper import clean_own_pad_entry
+
+        aperture = self._pad_mask_openings.get((opening, layer))
+        if aperture is None:
+            return False
+        pad, _centre, _layers, _net, ref, shape = pads[opening]
+        members, blocked = self._junction(layer, swap.far, swap.other_uuid, net)
+        if blocked or len(members) != 1 or self._has_fixed_junction_contact(swap.far, layer, net):
+            return False
+        lead_uuid, lead, lead_tag = members[0]
+        if (
+            lead_uuid in touched
+            or self._locks.is_locked(lead)
+            or self._locks.is_generator_owned(lead)
+        ):
+            return False
+        lead_end = self._xy(lead.find("end" if lead_tag == "start" else "start"))
+        lead_joint = self._xy(lead.find(lead_tag))
+        lead_width_node = lead.find("width")
+        if lead_end is None or lead_joint is None or lead_width_node is None:
+            return False
+        lead_width = _num(lead_width_node) or swap.other_width
+        into = (lead_end[0] - swap.far[0], lead_end[1] - swap.far[1])
+        lead_length = math.hypot(*into)
+        run = (swap.corner[0] - swap.anchor[0], swap.corner[1] - swap.anchor[1])
+        entry = (swap.far[0] - swap.corner[0], swap.far[1] - swap.corner[1])
+        det = run[0] * entry[1] - run[1] * entry[0]
+        if lead_length < _TOLERANCE_MM or abs(det) < 1e-9:
+            return False
+        run_length, entry_length = math.hypot(*run), math.hypot(*entry)
+        far_tag = "end" if swap.other_tag == "start" else "start"
+        rules = self._board_rules
+        first = LineString([swap.anchor, swap.elbow]).buffer(swap.width / 2, quad_segs=16)
+        second = LineString([swap.other_elbow, swap.far]).buffer(swap.other_width / 2, quad_segs=16)
+        lead_before = LineString([lead_joint, lead_end]).buffer(lead_width / 2, quad_segs=16)
+
+        for gap in dict.fromkeys((max(warning_clearance_mm or 0.0, required), required)):
+            for step in range(1, int(max_displacement / _SLIDE_STEP_MM + 1e-9) + 1):
+                slide = step * _SLIDE_STEP_MM
+                new_far = (
+                    round(swap.far[0] - slide * into[0] / lead_length, 4),
+                    round(swap.far[1] - slide * into[1] / lead_length, 4),
+                )
+                # The corner keeps to its leg's line while the second leg stays parallel.
+                offset = (new_far[0] - swap.anchor[0], new_far[1] - swap.anchor[1])
+                along = (offset[0] * entry[1] - offset[1] * entry[0]) / det
+                across = (run[0] * offset[1] - run[1] * offset[0]) / det
+                if min(abs(along) * run_length, across * entry_length) < _MIN_RUN_MM:
+                    continue
+                new_corner = (
+                    round(swap.anchor[0] + along * run[0], 4),
+                    round(swap.anchor[1] + along * run[1], 4),
+                )
+                shift = (new_corner[0] - swap.elbow[0], new_corner[1] - swap.elbow[1])
+                carried = (new_far[0] - swap.far[0], new_far[1] - swap.far[1])
+                displacement = max(math.hypot(*shift), math.hypot(*carried))
+                if displacement > max_displacement:
+                    break
+                new_other = (
+                    round(swap.other_elbow[0] + shift[0], 4),
+                    round(swap.other_elbow[1] + shift[1], 4),
+                )
+                new_lead = (
+                    round(lead_joint[0] + carried[0], 4),
+                    round(lead_joint[1] + carried[1], 4),
+                )
+                first_moved = LineString([swap.anchor, new_corner]).buffer(
+                    swap.width / 2, quad_segs=16
+                )
+                second_moved = LineString([new_other, new_far]).buffer(
+                    swap.other_width / 2, quad_segs=16
+                )
+                if any(
+                    copper.distance(aperture.geometry) < gap + margin_mm - 1e-9
+                    for copper in (first_moved, second_moved)
+                ):
+                    continue
+                lead_moved = LineString([new_lead, lead_end]).buffer(lead_width / 2, quad_segs=16)
+                if not clean_own_pad_entry(
+                    aperture.geometry,
+                    lead_moved,
+                    pad,
+                    f"pad:{shape}",
+                    lead_width,
+                    (new_lead, lead_end),
+                    clearance_mm=required,
+                    uncertainty_mm=_MASK_UNCERTAINTY_MM,
+                    margin_mm=aperture.margin_mm,
+                ):
+                    continue
+                moves: list[tuple[BaseGeometry, BaseGeometry, str]] = [
+                    (first, first_moved, layer),
+                    (second, second_moved, layer),
+                    (lead_before, lead_moved, layer),
+                ]
+                points: list[tuple[str, str, str | None, float, float]] = [
+                    ("segment", swap.uuid, swap.tag, *swap.elbow),
+                    ("segment", swap.other_uuid, swap.other_tag, *swap.other_elbow),
+                    ("segment", swap.other_uuid, far_tag, *swap.far),
+                    ("segment", lead_uuid, lead_tag, *lead_joint),
+                ]
+                shifts: list[tuple[float, float]] = [shift, shift, carried, carried]
+                if not self._slide_keeps_connections(points, 0.0, 0.0, net, shifts):
+                    continue
+                if self._copper_floor_reason(
+                    moves, layer, net, swap.uuid, pads, clearance_mm, pairwise_rules=rules
+                ):
+                    continue
+                if self._other_opening_reason(
+                    [opening],
+                    moves,
+                    [
+                        (swap.elbow, new_corner, frozenset({layer})),
+                        (swap.other_elbow, new_other, frozenset({layer})),
+                        (swap.far, new_far, frozenset({layer})),
+                        (lead_joint, new_lead, frozenset({layer})),
+                    ],
+                    pads,
+                    required,
+                    displacement,
+                ):
+                    continue
+                action = MaskNudgeAction(
+                    action="nudge_clear",
+                    uuid=swap.uuid,
+                    kind="segment",
+                    pad_uuid=opening,
+                    pad_ref=ref,
+                    net_name=net,
+                    layer=layer,
+                    old_x=swap.elbow[0],
+                    old_y=swap.elbow[1],
+                    new_x=new_corner[0],
+                    new_y=new_corner[1],
+                    dx=shift[0],
+                    dy=shift[1],
+                    displacement_mm=displacement,
+                    detail=(
+                        f"flipped a two-leg elbow {math.hypot(*shift):.4f}mm and slid it "
+                        f"{slide:.4f}mm along the {ref} lead for a straight entry"
+                    ),
+                    openings=[opening],
+                    points=points,
+                    shifts=shifts,
+                    minimum_mask_gap_mm=gap + margin_mm,
                 )
                 return self._apply_nudge(action, result, dry_run) is None
         return False
