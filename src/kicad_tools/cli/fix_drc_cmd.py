@@ -1621,7 +1621,7 @@ def _run_mask_pass(
             )
             bend_nets = {action.net_name for action in result.actions if action.bends}
             # Refill can split existing copper even when a move added no segment.
-            contact_nets = edited_nets if has_zones else bend_nets
+            contact_nets = edited_nets | before.pour_nets() if has_zones else bend_nets
             before_native = (
                 _mask_native_state(candidate) if has_zones or check_copper or bend_nets else None
             )
@@ -1851,6 +1851,13 @@ def _verify_mask_actions(
 
     disconnected = _split_mask_nets(pad_islands, candidate) if pad_islands else set()
     disconnected.update(lost_contacts or ())
+    # A refill can split another net's pour. No action on that net can be
+    # individually undone, so discard the private candidate as a whole.
+    unattributed = disconnected - {act.net_name for act in result.actions}
+    if unattributed:
+        raise _MaskPadConnectionLost(
+            f"repair disconnected copper on {', '.join(sorted(unattributed))}"
+        )
     keep = []
     revert = []
     for act in result.actions:

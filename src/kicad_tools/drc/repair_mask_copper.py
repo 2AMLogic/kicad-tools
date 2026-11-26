@@ -437,6 +437,14 @@ class MaskCopperRepairer(CopperGapRepairer):
             return atom
         return self.nets.get(atom, "") if isinstance(atom, int) else ""
 
+    def pour_nets(self) -> set[str]:
+        """Return named nets whose copper can change when KiCad refills the board."""
+        return {
+            name
+            for zone in self.doc.find_all("zone")
+            if zone.find("keepout") is None and (name := self._net_name(zone))
+        }
+
     def off_angle_tracks(self) -> Counter[str]:
         return off_angle_tracks(self.doc)
 

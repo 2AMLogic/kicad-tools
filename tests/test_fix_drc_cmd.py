@@ -4350,10 +4350,11 @@ def test_mask_track_repair_refills_zones_before_grading_on_zoned_board(
     assert filled == [(98.5, 99.9)]
 
 
+@pytest.mark.parametrize("pour_net", [1, 2], ids=["edited_net", "unedited_net"])
 @pytest.mark.parametrize("repair", ["bend", "orthogonal_elbow"])
 @pytest.mark.parametrize("split_on_refill", [1, 2])
 def test_mask_repair_rolls_back_when_refill_trades_one_contact_for_another(
-    tmp_path, monkeypatch, capsys, split_on_refill, repair
+    tmp_path, monkeypatch, capsys, split_on_refill, repair, pour_net
 ):
     from types import SimpleNamespace
 
@@ -4371,8 +4372,8 @@ def test_mask_repair_rolls_back_when_refill_trades_one_contact_for_another(
         _seg,
     )
 
-    tracks = [_seg(f"tap-{x}", (x, 110), (x, 111)) for x in (95, 100, 105)]
-    zone = """(zone (net 1) (net_name "N1") (layer "F.Cu")
+    tracks = [_seg(f"tap-{x}", (x, 110), (x, 111), net=pour_net) for x in (95, 100, 105)]
+    zone = f"""(zone (net {pour_net}) (net_name "N{pour_net}") (layer "F.Cu")
         (polygon (pts (xy 94 109) (xy 106 109) (xy 106 112) (xy 94 112)))
         (filled_polygon (layer "F.Cu")
           (pts (xy 94 109) (xy 101 109) (xy 101 112) (xy 94 112))))"""
