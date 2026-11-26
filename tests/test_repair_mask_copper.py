@@ -2642,8 +2642,11 @@ def test_chamfer_between_perpendicular_runs_slides_each_end_along_its_run(tmp_pa
     assert {k: _end(board, k) for k in original} == original
 
 
-def test_chamfer_slide_declines_and_leaves_the_board_alone_when_vetoed(tmp_path):
+def test_chamfer_slide_declines_and_leaves_the_board_alone_when_vetoed(tmp_path, monkeypatch):
     # Every case also crowds the plain recentre, so only the slide's own veto is tested.
+    # The edge-end extension (issue #9939) is a separate repair that would carry this
+    # chamfer's pad-edge end into the pad, so it is switched off here.
+    monkeypatch.setattr(MaskCopperRepairer, "_extend_entry_one", lambda *args, **kwargs: args[-1])
     cases = {
         # Other-net copper beside the chamfer's new position.
         "foreign-copper": (
@@ -3290,6 +3293,238 @@ def test_verified_slid_elbow_that_leaves_the_finding_restores_every_end(
         ("diag", "finding_not_cleared")
     ]
     assert board.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Issue #9939: an escape that stops on its pad's edge is carried into the pad
+# ---------------------------------------------------------------------------
+
+# An LQFP pin row on a 0.8 mm pitch (Board 03 U1/16..18, moved by (-40, +15)).
+_EDGE_BOARD = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "N1")
+  (net 2 "N2")
+  (net 3 "N3")
+  (footprint "test:U1" (layer "F.Cu") (at 100.8375 100.5)
+    (property "Reference" "U1" (at 0 -3 0) (layer "F.SilkS")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "U" (at 0 3 0) (layer "F.Fab")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (pad "16" smd roundrect (at 0 -0.8) (size 1.475 0.55) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 2 "N2") (uuid "pad-u1-16"))
+    (pad "17" smd roundrect (at 0 0) (size 1.475 0.55) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "N1") (uuid "pad-u1-17"))
+    (pad "18" smd roundrect (at 0 0.8) (size 1.475 0.55) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 3 "N3") (uuid "pad-u1-18"))
+  )
+%s
+)
+"""
+_EDGE_PAD = "pad-u1-17"
+_EDGE_OPTS = {"max_displacement": 2.0, "clearance_mm": 0.127}
+
+
+def _edge_escape_fixture(tmp_path, *, width=0.2, extra="", lock=""):
+    """A 45-degree escape that ends in the middle of its pin's end edge.
+
+    ``diag`` ends on a via, ``lead`` ends at the same edge point and
+    ``through`` crosses it on its way to a second via.  The recentre would aim
+    ``diag`` at the pad centre, a line that clears pin 18 by 0.073 mm (floor
+    0.127 mm), so it is declined; the repairer counts the edge end as inside,
+    so the pull-in does not apply either.
+    """
+    diag = _seg("diag", (100.1, 100.5), (99.3, 101.3), width=width)
+    shapes = [
+        diag.replace("(segment ", f"(segment {lock} " if lock else "(segment "),
+        _seg("lead", (100.5, 100.5), (100.1, 100.5)),
+        _seg("through", (100.5, 100.5), (99.685, 100.5)),
+        _seg("diag-b", (99.3, 101.3), (93.3, 101.3), layer="B.Cu"),
+        _seg("through-b", (99.685, 100.5), (96.5, 100.5), layer="B.Cu"),
+        _via("v-diag", (99.3, 101.3)),
+        _via("v-through", (99.685, 100.5)),
+    ]
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(_EDGE_BOARD % "\n".join([*shapes, extra]))
+    return path
+
+
+def _edge_finding() -> DRCViolation:
+    finding = _own_finding("diag", _EDGE_PAD, "U1/17")
+    finding.required_value_mm = 0.09
+    finding.actual_value_mm = 0.0
+    return finding
+
+
+def _is_clean_entry(board: Path, copper, ends) -> bool:
+    """The mask rule's own verdict on one straight track at U1/17."""
+    from kicad_tools.validate.mask_copper import clean_own_pad_entry
+
+    repairer = MaskCopperRepairer(board)
+    pad = next(entry for entry in repairer._openings().values() if entry[4] == "U1/17")
+    aperture = repairer._pad_mask_openings[_EDGE_PAD, "F.Cu"]
+    return clean_own_pad_entry(
+        aperture.geometry,
+        copper,
+        pad[0],
+        f"pad:{pad[5]}",
+        0.2,
+        ends,
+        clearance_mm=0.09,
+        uncertainty_mm=0.0101,
+        margin_mm=aperture.margin_mm,
+    )
+
+
+def test_edge_stopped_escape_is_carried_into_the_pad_along_its_own_line(tmp_path):
+    board = _edge_escape_fixture(tmp_path)
+    before = board.read_bytes()
+    original = {name: _end(board, name) for name in ("diag", "lead", "through")}
+    repairer = MaskCopperRepairer(board)
+    finding = _edge_finding()
+    # The incumbent is one straight crossing that the rule does not count.
+    assert not _is_clean_entry(
+        board, LineString(original["diag"]).buffer(0.1), tuple(original["diag"])
+    )
+
+    assert repairer.repair([finding], dry_run=True, **_EDGE_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair([finding], **_EDGE_OPTS)
+    assert result.repaired == 1 and not result.unrepaired
+    (action,) = result.actions
+    assert action.action == "extend_entry" and action.joined == []
+    repairer.save(board)
+    diag = _end(board, "diag")
+    # The via end and both tracks meeting the old end stay exactly as authored.
+    assert diag[1] == original["diag"][1]
+    assert {n: _end(board, n) for n in ("lead", "through")} == {
+        n: original[n] for n in ("lead", "through")
+    }
+    # The edge end moved on along the same 45-degree line, the shortest slide
+    # that leaves the whole track width ending on the pad.
+    assert diag[0] == (100.2025, 100.3975)
+    assert _pad_poly(board, "U1/17").covers(Point(diag[0]).buffer(0.1))
+    assert not repairer.off_angle_tracks()
+    moved = LineString(diag).buffer(0.1, quad_segs=16)
+    assert moved.distance(Point(original["lead"][1])) == 0
+    assert _is_clean_entry(board, moved, tuple(diag))
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert _end(board, "diag") == original["diag"]
+
+
+def test_edge_escape_is_not_carried_past_the_displacement_limit(tmp_path):
+    # The shortest clean slide is 0.145 mm; the recentre's own refusal stands.
+    board = _edge_escape_fixture(tmp_path)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_edge_finding()], **{**_EDGE_OPTS, "max_displacement": 0.1})
+    assert result.repaired == 0
+    assert [(u.uuid, u.reason) for u in result.unrepaired] == [("diag", "exceeds_max_displacement")]
+    assert not repairer.modified and repairer.doc.to_string() == before
+
+
+@pytest.mark.parametrize(
+    ("name", "width", "extra", "lock", "reason"),
+    [
+        # As wide as the pad's corner radius: its end can never lie wholly on
+        # the pad along this line.
+        ("wide-track", 0.3, "", "", "would_violate_clearance"),
+        # A via sits on the edge end.
+        ("via-at-end", 0.2, _via("v-edge", (100.1, 100.5)), "", "junction_at_moved_end"),
+        # Another net's track ends on the edge end.
+        (
+            "foreign-end",
+            0.2,
+            _seg("foreign", (100.1, 100.5), (99.6, 100.0), net=2),
+            "",
+            "junction_at_moved_end",
+        ),
+        ("locked", 0.2, "", "locked", "locked_segment"),
+    ],
+)
+def test_edge_escape_extension_declined_leaves_every_track_alone(
+    tmp_path, name, width, extra, lock, reason
+):
+    sub = tmp_path / name
+    sub.mkdir()
+    board = _edge_escape_fixture(sub, width=width, extra=extra, lock=lock)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_edge_finding()], **_EDGE_OPTS)
+    assert result.repaired == 0, name
+    assert [(u.uuid, u.reason) for u in result.unrepaired] == [("diag", reason)], name
+    assert not repairer.modified and repairer.doc.to_string() == before, name
+
+
+def test_verified_edge_extension_that_leaves_the_finding_restores_the_end(
+    tmp_path, monkeypatch, capsys
+):
+    board = _edge_escape_fixture(tmp_path)
+    before = board.read_bytes()
+    finding = _edge_finding()
+    _run(
+        monkeypatch,
+        board,
+        [_report(finding), _report(finding)],
+        extra=("--max-displacement", "2.0", "--format", "json"),
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [
+        ("diag", "finding_not_cleared")
+    ]
+    assert board.read_bytes() == before
+
+
+@pytest.mark.timeout(180)
+def test_verified_edge_escape_clears_the_plotted_opening(tmp_path, capsys):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+
+    fixture = Path(__file__).parent / "fixtures" / "mask_edge_stopped_escape.kicad_pcb"
+    board = tmp_path / fixture.name
+    board.write_text(fixture.read_text())
+    board.with_suffix(".kicad_pro").write_text("{}")
+    diag = "a60d1b45-13e7-5f9c-8a1b-0f5a5f3e2c11"
+    with evidence_toolchain([tmp_path]):
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-displacement",
+                "2",
+                "--max-passes",
+                "1",
+                "--format",
+                "json",
+            ]
+        )
+        report = json.loads(capsys.readouterr().out)["mask_copper"]
+        checked = fix_drc_cmd._run_python_drc(board, manufacturer="jlcpcb-tier1", mask_copper=True)
+    assert report["repaired"] == 1
+    assert checked is not None
+    findings = [
+        v
+        for v in checked.violations
+        if v.type == ViolationType.MASK_TO_COPPER and (v.is_error or diag in v.items)
+    ]
+    assert [(v.is_error, "within_own_pad" in v.message) for v in findings] == [(False, True)]
+    assert _end(board, diag) == [(100.2025, 100.3975), (99.3, 101.3)]
 
 
 def test_elbow_flip_vetoed_by_foreign_copper_a_lock_or_a_branch_restores_everything(tmp_path):
