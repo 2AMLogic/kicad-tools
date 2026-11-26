@@ -5,10 +5,10 @@
   "layers": 2,
   "summary": {
     "errors": 0,
-    "warnings": 8,
+    "warnings": 11,
     "infos": 22,
     "waived": 0,
-    "rules_checked": 84,
+    "rules_checked": 87,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -22,9 +22,12 @@
       "redundant_copper_via_offcentre": 1,
       "redundant_copper_covered": 1,
       "redundant_copper_staircase": 1,
+      "redundant_copper_pour_stub": 0,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
+      "netclass_sidecar_mismatch": 1,
+      "netclass_track_width_mismatch": 1,
       "netclass_clearance_copper": 1,
       "netclass_clearance_unsupported": 1,
       "netclass_track_width": 1,
@@ -48,7 +51,7 @@
     "passed": true,
     "stale_waivers": 0,
     "orphan_waivers": 0,
-    "coverage_checked": 44,
+    "coverage_checked": 46,
     "coverage_skipped": 7,
     "coverage_unknown": [
       "mask_multi_segment",
@@ -430,6 +433,78 @@
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
       "evidence_hash": "ev4:df27ba86834b2f95"
+    },
+    {
+      "rule_id": "netclass_sidecar_mismatch",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Net 'GND': sidecar trace_width 0.500mm but project class 'Power' track_width 0.127mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.5,
+      "required_value": 0.127,
+      "items": [
+        "net:GND",
+        "netclass:Power"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "netclass_sidecar_mismatch|net:GND,netclass:Power|GND|",
+      "evidence_hash": "ev4:9e59ae25f6a92c3c"
+    },
+    {
+      "rule_id": "netclass_sidecar_mismatch",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Net 'VIN': sidecar trace_width 0.500mm but project class 'Power' track_width 0.127mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.5,
+      "required_value": 0.127,
+      "items": [
+        "net:VIN",
+        "netclass:Power"
+      ],
+      "nets": [
+        "VIN"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "netclass_sidecar_mismatch|net:VIN,netclass:Power|VIN|",
+      "evidence_hash": "ev4:e5cb51b2bc9c284d"
+    },
+    {
+      "rule_id": "netclass_sidecar_mismatch",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Net 'VOUT': sidecar trace_width 0.500mm but project class 'Power' track_width 0.127mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.5,
+      "required_value": 0.127,
+      "items": [
+        "net:VOUT",
+        "netclass:Power"
+      ],
+      "nets": [
+        "VOUT"
+      ],
+      "same_net": null,
+      "fab_band": null,
+      "corner_class": null,
+      "status": "warning",
+      "waived": false,
+      "key": "netclass_sidecar_mismatch|net:VOUT,netclass:Power|VOUT|",
+      "evidence_hash": "ev4:4bcea31f9c6ee117"
     },
     {
       "rule_id": "mask_to_copper",
@@ -2119,10 +2194,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "811d97170ff6cfebdb1f43ff4b852a9a7a521c0a346446591f6de67dfe99e616",
-            "B.Mask": "9cd0a00c8c01fba36bb66be51224c8aa5973e6c3d4ae1c32346cce99ef30e1d5",
-            "F.Cu": "fe98585492a16ffedf3ce487e9917b1edcc14d7b8787256fbb736e630cc788b6",
-            "B.Cu": "e0832b1b2a922cb44d69b89da9098197bb2bfb3e5c60aa8e9217a549c8766b02"
+            "F.Mask": "0269a7b98fbdf29143a78aa3e0c8060ae9bdb2d2be157afe600eb01eab2a26ec",
+            "B.Mask": "dba349c7cc77be37f2730ae19060de8b783475a54f0cb4e5c05c3783273401b0",
+            "F.Cu": "6d23f22b3ca2bde2dcc3ca81b0b46567c51b57bd2e15708e20f78a04225f1eff",
+            "B.Cu": "84bf99ae7f01d67efc9e6ff87ab73c72ddad870ec7519da9c1f9b59a41ac5ab5"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -2789,6 +2864,51 @@
     },
     {
       "schema_version": 1,
+      "rule_id": "netclass_sidecar_mismatch",
+      "severity": "warning",
+      "message": "Net 'GND': sidecar trace_width 0.500mm but project class 'Power' track_width 0.127mm",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "GND"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "netclass_sidecar_mismatch",
+      "severity": "warning",
+      "message": "Net 'VIN': sidecar trace_width 0.500mm but project class 'Power' track_width 0.127mm",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "VIN"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "netclass_sidecar_mismatch",
+      "severity": "warning",
+      "message": "Net 'VOUT': sidecar trace_width 0.500mm but project class 'Power' track_width 0.127mm",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "VOUT"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
       "rule_id": "mask_to_copper",
       "severity": "warning",
       "message": "Mask-to-copper disjoint: warning; exposed area 0 mm\u00b2; assessment measurement 0; opening pad:J2/1; exposed copper zone (net GND); different-net",
@@ -3142,7 +3262,7 @@
     "flag_overrides_stackup": false,
     "floors_outer_oz": 1.0,
     "dfm_table": {
-      "version": 2,
+      "version": 4,
       "stackup": "2-layer, 1oz outer / 0oz inner (assumed: no stackup/--copper weight declared)",
       "entry": "2layer_1oz",
       "thresholds": {
@@ -3185,6 +3305,14 @@
           "basis": "capability_page",
           "source_url": "https://jlcpcb.com/capabilities/pcb-capabilities",
           "retrieved": "2026-01-16"
+        },
+        "tht_smd_spacing": {
+          "danger_mm": 2.032,
+          "warning_mm": 3.05,
+          "warning_basis": "observed_jlcdfm",
+          "basis": "observed_jlcdfm",
+          "source_url": "https://github.com/2AMLogic/kicad-tools/issues/9421",
+          "retrieved": "2026-11-18"
         }
       }
     }
@@ -3192,7 +3320,7 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "84 rules checked, 0 error(s), 8 warning(s)"
+      "detail": "87 rules checked, 0 error(s), 11 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -3246,6 +3374,12 @@
       "blocking": true
     },
     "board_id": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "bypass_distance": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -3381,6 +3515,12 @@
       "status": "unknown:host_library_refs (4 footprint(s); per-host detail: kct pcb model-audit)",
       "state": "unknown",
       "reason": "host_library_refs (4 footprint(s); per-host detail: kct pcb model-audit)",
+      "blocking": false
+    },
+    "netclass_agreement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": false
     },
     "netclass_clearance_copper": {
@@ -3571,7 +3711,7 @@
     }
   },
   "fab_dfm_parity": {
-    "table_version": "6e136337",
+    "table_version": "7d99c827",
     "source": "https://github.com/2AMLogic/kicad-tools/issues/8838",
     "retrieved": "2026-11-12",
     "manufacturer": "jlcpcb",
@@ -3701,6 +3841,15 @@
         "status": "covered",
         "danger_capable": false,
         "note": "checked; no finding on the board."
+      },
+      {
+        "category": "trace_width",
+        "kct_rules": [
+          "dimension_trace_width"
+        ],
+        "status": "partial",
+        "danger_capable": true,
+        "note": "JLCDFM rated 0.1016 mm outer-layer tracks Danger (listed as 0.1 mm) and 0.1524 mm Good on one 4-layer board (#10173; the Danger count was not recorded, so no recorded-board fixture carries this row). The published capability still allows 0.1016 mm, so the `dimension_trace_width` ERROR floor is unchanged; kct adds a WARNING for outer-layer tracks below the stackup's optional `trace_width` dfm_thresholds `warning_mm` (0.1524 mm on 4layer_1oz only). Stackups without that entry, and inner layers, get no warning. Partial because the fab's Danger edge between the two observed widths is unknown and only one stackup has evidence."
       }
     ],
     "incomplete_categories": []
