@@ -70,7 +70,7 @@ one or more `X`, and a group only sequences its contents. Supply names such as
 an invalid leading quantifier, so only the wildcard interpretation applies --
 while `Net-(U5-CAPP)` matches both that spelling (wildcard) and KiCad's
 unparenthesized spelling `Net-U5-CAPP` (regex), and `A.B`/`C+P` also match
-`AXB`/`CCP`. Other syntax is explicitly `unsupported_pattern`, including
+`AXB`/`CCP`. The resolver also recognizes the anchored literal expressions emitted for router-assigned net names. Those encode ASCII punctuation as hex escapes, leave Unicode letters intact, and end with a strict end-of-string anchor. Each generated pattern is checked against the board inventory to avoid a second match under KiCad’s wildcard interpretation. Other syntax is explicitly `unsupported_pattern`, including
 backslashes/escaping, brackets, braces, alternation, regex anchors, quantified
 or nested groups, and Unicode **in patterns**. It is not silently
 interpreted as a glob. The supported subset evaluates both interpretations;
