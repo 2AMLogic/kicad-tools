@@ -1814,7 +1814,10 @@ def _clear_tx2_exit(path: Path, rules: DesignRules, policy: MaskCopperPolicy) ->
         return 0
     if any(n not in classes or not classes[n].target_diff_impedance for n in _TX2_NETS):
         return 0
-    pair_classes = {n: classes[n] for n in _TX2_NETS}
+    # The checker takes the first matching spec, and a single-ended target is tried
+    # before a differential one. Drop it so the declared differential target is the
+    # one actually judged before this repair is written.
+    pair_classes = {n: replace(classes[n], target_single_impedance=None) for n in _TX2_NETS}
     layers = len(pcb.copper_layers)
     coverage = _tx2_coupling(
         DRCChecker(pcb, layers=layers, net_class_map=pair_classes, emit_measurements=True)

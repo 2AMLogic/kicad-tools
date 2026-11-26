@@ -192,3 +192,23 @@ def test_tx2_veto_preserves_the_source(local_specimen, monkeypatch, control):
     original = path.read_bytes()
     assert run(local_specimen) == 0
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("diff", "single", "expected"),
+    [(120.0, 60.0, 0), (90.0, 50.0, 1)],
+    ids=["diff-out-of-spec-with-single", "diff-in-spec-with-single"],
+)
+def test_tx2_guard_judges_the_differential_target_when_both_declared(
+    local_specimen, diff, single, expected
+):
+    path, _ = local_specimen
+    mapping = json.loads(path.with_name("net_class_map.json").read_text())
+    for entry in mapping.values():
+        entry["target_diff_impedance"] = diff
+        entry["target_single_impedance"] = single
+    path.with_name("net_class_map.json").write_text(json.dumps(mapping))
+    original = path.read_bytes()
+    assert run(local_specimen) == expected
+    if not expected:
+        assert path.read_bytes() == original
