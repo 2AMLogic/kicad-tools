@@ -190,6 +190,30 @@ def parse_package_name(name: str) -> dict:
     return result
 
 
+_PITCH_UNITS = ("mm", "mil", "mils")
+
+
+def _pitch_token_unit(tail: str) -> str | None:
+    """Classify the text that follows a pitch number.
+
+    Returns the lower-cased unit ("" when none), or None when a letter glued
+    onto the number or its unit makes the token incomplete (``1.27B``,
+    ``1.27mmA``, ``1.27 mmA``).
+    """
+    word = re.match(r"(\s*)([A-Za-z]*)", tail)
+    assert word is not None
+    gap, letters = word.group(1), word.group(2)
+    lowered = letters.lower()
+    if lowered in _PITCH_UNITS:
+        rest = tail[word.end() :]
+        return None if rest[:1].isdigit() else lowered
+    if not letters:
+        return ""
+    if gap and not lowered.startswith(("mm", "mil")):
+        return ""  # a separate word, not part of the measurement
+    return None
+
+
 def extract_dimension_from_text(text: str) -> dict[str, float]:
     """
     Extract dimension values from text.
@@ -211,6 +235,10 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
     for match in labeled_pattern.finditer(text):
         # JEDEC uses uppercase E for body length and lowercase e for pitch.
         label = "PITCH" if match.group(1) == "e" else match.group(1).upper()
+        if label == "PITCH":
+            # Only the pitch-specific parser below may set PITCH, so a token
+            # it rejects (e.g. "e=1.27mmA") cannot slip in through here.
+            continue
         value = float(match.group(2))
         unit = match.group(3)
 
@@ -230,17 +258,28 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
         dimensions["D"] = float(body_match.group(1))
         dimensions["E"] = float(body_match.group(2))
 
-    # Pattern for pitch (e.g., "pitch: 0.5mm", "e = 0.5")
-    pitch_match = re.search(
-        r"(?<![A-Za-z0-9])(?:(?i:pitch|p)\s*[=:]?|e\s*[=:])\s*"
-        r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))?\b",
-        text,
+    # Pattern for pitch (e.g., "pitch: 0.5mm", "e = 0.5"). The number is
+    # validated for a complete token below: a letter glued onto the number or
+    # its unit makes the candidate ambiguous and the search moves on.
+    pitch_prefix = re.compile(
+        r"(?<![A-Za-z0-9])(?:(?i:pitch|p)\s*[=:]?|e\s*[=:])\s*(\d+(?:\.\d+)?)"
     )
-    if not pitch_match:
-        pitch_match = re.search(r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))\s+(?i:pitch)\b", text)
-    if pitch_match:
+    for pitch_match in pitch_prefix.finditer(text):
+        unit = _pitch_token_unit(text[pitch_match.end() :])
+        if unit is None:
+            continue
         value = float(pitch_match.group(1))
-        unit = (pitch_match.group(2) or "").lower()
+        dimensions["PITCH"] = value * 0.0254 if unit in ("mil", "mils") else value
+        return dimensions
+    # Trailing-label form ("0.8 mm pitch"). A "pitch" that is itself followed by
+    # a number labels that number (a rejected candidate above), not the one
+    # before it ("7 x 7 mm pitch = 0.65mmX").
+    trailing_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))\s+(?i:pitch)\b(?!\s*[=:]?\s*\d)", text
+    )
+    if trailing_match:
+        value = float(trailing_match.group(1))
+        unit = trailing_match.group(2).lower()
         dimensions["PITCH"] = value * 0.0254 if unit in ("mil", "mils") else value
 
     return dimensions

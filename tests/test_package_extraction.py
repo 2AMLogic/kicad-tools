@@ -468,3 +468,66 @@ class TestPackageTypes:
         """Test SSOP has default pitch."""
         assert "pitch" in PACKAGE_TYPES["SSOP"]
         assert PACKAGE_TYPES["SSOP"]["pitch"] == 0.65
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["e=1.27mmA", "pitch 1.27mmA", "pitch 1.27B", "pitch = 0.65mmX", "e=1.27 mmA"],
+)
+def test_pitch_token_with_attached_letter_is_ambiguous(text):
+    # Key must be absent: a truncated 1.0 or a falsy 0.0 must not be reported.
+    assert "PITCH" not in extract_dimension_from_text(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "pitch"),
+    [
+        ("e=1.27mm", 1.27),
+        ("e=0.8", 0.8),
+        ("Pitch 50 mil", 1.27),
+        ("0.8 mm pitch", 0.8),
+        ("e=1.27mmA pitch 0.8mm", 0.8),
+        ("pitch 1.27 B", 1.27),
+    ],
+)
+def test_clean_pitch_forms_keep_their_values(text, pitch):
+    assert extract_dimension_from_text(text)["PITCH"] == pytest.approx(pitch)
+
+
+def test_uppercase_e_still_supplies_body_length_with_malformed_pitch():
+    dims = extract_dimension_from_text("E=7.0 mm e=1.27mmA")
+    assert dims["E"] == 7.0
+    assert "PITCH" not in dims
+
+
+@pytest.mark.parametrize(
+    ("cell", "pitch", "inferred"),
+    [
+        ("e=1.27mmA", None, True),
+        ("pitch = 0.65mmX", None, True),
+        ("e=1.27mmA pitch 0.8mm", 0.8, False),
+        ("e=1.27mm", 1.27, False),
+    ],
+)
+def test_malformed_pitch_cell_falls_back_like_empty_cell(
+    tmp_path, monkeypatch, cell, pitch, inferred
+):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+
+    def extract(third_cell):
+        parser = DatasheetParser(pdf)
+        table = ExtractedTable(1, [], [["LQFP32", "7 x 7 mm", third_cell]])
+        monkeypatch.setattr(parser, "extract_tables", lambda pages: [table])
+        (package,) = parser.extract_packages()
+        return package
+
+    control = extract("")
+    package = extract(cell)
+    assert (package.pin_count, package.body_width, package.body_length) == (32, 7, 7)
+    assert package.pitch_inferred is inferred
+    if pitch is None:
+        assert package.pitch == control.pitch
+        assert package.confidence == control.confidence
+    else:
+        assert package.pitch == pytest.approx(pitch)
