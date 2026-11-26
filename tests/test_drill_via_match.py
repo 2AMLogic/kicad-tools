@@ -198,3 +198,44 @@ def test_contradictory_kicad_units_are_unknown(board):
     result = match_drill_vias(board, {"board.drl": content}, use_aux_origin=True)
     assert result.matched == 0
     assert "format_unknown" in result.reasons
+
+
+def _outline_board(tmp_path, name="sample"):
+    path = tmp_path / f"{name}.kicad_pcb"
+    path.write_text("""(kicad_pcb (version 20240108) (generator "test")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+      (setup (aux_axis_origin 100 50))
+      (gr_rect (start 100 100) (end 140 130) (layer "Edge.Cuts") (width 0.1))
+      (via (at 140 125) (size .65) (drill .3) (layers "F.Cu" "B.Cu")
+           (uuid "11111111-1111-4111-8111-111111111111"))
+      (via (at 145 131) (size .65) (drill .5) (layers "F.Cu" "B.Cu")
+           (uuid "22222222-2222-4222-8222-222222222222")))
+    """)
+    return PCB.load(path)
+
+
+@pytest.mark.parametrize("use_aux_origin", [True, False])
+def test_translated_edge_cuts_origin_is_subtracted_before_lookup(tmp_path, use_aux_origin):
+    board = _outline_board(tmp_path)
+    assert board.board_origin == (100, 100)
+    # Sheet position -> drill frame: minus the aux origin (or none), Y negated.
+    ox, oy = (100, 50) if use_aux_origin else (0, 0)
+    hit = f"X{140 - ox}.0Y{-(125 - oy)}.0"
+    content = drill(f"T1\n{hit}", header="METRIC\nT1C0.300", function="Plated,1,2,PTH")
+    result = match_drill_vias(board, {"board.drl": content}, use_aux_origin=use_aux_origin)
+    assert [m.via_index for m in result.matches] == [0]
+    assert result.matches[0].diameter_mm == 0.3
+    assert result.matches[0].center_mm == (140 - ox, -(125 - oy))
+
+
+@pytest.mark.parametrize("name", ["board-PTH", "board-NPTH", "board-front-in1"])
+def test_board_name_that_looks_like_a_drill_suffix_is_not_evidence(tmp_path, name):
+    board = _outline_board(tmp_path, name)
+    header = "METRIC\n; #@! TA.AperFunction,Plated,PTH,ViaDrill\nT1C0.300"
+    content = drill("T1\nX40.0Y-75.0", header=header, function="MixedPlating,1,2")
+    result = match_drill_vias(board, {f"{name}.drl": content}, use_aux_origin=True)
+    assert (result.matched, result.reasons) == (1, ("unmatched_via",))
+    # A genuinely conflicting split-file suffix after the board name is still rejected.
+    conflicting = drill("T1\nX40.0Y-75.0", header=header, function="NonPlated,1,2,NPTH")
+    result = match_drill_vias(board, {f"{name}-PTH.drl": conflicting}, use_aux_origin=True)
+    assert result.matched == 0 and "plating_unknown" in result.reasons

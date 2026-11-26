@@ -64,8 +64,19 @@ class DrillCoverage:
         return len(self.matches)
 
 
-def _filename_span(filename: str) -> Span | None:
-    name = filename.lower()
+def _suffix_name(filename: str, board_name: str) -> str:
+    """Lowercase member name with the board's own basename removed.
+
+    KiCad names members ``<board><suffix>.drl``; a board literally called
+    ``board-PTH`` must not read its own name as a plating or span suffix.
+    """
+    name = filename.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    stem = board_name.lower()
+    return name[len(stem) :] if stem and name.startswith(stem) else name
+
+
+def _filename_span(filename: str, board_name: str = "") -> Span | None:
+    name = _suffix_name(filename, board_name)
     if name.endswith(("-pth.drl", "-npth.drl")):
         return "F.Cu", "B.Cu"
     if match := _FILENAME_SPAN.search(name):
@@ -114,7 +125,7 @@ class _Header:
         return value * self.scale, 0.5 * self.scale * 10.0**-precision
 
 
-def _read_header(lines: list[str], filename: str) -> _Header:
+def _read_header(lines: list[str], filename: str, board_name: str = "") -> _Header:
     header = _Header()
     tool_plating = None
     component = False
@@ -182,15 +193,16 @@ def _read_header(lines: list[str], filename: str) -> _Header:
 
     # KiCad splits through holes by plating and blind/buried files by span.
     name_plating = None
-    if _filename_span(filename):
-        name_plating = "NONPLATED" if filename.lower().endswith("-npth.drl") else "PLATED"
+    if _filename_span(filename, board_name):
+        suffixed = _suffix_name(filename, board_name)
+        name_plating = "NONPLATED" if suffixed.endswith("-npth.drl") else "PLATED"
     if name_plating and header.plating and header.plating != name_plating:
         raise ValueError("plating_unknown")
     header.plating = header.plating or name_plating
     return header
 
 
-def parse_excellon(filename: str, content: str) -> ParsedDrill:
+def parse_excellon(filename: str, content: str, board_name: str = "") -> ParsedDrill:
     """Read a KiCad drill member. Unsupported input produces a coverage reason."""
     lines = [line.strip().upper() for line in content.splitlines() if line.strip()]
     try:
@@ -199,7 +211,7 @@ def parse_excellon(filename: str, content: str) -> ParsedDrill:
         end = next((i for i, line in enumerate(lines) if line in ("%", "M95")), None)
         if end is None:
             raise ValueError("format_unknown")
-        header = _read_header(lines[1:end], filename)
+        header = _read_header(lines[1:end], filename, board_name)
     except ValueError as exc:
         return ParsedDrill(filename, None, None, (), (str(exc),))
 
@@ -265,7 +277,7 @@ def parse_excellon(filename: str, content: str) -> ParsedDrill:
     return ParsedDrill(filename, header.units, header.span, tuple(hits), tuple(sorted(reasons)))
 
 
-def _members(files: Mapping[str, str] | ZipFile) -> Iterator[ParsedDrill]:
+def _members(files: Mapping[str, str] | ZipFile, board_name: str = "") -> Iterator[ParsedDrill]:
     if isinstance(files, ZipFile):
         for member in files.infolist():
             if member.filename.lower().endswith((".drl", "-drl.gbr")):
@@ -274,10 +286,10 @@ def _members(files: Mapping[str, str] | ZipFile) -> Iterator[ParsedDrill]:
                 except (BadZipFile, UnicodeDecodeError):
                     yield ParsedDrill(member.filename, None, None, (), ("format_unknown",))
                     continue
-                yield parse_excellon(member.filename, content)
+                yield parse_excellon(member.filename, content, board_name)
     else:
         for name, content in files.items():
-            yield parse_excellon(name, content)
+            yield parse_excellon(name, content, board_name)
 
 
 class _PointIndex:
@@ -325,9 +337,11 @@ def match_drill_vias(
     reasons: set[str] = set()
     candidates: dict[int, ViaMatch] = {}
     ambiguous: set[int] = set()
-    for file in _members(files):
+    board_name = board.path.stem if board.path else ""
+    bx, by = board.board_origin
+    for file in _members(files, board_name):
         reasons.update(file.reasons)
-        span = _filename_span(file.filename)
+        span = _filename_span(file.filename, board_name)
         if file.layer_numbers is not None:
             first, last = file.layer_numbers
             if not (1 <= first < last <= len(stack)):
@@ -344,7 +358,9 @@ def match_drill_vias(
             if span is None:
                 reasons.add("span_unknown")
                 continue
-            center = ox + hit.center_mm[0], oy - hit.center_mm[1]
+            # Drill frame -> sheet frame -> the board-relative frame PCB.load()
+            # applies to every via and pad position.
+            center = ox + hit.center_mm[0] - bx, oy - hit.center_mm[1] - by
             if next(pads.near(center, hit.tolerance_mm), None) is not None:
                 continue
             owners = [
