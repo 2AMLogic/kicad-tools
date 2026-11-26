@@ -658,6 +658,11 @@ def _project_symbol_files(project_dir: Path) -> list[Path]:
     return files
 
 
+def is_project_library_directory(name: str) -> bool:
+    """Recognize project-local KiCad footprint, symbol and 3D library directories."""
+    return name in {"footprints", "symbols"} or name.endswith((".pretty", ".3dshapes"))
+
+
 def project_library_members(directory: Path, boundary: Path) -> list[Path]:
     """Files under a library directory that stay inside *boundary* (#8763).
 
@@ -690,7 +695,7 @@ def project_library_members(directory: Path, boundary: Path) -> list[Path]:
 def _project_footprint_files(project_dir: Path) -> list[Path]:
     """Project-local footprint library inventory (#8727).
 
-    ``fp-lib-table``, ``*.pretty`` / ``footprints`` / ``symbols`` directories and
+    ``fp-lib-table``, local footprint, symbol and 3D library directories, and
     the in-project ``${KIPRJMOD}`` (or relative) libraries the table references.
     This mirrors the footprint half of ``kct readiness``'s dependency inventory
     so ``kct export`` writes every file readiness requires of
@@ -704,9 +709,7 @@ def _project_footprint_files(project_dir: Path) -> list[Path]:
     if table.is_file():
         files.add(table)
     for directory in project_dir.iterdir():
-        if directory.is_dir() and (
-            directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
-        ):
+        if directory.is_dir() and is_project_library_directory(directory.name):
             files.update(project_library_members(directory, root))
     if table.is_file():
         for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text(errors="replace")):

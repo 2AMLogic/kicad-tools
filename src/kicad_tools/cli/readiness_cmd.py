@@ -2818,13 +2818,14 @@ def _project_dependencies(
 
 def _project_libraries(real_root: Path, boundary: Path, explicit_root: bool) -> set[Path]:
     """Project-local library tables and their members, shared by snapshots and packaging."""
-    from kicad_tools.export.manufacturing import project_library_members
+    from kicad_tools.export.manufacturing import (
+        is_project_library_directory,
+        project_library_members,
+    )
 
     files: set[Path] = set()
     for directory in real_root.iterdir():
-        if directory.is_dir() and (
-            directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
-        ):
+        if directory.is_dir() and is_project_library_directory(directory.name):
             files.update(project_library_members(directory, real_root))
     for table in (real_root / "fp-lib-table", real_root / "sym-lib-table"):
         if not table.is_file():
@@ -3073,11 +3074,13 @@ _PROJECT_LIB_REEXPORT_HINT = (
 
 
 def _is_project_local_library_member(relative: str) -> bool:
-    """True for ``fp-lib-table``/``sym-lib-table``, ``*.pretty/**``, ``footprints/**``, ``symbols/**``."""
+    """Whether the archive member belongs to a project-local KiCad library."""
+    from kicad_tools.export.manufacturing import is_project_library_directory
+
     parts = relative.split("/")
     if parts[-1] in ("fp-lib-table", "sym-lib-table"):
         return True
-    return any(part.endswith(".pretty") or part in ("footprints", "symbols") for part in parts[:-1])
+    return any(is_project_library_directory(part) for part in parts[:-1])
 
 
 def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
