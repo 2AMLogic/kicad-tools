@@ -790,6 +790,40 @@ class TestPhysicalLayerGraph:
         assert result.length_mm == pytest.approx(100)
         assert audit_current_paths(pcb, [_trunk_spec(), _sense_spec()]).fully_covered
 
+    @pytest.mark.parametrize(
+        "width,net,span,reverse,expected",
+        [
+            (2.45, "NET1", ("F.Cu", "B.Cu"), False, "resolved"),
+            (2.45, "NET1", ("F.Cu", "B.Cu"), True, "resolved"),
+            (1.95, "NET1", ("F.Cu", "B.Cu"), False, "unresolved"),
+            (2.45, "OTHER", ("F.Cu", "B.Cu"), False, "unresolved"),
+            (2.45, "NET1", ("In2.Cu", "B.Cu"), False, "unresolved"),
+        ],
+    )
+    def test_offset_endpoint_covers_via_drill(self, width, net, span, reverse, expected):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(layers=4)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50.632, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=100, y=50, net="NET1")
+        endpoints = [(20, 50.632), (60, 50.632)]
+        if reverse:
+            endpoints.reverse()
+        pcb.add_trace(*endpoints, width=width, layer="In1.Cu", net="NET1")
+        pcb.add_trace((60, 50), (100, 50), width=1, layer="F.Cu", net="NET1")
+        pcb.add_via(60, 50, size=1.6, drill=0.8, layers=span, net=net)
+        result = resolve_current_path(pcb, _trunk_spec())
+        assert result.status == expected
+        if result.ok:
+            assert {id(s) for s in result.segments} == {id(s) for s in pcb.segments}
+            assert len(result.layer_changes) == 1
+            assert result.layer_changes[0].count == 1
+            assert result.layer_changes[0].drill == pytest.approx(0.8)
+            # A second bridge across the layers creates a real parallel path.
+            pcb.add_via(30, 50.632, size=1.6, drill=0.8, net=net)
+            pcb.add_trace((30, 50.632), (100, 50), width=1, layer="F.Cu", net=net)
+            assert resolve_current_path(pcb, _trunk_spec()).status == "ambiguous"
+
     def test_interior_via_nearby_is_not_contact(self):
         pcb = self._interior_pcb()
         pcb.vias[0].position = (60, 50.01)
