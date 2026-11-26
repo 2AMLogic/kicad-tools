@@ -2115,16 +2115,18 @@ class ManufacturingPackage:
 
         rules = self._apply_stackup_copper(rules)
 
-        def existing_text(path: Path) -> str | None:
+        def existing_bytes(path: Path) -> bytes | None:
+            # Bytes, not text: read_text() normalizes line endings and would
+            # hide a rewrite that only changed them.
             try:
-                return path.read_text(encoding="utf-8")
+                return path.read_bytes()
             except OSError:
                 return None
 
         dru_path = Path(self.pcb_path).with_suffix(".kicad_dru")
         pro_path = Path(self.pcb_path).with_suffix(".kicad_pro")
-        dru_text_before = existing_text(dru_path)
-        pro_text_before = existing_text(pro_path)
+        dru_bytes_before = existing_bytes(dru_path)
+        pro_bytes_before = existing_bytes(pro_path)
         dru_before = self._ampacity_block(dru_path)
 
         max_width_mm: float | None = None
@@ -2134,7 +2136,11 @@ class ManufacturingPackage:
         else:
             from ..manufacturers.attach_zone_dru import has_designer_clearance_rule
 
-            if has_designer_clearance_rule(dru_text_before):
+            if has_designer_clearance_rule(
+                dru_bytes_before.decode("utf-8", errors="replace")
+                if dru_bytes_before is not None
+                else None
+            ):
                 result.warnings.append(
                     f"Skipped ampacity rules: {dru_path.name} carries the designer's own "
                     "clearance rules and was not extended with track_width floors."
@@ -2158,6 +2164,25 @@ class ManufacturingPackage:
             )
             return
 
+        # #8612: the designer owns these files; say so whenever export rewrote
+        # one. Runs on the write-error path too: the project is saved before
+        # the DRU, so a failed DRU write can still have changed the project.
+        def report_rewrites() -> None:
+            for path, before, reason in (
+                (dru_path, dru_bytes_before, "generated DRC rules"),
+                (pro_path, pro_bytes_before, "project DRC settings"),
+            ):
+                after = existing_bytes(path)
+                if before is not None and after is not None and before != after:
+                    note = f"Export modified {path.name} ({reason})."
+                    if path == pro_path:
+                        note += (
+                            f" Re-run `kicad-cli pcb drc` on {Path(self.pcb_path).name} "
+                            "with the packaged project settings."
+                        )
+                    logger.info(note)
+                    result.warnings.append(note)
+
         try:
             written = write_drc_constraints(
                 self.pcb_path,
@@ -2171,6 +2196,7 @@ class ManufacturingPackage:
         except OSError as e:
             logger.warning("Could not write DRC-constraint files: %s", e)
             result.warnings.append(f"Could not write DRC constraints: {e}")
+            report_rewrites()
             return
 
         result.drc_constraint_paths = written
@@ -2187,18 +2213,7 @@ class ManufacturingPackage:
             logger.warning(msg)
             result.warnings.append(msg)
 
-        # #8612: the designer owns this file; say so whenever export rewrote it.
-        for path, before, reason in (
-            (dru_path, dru_text_before, "generated DRC rules"),
-            (pro_path, pro_text_before, "project DRC settings"),
-        ):
-            after = existing_text(path)
-            if before is not None and after is not None and before != after:
-                note = f"Export modified {path.name} ({reason})."
-                if path == pro_path:
-                    note += " Re-run KiCad DRC against the packaged project settings."
-                logger.info(note)
-                result.warnings.append(note)
+        report_rewrites()
 
     def _dry_run_write_drc_constraints(
         self,

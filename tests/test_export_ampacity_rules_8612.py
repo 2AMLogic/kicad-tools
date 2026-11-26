@@ -46,7 +46,7 @@ def test_unwaived_nets_keep_floors(tmp_path: Path) -> None:
     pcb.with_suffix(".kicad_dru").write_text("(version 1)\n")
     dru, result = _export(pcb)
     assert "Ampacity Min Width" in dru
-    assert any("Export modified" in w for w in result.warnings)
+    assert any("Export modified" in w and ".kicad_dru" in w for w in result.warnings)
 
 
 def test_project_only_rewrite_reports_changed_settings(tmp_path: Path) -> None:
@@ -58,10 +58,46 @@ def test_project_only_rewrite_reports_changed_settings(tmp_path: Path) -> None:
     pro.write_text(json.dumps(data))
 
     _, changed = _export(pcb)
-    assert any(f"Export modified {pro.name}" in w for w in changed.warnings)
+    assert any(
+        f"Export modified {pro.name}" in w and f"`kicad-cli pcb drc` on {pcb.name}" in w
+        for w in changed.warnings
+    )
     assert not any("Export modified" in w and ".kicad_dru" in w for w in changed.warnings)
     _, unchanged = _export(pcb)
     assert not any("Export modified" in w for w in unchanged.warnings)
+
+
+def test_project_line_ending_rewrite_is_reported(tmp_path: Path) -> None:
+    pcb = _stage(tmp_path)
+    _export(pcb)
+    pro = pcb.with_suffix(".kicad_pro")
+    pro.write_bytes(pro.read_bytes().replace(b"\n", b"\r\n"))
+
+    _, result = _export(pcb)
+    assert any(f"Export modified {pro.name}" in w for w in result.warnings)
+
+
+def test_project_rewrite_reported_when_dru_write_fails(tmp_path: Path) -> None:
+    import os
+
+    import pytest
+
+    pcb = _stage(tmp_path)
+    _export(pcb)
+    pro = pcb.with_suffix(".kicad_pro")
+    dru = pcb.with_suffix(".kicad_dru")
+    data = json.loads(pro.read_text())
+    data["board"]["design_settings"]["rule_severities"]["lib_footprint_mismatch"] = "warning"
+    pro.write_text(json.dumps(data))
+    dru.chmod(0o444)
+    try:
+        if os.access(dru, os.W_OK):
+            pytest.skip("read-only file is still writable (running as root)")
+        _, result = _export(pcb)
+    finally:
+        dru.chmod(0o644)
+    assert any("Could not write DRC constraints" in w for w in result.warnings)
+    assert any(f"Export modified {pro.name}" in w for w in result.warnings)
 
 
 def test_waived_net_gets_no_rule(tmp_path: Path) -> None:
