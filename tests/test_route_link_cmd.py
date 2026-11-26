@@ -433,6 +433,66 @@ class TestCorridorPublish:
         assert f'(uri "{src.resolve()}/P.pretty")' in table and "KIPRJMOD" not in table
         assert len(staged) == 2
 
+    @pytest.mark.parametrize("corridor_second", [True, False])
+    def test_second_link_keeps_first_in_separate_output(self, plane_board, capsys, corridor_second):
+        text = plane_board.read_text().rstrip()[:-1]
+        for ref, x in (("R3", 110), ("R4", 120)):
+            text += f"""
+  (footprint "R" (layer "F.Cu") (at {x} 114)
+    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4)
+      (layers "*.Cu" "*.Mask") (net 1 "SIG")))"""
+        plane_board.write_text(text + ")\n")
+        out = plane_board.with_name("out.kicad_pcb")
+        out.write_bytes(plane_board.read_bytes())
+        second = ["--link", "SIG R3.1 R4.1"]
+        if corridor_second:
+            second += ["--link-layers", "In1.Cu", "--plane-corridor", "In1.Cu=109,113.9,121,114.1"]
+        rc, doc = self._link(capsys, plane_board, "-o", str(out), *second)
+        assert rc == 0, doc
+        assert [e["status"] for e in doc["links"]] == ["committed", "committed"]
+        ys = {round(s.start[1]) for s in PCB.load(out).segments if s.net_number == 1}
+        assert {10, 14} <= ys  # board-origin relative
+
+    def test_stage_handles_bare_uri(self, tmp_path):
+        from kicad_tools.cli.route_link_cmd import _stage_project_files
+
+        src = tmp_path / "proj"
+        src.mkdir()
+        board = src / "b.kicad_pcb"
+        board.write_text("")
+        (src / "fp-lib-table").write_text(
+            "(fp_lib_table (lib (name local)(type KiCad)(uri ${KIPRJMOD}/local.pretty)))"
+        )
+        private = tmp_path / "private"
+        private.mkdir()
+        _stage_project_files(board, private / "b.kicad_pcb")
+        table = (private / "fp-lib-table").read_text()
+        assert f'(uri "{src.resolve()}/local.pretty")' in table and "KIPRJMOD" not in table
+
+    def test_publish_stages_beside_resolved_destination(self, plane_board, capsys, monkeypatch):
+        import os
+
+        real = tmp = plane_board.parent / "elsewhere"
+        real.mkdir()
+        dest = real / "target.kicad_pcb"
+        dest.write_bytes(plane_board.read_bytes())
+        link = plane_board.with_name("out.kicad_pcb")
+        link.symlink_to(dest)
+        seen = []
+        orig = os.replace
+        monkeypatch.setattr(
+            os,
+            "replace",
+            lambda a, b: (
+                seen.append((Path(a).parent, Path(b).parent)) if ".publish-" in str(a) else None,
+                orig(a, b),
+            )[1],
+        )
+        rc, doc = self._link(capsys, plane_board, "-o", str(link))
+        assert rc == 0, doc
+        assert seen and all(a == b == tmp.resolve() for a, b in seen)
+
     def test_baseline_uses_input_rules_not_output_sidecars(self, plane_board, capsys, monkeypatch):
         from kicad_tools.cli import route_link_cmd
 

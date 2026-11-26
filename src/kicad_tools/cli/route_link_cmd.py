@@ -1117,13 +1117,16 @@ def _stage_project_files(pcb_path: Path, out_path: Path) -> list[Path]:
         project = str(pcb_path.resolve().parent)
 
         def absolute(match: re.Match[str]) -> str:
-            uri = match["uri"].replace("${KIPRJMOD}", project)
+            raw = match["quoted"] if match["quoted"] is not None else match["bare"]
+            uri = raw.replace("${KIPRJMOD}", project)
             if "${" not in uri and not uri.startswith("/") and not re.match(r"[A-Za-z]:", uri):
                 uri = f"{project}/{uri}"
             return f'(uri "{uri}")'
 
         text = table.read_text(encoding="utf-8")
-        target.write_text(re.sub(r'\(uri\s+"(?P<uri>[^"]*)"\)', absolute, text), encoding="utf-8")
+        # KiCad accepts the URI quoted or as a bare token.
+        uri_value = r'\(uri\s+(?:"(?P<quoted>[^"]*)"|(?P<bare>[^\s()"]+))\s*\)'
+        target.write_text(re.sub(uri_value, absolute, text), encoding="utf-8")
         staged.append(target)
     return staged
 
@@ -1386,11 +1389,18 @@ def _commit_links_gated(
             _commit_to_model(model, route, net_ids[spec.net])
         if path != out_path:
             destination = out_path.resolve()
-            staging = path.parent / f".publish-{destination.name}"
-            shutil.copyfile(path, staging)
-            if out_mode is not None:
-                staging.chmod(out_mode)
-            os.replace(staging, destination)
+            # Stage beside the resolved destination: a symlink may cross filesystems.
+            staging = destination.parent / f".publish-{destination.name}"
+            try:
+                shutil.copyfile(path, staging)
+                if out_mode is not None:
+                    staging.chmod(out_mode)
+                os.replace(staging, destination)
+            finally:
+                staging.unlink(missing_ok=True)
+            if baseline != out_path and path != baseline:
+                # The next link must start from the accepted board; sidecars stay.
+                baseline.write_bytes(destination.read_bytes())
         if plane_trial is None:
             baseline = out_path
         n_committed += 1
@@ -1461,7 +1471,9 @@ def run_route_link_command(args: argparse.Namespace) -> int:
 
             out_path = Path(args.output) if args.output else pcb_path
             try:
-                with evidence_toolchain(mounts=[out_path.resolve().parent]):
+                with evidence_toolchain(
+                    mounts=[out_path.resolve().parent, pcb_path.resolve().parent]
+                ):
                     written, refused = _commit_links(
                         args, links, pcb, model, rules, origin, net_ids, pcb_path, out_path, entries
                     )
