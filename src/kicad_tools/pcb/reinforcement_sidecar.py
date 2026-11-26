@@ -112,10 +112,13 @@ def reinforce_publication(source: Path, output: Path) -> Iterator[Callable[[], N
     with ExitStack() as stack:
         for lock in sorted(locks):
             stack.enter_context(publication_lock(lock))
-        for path in {source.resolve(), output.resolve()}:
-            if path.is_file():
-                stream = stack.enter_context(path.open("rb"))
-                stack.enter_context(board_stream_lock(stream.fileno(), path, writing=False))
+        # On Windows the sibling reservation also guards recordless moves.
+        # Keeping an open board handle there would block PCB.save's rename.
+        if os.name != "nt":
+            for path in {source.resolve(), output.resolve()}:
+                if path.is_file():
+                    stream = stack.enter_context(path.open("rb"))
+                    stack.enter_context(board_stream_lock(stream.fileno(), path, writing=False))
         verify()
         yield verify
 
