@@ -4033,3 +4033,38 @@ def test_disconnected_copper_nets_matches_items_assigned_first_uuid_by_native_sa
     assert all(p.uuid for fp in pcb.footprints for p in fp.pads)
     assert all(item.uuid for item in [*pcb.segments, *pcb.arcs, *pcb.vias])
     assert saved.disconnected_copper_nets(before, {"Signal"}) == set()
+
+
+@pytest.mark.timeout(180)
+def test_elbow_repair_preserves_tracks_on_neighbor_pour(tmp_path, capsys):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+
+    # Moving the N1 elbow moves a clearance cut across the N2 pour. N2's
+    # three front tracks trade B-C for A-B, keeping the native opens at two.
+    original = (Path(__file__).parent / "fixtures/mask_elbow_neighbor_pour.kicad_pcb").read_bytes()
+    board = tmp_path / "elbow.kicad_pcb"
+    board.write_bytes(original)
+    with evidence_toolchain(mounts=[tmp_path]):
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--max-displacement",
+                "2",
+                "--max-passes",
+                "1",
+                "--verify",
+                "--format",
+                "json",
+            ]
+        )
+    outcome = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert outcome["repaired"] == 0
+    assert any(
+        entry["reason"] == "pad_connection_lost" and "N2" in entry["detail"]
+        for entry in outcome["unrepaired"]
+    )
+    assert board.read_bytes() == original
