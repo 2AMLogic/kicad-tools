@@ -1369,12 +1369,21 @@ def _error_class(v: DRCViolation, split_parents: dict[str, str]) -> tuple:
         # Older and net-only reports have only the location to identify the witness.
         witness = v.witnesses or [item for item in v.items if not item.startswith("net:")]
         if witness:
-            if v.type_str in {"track_dangling", "physical_copper_gap"}:
-                witness = [split_parents.get(item, item) for item in witness]
+            # A leg split off by a repair has a new uuid but is the same copper.
+            witness = [split_parents.get(item, item) for item in witness]
             return (*key, tuple(sorted(witness)), tuple(loc.layer for loc in v.locations))
         return (*key, tuple((loc.layer, loc.x_mm, loc.y_mm) for loc in v.locations))
     # Clearance reports name tracks by geometry, which changes with the move.
     return key
+
+
+def _split_parent_map(actions: list) -> dict[str, str]:
+    """Map each uuid a repair split off to the original conductor's uuid."""
+    parents: dict[str, str] = {}
+    for action in actions:
+        for bend in getattr(action, "bends", ()):
+            parents[bend.added_uuid] = parents.get(bend.uuid, bend.uuid)
+    return parents
 
 
 def _new_errors(
@@ -1495,10 +1504,7 @@ def _moves_with_new_errors(
     # run or undo leaves ``baseline_errors`` empty, so every candidate reads
     # as new and the moves revert: fail closed.
     tolerance_mm = max(a.displacement_mm for a in actions) + 0.1
-    split_parents: dict[str, str] = {}
-    for action in actions:
-        for bend in action.bends:
-            split_parents[bend.added_uuid] = split_parents.get(bend.uuid, bend.uuid)
+    split_parents = _split_parent_map(actions)
     new_errors = _new_errors(candidates, baseline_errors, tolerance_mm, split_parents)
     if not new_errors:
         return set()
@@ -1535,25 +1541,46 @@ def _moves_with_new_errors(
 
 
 def _new_mask_keys(
-    before: DRCReport, after: DRCReport, *, guard_warnings: bool
+    before: DRCReport,
+    after: DRCReport,
+    *,
+    guard_warnings: bool,
+    split_parents: dict[str, str] | None = None,
 ) -> set[tuple[str, ...]]:
-    """Compare unwaived findings by copper identity, severity and multiplicity."""
+    """Compare unwaived findings by copper identity, severity and multiplicity.
 
-    def counts(report: DRCReport, include_warnings: bool) -> Counter:
+    A leg split off an original conductor by a repair carries a new uuid, so
+    ``split_parents`` maps it back before comparing: an unchanged warning on a
+    retained leg is not new. The returned keys are the after board's own.
+    """
+    parents = split_parents or {}
+
+    def norm(key: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(parents.get(uid, uid) for uid in key)
+
+    def counts(report: DRCReport, include_warnings: bool, *, mapped: bool) -> Counter:
         return Counter(
-            finding_key(v)
+            norm(finding_key(v)) if mapped else finding_key(v)
             for v in report.violations
             if v.type == ViolationType.MASK_TO_COPPER
             and not v.waived
             and (v.is_error or (include_warnings and v.severity == Severity.WARNING))
         )
 
-    after_errors, before_errors = counts(after, False), counts(before, False)
+    after_errors = counts(after, False, mapped=True)
+    before_errors = counts(before, False, mapped=False)
     if not guard_warnings:
-        return set(after_errors) - set(before_errors)
-    # The combined count admits an error-to-warning downgrade. Checking
-    # errors separately prevents an earlier warning from covering an error.
-    return set(after_errors - before_errors) | set(counts(after, True) - counts(before, True))
+        excess = set(after_errors) - set(before_errors)
+    else:
+        excess = set(after_errors - before_errors)
+        # The combined count admits an error-to-warning downgrade. Checking
+        # errors separately prevents an earlier warning from covering an error.
+        excess |= set(counts(after, True, mapped=True) - counts(before, True, mapped=False))
+    return {
+        finding_key(v)
+        for v in after.violations
+        if v.type == ViolationType.MASK_TO_COPPER and norm(finding_key(v)) in excess
+    }
 
 
 def _mask_action_touches(action: MaskRepairAction | MaskNudgeAction, touched: set[str]) -> bool:
@@ -1855,7 +1882,10 @@ def _run_mask_pass(
                     raise RuntimeError("could not verify mask openings on the final saved board")
                 remaining = {finding_key(v) for v in mask_copper_violations(final.violations)}
                 new_keys = _new_mask_keys(
-                    guard_baseline or report, final, guard_warnings=guard_baseline is not None
+                    guard_baseline or report,
+                    final,
+                    guard_warnings=guard_baseline is not None,
+                    split_parents=_split_parent_map(result.actions),
                 )
                 if guard_baseline is not None and new_keys:
                     raise _MaskBatchRejected(
@@ -1994,7 +2024,12 @@ def _verify_mask_actions(
         after = None
     after_errors = mask_copper_violations(after.violations) if after is not None else []
     new_keys = (
-        _new_mask_keys(guard_baseline or report, after, guard_warnings=guard_baseline is not None)
+        _new_mask_keys(
+            guard_baseline or report,
+            after,
+            guard_warnings=guard_baseline is not None,
+            split_parents=_split_parent_map(result.actions),
+        )
         if after is not None
         else set()
     )

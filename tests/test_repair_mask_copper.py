@@ -4328,3 +4328,45 @@ def test_violation_positional_constructors_preserve_fields():
         0.15,
     )
     assert (report.required_value_mm, report.actual_value_mm) == (0.25, 0.15)
+
+
+def _witness_finding(rule: str, witnesses: list[str], x: float = 97.0) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.from_string(rule),
+        type_str=rule,
+        severity=Severity.WARNING,
+        message=rule,
+        locations=[Location(x_mm=x, y_mm=100.5, layer="F.Cu")],
+        items=list(witnesses),
+        witnesses=list(witnesses),
+        nets=["N1", "N2"],
+    )
+
+
+@pytest.mark.parametrize("rule", ["pour_slot", "redundant_copper_covered"])
+def test_split_leg_warning_matches_its_original_conductor(rule):
+    """An unchanged warning on a retained split leg is not new; another is."""
+    before = [_witness_finding(rule, ["trk-a", "trk-n2"])]
+    same = [_witness_finding(rule, ["leg-a", "trk-n2"])]
+    other = [_witness_finding(rule, ["leg-a", "trk-other"])]
+    parents = {"leg-a": "trk-a"}
+    assert fix_drc_cmd._new_errors(same, before, 0.5, parents) == []
+    assert fix_drc_cmd._new_errors(other, before, 0.5, parents) == other
+    # Without the split map the retained leg would read as new.
+    assert fix_drc_cmd._new_errors(same, before, 0.5, {}) == same
+
+
+def test_split_leg_mask_warning_matches_its_original_conductor():
+    before = _report(_finding("trk-a", severity=Severity.WARNING))
+    same = _report(_finding("leg-a", severity=Severity.WARNING))
+    parents = {"leg-a": "trk-a"}
+    assert not fix_drc_cmd._new_mask_keys(before, same, guard_warnings=True, split_parents=parents)
+    assert fix_drc_cmd._new_mask_keys(before, same, guard_warnings=True)
+    # A second warning on the leg is still a new one (multiplicity preserved).
+    doubled = _report(
+        _finding("leg-a", severity=Severity.WARNING), _finding("leg-a", severity=Severity.WARNING)
+    )
+    assert fix_drc_cmd._new_mask_keys(before, doubled, guard_warnings=True, split_parents=parents)
+    # An error is never covered by a retained warning.
+    error = _report(_finding("leg-a"))
+    assert fix_drc_cmd._new_mask_keys(before, error, guard_warnings=True, split_parents=parents)
