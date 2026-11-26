@@ -14,7 +14,11 @@ from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyp
 
 from kicad_tools.schema.pcb import PCB, FootprintGraphic
 from kicad_tools.sexp.parser import SExp
-from kicad_tools.silkscreen._silk_defaults import SILK_EDGE_CLEARANCE_MM, SILK_HOLE_CLEARANCE_MM
+from kicad_tools.silkscreen._silk_defaults import (
+    DEFAULT_CLEARANCE_MM,
+    SILK_EDGE_CLEARANCE_MM,
+    SILK_HOLE_CLEARANCE_MM,
+)
 from kicad_tools.silkscreen.place_refs import _inverse_fp_transform, collect_apertures
 from kicad_tools.validate.native_silk_text import text_keepout_shapes
 from kicad_tools.validate.rules.factory_clearance import silk_pad_apertures
@@ -77,7 +81,7 @@ def _joined_lines(markers, graphics):
             yield sorted(group)
 
 
-def _shift_marker(fp, graphics, group, apertures, obstacles, outline, clearance, rule):
+def _shift_marker(fp, graphics, group, apertures, obstacles, keepouts, outline, clearance, rule):
     """Find one rigid translation, or leave the complete mark for manual repair."""
     forward = _fp_transform(fp)
     ink = unary_union([_stroke_geometry(graphics[i], forward) for i in group])
@@ -100,8 +104,13 @@ def _shift_marker(fp, graphics, group, apertures, obstacles, outline, clearance,
             continue
         if outline is not None and shifted.distance(outline) < SILK_EDGE_CLEARANCE_MM:
             continue
-        # A mark joined to other silk, or one that would hit it, stays put.
-        if any(g is None or ink.intersects(g) or shifted.intersects(g) for g in obstacles):
+        if any(ink.intersects(area) or shifted.intersects(area) for area in keepouts):
+            continue
+        # Preserve existing joins and leave placement clearance to other printed ink.
+        if any(
+            g is None or ink.intersects(g) or shifted.distance(g) < DEFAULT_CLEARANCE_MM
+            for g in obstacles
+        ):
             continue
         lx, ly = inverse((fp.position[0] + dx, fp.position[1] + dy))
         trial = list(graphics)
@@ -153,13 +162,14 @@ def _move_joined_markers(
             if key[0] == side and key not in own
             for geom in shapes
         ]
-        obstacles.extend(a.polygon for a in areas if (side, "graphic") in a.forbidden)
+        keepouts = [a.polygon for a in areas if (side, "graphic") in a.forbidden]
         shifted = _shift_marker(
             fp,
             graphics,
             group,
             obstacles_by_side[side],
             obstacles,
+            keepouts,
             outline,
             pad_clearance,
             rule,
