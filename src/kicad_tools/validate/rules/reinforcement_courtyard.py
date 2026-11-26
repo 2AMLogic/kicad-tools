@@ -375,7 +375,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                 ):
                     # Retain all bends between the verified anchors. The
                     # remaining hole-to-pad stubs carry current on copper.
-                    from shapely.ops import substring
+                    from shapely.ops import substring  # type: ignore[import-untyped]
 
                     assert installed.anchor_arc is not None
                     wire_points = list(
