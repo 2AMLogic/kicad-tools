@@ -144,14 +144,10 @@ BOARD06_GAP_NETS: tuple[str, ...] = ()
 # the U1.32 ground repair (#9891) retired the GND identity. J1/B2 (#10294)
 # clears the USB3_TX2+ identity.
 BOARD06_MASK_NETS = (
-    "+1V2",
-    "+3V3",
     "USB2_D+",
     "USB2_D-",
     "USB3_RX1+",
     "USB3_RX1-",
-    "USB3_RX2+",
-    "USB3_RX2-",
     "USB3_TX1-",
 )
 
@@ -580,6 +576,17 @@ def test_board06_unmodified_data_exits_are_rejected():
     assert gate.unexpected_baseline_errors(
         BOARD06_KEY, rule_counts(unmodified), identities_of(unmodified)
     ) == {"mask_to_copper": 2}  # the two newly unallowed net identities
+
+
+def test_board06_rejects_six_returning_power_mask_findings():
+    gate = load("check_diffpair_coverage")
+    repaired = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, repaired) == []
+    power = [net for net in ("+3V3", "+1V2") for _ in range(3)]
+    original = repaired + [mask_violation(net) for net in power]
+    assert sorted(gate.unallowed_blocking(BOARD06_KEY, original)) == sorted(
+        ("mask_to_copper", net) for net in power
+    )
 
 
 @pytest.mark.parametrize(
