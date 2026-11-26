@@ -1,9 +1,9 @@
 """Pour-slot advisory: parallel traces too close for the zone fill (Issue #8435).
 
 Two different-net tracks that run side by side on a layer carrying a copper
-zone leave a strip of pour between them.  The zone keeps ``clearance`` away
-from each track, so the strip is ``gap - 2 * clearance`` wide (``gap`` is the
-edge-to-edge distance).  A strip narrower than the zone's ``min_thickness``
+zone leave a strip of pour between them.  Subtract each track's required
+clearance to the zone from the edge-to-edge gap to get the strip width.
+A strip narrower than the zone's ``min_thickness``
 cannot be filled, so KiCad drops it and the plane gets a *slot* -- a long
 copper-free channel that passes every DRC gate.
 
@@ -11,11 +11,11 @@ Rule id ``pour_slot`` (always ``severity="warning"``).  A pair is reported
 when the tracks are parallel, on the same layer as a pour zone, on different
 nets, overlap along their length, and::
 
-    2 * clearance < gap < 2 * clearance + min_thickness
+    first_clearance + second_clearance < gap < first_clearance + second_clearance + min_thickness
 
-``clearance`` is ``max(zone clearance, netclass clearance of either net)``.
+Each side uses the larger of its track's and the zone's applicable clearances.
 Touching/overlapping tracks (``gap <= 0``) are a DRC matter and not reported,
-and so is a *packed* pair (``gap <= 2 * clearance``, Issue #10121): its
+and so is a *packed* pair whose gap is at or below the sum (Issue #10121): its
 clearance keep-outs already overlap, so no fill strip ever existed between
 the tracks -- the copper-free channel is the unavoidable clearance void any
 two different-net conductors at that spacing produce, and ``min_thickness``
@@ -30,7 +30,7 @@ that docstring's ``gap <= min_thickness`` row is about when two *fill
 fragments* are electrically bonded, which is a different question.  Here the
 question is whether a strip *between tracks* survives the fill, and KiCad
 discards fill islands narrower than ``min_thickness`` after clearing each
-track by ``clearance``; hence ``2 * clearance + min_thickness``.  This is a
+track by its applicable clearance.  This is a
 geometric advisory, not a native-DRC oracle, and it is independent of the
 board's file version.
 
@@ -67,10 +67,8 @@ RULE_ID = "pour_slot"
 PARALLEL_SIN_TOL = 0.02
 #: Minimum side-by-side overlap (mm) worth reporting.
 MIN_OVERLAP_MM = 0.01
-#: Packed-pair tolerance (mm): ``gap <= 2 * clearance + PACKED_GAP_TOL_MM``
+#: Packed-pair tolerance (mm): ``gap <= sum of clearances + PACKED_GAP_TOL_MM``
 #: leaves no fillable strip between the clearance keep-outs (Issue #10121).
-#: Matches the repair pass's own packed-pair cutoff in
-#: :mod:`kicad_tools.optim.pour_slot_cleanup`.
 PACKED_GAP_TOL_MM = 1e-3
 
 
@@ -97,11 +95,17 @@ class PourSlotPair:
     first: Any
     second: Any
     gap: float  #: edge-to-edge distance (mm)
-    threshold: float  #: ``2 * clearance + min_thickness``
-    clearance: float
+    threshold: float  #: sum of the two track-to-zone clearances and the minimum thickness
+    first_clearance: float
+    second_clearance: float
     thickness: float
     overlap: float
     location: tuple[float, float]
+
+    @property
+    def clearance(self) -> float:
+        """Conservative spacing for moved copper in the repair pass."""
+        return max(self.first_clearance, self.second_clearance)
 
 
 def iter_pour_slot_pairs(
@@ -118,9 +122,8 @@ class PourSlotRule(DRCRule):
     name = "Pour Slot"
     description = (
         "Reports parallel different-net tracks whose gap leaves an unfillable "
-        "strip in a poured layer (2 x clearance < gap < 2 x clearance + "
-        "min_thickness), which KiCad drops and leaves as a slot in the plane "
-        "(advisory)."
+        "strip in a poured layer after allowing for each track's clearance "
+        "to the zone (advisory)."
     )
 
     def __init__(self, netclass_clearances: Mapping[str, float] | None = None) -> None:
@@ -144,7 +147,9 @@ class PourSlotRule(DRCRule):
             outline = Polygon(zone.polygon)
             pour = _Pour(
                 outline if outline.is_valid else outline.buffer(0),
-                zone.clearance,
+                max(
+                    zone.clearance, self.netclass_clearances.get(getattr(zone, "net_name", ""), 0.0)
+                ),
                 zone.min_thickness,
             )
             for layer in {zone.layer, *getattr(zone, "layers", [])}:
@@ -184,7 +189,8 @@ class PourSlotRule(DRCRule):
             message=(
                 f"Pour slot: [{na}] and [{nb}] run parallel on {pair.layer} for "
                 f"{pair.overlap:.2f} mm with {pair.gap:.3f} mm gap; the pour between them "
-                f"(< {pair.threshold:.3f} mm = 2 x {pair.clearance:.3f} clearance + "
+                f"(< {pair.threshold:.3f} mm = {pair.first_clearance:.3f} + "
+                f"{pair.second_clearance:.3f} clearances + "
                 f"{pair.thickness:.3f} min_thickness) cannot fill, leaving a slot"
             ),
             location=pair.location,
@@ -256,25 +262,24 @@ class PourSlotRule(DRCRule):
             return None
         centre_dist = abs((db0 + db1) / 2)
         gap = centre_dist - (a.width + b.width) / 2
-        net_clearance = max(self.netclass_clearances.get(s.net_name, 0.0) for s in (a, b))
-        channel = None
+        net_clearance_a = self.netclass_clearances.get(a.net_name, 0.0)
+        net_clearance_b = self.netclass_clearances.get(b.net_name, 0.0)
         for zone in zlist:
-            clearance = max(zone.clearance, net_clearance)
-            threshold = 2 * clearance + zone.min_thickness
-            if gap <= 2 * clearance + PACKED_GAP_TOL_MM or gap >= threshold - 1e-6:
+            clearance_a = max(zone.clearance, net_clearance_a)
+            clearance_b = max(zone.clearance, net_clearance_b)
+            packed_gap = clearance_a + clearance_b
+            threshold = packed_gap + zone.min_thickness
+            if gap <= packed_gap + PACKED_GAP_TOL_MM or gap >= threshold - 1e-6:
                 continue
-            # Clip the midline between the facing track edges to the authored
-            # zone outline. The dropped strip is absent from its filled polygon.
-            if channel is None:
-                ends = []
-                for t in (start_t, end_t):
-                    d = db0 + (db1 - db0) * (t - tb0) / (tb1 - tb0)
-                    offset = d / 2 + math.copysign(1, d) * (a.width - b.width) / 4
-                    ends.append(
-                        (a.start[0] + ux * t - uy * offset, a.start[1] + uy * t + ux * offset)
-                    )
-                channel = LineString(ends)
-            covered = zone.outline.intersection(channel)
+            # Clip the centerline of the remaining strip to the local outline.
+            # Unequal clearances shift that line away from the tighter track.
+            midpoint_shift = (a.width - b.width) / 4 + (clearance_a - clearance_b) / 2
+            ends = []
+            for t in (start_t, end_t):
+                d = db0 + (db1 - db0) * (t - tb0) / (tb1 - tb0)
+                offset = d / 2 + math.copysign(1, d) * midpoint_shift
+                ends.append((a.start[0] + ux * t - uy * offset, a.start[1] + uy * t + ux * offset))
+            covered = zone.outline.intersection(LineString(ends))
             run = max(get_parts(covered), key=lambda part: part.length, default=None)
             if run is None or run.length < MIN_OVERLAP_MM:
                 continue
@@ -285,7 +290,8 @@ class PourSlotRule(DRCRule):
                 second=b,
                 gap=gap,
                 threshold=threshold,
-                clearance=clearance,
+                first_clearance=clearance_a,
+                second_clearance=clearance_b,
                 thickness=zone.min_thickness,
                 overlap=run.length,
                 location=(point.x, point.y),

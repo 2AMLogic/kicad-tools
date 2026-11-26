@@ -361,14 +361,14 @@ def _run_pour_slot_pass(written: Path, rules_from: Path | None, pack: bool = Fal
     pcb = PCB.load(str(written))
     clearances: dict[str, float] = {}
     try:
-        from kicad_tools.core.project_clearance import authored_netclass_clearances
+        from kicad_tools.core.project_clearance import resolve_project_clearances
         from kicad_tools.validate.rules.netclass_clearance_copper import load_project
 
         project = load_project(written)
         if project is not None:
             names = [n.name for n in pcb.nets.values() if n.name]
             clearances = {
-                n: v.clearance for n, v in authored_netclass_clearances(project, names).items()
+                n: v.clearance for n, v in resolve_project_clearances(project, names).items()
             }
     except Exception:  # advisory-grade input: fall back to the zone clearance
         clearances = {}

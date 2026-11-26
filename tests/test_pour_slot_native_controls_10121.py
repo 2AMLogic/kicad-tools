@@ -3,7 +3,7 @@
 Issue #10121 measured Board 05's nine remaining ``pour_slot`` advisories
 against the native copper film on pinned KiCad 10.0.6 and found every one
 packed (gap <= 2 x clearance), leaving no fillable strip for ``min_thickness``
-to drop.  The detector refinement that follows -- report a pair only for
+to drop. For equal clearances on the two tracks, the detector reports a pair for
 ``2 x clearance < gap < 2 x clearance + min_thickness`` -- is validated here
 against the two control boards that were refilled natively during the
 investigation (``kicad-cli pcb drc --refill-zones --save-board``, image
@@ -29,6 +29,7 @@ them from authored geometry at test time.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from kicad_tools.schema.pcb import PCB
@@ -72,14 +73,15 @@ def _roundtrip(pcb: PCB, tmp_path: Path, name: str) -> PCB:
     return PCB.load(str(path))
 
 
-def _control_p(tmp_path: Path, zones: tuple[str, ...] = (ZONE,)) -> PCB:
+def _control_p(tmp_path: Path, zones: tuple[str, ...] = (ZONE,), *, gap: float = 0.55) -> PCB:
     pcb = PCB.create(width=50, height=40, center=False)
+    net2_y = 15 + 0.4 + gap
     pcb.add_trace((11, 15), (19, 15), width=0.4, layer="F.Cu", net="NET1")
-    pcb.add_trace((11, 15.95), (19, 15.95), width=0.4, layer="F.Cu", net="NET2")
+    pcb.add_trace((11, net2_y), (19, net2_y), width=0.4, layer="F.Cu", net="NET2")
     pcb.add_via(10.2, 15, size=0.6, drill=0.3, net="NET1")
-    pcb.add_via(10.2, 15.95, size=0.6, drill=0.3, net="NET2")
+    pcb.add_via(10.2, net2_y, size=0.6, drill=0.3, net="NET2")
     pcb.add_via(19.8, 15, size=0.6, drill=0.3, net="NET1")
-    pcb.add_via(19.8, 15.95, size=0.6, drill=0.3, net="NET2")
+    pcb.add_via(19.8, net2_y, size=0.6, drill=0.3, net="NET2")
     for zone in zones:
         pcb._sexp.append(parse_string(zone))
     return _roundtrip(pcb, tmp_path, "control_p.kicad_pcb")
@@ -118,6 +120,30 @@ def test_control_p_genuine_slot_still_warns(tmp_path: Path) -> None:
     # 0.550 mm copper-free channel over the whole 8 mm run, pour both sides).
     assert round(gap - 2 * CLEARANCE_MM, 4) == 0.15
     assert gap - 2 * CLEARANCE_MM < MIN_THICKNESS_MM
+
+
+def test_public_check_uses_the_sibling_project_on_both_sides(tmp_path, capsys):
+    from kicad_tools.cli import check_cmd
+
+    board = tmp_path / "control_p.kicad_pcb"
+    settings = {
+        "meta": {"version": 5},
+        "classes": [
+            {"name": "Default", "clearance": 0.2},
+            {"name": "Wide", "clearance": 0.4},
+        ],
+        "netclass_patterns": [{"netclass": "Wide", "pattern": "NET1"}],
+    }
+    for gap, default, warnings in ((0.65, 0.2, 1), (0.95, 0.2, 0), (0.95, 0.4, 1)):
+        _control_p(tmp_path, gap=gap)
+        settings["classes"][0]["clearance"] = default
+        board.with_suffix(".kicad_pro").write_text(json.dumps({"net_settings": settings}))
+        check_cmd.main(
+            [str(board), "--mfr", "jlcpcb", "--only", "pour_slot", "--drc-only", "--format", "json"]
+        )
+        report = json.loads(capsys.readouterr().out)
+        assert report["coverage"]["pour_slot"]["state"] == "checked"
+        assert len([f for f in report["findings"] if f["rule_id"] == "pour_slot"]) == warnings
 
 
 def test_remote_zone_cannot_change_the_local_fill_band(tmp_path: Path) -> None:

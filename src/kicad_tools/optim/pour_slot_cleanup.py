@@ -1,15 +1,14 @@
 """Pour-slot cleanup: spread or pack parallel tracks that slot a pour (Issue #8440).
 
 :class:`~kicad_tools.validate.rules.pour_slot.PourSlotRule` (Issue #8435) flags
-different-net parallel tracks whose gap is below ``2 * clearance +
-min_thickness``: the strip of pour between them cannot fill and the plane gets
+different-net parallel tracks whose clearance envelopes leave a strip narrower
+than the zone's minimum thickness. The strip cannot fill and the plane gets
 a slot.  This pass resolves such pairs by shifting one run perpendicular to
 itself:
 
 * **spread** -- widen the gap to the rule's threshold (the strip then fills);
 * **pack** -- opt-in (``pack=True``): tighten the gap to the pair's clearance.
-  This removes the slot by removing the ground strip, and the pair is still
-  flagged by the advisory, so it is never the default;
+  This removes the ground strip.
 * otherwise the pair is **left alone**.
 
 Detection is :func:`iter_pour_slot_pairs`, the same code the advisory uses.
@@ -268,16 +267,8 @@ def _no_worse(after: Mapping[str, int], baseline: Mapping[str, int]) -> bool:
 
 
 def _slots(pcb: Any, netclass_clearances: Mapping[str, float] | None) -> list[PourSlotPair]:
-    """Flagged pairs that still leave an unfillable strip (``gap > 2 x clearance``).
-
-    Since Issue #10121 the advisory itself no longer yields packed pairs (the
-    detection path skips ``gap <= 2 x clearance``), so every pair it returns
-    already passes this filter; it stays as a defensive invariant so the
-    cleanup can never act on a pair with no strip between the keep-outs.
-    """
-    return [
-        p for p in iter_pour_slot_pairs(pcb, netclass_clearances) if p.gap > 2 * p.clearance + _TOL
-    ]
+    """Collect the pairs that the advisory would flag on this geometry."""
+    return list(iter_pour_slot_pairs(pcb, netclass_clearances))
 
 
 def _pair_key(pair: PourSlotPair) -> tuple:

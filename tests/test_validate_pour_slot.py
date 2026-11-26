@@ -20,6 +20,7 @@ class _Seg:
 @dataclass
 class _Zone:
     polygon = ((-50, -50), (100, -50), (100, 100), (-50, 100))
+    net_name: str = "GND"
     layer: str = "F.Cu"
     layers: list = field(default_factory=list)
     keepout: object = None
@@ -103,13 +104,26 @@ def test_touching_or_overlapping_left_to_drc():
     assert _run(_pair(-0.1)).violations == []
 
 
-def test_netclass_clearance_raises_threshold():
-    # gap 1.0 is clean with zone clearance 0.3 (threshold 0.85) ...
-    assert _run(_pair(1.0)).violations == []
-    # ... but a 0.5 mm netclass clearance gives a (1.0, 1.25) mm band.
-    res = _run(_pair(1.1), rule=PourSlotRule({"B": 0.5}))
-    assert len(res.violations) == 1
-    assert abs(res.violations[0].required_value - 1.25) < 1e-6
+def test_unequal_netclass_clearances_bound_each_side_of_the_strip():
+    thick = _Zone(clearance=0.2, min_thickness=0.3)
+    thin = _Zone(clearance=0.2, min_thickness=0.025)
+    for wider in ("A", "B"):
+        rule = PourSlotRule({wider: 0.4})
+        assert not _run(_pair(0.6), [thick], rule).violations
+        (slot,) = _run(_pair(0.65), [thick], rule).violations
+        assert abs(slot.required_value - 0.9) < 1e-6
+        assert abs(slot.location[1] - (0.525 if wider == "A" else 0.325)) < 1e-6
+        assert not _run(_pair(0.65), [thin], rule).violations
+        assert not _run(_pair(0.9), [thick], rule).violations
+        assert not _run(_pair(0.95), [thick], rule).violations
+
+
+def test_zone_netclass_sets_a_floor_on_both_facing_clearances():
+    zone = _Zone(clearance=0.2, min_thickness=0.3)
+    rule = PourSlotRule({"GND": 0.4})
+    assert not _run(_pair(0.65), [zone], rule).violations
+    (slot,) = _run(_pair(0.95), [zone], rule).violations
+    assert abs(slot.required_value - 1.1) < 1e-6
 
 
 def test_zone_clearance_wins_over_smaller_netclass():

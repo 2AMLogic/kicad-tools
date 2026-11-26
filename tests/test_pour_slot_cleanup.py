@@ -55,6 +55,17 @@ def test_spread_widens_gap_to_threshold():
     assert gap >= 0.85
 
 
+def test_cleanup_uses_the_checker_bounds_for_unequal_clearances():
+    for gap, thickness, count in ((0.65, 0.3, 1), (0.65, 0.025, 0), (0.95, 0.3, 0)):
+        pcb = _board(gap)
+        pcb.zones[0].clearance = 0.2
+        pcb.zones[0].min_thickness = thickness
+        result = cleanup_pour_slots(pcb, referee=_ok, netclass_clearances={"A": 0.4})
+        assert result.pairs_before == count
+        assert result.spread == count
+        assert result.pairs_after == 0
+
+
 def test_pack_when_spread_blocked_by_third_trace():
     def blocker(pcb):  # a net-C via just beyond where spread would land
         pcb.add_via(15, 11.4, size=0.6, net="C")  # blocks spreading B

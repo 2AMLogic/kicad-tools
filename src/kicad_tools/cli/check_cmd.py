@@ -4146,7 +4146,7 @@ def run_selected_checks(
         clearances: dict[str, float] = {}
         if pcb_path is not None:
             try:
-                from kicad_tools.core.project_clearance import authored_netclass_clearances
+                from kicad_tools.core.project_clearance import resolve_project_clearances
                 from kicad_tools.validate.rules.netclass_clearance_copper import load_project
 
                 project = load_project(pcb_path)
@@ -4154,7 +4154,7 @@ def run_selected_checks(
                     names = [n.name for n in checker.pcb.nets.values() if n.name]
                     clearances = {
                         n: v.clearance
-                        for n, v in authored_netclass_clearances(project, names).items()
+                        for n, v in resolve_project_clearances(project, names).items()
                     }
             except Exception:  # advisory: fall back to the zone clearance alone
                 clearances = {}
