@@ -14,8 +14,13 @@ from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyp
 
 from kicad_tools.schema.pcb import PCB, FootprintGraphic
 from kicad_tools.sexp.parser import SExp
-from kicad_tools.silkscreen._silk_defaults import SILK_EDGE_CLEARANCE_MM, SILK_HOLE_CLEARANCE_MM
+from kicad_tools.silkscreen._silk_defaults import (
+    DEFAULT_CLEARANCE_MM,
+    SILK_EDGE_CLEARANCE_MM,
+    SILK_HOLE_CLEARANCE_MM,
+)
 from kicad_tools.silkscreen.place_refs import _inverse_fp_transform, collect_apertures
+from kicad_tools.validate.mask_geometry import board_mask_margin
 from kicad_tools.validate.native_silk_text import text_keepout_shapes
 from kicad_tools.validate.rules.factory_clearance import silk_pad_apertures
 from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
@@ -77,7 +82,7 @@ def _joined_lines(markers, graphics):
             yield sorted(group)
 
 
-def _shift_marker(fp, graphics, group, apertures, obstacles, outline, clearance, rule):
+def _shift_marker(fp, graphics, group, apertures, obstacles, keepouts, outline, clearance, rule):
     """Find one rigid translation, or leave the complete mark for manual repair."""
     forward = _fp_transform(fp)
     ink = unary_union([_stroke_geometry(graphics[i], forward) for i in group])
@@ -100,8 +105,13 @@ def _shift_marker(fp, graphics, group, apertures, obstacles, outline, clearance,
             continue
         if outline is not None and shifted.distance(outline) < SILK_EDGE_CLEARANCE_MM:
             continue
-        # A mark joined to other silk, or one that would hit it, stays put.
-        if any(g is None or ink.intersects(g) or shifted.intersects(g) for g in obstacles):
+        if any(ink.intersects(area) or shifted.intersects(area) for area in keepouts):
+            continue
+        # Preserve existing joins and leave placement clearance to other printed ink.
+        if any(
+            g is None or ink.intersects(g) or shifted.distance(g) < DEFAULT_CLEARANCE_MM
+            for g in obstacles
+        ):
             continue
         lx, ly = inverse((fp.position[0] + dx, fp.position[1] + dy))
         trial = list(graphics)
@@ -153,13 +163,14 @@ def _move_joined_markers(
             if key[0] == side and key not in own
             for geom in shapes
         ]
-        obstacles.extend(a.polygon for a in areas if (side, "graphic") in a.forbidden)
+        keepouts = [a.polygon for a in areas if (side, "graphic") in a.forbidden]
         shifted = _shift_marker(
             fp,
             graphics,
             group,
             obstacles_by_side[side],
             obstacles,
+            keepouts,
             outline,
             pad_clearance,
             rule,
@@ -267,8 +278,10 @@ def repair_footprint_lines(
     skipped_pad_refs = {ref for ref, _ in skipped_markers}
     obstacles_by_side: dict[str, list] = {"F": [], "B": []}
     if skipped_markers:
-        margin = pcb.setup.pad_to_mask_clearance if pcb.setup is not None else 0.0
-        exact_pads = silk_pad_apertures(pcb.footprints, margin)
+        margin, declared = board_mask_margin(pcb)
+        exact_pads = silk_pad_apertures(
+            pcb.footprints, margin, board_declared=declared, board_version=pcb._file_version()
+        )
         openings = collect_apertures(pcb, mask_clearance, include_via_obstacles=False)
         drill_floor = SILK_HOLE_CLEARANCE_MM if hole_clearance is None else hole_clearance
         for face in ("F", "B"):

@@ -501,6 +501,93 @@ class TestPadExtentEndpointBinding:
     """
 
     @staticmethod
+    def _round_terminal_pcb(end_x: float):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=160, height=85, center=False)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+        terminal = pcb.get_footprint("J2")
+        assert terminal is not None
+        pad = terminal.pads[0]
+        pad.size = (3.0, 3.0)
+        pad.drill = 2.2
+        pcb.add_trace((20, 50), (end_x, 50), width=5.5, layer="F.Cu", net="NET1")
+        return pcb, pad
+
+    @pytest.mark.parametrize(
+        ("end_x", "resolved"), [(118.45, True), (118.0, False), (115.0, False)]
+    )
+    def test_round_pth_under_track_end_cap(self, end_x: float, resolved: bool) -> None:
+        # At 118.45 copper reaches the full circumference of the drill. At
+        # 118.0 it contacts only part of the barrel, and 115.0 misses the land.
+        pcb, _ = self._round_terminal_pcb(end_x)
+        assert resolve_current_path(pcb, _trunk_spec()).ok is resolved
+
+    @pytest.mark.parametrize("geometry", ["shape", "slot", "offset", "nonplated", "second_track"])
+    def test_end_cap_requires_one_track_at_a_round_plated_drill(self, geometry: str) -> None:
+        pcb, pad = self._round_terminal_pcb(118.45)
+        if geometry == "shape":
+            # Circular control: only the pad shape changes below.
+            assert resolve_current_path(pcb, _trunk_spec()).ok
+            pad.shape = "rect"
+        elif geometry == "slot":
+            pad.drill_size = (2.2, 2.6)
+        elif geometry == "offset":
+            pad.drill_offset = (0.5, 0.0)
+        elif geometry == "nonplated":
+            pad.type = "np_thru_hole"
+        elif geometry == "second_track":
+            pcb.add_trace((121.55, 50), (130, 50), width=5.5, layer="B.Cu", net="NET1")
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert not r.ok
+        if geometry == "shape":
+            assert r.status == "unresolved"
+            assert "no routed copper touching it" in r.reason
+
+    @pytest.mark.parametrize(
+        ("start", "end", "expected"),
+        [
+            ((110.0, 50.0), (118.45, 50.0), (118.45, 50.0, "F.Cu")),
+            ((119.0, 50.0), (121.0, 50.0), None),
+        ],
+    )
+    def test_end_cap_binds_only_one_enclosing_end(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        expected: tuple[float, float, str] | None,
+    ) -> None:
+        """Both ends of a short segment enclosing the barrel bind nothing.
+
+        Called through the helper directly: with both ends inside the pad the
+        public resolver attaches through the pad extent, and moving the only
+        trace disconnects J1, so an unresolved result would not isolate this
+        guard.
+        """
+        from kicad_tools.router.current_paths import _single_barrel_contact
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import PAD, build_copper_contact_graph
+
+        pcb, pad = self._round_terminal_pcb(118.45)
+        (segment,) = pcb.segments
+        segment.start, segment.end = start, end
+        pad_key = next(
+            (i, j)
+            for i, fp in enumerate(pcb.footprints)
+            for j, candidate in enumerate(fp.pads)
+            if candidate is pad
+        )
+        contacts = build_copper_contact_graph(
+            ConnectivityValidator(pcb), pad.net_number, with_bonds=True
+        )
+        index = next(
+            i for i, item in enumerate(contacts.items) if item.kind == PAD and item.key == pad_key
+        )
+        assert sum(index in bond for bond in contacts.bonds) == 1
+        assert _single_barrel_contact(pad, pad_key, lambda: contacts) == expected
+
+    @staticmethod
     def _wide_pad_pcb(*, offsets: tuple[float, ...], pad_size=(2.29, 2.03)):
         """J1 -> J2, where the J1 end fans into ``offsets`` stubs on its pad."""
         from kicad_tools.schema.pcb import PCB

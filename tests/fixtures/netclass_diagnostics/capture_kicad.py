@@ -59,6 +59,11 @@ patterns = [
     "((A))",
     "A{2}",
     "Net-(U5-CAP)?",
+    # Router-generated expressions with a strict end anchor (issue #10333).
+    r"^USB\z$",
+    r"^A\x2EB\z$",
+    r"^\x2B5V\z$",
+    r"^é\z$",
 ]
 nets = [
     "é",
@@ -114,6 +119,12 @@ nets = [
     "C+P",
     "USBX",
     "USB.X",
+    "A.B\n",
+    "+5V\n",
+    "é\n",
+    # The wildcard interpretation sees the pattern text itself.
+    r"^USB\z$",
+    "^USB\\z$\n",
 ]
 cases = []
 for pattern in patterns:
