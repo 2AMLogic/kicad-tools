@@ -271,8 +271,8 @@ class TestHierarchicalLabelNetMerging:
             f"{node.reference}.{node.pin}": net.name for net in exported.nets for node in net.nodes
         }
         for names in (pin_nets, export_nets):
-            assert names["R1.1"] == "I2C_SDA"
-            assert names["R5.1"] == ("I2C_SDA" if connected else "CHILD_ALIAS")
+            assert names["R1.1"] == "/I2C_SDA"
+            assert names["R5.1"] == ("/I2C_SDA" if connected else "/ChildWithLabels/CHILD_ALIAS")
 
     @pytest.mark.parametrize("connected", [True, False], ids=["wired", "disconnected"])
     @pytest.mark.parametrize("reverse_ports", [False, True], ids=["sda-first", "thru-first"])
@@ -309,8 +309,8 @@ class TestHierarchicalLabelNetMerging:
             f"{node.reference}.{node.pin}": net.name for net in exported.nets for node in net.nodes
         }
         for names in (pin_nets, export_nets):
-            assert names["R1.1"] == "I2C_SDA"
-            assert names["R2.1"] == names["R5.1"] == ("I2C_SDA" if connected else "SDA")
+            assert names["R1.1"] == "/I2C_SDA"
+            assert names["R2.1"] == names["R5.1"] == ("/I2C_SDA" if connected else "/SDA")
 
     @pytest.mark.parametrize("child_global", [True, False])
     @pytest.mark.parametrize("nested", [True, False])
@@ -339,7 +339,7 @@ class TestHierarchicalLabelNetMerging:
 
         for names in self._hierarchy_pin_maps(parent):
             assert names["R1.2"] == "SDA"
-            assert names["R1.1"] == names["R5.1"] == ("SDA" if child_global else "I2C_SDA")
+            assert names["R1.1"] == names["R5.1"] == ("SDA" if child_global else "/I2C_SDA")
 
     @pytest.mark.parametrize("connected", [True, False])
     def test_bridged_parent_global_beats_local(self, tmp_path, connected):
@@ -361,7 +361,7 @@ class TestHierarchicalLabelNetMerging:
 
         for names in self._hierarchy_pin_maps(parent):
             assert names["R1.1"] == "Z_BUS"
-            assert names["R1.2"] == names["R5.1"] == ("Z_BUS" if connected else "A_LOCAL")
+            assert names["R1.2"] == names["R5.1"] == ("Z_BUS" if connected else "/A_LOCAL")
 
     @pytest.mark.parametrize(
         "parent_kind,child_kind,name,parent_net,child_net",
@@ -387,6 +387,53 @@ class TestHierarchicalLabelNetMerging:
         for names in self._hierarchy_pin_maps(parent):
             assert names["R1.1"] == names["R5.1"] == parent_net
             assert names["R6.1"] == child_net
+
+    @pytest.mark.parametrize("sibling_label", ["OTHER", "SHARED"])
+    def test_sibling_sheet_label_does_not_rename_unrelated_net(self, tmp_path, sibling_label):
+        """Issue #10334: an unrelated sheet's label text must not rename a net."""
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.add(
+            parse_string(
+                '(sheet (at 130 80) (size 40 30) (uuid "sheet-child-b-uuid") '
+                '(property "Sheetname" "ChildB") '
+                '(property "Sheetfile" "child_b.kicad_sch") '
+                '(pin "SDA" input (at 130 90 180) (uuid "sheet-pin-b-uuid")))'
+            )
+        )
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string('(label "SHARED" (at 100 46.19 0))'))
+        child.write_text(doc.to_string())
+
+        # The second child is a copy with its own references and UUIDs; its R8.1
+        # carries the label whose text is edited, and its SDA port is unwired
+        # in the parent.
+        text = (FIXTURES / child.name).read_text()
+        for old, new in (("R5", "R7"), ("R6", "R8"), ("child-", "child-b-")):
+            text = text.replace(old, new)
+        doc = parse_string(text)
+        doc.add(parse_string(f'(label "{sibling_label}" (at 100 46.19 0))'))
+        (tmp_path / "child_b.kicad_sch").write_text(doc.to_string())
+
+        for names in self._hierarchy_pin_maps(parent):
+            assert names["R6.1"] == "/ChildWithLabels/SHARED"
+            assert names["R8.1"] == f"/ChildB/{sibling_label}"
+            assert names["R7.1"] == "/ChildB/SDA"
+            assert names["R1.1"] == names["R5.1"] == "/I2C_SDA"
+
+    def test_single_sheet_local_label_keeps_bare_name(self, tmp_path):
+        """The qualification applies to multi-sheet designs; a flat sheet is unchanged."""
+        sch = tmp_path / "flat.kicad_sch"
+        sch.write_bytes((FIXTURES / "child_with_hlabels.kicad_sch").read_bytes())
+        doc = parse_file(sch)
+        doc.add(parse_string('(label "LOCAL" (at 100 46.19 0))'))
+        sch.write_text(doc.to_string())
+
+        for names in self._hierarchy_pin_maps(sch):
+            assert names["R6.1"] == "LOCAL"
 
     @staticmethod
     def _hierarchy_pin_maps(parent):

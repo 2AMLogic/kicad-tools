@@ -615,14 +615,21 @@ def _collect_hierarchy_components(
     for identity, pins in nets.items():
         by_identity[aliases.resolve(identity)].extend(pins)
 
-    # Preserve short names when unique. For a collision, qualify each local
-    # label with its sheet instance path and keep the global name bare.
+    # In a multi-sheet design a local or hierarchical label is always rendered
+    # with its owning sheet-instance path, so a net's exported name never
+    # depends on whether an unrelated sheet reuses the same text (#10334).
+    # Global and power names stay bare. A single-sheet schematic and the
+    # automatically generated names (priority 4) keep their short spelling
+    # unless they collide, in which case the local one is qualified.
+    multi_sheet = bool(_get_sheet_entries(sch_path))
     counts = Counter(identity.name for identity in by_identity)
-    names = {
-        identity: identity.name
-        for identity in by_identity
-        if not identity.scope or counts[identity.name] == 1
-    }
+
+    def keeps_bare_name(identity: _NetIdentity) -> bool:
+        if multi_sheet and identity.priority in (2, 3):
+            return False
+        return not identity.scope or counts[identity.name] == 1
+
+    names = {identity: identity.name for identity in by_identity if keeps_bare_name(identity)}
     used = set(names.values())
     for identity in by_identity:
         if identity in names:

@@ -300,15 +300,26 @@ class OperatingState:
 
         Matching is exact first, then tolerant of a leading ``/`` and of case,
         so a manifest written as ``SRC_POS`` also matches a netlist's
-        ``/SRC_POS``.
+        ``/SRC_POS``. A sheet-qualified netlist name (``/Power/SRC_POS``) falls
+        back to its bare label when no manifest key names the full path; the
+        analyzer already rejects sheet-local labels repeated across sheets, so
+        the bare label identifies one net (#10334).
         """
         if not net_name:
             return None
         wanted = _normalize_net_name(net_name)
-        matches = [
-            value for key, value in self.potentials.items() if _normalize_net_name(key) == wanted
-        ]
-        return matches[0] if len(matches) == 1 else None
+        candidates = [wanted]
+        if "/" in wanted:
+            candidates.append(wanted.rsplit("/", 1)[1])
+        for candidate in candidates:
+            matches = [
+                value
+                for key, value in self.potentials.items()
+                if _normalize_net_name(key) == candidate
+            ]
+            if matches:
+                return matches[0] if len(matches) == 1 else None
+        return None
 
 
 @dataclass

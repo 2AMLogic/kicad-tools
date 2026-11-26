@@ -143,10 +143,21 @@ def test_child_sheet_mosfets_have_same_stress_as_flat_schematic(tmp_path):
     }
     nested = _analyze(root)
     flat = _analyze(SCH)
-    assert [r.to_dict() for r in nested] == [r.to_dict() for r in flat]
+
+    def rows(results):
+        # Reported net names are sheet-qualified in a child sheet (#10334);
+        # everything else, including the potentials resolved from the manifest,
+        # must match the flat schematic.
+        return [
+            {k: v for k, v in r.to_dict().items() if k not in ("high_net", "low_net")}
+            for r in results
+        ]
+
+    assert rows(nested) == rows(flat)
     q1 = next(
         r for r in nested if (r.reference, r.state, r.check) == ("Q1A", "mains_negative", "vds")
     )
+    assert (q1.high_net, q1.low_net) == ("/Child0/BANK_POS", "/Child0/SRC_POS")
     assert q1.status == "FAIL"
     assert q1.stress_v == pytest.approx(259.3)
 
