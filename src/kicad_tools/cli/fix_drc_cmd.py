@@ -1511,14 +1511,31 @@ def _mask_native_pad_groups(board: Path) -> list[frozenset[str]]:
     return [frozenset(group) for group in json.loads(result.stdout)]
 
 
-def _mask_native_state(board: Path) -> tuple[Counter, int]:
+@dataclass
+class _MaskNativeState:
+    errors: Counter = field(default_factory=Counter)
+    opens: int = 0
+    clearance_gaps: dict[tuple, list[float]] = field(default_factory=dict)
+
+    def worsened_clearance(self, before: _MaskNativeState) -> tuple[float, float] | None:
+        for key, gaps in self.clearance_gaps.items():
+            previous = before.clearance_gaps.get(key, [])
+            # A pair can have several witnesses. Compare the worst remaining
+            # gaps in order, allowing a repair to remove or improve a witness.
+            for old, new in zip(sorted(previous), sorted(gaps), strict=False):
+                if new < old - 1e-6:
+                    return old, new
+        return None
+
+
+def _mask_native_state(board: Path) -> _MaskNativeState:
     """Read the native errors and opens on the copper actually stored on disk."""
     from kicad_tools.drc.geometric import run_geometric_drc
 
     report = run_geometric_drc(board, refill_zones=False, all_track_errors=True)
     if not report.ran:
         raise RuntimeError(f"could not check saved copper: {report.note}")
-    failures: Counter = Counter()
+    state = _MaskNativeState(opens=report.unconnected_count)
     for v in report.error_violations:
         items: tuple[str, ...] | tuple[tuple[float, float, str], ...]
         if v.type_str == "invalid_outline" and v.items == ["PCB"]:
@@ -1527,8 +1544,16 @@ def _mask_native_state(board: Path) -> tuple[Counter, int]:
             items = tuple((loc.x_mm, loc.y_mm, loc.layer) for loc in v.locations)
         else:
             items = tuple(sorted(v.item_uuids if any(v.item_uuids) else v.items))
-        failures[v.type_str, v.rule, items] += 1
-    return failures, report.unconnected_count
+        key = (v.type_str, v.rule, items)
+        state.errors[key] += 1
+        if (
+            v.type_str in {"clearance", "hole_clearance", "copper_edge_clearance"}
+            and v.actual_value_mm is not None
+        ):
+            state.clearance_gaps.setdefault((*key, v.required_value_mm), []).append(
+                v.actual_value_mm
+            )
+    return state
 
 
 def _run_mask_pass(
@@ -1559,7 +1584,7 @@ def _run_mask_pass(
     if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
         load_path = output_path
     try:
-        repairer = MaskCopperRepairer(load_path, project_pcb_path=pcb_path)
+        repairer = MaskCopperRepairer(load_path, project_pcb_path=pcb_path, will_refill=True)
         request = default_request_for_manufacturer(args.mfr)
         result = repairer.repair(
             mask_violations,
@@ -1607,6 +1632,18 @@ def _run_mask_pass(
             )
             proposed = len(result.actions)
             repairer.save(candidate)
+            from kicad_tools.cli.runner import run_refill_zones
+
+            def refill_candidate() -> None:
+                refill = run_refill_zones(candidate, require_save=True)
+                if not refill.success:
+                    raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
+
+            # The barrel's old antipad belongs to the old drill position. Grade
+            # a pad bridge against the copper that will actually be published.
+            refilled = has_zones and any(a.action == "bridge_via" for a in result.actions)
+            if refilled:
+                refill_candidate()
             _verify_mask_actions(
                 result,
                 report,
@@ -1622,20 +1659,23 @@ def _run_mask_pass(
                     raise _MaskPadConnectionLost(
                         f"saved repair disconnected copper on {', '.join(sorted(lost))}"
                     )
-            if result.actions and has_zones:
-                from kicad_tools.cli.runner import run_refill_zones
-
-                refill = run_refill_zones(candidate, require_save=True)
-                if not refill.success:
-                    raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
+            if result.actions and has_zones and (not refilled or result.repaired < proposed):
+                refill_candidate()
             if result.actions and before_native is not None:
-                errors, opens = _mask_native_state(candidate)
-                new_errors = (errors - before_native[0]).total()
+                saved_native = _mask_native_state(candidate)
+                new_errors = (saved_native.errors - before_native.errors).total()
                 check_opens = has_zones or not args.no_connectivity_check
-                if new_errors or (check_opens and opens > before_native[1]):
+                if new_errors or (check_opens and saved_native.opens > before_native.opens):
                     raise RuntimeError(
                         "saved mask repair introduced native errors or opens "
-                        f"({new_errors} new errors, native opens {before_native[1]} to {opens})"
+                        f"({new_errors} new errors, native opens {before_native.opens} to {saved_native.opens})"
+                    )
+                worsened = saved_native.worsened_clearance(before_native)
+                if worsened is not None:
+                    old_gap, new_gap = worsened
+                    raise RuntimeError(
+                        f"saved mask repair reduced native clearance from {old_gap:.4f} "
+                        f"to {new_gap:.4f} mm under the same rule"
                     )
                 if native_groups:
                     membership = {
@@ -1737,7 +1777,7 @@ _VERIFY_DISPOSITIONS = frozenset(
 
 
 class _ElbowGapCheck:
-    """Compare accepted outside elbows with the saved board's native mask measurements."""
+    """Check proposed conductor gaps against the saved board's native mask measurements."""
 
     def __init__(self, result: MaskRepairResult) -> None:
         self.required = {

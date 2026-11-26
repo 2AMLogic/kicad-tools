@@ -274,7 +274,6 @@ def test_fix_drc_only_mask_copper_repairs_and_verifies(tmp_path, monkeypatch, ca
 
 
 def test_verified_mask_move_keeps_collateral_traces_aligned(tmp_path, monkeypatch):
-    from collections import Counter
 
     from kicad_tools.router.quantize import is_45_aligned
 
@@ -284,7 +283,9 @@ def test_verified_mask_move_keeps_collateral_traces_aligned(tmp_path, monkeypatc
     other = _seg("other", (110, 110), (113, 111), net=2)
     joined = _seg("joined", (100.7, 100.3), (100.7, 105), width=0.3)
     board = _board(tmp_path, "\n".join([ENTRY, joined, other]))
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     _run(monkeypatch, board, [_report(_finding("trk-a")), _report()])
     tracks = MaskCopperRepairer(board)
     off_angle = set()
@@ -307,11 +308,12 @@ def test_verified_mask_move_keeps_collateral_traces_aligned(tmp_path, monkeypatc
 
 
 def test_finding_on_new_leg_rolls_back_whole_junction(tmp_path, monkeypatch, capsys):
-    from collections import Counter
 
     board = _board(tmp_path, ENTRY + "\n" + _seg("joined", (100.7, 100.3), (100.7, 105)))
     original = board.read_bytes()
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     found_leg = []
 
     def check(path, **kwargs):
@@ -390,7 +392,6 @@ def test_bend_refuses_a_collateral_track_in_a_generator_subgroup(tmp_path, monke
 def test_off_angle_track_introduced_during_refill_is_never_published(
     tmp_path, monkeypatch, capsys, identity
 ):
-    from collections import Counter
 
     from kicad_tools.cli import runner
 
@@ -413,7 +414,9 @@ def test_off_angle_track_introduced_during_refill_is_never_published(
         edited.save()
         return runner.KiCadCLIResult(success=True)
 
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     monkeypatch.setattr(runner, "run_refill_zones", refill)
     _run(monkeypatch, board, [_report(_pt_finding("trk-p")), _report()], extra=("-o", str(output)))
     out = capsys.readouterr()
@@ -686,7 +689,12 @@ def test_native_pull_in_check_preserves_prior_output_on_new_error(
     output = tmp_path / "other.kicad_pcb"
     output.write_bytes(b"previous output")
     native = iter(
-        [(Counter(), 0), (Counter({("clearance", "board rule", ("pad", "track")): 1}), 0)]
+        [
+            fix_drc_cmd._MaskNativeState(),
+            fix_drc_cmd._MaskNativeState(
+                Counter({("clearance", "board rule", ("pad", "track")): 1})
+            ),
+        ]
     )
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: next(native))
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda candidate: [])
@@ -1694,9 +1702,11 @@ def test_public_via_repair_with_reported_approach_restores_input_on_native_veto(
 
     def native_state(candidate):
         if _saved_copper(candidate, "via-p")[1] == centre:
-            return Counter(), 0
+            return fix_drc_cmd._MaskNativeState()
         assert _end(candidate, "approach")[1][0] == 101.05
-        return Counter({("items_not_allowed", "via rule", ("via-p",)): 1}), 0
+        return fix_drc_cmd._MaskNativeState(
+            Counter({("items_not_allowed", "via rule", ("via-p",)): 1})
+        )
 
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", native_state)
     _run(
@@ -2167,7 +2177,6 @@ def test_mask_nudges_cannot_trade_pad_connections_on_the_same_partial_net(tmp_pa
 def test_unavailable_native_pad_groups_preserve_prior_output(
     tmp_path, monkeypatch, capsys, fail_on_read
 ):
-    from collections import Counter
 
     board = _board(tmp_path, PASS)
     original = board.read_bytes()
@@ -2183,7 +2192,9 @@ def test_unavailable_native_pad_groups_preserve_prior_output(
         return [frozenset({"left", "right"})]
 
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", read_groups)
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: (Counter(), 1))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda candidate: fix_drc_cmd._MaskNativeState(opens=1)
+    )
     _run(
         monkeypatch,
         board,
@@ -2219,7 +2230,9 @@ def test_mask_refill_publishes_only_verified_saved_copper(tmp_path, monkeypatch,
         assert candidate.name == board.name
         assert candidate.with_suffix(".kicad_dru").read_text() == "(version 1)"
         saved = "priority 3" in candidate.read_text()
-        return (Counter({"clearance": 1}) if saved and outcome == "saved_error" else Counter(), 0)
+        return fix_drc_cmd._MaskNativeState(
+            Counter({"clearance": 1}) if saved and outcome == "saved_error" else Counter()
+        )
 
     def refill(candidate, *, require_save):
         assert require_save
@@ -2805,7 +2818,6 @@ def test_elbow_flip_moves_the_corner_into_the_pad_keeping_every_angle_and_undoes
 def test_elbow_selective_undo_preserves_both_authored_ends_when_other_action_is_saved(
     tmp_path, monkeypatch, capsys
 ):
-    from collections import Counter
 
     board = _board2(
         tmp_path,
@@ -2821,7 +2833,9 @@ def test_elbow_selective_undo_preserves_both_authored_ends_when_other_action_is_
     original = {uid: _end(board, uid) for uid in ("hug", "turn")}
     elbow = _overlap_pass_through("hug")
     entry = _own_finding("entry", "pad-r2-1", "R2/1")
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     _run(
         monkeypatch,
         board,
@@ -3060,11 +3074,9 @@ def test_saved_elbow_rolls_back_a_gap_beyond_the_usual_advisory_range(
     # Give the predictor the unexpanded land: it will propose an elbow with a
     # 0.300 mm modeled gap. The native plot sees 0.285 mm, beyond the ordinary
     # 0.150 mm warning range but short of the requested 0.090 + 0.210 mm.
-    monkeypatch.setattr(
-        MaskCopperRepairer,
-        "_elbow_mask_apertures",
-        {("ad22088e-c1cf-5aaf-8d08-4a5294d93e8f", "F.Cu"): box(52.3, 39.6, 54.0, 40.6)},
-    )
+    apertures = MaskCopperRepairer(board)._pad_mask_openings
+    apertures["ad22088e-c1cf-5aaf-8d08-4a5294d93e8f", "F.Cu"].geometry = box(52.3, 39.6, 54.0, 40.6)
+    monkeypatch.setattr(MaskCopperRepairer, "_pad_mask_openings", apertures)
     with evidence_toolchain([tmp_path]):
         fix_drc_cmd.main(
             [
@@ -3193,6 +3205,51 @@ def test_disjoint_via_approach_turns_outside_pad_and_undoes(tmp_path):
     assert {uid: _end(board, uid) for uid in original} == original
 
 
+def _tangent_via_entry(tmp_path):
+    # The tap just meets the round cap of the diagonal entry. Moving the
+    # opposite end farther along its line leaves that cap in the same place.
+    via, corner, inside = (100.375, 99.0), (100.375, 99.375), (100.0, 99.75)
+    return _board(
+        tmp_path,
+        "\n".join(
+            [
+                _via("fixed", via),
+                _seg("lead", via, corner),
+                _seg("entry", corner, inside),
+                _seg("tap", (99.775, 99.75), (99.5, 99.75), width=0.25),
+            ]
+        ),
+    )
+
+
+def test_via_entry_extension_preserves_tangent_at_its_fixed_end(tmp_path):
+    board = _tangent_via_entry(tmp_path)
+    old_lead_ends = _end(board, "lead")
+    old_entry, old_ends = _saved_copper(board, "entry")
+    tap_copper, tap_ends = _saved_copper(board, "tap")
+    assert old_entry.intersects(tap_copper)
+    assert old_entry.intersection(tap_copper).geom_type == "Point"
+    before = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    finding = _pt_finding("lead", measured=0.025)
+    assert repairer.repair([finding], dry_run=True, **_ELBOW_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair([finding], **_ELBOW_OPTS)
+    (action,) = result.actions
+    repairer.save(board)
+    entry, ends = _saved_copper(board, "entry")
+    assert ends[1] == old_ends[1]
+    assert entry.covers(old_entry) and entry.intersects(tap_copper)
+    assert tuple(_end(board, "tap")) == tap_ends
+    assert _pad_poly(board, "R1/1").distance(_saved_copper(board, "lead")[0]) >= 0.11
+    assert not repairer.off_angle_tracks()
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert tuple(_end(board, "entry")) == old_ends
+    assert _end(board, "lead") == old_lead_ends
+
+
 def test_locked_via_entry_corner_leaves_all_copper_untouched(tmp_path):
     repairer = MaskCopperRepairer(_via_pad_entry(tmp_path, locked=True))
     before = repairer.doc.to_string()
@@ -3201,8 +3258,9 @@ def test_locked_via_entry_corner_leaves_all_copper_untouched(tmp_path):
     assert repairer.doc.to_string() == before
 
 
-def test_via_entry_recheck_veto_preserves_board_bytes(tmp_path, monkeypatch, capsys):
-    board = _via_pad_entry(tmp_path)
+@pytest.mark.parametrize("make_board", [_via_pad_entry, _tangent_via_entry])
+def test_via_entry_recheck_veto_preserves_board_bytes(tmp_path, monkeypatch, capsys, make_board):
+    board = make_board(tmp_path)
     before = board.read_bytes()
     reported = _pt_finding("lead", measured=0.025)
     neighbour = _finding("entry")
@@ -3419,3 +3477,329 @@ def test_disjoint_pass_through_chamfer_slides_along_its_runs_and_undoes(tmp_path
     assert repairer.undo_action(action)
     repairer.save(board)
     assert {name: _end(board, name) for name in shapes} == original
+
+
+def _pad_chain(tmp_path, *, reverse=False, extra="", lock_tail=False, project_floor=0.1016):
+    anchor, elbow, target = (100, 100), (100.85, 100.85), (100.85, 101.35)
+    diagonal, tail = (anchor, elbow), (elbow, target)
+    if reverse:
+        diagonal, tail = diagonal[::-1], tail[::-1]
+    straight = _seg("tail", *tail)
+    if lock_tail:
+        straight = straight.replace("(width", "(locked yes) (width")
+    # This parallel trace vetoes moving the existing diagonal toward lower Y.
+    copper = [
+        _seg("diag", *diagonal),
+        straight,
+        _seg("foreign", (100.52, 100.07), (100.72, 100.27), net=2),
+        extra,
+    ]
+    board = _board2(tmp_path, "\n".join(copper), "100.85 101.35")
+    board.write_text(
+        board.read_text().replace("smd rect", "smd circle").replace("(size 2 1)", "(size 0.7 0.7)")
+    )
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"net_settings": {"classes": [{"name": "Default", "clearance": project_floor}]}})
+    )
+    return board, _pt_finding("diag", "pad-r2-1", measured=0.05)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_pad_chain_shares_the_straight_length_and_restores_the_authored_tracks(tmp_path, reverse):
+    board, finding = _pad_chain(tmp_path, reverse=reverse)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    assert repairer.repair([finding], clearance_mm=0.1016, dry_run=True).repaired == 1
+    assert repairer.doc.to_string() == before
+    (action,) = repairer.repair([finding], clearance_mm=0.1016).actions
+    repairer.save(board)
+    saved = MaskCopperRepairer(board)
+    legs = {
+        tuple(sorted(_end(board, uid)))
+        for uid, node in saved._segment_nodes().items()
+        if uid != "foreign"
+        and node.get("width").get_float() == 0.2
+        and saved._net_name(node) == "N1"
+        and node.get("layer").get_string() == "F.Cu"
+    }
+    assert legs == {
+        ((100, 100), (100, 100.25)),
+        ((100, 100.25), (100.85, 101.1)),
+        ((100.85, 101.1), (100.85, 101.35)),
+    }
+    assert sum(math.dist(*leg) for leg in legs) == pytest.approx(math.hypot(0.85, 0.85) + 0.5)
+    assert saved.undo_action(action)
+    assert saved._segment_nodes().keys() == {"diag", "tail", "foreign"}
+    assert saved.doc.to_string() == before
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    ("floor", "expected_gaps", "permitted", "native_only"),
+    [
+        (0.65, [0.4131, 0.6107], False, False),
+        (0.55, [0.4131], False, False),
+        (0.40, [], True, False),
+        (0.65, [0.4131, 0.6107], False, True),
+    ],
+)
+def test_pad_chain_preserves_individual_native_clearances(
+    tmp_path, capsys, monkeypatch, floor, expected_gaps, permitted, native_only
+):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    # Exercise the saved-board backstop independently of the local pad model.
+    if native_only:
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+        monkeypatch.setattr(BoardClearanceRules, "net_requirement", lambda *args: 0.1016)
+        monkeypatch.setattr(MaskCopperRepairer, "_pull_in_crowds_pad", lambda *args: False)
+
+    fixture = Path(__file__).parent / "fixtures" / "mask_pad_chain_clearance.kicad_pcb"
+    board = tmp_path / fixture.name
+    original = fixture.read_bytes()
+    board.write_bytes(original)
+    board.with_suffix(".kicad_pro").write_text("{}")
+    board.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "board minimum" (constraint clearance (min 0.1016mm)))\n'
+        '(rule "A7 rail clearance" (layer "F.Cu") '
+        "(condition \"A.Type == 'Pad' && A.Reference == 'J1' && A.Pad_Number == 'A7' "
+        "&& B.Type == 'Track' && B.NetName == 'USB_D+'\") "
+        f"(constraint clearance (min {floor}mm)))\n"
+    )
+
+    def measured_gaps():
+        native = run_geometric_drc(board, refill_zones=False, all_track_errors=True)
+        assert native.ran and native.unconnected_count == 0
+        return sorted(
+            v.actual_value_mm for v in native.error_violations if v.type_str == "clearance"
+        )
+
+    with evidence_toolchain(mounts=[tmp_path]):
+        assert measured_gaps() == pytest.approx(expected_gaps)
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--verify",
+                "--format",
+                "json",
+            ]
+        )
+        report = json.loads(capsys.readouterr().out)["mask_copper"]
+        assert measured_gaps() == pytest.approx(expected_gaps)
+    assert report["repaired"] == int(permitted)
+    assert (board.read_bytes() != original) == permitted
+    if native_only:
+        assert any("0.6107 to 0.4339 mm" in row["detail"] for row in report["unrepaired"]), report
+
+
+def test_native_clearance_comparison_allows_improved_and_removed_witnesses():
+    pair = ("clearance", "rule", ("pad", "track"), 0.65)
+    before = fix_drc_cmd._MaskNativeState(clearance_gaps={pair: [0.61, 0.41]})
+    for improved in ([0.42, 0.62], [0.42], []):
+        after = fix_drc_cmd._MaskNativeState(clearance_gaps={pair: improved})
+        assert after.worsened_clearance(before) is None
+    after = fix_drc_cmd._MaskNativeState(clearance_gaps={pair: [0.55, 0.42]})
+    assert after.worsened_clearance(before) == (0.61, 0.55)
+
+
+@pytest.mark.parametrize(("floor", "accepted"), [(0.1016, False), (0.08, True)])
+def test_pad_chain_checks_project_clearance_on_the_saved_diagonal(tmp_path, floor, accepted):
+    # The replacement clears this foreign trace by 0.09 mm.
+    obstacle = _seg("obstacle", (100.25, 100.91), (100.4, 101.06), net=2)
+    board, finding = _pad_chain(tmp_path, extra=obstacle, project_floor=floor)
+    original = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    assert bool(repairer.repair([finding], clearance_mm=0.08).actions) == accepted
+    if not accepted:
+        assert not repairer.modified
+        assert board.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("extra", "locked"),
+    [
+        # A same-net mid-track tap on the side from which the diagonal recedes.
+        (_seg("tap", (100.6, 100.43), (100.6, 100.0)), False),
+        ("", True),
+        # Copper clears this pad but would be exposed by its enlarged mask opening.
+        (
+            '(footprint "test:TP" (layer "F.Cu") (at 100.25 100.98) '
+            '(pad "1" smd circle (at 0 0) (size 0.15 0.15) (layers "F.Cu" "F.Mask") '
+            '(solder_mask_margin 0.2) (net 2 "N2") (uuid "tp-pad")))',
+            False,
+        ),
+    ],
+    ids=["lost_contact", "locked_tail", "mask_opening"],
+)
+def test_pad_chain_refusals_preserve_original_copper(tmp_path, extra, locked):
+    board, finding = _pad_chain(tmp_path, extra=extra, lock_tail=locked)
+    original = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    assert not repairer.repair([finding], clearance_mm=0.08).actions
+    assert repairer.doc.to_string() == before
+    assert board.read_bytes() == original
+
+
+def test_pad_chain_added_leg_verification_failure_preserves_prior_output(
+    tmp_path, monkeypatch, capsys
+):
+
+    board, finding = _pad_chain(tmp_path)
+    original = board.read_bytes()
+    output = tmp_path / "prior.kicad_pcb"
+    prior = original + b"\n"
+    output.write_bytes(prior)
+    observed = []
+
+    def check(path, **kwargs):
+        new = MaskCopperRepairer(path)._segment_nodes().keys() - {"diag", "tail", "foreign"}
+        if not new:
+            return _report(finding)
+        (added,) = new
+        observed.append(added)
+        return _report(_pt_finding(added, "unrelated-opening"))
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", check)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--mfr",
+            "jlcpcb-tier1",
+            "--verify",
+            "--format",
+            "json",
+            "--no-connectivity-check",
+            "--output",
+            str(output),
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert observed and result["repaired"] == 0
+    assert result["unrepaired"][-1]["reason"] == "new_mask_finding"
+    assert board.read_bytes() == original
+    assert output.read_bytes() == prior
+
+
+def _bonded_via_finding():
+    found = _pt_finding("via-bond", measured=0.0)
+    found.message = "Mask-to-copper overlap: exposed copper via (net N1); same-net pass-through"
+    return found
+
+
+def test_direct_pad_via_keeps_its_connection_and_undoes_as_one_action(tmp_path):
+    from kicad_tools.manufacturers import get_profile
+
+    board = _board(tmp_path, _via("via-bond", (101.20, 100.35)))
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "net_settings": {
+                    "meta": {"version": 3},
+                    "classes": [{"name": "Default"}, {"name": "Power", "track_width": 0.24}],
+                    "netclass_patterns": [{"netclass": "Power", "pattern": "N1"}],
+                }
+            }
+        )
+    )
+    repairer = MaskCopperRepairer(board)
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=2)
+    repair = repairer.repair(
+        [_bonded_via_finding()], design_rules=rules, clearance_mm=0.15, warning_clearance_mm=0.15
+    )
+    assert repair.repaired == 1
+    action = repair.actions[0]
+    assert len(action.added_segments) == 1
+    uid, ax, ay, vx, vy, width, layer, net = action.added_segments[0]
+    assert layer == "F.Cu" and net == 1 and width == 0.24
+    assert _is_quantum_aligned(vx - ax, vy - ay)
+    repairer.save(board)
+    pad, (via, seat), (bridge, _) = (
+        _pad_poly(board, "R1/1"),
+        _saved_copper(board, "via-bond"),
+        _saved_copper(board, uid),
+    )
+    assert seat == (vx, vy) and pad.distance(via) >= 0.15
+    assert pad.contains(Point(ax, ay)) and bridge.intersects(via) and bridge.intersects(pad)
+    assert not MaskCopperRepairer(board).off_angle_tracks()
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert _saved_copper(board, "via-bond")[1] == (101.2, 100.35)
+    assert uid not in MaskCopperRepairer(board)._segment_nodes()
+
+
+@pytest.mark.parametrize(
+    "obstacle", ["project clearance", "drill spacing", "locked via", "generated via", "contact"]
+)
+def test_direct_pad_via_veto_preserves_the_copper(tmp_path, obstacle):
+    from kicad_tools.manufacturers import get_profile
+
+    copper = _via("via-bond", (101.20, 100.35))
+    if obstacle == "project clearance":
+        # The closest mask-safe seat leaves 0.175 mm to this rear track.
+        copper += _seg("rear", (102.045, 98.0), (102.045, 102.0), layer="B.Cu", net=2)
+    elif obstacle == "drill spacing":
+        copper += _via("other-drill", (102.22, 100.35), size=0.4, drill=0.3, net=2)
+    elif obstacle == "locked via":
+        copper += '(group "protected" (uuid "grp") (locked yes) (members "via-bond"))'
+    elif obstacle == "generated via":
+        copper += "(generated (uuid tuning) (members via-bond))"
+    else:
+        # Its locked tip touches the original annulus by width on the rear.
+        copper += _seg("tap", (100.3, 100.35), (100.95, 100.35), layer="B.Cu").replace(
+            "(segment ", "(segment (locked yes) "
+        )
+    board = _board(tmp_path, copper)
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=2)
+    opts = {
+        "max_displacement": 0.28,
+        "design_rules": rules,
+        "clearance_mm": 0.127,
+        "warning_clearance_mm": 0.15,
+    }
+    if obstacle == "project clearance":
+        # First demonstrate that the manufacturer's smaller floor would permit it.
+        board.with_suffix(".kicad_pro").write_text(
+            json.dumps(
+                {
+                    "net_settings": {
+                        "meta": {"version": 3},
+                        "classes": [{"name": "Default", "clearance": 0.127}],
+                    }
+                }
+            )
+        )
+        assert (
+            MaskCopperRepairer(board).repair([_bonded_via_finding()], dry_run=True, **opts).repaired
+            == 1
+        )
+        board.with_suffix(".kicad_pro").write_text(
+            json.dumps(
+                {
+                    "net_settings": {
+                        "meta": {"version": 3},
+                        "classes": [
+                            {"name": "Default", "clearance": 0.127},
+                            {"name": "Power", "clearance": 0.2},
+                        ],
+                        "netclass_patterns": [{"netclass": "Power", "pattern": "N1"}],
+                    }
+                }
+            )
+        )
+    before = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_bonded_via_finding()], **opts)
+    assert not result.actions and not repairer.modified
+    assert result.unrepaired and board.read_bytes() == before

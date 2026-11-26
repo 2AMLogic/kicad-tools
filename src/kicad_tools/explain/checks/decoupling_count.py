@@ -347,6 +347,15 @@ class DecouplingCountCheck:
 
     def check(self, pcb: PCB) -> list[Mistake]:
         """Advisory findings for redundant or missing per-pin decoupling."""
+        return self.check_with_inventory(pcb)[0]
+
+    def check_with_inventory(self, pcb: PCB) -> tuple[list[Mistake], list[PinDecoupling]]:
+        """Findings plus the per-pin inventory they were derived from.
+
+        One schematic parse and one set of constructor settings serve both, so
+        a report that lists the inventory beside the findings (Issue #10241)
+        cannot disagree with them and does not re-read the schematic.
+        """
         mistakes: list[Mistake] = []
         inventory = self.pin_inventory(pcb)
 
@@ -552,4 +561,4 @@ class DecouplingCountCheck:
                         },
                     )
                 )
-        return mistakes
+        return mistakes, inventory

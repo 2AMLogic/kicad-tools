@@ -248,7 +248,9 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
     return symbols
 
 
-def _mark_paired_units(file_symbols: dict[Path, list[dict]], prefixes: list[str] | None) -> None:
+def _mark_package_units(
+    file_symbols: dict[Path, list[dict]], prefixes: list[str] | None, *, paired_board: bool
+) -> None:
     """Recognize native units of the same footprint across the schematic hierarchy."""
     by_reference: dict[str, list[dict]] = defaultdict(list)
     for symbols in file_symbols.values():
@@ -260,7 +262,10 @@ def _mark_paired_units(file_symbols: dict[Path, list[dict]], prefixes: list[str]
             ):
                 continue
             if sym["unit_suffix"]:
-                sym["package_ref"] = sym["reference"].removesuffix(sym["unit_suffix"])
+                # Paired mode looks up the exact footprint spelling, including leading zeros.
+                # Standalone mode already groups explicit suffixes numerically in _assign_numbers.
+                if paired_board:
+                    sym["package_ref"] = sym["reference"].removesuffix(sym["unit_suffix"])
             else:
                 by_reference[sym["reference"]].append(sym)
 
@@ -268,9 +273,12 @@ def _mark_paired_units(file_symbols: dict[Path, list[dict]], prefixes: list[str]
         if len(units) < 2:
             continue
         if len({s["lib_id"] for s in units}) != 1 or len({s["unit"] for s in units}) != len(units):
-            raise ValueError(
-                f"Ambiguous schematic reference '{ref}': expected distinct units of one symbol"
-            )
+            if paired_board:
+                raise ValueError(
+                    f"Ambiguous schematic reference '{ref}': expected distinct units of one symbol"
+                )
+            # Standalone reannotation keeps its handling of ordinary duplicate references.
+            continue
         for unit in units:
             unit["package_ref"] = ref
 
@@ -598,15 +606,11 @@ def run_re_annotate(
     # The mapping is now keyed by UUID to handle unannotated refs (R?, C?)
     # that share the same reference string across multiple components.
 
-    if pcb_path is not None and not check and not unannotated_only:
-        try:
-            _mark_paired_units(file_symbols, prefixes)
-        except ValueError as e:
-            print(f"Error: {e}. No files were modified.", file=sys.stderr)
-            return 1
-
-    if per_sheet:
-        uuid_mapping = _build_per_sheet_mapping(
+    try:
+        if not check and not unannotated_only:
+            _mark_package_units(file_symbols, prefixes, paired_board=pcb_path is not None)
+        build_mapping = _build_per_sheet_mapping if per_sheet else _build_continuous_mapping
+        uuid_mapping = build_mapping(
             all_files,
             file_symbols,
             prefixes,
@@ -614,15 +618,9 @@ def run_re_annotate(
             unannotated_only=unannotated_only,
             include_power=include_power,
         )
-    else:
-        uuid_mapping = _build_continuous_mapping(
-            all_files,
-            file_symbols,
-            prefixes,
-            start_from,
-            unannotated_only=unannotated_only,
-            include_power=include_power,
-        )
+    except ValueError as e:
+        print(f"Error: {e}. No files were modified.", file=sys.stderr)
+        return 1
 
     if check:
         import json
@@ -1175,6 +1173,7 @@ def _build_per_sheet_mapping(
 ) -> dict[str, dict]:
     """Build a per-sheet UUID-keyed mapping, restarting numbering per file."""
     mapping: dict[str, dict] = {}
+    package_targets: dict[str, str] = {}
 
     for sch_file in all_files:
         syms = file_symbols[sch_file]
@@ -1186,6 +1185,18 @@ def _build_per_sheet_mapping(
             unannotated_only=unannotated_only,
             include_power=include_power,
         )
+        # One package can span sheets even when their counters restart independently.
+        for sym in syms:
+            package = sym.get("package_ref")
+            if package is None:
+                continue
+            target = sheet_mapping[sym.get("uuid") or sym["reference"]]["new"].removesuffix(
+                sym["unit_suffix"]
+            )
+            if package_targets.setdefault(package, target) != target:
+                raise ValueError(
+                    f"Units of '{package}' would receive different references with --per-sheet"
+                )
         mapping.update(sheet_mapping)
 
     return mapping

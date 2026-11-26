@@ -467,12 +467,10 @@ Each tier is tried in order until one yields an existing file.
    `placeholder`, never as `resolved`. A render shows *something*, and the
    audit still counts the gap.
 
-For **"the whole JLCPCB catalog"**, tiers 1 and 3 cover the volume: the
-catalogue is dominated by standard chip and IC packages. Tier 4 covers the
-long tail of vendor-specific connectors, switches and modules, and only at
-use time. We could not measure the catalogue split here, because the
-jlcparts SQLite is not cached on this host. Measuring it is the first
-acceptance criterion of the pipeline issue.
+In the November 3, 2026 jlcparts snapshot, the package matcher found a KiCad
+footprint for 22,966 of 530,624 in-stock parts. Of those, 17,515 matched a
+body in the verified 56-model subset. Coverage depends on both the package
+matcher and the model library available to it. [Catalogue measurement](#catalogue-measurement-method-and-status)
 
 ## 3. Ecosystem registry and external options
 
@@ -580,15 +578,22 @@ stock body, the share that would need the LCSC tier (a footprint with no
 body), and the share with no footprint match, by Basic/Preferred vs Extended
 and by category. It is offline and read-only.
 
-**Status: not measured.** The jlcparts SQLite (`kct parts sync-catalog`, a
-large download) was not cached on the worker that implemented #7686, so no
-numbers are claimed here. The share with a *generatable* family (#7687) is also
-not measured: there is no generator registry to ask yet. Run the script on a
-host with the catalog and the pinned model set, and paste the table below.
+The November 3, 2026 jlcparts `source-db-v2` snapshot contained 3,600,372
+rows. Filtering to positive stock left 530,624 parts across 93 categories.
+The measurement used all 15,450 stock footprints from pinned KiCad 10.0.6
+and the verified subset of 56 stock model files. The 1,336 Basic and
+Preferred parts comprise 351 Basic (`library_type='base'`) and 985 Preferred
+(`library_type='expand'` and `preferred=1`). [Measurement record and snapshot SHA-256](https://github.com/2AMLogic/kicad-tools/issues/7727#issuecomment-7083884763)
 
-| bucket | parts | stock body | needs LCSC | no footprint match |
-|---|---|---|---|---|
-| all | not measured | not measured | not measured | not measured |
+| In-stock tier | Parts | Footprint with stock body | Footprint without body in subset | No footprint match |
+| --- | ---: | ---: | ---: | ---: |
+| Basic and Preferred | 1,336 | 146 | 4 | 1,186 |
+| Extended | 529,288 | 17,369 | 5,447 | 506,472 |
+| All | 530,624 | 17,515 | 5,451 | 507,658 |
+
+Using an empty model directory removed all 17,515 body matches and left the
+507,658 unmatched parts unchanged. The share eligible for parametric model
+generation (#7687) remains unmeasured.
 
 ## 4. Interaction with existing gates
 
