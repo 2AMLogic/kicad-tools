@@ -472,7 +472,17 @@ class TestPackageTypes:
 
 @pytest.mark.parametrize(
     "text",
-    ["e=1.27mmA", "pitch 1.27mmA", "pitch 1.27B", "pitch = 0.65mmX", "e=1.27 mmA"],
+    [
+        "e=1.27mmA",
+        "pitch 1.27mmA",
+        "pitch 1.27B",
+        "pitch = 0.65mmX",
+        "e=1.27 mmA",
+        "pitch 500µm",
+        "pitch 500μm",
+        "e=1.27mmβ",
+        "e=1.27 mmβ",
+    ],
 )
 def test_pitch_token_with_attached_letter_is_ambiguous(text):
     # Key must be absent: a truncated 1.0 or a falsy 0.0 must not be reported.
@@ -485,6 +495,8 @@ def test_pitch_token_with_attached_letter_is_ambiguous(text):
         ("e=1.27mm", 1.27),
         ("e=0.8", 0.8),
         ("Pitch 50 mil", 1.27),
+        ("pitch 0.8 millimeters", 0.8),
+        ("e=0.8 millimetres", 0.8),
         ("0.8 mm pitch", 0.8),
         ("e=1.27mmA pitch 0.8mm", 0.8),
         ("pitch 1.27 B", 1.27),
@@ -505,6 +517,10 @@ def test_uppercase_e_still_supplies_body_length_with_malformed_pitch():
     [
         ("e=1.27mmA", None, True),
         ("pitch = 0.65mmX", None, True),
+        ("pitch 500µm", None, True),
+        ("pitch 500μm pitch 0.8mm", 0.8, False),
+        ("pitch 0.8 millimeters", 0.8, False),
+        ("e=0.8 millimetres", 0.8, False),
         ("e=1.27mmA pitch 0.8mm", 0.8, False),
         ("e=1.27mm", 1.27, False),
     ],

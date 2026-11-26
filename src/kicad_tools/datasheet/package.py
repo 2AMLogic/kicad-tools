@@ -190,7 +190,7 @@ def parse_package_name(name: str) -> dict:
     return result
 
 
-_PITCH_UNITS = ("mm", "mil", "mils")
+_PITCH_UNITS = ("mm", "millimeter", "millimeters", "millimetre", "millimetres", "mil", "mils")
 
 
 def _pitch_token_unit(tail: str) -> str | None:
@@ -200,7 +200,8 @@ def _pitch_token_unit(tail: str) -> str | None:
     onto the number or its unit makes the token incomplete (``1.27B``,
     ``1.27mmA``, ``1.27 mmA``).
     """
-    word = re.match(r"(\s*)([A-Za-z]*)", tail)
+    # Scan the entire Unicode suffix so an unsupported unit like µm stays intact.
+    word = re.match(r"(\s*)([^\W\d_]*)", tail)
     assert word is not None
     gap, letters = word.group(1), word.group(2)
     lowered = letters.lower()
