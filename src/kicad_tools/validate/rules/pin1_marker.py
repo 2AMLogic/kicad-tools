@@ -58,7 +58,9 @@ from __future__ import annotations
 
 import math
 import re
+from collections import defaultdict
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
@@ -120,6 +122,46 @@ def _has_copper(pad: Pad) -> bool:
     return any(layer.endswith(".Cu") or layer == "*.Cu" for layer in pad.layers)
 
 
+@dataclass
+class _MarkerPadCopper:
+    """Polygonal copper for visibility and exact circular lands for distance comparisons."""
+
+    outline: Any
+    circles: list[tuple[float, Any]]
+
+    @classmethod
+    def from_pads(cls, footprint: Footprint, pads: Iterable[Pad]) -> _MarkerPadCopper:
+        from shapely.geometry import MultiPoint  # type: ignore[import-untyped]
+        from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+        from .clearance import _pad_polygon, _transform_pad_position
+
+        outlines = []
+        centers: dict[float, list[tuple[float, float]]] = defaultdict(list)
+        for pad in pads:
+            polygon = _pad_polygon(pad, footprint)
+            if polygon is None:
+                continue
+            outlines.append(polygon)
+            width, height = pad.size
+            if pad.shape == "circle" or (
+                pad.shape in ("oval", "obround") and abs(width - height) < 1e-6
+            ):
+                centers[min(width, height) / 2].append(_transform_pad_position(pad, footprint))
+        return cls(
+            unary_union(outlines), [(r, MultiPoint(points)) for r, points in centers.items()]
+        )
+
+    def distance_to(self, ink: Any) -> float:
+        """Measure to circular copper without the angle-dependent error of an inscribed polygon."""
+        if self.outline.is_empty:
+            return math.inf
+        distance = float(ink.distance(self.outline))
+        for radius, centers in self.circles:
+            distance = min(distance, max(0.0, ink.distance(centers) - radius))
+        return distance
+
+
 def _arc_points(
     start: tuple[float, float], mid: tuple[float, float], end: tuple[float, float]
 ) -> list[tuple[float, float]]:
@@ -163,7 +205,7 @@ def _graphic_geometry(
     graphic: FootprintGraphic | BoardGraphic, transform: _Transform | None
 ) -> Any | None:
     """Build a shapely geometry for a silk graphic (stroke-buffered)."""
-    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+    from shapely.geometry import LineString, Point, Polygon
 
     def xf(p: tuple[float, float]) -> tuple[float, float]:
         return transform(p) if transform is not None else p
@@ -346,45 +388,35 @@ class Pin1MarkerRule(DRCRule):
                 results.add(violation)
         return results
 
+    def _pad_groups(self, footprint: Footprint) -> tuple[_MarkerPadCopper, _MarkerPadCopper]:
+        first = self.pin1_pads(footprint)
+        first_numbers = {p.number for p in first}
+        others = (
+            p
+            for p in footprint.pads
+            if p.number and p.number not in first_numbers and _has_copper(p)
+        )
+        return _MarkerPadCopper.from_pads(footprint, first), _MarkerPadCopper.from_pads(
+            footprint, others
+        )
+
     def _check_footprint(self, footprint: Footprint, board_silk: list[Any]) -> DRCViolation | None:
-        from shapely.ops import unary_union  # type: ignore[import-untyped]
-
-        from .clearance import _pad_polygon
-
-        pin1_numbers = {p.number for p in self.pin1_pads(footprint)}
-        pin1_geoms: list[Any] = []
-        other_geoms: list[Any] = []
-        for pad in footprint.pads:
-            if not _has_copper(pad):
-                continue
-            polygon = _pad_polygon(pad, footprint)
-            if polygon is None:
-                continue
-            if pad.number in pin1_numbers:
-                pin1_geoms.append(polygon)
-            elif pad.number:
-                other_geoms.append(polygon)
-        if not pin1_geoms:
+        pin1, others = self._pad_groups(footprint)
+        if pin1.outline.is_empty:
             return None
-        pin1 = unary_union(pin1_geoms)
-        others = unary_union(other_geoms) if other_geoms else None
-        all_pads = unary_union(pin1_geoms + other_geoms)
+        all_pads = pin1.outline.union(others.outline)
         body, _source = package_body_polygon(footprint)
 
         own_silk = list(self._silk_geometries(footprint, []))
         radius = self._effective_radius(pin1, body, footprint)
-        near_board_silk = [g for g in board_silk if g.distance(pin1) <= radius]
+        near_board_silk = [g for g in board_silk if pin1.distance_to(g) <= radius]
 
         candidates = 0
         for geom in own_silk + near_board_silk:
-            d1 = geom.distance(pin1)
+            d1 = pin1.distance_to(geom)
             if d1 > radius:
                 continue
-            if (
-                self.require_asymmetry
-                and others is not None
-                and geom.distance(others) <= d1 + _ASYMMETRY_MARGIN_MM
-            ):
+            if self.require_asymmetry and others.distance_to(geom) <= d1 + _ASYMMETRY_MARGIN_MM:
                 continue
             candidates += 1
             if self._is_visible(geom, all_pads, body):
@@ -401,12 +433,15 @@ class Pin1MarkerRule(DRCRule):
         # than to every other pad.  A closed box or a U centred on the part
         # keeps tying and is still rejected; an L at another pad's corner
         # points at that pad instead.
-        if self.require_asymmetry and others is not None:
+        if self.require_asymmetry and not others.outline.is_empty:
             for component in self._bent_components(own_silk):
-                if component.distance(pin1) > radius:
+                if pin1.distance_to(component) > radius:
                     continue
                 centroid = component.centroid
-                if centroid.distance(others) <= centroid.distance(pin1) + _ASYMMETRY_MARGIN_MM:
+                if (
+                    others.distance_to(centroid)
+                    <= pin1.distance_to(centroid) + _ASYMMETRY_MARGIN_MM
+                ):
                     continue
                 candidates += 1
                 if self._is_visible(component, all_pads, body):
@@ -415,7 +450,9 @@ class Pin1MarkerRule(DRCRule):
         accepted, has_sign = self._radial_sign(footprint, footprint.graphics, all_pads, body)
         if accepted:
             return None
-        return self._make_violation(footprint, pin1, radius, obscured=bool(candidates or has_sign))
+        return self._make_violation(
+            footprint, pin1.outline, radius, obscured=bool(candidates or has_sign)
+        )
 
     def marker_graphic_indices(self, footprint: Footprint, graphics: list[Any]) -> set[int]:
         """Return indices into ``graphics`` that this rule accepts as pin-1 marks.
@@ -426,30 +463,12 @@ class Pin1MarkerRule(DRCRule):
         elements the check relies on untouched.  Empty when the footprint is
         not selected by the rule.  Needs shapely.
         """
-        from shapely.ops import unary_union
-
-        from .clearance import _pad_polygon
-
         if not self.selects(footprint):
             return set()
-        pin1_numbers = {p.number for p in self.pin1_pads(footprint)}
-        pin1_geoms: list[Any] = []
-        other_geoms: list[Any] = []
-        for pad in footprint.pads:
-            if not _has_copper(pad):
-                continue
-            polygon = _pad_polygon(pad, footprint)
-            if polygon is None:
-                continue
-            if pad.number in pin1_numbers:
-                pin1_geoms.append(polygon)
-            elif pad.number:
-                other_geoms.append(polygon)
-        if not pin1_geoms:
+        pin1, others = self._pad_groups(footprint)
+        if pin1.outline.is_empty:
             return set()
-        pin1 = unary_union(pin1_geoms)
-        others = unary_union(other_geoms) if other_geoms else None
-        all_pads = unary_union(pin1_geoms + other_geoms)
+        all_pads = pin1.outline.union(others.outline)
         body, _source = package_body_polygon(footprint)
 
         radius = self._effective_radius(pin1, body, footprint)
@@ -466,24 +485,23 @@ class Pin1MarkerRule(DRCRule):
 
         accepted, _ = self._radial_sign(footprint, graphics, all_pads, body)
         for idx, geom in indexed:
-            d1 = geom.distance(pin1)
+            d1 = pin1.distance_to(geom)
             if d1 > radius:
                 continue
-            if (
-                self.require_asymmetry
-                and others is not None
-                and geom.distance(others) <= d1 + _ASYMMETRY_MARGIN_MM
-            ):
+            if self.require_asymmetry and others.distance_to(geom) <= d1 + _ASYMMETRY_MARGIN_MM:
                 continue
             if self._is_visible(geom, all_pads, body):
                 accepted.add(idx)
 
-        if self.require_asymmetry and others is not None:
+        if self.require_asymmetry and not others.outline.is_empty:
             for component in self._bent_components([g for _, g in indexed]):
-                if component.distance(pin1) > radius:
+                if pin1.distance_to(component) > radius:
                     continue
                 centroid = component.centroid
-                if centroid.distance(others) <= centroid.distance(pin1) + _ASYMMETRY_MARGIN_MM:
+                if (
+                    others.distance_to(centroid)
+                    <= pin1.distance_to(centroid) + _ASYMMETRY_MARGIN_MM
+                ):
                     continue
                 if self._is_visible(component, all_pads, body):
                     accepted.update(i for i, g in indexed if g.intersects(component))
@@ -491,7 +509,7 @@ class Pin1MarkerRule(DRCRule):
 
     def _radial_sign(self, footprint, graphics, all_pads, body) -> tuple[set[int], bool]:
         """Check a positive sign on the rim beyond the ordinary pad search radius."""
-        visible = set()
+        visible: set[int] = set()
         found = False
         if len(footprint.pads) != 2:
             return visible, found
@@ -514,7 +532,9 @@ class Pin1MarkerRule(DRCRule):
                     visible.update(pair)
         return visible, found
 
-    def _effective_radius(self, pin1: Any, body: Any | None, footprint: Footprint) -> float:
+    def _effective_radius(
+        self, pin1: _MarkerPadCopper, body: Any | None, footprint: Footprint
+    ) -> float:
         """Search radius for one footprint: ``search_radius_mm`` is a floor.
 
         Modules whose body overhangs pad 1 (AC/DC bricks, relays) put the
@@ -533,7 +553,7 @@ class Pin1MarkerRule(DRCRule):
         outlines.append(_courtyard_polygon(footprint, footprint_side(footprint), Polygon))
         for outline in outlines:
             if outline is not None and not outline.is_empty:
-                reach = max(reach, float(pin1.distance(outline.boundary)) + 0.1)
+                reach = max(reach, pin1.distance_to(outline.boundary) + 0.1)
         return max(self.search_radius_mm, reach)
 
     @staticmethod
