@@ -3,7 +3,10 @@
 The follow-up to #8357 (board 05, ``test_board05_recipe_dru_reproduces_8357.py``):
 under the same operator ruling (commit what the recipe emits, consistent with
 #8029), a board's committed routed ``.kicad_dru`` must be the file its recipe
-leaves on disk, including the #8048 attach-zone block.
+leaves on disk, including the #8048 attach-zone block.  Board 01 is the one
+exception to the block: its recipe authors its ``Power`` net class (Issue
+#10421), a designer minimum is never relaxed, and a project that declares no
+router class gets no block.
 
 Each recipe's *last* DRU write is replayed on the committed routed board in a
 scratch directory, starting -- as a fresh recipe run does -- from no
@@ -106,6 +109,8 @@ PARAMS = [
     pytest.param("07-matchgroup-test", id="board07"),
 ]
 
+ATTACH_ZONE_PARAMS = [param for param in PARAMS if param.values[0] != "01-voltage-divider"]
+
 
 def _committed_dru(board: str) -> str:
     stem = CASES[board][0]
@@ -126,9 +131,14 @@ def _recipe_dru(board: str, tmp_path: Path) -> str:
     return routed.with_suffix(".kicad_dru").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("board", PARAMS)
+@pytest.mark.parametrize("board", ATTACH_ZONE_PARAMS)
 def test_committed_dru_carries_the_attach_zone_block(board):
     assert has_attach_zone_block(_committed_dru(board))
+
+
+def test_board01_authored_power_class_leaves_no_attach_zone_block():
+    """A designer-authored class is never relaxed, so board 01 emits no block."""
+    assert not has_attach_zone_block(_committed_dru("01-voltage-divider"))
 
 
 @pytest.mark.parametrize("board", PARAMS)
