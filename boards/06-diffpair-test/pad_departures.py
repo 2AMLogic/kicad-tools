@@ -73,6 +73,12 @@ from kicad_tools.router.rules import net_class_map_from_path
 from kicad_tools.schema.pcb import PCB, Pad, Segment, Via
 from kicad_tools.sidecars import copy_project_sidecars
 from kicad_tools.validate import DRCChecker
+from kicad_tools.validate.clearance_shapes import (
+    inside_filled_outline_region,
+    min_gap_to_outline,
+    outline_shapes,
+    segment_shape,
+)
 from kicad_tools.validate.connectivity import ConnectivityValidator
 from kicad_tools.validate.copper_contact import (
     CopperContactGraph,
@@ -1644,7 +1650,43 @@ _POWER_EXITS = (
 )
 
 
-def _clear_power_exit(path: Path, rules: DesignRules, site: _PowerExit) -> int:
+def _power_exit_mask_ok(
+    pcb: PCB, site: _PowerExit, tracks: list[Segment], clearance: float
+) -> bool:
+    """Only the measured entry pads may share their mask openings with the new copper."""
+    entries = {site.pin, "D2"} if site.ref == "U2" else {site.pin}
+    runs = [(LineString([s.start, s.end]), s.width / 2) for s in tracks]
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if fp.reference == site.ref and pad.number in entries:
+                continue
+            if not {"F.Mask", "*.Mask"}.intersection(pad.layers):
+                continue
+            shapes = _departure_mask_shapes(pcb, fp, pad)
+            if shapes is None or any(
+                line.distance(shapes[1]) < radius + clearance - _EPS for line, radius in runs
+            ):
+                return False
+    return True
+
+
+def _power_exit_edge_ok(pcb: PCB, path: Path, tracks: list[Segment]) -> bool:
+    """Apply the project copper-to-edge minimum to the new track envelopes."""
+    minimum = BoardClearanceRules.from_board(path).min_edge_clearance
+    outline = pcb.get_board_outline_segments()
+    edges = outline_shapes(outline)
+    curve_error = getattr(outline, "max_error_mm", 0.0)
+    regions = pcb.get_board_outline_filled_regions()
+    return all(
+        min_gap_to_outline(segment_shape(track), edges) - curve_error >= minimum - _EPS
+        and inside_filled_outline_region(regions, *track.start) is None
+        for track in tracks
+    )
+
+
+def _clear_power_exit(
+    path: Path, rules: DesignRules, site: _PowerExit, mask_clearance: float
+) -> int:
     """Replace one measured front-layer departure, preserving its barrel and every external tap."""
     pcb = PCB.load(path)
     fp = pcb.get_footprint(site.ref)
@@ -1743,6 +1785,10 @@ def _clear_power_exit(path: Path, rules: DesignRules, site: _PowerExit) -> int:
     if len(after.components()) != 1 or not contacts <= new_contacts or not ends <= new_ends:
         return 0
     if not _copper_gap_ok(pcb, path, added, [], rules):
+        return 0
+    if not _power_exit_mask_ok(pcb, site, added, mask_clearance):
+        return 0
+    if not _power_exit_edge_ok(pcb, path, added):
         return 0
     # The fabricator also sees slits between branches of the same net.
     # Check the final tracks together, with each other branch still present.
@@ -1844,4 +1890,6 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
     edits += _clear_data_pair(path, rules, _DATA_EXITS, _DATA_NETS, _DATA_WIDTH, "MIPI data")
     edits += _clear_data_pair(path, rules, _USB2_EXITS, _USB2_NETS, 0.25, "USB2")
     edits += _center_u1_ground_entry(path, rules, request.policy.warning_clearance_mm)
-    return edits + sum(_clear_power_exit(path, rules, site) for site in _POWER_EXITS)
+    return edits + sum(
+        _clear_power_exit(path, rules, site, request.policy.clearance_mm) for site in _POWER_EXITS
+    )

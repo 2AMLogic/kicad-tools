@@ -1126,7 +1126,8 @@ def _write_power_board(board, ref, pin, control=None):
         else "Package_QFP:LQFP-48_7x7mm_P0.5mm"
     )
     routes = [("F.Cu", absolute(a), absolute(b), 0.2) for a, b in pairwise(old)]
-    routes.append(("In1.Cu", via, (via[0], 12), 0.20))
+    far = (via[0], 7 if control == "project edge" else 12)
+    routes.append(("In1.Cu", via, far, 0.20))
     if ref == "U2" and control != "missing vertical":
         top = 0.20 if control == "short vertical" else 1.395
         routes.append(("F.Cu", absolute((0, top)), absolute((0, -0.125)), 0.20))
@@ -1139,6 +1140,22 @@ def _write_power_board(board, ref, pin, control=None):
     extra = (
         f'(group "protected" (uuid grp) (members "{_uid("seg", 0)}"))' if control == "group" else ""
     )
+    if control == "neighbor mask":
+        extra = (
+            '(net 2 "OTHER") (footprint "Neighbor" (layer "F.Cu") (at 9.35 10.34)'
+            ' (property "Reference" "X1") (pad "1" smd rect (at 0 0) (size 0.16 0.16)'
+            ' (layers "F.Cu" "F.Mask") (solder_mask_margin 0.14) (net 2 "OTHER")))'
+        )
+    if control == "project edge":
+        extra = (
+            "(gr_rect (start 7.8 10.30) (end 9.35 11.10) (stroke (width 0.05)"
+            ' (type default)) (fill none) (layer "Edge.Cuts"))'
+        )
+        board.with_suffix(".kicad_pro").write_text(
+            json.dumps(
+                {"board": {"design_settings": {"rules": {"min_copper_edge_clearance": 0.28}}}}
+            )
+        )
     _write_board(
         board,
         pad_ref=ref,
@@ -1148,12 +1165,14 @@ def _write_power_board(board, ref, pin, control=None):
         net_name=net,
         segments=routes,
         vias=[via],
-        far_at=(via[0], 12),
+        far_at=far,
         neighbor=False,
         extra=extra,
         locked_index=0 if control == "locked" else None,
     )
     text = board.read_text().replace("(size 0.6) (drill 0.25)", "(size 0.5) (drill 0.3)")
+    if control == "neighbor mask":
+        text = text.replace('(31 "B.Cu" signal))', '(31 "B.Cu" signal) (39 "F.Mask" user))')
     if ref == "U2":
         text = text.replace(
             '(pad "D3"',
@@ -1213,6 +1232,8 @@ def test_power_pad_departure_keeps_barrel_and_reaches_pad(tmp_path, departures, 
         ("U3", "25", "group"),
         ("U3", "36", "locked"),
         ("U3", "25", "expanded mask"),
+        ("U3", "25", "neighbor mask"),
+        ("U3", "25", "project edge"),
         ("U3", "36", "project clearance"),
         ("U3", "25", "changed width"),
     ],
@@ -1222,6 +1243,16 @@ def test_power_pad_departure_veto_preserves_input(tmp_path, departures, ref, pin
     _write_power_board(board, ref, pin, control)
     original = board.read_bytes()
     assert departures.clear_pad_departures(board, _rules()) == 0 and board.read_bytes() == original
+
+
+def test_power_exit_accepts_project_edge_gap_at_limit(tmp_path, departures):
+    board = tmp_path / "power.kicad_pcb"
+    _write_power_board(board, "U3", "25", "project edge")
+    # The two closest replacement tracks have exactly 0.250 mm to the cut-out.
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_copper_edge_clearance": 0.25}}}})
+    )
+    assert departures.clear_pad_departures(board, _rules()) == 1
 
 
 def test_power_u3_36_center_segment_keeps_all_thirteen_pads_on_the_pour(tmp_path, departures):
