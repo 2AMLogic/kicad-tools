@@ -211,3 +211,28 @@ def test_radial_positive_lead_mark(tmp_path, rules, face, case):
         assert all(any(extra_id in item for item in finding.items) for finding in findings)
     else:
         assert len(findings) == (0 if case == "plus" else 1)
+
+
+def test_round_pad_cutout_with_repair_clearance_and_mask_margin(tmp_path, rules):
+    """Stock-width (0.12 mm) ink clipped 0.255 mm off a pad stays a recognised cutout."""
+    stroke = '(stroke (width 0.12) (type solid)) (layer "F.SilkS")'
+    pad_radius, tip_radius = 0.4, 0.4 + 0.045 + 0.15 + 0.06
+    graphics = []
+    for x in OFFSETS:
+        outer = math.sqrt(4 - x**2)
+        tip = math.sqrt(tip_radius**2 - (x - 0.4) ** 2)
+        for a, b in (((x, -outer), (x, -tip)), ((x, tip), (x, outer))):
+            graphics.append(
+                f"(fp_line (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) {stroke} (uuid {uuid.uuid4()}))"
+            )
+    path = tmp_path / "clipped.kicad_pcb"
+    path.write_text(f"""(kicad_pcb (version 20240108) (generator "test")
+        (setup (pad_to_mask_clearance 0.045))
+        (footprint "ProjectMark" (layer "F.Cu") (at 10 10 0)
+            (property "Reference" "C1" (at 0.4 0) (layer "F.Fab")
+              (effects (font (size 1 1) (thickness 0.15))))
+            (fp_circle (center 0 0) (end 2 0) {stroke} (fill no))
+            (pad "2" smd circle (at 0.4 0) (size {2 * pad_radius} {2 * pad_radius})
+              (layers "F.Cu" "F.Mask"))
+            {" ".join(graphics)}))""")
+    assert not check_silk_overlap(PCB.load(path), rules).violations
