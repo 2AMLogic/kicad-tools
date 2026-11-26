@@ -136,20 +136,39 @@ def test_all_footprints_present_reports_success(tmp_path, monkeypatch, capsys):
     assert output_path.exists()
 
 
-@pytest.mark.parametrize("board_only", [False, True], ids=["shared-sheet", "board-only"])
-def test_saved_footprint_paths_match_native_project(tmp_path, board_only):
-    import shutil
+def _native_symbol_paths(schematic: Path) -> dict[str, set[str]]:
     import subprocess
-    from copy import deepcopy
     from xml.etree import ElementTree
 
     from kicad_tools.cli.runner import find_kicad_cli
-    from kicad_tools.schema.pcb import PCB
-    from kicad_tools.sexp import parse_file
 
     cli = find_kicad_cli()
     if cli is None:
         pytest.skip("requires the native KiCad netlist exporter")
+    xml = schematic.with_suffix(".xml")
+    subprocess.run(
+        [cli, "sch", "export", "netlist", "--format", "kicadxml", "-o", str(xml), str(schematic)],
+        check=True,
+        capture_output=True,
+        timeout=90,
+    )
+    return {
+        component.attrib["ref"]: {
+            component.find("sheetpath").attrib["tstamps"] + unit
+            for unit in component.findtext("tstamps").split()
+        }
+        for component in ElementTree.parse(xml).findall("./components/comp")
+    }
+
+
+@pytest.mark.parametrize("fallback", [False, True], ids=["native", "python"])
+@pytest.mark.parametrize("board_only", [False, True], ids=["shared-sheet", "board-only"])
+def test_saved_footprint_paths_match_native_project(tmp_path, monkeypatch, board_only, fallback):
+    import shutil
+    from copy import deepcopy
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_file
 
     fixture = Path(__file__).parent / "fixtures" / "sheet_qualified_lvs"
     root = tmp_path / "repeat_root.kicad_sch"
@@ -177,26 +196,91 @@ def test_saved_footprint_paths_match_native_project(tmp_path, board_only):
         footprint = footprint.replace("(attr smd)", "(attr smd board_only)")
     (library / "OnlyHere.kicad_mod").write_text(footprint)
 
-    xml = tmp_path / "native.xml"
-    subprocess.run(
-        [cli, "sch", "export", "netlist", "--format", "kicadxml", "-o", str(xml), str(root)],
-        check=True,
-        capture_output=True,
-        timeout=90,
-    )
-    expected = {
-        component.attrib["ref"]: component.find("sheetpath").attrib["tstamps"]
-        + component.findtext("tstamps")
-        for component in ElementTree.parse(xml).findall("./components/comp")
-    }
+    expected = _native_symbol_paths(root)
     assert set(expected) == {"R1", "R2", "R11", "R12"}
+    if fallback:
+        monkeypatch.setattr("kicad_tools.operations.netlist.find_kicad_cli", lambda: None)
     output = tmp_path / "created.kicad_pcb"
     assert create_pcb_cmd.main([str(root), "--output", str(output)]) == 0
     saved = PCB.load(output).footprints
-    assert {fp.reference for fp in saved} == set(expected)
+    assert sorted(fp.reference for fp in saved) == sorted(expected)
     for fp in saved:
         assert ("board_only" in fp.attr_flags) == board_only
-        assert fp.path == ("" if board_only else expected[fp.reference])
+        assert fp.path in ({""} if board_only else expected[fp.reference])
+
+
+@pytest.mark.parametrize("fallback", [False, True], ids=["native", "python"])
+def test_multiunit_package_has_one_saved_footprint(tmp_path, monkeypatch, fallback, caplog):
+    from kicad_tools.schema.pcb import PCB
+
+    root = tmp_path / "dual.kicad_sch"
+    (tmp_path / "fp-lib-table").write_text(_FP_LIB_TABLE)
+    library = tmp_path / "local.pretty"
+    library.mkdir()
+    pads = " ".join(
+        f'(pad "{n}" smd rect (at {n} 0) (size 0.6 0.6) (layers "F.Cu"))' for n in range(1, 7)
+    )
+    (library / "Multi.kicad_mod").write_text(f'(footprint "Multi" (layer "F.Cu") {pads})')
+    symbols = Path(__file__).parent / "fixtures" / "multiunit_test.kicad_sym"
+    sch = Schematic(title="Two units", project_name=root.stem, local_symbol_libs=[symbols])
+    for unit, x in [(1, 50), (2, 100)]:
+        placed = sch.add_symbol(
+            "multiunit_test:MultiUnitPart",
+            x,
+            50,
+            "U1",
+            "MultiUnitPart",
+            footprint="local:Multi",
+            unit=unit,
+        )
+        px, py = placed.pin_position("1" if unit == 1 else "3")
+        sch.add_wire((px, py), (px - 5, py))
+        sch.add_label(f"UNIT{unit}", px - 5, py)
+    sch.write(root)
+    expected = _native_symbol_paths(root)
+    assert set(expected) == {"U1"} and len(expected["U1"]) == 2
+    if fallback:
+        monkeypatch.setattr("kicad_tools.operations.netlist.find_kicad_cli", lambda: None)
+    output = tmp_path / "dual.kicad_pcb"
+    assert create_pcb_cmd.main([str(root), "--output", str(output)]) == 0
+    assert "netlist is missing components" not in caplog.text
+    (footprint,) = PCB.load(output).footprints
+    assert footprint.reference == "U1" and footprint.path in expected["U1"]
+    nets = {p.number: p.net_name.lstrip("/") for p in footprint.pads}
+    assert (nets["1"], nets["3"]) == ("UNIT1", "UNIT2")
+
+
+@pytest.mark.parametrize("foreign_first", [True, False])
+def test_python_extraction_keeps_project_annotations_with_their_symbols(
+    tmp_path, monkeypatch, foreign_first
+):
+    from copy import deepcopy
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_file
+
+    root = _build_two_resistor_project(
+        tmp_path, footprints={"R1": "local:OnlyHere", "R2": "local:OnlyHere"}
+    )
+    doc = parse_file(root)
+    for symbol in doc.find_children("symbol"):
+        instances = symbol.find_child("instances")
+        foreign = deepcopy(instances.find_child("project"))
+        foreign.set_value(0, "another-project")
+        reference = foreign.find_child("path").find_child("reference")
+        reference.set_value(0, {"R1": "R2", "R2": "R1"}[reference.get_string(0)])
+        if foreign_first:
+            instances.children.insert(0, foreign)
+        else:
+            instances.children.append(foreign)
+    root.write_text(doc.to_string())
+    expected = _native_symbol_paths(root)
+    monkeypatch.setattr("kicad_tools.operations.netlist.find_kicad_cli", lambda: None)
+    output = tmp_path / "python.kicad_pcb"
+    assert create_pcb_cmd.main([str(root), "--output", str(output)]) == 0
+    saved = PCB.load(output).footprints
+    assert sorted(fp.reference for fp in saved) == sorted(expected) == ["R1", "R2"]
+    assert all(fp.path in expected[fp.reference] for fp in saved)
 
 
 def test_all_footprints_present_preserves_pad_bindings(tmp_path, monkeypatch):
