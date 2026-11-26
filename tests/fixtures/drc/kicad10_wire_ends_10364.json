@@ -1,0 +1,82 @@
+{
+  "source": "board.kicad_pcb",
+  "coordinate_units": "mm",
+  "kicad_version": "10.0.6",
+  "violations": [
+    {
+      "description": "Via is not connected or connected on only one layer",
+      "items": [
+        {
+          "description": "Via [FUSED_LINE] on F.Cu - B.Cu",
+          "pos": {
+            "x": 70.958001,
+            "y": 105.000022
+          },
+          "uuid": "47768167-88f4-5cfa-bef7-cf5dca9689dd"
+        }
+      ],
+      "severity": "warning",
+      "type": "via_dangling"
+    },
+    {
+      "description": "Via is not connected or connected on only one layer",
+      "items": [
+        {
+          "description": "Via [FUSED_LINE] on F.Cu - B.Cu",
+          "pos": {
+            "x": 166.041999,
+            "y": 105.000022
+          },
+          "uuid": "f424b595-c3bd-52d4-a9df-188b0b159440"
+        }
+      ],
+      "severity": "warning",
+      "type": "via_dangling"
+    },
+    {
+      "description": "Via is not connected or connected on only one layer",
+      "items": [
+        {
+          "description": "Via [PGND] on F.Cu - B.Cu",
+          "pos": {
+            "x": 70.958001,
+            "y": 125
+          },
+          "uuid": "0f6c13df-57a0-5f87-883c-c73d1df39c14"
+        }
+      ],
+      "severity": "warning",
+      "type": "via_dangling"
+    },
+    {
+      "description": "Via is not connected or connected on only one layer",
+      "items": [
+        {
+          "description": "Via [PGND] on F.Cu - B.Cu",
+          "pos": {
+            "x": 166.041999,
+            "y": 125
+          },
+          "uuid": "39a513fd-fe34-5d92-a6a1-5882807dfa49"
+        }
+      ],
+      "severity": "warning",
+      "type": "via_dangling"
+    },
+    {
+      "description": "Via is not connected or connected on only one layer",
+      "items": [
+        {
+          "description": "Via [FUSED_LINE] on F.Cu - B.Cu",
+          "pos": {
+            "x": 70.958001,
+            "y": 107.000022
+          },
+          "uuid": "5ffebf08-8bfa-5448-82ec-33f87cd4f622"
+        }
+      ],
+      "severity": "warning",
+      "type": "via_dangling"
+    }
+  ]
+}
