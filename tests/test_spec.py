@@ -815,12 +815,13 @@ class TestPurchasingEntries:
         assert only[0].refs is None
         assert self._load(tmp_path, "purchasing: []\n").purchasing == []
 
-    def test_round_trip(self, tmp_path):
+    @pytest.mark.parametrize("exclude_none", [True, False])
+    def test_round_trip(self, tmp_path, exclude_none):
         from kicad_tools.spec.parser import load_spec, save_spec
 
         path = tmp_path / "project.kct"
         spec = self._load(tmp_path, self.FUSE_ROWS)
-        save_spec(spec, path)
+        save_spec(spec, path, exclude_none=exclude_none)
         assert load_spec(path).purchasing == spec.purchasing
 
     def test_blank_surrounding_whitespace_is_trimmed(self, tmp_path):

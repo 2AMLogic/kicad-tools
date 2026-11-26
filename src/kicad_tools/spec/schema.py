@@ -1089,14 +1089,6 @@ class PurchasingEntry(SpecModel):
             refs.append(ref)
         return refs
 
-    @model_validator(mode="before")
-    @classmethod
-    def _pending_is_stated(cls, data: Any) -> Any:
-        # A bare ``pending:`` loads as None, which would read as "selected".
-        if isinstance(data, dict) and "pending" in data and data["pending"] is None:
-            raise ValueError("pending must say what is still to be selected")
-        return data
-
     @field_validator("manufacturer", "mpn", "pending")
     @classmethod
     def _optional_text_not_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
@@ -1116,7 +1108,7 @@ class PurchasingEntry(SpecModel):
         if self.manufacturer is None or self.mpn is None:
             raise ValueError(
                 "a selected row needs both manufacturer and mpn; "
-                "set pending to flag a part that is not chosen yet"
+                "otherwise pending must say what is still to be selected"
             )
         return self
 
