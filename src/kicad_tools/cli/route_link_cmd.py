@@ -372,7 +372,9 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
     required = getattr(args, "_pairwise_required", None)
     voltages = getattr(args, "_pairwise_voltages", None)
     args._pcb_for_floors = pcb
-    authored = _authored_floors(args)
+    # Project rules (netclass + .kicad_dru) are resolved per pair by
+    # ``board_rules``; authored netclass floors would override a lower pair exception.
+    authored = {} if base.board_rules is not None else _authored_floors(args)
     if voltages is None and not spec.net_clearance and not authored:
         return base
     names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
@@ -890,7 +892,9 @@ def _commit_links_gated(
         # Issue #8573: the collapse has no clearance oracle and KiCad DRC does
         # not know --net-clearance, so re-check it against the per-net floors.
         link_rules = _rules_for_link(args, pcb, rules, spec)
-        if link_rules.clearance_by_net and not route_clears_floors(collapsed, model, link_rules):
+        if (
+            link_rules.clearance_by_net or link_rules.board_rules is not None
+        ) and not route_clears_floors(collapsed, model, link_rules):
             collapsed = route
         candidates = [collapsed, route] if collapsed.segments != route.segments else [route]
         for candidate in candidates:

@@ -184,3 +184,76 @@ def test_invalid_dru_refuses_before_routing(tmp_path):
     args = _parse(str(p), "--link", "SIG R1.1 R2.1")
     with pytest.raises(LinkSpecError):
         _rules_from_args(args, PCB.load(str(p)))
+
+
+def _pair_rules(tmp_path, dru, clearance=0.2):
+    p = _write(tmp_path, BODY)
+    _project(p, clearance)
+    p.with_suffix(".kicad_dru").write_text("(version 1)\n" + dru)
+    pcb = PCB.load(str(p))
+    args = _parse(str(p), "--link", "SIG R1.1 R2.1")
+    return _rules_for_link(args, pcb, _rules_from_args(args, pcb), args.links[0])
+
+
+def test_pair_exception_below_netclass_wins(tmp_path):
+    from shapely.geometry import Point
+
+    rules = _pair_rules(
+        tmp_path,
+        '(rule "p" (layer "F.Cu") (condition "A.NetName == \'SIG\' && B.NetName == \'HV\'") '
+        "(constraint clearance (min 0.3mm)))\n",
+        clearance=2.0,
+    )
+    assert rules.clearance_parts("SIG", 2, "F.Cu", Point(0, 0))[0][1] == pytest.approx(0.3)
+
+
+def test_via_rule_applies_to_via_mask_only(tmp_path):
+    from shapely.geometry import Point
+
+    rules = _pair_rules(
+        tmp_path,
+        "(rule \"v\" (condition \"A.Type == 'Via' && A.NetName == 'SIG' && B.NetName == 'HV'\") "
+        "(constraint clearance (min 6mm)))\n",
+    )
+    pt = Point(0, 0)
+    assert rules.clearance_parts("SIG", 2, "F.Cu", pt, None, "Track")[0][1] == pytest.approx(0.2)
+    assert rules.clearance_parts("SIG", 2, "F.Cu", pt, None, "Via")[0][1] == pytest.approx(6.0)
+
+
+def test_pad_reference_reaches_resolver(tmp_path):
+    from shapely.geometry import Point
+
+    from kicad_tools.router.link_router import _Item
+
+    rules = _pair_rules(
+        tmp_path,
+        "(rule \"r\" (condition \"A.NetName == 'SIG' && B.Type == 'Pad' && B.Reference == 'R9'\") "
+        "(constraint clearance (min 6mm)))\n",
+    )
+    pt = Point(0, 0)
+    r9 = _Item(2, {"F.Cu": pt}, True, 0.0, "R9", "")
+    r3 = _Item(2, {"F.Cu": pt}, True, 0.0, "R3", "")
+    assert rules.clearance_parts("SIG", 2, "F.Cu", pt, r9)[0][1] == pytest.approx(6.0)
+    assert rules.clearance_parts("SIG", 2, "F.Cu", pt, r3)[0][1] == pytest.approx(0.2)
+
+
+def test_copper_beyond_window_padding_is_still_avoided(tmp_path, capsys):
+    from kicad_tools.cli import main
+
+    body = (
+        _pad(1, 105, 110, 1, "SIG") + _pad(2, 125, 110, 1, "SIG") + _seg(1, 111, 116, 119, 116, 2)
+    )
+    p = _write(tmp_path, body)
+    _project(p, 0.2)
+    argv = ["route-link", "--format", "json", "--probe", str(p), "--link", "SIG R1.1 R2.1"]
+    main(argv)
+    plain = json.loads(capsys.readouterr().out)["links"][0]
+    p.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "far" (layer "F.Cu") '
+        "(condition \"A.NetName == 'SIG' && B.NetName == 'HV'\") "
+        "(constraint clearance (min 7mm)))\n"
+    )
+    main(argv)
+    ruled = json.loads(capsys.readouterr().out)["links"][0]
+    assert plain["routable"]
+    assert not ruled["routable"] or ruled["length_mm"] > plain["length_mm"]
