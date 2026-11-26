@@ -1317,3 +1317,53 @@ def test_unrelated_preexisting_slit_in_shelf_window_is_allowed(tmp_path):
     assert any(gap.actual_value_mm == pytest.approx(0.06) for gap in before)
     result = CopperGapRepairer(board).repair_gaps([_shelf_finding()])
     assert result.repaired == 1, result.unrepaired
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        (
+            '(footprint "T" (layer "F.Cu") (at 92 107) (pad "1" smd rect (at 0 0) (size 0.4 0.2) (layers "F.Cu")))',
+            "would_violate_clearance",
+        ),
+        (
+            '(footprint "T" (layer "F.Cu") (at 92 107) (pad "" np_thru_hole circle (at 0 0) (size 0.3 0.3) (drill 0.3) (layers "*.Cu")))',
+            "hole_clearance",
+        ),
+        (
+            '(zone (net 0) (layer "F.Cu") (keepout (tracks not_allowed)) (polygon (pts (xy 91.9 106.9) (xy 92.1 106.9) (xy 92.1 107.1) (xy 91.9 107.1))))',
+            "track_keepout",
+        ),
+        (
+            '(footprint "T" (layer "F.Cu") (at 92 106.635) (pad "1" smd rect (at 0 0) (size 0.4 0.2) (layers "F.Cu") (net 1 "N1")))',
+            "gap_not_cleared",
+        ),
+        (_seg("foreign", (91.7, 106.575), (92.25, 106.575), net=2), "would_violate_clearance"),
+    ],
+    ids=["unassigned-pad", "npth-drill", "track-keepout", "pad-gap", "netclass"],
+)
+def test_cli_rejects_unsafe_shelf(tmp_path, capsys, extra, reason):
+    import json
+
+    board = _board(
+        tmp_path, SHELF.replace("90.8086", "92.8086").replace("91.4 ", "93.4 ") + "\n" + extra
+    )
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "net_settings": {
+                    "classes": [
+                        {"name": "Default", "clearance": 0.1},
+                        {"name": "HV", "clearance": 0.5},
+                    ],
+                    "netclass_patterns": [{"netclass": "HV", "pattern": "N2"}],
+                }
+            }
+        )
+    )
+    make_assembly_ready(board)
+    before = board.read_bytes()
+    fix_drc_cmd.main([str(board), "--only", "copper-gap"])
+    output = capsys.readouterr().out
+    assert reason in output
+    assert board.read_bytes() == before

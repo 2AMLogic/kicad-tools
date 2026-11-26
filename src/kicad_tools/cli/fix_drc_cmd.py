@@ -877,6 +877,8 @@ def _execute_repair(
             pass_number=pass_num,
             local_reroute=args.local_reroute,
             design_rules=drill_design_rules,
+            manufacturer=args.mfr,
+            layers=args.layers,
         )
 
         mask_result = MaskRepairResult()
@@ -1205,6 +1207,8 @@ def _run_single_pass(
     pass_number: int = 1,
     local_reroute: bool = False,
     design_rules: DesignRules | None = None,
+    manufacturer: str = "jlcpcb",
+    layers: int | None = None,
     copper_violations: list | None = None,
 ) -> tuple[RepairResult, DrillRepairResult, CopperGapResult]:
     """Execute a single repair pass (clearance + drill + copper gap).
@@ -1272,9 +1276,12 @@ def _run_single_pass(
             ):
                 load_path = output_path
 
-            # The input board's reinforcement sidecar protects branch
-            # endpoints from the shelf rewrite (Issue #10367).
-            copper_repairer = CopperGapRepairer(load_path, project_pcb_path=pcb_path)
+            from kicad_tools.schema.pcb import PCB
+
+            _, policy = _board_gap_policy(PCB.load(load_path), manufacturer, layers)
+            copper_repairer = CopperGapRepairer(
+                load_path, project_pcb_path=pcb_path, fab_gap_policy=policy
+            )
             copper_result = copper_repairer.repair_gaps(
                 copper_violations,
                 max_displacement=max_displacement,
@@ -2183,6 +2190,20 @@ def _get_drc_report(
     return _run_python_drc(pcb_path, manufacturer=manufacturer, layers=layers)
 
 
+def _board_gap_policy(pcb, manufacturer, layers):
+    from kicad_tools.cli.check_cmd import _resolve_fab_gap_policy, stackup_copper_oz
+
+    outer, inner = stackup_copper_oz(pcb)
+    return outer, _resolve_fab_gap_policy(
+        manufacturer,
+        layers,
+        outer,
+        inner,
+        outer if outer is not None else 1.0,
+        len(pcb.copper_layers),
+    )
+
+
 def _run_python_drc(
     pcb_path: Path,
     manufacturer: str = "jlcpcb",
@@ -2251,24 +2272,10 @@ def _run_python_drc(
                     )
             rule_set.checker.mask_copper_request = request
         if copper_gap:
-            from kicad_tools.cli.check_cmd import _resolve_fab_gap_policy, stackup_copper_oz
-
-            outer, inner = stackup_copper_oz(pcb)
-            # The same tier-1/2 resolution ``kct check`` applies: an undeclared
-            # stackup follows the 1 oz entry (fix-drc has no --copper flag).
-            preset_oz = outer if outer is not None else 1.0
-            # And the same fab-view flags its DRCChecker(...) call passes:
-            # without ``fab_view`` the gap pass returns before scanning.
+            outer, policy = _board_gap_policy(pcb, rule_set.manufacturer, layers)
             rule_set.checker.fab_view = rule_set.manufacturer == "jlcpcb"
             rule_set.checker.fab_view_copper_oz = outer
-            rule_set.checker.fab_view_gap_policy = _resolve_fab_gap_policy(
-                rule_set.manufacturer,
-                layers,
-                outer,
-                inner,
-                preset_oz,
-                len(pcb.copper_layers),
-            )
+            rule_set.checker.fab_view_gap_policy = policy
         results = run_check_rule_set(rule_set)
         if elbow_gaps and elbow_gaps.required:
             # Use the physical observations before waiver and severity filtering.

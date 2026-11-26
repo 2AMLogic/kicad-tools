@@ -64,6 +64,8 @@ from .violation import DRCViolation, ViolationType
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.physical_gap import FabGapPolicy
 
 # Item descriptors (``validate/copper_refs.py``) are quantised to 1 um, so a
 # match tolerance of 2 um absorbs the origin add/subtract round trip.
@@ -283,7 +285,14 @@ class CopperGapRepairer(DrillClearanceRepairer):
     move against the shared clearance engine before it is applied.
     """
 
-    def __init__(self, pcb_path: str | Path, project_pcb_path: str | Path | None = None):
+    def __init__(
+        self,
+        pcb_path: str | Path,
+        project_pcb_path: str | Path | None = None,
+        *,
+        fab_gap_policy: FabGapPolicy | None = None,
+    ):
+        self._fab_gap_policy = fab_gap_policy
         super().__init__(pcb_path)
         self._locks = BoardItemLocks(self.doc)
         # The reinforcement sidecar sits next to the *input* board; a repair
@@ -291,7 +300,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         self._sidecar_board = Path(project_pcb_path) if project_pcb_path else self.path
         # The physical-gap copper model of the current document, built lazily
         # and dropped whenever the document is edited.
-        self._gap_model_cache: tuple[Point2, list, bool] | None = None
+        self._gap_model_cache: tuple[PCB, list, bool] | None = None
 
     def repair_gaps(
         self,
@@ -1180,8 +1189,8 @@ class CopperGapRepairer(DrillClearanceRepairer):
                     points.append((float(p["x"]), float(p["y"])))
         return points
 
-    def _gap_model(self) -> tuple[Point2, list] | None:
-        """``(board origin, copper sources)`` of the current document, or ``None``.
+    def _gap_model(self) -> tuple[PCB, list] | None:
+        """``(board, copper sources)`` of the current document, or ``None``.
 
         The sources are the physical-gap rule's own (``physical_gap._collect``).
         Geometry the rule cannot model exactly makes the answer ``None`` (no
@@ -1190,15 +1199,77 @@ class CopperGapRepairer(DrillClearanceRepairer):
         """
         if self._gap_model_cache is None:
             from kicad_tools.schema.pcb import PCB
-            from kicad_tools.validate.copper_refs import board_origin
             from kicad_tools.validate.rules.physical_gap import _collect
 
-            pcb = PCB(self.doc)
+            pcb = PCB(self.doc, self._sidecar_board)
             sources, unsupported = _collect(pcb)
             incomplete = any(not str(u).startswith("unfilled zone") for u in unsupported)
-            self._gap_model_cache = (board_origin(pcb), sources, incomplete)
-        origin, sources, incomplete = self._gap_model_cache
-        return None if incomplete else (origin, sources)
+            self._gap_model_cache = (pcb, sources, incomplete)
+        pcb, sources, incomplete = self._gap_model_cache
+        return None if incomplete else (pcb, sources)
+
+    def _shelf_obstacle_reason(
+        self,
+        pcb: PCB,
+        candidate: BaseGeometry,
+        layer: str,
+        net_number: int,
+        rules: DesignRules | None,
+    ) -> str | None:
+        """Check the swept track against rule areas and drills in board coordinates."""
+        from shapely.geometry import Polygon
+
+        from kicad_tools.cli.relocate_in_pad_vias import _pad_drill_focus, _resolve_hole_clearance
+        from kicad_tools.router.rule_area_resolve import all_rule_area_zones
+
+        for zone in all_rule_area_zones(pcb):
+            if zone.keepout is None or zone.keepout.tracks_allowed:
+                continue
+            layers = zone.layers or [zone.layer]
+            wildcard = "F&B.Cu" if layer in ("F.Cu", "B.Cu") else "*.In.Cu"
+            if not {layer, "*.Cu", wildcard}.intersection(layers):
+                continue
+            if len(zone.polygon) < 3:
+                return "gap_model_incomplete"
+            polygon = Polygon(zone.polygon)
+            if not polygon.is_valid:
+                return "gap_model_incomplete"
+            if candidate.intersects(polygon):
+                return "track_keepout"
+
+        try:
+            hole_floor = _resolve_hole_clearance(pcb)
+        except (OSError, ValueError):
+            return "gap_model_incomplete"
+        plated_floor = hole_floor
+        if rules is not None:
+            plated_floor = max(plated_floor, rules.min_pth_hole_to_track_mm or 0)
+            if layer not in ("F.Cu", "B.Cu"):
+                plated_floor = max(plated_floor, rules.min_inner_pth_hole_to_copper_mm or 0)
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.type not in ("thru_hole", "np_thru_hole"):
+                    continue
+                plated = pad.type == "thru_hole"
+                if plated and pad.net_number == net_number and net_number:
+                    continue
+                drill = _pad_drill_focus(pad, fp)
+                if drill is None:
+                    return "gap_model_incomplete"
+                focus, radius = drill
+                if candidate.distance(focus) < radius + (plated_floor if plated else hole_floor):
+                    return "hole_clearance"
+        layers_in_order = [item.name for item in pcb.copper_layers]
+        for via in pcb.vias:
+            if via.net_number == net_number and net_number:
+                continue
+            first, last = sorted(layers_in_order.index(name) for name in via.layers)
+            if (
+                layer in layers_in_order[first : last + 1]
+                and candidate.distance(Point(via.position)) < via.drill / 2 + hole_floor
+            ):
+                return "hole_clearance"
+        return None
 
     def _shelf_candidate_reason(
         self,
@@ -1217,14 +1288,17 @@ class CopperGapRepairer(DrillClearanceRepairer):
         from shapely import union_all  # type: ignore[import-untyped]
         from shapely.geometry import LineString
 
+        from kicad_tools.core.project_clearance import ProjectClearanceError
         from kicad_tools.schema.pcb import Segment
-        from kicad_tools.validate.copper_refs import segment_ref
+        from kicad_tools.validate.copper_refs import board_origin, segment_ref
+        from kicad_tools.validate.rules.netclass_clearance_copper import netclass_pair_requirement
         from kicad_tools.validate.rules.physical_gap import CopperSource, iter_source_gaps
 
         model = self._gap_model()
         if model is None:
             return "gap_model_incomplete"
-        origin, sources = model
+        pcb, sources = model
+        origin = board_origin(pcb)
         ox, oy = origin
 
         def rel(p: Point2) -> Point2:
@@ -1248,7 +1322,17 @@ class CopperGapRepairer(DrillClearanceRepairer):
         ]
         candidate_geom = union_all([c.geometry for c in candidate_sources])
         foreign_required = design_rules.min_clearance_mm if design_rules is not None else required
-        reach = max(required, foreign_required) + _TOLERANCE_MM
+        numbers = {n.name: n.number for n in pcb.nets.values()}
+        net_number = numbers.get(net, 0)
+        try:
+            pair_requirement = netclass_pair_requirement(self._sidecar_board, pcb, foreign_required)
+        except ProjectClearanceError:
+            return "gap_model_incomplete"
+        obstacle = self._shelf_obstacle_reason(pcb, candidate_geom, layer, net_number, design_rules)
+        if obstacle:
+            return obstacle
+        policy = self._fab_gap_policy
+        scan = policy.detection_edge_mm if policy else required
         removed_sources = [s for s in sources if s.layer == layer and s.identity in removed]
         if len(removed_sources) != len(chain):
             return "gap_model_incomplete"
@@ -1259,12 +1343,12 @@ class CopperGapRepairer(DrillClearanceRepairer):
         for source in sources:
             if source.layer != layer or source.geometry.is_empty or source.identity in removed:
                 continue
+            clearance = pair_requirement(net_number, numbers.get(source.net, 0))
+            reach = max(scan, clearance) + _TOLERANCE_MM
             sx0, sy0, sx1, sy1 = source.geometry.bounds
             if sx1 < minx - reach or sx0 > maxx + reach or sy1 < miny - reach or sy0 > maxy + reach:
                 continue
             neighbours.append(source)
-
-        for source in neighbours:
             if (
                 source.net == net
                 and original_geom.intersects(source.geometry)
@@ -1275,11 +1359,12 @@ class CopperGapRepairer(DrillClearanceRepairer):
                 if source.identity.startswith("Via@"):
                     return "protected_via"
                 return "protected_tap"
-            # Same-net and unassigned copper are exempt, as in the pairwise
-            # clearance rule (and ``_dragged_track_reason``).
-            if not source.net or source.net == net:
+            if source.net == net:
                 continue
-            if candidate_geom.distance(source.geometry) < foreign_required - 1e-6:
+            if (
+                candidate_geom.intersects(source.geometry)
+                or candidate_geom.distance(source.geometry) < clearance - 1e-6
+            ):
                 return "would_violate_clearance"
 
         # A previously covered slit can have two surviving owners. Compare
@@ -1287,7 +1372,15 @@ class CopperGapRepairer(DrillClearanceRepairer):
         def witnesses(local: list[CopperSource]) -> set[tuple]:
             return {
                 (gap.ids, tuple(sorted((round(p.x, 9), round(p.y, 9)) for p in (gap.a, gap.b))))
-                for gap in iter_source_gaps(local, required)
+                for gap in iter_source_gaps(local, scan)
+                if policy is None
+                or (
+                    "zone" not in gap.kinds
+                    and (policy.pad if "pad" in gap.kinds else policy.trace).severity_for(
+                        gap.distance
+                    )
+                    is not None
+                )
             }
 
         after = witnesses(neighbours + candidate_sources)
