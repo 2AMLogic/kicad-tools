@@ -1765,12 +1765,13 @@ class CppPathfinder:
         # Issue #8370: per-net fallback wall time (including failed
         # fallbacks), and the pad-pair requests whose Python A* has already
         # drained (``last_route_exhausted``) after a C++ NO_PATH /
-        # PAIRWISE_BLOCKED.  Keyed on the request (Issue #8377), not the net:
-        # on a multi-pad net a drained pair A must not suppress the first
-        # attempt of never-tried pair B.  Unlike the #6098 memo this record is
-        # NOT stamped with the grid state, so it survives the grid changes
-        # negotiated rip-up makes between iterations.  Key:
-        # :meth:`_python_unreachable_key`.  Value: seconds the search took.
+        # PAIRWISE_BLOCKED / VIA_VIA_BLOCKED (#8486).  Keyed on the request
+        # (Issue #8377), not the net: on a multi-pad net a drained pair A must
+        # not suppress the first attempt of never-tried pair B.  Unlike the
+        # #6098 memo this record is NOT stamped with the grid state, so it
+        # survives the grid changes negotiated rip-up makes between
+        # iterations.  Key: :meth:`_python_unreachable_key`.  Value: seconds
+        # the search took.
         self._python_fallback_seconds_by_net: dict[str, float] = {}
         self._python_drained_nets: dict[tuple, float] = {}
         self._python_fallback_repeat_skips: int = 0
@@ -5040,6 +5041,22 @@ class CppPathfinder:
         # each rip-up, so the #6098 memo misses) cost 45-100 min/iteration on a
         # 97-net HV board.  Never in relief-probe mode, which stresses the
         # search without being committed.  Opt out: KICAD_ROUTER_SKIP_REPEAT_FALLBACK=0.
+        #
+        # Issue #8486 (November 2026): FAILURE_VIA_VIA_BLOCKED joins the two
+        # codes above.  The measured residual on the reported board is the
+        # Python fallback that follows the native via verdict -- five calls on
+        # one pad pair, 21.55 s of a 60.00 s sample, 99.95% of the non-native
+        # time -- and every repeat of the same request re-drained it.  The old
+        # exclusion inherited the #3923 resume-guard's wording ("the Python
+        # router's via placement can differ"), which is a FIRST-attempt
+        # argument: this skip fires only after the Python A* itself drained
+        # the SAME pad-pair request, so that placement already had its
+        # exhaustive chance.  A repeat whose only grid change is rip-up churn
+        # fails the same way.  Recovery when the blocker really changes: the
+        # native search runs first (a fully opened connection never consults
+        # the fallback), and the negotiated loop's reset_fallback_for_net
+        # valve -- the witness change or the periodic re-probe -- clears the
+        # record to buy a fresh full attempt.
         if (
             not self._relief_mode
             and cpp_failure_reason is not None
@@ -5048,6 +5065,7 @@ class CppPathfinder:
             in (
                 int(router_cpp.FAILURE_NO_PATH),
                 int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+                int(router_cpp.FAILURE_VIA_VIA_BLOCKED),
             )
             and _pair_key in self._python_drained_nets
             and os.environ.get("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "1").strip() != "0"
@@ -5282,7 +5300,10 @@ class CppPathfinder:
         )
 
         # Issue #8370: per-net fallback time (successful or not), and remember
-        # pad-pair requests whose Python A* drained for the repeat-only skip above.
+        # pad-pair requests whose Python A* drained for the repeat-only skip
+        # above -- including after a FAILURE_VIA_VIA_BLOCKED give-up (#8486):
+        # the fallback's own drain is the proof, whatever verdict handed it
+        # here.
         if not self._relief_mode:
             self._python_fallback_seconds_by_net[net_name] = (
                 self._python_fallback_seconds_by_net.get(net_name, 0.0) + dt
@@ -5295,6 +5316,7 @@ class CppPathfinder:
                 in (
                     int(router_cpp.FAILURE_NO_PATH),
                     int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+                    int(router_cpp.FAILURE_VIA_VIA_BLOCKED),
                 )
                 and getattr(self._py_router, "last_route_exhausted", False) is True
             ):
@@ -5798,9 +5820,10 @@ class CppPathfinder:
                   copper can depend on machine load.
                 - python_fallback_seconds_by_net: Issue #8370.  Net name ->
                   summed wall time of its Python fallbacks, successful or not.
-                - python_fallback_repeat_skips: Issue #8370.  Fallbacks skipped
-                  because the Python A* had already drained for that net after
-                  a C++ NO_PATH / PAIRWISE_BLOCKED (seconds saved are added to
+                - python_fallback_repeat_skips: Issue #8370.  Fallbacks
+                  skipped because the Python A* had already drained for that
+                  net after a C++ NO_PATH / PAIRWISE_BLOCKED /
+                  VIA_VIA_BLOCKED (#8486) (seconds saved are added to
                   ``python_fallback_seconds_saved``).
                 - python_fallback_reduced_repeats: Issue #8485.  Repeat
                   fallbacks of a request whose Python A* already failed (any
