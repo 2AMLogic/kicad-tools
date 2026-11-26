@@ -250,8 +250,6 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         # A parallel copy exempts copper from requiring a wire, but can coexist
         # with one. Verify wire geometry using the wire records and their gauges.
         wire_records = [r for r in self.wires if r.get("strategy", "wire") == "wire"]
-        # Gauge lookup uses the first matching record for a leg.
-        self.wires.sort(key=lambda record: record.get("strategy") == "parallel")
         end_offset = (
             self.end_offset_mm if self.end_offset_mm is not None else rf.DEFAULT_END_OFFSET_MM
         )
@@ -296,21 +294,6 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
             if self._matches_ends(actual, record.get("anchors")):
                 return True
         return False
-
-    @staticmethod
-    def _matches_ends(actual: list[_Point], recorded: Any) -> bool:
-        """Compare two sheet-coordinate endpoints, allowing reversed runs."""
-        try:
-            ends = [(float(p["x"]), float(p["y"])) for p in recorded]
-        except (KeyError, ValueError, TypeError):
-            return False
-        return len(ends) == 2 and any(
-            all(
-                math.dist(p, q) <= ANCHOR_ON_LEG_SLACK_MM
-                for p, q in zip(actual, order, strict=True)
-            )
-            for order in (ends, ends[::-1])
-        )
 
     # ------------------------------------------------------------- per net
 
@@ -387,9 +370,6 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
             span_points = _poly_between(list(wire.points), *wire.anchor_arc)
             installed_spans[wire.layer, wire.points] = span_points
             installed_spans[wire.layer, wire.points[::-1]] = span_points
-        strips: dict[str, list] = {}
-        if fitted:
-            strips, _, _ = self._locate_wire(pcb, rf, net, set(), list(pcb.segments))
         # Attribute a shared plated hole to its fitted wire first.
         legs.sort(key=lambda leg: (leg.layer, tuple(leg.points)) not in installed_spans)
 
@@ -400,29 +380,18 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
             wire_r = bare_copper_diameter_mm(leg.gauge) / 2.0
             drill = anchor_drill_for_awg(leg.gauge)
             tol = leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM
-            anchors = self._leg_holes(holes, leg, drill, tol, is_change_via, rotate_pad_offset)
+            evidence, wire_ends = self._wire_evidence(pcb, leg)
+            anchors = self._leg_holes(
+                holes,
+                leg,
+                drill,
+                tol,
+                lambda p: is_change_via(p) and not self._at_wire_end(p, wire_ends),
+                rotate_pad_offset,
+            )
             if span is not None:
                 wire_points = span
-            elif self._parallel_reinforced(pcb, leg):
-                wire_points = []
-            elif (
-                not fitted
-                or any(
-                    r.get("layer") == leg.layer
-                    and r.get("strategy", "wire") == "wire"
-                    and r.get("status") in ("partial", "full", "adopted")
-                    and self._matches_ends(
-                        [self._abs(leg.points[0]), self._abs(leg.points[-1])],
-                        [r.get("leg_start"), r.get("leg_end")],
-                    )
-                    for r in records
-                )
-                or any(
-                    self._strip_along(a, b, seg.start, seg.end)
-                    for seg in strips.get(leg.layer, [])
-                    for a, b in zip(leg.points, leg.points[1:], strict=False)
-                )
-            ):
+            elif evidence or (not fitted and not self._parallel_reinforced(pcb, leg)):
                 wire_points = leg.points
             else:
                 wire_points = []

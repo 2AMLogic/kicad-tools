@@ -272,6 +272,9 @@ class ReinforcementIncompleteRule(DRCRule):
         """
         self.specs = list(specs) if specs else []
         self.wires = list(wires) if wires else []
+        self.wires.sort(
+            key=lambda record: isinstance(record, dict) and record.get("strategy") == "parallel"
+        )
         self.waived_nets = frozenset(waived_nets or ())
         self.end_offset_mm = end_offset_mm
         self.max_end_shift_mm = max_end_shift_mm
@@ -579,6 +582,69 @@ class ReinforcementIncompleteRule(DRCRule):
                     return bound
         return None
 
+    @staticmethod
+    def _matches_ends(actual: list[_Point], recorded: Any) -> bool:
+        """Compare two sheet-coordinate endpoints, allowing reversed runs."""
+        try:
+            ends = [(float(p["x"]), float(p["y"])) for p in recorded]
+        except (KeyError, ValueError, TypeError):
+            return False
+        return len(ends) == 2 and any(
+            all(
+                math.dist(p, q) <= ANCHOR_ON_LEG_SLACK_MM
+                for p, q in zip(actual, order, strict=True)
+            )
+            for order in (ends, ends[::-1])
+        )
+
+    def _wire_evidence(self, pcb: PCB, leg: _Leg) -> tuple[bool, list[_Point]]:
+        """Find assembly records or mask strips on this leg and their physical ends."""
+        from kicad_tools.pcb.reinforce import MASK_LAYER_FOR_COPPER
+
+        ends: list[_Point] = []
+        recorded = False
+        leg_ends = [self._abs(leg.points[0]), self._abs(leg.points[-1])]
+        for record in self.wires:
+            if not isinstance(record, dict) or (
+                record.get("net") != leg.net
+                or record.get("layer") != leg.layer
+                or record.get("strategy", "wire") != "wire"
+                or record.get("status") not in ("partial", "full", "adopted")
+            ):
+                continue
+            matches_leg = self._matches_ends(
+                leg_ends, [record.get("leg_start"), record.get("leg_end")]
+            )
+            record_ends = []
+            for anchor in record.get("anchors") or ():
+                try:
+                    pos = (float(anchor["x"]) - self._ox, float(anchor["y"]) - self._oy)
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if (
+                    self._dist_to_polyline(leg.points, pos)
+                    <= leg.width / 2 + ANCHOR_ON_LEG_SLACK_MM
+                ):
+                    record_ends.append(pos)
+            if matches_leg or len(record_ends) == 2:
+                recorded = True
+                ends.extend(record_ends)
+        mask = MASK_LAYER_FOR_COPPER.get(leg.layer)
+        for line in pcb.graphic_lines:
+            if line.layer != mask:
+                continue
+            a, b = ((p[0] - self._ox, p[1] - self._oy) for p in (line.start, line.end))
+            if any(
+                self._strip_along(p, q, a, b)
+                for p, q in zip(leg.points, leg.points[1:], strict=False)
+            ):
+                ends.extend((a, b))
+        return recorded or bool(ends), ends
+
+    @staticmethod
+    def _at_wire_end(p: _Point, ends: list[_Point]) -> bool:
+        return any(math.dist(p, end) <= ANCHOR_ON_LEG_SLACK_MM for end in ends)
+
     def _parallel_reinforced(self, pcb: PCB, leg: _Leg) -> bool:
         """True when a placed parallel-copy record covers ``leg`` (Issue #8916).
 
@@ -778,55 +844,45 @@ class ReinforcementIncompleteRule(DRCRule):
         claimed: set[int] = set()
         drills_seen: set[float] = set()
         for leg in legs:
-            # Issue #8916: a leg reinforced by a parallel copy -- the original
-            # or the copy itself -- is not a wire: (a)-(c) do not apply to it.
             parallel = self._parallel_reinforced(pcb, leg)
-            if parallel and not include_parallel_wires:
+            # Ampacity accounts for parallel copper separately. Courtyard
+            # clearance and assembly completeness also inspect a coexisting wire.
+            if parallel and collector is not None and not include_parallel_wires:
                 continue
+            evidence, wire_ends = self._wire_evidence(pcb, leg)
+            if parallel and not evidence:
+                continue
+
+            def exclude_via(p: _Point) -> bool:
+                return is_change_via(p) and not self._at_wire_end(p, wire_ends)
+
             drill = anchor_drill_for_awg(leg.gauge)
             drills_seen.add(round(drill, 4))
-            if collector is None:
-                self._check_leg(
-                    pcb,
-                    rf,
-                    leg,
-                    drill,
-                    holes_for,
-                    is_change_via,
-                    end_offset,
-                    claimed,
-                    results,
-                    _via_is_tented,
-                )
-            else:
-                # Same verdict as check(), into a scratch that is discarded:
-                # the leg is fully wired iff it emitted nothing (Issue #9648).
-                scratch = DRCResults()
-                outcome = self._check_leg(
-                    pcb,
-                    rf,
-                    leg,
-                    drill,
-                    holes_for,
-                    # A wire anchor can also electrically join a parallel copy.
-                    (lambda _p: False) if parallel else is_change_via,
-                    end_offset,
-                    claimed,
-                    scratch,
-                    _via_is_tented,
-                )
-                if outcome and not scratch.violations:
-                    collector.append(
-                        WiredLeg(
-                            net=leg.net,
-                            layer=leg.layer,
-                            points=tuple(leg.points),
-                            width=leg.width,
-                            gauge=leg.gauge,
-                            anchor_arc=(outcome[0].arc, outcome[1].arc),
-                            anchor_centers=(outcome[0].pos, outcome[1].pos),
-                        )
+            leg_results = results if collector is None else DRCResults()
+            outcome = self._check_leg(
+                pcb,
+                rf,
+                leg,
+                drill,
+                holes_for,
+                exclude_via,
+                end_offset,
+                claimed,
+                leg_results,
+                _via_is_tented,
+            )
+            if collector is not None and outcome and not leg_results.violations:
+                collector.append(
+                    WiredLeg(
+                        net=leg.net,
+                        layer=leg.layer,
+                        points=tuple(leg.points),
+                        width=leg.width,
+                        gauge=leg.gauge,
+                        anchor_arc=(outcome[0].arc, outcome[1].arc),
+                        anchor_centers=(outcome[0].pos, outcome[1].pos),
                     )
+                )
 
         # --- (d) layer change through a via smaller than the anchor drill ---
         for change in sorted(changes.values(), key=lambda c: c.position):

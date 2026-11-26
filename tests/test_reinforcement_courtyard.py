@@ -456,12 +456,12 @@ def test_mixed_wire_assembly_checks_actual_wire_and_anchor_bodies():
     assert any("COPPER_ONLY" in m for m in messages(records))
 
 
-@pytest.mark.parametrize("with_wire", [False, True])
-def test_parallel_copper_checks_only_a_fitted_wire(with_wire):
+@pytest.mark.parametrize("wire", ["absent", "current", "stale", "unrecorded", "mask_gap"])
+def test_parallel_copper_checks_only_a_fitted_wire(wire):
     pcb = _bare_board()
     spec = _spec()
     wires = []
-    if with_wire:
+    if wire != "absent":
         wire_plan = reinforce_net(pcb, NET, current_paths=[spec], strategy="wire")
         wires = build_wire_records(wire_plan, *pcb.board_origin)
         assert [w["status"] for w in wires] == ["full"]
@@ -470,17 +470,29 @@ def test_parallel_copper_checks_only_a_fitted_wire(with_wire):
     assert any(r["copy_status"] == "placed" for r in records)
     for side in ("F", "B"):
         _body(pcb, f"OVER_{side}", 70, 50, side=side)
-    if with_wire:
+    if wire != "absent":
         anchor = wires[0]["anchors"][0]
         _body(pcb, "FILLET", anchor["x"], anchor["y"], side="B", half=0.5)
+    if wire == "stale":
+        wires[0]["anchors"][0]["y"] += 0.5
+    elif wire == "unrecorded":
+        wires.clear()
+    elif wire == "mask_gap":
+        strip = next(g for g in pcb.graphic_lines if g.layer == "F.Mask")
+        strip.end = (strip.end[0] - 1, strip.end[1])
     checker = DRCChecker(pcb, current_path_specs=[spec], reinforcement_wires=records + wires)
     messages = _msgs(checker.check_wire_run_courtyard_overlap())
-    if with_wire:
+    if wire != "absent":
         assert any("[run]" in m and "OVER_F" in m for m in messages)
         assert not any("OVER_B" in m for m in messages)
         assert any("[end hole]" in m and "FILLET" in m and "opposite" in m for m in messages)
     else:
         assert messages == []
+    incomplete = _msgs(checker.check_reinforcement_incomplete())
+    if wire == "mask_gap":
+        assert any("[b]" in m for m in incomplete)
+    else:
+        assert incomplete == []
 
 
 def test_recorded_wire_leaves_bare_copper_between_hole_and_terminal():
@@ -549,3 +561,21 @@ def test_adopted_wire_sidecar_checks_same_span_as_planned_wire(tmp_path):
         messages = _msgs(checker.check_wire_run_courtyard_overlap())
         assert any("[run]" in m and "WIRE" in m for m in messages)
         assert not any("BARE" in m for m in messages)
+
+
+def test_recorded_anchor_also_serves_as_layer_change():
+    pcb = _bare_board()
+    plan = reinforce_net(pcb, NET, layer="F.Cu")
+    records = build_wire_records(plan, *pcb.board_origin)
+    x, y = pcb.vias[-1].position
+    _add_th_pad_footprint(pcb, ref="J3", x=x, y=80, net=NET, drill=1, size=2)
+    pcb.add_trace((x, y), (x, 80), width=5.5, layer="B.Cu", net=NET)
+    spec = replace(_spec(), sink=PathEndpoint("J3", "1"))
+    _body(pcb, "WIRE", 70, 50)
+    _body(pcb, "FILLET", x, y, side="B", half=0.5)
+    _body(pcb, "BARE", x, 65, side="B", half=0.5)
+    checker = DRCChecker(pcb, current_path_specs=[spec], reinforcement_wires=records)
+    messages = _msgs(checker.check_wire_run_courtyard_overlap())
+    assert any("[run]" in m and "F.Cu" in m and "WIRE" in m for m in messages)
+    assert any("[end hole]" in m and "opposite" in m and "FILLET" in m for m in messages)
+    assert not any("[run]" in m and "B.Cu" in m for m in messages)
