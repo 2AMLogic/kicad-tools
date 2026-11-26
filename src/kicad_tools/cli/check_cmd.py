@@ -3220,11 +3220,30 @@ def main(argv: list[str] | None = None) -> int:
         # at a wider stdout bound -- and print one remediation line naming
         # what to configure.  JSON/SARIF output is untouched (the guard
         # above); the machine report already carries the full reasons list.
+        from kicad_tools.validate.mask_copper_exposure import nominal_exposure
+
         for assessment in results.mask_copper_assessments:
             print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
-            # Issue #8991: a ``complete`` assessment with nothing to report
-            # prints only the header; the "no reason reported" placeholder is
-            # kept for non-complete states (and for any reasons present).
+            exposure = nominal_exposure(assessment)
+            artwork = (exposure["artwork_source"] or "unavailable").replace("_", " ")
+            print(f"  Nominal artwork exposure ({artwork}, {exposure['status']})")
+            for side, face in exposure["faces"].items():
+                counts = face["finding_counts"] | face["opening_counts"]
+                shown = {k: v if v is not None else "unknown" for k, v in counts.items()}
+                print(
+                    f"    {side} ({face['status']}): {shown['matched']}/{shown['plotted']} matched, "
+                    f"{shown['unresolved']} unresolved, {shown['excluded']} excluded; "
+                    f"{shown['foreign_net']} foreign-net, {shown['same_net_beyond_land']} "
+                    f"same-net beyond land, {shown['registration_or_near_pad_only']} near-pad only"
+                )
+                measured = face["measured_opening_counts"]
+                if face["status"] == "partial" and measured["evaluated"]:
+                    print(
+                        f"      Of {measured['evaluated']} fully evaluated component openings, "
+                        f"{measured['foreign_net']} expose foreign-net copper and "
+                        f"{measured['same_net_beyond_land']} expose same-net copper beyond the land"
+                    )
+            # Keep placeholder reasons out of a complete assessment (#8991).
             if assessment.reasons or assessment.coverage != "complete":
                 print(f"  {collapse_reasons(assessment.reasons, limit=_MASK_STDOUT_REASON_LIMIT)}")
             remediation = assessment.remediation
