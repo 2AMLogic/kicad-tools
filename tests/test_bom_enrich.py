@@ -426,13 +426,16 @@ class TestEnrichBomLcscExplicitSourcing:
         assert report.spec_unresolved == 0
 
     @patch("kicad_tools.export.bom_enrich.PartSuggester")
-    def test_mpn_without_spec_ref_still_auto_matched(self, MockSuggester):
+    def test_mpn_without_spec_ref_matches_exact_catalogue_mpn(self, MockSuggester):
         """An item with mpn set but whose ref is NOT in spec_refs (e.g. an
         mpn carried over from the schematic library, not the project spec)
-        is unaffected and still eligible for generic auto-matching."""
+        may still be matched when the exact catalogue MPN agrees."""
         mock_instance = MagicMock()
         _make_suggester_mock(mock_instance)
         mock_instance.suggest_for_component.return_value = _mock_suggestion("C25744")
+        mock_instance.suggest_for_component.return_value.best_suggestion.mfr_part = (
+            "RC0402FR-0710KL"
+        )
         MockSuggester.return_value = mock_instance
 
         items = [
@@ -1126,3 +1129,66 @@ class TestExplicitSourcingMixedGroups:
             assert [(e.source, e.references) for e in report.entries if "J2" in e.references] == [
                 ("cache", ["J2"])
             ]
+
+
+@patch("kicad_tools.export.bom_enrich.PartSuggester")
+def test_rejects_incompatible_assembly_part(MockSuggester):
+    cases = [
+        ("R31", "330k 0.1%", "R_1206", "", "330kΩ ±1% 1206", True),
+        ("R34", "3.30k 0.1%", "R_1206", "", "3.3kΩ ±5% 1206", True),
+        ("R11", "10k 0.1%", "R_1206", "", "10kΩ ±0.05% 1206", False),
+        ("R21", "100k 1W", "R_2512", "", "100kΩ 250mW 2512", True),
+        ("R21", "100k 1/4W", "R_2512", "", "100kΩ 250mW 2512", False),
+        ("R30", "330k", "R_MELF_MMB-0207", "MMB02070D3303BB200", "330kΩ 0603", True),
+        ("SW1", "ARM", "Connector_Wire:SolderWire_1x02", "", "5V relay", True),
+    ]
+    mock = MockSuggester.return_value
+    _make_suggester_mock(mock)
+    for ref, value, footprint, mpn, description, rejected in cases:
+        suggestion = _mock_suggestion("C12345")
+        suggestion.best_suggestion.description = description
+        suggestion.best_suggestion.package = footprint.removeprefix("R_")
+        mock.suggest_for_component.return_value = suggestion
+        item = _make_item(ref, value, footprint, mpn=mpn)
+        report = enrich_bom_lcsc([item])
+        assert (not item.lcsc) == rejected, (ref, report.entries)
+        assert (report.entries[0].source == "unmatched") == rejected
+
+
+@patch("kicad_tools.export.bom_enrich.PartSuggester")
+def test_cached_guess_needs_evidence_for_explicit_tolerance(MockSuggester, tmp_path):
+    from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    cache.put_enrichment_match("3.3k 0.1%", "R_1206", "C125845", confidence=0.9, part_type="Ext")
+    mock = MockSuggester.return_value
+    _make_suggester_mock(mock)
+    mock._get_client.return_value.cache = cache
+    mock.suggest_for_component.side_effect = LCSCForbiddenError("fixture")
+    item = _make_item("R34", "3.3k 0.1%", "R_1206")
+    report = enrich_bom_lcsc([item])
+    assert not item.lcsc and "tolerance" in report.entries[0].error
+
+
+def test_previous_csv_cannot_restore_incompatible_sourcing(tmp_path):
+    from kicad_tools.export.bom_formats import apply_existing_lcsc_assignments
+    from kicad_tools.parts.models import Part
+
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    cache.put(
+        Part(lcsc_part="C17902", mfr_part="1206W4F1002T5E", description="10kΩ ±1%", package="1206")
+    )
+    precision = _make_item("R11", "10k 0.1%", "R_1206")
+    remote = _make_item("SW1", "ARM", "Connector_Wire:SolderWire_1x02")
+    ordinary = _make_item("R10", "10k", "R_1206")
+    merged, refs = apply_existing_lcsc_assignments(
+        [precision, remote, ordinary],
+        {
+            (precision.value, precision.footprint): "C17902",
+            (remote.value, remote.footprint): "C28975",
+            (ordinary.value, ordinary.footprint): "C17902",
+        },
+        parts_cache=cache,
+    )
+    assert (merged, refs) == (1, {"R10"})
+    assert ordinary.lcsc == "C17902" and not precision.lcsc and not remote.lcsc

@@ -48,9 +48,11 @@ from ..cost.suggest import (
 )
 
 if TYPE_CHECKING:
+    from ..cost.suggest import SuggestedPart
     from ..parts.cache import PartsCache
     from ..parts.jlcparts_catalog import JlcpartsCatalog
     from ..parts.models import Part
+    from ..schema.bom import BOMItem
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +574,45 @@ def find_value_mismatch(
         requested_si=requested_si,
         candidate_si=candidate_si,
     )
+
+
+def is_wire_landing(footprint: str) -> bool:
+    return footprint.split(":")[-1].casefold().startswith("solderwire")
+
+
+_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_WATTS = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?:/(\d+))?\s*(m?W)(?![a-z])", re.I)
+
+
+def _watts(text: str) -> float | None:
+    match = _WATTS.search(text)
+    if match is None:
+        return None
+    divisor = int(match[2] or 1)
+    if not divisor:
+        return None
+    return float(match[1]) / divisor * (0.001 if match[3].lower() == "mw" else 1)
+
+
+def sourcing_problem(item: BOMItem, part: SuggestedPart | Part | None) -> str | None:
+    """Check specifications a broad nominal-value search can lose."""
+    mpn = getattr(item, "mpn", "")
+    if mpn and (part is None or (part.mfr_part or "").casefold() != mpn.casefold()):
+        return f"catalogue MPN does not match {mpn}"
+    if not re.fullmatch(r"R\d+[A-Z]*", item.reference, re.I):
+        return None
+    description = (part.description or "") if part else ""
+    tolerance = _PERCENT.search(item.value)
+    if tolerance:
+        found = _PERCENT.search(description)
+        if not found or float(found[1]) > float(tolerance[1]):
+            return f"catalogue does not establish {tolerance[0]} resistor tolerance"
+    power = _watts(item.value)
+    if power is not None:
+        found_power = _watts(description)
+        if found_power is None or found_power < power:
+            return f"catalogue does not establish the required {power:g} W rating"
+    return None
 
 
 def check_lcsc_against_cache(

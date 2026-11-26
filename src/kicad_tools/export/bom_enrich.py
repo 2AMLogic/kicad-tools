@@ -25,6 +25,8 @@ from .lcsc_value_check import (
     check_lcsc_against_cache,
     find_package_mismatch,
     find_value_mismatch,
+    is_wire_landing,
+    sourcing_problem,
 )
 
 if TYPE_CHECKING:
@@ -150,7 +152,7 @@ def enrich_bom_lcsc(
     """
     Populate missing LCSC part numbers on BOM items in-place.
 
-    For each unique (value, footprint) group that lacks an LCSC number,
+    For each unique (value, footprint, MPN) group that lacks an LCSC number,
     searches the LCSC catalog using :class:`PartSuggester` and writes
     the best match back onto every ``BOMItem`` in that group.
 
@@ -204,13 +206,13 @@ def enrich_bom_lcsc(
     report = EnrichmentReport()
 
     # Group items by (value, footprint) to avoid duplicate searches
-    groups: dict[tuple[str, str], list[BOMItem]] = {}
+    groups: dict[tuple[str, str, str], list[BOMItem]] = {}
     for item in items:
         if getattr(item, "dnp", False):
             continue
         if getattr(item, "is_virtual", False):
             continue
-        key = (item.value, item.footprint)
+        key = (item.value, item.footprint, item.mpn.casefold())
         groups.setdefault(key, []).append(item)
 
     api_forbidden = False
@@ -242,15 +244,21 @@ def enrich_bom_lcsc(
                 mismatch = check_lcsc_against_cache(
                     cache, lcsc, value, first_ref, footprint=footprint
                 )
-                if mismatch is not None:
-                    cache.delete_enrichment_match(value, footprint)
+                cached_part = cache.get(lcsc, ignore_expiry=True)
+                problem = (
+                    mismatch.describe()
+                    if mismatch
+                    else sourcing_problem(group_items[0], cached_part)
+                )
+                if problem:
+                    if mismatch or not group_items[0].mpn:
+                        cache.delete_enrichment_match(value, footprint)
                     logger.warning(
-                        "Rejecting cached LCSC match %s for %s [%s]: %s "
-                        "-- evicted poisoned cache entry",
+                        "Rejecting cached LCSC match %s for %s [%s]: %s",
                         lcsc,
                         value,
                         footprint,
-                        mismatch.describe(),
+                        problem,
                     )
                     return EnrichmentEntry(
                         value=value,
@@ -258,7 +266,7 @@ def enrich_bom_lcsc(
                         references=refs,
                         lcsc_part="",
                         source="unmatched",
-                        error=(f"cached match {lcsc} rejected: {mismatch.describe()}"),
+                        error=(f"cached match {lcsc} rejected: {problem}"),
                     )
 
                 for it in group_items:
@@ -272,7 +280,6 @@ def enrich_bom_lcsc(
                     footprint,
                     lcsc,
                 )
-                cached_part = cache.get(lcsc, ignore_expiry=True)
                 return EnrichmentEntry(
                     inventory=cached_part.inventory_provenance() if cached_part is not None else {},
                     value=value,
@@ -303,7 +310,7 @@ def enrich_bom_lcsc(
         if client is not None:
             cache = client.cache
 
-        for (value, footprint), group_items in groups.items():
+        for (value, footprint, _mpn), group_items in groups.items():
             refs = [it.reference for it in group_items]
 
             # Separate explicit non-LCSC selections before any existing-part,
@@ -376,6 +383,19 @@ def enrich_bom_lcsc(
                     )
                 continue
 
+            if is_wire_landing(footprint):
+                report.entries.append(
+                    EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=refs,
+                        lcsc_part="",
+                        source="unmatched",
+                        error="wire landing for external assembly",
+                    )
+                )
+                continue
+
             # If the API is known to be forbidden, try the cache before
             # marking as unmatched.
             if api_forbidden:
@@ -442,13 +462,16 @@ def enrich_bom_lcsc(
                     mismatch = check_lcsc_against_cache(
                         cache, lcsc, value, first_ref, footprint=footprint
                     )
-                if mismatch is not None:
+                problem = (
+                    mismatch.describe() if mismatch else sourcing_problem(group_items[0], best)
+                )
+                if problem:
                     logger.warning(
                         "Rejecting LCSC auto-match %s for %s [%s]: %s",
                         lcsc,
                         value,
                         footprint,
-                        mismatch.describe(),
+                        problem,
                     )
                     report.entries.append(
                         EnrichmentEntry(
@@ -457,7 +480,7 @@ def enrich_bom_lcsc(
                             references=refs,
                             lcsc_part="",
                             source="unmatched",
-                            error=(f"auto-match {lcsc} rejected: {mismatch.describe()}"),
+                            error=(f"auto-match {lcsc} rejected: {problem}"),
                         )
                     )
                     continue
