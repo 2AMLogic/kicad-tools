@@ -189,32 +189,22 @@ def test_post_route_prep_runs_on_the_finished_board(mod, monkeypatch, tmp_path):
         lambda routed, auto: (calls.append(("board_info", routed, auto)), 0)[1],
     )
     monkeypatch.setattr(
-        "kicad_tools.cli.fix_drc_cmd.main",
-        lambda argv: (calls.append(("mask_copper_repair", argv)), 2)[1],
-    )
-    monkeypatch.setattr(
         "kicad_tools.cli.place_silk_refs_cmd.main",
         lambda argv: (calls.append(("silk_refs_over_holes", argv)), 0)[1],
     )
     board = tmp_path / "routed.kicad_pcb"
     board.write_text("(kicad_pcb)")
     row = mod.prepare_for_grading(board)
-    assert row["prep"] == ["fiducials", "board_info", "mask_copper_repair", "silk_refs_over_holes"]
+    assert row["prep"] == ["fiducials", "board_info", "silk_refs_over_holes"]
     assert [c[0] for c in calls] == row["prep"]
     assert calls[0][2] == "populated"  # build.py's sides, verbatim
-    # The repair runs before the silkscreen pass (it can move a via) and may
-    # never trade a mask error for a warning the no-warning gate would count.
-    assert calls[2][1][0] == str(board)
-    assert "--no-new-warnings" in calls[2][1]
-    assert "--transactional" in calls[2][1]
-    assert calls[2][1][calls[2][1].index("--only") + 1] == "mask-copper"
-    assert calls[3][1] == [str(board), "--mfr", "jlcpcb", "--layers", "4", "--over-holes"]
+    assert calls[2][1] == [str(board), "--mfr", "jlcpcb", "--layers", "4", "--over-holes"]
     # run_seed wires the prep in before grading, and its failure is fatal.
     code = SCRIPT.read_text()
     assert "prepare_for_grading(artifact)" in code
 
 
-def test_post_route_prep_clears_only_references_over_the_seed_42_vias(mod, monkeypatch, tmp_path):
+def test_post_route_prep_clears_only_references_over_the_seed_42_vias(mod, tmp_path):
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
 
@@ -241,7 +231,6 @@ def test_post_route_prep_clears_only_references_over_the_seed_42_vias(mod, monke
         "R11 (reference)",
         "R11 (reference)",
     ]
-    monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd.main", lambda argv: 1)
     mod.prepare_for_grading(path)
     prepared = PCB.load(path)
     assert not check_silk_hole_overlap(prepared).violations
@@ -249,102 +238,6 @@ def test_post_route_prep_clears_only_references_over_the_seed_42_vias(mod, monke
     assert {ref for ref in before if before[ref] != after[ref]} == {"C3", "R11"}
     assert [(v.position, v.drill) for v in prepared.vias] == [
         (v.position, v.drill) for v in board.vias
-    ]
-
-
-@pytest.mark.parametrize("code", [0, 1, 2])
-def test_mask_repair_accepts_repaired_unrepaired_and_partial_exits(
-    mod, monkeypatch, tmp_path, code
-):
-    monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd.main", lambda argv: code)
-    mod.repair_mask_copper(tmp_path / "routed.kicad_pcb")
-
-
-def test_mask_repair_rollback_is_fatal(mod, monkeypatch, tmp_path):
-    monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd.main", lambda argv: 3)
-    with pytest.raises(RuntimeError, match="mask-copper failed"):
-        mod.repair_mask_copper(tmp_path / "routed.kicad_pcb")
-
-
-@pytest.mark.parametrize("incomplete", [False, True])
-def test_mask_detection_failure_reaches_nightly_prep(mod, monkeypatch, tmp_path, incomplete):
-    from kicad_tools.drc import DRCReport, DRCViolation, Severity, ViolationType
-
-    board = tmp_path / "routed.kicad_pcb"
-    board.write_text('(kicad_pcb (version 20240108) (generator "kct") (net 0 ""))')
-    original = board.read_bytes()
-    assessment = None
-    if incomplete:
-        finding = DRCViolation(
-            type=ViolationType.MASK_TO_COPPER_INCOMPLETE,
-            type_str="mask_to_copper_incomplete",
-            severity=Severity.INFO,
-            message="Mask coverage unavailable",
-        )
-        assessment = DRCReport(
-            source_file=board.name, created_at=None, pcb_name=board.name, violations=[finding]
-        )
-    monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd._run_python_drc", lambda *a, **kw: assessment)
-    with pytest.raises(RuntimeError, match="mask-copper failed"):
-        mod.repair_mask_copper(board)
-    assert board.read_bytes() == original
-
-
-def test_nightly_gate_rejects_failed_mask_detection_and_accepts_completed_check(
-    mod, tmp_path, monkeypatch
-):
-    from unittest.mock import Mock
-
-    from kicad_tools.drc import DRCReport
-    from kicad_tools.validate.mask_copper import MaskCopperAssessment
-
-    original = b'(kicad_pcb (version 20240108) (generator "test") (net 0 ""))'
-    failures = []
-
-    def stage(generated, run_dir):
-        run_dir.mkdir(parents=True, exist_ok=True)
-        return run_dir / "input.kicad_pcb"
-
-    def route(inp, routed, flags, timeout, log):
-        routed.write_bytes(original)
-        log.write_text("")
-        return {"exit_code": 0}
-
-    harness = Mock()
-    harness.run_route.side_effect = route
-    harness.parse_route_log.return_value = {}
-    harness.pick_artifact.side_effect = lambda routed, exit_code: (routed, "final")
-    monkeypatch.setattr(mod, "stage_seed", stage)
-    monkeypatch.setattr(mod, "_load_harness", lambda: harness)
-    monkeypatch.setattr(mod, "generate_unrouted", lambda path: None)
-    monkeypatch.setattr(mod, "grade", lambda *a: clean_row())
-    monkeypatch.setattr(
-        "kicad_tools.cli.kicad_toolchain.evidence_toolchain", lambda _: nullcontext()
-    )
-    monkeypatch.setattr("kicad_tools.cli.pcb_add_fiducials.run_add_fiducials", lambda *a, **kw: 0)
-    monkeypatch.setattr("kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **kw: 0)
-    monkeypatch.setattr("kicad_tools.cli.place_silk_refs_cmd.main", lambda argv: 0)
-    report = DRCReport(
-        source_file="",
-        created_at=None,
-        pcb_name="",
-        mask_copper_assessments=[MaskCopperAssessment(coverage="complete")],
-    )
-    for assessment, expected_code in [(None, 1), (report, 0)]:
-        monkeypatch.setattr(
-            "kicad_tools.cli.fix_drc_cmd._run_python_drc", lambda *a, **kw: assessment
-        )
-        receipt = tmp_path / "rows.json"
-        assert (
-            mod.main(["--seeds", "42", "--work-dir", str(tmp_path), "--json", str(receipt)])
-            == expected_code
-        )
-        row = json.loads(receipt.read_text())["rows"][0]
-        failures.append(row.get("error"))
-        assert Path(row["routed"]).read_bytes() == original
-    assert failures == [
-        "post-route prep failed: RuntimeError: fix-drc --only mask-copper failed (exit 4)",
-        None,
     ]
 
 
