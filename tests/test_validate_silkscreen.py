@@ -1913,6 +1913,21 @@ class TestSilkCircleArcGeometry:
         pcb = self._pcb_with(g, pad_at=(1.0, 0.0))
         assert len(check_silk_over_copper(pcb, _rules())) == 1
 
+    @pytest.mark.parametrize(
+        ("radius", "mask_margin", "overlaps"),
+        [(1.76, 0.05, False), (1.44, 0.05, True), (1.76, 0.40, True)],
+    )
+    def test_ring_at_round_wire_pad(self, radius, mask_margin, overlaps):
+        ring = _silk_circle()
+        ring.fill = "no"
+        ring.end = (radius, 0.0)
+        ring.stroke_width = 0.15
+        pad = _thru_hole_pad(position=(0.0, 0.0), size=(2.8, 2.8))
+        pad.solder_mask_margin = mask_margin
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(pads=[pad], graphics=[ring]))
+        assert len(check_silk_over_copper(pcb, _rules())) == int(overlaps)
+
     def test_unfilled_ring_enclosing_pad_does_not_flag(self):
         g = _silk_circle()
         g.fill = "no"

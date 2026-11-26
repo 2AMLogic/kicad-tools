@@ -1089,15 +1089,14 @@ def _stroke_geometry(
 
 def _pad_aperture_geometry(
     pad: Pad,
-    pad_pos: tuple[float, float],
+    footprint: Footprint,
     min_mask_clearance: float,
 ) -> _Geometry:
     """Build a shapely polygon for a pad's solder-mask aperture (exposed copper).
 
     Aperture = pad copper expanded by the mask margin (``pad.solder_mask_margin``
-    if set, else the profile default).  Approximated as a rectangle -- rounded
-    corners are over-approximated, matching the text-box approximation used
-    elsewhere in this module.
+    if set, else the profile default). Circular pads and supported custom pads
+    use their copper outline. Other shapes use an oriented rectangle.
 
     The rectangle is **oriented by the pad's absolute angle** (``pad.rotation``
     already includes ``footprint.rotation`` per KiCad's file convention, see
@@ -1114,21 +1113,22 @@ def _pad_aperture_geometry(
     from shapely.affinity import rotate
     from shapely.geometry import box
 
-    # A custom pad's aperture follows its real copper -- the anchor plus
-    # filled primitives (Issue #9498) -- not the nominal anchor ``size`` box;
-    # KiCad masks the whole custom shape.  When the builder refuses, the
-    # anchor box below remains the aperture and ``check_silk_over_copper``
-    # emits the matching ``silk_over_copper_incomplete`` finding.
-    from kicad_tools.geometry.copper import custom_pad_board_outline
-
-    custom = custom_pad_board_outline(pad, pad_pos)
-    if custom is not None:
-        margin = (
-            pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
-        )
-        return custom.buffer(margin) if margin else custom
+    from kicad_tools.geometry.copper import (
+        custom_pad_board_outline,
+        pad_board_center,
+        pad_copper_outline,
+    )
 
     margin = pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
+    pad_pos = pad_board_center(pad, footprint.position, footprint.rotation)
+    if pad.shape == "circle":
+        outline = pad_copper_outline(pad, footprint.position, footprint.rotation)
+    else:
+        outline = custom_pad_board_outline(pad, pad_pos)
+    if outline is not None:
+        return outline.buffer(margin) if margin else outline
+
+    # The coverage check also reports custom pads whose primitive geometry was refused.
     w = pad.size[0] + 2.0 * margin
     h = pad.size[1] + 2.0 * margin
     cx, cy = pad_pos
@@ -1462,7 +1462,6 @@ def _iter_pad_apertures(
     from .clearance import _pad_has_no_copper, _pad_has_no_mask
 
     for footprint in pcb.footprints:
-        transform = _fp_transform(footprint)
         for pad in footprint.pads:
             if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
                 # Issue #9528: no copper and no mask opening: no aperture.
@@ -1476,8 +1475,7 @@ def _iter_pad_apertures(
             else:
                 # NPTH / connect / other: no exposed copper to smear silk onto.
                 continue
-            pad_pos = transform(pad.position)
-            geom = _pad_aperture_geometry(pad, pad_pos, min_mask_clearance)
+            geom = _pad_aperture_geometry(pad, footprint, min_mask_clearance)
             label = f"{footprint.reference} pad {pad.number}"
             for side in sides:
                 yield side, geom, label
