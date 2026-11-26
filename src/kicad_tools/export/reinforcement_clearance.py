@@ -447,7 +447,7 @@ class _Face:
         for flash in self.by_net.get(net, ()):
             if flash.operation == "flash":
                 centre = flash.geometry.centroid
-                if centre.distance(point) <= tolerance and all(
+                if centre.distance(point) <= tolerance and any(
                     centre.distance(other) <= tolerance for other in centres
                 ):
                     return None
