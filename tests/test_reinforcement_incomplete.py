@@ -895,3 +895,38 @@ class TestFullyWiredLegs:
         rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
         assert _subchecks(rule.check(pcb, _rules())) == []  # complete...
         assert rule.fully_wired_legs(pcb, _rules()) == []  # ...but wire-less
+
+
+@pytest.mark.parametrize("gauge", [14, 16])
+def test_two_taps_without_a_derivable_wire_leg_reports_skipped(gauge):
+    from kicad_tools.physics.wire_gauge import anchor_drill_for_awg
+
+    pcb = PCB.create(width=160, height=100, center=False)
+    pins = {"J1": (20, 40), "J2": (120, 40), "Q1": (50, 65), "Q2": (90, 65)}
+    for ref, (x, y) in pins.items():
+        _add_th_pad_footprint(pcb, ref=ref, x=x, y=y, net=NET, drill=1.0, size=2.0)
+    junctions = [pins["J1"], (50, 40), (90, 40), pins["J2"]]
+    for start, end in zip(junctions, junctions[1:], strict=False):
+        pcb.add_trace(start, end, width=2.0, layer="F.Cu", net=NET)
+    specs = [_spec()]
+    for ref in ("Q1", "Q2"):
+        x, y = pins[ref]
+        pcb.add_trace((x, 40), (x, y), width=2.0, layer="F.Cu", net=NET)
+        specs.append(
+            CurrentPathSpec(
+                name=ref,
+                net_name=NET,
+                source=PathEndpoint(ref, "1"),
+                sink=PathEndpoint("J2", "1"),
+                continuous_a=3.0,
+                reinforcement_eligible=True,
+            )
+        )
+    drill = anchor_drill_for_awg(gauge)
+    pcb.add_via(15, 15, net=NET, size=drill + 0.5, drill=drill)
+    wires = [{"net": NET, "wire_gauge_awg": gauge}] if gauge != 16 else []
+    rule = ReinforcementIncompleteRule(specs=specs, wires=wires)
+    findings = rule.check(pcb, _rules())
+    assert _subchecks(findings) == ["skipped"]
+    assert "2 junctions" in findings.violations[0].message
+    assert rule.fully_wired_legs(pcb, _rules()) == []
