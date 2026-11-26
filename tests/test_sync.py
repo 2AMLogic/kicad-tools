@@ -3527,8 +3527,10 @@ class TestRemovedPadScanProjectLib:
 
 
 @pytest.mark.parametrize("scenario", ["add", "swap", "existing"])
-def test_sync_purchasing_fields_round_trip(tmp_path, scenario):
+@pytest.mark.parametrize("empty_alias_first", [False, True])
+def test_sync_purchasing_fields_round_trip(tmp_path, scenario, empty_alias_first):
     """A schematic purchasing change must survive a PCB save and a second sync."""
+    from kicad_tools.schema.bom import extract_bom_from_pcb
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.sexp import parse_string
 
@@ -3542,11 +3544,11 @@ def test_sync_purchasing_fields_round_trip(tmp_path, scenario):
     )
     sch = project / "removed_pad_scan.kicad_sch"
     pcb = project / "removed_pad_scan.kicad_pcb"
+    populated = '(property "LCSC_PN" "C1234") (property "PN" "0012")'
+    empty = '(property "LCSC" "") (property "MFR_PN" " ")'
+    fields = f"{empty} {populated}" if empty_alias_first else f"{populated} {empty}"
     sch.write_text(
-        sch.read_text().replace(
-            '(property "Reference"',
-            '(property "LCSC_PN" "C1234") (property "PN" "0012") (property "Reference"',
-        )
+        sch.read_text().replace('(property "Reference"', f'{fields} (property "Reference"')
     )
     board = parse_string(pcb.read_text())
     fp = board.find("footprint")
@@ -3557,6 +3559,7 @@ def test_sync_purchasing_fields_round_trip(tmp_path, scenario):
             fp.children[0].value = "scanlib:ProjFP"
         fp.append(parse_string('(property "JLC" "C0000" (at 3 4) (layer "F.Fab") (hide yes))'))
         fp.append(parse_string('(property "Manufacturer" "Board source")'))
+        fp.append(parse_string('(property "Mfg" " ")'))
     pcb.write_text(board.to_string())
     rec = Reconciler(schematic=sch, pcb=pcb)
     # This minimal library fixture has no pin model for the native netlist exporter.
@@ -3567,10 +3570,22 @@ def test_sync_purchasing_fields_round_trip(tmp_path, scenario):
         plan = rec.analyze()
         assert not plan.is_in_sync
         original = pcb.read_bytes()
-        assert all(not change.applied for change in rec.apply(plan, dry_run=True))
+        preview = rec.apply(plan, dry_run=True)
+        assert all(not change.applied for change in preview)
         assert pcb.read_bytes() == original
+        if scenario == "existing":
+            updates = {
+                action["property"]: action["new_value"]
+                for match in plan.matches
+                for action in match.actions
+                if action["type"] == "update_property"
+            }
+            assert updates == {"JLC": "C1234", "MPN": "0012"}
+            assert {c.property_name: c.new_value for c in preview if c.property_name} == updates
         assert any(change.applied for change in rec.apply(plan, dry_run=False))
         placed = PCB.load(pcb).get_footprint("R1")
+        item = next(part for part in extract_bom_from_pcb(str(pcb)).items if part.reference == "R1")
+        assert (item.lcsc, item.mpn) == ("C1234", "0012")
         assert placed.properties["MPN"] == "0012"
         if scenario in {"add", "swap"}:
             assert placed.properties["JLCPCB"] == "C1234"
@@ -3579,6 +3594,7 @@ def test_sync_purchasing_fields_round_trip(tmp_path, scenario):
         else:
             assert placed.properties["JLC"] == "C1234"
             assert placed.properties["Manufacturer"] == "Board source"
+            assert item.manufacturer == "Board source"
             assert "LCSC" not in placed.properties
         if scenario == "existing":
             prop = next(

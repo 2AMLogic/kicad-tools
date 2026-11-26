@@ -650,7 +650,7 @@ class Reconciler:
                 for key in keys:
                     old = board.get(key, "")
                     new = sch.get(name) or old
-                    if swap is not None and new:
+                    if swap is not None and new.strip():
                         # Carry fields on the swap itself, only if the replacement succeeds.
                         swap.setdefault("properties", {})[key] = new
                     elif new and new != old:

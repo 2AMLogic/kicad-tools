@@ -24,6 +24,11 @@ PURCHASING_FIELDS = {
 }
 
 
+def _purchasing_value(previous: str, candidate: str) -> str:
+    """Keep the last populated alias in KiCad's property order."""
+    return candidate if candidate.strip() else previous
+
+
 @dataclass
 class BOMItem:
     """A single component in the BOM."""
@@ -298,11 +303,11 @@ def _bom_item_from_symbol(
         if name.lower() in ("description", "desc"):
             item.description = value
         elif name.lower() in PURCHASING_FIELDS["Manufacturer"]:
-            item.manufacturer = value
+            item.manufacturer = _purchasing_value(item.manufacturer, value)
         elif name.lower() in PURCHASING_FIELDS["MPN"]:
-            item.mpn = value
+            item.mpn = _purchasing_value(item.mpn, value)
         elif name.lower() in PURCHASING_FIELDS["LCSC"]:
-            item.lcsc = value
+            item.lcsc = _purchasing_value(item.lcsc, value)
         else:
             item.properties[name] = value
 
@@ -455,11 +460,11 @@ def extract_bom_from_pcb(pcb_path: str) -> BOM:
             if name_lower in ("description", "desc"):
                 description = value
             elif name_lower in PURCHASING_FIELDS["Manufacturer"]:
-                manufacturer = value
+                manufacturer = _purchasing_value(manufacturer, value)
             elif name_lower in PURCHASING_FIELDS["MPN"]:
-                mpn = value
+                mpn = _purchasing_value(mpn, value)
             elif name_lower in PURCHASING_FIELDS["LCSC"]:
-                lcsc = value
+                lcsc = _purchasing_value(lcsc, value)
             else:
                 extra_props[name] = value
 
