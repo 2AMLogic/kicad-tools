@@ -1419,7 +1419,8 @@ def _new_errors(
                     for i, b in eligible
                     if b.locations
                     and any(
-                        math.hypot(a.x_mm - c.x_mm, a.y_mm - c.y_mm) <= tolerance_mm
+                        a.layer == c.layer
+                        and math.hypot(a.x_mm - c.x_mm, a.y_mm - c.y_mm) <= tolerance_mm
                         for a in v.locations
                         for c in b.locations
                     )
@@ -1555,12 +1556,15 @@ def _new_mask_keys(
     """
     parents = split_parents or {}
 
-    def norm(key: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(parents.get(uid, uid) for uid in key)
+    def identity(v: DRCViolation, mapped: bool) -> tuple:
+        key = finding_key(v)
+        if mapped and key:
+            key = (*key[:-1], parents.get(key[-1], key[-1]))
+        return key, tuple(loc.layer for loc in v.locations)
 
     def counts(report: DRCReport, include_warnings: bool, *, mapped: bool) -> Counter:
         return Counter(
-            norm(finding_key(v)) if mapped else finding_key(v)
+            identity(v, mapped)
             for v in report.violations
             if v.type == ViolationType.MASK_TO_COPPER
             and not v.waived
@@ -1579,7 +1583,18 @@ def _new_mask_keys(
     return {
         finding_key(v)
         for v in after.violations
-        if v.type == ViolationType.MASK_TO_COPPER and norm(finding_key(v)) in excess
+        if v.type == ViolationType.MASK_TO_COPPER and identity(v, mapped=True) in excess
+    }
+
+
+def _persisting_mask_conductors(
+    violations: list[DRCViolation], parents: dict[str, str]
+) -> set[str]:
+    """Identify original conductors still carrying mask errors after a repair."""
+    return {
+        parents.get(key[-1], key[-1])
+        for v in mask_copper_violations(violations)
+        if (key := finding_key(v))
     }
 
 
@@ -1880,19 +1895,19 @@ def _run_mask_pass(
                     final, require_coverage=guard_baseline is not None
                 ):
                     raise RuntimeError("could not verify mask openings on the final saved board")
-                remaining = {finding_key(v) for v in mask_copper_violations(final.violations)}
+                parents = _split_parent_map(result.actions)
                 new_keys = _new_mask_keys(
                     guard_baseline or report,
                     final,
                     guard_warnings=guard_baseline is not None,
-                    split_parents=_split_parent_map(result.actions),
+                    split_parents=parents,
                 )
                 if guard_baseline is not None and new_keys:
                     raise _MaskBatchRejected(
                         "new_mask_finding", "final saved mask repair introduced new mask findings"
                     )
                 touched = {uid for key in new_keys for uid in key}
-                persisting = {key[-1] for key in remaining if key}
+                persisting = _persisting_mask_conductors(final.violations, parents)
                 if (
                     any(
                         a.uuid in persisting or _mask_action_touches(a, touched)
@@ -2022,13 +2037,13 @@ def _verify_mask_actions(
                 "could not complete the mask assessment of the proposed board"
             )
         after = None
-    after_errors = mask_copper_violations(after.violations) if after is not None else []
+    parents = _split_parent_map(result.actions)
     new_keys = (
         _new_mask_keys(
             guard_baseline or report,
             after,
             guard_warnings=guard_baseline is not None,
-            split_parents=_split_parent_map(result.actions),
+            split_parents=parents,
         )
         if after is not None
         else set()
@@ -2037,7 +2052,7 @@ def _verify_mask_actions(
         not any(_mask_action_touches(act, set(key)) for act in result.actions) for key in new_keys
     )
     touched = {u for key in new_keys for u in key}
-    persisting = {key[-1] for key in (finding_key(v) for v in after_errors) if key}
+    persisting = _persisting_mask_conductors(after.violations, parents) if after else set()
     regressed = (
         _moves_with_new_errors(
             after=after,

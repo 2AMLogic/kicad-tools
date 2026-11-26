@@ -4370,3 +4370,77 @@ def test_split_leg_mask_warning_matches_its_original_conductor():
     # An error is never covered by a retained warning.
     error = _report(_finding("leg-a"))
     assert fix_drc_cmd._new_mask_keys(before, error, guard_warnings=True, split_parents=parents)
+
+
+@pytest.mark.parametrize("guard", [False, True])
+@pytest.mark.parametrize("after_refill", [False, True])
+def test_persisting_mask_error_on_split_leg_restores_board(
+    tmp_path, monkeypatch, capsys, guard, after_refill
+):
+    from kicad_tools.cli import runner
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(tmp_path, ENTRY + (zone if after_refill else ""))
+    original = board.read_bytes()
+    refilled = False
+    split_errors = []
+
+    def refill(path, *, require_save):
+        nonlocal refilled
+        refilled = True
+        return runner.KiCadCLIResult(success=True)
+
+    def assess(path, **kwargs):
+        segments = parse_file(path).find_all("segment")
+        uuids = [str(s.find("uuid").get_first_atom()).strip('"') for s in segments]
+        if uuids == ["trk-a"]:
+            return _report(_finding("trk-a"))
+        (leg,) = set(uuids) - {"trk-a"}
+        if after_refill and not refilled:
+            return _report()
+        split_errors.append(leg)
+        return _report(_finding(leg))
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    code = fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-connectivity-check",
+            "--max-displacement",
+            "1",
+            "--max-passes",
+            "1",
+            "--format",
+            "json",
+            *(["--no-new-warnings"] if guard else []),
+        ]
+    )
+    assert split_errors
+    assert code == 1
+    assert json.loads(capsys.readouterr().out)["total_repaired"] == 0
+    assert board.read_bytes() == original
+
+
+def test_guard_detects_mask_warning_on_other_face():
+    from dataclasses import replace
+
+    front = _finding("trk-a", severity=Severity.WARNING)
+    back_location = replace(front.locations[0], layer="B.Cu")
+    back = replace(front, locations=[back_location])
+    assert fix_drc_cmd._new_mask_keys(_report(front), _report(back), guard_warnings=True) == {
+        (PAD, "trk-a")
+    }
+
+
+def test_guard_detects_clearance_warning_on_other_face():
+    from dataclasses import replace
+
+    front = replace(_clearance_error(), severity=Severity.WARNING)
+    back = replace(front, locations=[replace(front.locations[0], layer="B.Cu")])
+    assert fix_drc_cmd._new_errors([back], [front], 0.5, {}) == [back]
