@@ -34,6 +34,9 @@ committed-copper source of truth:
   :data:`~kicad_tools.validate.rules.base.DRC_TOLERANCE` of the endpoint.
   One violation is emitted per dangling *track* (at the first dangling
   endpoint), matching kicad-cli's per-track reporting so counts agree.
+  An off-center tip alongside a track already holding the other end of
+  the branch needs a separate contact. A centerline T or a contact at
+  the neighboring track's end is still a bond (issue #10269).
 * **Vias**: for every copper layer the barrel spans
   (:func:`~kicad_tools.core.layers.via_spans_layer` -- a through via is
   copper on ALL intermediate layers), the layer counts as bonded when
@@ -60,6 +63,9 @@ criteria):
   first-class copper primitives).  A dangling arc kicad-cli flags is
   therefore not reported here.
 * KiCad's "free via" / locked-item exemptions are not modeled.
+* Exact copies of a track occupy a single copper span. A free tip is
+  reported once, regardless of endpoint order. KiCad 10.0.8 can suppress
+  this finding for copies stored in the same direction (issue #10268).
 """
 
 from __future__ import annotations
@@ -70,6 +76,7 @@ from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
 from kicad_tools.core.layers import via_spans_layer
+from kicad_tools.geometry.copper import point_segment_distance
 
 from ..copper_refs import board_origin, via_ref
 from ..violations import DRCResults, DRCViolation
@@ -104,6 +111,7 @@ class _CopperItem:
     net_number: int
     net_name: str
     key: int | None = None
+    segment: Segment | None = None
 
 
 @dataclass
@@ -436,6 +444,7 @@ def build_copper_layer_indexes(
                 net_number=resolve_net(segment.net_number, segment.net_name),
                 net_name=segment.net_name,
                 key=id(segment),
+                segment=segment,
             ),
         )
 
@@ -502,6 +511,70 @@ def build_copper_layer_indexes(
                 )
 
     return {layer: _LayerIndex(items) for layer, items in items_by_layer.items()}
+
+
+def _trunk_span(
+    index: _LayerIndex,
+    parent_item: _CopperItem,
+    span_keys: set[int],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """End-to-end extent of the straight trunk ``parent_item`` belongs to.
+
+    Subdividing a straight trunk adds vertices without changing the copper, so
+    a record is judged as the whole run of collinear, same-net, same-width
+    records that meet it end-to-end. However many times (and wherever) the
+    trunk was cut, the result equals the unsplit trunk's endpoints.
+    """
+    from shapely import box
+
+    parent = parent_item.segment
+    assert parent is not None
+    origin = parent.start
+    dx, dy = parent.end[0] - origin[0], parent.end[1] - origin[1]
+    length = math.hypot(dx, dy)
+    if length <= _TOUCH_TOL_MM:
+        return parent.start, parent.end
+    ux, uy = dx / length, dy / length
+
+    def collinear(seg: Segment) -> bool:
+        return (
+            seg.width == parent.width
+            and seg.layer == parent.layer
+            and seg.net_name == parent.net_name
+            and all(
+                abs((pt[0] - origin[0]) * uy - (pt[1] - origin[1]) * ux) <= _TOUCH_TOL_MM
+                for pt in (seg.start, seg.end)
+            )
+        )
+
+    chain = {parent_item.key}
+    points = [parent.start, parent.end]
+    frontier = [parent]
+    while frontier:
+        current = frontier.pop()
+        for end in (current.start, current.end):
+            probe = box(
+                end[0] - _TOUCH_TOL_MM,
+                end[1] - _TOUCH_TOL_MM,
+                end[0] + _TOUCH_TOL_MM,
+                end[1] + _TOUCH_TOL_MM,
+            )
+            for other in index.candidates(probe):
+                seg = other.segment
+                if seg is None or other.key in chain or other.key in span_keys:
+                    continue
+                if min(math.dist(end, seg.start), math.dist(end, seg.end)) > _TOUCH_TOL_MM:
+                    continue
+                if not collinear(seg):
+                    continue
+                chain.add(other.key)
+                points.extend((seg.start, seg.end))
+                frontier.append(seg)
+
+    def along(pt: tuple[float, float]) -> float:
+        return (pt[0] - origin[0]) * ux + (pt[1] - origin[1]) * uy
+
+    return min(points, key=along), max(points, key=along)
 
 
 class DanglingCopperRule(DRCRule):
@@ -589,7 +662,8 @@ class DanglingCopperRule(DRCRule):
     @staticmethod
     def _point_terminated(
         point_xy: tuple[float, float],
-        self_key: int,
+        other_end: tuple[float, float],
+        span_keys: set[int],
         net_number: int,
         net_name: str,
         index: _LayerIndex | None,
@@ -610,13 +684,39 @@ class DanglingCopperRule(DRCRule):
             py + reach,
         )
         point = Point(px, py)
+        off_center = []
         for item in index.candidates(probe):
-            if item.key is not None and item.key == self_key:
+            if item.key in span_keys:
                 continue
             if item.kind == "fill" and not _fill_net_matches(net_number, net_name, item):
                 continue
-            if item.geom.distance(point) <= reach:
+            if item.geom.distance(point) > reach:
+                continue
+            parent = item.segment
+            if parent is None or other_end == point_xy:
                 return True
+            if point_segment_distance(point_xy, parent.start, parent.end) <= _TOUCH_TOL_MM:
+                return True
+            off_center.append((item, parent))
+
+        # Only walk collinear runs if no local contact already terminates the tip.
+        for item, parent in off_center:
+            # The side of the same parent can graze both ends of a spur.
+            # Keep true T landings, end-cap joins and independent contacts.
+            start, end = _trunk_span(index, item, span_keys)
+            half_width = parent.width / 2.0
+            if (
+                point_segment_distance(other_end, start, end) <= half_width + _TOUCH_TOL_MM
+                and point_segment_distance(point_xy, start, end) > _TOUCH_TOL_MM
+                # A cap at the spur root already accounts for that end.
+                and not any(
+                    math.dist(point_xy, cap) <= half_width + reach
+                    and math.dist(other_end, cap) > _TOUCH_TOL_MM
+                    for cap in (start, end)
+                )
+            ):
+                continue
+            return True
         return False
 
     # ------------------------------------------------------------------
@@ -630,10 +730,20 @@ class DanglingCopperRule(DRCRule):
         resolve_net: Any,
         results: DRCResults,
     ) -> None:
-        """One ``track_dangling`` warning per track with a free end."""
+        """One ``track_dangling`` warning per physical track with a free end."""
+        # Repeated records cannot terminate each other. Group only exactly
+        # coincident copper so a nearby cap or a partial overlap still counts.
+        spans: dict[tuple, list[Segment]] = {}
         for segment in pcb.segments:
             if segment.width <= 0 or not segment.layer:
                 continue
+            net = resolve_net(segment.net_number, segment.net_name) or segment.net_name
+            start, end = sorted((segment.start, segment.end))
+            spans.setdefault((net, segment.layer, segment.width, start, end), []).append(segment)
+
+        for copies in spans.values():
+            segment = copies[0]
+            span_keys = {id(copy) for copy in copies}
             index = indexes.get(segment.layer)
             net_number = resolve_net(segment.net_number, segment.net_name)
             endpoints = (
@@ -643,7 +753,13 @@ class DanglingCopperRule(DRCRule):
                 point
                 for point in endpoints
                 if not self._point_terminated(
-                    point, id(segment), net_number, segment.net_name, index, segment.width / 2.0
+                    point,
+                    segment.end if point == segment.start else segment.start,
+                    span_keys,
+                    net_number,
+                    segment.net_name,
+                    index,
+                    segment.width / 2.0,
                 )
             ]
             if not dangling:
