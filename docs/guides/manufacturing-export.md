@@ -552,6 +552,59 @@ if __name__ == "__main__":
     export_for_jlcpcb(sys.argv[1], sys.argv[2], sys.argv[3])
 ```
 
+## Via Drills Against the Mask, Stencil and Land (`--via-land-overlap`)
+
+Under an ordinary via process every routed via should stay tented and off the
+stencil. `--via-land-overlap` measures the archive the export has just written,
+so it reports what the assembler receives rather than what the source board
+says (Issue #10357):
+
+```bash
+kct export board.kicad_pcb --mfr jlcpcb --via-land-overlap --format json
+```
+
+The opt-in appends a `via_land_overlap` entry to the preflight list of the JSON
+output and of `manifest.json`. A drill counts when the exported drill disk of a
+via matched to a plated Excellon hit shares area with the solder-mask opening,
+the stencil opening and one SMD land on the same face. A drill whose center
+lies outside the opening still counts when its edge reaches it.
+
+```json
+{
+  "name": "via_land_overlap",
+  "status": "WARN",
+  "data": {
+    "expected_vias": 499, "matched_vias": 499, "distinct_holes": 22,
+    "dispositions": {"undeclared": 22, "filled_capped": 0, "exposed_thermal": 0},
+    "coverage": {"status": "complete", "reasons": []},
+    "observations": [
+      {"face": "F", "reference": "U1", "pad": "3", "drill_file": "board-PTH.drl",
+       "drill_center_mm": [12.7, -3.4], "drill_diameter_mm": 0.3,
+       "overlap_area_mm2": 0.0075, "edge_overlap": true,
+       "process_disposition": "undeclared", "declarations": []}
+    ]
+  }
+}
+```
+
+- `drill_center_mm` is the coordinate as printed in `drill_file`, in millimetres.
+  A physical hole is counted once in `distinct_holes` however many faces
+  observe it.
+- `process_disposition` names the declaration that applies to an intersection:
+  `filled_capped` under the bundle's declared via-in-pad process (the
+  manifest's `fabrication_process`), `exposed_thermal` on a pad carrying
+  KiCad's `pad_prop_heatsink` property, or `undeclared`. A manufacturer's
+  via-in-pad capability or a pad name alone is not a declaration.
+- `coverage.status` is `complete` only when every routed via matched a drill
+  hit and the mask and paste plots of every reached face were read and line up
+  with the board. Otherwise `reasons` names what is missing, unsupported,
+  unregistered or ambiguous, the findings of the measured faces are kept, and
+  a zero is not a complete one.
+
+The result is `OK` when coverage is complete and every intersection is
+declared, and `WARN` otherwise; it never blocks the export. A standard export
+does not run the measurement.
+
 ## Other Manufacturers
 
 kicad-tools supports multiple manufacturers:

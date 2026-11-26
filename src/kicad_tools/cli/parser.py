@@ -10866,6 +10866,17 @@ def _add_export_parser(subparsers) -> None:
         help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
     )
     export_parser.add_argument(
+        "--via-land-overlap",
+        dest="export_via_land_overlap",
+        action="store_true",
+        help=(
+            "Measure the shipped PCBA archive for plated via drills that overlap the "
+            "solder-mask opening, stencil opening and an SMD land on the same face; adds "
+            "the via_land_overlap preflight result to the JSON output and manifest "
+            "(Issue #10357)"
+        ),
+    )
+    export_parser.add_argument(
         "--format",
         dest="export_format",
         default="text",

@@ -918,6 +918,19 @@ def profile_rotation_corrections(manufacturer: str) -> dict[str, float] | None:
     return None
 
 
+def plot_use_aux_origin(fab_family: str, config: AssemblyConfig) -> bool:
+    """The ``GerberConfig.use_aux_origin`` an assembly package plots its Gerbers with.
+
+    The resolution :meth:`AssemblyPackage._generate_gerbers` applies: a
+    manufacturer preset owns the Gerber options, anything else plots with the
+    caller's ``gerber_config`` or the defaults. A measurement of the shipped
+    archive must register the drill files in this frame (Issue #10357).
+    """
+    if fab_family in MANUFACTURER_PRESETS:
+        return MANUFACTURER_PRESETS[fab_family].config.use_aux_origin
+    return (config.gerber_config or GerberConfig()).use_aux_origin
+
+
 def resolve_pnp_config(
     fab_family: str,
     pnp_config: PnPExportConfig | None,
