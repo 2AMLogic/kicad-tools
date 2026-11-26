@@ -136,6 +136,69 @@ def test_all_footprints_present_reports_success(tmp_path, monkeypatch, capsys):
     assert output_path.exists()
 
 
+@pytest.mark.parametrize("board_only", [False, True], ids=["shared-sheet", "board-only"])
+def test_saved_footprint_paths_match_native_project(tmp_path, board_only):
+    import shutil
+    import subprocess
+    from copy import deepcopy
+    from xml.etree import ElementTree
+
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_file
+
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("requires the native KiCad netlist exporter")
+
+    fixture = Path(__file__).parent / "fixtures" / "sheet_qualified_lvs"
+    root = tmp_path / "repeat_root.kicad_sch"
+    shutil.copyfile(fixture / root.name, root)
+    child = parse_file(fixture / "repeat_child.kicad_sch")
+    if not board_only:
+        for symbol in child.find_children("symbol"):
+            instances = symbol.find_child("instances")
+            foreign = deepcopy(instances.find_child("project"))
+            foreign.set_value(0, "second-project")
+            for placement in foreign.find_children("path"):
+                reference = placement.find_child("reference")
+                ref = reference.get_string(0)
+                if ref.startswith("R"):
+                    reference.set_value(0, f"R{int(ref[1:]) + 20}")
+            instances.children.insert(0, foreign)
+    (tmp_path / "repeat_child.kicad_sch").write_text(
+        child.to_string().replace("Resistor_SMD:R_0402_1005Metric", "local:OnlyHere")
+    )
+    (tmp_path / "fp-lib-table").write_text(_FP_LIB_TABLE)
+    library = tmp_path / "local.pretty"
+    library.mkdir()
+    footprint = _TWO_PAD_FOOTPRINT
+    if board_only:
+        footprint = footprint.replace("(attr smd)", "(attr smd board_only)")
+    (library / "OnlyHere.kicad_mod").write_text(footprint)
+
+    xml = tmp_path / "native.xml"
+    subprocess.run(
+        [cli, "sch", "export", "netlist", "--format", "kicadxml", "-o", str(xml), str(root)],
+        check=True,
+        capture_output=True,
+        timeout=90,
+    )
+    expected = {
+        component.attrib["ref"]: component.find("sheetpath").attrib["tstamps"]
+        + component.findtext("tstamps")
+        for component in ElementTree.parse(xml).findall("./components/comp")
+    }
+    assert set(expected) == {"R1", "R2", "R11", "R12"}
+    output = tmp_path / "created.kicad_pcb"
+    assert create_pcb_cmd.main([str(root), "--output", str(output)]) == 0
+    saved = PCB.load(output).footprints
+    assert {fp.reference for fp in saved} == set(expected)
+    for fp in saved:
+        assert ("board_only" in fp.attr_flags) == board_only
+        assert fp.path == ("" if board_only else expected[fp.reference])
+
+
 def test_all_footprints_present_preserves_pad_bindings(tmp_path, monkeypatch):
     """A successful import preserves every physical pad's net binding."""
     monkeypatch.setattr("kicad_tools.schema.pcb.detect_kicad_library_path", _no_global_libs)

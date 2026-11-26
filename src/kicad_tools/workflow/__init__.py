@@ -303,10 +303,12 @@ class PCBFromSchematic:
             )
         except (FileNotFoundError, ValueError):
             return None
-        paths = self._symbol_paths.get(reference)
-        if paths and footprint is not None:
-            # Multiple units can share the footprint. Each has a valid native link.
-            footprint.path = min(paths)
+        if footprint is None or "board_only" in footprint.attr_flags:
+            return footprint
+        # A Python-generated netlist may lack native timestamps.
+        path = comp.symbol_path or min(self._symbol_paths.get(reference, ()), default="")
+        if path:
+            footprint.path = path
         return footprint
 
     def place_component(

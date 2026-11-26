@@ -41,6 +41,7 @@ class NetlistComponent:
     sheet_path: str = ""
     properties: dict[str, str] = field(default_factory=dict)
     pins: list[ComponentPin] = field(default_factory=list)
+    symbol_path: str = ""
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> NetlistComponent:
@@ -50,6 +51,7 @@ class NetlistComponent:
         footprint = ""
         lib_id = ""
         sheet_path = ""
+        symbol_path = ""
         properties: dict[str, str] = {}
 
         if ref_node := sexp.find("ref"):
@@ -67,8 +69,18 @@ class NetlistComponent:
             elif lib_node.get_string(1):
                 lib_id = lib_node.get_string(1) or ""
 
-        if (sheet_node := sexp.find("sheetpath")) and (names := sheet_node.find("names")):
-            sheet_path = names.get_string(0) or ""
+        if sheet_node := sexp.find_child("sheetpath"):
+            if names := sheet_node.find_child("names"):
+                sheet_path = names.get_string(0) or ""
+            # The native export has already selected this project's annotation.
+            # A multi-unit part can supply several symbol timestamps.
+            sheet_stamps = sheet_node.find_child("tstamps")
+            unit_stamps = sexp.find_child("tstamps")
+            if sheet_stamps is not None and unit_stamps is not None:
+                prefix = sheet_stamps.get_string(0) or ""
+                units = (unit_stamps.get_string(0) or "").split()
+                if prefix.startswith("/") and units:
+                    symbol_path = f"{prefix.rstrip('/')}/{units[0]}"
 
         # Parse properties
         for prop in sexp.find_all("property"):
@@ -84,6 +96,7 @@ class NetlistComponent:
             lib_id=lib_id,
             sheet_path=sheet_path,
             properties=properties,
+            symbol_path=symbol_path,
         )
 
 
