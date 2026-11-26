@@ -2194,10 +2194,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "0269a7b98fbdf29143a78aa3e0c8060ae9bdb2d2be157afe600eb01eab2a26ec",
-            "B.Mask": "dba349c7cc77be37f2730ae19060de8b783475a54f0cb4e5c05c3783273401b0",
-            "F.Cu": "6d23f22b3ca2bde2dcc3ca81b0b46567c51b57bd2e15708e20f78a04225f1eff",
-            "B.Cu": "84bf99ae7f01d67efc9e6ff87ab73c72ddad870ec7519da9c1f9b59a41ac5ab5"
+            "F.Mask": "bd991187073d9bb7479354c359f65281bdabbbd9ea66c63ba629c4fcae35deb2",
+            "B.Mask": "2594cb431f09d011cddcb028dba9015f277c350937d1141386aeddf7974f85aa",
+            "F.Cu": "1277d5c892cc7f901b4c0df3b21db14fdf6f73993cef352d82747c6e128d5890",
+            "B.Cu": "2f8882b0bf92e0846837c318a37cba1e5a102e23fac267586999dc99d4d6024d"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -3343,8 +3343,8 @@
     "schematic_missing": false,
     "incomplete_categories": [],
     "schematic": {
-      "path": "voltage_divider.kicad_sch",
-      "source": "project.kct"
+      "path": "output/voltage_divider.kicad_sch",
+      "source": "--schematic"
     }
   },
   "routing_quality": {
