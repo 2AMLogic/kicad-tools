@@ -103,9 +103,9 @@ class _Source:
         source = cls()
         if not path.is_file():
             raise FileNotFoundError(path)
-        for ref, symbol, _ in _iter_instance_symbols(path):
+        for ref, symbol, _ in _iter_instance_symbols(path, placement_refs=True):
             source.add_component(ref, symbol.value, symbol.properties)
-        for key, name in _schematic_pin_to_net(path).items():
+        for key, name in _schematic_pin_to_net(path, placement_refs=True).items():
             source.pins[key].add(name)
         return source
 

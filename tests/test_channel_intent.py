@@ -32,17 +32,10 @@ def check(bank, source, capsys, status):
     )
     assert result == status
     rows = json.loads(capsys.readouterr().out)["findings"]
+    keys = ["instance", "reference", "source", "pin", "field", "expected", "observed"]
     return sorted(
-        (
-            r["instance"],
-            r["reference"],
-            r["source"],
-            r["pin"],
-            r["field"],
-            r["expected"],
-            r["observed"],
-        )
-        for r in rows
+        (tuple(r[k] for k in keys) for r in rows),
+        key=lambda row: tuple("" if v is None else v for v in row),
     )
 
 
@@ -216,3 +209,37 @@ def test_missing_value_and_undeclared_field(bank, capsys):
     pcb = bank / "bank.kicad_pcb"
     pcb.write_text(pcb.read_text().replace('"Value" "1 µF"', '"Unrequested" "other"', 1))
     assert check(bank, "net", capsys, 1) == [("27", "C127", "pcb", None, "Value", "1 µF", None)]
+
+
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="needs kicad-cli for a native export")
+def test_swapped_placement_references_match_native_export(bank, capsys, tmp_path):
+    """Swapped placement annotations: direct schematic input agrees with a fresh native netlist."""
+    import subprocess
+
+    sch = bank / "bank.kicad_sch"
+    text = sch.read_text()
+    text = text.replace('(reference "R327")', '(reference "TMP")')
+    text = text.replace('(reference "R427")', '(reference "R327")')
+    sch.write_text(text.replace('(reference "TMP")', '(reference "R427")'))
+    native = tmp_path / "native.net"
+    subprocess.run(
+        [
+            "kicad-cli",
+            "sch",
+            "export",
+            "netlist",
+            "--format",
+            "kicadsexpr",
+            "-o",
+            str(native),
+            str(sch),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    direct = check(bank, "kicad_sch", capsys, 1)
+    (bank / "bank.net").write_bytes(native.read_bytes())
+    exported = check(bank, "net", capsys, 1)
+    assert direct
+    # Drop the source label: the same defects are reported against either input.
+    assert [r[:2] + r[3:] for r in direct] == [r[:2] + r[3:] for r in exported]
