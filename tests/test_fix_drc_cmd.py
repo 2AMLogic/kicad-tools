@@ -883,7 +883,7 @@ class TestFixDRCCLI:
         out = captured.out
 
         # The detection total is engine-labeled.
-        assert "Found" in out and "repairable violation(s) (kicad-cli engine)" in out
+        assert "Found" in out and "targeted violation(s) (kicad-cli engine)" in out
         # The --verify snapshot total names its (different) engine.
         assert "via pure-Python DRC" in out
 
@@ -1074,6 +1074,29 @@ class TestFixDRCCLI:
         data = json.loads(captured.out)
         # The violation should be repaired (via found despite having no net)
         assert data["clearance"]["repaired"] >= 1
+
+    @pytest.mark.parametrize(("limit", "unplanned"), [("0", 1), ("0.5", 0)])
+    def test_text_dry_run_reports_predicted_outcome(
+        self, pcb_clearance: Path, report_clearance: Path, capsys, limit: str, unplanned: int
+    ):
+        original = pcb_clearance.read_bytes()
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-displacement",
+                limit,
+                "--dry-run",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert "Found 1 targeted violation" in out
+        assert f"Would repair {1 - unplanned}/1" in out
+        assert f"Targeted findings without a proposed repair: {unplanned}" in out
+        assert "All violations repaired!" not in out
+        assert "Repairable (not yet fixed)" not in out
+        assert pcb_clearance.read_bytes() == original
 
     def test_max_displacement_zero_skips_nudges(
         self, pcb_clearance: Path, report_clearance: Path, capsys
