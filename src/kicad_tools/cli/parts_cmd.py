@@ -52,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     search_parser.add_argument("--format", choices=["text", "json", "table"], default="table")
     search_parser.add_argument("--limit", type=int, default=20, help="Max results")
+    search_parser.add_argument(
+        "--package", help="Match the exact catalogue package (case-insensitive)"
+    )
     search_parser.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
     search_parser.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
 
@@ -235,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "lookup":
         return _lookup(args)
     elif args.action == "search":
+        if args.package is not None and not args.package.strip():
+            search_parser.error("--package requires a nonempty catalogue package")
         return _search(args)
     elif args.action == "import":
         return _import(args)
@@ -587,6 +592,7 @@ def _search(args) -> int:
             page_size=args.limit,
             in_stock=args.in_stock,
             basic_only=args.basic,
+            package=args.package,
         )
     except (LCSCDependencyMissingError, LCSCUnavailableError) as e:
         # Backend genuinely unavailable (no ``requests`` extra AND no synced
@@ -598,13 +604,28 @@ def _search(args) -> int:
             print(f"Error: parts search backend unavailable: {e}", file=sys.stderr)
         return 1
 
-    if not results.parts and args.format != "json":
-        label = (
-            "No parts found"
-            if results.coverage == "live"
-            else "No candidates in incomplete source coverage; catalog absence not verified"
+    heading = f"Found {results.total_count} results for '{args.query}':"
+    keyword_total = results.keyword_total
+    if args.package:
+        heading = (
+            f"Found {len(results.parts)} compatible rows for package '{args.package}' "
+            f"matching '{args.query}'"
         )
-        print(f"{label} for: {args.query}", file=sys.stderr)
+        if keyword_total is not None:
+            heading += f" on this page ({keyword_total} keyword hits total)"
+
+    if not results.parts and args.format != "json":
+        if args.package:
+            print(heading, file=sys.stderr)
+            if results.coverage == "live":
+                print("All keyword hits evaluated.", file=sys.stderr)
+        else:
+            label = (
+                "No parts found"
+                if results.coverage == "live"
+                else "No candidates in incomplete source coverage; catalog absence not verified"
+            )
+            print(f"{label} for: {args.query}", file=sys.stderr)
         for diagnostic in results.diagnostics:
             print(diagnostic, file=sys.stderr)
         return 1
@@ -647,9 +668,11 @@ def _search(args) -> int:
                 for p in results.parts
             ],
         }
+        if args.package:
+            data.update(compatible_count=len(results.parts), keyword_total=keyword_total)
         print(json.dumps(data, indent=2))
     elif args.format == "table":
-        print(f"Found {results.total_count} results for '{args.query}':")
+        print(heading)
         print()
         # Header
         print(
@@ -668,7 +691,7 @@ def _search(args) -> int:
                 f"{part.lcsc_part:<10} {mfr:<25} {pkg:<12} {part.stock:>8,} {price_str:>8} {type_str:<8} {desc}"
             )
     else:  # text
-        print(f"Found {results.total_count} results for '{args.query}':")
+        print(heading)
         print()
         for part in results.parts:
             price_str = f"${part.best_price:.4f}" if part.best_price else "N/A"
