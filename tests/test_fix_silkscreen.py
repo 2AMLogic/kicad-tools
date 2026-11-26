@@ -1,9 +1,11 @@
 """Tests for the fix-silkscreen command and SilkscreenRepairer."""
 
+import json
 from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli import main as kct_main
 from kicad_tools.cli.fix_silkscreen_cmd import _get_min_height, _get_min_width, main
 from kicad_tools.drc.repair_silkscreen import SilkscreenRepairer
 from kicad_tools.sexp.parser import parse_file
@@ -1158,23 +1160,37 @@ class TestClipToPads:
         assert not _silk_pad_findings(path)
 
 
-@pytest.mark.parametrize("profile", ["jlcpcb-tier1", "jlcpcb_tier1"])
-def test_all_resolves_order_profile_and_alias(pcb_undersized_both: Path, profile: str):
-    before = pcb_undersized_both.read_bytes()
+@pytest.mark.parametrize("profile", ["osh", "oshpark"])
+def test_individual_width_and_height_use_osh_rules(pcb_undersized_both, profile, capsys):
+    args = ["fix-silkscreen", str(pcb_undersized_both), "--mfr", profile, "--dry-run"]
+    assert kct_main([*args, "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["min_width_mm"] == pytest.approx(0.127)
+    assert report["min_height_mm"] == pytest.approx(0.762)
+
+
+def test_individual_pad_clearance_uses_order_profile(clip_pcb, capsys):
+    path = clip_pcb(_line(-1.5, 0.45, 1.5, 0.45))
+    args = ["fix-silkscreen", str(path), "--clip-to-pads", "--dry-run", "--format", "json"]
     assert (
-        main(
-            [
-                str(pcb_undersized_both),
-                "--mfr",
-                profile,
-                "--layers",
-                "4",
-                "--copper",
-                "2",
-                "--all",
-                "--dry-run",
-            ]
-        )
-        == 0
+        kct_main([*args, "--mfr", "jlcpcb-capabilityplus", "--layers", "4", "--copper", "2"]) == 0
     )
-    assert pcb_undersized_both.read_bytes() == before
+    report = json.loads(capsys.readouterr().out)
+    assert report["min_pad_clearance_mm"] == pytest.approx(0.15)
+    assert report["total_pad_clearance_fixed"] == 1
+
+
+def test_individual_pad_clearance_missing_for_osh(pcb_undersized_both, capsys):
+    args = [
+        "fix-silkscreen",
+        str(pcb_undersized_both),
+        "--mfr",
+        "osh",
+        "--clip-to-pads",
+        "--dry-run",
+    ]
+    assert kct_main(args) == 1
+    assert (
+        "--clip-to-pads needs a silk-to-pad clearance, but 'osh' defines none"
+        in capsys.readouterr().err
+    )
