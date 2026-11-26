@@ -908,6 +908,26 @@ def _add_creepage_parser(subparsers) -> None:
             "audit manufacturing-readiness gate."
         ),
     )
+    # Selected-pair diagnostic (#10342): measure only the named pairs.
+    creepage_parser.add_argument(
+        "--pair",
+        dest="pairs",
+        nargs=2,
+        action="append",
+        metavar=("NET_A", "NET_B"),
+        default=None,
+        help=(
+            "Limited diagnostic: measure ONLY this exact, unordered conductor pair "
+            "(repeatable; a reversed duplicate is measured once).  Neither net needs "
+            "to be HV, and no census, board-edge row or implicit 0 V comparison is "
+            "made.  Combine with --voltage-map for one operating state: a selected "
+            "net absent from the map is reported as unmeasurable (an explicit 0 is "
+            "valid).  Unknown nets and pairs with no measurable path are named and "
+            "exit non-zero, as does a measured violation.  Table and JSON output are "
+            "marked as a limited diagnostic -- not a complete census and not release "
+            "evidence; omit --pair for the full board (as kct audit / readiness do)."
+        ),
+    )
     creepage_parser.add_argument(
         "--format",
         choices=["table", "json"],
