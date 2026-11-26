@@ -512,34 +512,68 @@ def build_copper_layer_indexes(
     return {layer: _LayerIndex(items) for layer, items in items_by_layer.items()}
 
 
-def _is_trunk_join(
+def _trunk_span(
     index: _LayerIndex,
     parent_item: _CopperItem,
-    cap: tuple[float, float],
-    other_end: tuple[float, float],
     span_keys: set[int],
-) -> bool:
-    """True when ``cap`` joins ``parent_item`` to a sibling segment under ``other_end``.
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """End-to-end extent of the straight trunk ``parent_item`` belongs to.
 
     Subdividing a straight trunk adds vertices without changing the copper, so
-    such a vertex must not count as a second connection for a spur.
+    a record is judged as the whole run of collinear, same-net, same-width
+    records that meet it end-to-end. However many times (and wherever) the
+    trunk was cut, the result equals the unsplit trunk's endpoints.
     """
     from shapely import box
 
-    reach = _TOUCH_TOL_MM
-    probe = box(cap[0] - reach, cap[1] - reach, cap[0] + reach, cap[1] + reach)
-    for other in index.candidates(probe):
-        sibling = other.segment
-        if sibling is None or other.key == parent_item.key or other.key in span_keys:
-            continue
-        if min(math.dist(cap, sibling.start), math.dist(cap, sibling.end)) > _TOUCH_TOL_MM:
-            continue
-        if (
-            point_segment_distance(other_end, sibling.start, sibling.end)
-            <= sibling.width / 2.0 + _TOUCH_TOL_MM
-        ):
-            return True
-    return False
+    parent = parent_item.segment
+    assert parent is not None
+    origin = parent.start
+    dx, dy = parent.end[0] - origin[0], parent.end[1] - origin[1]
+    length = math.hypot(dx, dy)
+    if length <= _TOUCH_TOL_MM:
+        return parent.start, parent.end
+    ux, uy = dx / length, dy / length
+
+    def collinear(seg: Segment) -> bool:
+        return (
+            seg.width == parent.width
+            and seg.layer == parent.layer
+            and seg.net_name == parent.net_name
+            and all(
+                abs((pt[0] - origin[0]) * uy - (pt[1] - origin[1]) * ux) <= _TOUCH_TOL_MM
+                for pt in (seg.start, seg.end)
+            )
+        )
+
+    chain = {parent_item.key}
+    points = [parent.start, parent.end]
+    frontier = [parent]
+    while frontier:
+        current = frontier.pop()
+        for end in (current.start, current.end):
+            probe = box(
+                end[0] - _TOUCH_TOL_MM,
+                end[1] - _TOUCH_TOL_MM,
+                end[0] + _TOUCH_TOL_MM,
+                end[1] + _TOUCH_TOL_MM,
+            )
+            for other in index.candidates(probe):
+                seg = other.segment
+                if seg is None or other.key in chain or other.key in span_keys:
+                    continue
+                if min(math.dist(end, seg.start), math.dist(end, seg.end)) > _TOUCH_TOL_MM:
+                    continue
+                if not collinear(seg):
+                    continue
+                chain.add(other.key)
+                points.extend((seg.start, seg.end))
+                frontier.append(seg)
+
+    def along(pt: tuple[float, float]) -> float:
+        return (pt[0] - origin[0]) * ux + (pt[1] - origin[1]) * uy
+
+    return min(points, key=along), max(points, key=along)
 
 
 class DanglingCopperRule(DRCRule):
@@ -660,7 +694,7 @@ class DanglingCopperRule(DRCRule):
             if parent is not None and other_end != point_xy:
                 # The side of the same parent can graze both ends of a spur.
                 # Keep true T landings, end-cap joins and independent contacts.
-                start, end = parent.start, parent.end
+                start, end = _trunk_span(index, item, span_keys)
                 half_width = parent.width / 2.0
                 if (
                     point_segment_distance(other_end, start, end) <= half_width + _TOUCH_TOL_MM
@@ -669,9 +703,6 @@ class DanglingCopperRule(DRCRule):
                     and not any(
                         math.dist(point_xy, cap) <= half_width + reach
                         and math.dist(other_end, cap) > _TOUCH_TOL_MM
-                        # A vertex that only joins two pieces of the trunk
-                        # carrying the spur root is not an independent contact.
-                        and not _is_trunk_join(index, item, cap, other_end, span_keys)
                         for cap in (start, end)
                     )
                 ):

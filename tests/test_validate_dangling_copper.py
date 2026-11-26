@@ -501,15 +501,19 @@ class TestEndToEndParsedBoard:
         assert [v.location for v in findings] == ([tip] if contact == "open" else [])
 
     @pytest.mark.parametrize("contact", ["open", "pad", "cap"])
-    @pytest.mark.parametrize("extra_vertex", [False, True])
-    def test_subdividing_straight_trunk_keeps_spur_tip_warning(
-        self, tmp_path, extra_vertex, contact
-    ):
-        """An added vertex on the trunk near the root is not a contact."""
+    @pytest.mark.parametrize("offset", [None, 0.05, 0.10, 0.12, 0.15, (0.15, 0.3)])
+    def test_subdividing_straight_trunk_keeps_spur_tip_warning(self, tmp_path, offset, contact):
+        """Added vertices on the trunk, at any distance from the root, are not a contact."""
         from kicad_tools.schema.pcb import PCB
 
         left, root, right, tip = (6, 9), (12, 9), (19, 9), (11.8, 9.15)
-        segments = [(left, (11.9, 9)), ((11.9, 9), root)] if extra_vertex else [(left, root)]
+        if offset is None:
+            segments = [(left, root)]
+        else:
+            cuts = offset if isinstance(offset, tuple) else (offset,)
+            xs = [root[0] - d for d in sorted(cuts, reverse=True)]
+            pts = [left, *((x, 9) for x in xs), root]
+            segments = list(zip(pts, pts[1:], strict=False))
         segments += [(root, right), (tip, root)]
         pads = [left, right]
         if contact == "pad":
