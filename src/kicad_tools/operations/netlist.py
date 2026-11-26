@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -565,6 +565,34 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
     return entries
 
 
+@dataclass(frozen=True, order=True)
+class _NetIdentity:
+    """Rank and name select the display name. Scope distinguishes sheet-local aliases."""
+
+    priority: int
+    name: str
+    scope: str
+
+
+class _ParentNetAliases:
+    """Equivalences between parent nets joined through child-sheet wiring."""
+
+    def __init__(self) -> None:
+        self.parents: dict[_NetIdentity, _NetIdentity] = {}
+
+    def resolve(self, name: _NetIdentity) -> _NetIdentity:
+        while name in self.parents:
+            parent = self.parents[name]
+            self.parents[name] = self.parents.get(parent, parent)
+            name = self.parents[name]
+        return name
+
+    def join(self, first: _NetIdentity, second: _NetIdentity) -> None:
+        first, second = sorted((self.resolve(first), self.resolve(second)))
+        if first != second:
+            self.parents[second] = first
+
+
 def _collect_hierarchy_components(
     sch_path: Path,
     sheet_path: str,
@@ -572,6 +600,55 @@ def _collect_hierarchy_components(
     *,
     include_symbol_pins: bool = False,
 ) -> tuple[list[NetlistComponent], dict[str, list]]:
+    """Resolve names after collecting bindings from every sheet in the hierarchy."""
+    aliases = _ParentNetAliases()
+    components, nets = _collect_sheet_nets(
+        sch_path,
+        sheet_path,
+        visited,
+        include_symbol_pins=include_symbol_pins,
+        net_scope=sheet_path,
+        parent_nets_by_port={},
+        aliases=aliases,
+    )
+    by_identity: dict[_NetIdentity, list] = defaultdict(list)
+    for identity, pins in nets.items():
+        by_identity[aliases.resolve(identity)].extend(pins)
+
+    # Preserve short names when unique. For a collision, qualify each local
+    # label with its sheet instance path and keep the global name bare.
+    counts = Counter(identity.name for identity in by_identity)
+    names = {
+        identity: identity.name
+        for identity in by_identity
+        if not identity.scope or counts[identity.name] == 1
+    }
+    used = set(names.values())
+    for identity in by_identity:
+        if identity in names:
+            continue
+        qualified = f"{identity.scope}{identity.name}"
+        name = qualified
+        # A label can itself contain the generated path.
+        suffix = 2
+        while name in used:
+            name = f"{qualified}#{suffix}"
+            suffix += 1
+        names[identity] = name
+        used.add(name)
+    return components, {names[identity]: pins for identity, pins in by_identity.items()}
+
+
+def _collect_sheet_nets(
+    sch_path: Path,
+    sheet_path: str,
+    visited: set[Path] | None,
+    *,
+    include_symbol_pins: bool,
+    net_scope: str,
+    parent_nets_by_port: dict[str, _NetIdentity],
+    aliases: _ParentNetAliases,
+) -> tuple[list[NetlistComponent], dict[_NetIdentity, list]]:
     """Recursively collect components and nets from a schematic hierarchy.
 
     Loads the schematic at *sch_path*, collects its components and
@@ -591,14 +668,18 @@ def _collect_hierarchy_components(
             the function creates the set internally.
         include_symbol_pins: Retain library pin definitions and include the
             pins of placed power symbols in the connectivity.
+        net_scope: Path of sheet instance names used to qualify local nets.
+        parent_nets_by_port: Parent net names at this sheet instance's ports.
+        aliases: Parent nets joined by ports anywhere in this traversal.
 
     Returns:
         A ``(components, net_dict)`` tuple where *components* is a flat
         list of :class:`NetlistComponent` from all sheets and *net_dict*
-        maps net names to lists of :class:`PinRef`-like objects (each
+        maps net identities to lists of :class:`PinRef`-like objects (each
         with ``symbol_ref`` and ``pin`` attributes).
     """
     from kicad_tools.schematic.models import Schematic
+    from kicad_tools.schematic.models.netlist_mixin import _component_root
 
     if visited is None:
         visited = set()
@@ -644,67 +725,70 @@ def _collect_hierarchy_components(
             )
         )
 
-    # Extract per-sheet connectivity
-    net_dict: dict[str, list] = {}
+    ranked_names: dict[tuple, list[tuple[int, str]]] = {}
+    connectivity, names_by_root, _ = sch._build_connectivity_graph(
+        ranked_names_by_root=ranked_names
+    )
+    identities = {}
+    for candidates in ranked_names.values():
+        priority, winner = candidates[0]
+        identity = _NetIdentity(priority, winner, "" if priority <= 1 else net_scope)
+        identities[winner] = identity
+        # Every global or power name is a connection across sheets, even if
+        # another label won the flat component's display name.
+        for rank, name in candidates:
+            if rank <= 1:
+                # Both power symbols and global labels share this namespace.
+                aliases.join(identity, _NetIdentity(1, name, ""))
+
+    def net_at(pos: tuple[float, float]) -> str | None:
+        root = _component_root(connectivity, (round(pos[0], 2), round(pos[1], 2)))
+        names = names_by_root.get(root)
+        return names[0] if names else None
+
+    # A local label can win the flat sheet's name even though the same wire
+    # reaches a differently named hierarchical port. Bind the physical
+    # component at the port, then carry its parent name through nested sheets.
+    parent_names: dict[str, _NetIdentity] = {}
+    for label in sch.hier_labels:
+        if label.text in parent_nets_by_port:
+            local_net = net_at((label.x, label.y))
+            if local_net:
+                parent_name = parent_nets_by_port[label.text]
+                first_parent = parent_names.setdefault(local_net, parent_name)
+                aliases.join(first_parent, parent_name)
+                identity = identities[local_net]
+                if identity.priority <= 1:
+                    aliases.join(identity, parent_name)
+
+    net_dict: dict[_NetIdentity, list] = {}
     try:
-        sheet_nets = sch.extract_netlist(include_power_symbols=include_symbol_pins)
-        for net_name, pins in sheet_nets.items():
-            net_dict.setdefault(net_name, []).extend(pins)
+        for name, pins in sch.extract_netlist(include_power_symbols=include_symbol_pins).items():
+            identity = (
+                parent_names.get(name) or identities.get(name) or _NetIdentity(4, name, net_scope)
+            )
+            net_dict.setdefault(identity, []).extend(pins)
     except Exception:
         logger.warning("Failed to extract netlist from %s, skipping connectivity", sch_path)
 
-    # Build a map from sheet pin position -> net name in the parent sheet.
-    # This is used to resolve hierarchical label connections: the parent's
-    # connectivity graph tells us what net each sheet pin is on.
-    parent_connectivity, parent_net_names, _ = sch._build_connectivity_graph()
-
-    def _find_parent(p: tuple) -> tuple:
-        if p not in parent_connectivity:
-            parent_connectivity[p] = p
-        if parent_connectivity[p] != p:
-            parent_connectivity[p] = _find_parent(parent_connectivity[p])
-        return parent_connectivity[p]
-
-    def _net_name_at(pos: tuple) -> str | None:
-        """Find the net name for a position in the parent connectivity graph."""
-        root = _find_parent(pos)
-        # Check all points in the same connected component for net names
-        for point, names in parent_net_names.items():
-            if _find_parent(point) == root and names:
-                return names[0]
-        return None
-
-    # Recurse into sub-sheets with hierarchical label net merging
-    sheet_entries = _get_sheet_entries(sch_path)
-    parent_dir = sch_path.parent
-    for entry in sheet_entries:
-        sub_path = parent_dir / entry.filename
-        sub_sheet_path = f"{sheet_path}{entry.filename}/"
-        sub_components, sub_nets = _collect_hierarchy_components(
-            sub_path, sub_sheet_path, visited, include_symbol_pins=include_symbol_pins
+    for entry in _get_sheet_entries(sch_path):
+        child_bindings = {}
+        for pin_name, pin_pos in zip(entry.pin_names, entry.pin_positions, strict=False):
+            parent_net = net_at(pin_pos)
+            if parent_net:
+                child_bindings[pin_name] = parent_names.get(parent_net, identities[parent_net])
+        sub_components, sub_nets = _collect_sheet_nets(
+            sch_path.parent / entry.filename,
+            f"{sheet_path}{entry.filename}/",
+            visited,
+            include_symbol_pins=include_symbol_pins,
+            net_scope=f"{net_scope}{entry.sheetname or Path(entry.filename).stem}/",
+            parent_nets_by_port=child_bindings,
+            aliases=aliases,
         )
         components.extend(sub_components)
-
-        # Build a mapping from hierarchical label name -> parent net name
-        # using the sheet pin positions in the parent's connectivity graph.
-        hlabel_to_parent_net: dict[str, str] = {}
-        for pin_name, pin_pos in zip(entry.pin_names, entry.pin_positions, strict=False):
-            parent_net = _net_name_at(pin_pos)
-            if parent_net:
-                hlabel_to_parent_net[pin_name] = parent_net
-
-        # Merge child nets into parent net_dict.  When a child net name
-        # matches a hierarchical label that has a different net name in
-        # the parent context, unify them under the parent's net name.
-        for net_name, pins in sub_nets.items():
-            target_name = hlabel_to_parent_net.get(net_name, net_name)
-            net_dict.setdefault(target_name, []).extend(pins)
-
-        # Also ensure any parent-side pins already in net_dict under the
-        # hierarchical label name are merged if we renamed the net.
-        for hlabel_name, parent_net in hlabel_to_parent_net.items():
-            if hlabel_name != parent_net and hlabel_name in net_dict:
-                net_dict.setdefault(parent_net, []).extend(net_dict.pop(hlabel_name))
+        for identity, pins in sub_nets.items():
+            net_dict.setdefault(identity, []).extend(pins)
 
     return components, net_dict
 
