@@ -44,8 +44,10 @@ def run_creepage_command(args) -> int:
     from kicad_tools.creepage.engine import (
         SELV_WORKING_VOLTAGE_V,
         BoardThicknessError,
+        CreepageExceptionError,
         apply_census_waivers,
         compute_creepage_census,
+        creepage_exceptions_from_dict,
         mains_suspect_nets,
         pair_bounds_from_dict,
         pair_bounds_unmapped_nets,
@@ -210,6 +212,28 @@ def run_creepage_command(args) -> int:
             print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
             return 1
 
+    # --- Scoped per-pad-pair exceptions (#10317) -----------------------------
+    # An explicitly supplied JSON file of reviewed, component-bound waivers.
+    # Structural validation happens here; board validation (the selector
+    # resolves, the two pads sit on two different nets) happens inside the
+    # census and fails the run loudly -- an invalid or ambiguous selector can
+    # never waive a finding.
+    exceptions = None
+    exc_arg = getattr(args, "exceptions", None)
+    if exc_arg:
+        exc_path = Path(exc_arg)
+        if not exc_path.exists():
+            print(f"Error: creepage-exceptions file not found: {exc_path}", file=sys.stderr)
+            return 1
+        try:
+            exceptions = creepage_exceptions_from_dict(json.loads(exc_path.read_text()))
+        except json.JSONDecodeError as e:
+            print(f"Error: parsing creepage-exceptions JSON: {e}", file=sys.stderr)
+            return 1
+        except (TypeError, ValueError) as e:
+            print(f"Error: invalid creepage-exceptions structure: {e}", file=sys.stderr)
+            return 1
+
     pcb = PCB.load(pcb_path)
     net_class = getattr(args, "net_class", "HV") or "HV"
 
@@ -261,6 +285,7 @@ def run_creepage_command(args) -> int:
             insulation=insulation,
             attach_zones=attach_zones,
             pair_bounds=pair_bounds or None,
+            exceptions=exceptions,
         )
     except BoardThicknessError as e:
         if fmt == "json":
@@ -271,6 +296,11 @@ def run_creepage_command(args) -> int:
             print(json.dumps(error, indent=2))
         else:
             print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except CreepageExceptionError as e:
+        # A scoped exception whose selector does not resolve on the board
+        # (#10317): fail loud, waive nothing.
+        print(f"Error: invalid creepage exception: {e}", file=sys.stderr)
         return 1
     except StandardLookupError as e:
         # A per-pair |ΔV| out of the table's range (map mode): fail LOUD, never
@@ -285,6 +315,13 @@ def run_creepage_command(args) -> int:
     apply_census_waivers(
         report, waive_same_footprint=bool(getattr(args, "waive_same_footprint", False))
     )
+
+    # Scoped exceptions that matched no census row (#10317): their net pair was
+    # not audited, so they waived nothing -- surface that loudly so a typo in
+    # the exception file (or a changed net-class selection) cannot silently
+    # pass a board the operator believes is waived.
+    for desc in report.exceptions_unused or []:
+        print(f"Warning: creepage exception matched no census row: {desc}", file=sys.stderr)
 
     # Vacuity guard (issue #4354): a census that resolves ZERO HV nets is only
     # legitimately "nothing to audit" on a genuinely low-voltage board.  When
@@ -379,16 +416,28 @@ def _warn_hv_unclassified(
 
 
 def _result_token(p: CreepagePair) -> str:
-    """Per-row result token: WAIVED for a waived failing pair, else PASS/FAIL."""
-    if p.waived and not p.passed:
-        return "WAIVED"
-    return "PASS" if p.passed else "FAIL"
+    """Per-row result token: FAIL whenever the row still gates, else PASS/WAIVED.
+
+    A row fails the gate when any un-waived metric fails (#10317) -- including
+    a partially waived pad pair (creepage waived, air clearance failing).  A
+    row whose every failure is covered (broad waiver, attach-zone residual or
+    a scoped exception) shows WAIVED; the raw failure stays visible in JSON.
+    """
+    if not p.gate_row_passed:
+        return "FAIL"
+    return "PASS" if p.passed else "WAIVED"
 
 
 def _rel_token(p: CreepagePair) -> str:
-    """Compact footprint-relationship token for the census tables (#4403)."""
+    """Compact footprint-relationship token for the census tables (#4403).
+
+    A #10317 per-pad-pair row carries the reviewed identity instead of the
+    bare marker: ``R1.1-2`` names the component and its pad pair.
+    """
     if p.relationship == "attach_zone":
         return "attach-zn"
+    if p.relationship == "same_footprint" and p.pad_numbers is not None:
+        return f"{p.footprint_ref}.{p.pad_numbers[0]}-{p.pad_numbers[1]}"
     return "same-ftpt" if p.relationship == "same_footprint" else "board"
 
 
@@ -401,9 +450,10 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
     audit``).
     """
     total = len(report.pairs)
-    waived = [p for p in report.pairs if p.waived]
-    gate_failures = [p for p in report.pairs if not p.passed and not p.waived]
+    waived = [p for p in report.pairs if p.waived or p.exception_waivers]
+    gate_failures = [p for p in report.pairs if not p.gate_row_passed]
     same_fp = [p for p in report.pairs if p.relationship == "same_footprint"]
+    scoped = [p for p in report.pairs if p.exception_waivers]
 
     # Issue #8277: an ``attach-zn`` row is waived only when the copper OUTSIDE
     # the zone still clears; say why one that is not waived still gates.
@@ -418,18 +468,32 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
                 f"(layer {p.residual_layer})."
             )
 
+    # Reviewed per-pad-pair exceptions (#10317): name the component, the pads,
+    # the waived metric and the reason right above the verdict so the waiver is
+    # auditable from the table alone.
+    for p in scoped:
+        for metric, reason in sorted(p.exception_waivers.items()):
+            print(
+                f"Reviewed exception: {p.footprint_ref} pads "
+                f"{(p.pad_numbers or ('?', '?'))[0]}-{(p.pad_numbers or ('?', '?'))[1]} "
+                f"({p.net_a} vs {p.net_b}) {metric} waived -- {reason}"
+            )
+
     if waived:
+        waived_note = (
+            "(same-footprint / attach-zone -- qualify at the component, not the layout)"
+            if not scoped
+            else "(same-footprint / attach-zone / reviewed exceptions -- see above)"
+        )
         if gate_failures:
             print(
                 f"FAIL (gate): {len(gate_failures)}/{total} board pair(s) fail "
-                f"{unit_desc}; {len(waived)} pair(s) WAIVED "
-                "(same-footprint / attach-zone -- qualify at the component, not the layout)."
+                f"{unit_desc}; {len(waived)} pair(s) WAIVED {waived_note}."
             )
         else:
             print(
                 f"PASS (gate): {total - len(waived)}/{total} pair(s) clear "
-                f"{unit_desc}; {len(waived)} pair(s) WAIVED "
-                "(same-footprint / attach-zone -- qualify at the component, not the layout)."
+                f"{unit_desc}; {len(waived)} pair(s) WAIVED {waived_note}."
             )
         return
 

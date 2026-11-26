@@ -648,3 +648,82 @@ def board_net0_npth_source(*, copper_ring: bool) -> str:
     )
     parts.append(")\n")
     return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Scoped per-pad-pair exception fixtures (Issue #10317)
+# ---------------------------------------------------------------------------
+
+
+def board_scoped_exception_source(
+    *,
+    r1_gap_mm: float = 1.6,
+    r2_gap_mm: float = 2.5,
+    r1_second_pair_gap_mm: float | None = None,
+    track_gap_mm: float | None = None,
+) -> str:
+    """Two footprints (R1/R2) sharing the ``L_MAINS``/``DIV_MID`` pair (#10317).
+
+    ``R1`` and ``R2`` each hold an ``L_MAINS`` pad and a ``DIV_MID`` pad whose
+    edge-to-edge copper gap is ``r1_gap_mm`` / ``r2_gap_mm`` (0.6 mm pads, so
+    the pad-centre pitch is ``gap + 0.6``).  Both packages sit far apart
+    (cross approaches >= 17 mm) so the two intra-package gaps are the only
+    package-level candidates.  With ``r1_second_pair_gap_mm`` R1 grows a
+    second ``L_MAINS``/``DIV_MID`` pad pair (pads 3/4, 4 mm to the right) at
+    that gap -- a *different pair on the reviewed footprint*.  With
+    ``track_gap_mm`` a ``DIV_MID`` track runs under R1's L_MAINS pad at that
+    gap -- a board-level approach on the SAME nets.
+
+    Against the phase-2 defaults of ``--standard iec60664 --working-voltage
+    170 --pollution-degree 2`` (required creepage 2.0 mm, clearance 1.5 mm):
+    a 1.6 mm gap fails creepage only; a gap below 1.5 mm fails both metrics;
+    a 2.5 mm gap clears both.
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    r1_pads = [
+        ("1", 1, "L_MAINS", 0, 0),
+        ("2", 4, "DIV_MID", 0, round(r1_gap_mm + 0.6, 6)),
+    ]
+    if r1_second_pair_gap_mm is not None:
+        r1_pads.append(("3", 1, "L_MAINS", 4.0, 0))
+        r1_pads.append(("4", 4, "DIV_MID", 4.0, round(r1_second_pair_gap_mm + 0.6, 6)))
+    parts.append(_footprint2("R1", 110, 110, r1_pads))
+    parts.append(
+        _footprint2(
+            "R2",
+            130,
+            110,
+            [
+                ("1", 1, "L_MAINS", 0, 0),
+                ("2", 4, "DIV_MID", 0, round(r2_gap_mm + 0.6, 6)),
+            ],
+        )
+    )
+    if track_gap_mm is not None:
+        # 0.2 mm-wide horizontal track whose top copper edge sits track_gap_mm
+        # below R1's pad 1 (pad copper bottom edge y=110.3).
+        y = round(110.4 + track_gap_mm, 6)
+        parts.append(
+            f'  (segment (start 108 {y}) (end 112 {y}) (width 0.2) (layer "F.Cu") (net 4))\n'
+        )
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_scoped_exception_unaudited_source() -> str:
+    """A footprint whose two nets are never a census pair (#10317).
+
+    ``X1`` holds a ``GND`` pad and a ``DIV_MID`` pad 0.4 mm apart -- neither
+    net is in the HV group, so no census row exists for the pair and an
+    exception on ``X1`` pads 1/2 can never waive a finding.  ``P1``
+    (``L_MAINS``) sits far away so the board itself passes a ~2 mm
+    requirement.
+    """
+    parts = [
+        _SAMEFP_HEADER,
+        _OUTLINE,
+        _footprint2("X1", 110, 110, [("1", 2, "GND", 0, 0), ("2", 4, "DIV_MID", 0, 1.0)]),
+        _footprint2("P1", 130, 110, [("1", 1, "L_MAINS", 0, 0)]),
+        ")\n",
+    ]
+    return "".join(parts)
