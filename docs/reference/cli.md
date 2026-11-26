@@ -1896,11 +1896,10 @@ together is:
 
 For a pulsed path, a case's `current_a` is its **between-pulse** current;
 during a pulse the path carries its declared `pulsed_a`, with the sign of
-`current_a`.
+`current_a` (here each path goes from +0.5 A to +6 A or +4 A).
 With `VOUT_LOAD` declaring `"pulsed_a": 6.0` and `VOUT_HOLDUP`
 `"pulsed_a": 4.0`, both at `"duty_cycle": 0.1`, the `burst` case puts 1.0 A
-on the shared feed between pulses and, with each path going from +0.5 A to its
-+6 A or +4 A pulse, 10 A at the coincident peak, and
+on the shared feed between pulses and 10 A at the coincident peak, and
 sizes the feed for their 3.30 A RMS (`sqrt(0.1*10² + 0.9*1²)`).
 
 `pulse_overlap` is read only where two or more pulsed members share copper.
