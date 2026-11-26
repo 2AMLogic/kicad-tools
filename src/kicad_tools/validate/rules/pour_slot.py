@@ -14,7 +14,8 @@ nets, overlap along their length, and::
     first_clearance + second_clearance < gap < first_clearance + second_clearance + min_thickness
 
 Each side uses the maximum of the board minimum, the zone clearance, and the
-applicable track and zone netclass clearances.
+applicable track and zone netclass clearances. An unconditional custom copper
+clearance replaces the project clearance for all nets.
 Touching/overlapping tracks (``gap <= 0``) are a DRC matter and not reported,
 and so is a *packed* pair whose gap is at or below the sum (Issue #10121): its
 clearance keep-outs already overlap, so no fill strip ever existed between
@@ -112,10 +113,19 @@ class PourSlotPair:
 
 
 def load_pour_slot_clearances(path: Path, pcb: PCB) -> dict[str, float]:
-    """Per-net clearance to copper, including the selected project's board floor."""
+    """Per-net copper clearances for the selected project and its rule sidecar."""
     from kicad_tools.core.project_clearance import ProjectClearanceError, resolve_project_clearances
+    from kicad_tools.router.board_clearance_rules import CLEARANCE, parse_dru
     from kicad_tools.router.clearance_resolver import project_min_clearance_mm
     from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+    # KiCad gives the last matching custom rule precedence. Only global
+    # rules can supply one uniform value for this per-net lookup.
+    rules, _ = parse_dru(path.with_suffix(".kicad_dru"))
+    for rule in reversed(rules):
+        clearance = rule.value(CLEARANCE)
+        if rule.condition is None and rule.layer is None and clearance is not None:
+            return {"": 0.0 if rule.ignored else clearance}
 
     project = load_project(path)
     if project is None:

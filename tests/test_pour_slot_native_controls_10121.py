@@ -321,8 +321,8 @@ def test_board_minimum_in_check_cleanup_and_fill(tmp_path, capsys, gap, expected
         pytest.skip("native refill requires kicad-cli")
 
     films = []
-    for zone_clearance in (0.1, 0.3):
-        directory = tmp_path / str(zone_clearance)
+    for floor_source, zone_clearance in (("board", 0.1), ("board", 0.3), ("custom", 0.1)):
+        directory = tmp_path / f"{floor_source}-{zone_clearance}"
         directory.mkdir()
         board = directory / "control_p.kicad_pcb"
         zone = ZONE.replace("clearance 0.2", f"clearance {zone_clearance}")
@@ -344,8 +344,13 @@ def test_board_minimum_in_check_cleanup_and_fill(tmp_path, capsys, gap, expected
             )
         pcb._sexp.append(parse_string(zone))
         pcb.save(board)
+        if floor_source == "custom":
+            board.with_suffix(".kicad_dru").write_text(
+                '(version 1)\n(rule "Global copper clearance" (constraint clearance (min 0.3mm)))\n'
+            )
+        board_min = 0.3 if floor_source == "board" else 0.0
         project = {
-            "board": {"design_settings": {"rules": {"min_clearance": 0.3}}},
+            "board": {"design_settings": {"rules": {"min_clearance": board_min}}},
             "net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]},
         }
         board.with_suffix(".kicad_pro").write_text(json.dumps(project))
@@ -371,4 +376,5 @@ def test_board_minimum_in_check_cleanup_and_fill(tmp_path, capsys, gap, expected
         section = film.intersection(LineString([(15, bottom), (15, top)]))
         assert section.length == pytest.approx(0.304 if warnings else 0.0, abs=0.002)
         films.append(film)
-    assert films[0].symmetric_difference(films[1]).area == pytest.approx(0)
+    for film in films[1:]:
+        assert films[0].symmetric_difference(film).area == pytest.approx(0)
