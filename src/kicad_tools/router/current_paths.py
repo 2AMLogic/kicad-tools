@@ -2285,16 +2285,27 @@ def _build_graph(
             if via_spans_layer(via.layers, seg.layer)
             and point_to_segment_distance(*via.position, *seg.start, *seg.end) <= _VIA_CENTRE_EPS
         }
+        # A run whose covered end already joins an on-centre run reaches the
+        # bore by that routed entry. A second edge at any vertex of the same
+        # run (e.g. a subdivision point) would bypass the short routed bend.
+        carried = {
+            run_root(i)
+            for i, seg in enumerate(segments)
+            if via_spans_layer(via.layers, seg.layer)
+            for end in (seg.start, seg.end)
+            if _via_covered_by_end(via, seg, end)
+            and any(run_root(j) in on_centre for j in at_node[_copper_node(end, seg.layer)])
+        }
         for i, seg in enumerate(segments):
-            if not via_spans_layer(via.layers, seg.layer) or run_root(i) in on_centre:
+            if (
+                not via_spans_layer(via.layers, seg.layer)
+                or run_root(i) in on_centre
+                or run_root(i) in carried
+            ):
                 continue
             for end in (seg.start, seg.end):
                 if _via_covered_by_end(via, seg, end):
                     node = _copper_node(end, seg.layer)
-                    # A connected run already carries this end into the bore.
-                    # A second edge here would bypass its short routed entry.
-                    if any(run_root(j) in on_centre for j in at_node[node]):
-                        continue
                     candidate = ((i, node) in continuations, math.dist(end, via.position), node)
                     root_i = run_root(i)
                     if root_i not in best or candidate < best[root_i]:
