@@ -70,6 +70,7 @@ from .base import DRCRule
 from .silkscreen import (
     _board_frame_shift,
     _footprint_text_drawn_angle,
+    _positive_lead_mark,
     _silk_side,
     _text_bbox_geometry,
 )
@@ -411,7 +412,10 @@ class Pin1MarkerRule(DRCRule):
                 if self._is_visible(component, all_pads, body):
                     return None
 
-        return self._make_violation(footprint, pin1, radius, obscured=candidates > 0)
+        accepted, has_sign = self._radial_sign(footprint, footprint.graphics, all_pads, body)
+        if accepted:
+            return None
+        return self._make_violation(footprint, pin1, radius, obscured=bool(candidates or has_sign))
 
     def marker_graphic_indices(self, footprint: Footprint, graphics: list[Any]) -> set[int]:
         """Return indices into ``graphics`` that this rule accepts as pin-1 marks.
@@ -460,7 +464,7 @@ class Pin1MarkerRule(DRCRule):
             if geom is not None and not geom.is_empty:
                 indexed.append((idx, geom))
 
-        accepted: set[int] = set()
+        accepted, _ = self._radial_sign(footprint, graphics, all_pads, body)
         for idx, geom in indexed:
             d1 = geom.distance(pin1)
             if d1 > radius:
@@ -484,6 +488,31 @@ class Pin1MarkerRule(DRCRule):
                 if self._is_visible(component, all_pads, body):
                     accepted.update(i for i, g in indexed if g.intersects(component))
         return accepted
+
+    def _radial_sign(self, footprint, graphics, all_pads, body) -> tuple[set[int], bool]:
+        """Check a positive sign on the rim beyond the ordinary pad search radius."""
+        visible = set()
+        found = False
+        if len(footprint.pads) != 2:
+            return visible, found
+        side = footprint_side(footprint)
+        transform = _fp_transform(footprint)
+        for outline in graphics:
+            if (
+                outline.graphic_type != "circle"
+                or _silk_side(outline.layer) != side
+                or outline.center is None
+                or outline.is_filled
+                or outline.stroke_width <= 0
+            ):
+                continue
+            radius = math.dist(outline.center, outline.end)
+            for pair in _positive_lead_mark(footprint, graphics, outline, outline.center, radius):
+                found = True
+                ink = (_graphic_geometry(graphics[idx], transform) for idx in pair)
+                if all(g is not None and self._is_visible(g, all_pads, body) for g in ink):
+                    visible.update(pair)
+        return visible, found
 
     def _effective_radius(self, pin1: Any, body: Any | None, footprint: Footprint) -> float:
         """Search radius for one footprint: ``search_radius_mm`` is a floor.

@@ -2067,7 +2067,11 @@ def _painted_chords(
 
 
 def _positive_lead_mark(
-    footprint: Footprint, outline: FootprintGraphic, center: tuple[float, float], radius: float
+    footprint: Footprint,
+    graphics: Sequence[FootprintGraphic],
+    outline: FootprintGraphic,
+    center: tuple[float, float],
+    radius: float,
 ) -> Iterator[tuple[int, int]]:
     """Find the two strokes of a plus beside pad 1 of a painted radial body."""
     pads = sorted(footprint.pads, key=lambda pad: pad.number)
@@ -2087,7 +2091,7 @@ def _positive_lead_mark(
     # The library draws the sign in footprint-local axes. Match only a
     # single horizontal and vertical with the same center and length.
     candidates = defaultdict(list)
-    for index, line in enumerate(footprint.graphics):
+    for index, line in enumerate(graphics):
         if (
             line.graphic_type != "line"
             or line.layer != outline.layer
@@ -2199,7 +2203,9 @@ def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
                     for index in members[offset]:
                         marks[index].add(mark)
         if outline_index in marks:
-            for first, second in _positive_lead_mark(footprint, outline, center, radius):
+            for first, second in _positive_lead_mark(
+                footprint, footprint.graphics, outline, center, radius
+            ):
                 # Its own mark: the plus can still collide with the body and other ink.
                 mark = object()
                 marks[first].add(mark)

@@ -693,3 +693,54 @@ class TestCLI:
         out = capsys.readouterr().out
         assert rc == 0
         assert "WAIVED" in out
+
+
+@pytest.mark.parametrize("side", ["F", "B"])
+@pytest.mark.parametrize("case", ["stock", "opposite", "loose", "wrong_face", "covered"])
+def test_large_radial_positive_mark(side, case):
+    # KiCad CP_Radial_D16.0mm_P7.50mm sign and pad positions.
+    silk = f"{side}.SilkS"
+    mark_layer = ("B.SilkS" if side == "F" else "F.SilkS") if case == "wrong_face" else silk
+    x = 11.889491 if case == "opposite" else -4.139491
+    y = -4.555
+    body_radius = 10.5 if case == "covered" else 8
+    graphics = [
+        _g("circle", layer=f"{side}.Fab", center=(3.75, 0), end=(3.75 + body_radius, 0)),
+        _g("circle", layer=silk, center=(3.75, 0), end=(11.87, 0)),
+        _g("line", layer=mark_layer, start=(x - 0.8, y), end=(x + 0.8, y)),
+        _g("line", layer=mark_layer, start=(x, y - 0.8), end=(x, y + 0.8)),
+    ]
+    if case == "loose":
+        graphics.pop()
+    pads = [
+        Pad(
+            number=num,
+            type="thru_hole",
+            shape=shape,
+            position=(px, 0),
+            size=(2.4, 2.4),
+            drill=1.2,
+            layers=["*.Cu", "*.Mask"],
+        )
+        for num, shape, px in (("1", "roundrect", 0), ("2", "circle", 7.5))
+    ]
+    fp = _fp(
+        name="Capacitor_THT:CP_Radial",
+        reference="C1",
+        pads=pads,
+        graphics=graphics,
+        layer=f"{side}.Cu",
+        rotation=31,
+    )
+    rule = Pin1MarkerRule()
+    findings = rule.check(_pcb(fp)).violations
+    if case == "stock":
+        assert not findings
+        assert rule.marker_graphic_indices(fp, list(reversed(graphics))) == {0, 1}
+        assert not rule.marker_graphic_indices(fp, graphics[:-1])
+    else:
+        expected = (
+            PIN1_MARKER_OBSCURED_RULE_ID if case == "covered" else PIN1_MARKER_MISSING_RULE_ID
+        )
+        assert [v.rule_id for v in findings] == [expected]
+        assert not rule.marker_graphic_indices(fp, graphics)
