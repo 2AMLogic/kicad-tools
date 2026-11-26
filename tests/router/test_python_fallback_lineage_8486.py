@@ -90,7 +90,12 @@ def test_first_search_is_traced_as_a_fresh_drained_request() -> None:
 
 
 def test_identical_request_on_an_unchanged_grid_is_a_skipped_repeat() -> None:
-    first, second, third = _route_traces(_pathfinder(_walled_grid(), traced=True), 3)
+    pathfinder = _pathfinder(_walled_grid(), traced=True)
+    with mock.patch.object(
+        pathfinder, "_py_grid_state_stamp", wraps=pathfinder._py_grid_state_stamp
+    ) as stamp:
+        first, second, third = _route_traces(pathfinder, 3)
+    assert stamp.call_count == 3  # One proof fingerprint per call also supplies the trace.
     assert first["action"] == "ran"
     for repeat in (second, third):
         assert repeat["request"] == "repeat"
@@ -173,6 +178,24 @@ def test_a_search_that_did_not_drain_is_not_traced_as_one(stub, outcome) -> None
     assert second["outcome"] == outcome
     # The second attempt is already bounded by the #8485 repeat budget.
     assert second["reduced_budget"] is True
+
+
+@pytest.mark.parametrize(
+    ("deadline", "action"), [(0.0, "skipped_deadline_spent"), (None, "skipped_stage_budget")]
+)
+def test_budget_skip_classifies_the_previous_search(deadline, action) -> None:
+    pathfinder = _pathfinder(_walled_grid(), traced=True)
+    pathfinder.set_python_fallback_stage_budget(1e-12)
+    with mock.patch.object(Router, "route", autospec=True, side_effect=_deadline_stub):
+        (first,) = _route_traces(pathfinder, 1)
+    assert first["outcome"] == "deadline"
+
+    pathfinder._attempt_diagnostic = {}
+    assert pathfinder._try_python_fallback(*_pads(), deadline=deadline) is None
+    trace = pathfinder._attempt_diagnostic["python_fallback"]
+    assert (trace["action"], trace["request"]) == (action, "repeat")
+    assert (trace["prior_outcome"], trace["grid"]) == ("deadline", "unchanged")
+    assert "outcome" not in trace
 
 
 def test_reenabled_trace_starts_fresh_but_reuses_an_untraced_proof(monkeypatch) -> None:
