@@ -50,7 +50,7 @@ SHORT = (
 
 _DRIVER = textwrap.dedent(
     """
-    import sys, time
+    import os, sys, time
     from pathlib import Path
     from unittest.mock import patch
 
@@ -61,13 +61,19 @@ _DRIVER = textwrap.dedent(
     argv = sys.argv[3:]
     SEG = {seg!r}
 
+    def publish_ready(staged_board):
+        # The parent sends its signal as soon as the ready file exists.
+        pending = ready.with_suffix(".tmp")
+        pending.write_text(str(staged_board))
+        os.replace(pending, ready)
+
     def fake_route(args, parser, argv_):
         src, out = Path(args.pcb), Path(args.output)
         text = src.read_text()
         i = text.rstrip().rfind(")")
         out.write_text(text[:i] + SEG + text[i:])
         if mode == "route":
-            ready.write_text(str(out))
+            publish_ready(out)
             time.sleep(300)
         return 0
 
@@ -75,7 +81,7 @@ _DRIVER = textwrap.dedent(
 
     def slow_check(a):
         if mode == "lint" and ".lint-gate-" in a[0]:
-            ready.write_text(a[0])
+            publish_ready(a[0])
             time.sleep(300)
         return real_check(a)
 
@@ -206,7 +212,10 @@ def _run_and_signal(tmp_path: Path, mode: str, argv: list[str], sig: int) -> tup
             proc.stdout.close()
             proc.stderr.close()
             proc.wait(timeout=3)
-    return proc.returncode, err, Path(ready.read_text())
+    staged_board = ready.read_text()
+    if not staged_board:
+        pytest.fail(f"driver published an empty ready file: {ready}")
+    return proc.returncode, err, Path(staged_board)
 
 
 def _rejected(output: Path) -> Path:
