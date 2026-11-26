@@ -19545,6 +19545,12 @@ def _run_post_save_stitching(
 
     # Keep the published board and project together while the new via or
     # trace still crosses the previous fill. Only promote the refilled copy.
+    # The staged copy is byte-identical to the board whose fill and pour
+    # connectivity were just verified, so the stitcher may reuse that fill.
+    fill_verified = bool(
+        getattr(args, "_zone_fill_verified", False)
+        and getattr(args, "_pour_connectivity_verified", False)
+    )
     with tempfile.TemporaryDirectory(prefix=".kct-stitch-", dir=output_path.parent) as directory:
         staged = Path(directory) / output_path.name
         shutil.copy2(output_path, staged)
@@ -19556,6 +19562,7 @@ def _run_post_save_stitching(
             drill=args.via_drill,
             clearance=args.clearance,
             dry_run=False,
+            fill_verified=fill_verified,
         )
         if stitch_result.vias_added or stitch_result.traces_added:
             _fill_zones_after_route(

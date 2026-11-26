@@ -282,6 +282,46 @@ def test_mixed_signal_route_keeps_the_bonded_ground_copper(
     assert ground_copper(routed) == (2, 2)
 
 
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("prefilled", [False, True], ids=["unfilled", "prefilled"])
+def test_route_reuses_verified_fill_without_a_bond_check_refill(
+    tmp_path, native_cli, monkeypatch, prefilled
+):
+    """A refused stitcher bond-check refill must not cost the bonded ground copper (#10261)."""
+    from kicad_tools.cli import route_cmd, runner
+
+    board = make_board(tmp_path)
+    text = board.read_text().rstrip()[:-1]
+    for i, x in enumerate((115, 125), 1):
+        text += f"""
+        (footprint "Test:OnePad" (layer "F.Cu") (at {x} 112)
+          (property "Reference" "R{i}" (at 0 -1.5) (layer "F.SilkS"))
+          (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask" "F.Paste")
+            (net "SIG")))
+        """
+    board.write_text(text + ")\n")
+    if prefilled:
+        assert len(refill(board, native_cli)["unconnected_items"]) == 1
+    original = board.read_bytes()
+    native_refill = runner.run_refill_zones
+    bond_check_calls = []
+
+    def refuse_bond_check(path, *args, **kwargs):
+        if "kct-stitch-fill-" in str(path):
+            bond_check_calls.append(path)
+            return runner.KiCadCLIResult(success=False, stderr="refused bond-check refill")
+        return native_refill(path, *args, **kwargs)
+
+    monkeypatch.setattr(runner, "run_refill_zones", refuse_bond_check)
+    result = route_cmd.main(route_args(board, "--native-zone-clearance"))
+    assert result == 0
+    assert not bond_check_calls
+    assert board.read_bytes() == original
+    routed = PCB.load(board.with_name("routed.kicad_pcb"))
+    assert sum(segment.net_name == "SIG" for segment in routed.segments) == 1
+    assert ground_copper(routed) == (2, 2)
+
+
 @pytest.mark.parametrize("island", [False, True], ids=["bonded", "island"])
 def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
     board = make_board(tmp_path, right_edge=115 if island else 135)
