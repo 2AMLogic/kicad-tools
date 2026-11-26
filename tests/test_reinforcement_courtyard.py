@@ -133,9 +133,46 @@ def test_opposite_side_tht_foreign_pin_errors_own_pin_clean():
     assert [v for v in _run(pcb) if "[run]" in v.message and "Q1" in v.message]
 
     pcb = _board()
-    _body(pcb, "Q1", 70.0, 51.0, side="B", courtyard=False, pads=[tht(NET)])
+    _body(pcb, "Q1", 70.0, 51.3, side="B", courtyard=False, pads=[tht(NET)])
     pcb._footprints[-1].graphics = []
     assert not [v for v in _run(pcb) if "Q1" in v.message]
+
+
+def test_same_net_component_drill_is_clear_of_the_fitted_wire():
+    pcb = _board()
+    pad = Pad(
+        number="1",
+        type="thru_hole",
+        shape="circle",
+        position=(0, 0),
+        size=(2.8, 2.8),
+        layers=["*.Cu"],
+        net_number=pcb.add_net(NET).number,
+        net_name=NET,
+        drill=1.70,
+    )
+    fp = _body(pcb, "R6", 70, 51.20, side="B", pads=[pad])
+    matches = [v for v in _run(pcb) if "component drill" in v.message and "R6.1" in v.message]
+    assert len(matches) == 1
+    assert round(matches[0].actual_value, 3) == 0.350
+    assert matches[0].required_value == 0.6455
+    fp.position = (70, 52.50)
+    assert not [v for v in _run(pcb) if "R6.1" in v.message]
+    # The end terminal is connected to an unwired copper tail beyond the anchor.
+    fp.position = (20.5, 50)
+    assert not [v for v in _run(pcb) if "R6.1" in v.message]
+
+
+def test_same_net_plated_pad_can_serve_as_a_verified_wire_anchor():
+    pcb = _board()
+    anchor = pcb.vias[0]
+    pcb.remove_vias([anchor])
+    x, y = anchor.position
+    _add_th_pad_footprint(pcb, ref="W1", x=x, y=y, net=NET, drill=anchor.drill, size=anchor.size)
+    pcb.get_footprint("W1").layer = "B.Cu"
+    rule = ReinforcementCourtyardRule(specs=[_spec()])
+    assert len(rule.fully_wired_legs(pcb, _rules())) == 1
+    assert not [v for v in rule.check(pcb, _rules()) if "W1" in v.message]
 
 
 def test_end_hole_under_opposite_side_body_errors():

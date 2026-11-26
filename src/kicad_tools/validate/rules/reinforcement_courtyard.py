@@ -12,7 +12,8 @@ sidecar's anchor list) and checks two things:
   wire terminates at. A footprint with no courtyard on that side falls back to
   its fab-layer bounding box. On the side *opposite* a through-hole part only
   its pins protrude, so there the envelope is checked against foreign-net pads
-  (pad radius + :data:`HOLE_FILLET_MM`); own-net pins may be soldered to.
+  (pad radius + :data:`HOLE_FILLET_MM`). Same-net lands may be soldered to,
+  but the fitted wire must clear other component lead holes.
 * **end hole** -- each anchor hole's envelope (annulus radius +
   :data:`HOLE_FILLET_MM`) against courtyards on *both* sides of the board: the
   hole is a through hole, so the tail and fillet exit opposite the run. A
@@ -247,7 +248,66 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
             self._check_net_bodies(
                 pcb, rf, net, plan.resolved.get(net, []), results, located=plan.located.get(net)
             )
+        self._check_component_bores(pcb, design_rules, results)
         return results
+
+    def _check_component_bores(
+        self, pcb: PCB, design_rules: DesignRules, results: DRCResults
+    ) -> None:
+        """Keep the fitted span clear of same-net lead holes on the other side."""
+        from shapely.geometry import LineString
+        from shapely.ops import nearest_points, substring
+
+        from kicad_tools.physics.wire_gauge import anchor_drill_for_awg, bare_copper_diameter_mm
+
+        from .factory_clearance import _hole_geometry
+
+        net_numbers = {net.name: number for number, net in pcb.nets.items()}
+        for leg in self.fully_wired_legs(pcb, design_rules):
+            if leg.anchor_arc is None:
+                continue
+            side = _side_of_layer(leg.layer)
+            centreline = LineString(leg.points)
+            fitted = substring(centreline, *leg.anchor_arc)
+            radius = bare_copper_diameter_mm(leg.gauge) / 2
+            for fp in pcb.footprints:
+                if _fp_side(fp) == side:
+                    continue
+                for pad in fp.pads:
+                    if pad.type != "thru_hole" or pad.net_number != net_numbers.get(leg.net):
+                        continue
+                    bore = _hole_geometry(pad, fp)
+                    if bore is None:
+                        continue
+                    gap = fitted.distance(bore)
+                    if gap >= radius - 1e-6:
+                        continue
+                    # A plated pad may itself be either of the two verified anchors.
+                    arc = centreline.project(bore.centroid)
+                    if abs(
+                        pad.drill - anchor_drill_for_awg(leg.gauge)
+                    ) <= DRILL_TOLERANCE_MM and any(
+                        abs(arc - end) <= 1e-4 for end in leg.anchor_arc
+                    ):
+                        continue
+                    point = nearest_points(fitted, bore)[0]
+                    results.add(
+                        DRCViolation(
+                            rule_id=self.rule_id,
+                            severity="error",
+                            message=(
+                                f"Wire run overlaps component drill [run] on {leg.layer}: "
+                                f"{fp.reference}.{pad.number} on {leg.net!r} has {radius - gap:.4f} mm "
+                                f"interference (centreline to bore {gap:.4f} mm, wire radius {radius:.4f} mm)"
+                            ),
+                            location=(point.x, point.y),
+                            layer=leg.layer,
+                            actual_value=gap,
+                            required_value=radius,
+                            items=(leg.net, fp.reference, pad.number),
+                            nets=(leg.net,),
+                        )
+                    )
 
     # ------------------------------------------------------------- per net
 
