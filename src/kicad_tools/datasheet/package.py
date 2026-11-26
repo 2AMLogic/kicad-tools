@@ -261,13 +261,17 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
 
     # Pattern for pitch (e.g., "pitch: 0.5mm", "e = 0.5"). The number is
     # validated for a complete token below: a letter glued onto the number or
-    # its unit makes the candidate ambiguous and the search moves on.
+    # its unit makes the candidate ambiguous and the search moves on. A bare
+    # "P0.5mm" (no "=" / ":") needs its unit, so "P48" is never a pitch.
     pitch_prefix = re.compile(
         r"(?<![A-Za-z0-9])(?:(?i:pitch|p)\s*[=:]?|e\s*[=:])\s*(\d+(?:\.\d+)?)"
     )
     for pitch_match in pitch_prefix.finditer(text):
         unit = _pitch_token_unit(text[pitch_match.end() :])
         if unit is None:
+            continue
+        bare_p = re.fullmatch(r"(?i:p)\s*", text[pitch_match.start() : pitch_match.start(1)])
+        if bare_p and not unit:
             continue
         value = float(pitch_match.group(1))
         dimensions["PITCH"] = value * 0.0254 if unit in ("mil", "mils") else value
