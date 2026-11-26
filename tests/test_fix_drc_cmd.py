@@ -4295,7 +4295,6 @@ def test_mask_track_repair_refills_zones_before_grading_on_zoned_board(
     tmp_path, monkeypatch, capsys
 ):
     """A moved track on a zoned board is graded against refilled pours (#9939)."""
-    from collections import Counter
     from types import SimpleNamespace
 
     from kicad_tools.cli import fix_drc_cmd, runner
@@ -4333,7 +4332,10 @@ def test_mask_track_repair_refills_zones_before_grading_on_zoned_board(
 
     monkeypatch.setattr(runner, "run_refill_zones", refill)
     monkeypatch.setattr(fix_drc_cmd, "_verify_mask_actions", grade_saved)
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        "kicad_tools.drc.geometric.run_geometric_drc",
+        lambda *a, **kw: SimpleNamespace(ran=True, error_violations=[], unconnected_count=0),
+    )
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda path: [frozenset({"pad"})])
     _run(
         monkeypatch,
@@ -4344,3 +4346,68 @@ def test_mask_track_repair_refills_zones_before_grading_on_zoned_board(
     )
     assert json.loads(capsys.readouterr().out)["mask_copper"]["repaired"] == 1
     assert filled == [(98.5, 99.9)]
+
+
+@pytest.mark.parametrize("split_on_refill", [1, 2])
+def test_mask_bend_rolls_back_when_refill_trades_one_contact_for_another(
+    tmp_path, monkeypatch, capsys, split_on_refill
+):
+    from types import SimpleNamespace
+
+    from kicad_tools.cli import runner
+    from kicad_tools.sexp import parse_file
+    from tests.test_repair_mask_copper import (
+        ENTRY,
+        _board2,
+        _finding,
+        _own_finding,
+        _report,
+        _run,
+        _seg,
+    )
+
+    tracks = [_seg(f"tap-{x}", (x, 110), (x, 111)) for x in (95, 100, 105)]
+    zone = """(zone (net 1) (net_name "N1") (layer "F.Cu")
+        (polygon (pts (xy 94 109) (xy 106 109) (xy 106 112) (xy 94 112)))
+        (filled_polygon (layer "F.Cu")
+          (pts (xy 94 109) (xy 101 109) (xy 101 112) (xy 94 112))))"""
+    second = _seg("trk-2", (115, 100.3), (120.7, 100.3))
+    board = _board2(tmp_path, "\n".join([ENTRY, second, *tracks, zone]), "120 100")
+    other = _own_finding("trk-2", "pad-r2-1", "R2/1")
+    findings = [_finding("trk-a")]
+    if split_on_refill == 2:
+        findings.append(other)  # Its persisting finding forces a partial rollback.
+    refill_count = 0
+    original = board.read_bytes()
+
+    def refill(candidate, *, require_save):
+        nonlocal refill_count
+        assert require_save
+        refill_count += 1
+        if refill_count < split_on_refill:
+            return SimpleNamespace(success=True)
+        doc = parse_file(candidate)
+        points = doc.find("zone").find("filled_polygon").find("pts")
+        for xy in points.find_all("xy"):
+            xy.set_atom(0, xy.get_float(0) + 5)
+        candidate.write_text(doc.to_string())
+        return SimpleNamespace(success=True)
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(
+        "kicad_tools.drc.geometric.run_geometric_drc",
+        lambda *a, **kw: SimpleNamespace(
+            ran=True, error_violations=[], unconnected_count=2 if refill_count else 3
+        ),
+    )
+    _run(
+        monkeypatch,
+        board,
+        [_report(*findings), _report(other) if split_on_refill == 2 else _report()],
+        extra=("--format", "json", "--max-passes", "1"),
+    )
+    assert refill_count == split_on_refill
+    outcome = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert outcome["repaired"] == 0
+    assert outcome["unrepaired"][-1]["reason"] == "pad_connection_lost"
+    assert board.read_bytes() == original

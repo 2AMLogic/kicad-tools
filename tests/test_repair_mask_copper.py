@@ -3799,3 +3799,34 @@ def test_orthogonal_elbow_flip_uses_pairwise_netclass_clearance(
     repairer = MaskCopperRepairer(board)
     result = repairer.repair([_overlap_pass_through("hug")], **_ELBOW_OPTS)
     assert result.repaired == expected_repaired
+
+
+def test_disconnected_bends_matches_items_assigned_first_uuid_by_native_save(tmp_path):
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.runner import run_refill_zones
+    from kicad_tools.schema.pcb import PCB
+
+    fixture = Path(__file__).parent / "fixtures" / "mask_elbow_outside_pad.kicad_pcb"
+    source = fixture.read_text().rstrip()[:-1]
+    for uid in ("ad22088e-c1cf-5aaf-8d08-4a5294d93e8f", "e1dda6eb-ce7b-52c5-b8ff-623efb07a385"):
+        source = source.replace(f'(uuid "{uid}")', "")
+    board = tmp_path / fixture.name
+    board.write_text(
+        source
+        + """
+      (via (at 52.25 40.82) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+      (arc (start 52.25 40.82) (mid 53.25 41.82) (end 54.25 40.82)
+        (width 0.2) (layer "F.Cu") (net 1)))"""
+    )
+    before = MaskCopperRepairer(board)
+    refill = run_refill_zones(board, require_save=True)
+    assert refill.success, refill.stderr
+    saved = MaskCopperRepairer(board)
+    pcb = PCB(saved.doc)
+    assert all(p.uuid for fp in pcb.footprints for p in fp.pads)
+    assert all(item.uuid for item in [*pcb.segments, *pcb.arcs, *pcb.vias])
+    assert (
+        saved.disconnected_bends(before, [SimpleNamespace(net_name="Signal", bends=[True])])
+        == set()
+    )

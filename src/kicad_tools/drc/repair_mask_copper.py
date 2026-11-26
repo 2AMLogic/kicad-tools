@@ -551,6 +551,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         Matches authored copper items (pads, vias, segments and arcs) by UUID
         when present so a KiCad zone-refill save that reorders segments/vias
         and regenerates filled polygons does not trigger false disconnections.
+        Items without a baseline UUID must have a unique geometry match.
         """
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.validate.connectivity import ConnectivityValidator
@@ -562,24 +563,36 @@ class MaskCopperRepairer(CopperGapRepairer):
         old_board, new_board = PCB(before.doc), PCB(self.doc)
         old, new = ConnectivityValidator(old_board), ConnectivityValidator(new_board)
 
-        def _item_id(board: PCB, item: CopperItem) -> object | None:
+        def identities(board: PCB, item: CopperItem) -> tuple[str, tuple] | None:
             if item.kind == PAD:
                 fi, pi = item.key
                 fp = board.footprints[fi]
                 pad = fp.pads[pi]
-                return (PAD, _bare(pad.uuid) if pad.uuid else (fp.reference, pad.number, pi))
+                return _bare(pad.uuid), (
+                    PAD,
+                    fp.reference,
+                    pad.number,
+                    item.center,
+                    item.layers,
+                    pad.shape,
+                    pad.size,
+                    pad.rotation,
+                )
             if item.kind == VIA:
                 via = board.vias[item.key]
-                return (VIA, _bare(via.uuid) if via.uuid else item.key)
+                return _bare(via.uuid), (VIA, via.position, via.size, via.drill, item.layers)
             if item.kind == TRACK:
-                track_kind, idx = item.key
-                if track_kind == "segment":
-                    seg = board.segments[idx]
-                    return (TRACK, "segment", _bare(seg.uuid) if seg.uuid else idx)
-                if track_kind == "arc":
-                    arc = board.arcs[idx]
-                    return (TRACK, "arc", _bare(arc.uuid) if arc.uuid else idx)
-            return None
+                kind, idx = item.key
+                track = board.segments[idx] if kind == "segment" else board.arcs[idx]
+                return _bare(track.uuid), (
+                    kind,
+                    track.start,
+                    track.end,
+                    track.width,
+                    track.layer,
+                    track.mid if isinstance(track, Arc) else None,
+                )
+            return None  # Fill polygons participate in contact, but are regenerated.
 
         disconnected = set()
         for name in names:
@@ -589,17 +602,33 @@ class MaskCopperRepairer(CopperGapRepairer):
                 continue
             old_graph = old._contact_graph(old_net.number)
             new_graph = new._contact_graph(new_net.number)
-            membership = {
-                iid: group
-                for item, group in zip(new_graph.items, new_graph.component, strict=True)
-                if (iid := _item_id(new_board, item)) is not None
-            }
-            destinations: dict[int, int] = {}
-            for item, old_group in zip(old_graph.items, old_graph.component, strict=True):
-                iid = _item_id(old_board, item)
-                if iid is None:
+            baseline = [
+                (identity, group)
+                for item, group in zip(old_graph.items, old_graph.component, strict=True)
+                if (identity := identities(old_board, item)) is not None
+            ]
+            known_ids = {uid for (uid, _), _group in baseline if uid}
+            by_uuid: dict[tuple, list[int]] = {}
+            by_geometry: dict[tuple, list[int]] = {}
+            for item, group in zip(new_graph.items, new_graph.component, strict=True):
+                identity = identities(new_board, item)
+                if identity is None:
                     continue
-                new_group = membership.get(iid)
+                uid, geometry = identity
+                if uid in known_ids:
+                    by_uuid.setdefault((geometry[0], uid), []).append(group)
+                else:
+                    by_geometry.setdefault(geometry, []).append(group)
+
+            destinations: dict[int, int] = {}
+            for (uid, geometry), old_group in baseline:
+                if uid:
+                    matches = by_uuid.pop((geometry[0], uid), [])
+                else:
+                    # A native save can assign the first UUID. Require one
+                    # unclaimed match, independent of the saved item order.
+                    matches = by_geometry.pop(geometry, [])
+                new_group = matches[0] if len(matches) == 1 else None
                 if new_group is None or destinations.setdefault(old_group, new_group) != new_group:
                     disconnected.add(name)
                     break

@@ -1616,8 +1616,7 @@ def _run_mask_pass(
 
             # Refill zone pours before grading so moved tracks and via antipads
             # are checked against the copper that will actually be published (#9939).
-            refilled = has_zones
-            if refilled:
+            if has_zones:
                 refill_candidate()
             _verify_mask_actions(
                 result,
@@ -1626,16 +1625,20 @@ def _run_mask_pass(
                 pcb_path,
                 candidate,
                 pad_islands,
-                lost_contacts=repairer.disconnected_bends(before, result.actions),
+                lost_contacts=(
+                    MaskCopperRepairer(candidate).disconnected_bends(before, result.actions)
+                    if has_bends
+                    else set()
+                ),
             )
-            if has_bends and result.repaired < proposed:
+            if result.actions and has_zones and result.repaired < proposed:
+                refill_candidate()
+            if any(action.bends for action in result.actions) and result.repaired < proposed:
                 lost = MaskCopperRepairer(candidate).disconnected_bends(before, result.actions)
                 if lost:
                     raise _MaskPadConnectionLost(
                         f"saved repair disconnected copper on {', '.join(sorted(lost))}"
                     )
-            if result.actions and has_zones and (not refilled or result.repaired < proposed):
-                refill_candidate()
             if result.actions and before_native is not None:
                 errors, opens = _mask_native_state(candidate)
                 new_errors = (errors - before_native[0]).total()
