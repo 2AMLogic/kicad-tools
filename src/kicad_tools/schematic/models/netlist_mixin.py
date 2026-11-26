@@ -116,7 +116,9 @@ class SchematicNetlistMixin:
 
     power_symbols: list[PowerSymbol]
 
-    def _build_connectivity_graph(self) -> tuple[dict, dict, dict]:
+    def _build_connectivity_graph(
+        self, *, ranked_names_by_root: dict[tuple, list[tuple[int, str]]] | None = None
+    ) -> tuple[dict, dict, dict]:
         """Build a connectivity graph using Union-Find.
 
         Equal labels join separate wire branches on this sheet, including
@@ -125,7 +127,9 @@ class SchematicNetlistMixin:
         (global label, power symbol, local label, hierarchical label).  Every
         netlist API (:meth:`extract_netlist`, :meth:`get_net_for_pin`,
         :meth:`get_all_pin_nets`) therefore shares one net identity, including
-        for a rail that carries two names (issue #10240).
+        for a rail that carries two names (issue #10240). Hierarchical callers
+        can supply ranked_names_by_root to retain every alias and its priority
+        when joining components across sheet boundaries.
 
         Returns:
             Tuple of (parent dict, point_to_net_names dict, point_to_pins dict)
@@ -318,7 +322,10 @@ class SchematicNetlistMixin:
         # Keep one representative name per electrical component.
         point_to_net_names = {}
         for name in sorted(first_point, key=lambda name: (name_priority[name], name)):
-            point_to_net_names.setdefault(find(first_point[name]), [name])
+            root = find(first_point[name])
+            point_to_net_names.setdefault(root, [name])
+            if ranked_names_by_root is not None:
+                ranked_names_by_root.setdefault(root, []).append((name_priority[name], name))
 
         return parent, point_to_net_names, point_to_pins
 

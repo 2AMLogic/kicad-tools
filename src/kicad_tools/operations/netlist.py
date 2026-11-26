@@ -565,20 +565,29 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
     return entries
 
 
+@dataclass(frozen=True, order=True)
+class _NetIdentity:
+    """Rank and name select the display name. Scope distinguishes sheet-local aliases."""
+
+    priority: int
+    name: str
+    scope: str
+
+
 class _ParentNetAliases:
     """Equivalences between parent nets joined through child-sheet wiring."""
 
     def __init__(self) -> None:
-        self.parents: dict[str, str] = {}
+        self.parents: dict[_NetIdentity, _NetIdentity] = {}
 
-    def resolve(self, name: str) -> str:
+    def resolve(self, name: _NetIdentity) -> _NetIdentity:
         while name in self.parents:
             parent = self.parents[name]
             self.parents[name] = self.parents.get(parent, parent)
             name = self.parents[name]
         return name
 
-    def join(self, first: str, second: str) -> None:
+    def join(self, first: _NetIdentity, second: _NetIdentity) -> None:
         first, second = sorted((self.resolve(first), self.resolve(second)))
         if first != second:
             self.parents[second] = first
@@ -590,9 +599,32 @@ def _collect_hierarchy_components(
     visited: set[Path] | None = None,
     *,
     include_symbol_pins: bool = False,
-    parent_nets_by_port: dict[str, str] | None = None,
-    aliases: _ParentNetAliases | None = None,
 ) -> tuple[list[NetlistComponent], dict[str, list]]:
+    """Resolve names after collecting bindings from every sheet in the hierarchy."""
+    aliases = _ParentNetAliases()
+    components, nets = _collect_sheet_nets(
+        sch_path,
+        sheet_path,
+        visited,
+        include_symbol_pins=include_symbol_pins,
+        parent_nets_by_port={},
+        aliases=aliases,
+    )
+    merged: dict[str, list] = {}
+    for identity, pins in nets.items():
+        merged.setdefault(aliases.resolve(identity).name, []).extend(pins)
+    return components, merged
+
+
+def _collect_sheet_nets(
+    sch_path: Path,
+    sheet_path: str,
+    visited: set[Path] | None,
+    *,
+    include_symbol_pins: bool,
+    parent_nets_by_port: dict[str, _NetIdentity],
+    aliases: _ParentNetAliases,
+) -> tuple[list[NetlistComponent], dict[_NetIdentity, list]]:
     """Recursively collect components and nets from a schematic hierarchy.
 
     Loads the schematic at *sch_path*, collects its components and
@@ -618,15 +650,11 @@ def _collect_hierarchy_components(
     Returns:
         A ``(components, net_dict)`` tuple where *components* is a flat
         list of :class:`NetlistComponent` from all sheets and *net_dict*
-        maps net names to lists of :class:`PinRef`-like objects (each
+        maps net identities to lists of :class:`PinRef`-like objects (each
         with ``symbol_ref`` and ``pin`` attributes).
     """
     from kicad_tools.schematic.models import Schematic
     from kicad_tools.schematic.models.netlist_mixin import _component_root
-
-    root_call = aliases is None
-    if aliases is None:
-        aliases = _ParentNetAliases()
 
     if visited is None:
         visited = set()
@@ -672,7 +700,21 @@ def _collect_hierarchy_components(
             )
         )
 
-    connectivity, names_by_root, _ = sch._build_connectivity_graph()
+    ranked_names: dict[tuple, list[tuple[int, str]]] = {}
+    connectivity, names_by_root, _ = sch._build_connectivity_graph(
+        ranked_names_by_root=ranked_names
+    )
+    identities = {}
+    for candidates in ranked_names.values():
+        priority, winner = candidates[0]
+        identity = _NetIdentity(priority, winner, "" if priority <= 1 else sheet_path)
+        identities[winner] = identity
+        # Every global or power name is a connection across sheets, even if
+        # another label won the flat component's display name.
+        for rank, name in candidates:
+            if rank <= 1:
+                # Both power symbols and global labels share this namespace.
+                aliases.join(identity, _NetIdentity(1, name, ""))
 
     def net_at(pos: tuple[float, float]) -> str | None:
         root = _component_root(connectivity, (round(pos[0], 2), round(pos[1], 2)))
@@ -682,19 +724,25 @@ def _collect_hierarchy_components(
     # A local label can win the flat sheet's name even though the same wire
     # reaches a differently named hierarchical port. Bind the physical
     # component at the port, then carry its parent name through nested sheets.
-    parent_names: dict[str, str] = {}
+    parent_names: dict[str, _NetIdentity] = {}
     for label in sch.hier_labels:
-        if parent_nets_by_port and label.text in parent_nets_by_port:
+        if label.text in parent_nets_by_port:
             local_net = net_at((label.x, label.y))
             if local_net:
                 parent_name = parent_nets_by_port[label.text]
                 first_parent = parent_names.setdefault(local_net, parent_name)
                 aliases.join(first_parent, parent_name)
+                identity = identities[local_net]
+                if identity.priority <= 1:
+                    aliases.join(identity, parent_name)
 
-    net_dict: dict[str, list] = {}
+    net_dict: dict[_NetIdentity, list] = {}
     try:
         for name, pins in sch.extract_netlist(include_power_symbols=include_symbol_pins).items():
-            net_dict.setdefault(parent_names.get(name, name), []).extend(pins)
+            identity = (
+                parent_names.get(name) or identities.get(name) or _NetIdentity(4, name, sheet_path)
+            )
+            net_dict.setdefault(identity, []).extend(pins)
     except Exception:
         logger.warning("Failed to extract netlist from %s, skipping connectivity", sch_path)
 
@@ -703,8 +751,8 @@ def _collect_hierarchy_components(
         for pin_name, pin_pos in zip(entry.pin_names, entry.pin_positions, strict=False):
             parent_net = net_at(pin_pos)
             if parent_net:
-                child_bindings[pin_name] = parent_names.get(parent_net, parent_net)
-        sub_components, sub_nets = _collect_hierarchy_components(
+                child_bindings[pin_name] = parent_names.get(parent_net, identities[parent_net])
+        sub_components, sub_nets = _collect_sheet_nets(
             sch_path.parent / entry.filename,
             f"{sheet_path}{entry.filename}/",
             visited,
@@ -713,15 +761,8 @@ def _collect_hierarchy_components(
             aliases=aliases,
         )
         components.extend(sub_components)
-        for name, pins in sub_nets.items():
-            net_dict.setdefault(name, []).extend(pins)
-
-    if root_call:
-        # A later sheet can connect nets whose pins were already collected.
-        merged: dict[str, list] = {}
-        for name, pins in net_dict.items():
-            merged.setdefault(aliases.resolve(name), []).extend(pins)
-        return components, merged
+        for identity, pins in sub_nets.items():
+            net_dict.setdefault(identity, []).extend(pins)
 
     return components, net_dict
 
