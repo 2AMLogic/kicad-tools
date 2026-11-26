@@ -40,6 +40,7 @@ class _FakePCB:
     """Board with nets: /A(2), /B(2), /C(2), GND(3), /SOLO(1)."""
 
     def __init__(self) -> None:
+        self.arcs = []
         self.footprints = [
             _FP([_Pad("/A"), _Pad("/A")]),
             _FP([_Pad("/B"), _Pad("/B")]),
