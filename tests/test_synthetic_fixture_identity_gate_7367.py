@@ -501,15 +501,16 @@ def test_board06_measured_mask_population_passes_and_drains():
         "PCIE_TX-",
         "PCIE_RX+",
         "PCIE_RX-",
+        "USB3_RX1+",
+        "USB3_RX1-",
     ):
         regressed = found + [mask_violation(net)]
         assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", net)]
-    last_mask_net = BOARD06_MASK_NETS[-1]
-    drained = [
-        v for v in found if not (v["rule_id"] == "mask_to_copper" and v["nets"] == [last_mask_net])
-    ]
-    stale = gate.stale_allowances(BOARD06_KEY, identities_of(drained))
-    assert stale == [("mask_to_copper", last_mask_net, 8858)]
+    # Reinstall the retired RX1 identity on this isolated gate to exercise
+    # stale detection even after every real allowance has been removed.
+    retired = ("mask_to_copper", "USB3_RX1+")
+    gate.DIFFPAIR_ALLOWANCES[BOARD06_KEY][retired] = 8858
+    assert gate.stale_allowances(BOARD06_KEY, ids) == [(*retired, 8858)]
 
 
 def test_board06_unmodified_clock_exits_are_rejected():
