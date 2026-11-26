@@ -49,7 +49,9 @@
 #     container. Locally you need kicad-cli (KiCad 10) on PATH for full
 #     parity; jobs that strictly require it SKIP with a notice when it is
 #     absent.
-#   * Board jobs 03/04/06/07 stage freshly-routed artifacts over the
+#   * Board jobs 06/07 check the fresh fixture and its sidecars directly
+#     in the clean directory produced by the recipe.
+#   * Board jobs 03/04 stage freshly-routed artifacts over the
 #     committed boards/*/output/ paths (the DRC gates key allowlist/mfr
 #     overrides off the repo-relative path). CI runs in a throwaway
 #     checkout; locally each job script backs the committed files up first
