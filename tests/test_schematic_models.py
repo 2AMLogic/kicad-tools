@@ -2233,6 +2233,40 @@ class TestSchematicAutoLayout:
 class TestSchematicValidationAdvanced:
     """Advanced tests for Schematic validation."""
 
+    def test_native_bom_reference_suffix(self):
+        sch = Schematic(title="Assembly references", snap_mode=SnapMode.OFF)
+        part = SymbolDef(lib_id="Device:R", name="R", raw_sexp="", pins=[])
+        for index, (ref, unit, listed) in enumerate(
+            [
+                ("Q1A", 1, True),
+                ("R2", 1, True),
+                ("D_TVS2", 1, True),
+                ("U3", 1, True),
+                ("U3", 2, True),
+                ("J4A", 1, False),
+                ("#PWR5A", 1, True),
+            ]
+        ):
+            sch.symbols.append(
+                SymbolInstance(
+                    symbol_def=part,
+                    x=10.16 * index,
+                    y=0,
+                    rotation=0,
+                    reference=ref,
+                    value="test",
+                    unit=unit,
+                    in_bom=listed,
+                )
+            )
+
+        findings = [i for i in sch.validate(fix_auto=True) if i["type"] == "native_bom_reference"]
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "warning"
+        assert "'Q1A?'" in findings[0]["message"]
+        assert not findings[0]["fix_applied"]
+        assert sch.symbols[0].reference == "Q1A"
+
     def test_validate_duplicate_references(self):
         """Validate detects duplicate references."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)

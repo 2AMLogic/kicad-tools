@@ -6,6 +6,7 @@ Provides validation and statistics functionality.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -80,6 +81,24 @@ class SchematicValidationMixin:
             refs.setdefault(sym.reference, []).append(sym)
 
         for ref, instances in refs.items():
+            # Native BOM export interprets an authored numeric reference followed
+            # by letters as an unannotated prefix. Real multi-unit lettering lives
+            # in the unit field and leaves the common reference unchanged.
+            if not ref.startswith("#") and re.search(r"[0-9][A-Za-z]+\Z", ref):
+                listed = next((sym for sym in instances if sym.in_bom), None)
+                if listed is not None:
+                    issues.append(
+                        {
+                            "severity": "warning",
+                            "type": "native_bom_reference",
+                            "message": (
+                                f"KiCad's native BOM exports '{ref}' as '{ref}?'. "
+                                "Use a reference ending in a number to match placement data."
+                            ),
+                            "location": (listed.x, listed.y),
+                            "fix_applied": False,
+                        }
+                    )
             if len(instances) < 2:
                 continue
             seen_units: dict[tuple[str, int], object] = {}
