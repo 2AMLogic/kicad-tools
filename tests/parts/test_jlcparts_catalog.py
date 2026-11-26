@@ -217,6 +217,39 @@ def test_catalog_lookup_normalizes_and_missing(catalog_db: Path):
     assert catalog.lookup("C999999") is None
 
 
+def test_catalog_lookup_with_status_separates_unusable_from_miss(tmp_path: Path, catalog_db):
+    """Issue #10386: a search that found nothing is not a catalog it could not read.
+
+    ``lookup`` answers ``None`` for all four of these, so evidence built on it
+    could not tell a host with no catalog from a catalog lacking the part.
+    """
+    garbage = tmp_path / "not-a-database.sqlite3"
+    garbage.write_bytes(b"SQLite format 3\x00truncated" * 8)
+    other_schema = sqlite3.connect(tmp_path / "other-schema.sqlite3")
+    other_schema.execute("CREATE TABLE something_else (x)")
+    other_schema.close()
+    empty = _builder.build_fixture(tmp_path / "no-rows.sqlite3", rows=[])
+
+    catalog = JlcpartsCatalog(catalog_db)
+    hit = catalog.lookup_with_status("c25804")
+    assert (hit.status, hit.part.lcsc_part) == ("hit", "C25804")
+    # ``lookup`` stays the part-only view of the same search.
+    assert catalog.lookup("c25804").mfr_part == hit.part.mfr_part
+    assert (catalog.lookup_with_status("C999999").status, catalog.lookup("C999999")) == (
+        "miss",
+        None,
+    )
+
+    for path, status in (
+        (tmp_path / "absent.sqlite3", "missing"),
+        (garbage, "unreadable"),
+        (tmp_path / "other-schema.sqlite3", "unreadable"),
+        (empty, "miss"),
+    ):
+        result = JlcpartsCatalog(path).lookup_with_status("C25804")
+        assert (result.status, result.part) == (status, None), path
+
+
 def test_catalog_library_type_mapping(catalog_db: Path):
     catalog = JlcpartsCatalog(catalog_db)
     preferred = catalog.lookup("C100")

@@ -40,21 +40,16 @@ if TYPE_CHECKING:
 
 
 def _hole_geometry(pad: Pad, footprint: Footprint):
-    """Actual round/slotted drill including its offset and absolute pad angle."""
+    """Round/slotted drill at the pad anchor. KiCad offsets move the copper land."""
     from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
     from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
     from .clearance import _transform_pad_position
 
     width = height = pad.drill
-    offset_x = offset_y = 0.0
     node = pad._sexp_node.find("drill") if pad._sexp_node is not None else None
-    if node is not None:
-        if node.get_string(0) == "oval":
-            width, height = node.get_float(1) or 0, node.get_float(2) or 0
-        offset = node.find("offset")
-        if offset is not None:
-            offset_x, offset_y = offset.get_float(0) or 0, offset.get_float(1) or 0
+    if node is not None and node.get_string(0) == "oval":
+        width, height = node.get_float(1) or 0, node.get_float(2) or 0
     if width <= 0 or height <= 0:
         return None
     radius = min(width, height) / 2
@@ -63,7 +58,7 @@ def _hole_geometry(pad: Pad, footprint: Footprint):
         ((-half_line, 0), (half_line, 0)) if width >= height else ((0, -half_line), (0, half_line))
     )
     geom = (LineString(ends) if half_line else Point(0, 0)).buffer(radius, quad_segs=64)
-    geom = rotate(translate(geom, offset_x, offset_y), -pad.rotation, origin=(0, 0))
+    geom = rotate(geom, -pad.rotation, origin=(0, 0))
     return translate(geom, *_transform_pad_position(pad, footprint))
 
 

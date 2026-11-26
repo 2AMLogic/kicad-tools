@@ -168,7 +168,11 @@ Such a receipt keys `inputs` against the declaring project instead of the
 board directory and records the explicit bases in `project_root` (the board
 directory's relative location within the project) and `output_root` (the
 declared root, project-relative); sibling dependencies are hashed directly in
-`inputs` instead of `external_inputs`. Without a declaration the board-local
+`inputs` instead of `external_inputs`.
+The `schematic_root` field identifies the selected root sheet by its
+project-relative path. A ready receipt covers that sheet and every referenced
+child. Readers accept an older declared-layout receipt when its sheet hashes
+identify one complete hierarchy. Without a declaration the board-local
 destinations and the `--output` containment refusals are unchanged, and a
 user-wide config never authorizes a sibling.
 

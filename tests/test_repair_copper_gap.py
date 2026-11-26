@@ -797,3 +797,573 @@ def test_real_rule_dragged_track_short_is_declined_not_written(tmp_path, capsys)
     after = _real_report(board)
     assert not _clearance_errors(after)
     assert len(_same_net_gap_errors(after)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Same-net trace shelf at a routed branch (issue #10367)
+# ---------------------------------------------------------------------------
+#
+# The reporter's four-segment board, placed clear of the fixture's pads: a
+# 0.375 mm trunk leaving (90, 108), and a three-segment branch (diagonal,
+# 0.4 mm horizontal "shelf", diagonal) that ends 0.25 mm wide at (91.4, 107).
+# The 0.4 mm shelf sits 0.0336 mm from the trunk.
+
+TRUNK_END = (99.887, 108)
+B_NODE_1 = (90.4086, 107.5914)
+B_NODE_2 = (90.8086, 107.5914)
+FAR_END = (91.4, 107)
+SHELF_SEGS = [
+    _seg("sh-trunk", (90, 108), TRUNK_END, width=0.375),
+    _seg("sh-b1", (90, 108), B_NODE_1, width=0.375),
+    _seg("sh-b2", B_NODE_1, B_NODE_2, width=0.375),
+    _seg("sh-b3", B_NODE_2, FAR_END, width=0.25),
+]
+SHELF = "\n".join(SHELF_SEGS)
+TRUNK_REF = "Trace@F.Cu:w0.375:90/108~99.887/108"
+SHELF_REF = "Trace@F.Cu:w0.375:90.409/107.591~90.809/107.591"
+
+
+def _shelf_finding(**kwargs) -> DRCViolation:
+    kwargs.setdefault("required", 0.127)
+    kwargs.setdefault("actual", 0.0336)
+    return _finding([SHELF_REF, TRUNK_REF], **kwargs)
+
+
+def _segments(path: Path) -> list[tuple]:
+    """``(start, end, width, layer, net, uuid)`` of every segment, file order."""
+    out = []
+    for node in parse_file(path).find_all("segment"):
+        start, end = node.find("start").get_atoms(), node.find("end").get_atoms()
+        out.append(
+            (
+                (float(start[0]), float(start[1])),
+                (float(end[0]), float(end[1])),
+                float(node.find("width").get_first_atom()),
+                str(node.find("layer").get_first_atom()).strip('"'),
+                int(node.find("net").get_first_atom()),
+                str(node.find("uuid").get_first_atom()).strip('"'),
+            )
+        )
+    return out
+
+
+def _geometry(path: Path) -> list[tuple]:
+    """Segments without their uuids, order-insensitive."""
+    return sorted((tuple(sorted((s[0], s[1]))), s[2], s[3], s[4]) for s in _segments(path))
+
+
+def _jlcpcb_rules():
+    from kicad_tools.manufacturers import get_profile
+
+    return get_profile("jlcpcb").get_design_rules(2)
+
+
+@pytest.mark.parametrize("with_rules", [False, True])
+def test_shelf_at_a_branch_is_rewritten_to_the_shortcut(tmp_path, with_rules):
+    board = _board(tmp_path, SHELF)
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps(
+        [_shelf_finding()], design_rules=_jlcpcb_rules() if with_rules else None
+    )
+    assert result.repaired == 1 and result.rewritten_shelves == 1 and not result.unrepaired
+    (action,) = result.actions
+    assert action.action == "rewrite_shelf"
+    # Both end nodes are the preserved ones; the shelf is the finding's segment.
+    assert (action.via_x, action.via_y) == (90.0, 108.0)
+    assert (action.new_x, action.new_y) == FAR_END
+    assert action.shelf.shelf == (B_NODE_1, B_NODE_2)
+    repairer.save(board)
+
+    segments = _segments(board)
+    assert len(segments) == 3
+    # The trunk is untouched, byte for byte.
+    assert ((90.0, 108.0), TRUNK_END, 0.375, "F.Cu", 1, "sh-trunk") in segments
+    new = sorted(s for s in segments if s[5] != "sh-trunk")
+    # 45-degree leg at the first width, then the H/V leg at the last width;
+    # the far end keeps its exact coordinates.
+    assert [(s[0], s[1], s[2]) for s in new] == [
+        ((90.0, 108.0), (91.0, 107.0), 0.375),
+        ((91.0, 107.0), FAR_END, 0.25),
+    ] or [(s[0], s[1], s[2]) for s in new] == [
+        ((91.0, 107.0), FAR_END, 0.25),
+        ((90.0, 108.0), (91.0, 107.0), 0.375),
+    ]
+    assert all(s[3] == "F.Cu" and s[4] == 1 for s in new)
+    assert len({s[5] for s in segments}) == 3  # fresh, unique uuids
+
+
+def test_real_rule_shelf_is_found_then_repaired(tmp_path, capsys):
+    board = _board(tmp_path, SHELF)
+    make_assembly_ready(board)
+
+    before = _real_report(board)
+    (finding,) = _same_net_gap_errors(before)
+    assert set(finding.items) == {SHELF_REF, TRUNK_REF}
+    assert finding.actual_value_mm == pytest.approx(0.0336, abs=0.0005)
+    assert not _clearance_errors(before)
+
+    fix_drc_cmd.main([str(board), "--only", "copper-gap", "--no-connectivity-check"])
+    out = capsys.readouterr().out
+    assert "kct-check: 0 targeted error(s)" in out
+    assert "COPPER GAP (same-net): 1/1" in out
+    assert "[REWRITE_SHELF]" in out
+
+    after = _real_report(board)
+    assert _same_net_gap_errors(after) == []
+    assert not _clearance_errors(after)
+    geometry = _geometry(board)
+    assert (((90.0, 108.0), TRUNK_END), 0.375, "F.Cu", 1) in geometry
+    assert (((90.0, 108.0), (91.0, 107.0)), 0.375, "F.Cu", 1) in geometry
+    assert (((91.0, 107.0), FAR_END), 0.25, "F.Cu", 1) in geometry
+    assert len(geometry) == 3
+
+
+def test_shelf_dry_run_names_the_shelf_and_both_ends_without_writing(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, SHELF)
+    before = board.read_text()
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps([_shelf_finding()], dry_run=True)
+    assert result.repaired == 1 and not repairer.modified
+    assert board.read_text() == before
+    (action,) = result.actions
+    for fragment in ("90.4086, 107.5914", "90.8086, 107.5914", "90.0000, 108.0000", "91.4000"):
+        assert fragment in action.detail
+    assert len(action.shelf.removed) == 3 and len(action.shelf.added) == 2
+
+    _run(monkeypatch, board, [_report(_shelf_finding())], extra=("--dry-run",))
+    assert board.read_text() == before
+    assert "[REWRITE_SHELF]" in capsys.readouterr().out
+
+
+def test_shelf_rewrite_undoes_in_place_and_in_a_fresh_document(tmp_path):
+    board = _board(tmp_path, SHELF)
+    original = _segments(board)
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps([_shelf_finding()])
+    (action,) = result.actions
+    # In place: the three originals (uuids included) come back.
+    assert repairer.undo_move(action)
+    repairer.save(board)
+    assert sorted(_segments(board)) == sorted(original)
+
+    # From the saved file, as the fix-drc per-action rollback does.
+    again = CopperGapRepairer(board)
+    redo = again.repair_gaps([_shelf_finding()])
+    again.save(board)
+    assert _geometry(board) != _geometry_of(original)
+    fresh = CopperGapRepairer(board)
+    assert fresh.undo_move(redo.actions[0])
+    fresh.save(board)
+    assert sorted(_segments(board)) == sorted(original)
+
+
+def _geometry_of(segments: list[tuple]) -> list[tuple]:
+    return sorted((tuple(sorted((s[0], s[1]))), s[2], s[3], s[4]) for s in segments)
+
+
+def test_shelf_undo_declines_when_a_replacement_segment_is_gone(tmp_path):
+    board = _board(tmp_path, SHELF)
+    repairer = CopperGapRepairer(board)
+    (action,) = repairer.repair_gaps([_shelf_finding()]).actions
+    repairer.save(board)
+    other = CopperGapRepairer(board)
+    victim = other._segment_by_uuid(action.shelf.added[0][0])
+    other.doc.remove(victim)
+    assert not other.undo_move(action)
+
+
+def test_second_finding_on_a_rewritten_chain_is_not_rewritten_twice(tmp_path):
+    board = _board(tmp_path, SHELF)
+    finding = _shelf_finding()
+    dry = CopperGapRepairer(board).repair_gaps([finding, finding], dry_run=True)
+    assert dry.repaired == 1 and dry.skipped("shelf_already_rewritten") == 1
+    live = CopperGapRepairer(board).repair_gaps([finding, finding])
+    assert live.repaired == 1 and len(live.unrepaired) == 1
+
+
+_PAD_AT_NODE = (
+    '  (footprint "test:R9" (layer "F.Cu") (at 90.4086 107.5914)\n'
+    '    (property "Reference" "R9" (at 0 -1.5 0) (layer "F.SilkS")\n'
+    "      (effects (font (size 1 1) (thickness 0.15))))\n"
+    '    (property "Value" "R" (at 0 1.5 0) (layer "F.Fab")\n'
+    "      (effects (font (size 1 1) (thickness 0.15))))\n"
+    '    (pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu" "F.Paste" "F.Mask") '
+    '(net 2 "N2") (uuid "pad-r9-1"))\n'
+    "  )"
+)
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        # a pad (any net) under an interior node
+        (_PAD_AT_NODE, "protected_pad"),
+        # a via under an interior node
+        (
+            '  (via (at 90.8086 107.5914) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(net 1) (uuid "via-i"))',
+            "protected_via",
+        ),
+        # a same-net track on the other layer ends at an interior node
+        (_seg("lc", B_NODE_2, (95, 105), layer="B.Cu"), "protected_layer_change"),
+        # a tap whose end meets an interior node (a T-junction)
+        (_seg("tap", B_NODE_1, (90.4086, 105)), "protected_tap"),
+        # a same-net track crossing an interior node
+        (_seg("tapx", (90.4086, 105), (90.4086, 110)), "protected_tap"),
+    ],
+)
+def test_protected_interior_node_declines_the_rewrite(tmp_path, extra, reason):
+    board = _board(tmp_path, SHELF + "\n" + extra)
+    before = board.read_text()
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps([_shelf_finding()])
+    assert result.repaired == 0
+    assert result.skipped(reason) == 1, result.unrepaired
+    assert not repairer.modified
+    assert board.read_text() == before
+
+
+def test_reinforcement_endpoint_on_an_interior_node_protects_the_chain(tmp_path):
+    import json
+
+    board = _board(tmp_path, SHELF)
+    sidecar = board.with_name(board.name + ".reinforcement.json")
+    wire = {
+        "net": "N1",
+        "layer": "F.Cu",
+        "leg_start": {"x": B_NODE_2[0], "y": B_NODE_2[1]},
+        "leg_end": {"x": 95.0, "y": 100.0},
+        "anchors": [{"x": B_NODE_2[0], "y": B_NODE_2[1]}],
+    }
+    sidecar.write_text(json.dumps({"version": 1, "wires": [wire]}))
+    before = board.read_text()
+    result = CopperGapRepairer(board).repair_gaps([_shelf_finding()])
+    assert result.repaired == 0 and result.skipped("protected_reinforcement") == 1
+    assert board.read_text() == before
+
+    # Another net's wire at the same place does not protect this net.
+    wire["net"] = "N2"
+    sidecar.write_text(json.dumps({"version": 1, "wires": [wire]}))
+    assert CopperGapRepairer(board).repair_gaps([_shelf_finding()]).repaired == 1
+
+    # A repair pass that loads a copy still finds the input board's sidecar.
+    wire["net"] = "N1"
+    sidecar.write_text(json.dumps({"version": 1, "wires": [wire]}))
+    copy = tmp_path / "copy.kicad_pcb"
+    copy.write_text(board.read_text())
+    declined = CopperGapRepairer(copy, project_pcb_path=board).repair_gaps([_shelf_finding()])
+    assert declined.skipped("protected_reinforcement") == 1
+
+
+def test_shelf_rewrite_that_crowds_foreign_copper_is_declined(tmp_path):
+    # A 0.2 mm N2 track 0.199 mm from the original branch but 0.013 mm from
+    # the shortcut: the rewrite would trade one finding for a worse one.
+    foreign = _seg("n2", (90.9, 106.7), (91.1, 106.7), net=2, width=0.2)
+    board = _board(tmp_path, SHELF + "\n" + foreign)
+    before = board.read_text()
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps([_shelf_finding()], design_rules=_jlcpcb_rules())
+    assert result.repaired == 0 and result.skipped("would_violate_clearance") == 1
+    assert not repairer.modified and board.read_text() == before
+    # The same refusal without profile rules: the finding's own edge applies.
+    again = CopperGapRepairer(board).repair_gaps([_shelf_finding()])
+    assert again.skipped("would_violate_clearance") == 1
+
+
+def test_shelf_rewrite_that_leaves_a_new_same_net_slit_is_declined(tmp_path):
+    # Same geometry, same net: no clearance rule applies, but the shortcut
+    # would leave a 0.013 mm slit to that copper -- a new physical gap finding.
+    spur = _seg("spur", (90.9, 106.7), (91.1, 106.7), width=0.2)
+    board = _board(tmp_path, SHELF + "\n" + spur)
+    before = board.read_text()
+    result = CopperGapRepairer(board).repair_gaps([_shelf_finding()])
+    assert result.repaired == 0 and result.skipped("gap_not_cleared") == 1
+    assert board.read_text() == before
+
+
+@pytest.mark.parametrize(
+    ("flag", "locked"), [("(locked yes)", True), ("locked", True), ("(locked no)", False)]
+)
+@pytest.mark.parametrize("victim", [1, 2, 3])
+def test_shelf_rewrite_respects_locked_segments(tmp_path, flag, locked, victim):
+    segs = list(SHELF_SEGS)
+    segs[victim] = segs[victim].replace("(segment ", f"(segment {flag} ")
+    board = _board(tmp_path, "\n".join(segs))
+    result = CopperGapRepairer(board).repair_gaps([_shelf_finding()])
+    assert result.repaired == int(not locked)
+    assert result.skipped("locked_segment") == int(locked)
+
+
+def test_shelf_rewrite_respects_a_locked_group(tmp_path):
+    groups = '(group "fab" (uuid "g") (locked yes) (members "sh-b3"))'
+    board = _board(tmp_path, SHELF + "\n" + groups)
+    before = board.read_bytes()
+    result = CopperGapRepairer(board).repair_gaps([_shelf_finding()])
+    assert result.repaired == 0 and result.skipped("locked_segment") == 1
+    assert board.read_bytes() == before
+
+
+def test_a_locked_trunk_is_not_a_reason_to_decline(tmp_path):
+    # The trunk is preserved byte for byte, so locking it blocks nothing.
+    segs = list(SHELF_SEGS)
+    segs[0] = segs[0].replace("(segment ", "(segment (locked yes) ")
+    board = _board(tmp_path, "\n".join(segs))
+    assert CopperGapRepairer(board).repair_gaps([_shelf_finding()]).repaired == 1
+
+
+def test_shelf_chain_with_a_single_width_keeps_it_on_both_legs(tmp_path):
+    segs = [s.replace("(width 0.25)", "(width 0.375)") for s in SHELF_SEGS]
+    board = _board(tmp_path, "\n".join(segs))
+    repairer = CopperGapRepairer(board)
+    assert repairer.repair_gaps([_shelf_finding()]).repaired == 1
+    repairer.save(board)
+    widths = {s[2] for s in _segments(board)}
+    assert widths == {0.375}
+
+
+def test_shelf_chain_with_a_straight_shortcut_becomes_one_segment(tmp_path):
+    # Ends 1 mm apart on a 45-degree line: one straight leg replaces three.
+    chain = [
+        _seg("st-trunk", (90, 108), TRUNK_END, width=0.375),
+        _seg("st-b1", (90, 108), (90.5, 107.9), width=0.375),
+        _seg("st-b2", (90.5, 107.9), (90.7, 107.5), width=0.375),
+        _seg("st-b3", (90.7, 107.5), (91, 107), width=0.375),
+    ]
+    board = _board(tmp_path, "\n".join(chain))
+    repairer = CopperGapRepairer(board)
+    finding = _finding(
+        ["Trace@F.Cu:w0.375:90.5/107.9~90.7/107.5", TRUNK_REF], required=0.127, actual=0.05
+    )
+    result = repairer.repair_gaps([finding])
+    assert result.repaired == 1, result.unrepaired
+    repairer.save(board)
+    assert ((90.0, 108.0), (91.0, 107.0), 0.375) in [(s[0], s[1], s[2]) for s in _segments(board)]
+    assert len(_segments(board)) == 2
+
+
+def test_straight_shortcut_keeps_a_width_step_at_the_projected_node():
+    pts = [(0.0, 0.0), (0.4, -0.1), (0.8, -0.5), (1.0, -1.0)]
+    (legs,) = CopperGapRepairer._shelf_candidates(pts, 0.375, 0.25, (0.8, -0.5))
+    assert [w for _a, _b, w in legs] == [0.375, 0.25]
+    assert legs[0][0] == (0.0, 0.0) and legs[-1][1] == (1.0, -1.0)
+    assert legs[0][1] == legs[1][0]
+    assert legs[0][1] == pytest.approx((0.65, -0.65), abs=1e-4)
+
+
+def test_taper_with_two_width_steps_is_declined(tmp_path):
+    segs = list(SHELF_SEGS)
+    segs[3] = segs[3].replace("(width 0.25)", "(width 0.2)")
+    segs[2] = segs[2].replace("(width 0.375)", "(width 0.3)")
+    board = _board(tmp_path, "\n".join(segs))
+    result = CopperGapRepairer(board).repair_gaps(
+        [_finding([SHELF_REF.replace("w0.375", "w0.3"), TRUNK_REF], required=0.127)]
+    )
+    assert result.repaired == 0 and result.skipped("width_profile_unsupported") == 1
+
+
+def test_a_single_segment_branch_has_nothing_to_simplify(tmp_path):
+    copper = "\n".join(
+        [
+            _seg("one-trunk", (90, 108), TRUNK_END, width=0.375),
+            _seg("one-branch", (90, 108), (90.4, 107.6), width=0.375),
+        ]
+    )
+    board = _board(tmp_path, copper)
+    result = CopperGapRepairer(board).repair_gaps(
+        [_finding(["Trace@F.Cu:w0.375:90/108~90.4/107.6", TRUNK_REF], required=0.127)]
+    )
+    assert result.repaired == 0 and result.skipped("no_simplification") == 1
+
+
+def test_a_chain_longer_than_one_branch_is_declined(tmp_path):
+    # Ten 0.2 mm staircase steps off the trunk: that is a re-route, not a shelf.
+    points = [(90.0, 108.0)]
+    for i in range(10):
+        x, y = points[-1]
+        points.append((x + 0.2, y) if i % 2 else (x, y - 0.2))
+    segs = [_seg("lg-trunk", (90, 108), TRUNK_END, width=0.375)]
+    segs += [
+        _seg(f"lg-{i}", a, b, width=0.375)
+        for i, (a, b) in enumerate(zip(points, points[1:], strict=False))
+    ]
+    board = _board(tmp_path, "\n".join(segs))
+    (ax, ay), (bx, by) = points[3], points[4]
+    shelf = f"Trace@F.Cu:w0.375:{ax:g}/{ay:g}~{bx:g}/{by:g}"
+    result = CopperGapRepairer(board).repair_gaps([_finding([shelf, TRUNK_REF], required=0.127)])
+    assert result.repaired == 0 and result.skipped("chain_too_long") == 1
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        # two tracks on different layers
+        [SHELF_REF, "Trace@B.Cu:w0.375:90/108~99.887/108"],
+        # two segments with no branch between them
+        [TRUNK_REF, "Trace@F.Cu:w0.375:90/110~95/110"],
+        # a pair of equal length: neither is the shelf
+        [TRUNK_REF, "Trace@F.Cu:w0.375:90/112~99.887/112"],
+    ],
+)
+def test_track_pairs_that_are_not_a_branch_shelf_stay_unsupported(tmp_path, items):
+    extra = _seg("far", (90, 110), (95, 110), width=0.375) + "\n"
+    extra += _seg("twin", (90, 112), TRUNK_END[:1] + (112,), width=0.375)
+    board = _board(tmp_path, SHELF + "\n" + extra)
+    before = board.read_text()
+    result = CopperGapRepairer(board).repair_gaps([_finding(items, required=0.127)])
+    assert result.repaired == 0
+    assert result.skipped("unsupported_pair") == 1, result.unrepaired
+    assert board.read_text() == before
+
+
+def test_fix_drc_json_reports_the_shelf_rewrite(tmp_path, monkeypatch, capsys):
+    import json
+
+    board = _board(tmp_path, SHELF)
+    code = _run(
+        monkeypatch,
+        board,
+        [_report(_shelf_finding()), _report()],
+        extra=("--format", "json"),
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert data["copper_gap"]["rewritten_shelves"] == 1
+    (action,) = data["copper_gap"]["actions"]
+    assert action["action"] == "rewrite_shelf"
+    assert action["shelf"]["trunk_node"] == [90.0, 108.0]
+    assert action["shelf"]["far_node"] == list(FAR_END)
+    assert action["shelf"]["removed_segments"] == 3
+    assert len(action["shelf"]["added_segments"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        (_seg("tap", (92, 107.5914), (92, 107.4), width=0.12), "protected_tap"),
+        (
+            '(via (at 92 107.5914) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu") (net 1) (uuid "v"))',
+            "protected_via",
+        ),
+        (
+            "\n".join(_seg(str(y), (91.6, y), (92.25, y), width=0.12) for y in (107.52, 107.68)),
+            "protected_tap",
+        ),
+        # Foreign tracks isolate the newly exposed slit from same-net contact protection.
+        (
+            "\n".join(
+                _seg(str(y), (91.6, y), (92.25, y), net=2, width=0.12) for y in (107.52, 107.68)
+            ),
+            "gap_not_cleared",
+        ),
+    ],
+)
+def test_extended_shelf_preserves_contacts_and_covered_gaps(tmp_path, extra, reason):
+    board = _board(
+        tmp_path, SHELF.replace("90.8086", "92.8086").replace("91.4 ", "93.4 ") + "\n" + extra
+    )
+    finding = _finding([SHELF_REF.replace("90.809", "92.809"), TRUNK_REF], required=0.127)
+    repairer = CopperGapRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair_gaps([finding])
+    assert result.skipped(reason) == 1, result.unrepaired
+    assert repairer.doc.to_string() == before
+
+
+@pytest.mark.parametrize(
+    ("owner", "reason"), [("generated", "generator_owned"), ("group", "group_member")]
+)
+def test_shelf_rewrite_preserves_member_ids(tmp_path, owner, reason):
+    board = _board(
+        tmp_path, SHELF + f'\n({owner} "tuning" (uuid "g") (members "sh-b1" "sh-b2" "sh-b3"))'
+    )
+    repairer = CopperGapRepairer(board)
+    before = repairer.doc.to_string()
+    assert repairer.repair_gaps([_shelf_finding()]).skipped(reason) == 1
+    assert repairer.doc.to_string() == before
+
+
+def test_saved_legacy_shelf_undo(tmp_path):
+    board = _board(tmp_path, SHELF.replace("(uuid", "(tstamp"))
+    repairer = CopperGapRepairer(board)
+    original = [n.to_string() for n in repairer.doc.find_children("segment")]
+    (action,) = repairer.repair_gaps([_shelf_finding()]).actions
+    repairer.save(board)
+    fresh = CopperGapRepairer(board)
+    assert fresh.undo_move(action)
+    assert [n.to_string() for n in fresh.doc.find_children("segment")] == original
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("end", 94), ("start", 91.5), ("width", 0.2), ("layer", "B.Cu"), ("net", 2)],
+)
+def test_shelf_undo_preserves_later_edits(tmp_path, field, value):
+    board = _board(tmp_path, SHELF)
+    repairer = CopperGapRepairer(board)
+    (action,) = repairer.repair_gaps([_shelf_finding()]).actions
+    repairer.save(board)
+    fresh = CopperGapRepairer(board)
+    replacement = fresh._segment_by_uuid(action.shelf.added[-1][0])
+    replacement.find_child(field).set_value(0, value)
+    edited = fresh.doc.to_string()
+    assert not fresh.undo_move(action)
+    assert fresh.doc.to_string() == edited
+
+
+def test_unrelated_preexisting_slit_in_shelf_window_is_allowed(tmp_path):
+    extra = "\n".join(_seg(str(y), (91.15, y), (91.45, y), width=0.1) for y in (107.53, 107.69))
+    board = _board(tmp_path, SHELF + "\n" + extra)
+    before = _same_net_gap_errors(_real_report(board))
+    assert any(gap.actual_value_mm == pytest.approx(0.06) for gap in before)
+    result = CopperGapRepairer(board).repair_gaps([_shelf_finding()])
+    assert result.repaired == 1, result.unrepaired
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        (
+            '(footprint "T" (layer "F.Cu") (at 92 107) (pad "1" smd rect (at 0 0) (size 0.4 0.2) (layers "F.Cu")))',
+            "would_violate_clearance",
+        ),
+        (
+            '(footprint "T" (layer "F.Cu") (at 92 107) (pad "" np_thru_hole circle (at 0 0) (size 0.3 0.3) (drill 0.3) (layers "*.Cu")))',
+            "hole_clearance",
+        ),
+        (
+            '(zone (net 0) (layer "F.Cu") (keepout (tracks not_allowed)) (polygon (pts (xy 91.9 106.9) (xy 92.1 106.9) (xy 92.1 107.1) (xy 91.9 107.1))))',
+            "track_keepout",
+        ),
+        (
+            '(footprint "T" (layer "F.Cu") (at 92 106.635) (pad "1" smd rect (at 0 0) (size 0.4 0.2) (layers "F.Cu") (net 1 "N1")))',
+            "gap_not_cleared",
+        ),
+        (_seg("foreign", (91.7, 106.575), (92.25, 106.575), net=2), "would_violate_clearance"),
+    ],
+    ids=["unassigned-pad", "npth-drill", "track-keepout", "pad-gap", "netclass"],
+)
+def test_cli_rejects_unsafe_shelf(tmp_path, capsys, extra, reason):
+    import json
+
+    board = _board(
+        tmp_path, SHELF.replace("90.8086", "92.8086").replace("91.4 ", "93.4 ") + "\n" + extra
+    )
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "net_settings": {
+                    "classes": [
+                        {"name": "Default", "clearance": 0.1},
+                        {"name": "HV", "clearance": 0.5},
+                    ],
+                    "netclass_patterns": [{"netclass": "HV", "pattern": "N2"}],
+                }
+            }
+        )
+    )
+    make_assembly_ready(board)
+    before = board.read_bytes()
+    fix_drc_cmd.main([str(board), "--only", "copper-gap"])
+    output = capsys.readouterr().out
+    assert reason in output
+    assert board.read_bytes() == before

@@ -1069,6 +1069,61 @@ def clip_pcb(tmp_path: Path):
 
 
 class TestClipToPads:
+    @pytest.mark.parametrize(
+        ("version", "board_margin", "fp_margin", "pad_margin", "too_close"),
+        [
+            (20240202, 0, 0.22, None, True),
+            (20240202, 0, 0.22, 0.05, False),
+            (20240202, 0.22, None, None, True),
+            (20240202, 0.22, 0, None, False),
+            (20240108, 0.22, 0, None, True),
+            (20240108, 0, 0.22, 0, True),
+        ],
+    )
+    def test_repair_uses_checked_mask_margin(
+        self, tmp_path, version, board_margin, fp_margin, pad_margin, too_close
+    ):
+        # The stroke is 0.285 mm from copper and 0.065 mm from a +0.22 mm opening.
+        path = tmp_path / "margin.kicad_pcb"
+        local_fp = f"(solder_mask_margin {fp_margin})" if fp_margin is not None else ""
+        local_pad = f"(solder_mask_margin {pad_margin})" if pad_margin is not None else ""
+        path.write_text(f"""(kicad_pcb (version {version})
+          (setup (pad_to_mask_clearance {board_margin}))
+          (footprint "X:Y" (layer "F.Cu") (at 10 10) {local_fp}
+            (property "Reference" "R1")
+            (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") {local_pad})
+            (fp_line (start 0.86 -2) (end 0.86 2)
+              (stroke (width 0.15) (type solid)) (layer "F.SilkS"))))""")
+        before = _silk_pad_findings(path, 0.12)
+        assert [v.severity for v in before] == (["error"] if too_close else [])
+        repairer = SilkscreenRepairer(path)
+        result = repairer.repair_pad_clearance(0.12)
+        assert [f.action for f in result.fixes] == (["trimmed"] if too_close else [])
+        repairer.save()
+        assert not _silk_pad_findings(path, 0.12)
+
+    def test_legalize_moves_joined_marker_clear_of_inherited_legacy_margin(self, tmp_path):
+        from kicad_tools.drc.repair_silkscreen import legalize_silk
+        from kicad_tools.manufacturers import get_profile
+
+        path = tmp_path / "marker.kicad_pcb"
+        path.write_text("""(kicad_pcb (version 20240108)
+          (setup (pad_to_mask_clearance 0.22))
+          (footprint "X:Y" (layer "F.Cu") (at 10 10) (solder_mask_margin 0)
+            (property "Reference" "U1")
+            (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask"))
+            (pad "2" smd rect (at 5 0) (size 1 1) (layers "F.Cu" "F.Mask"))
+            (pad "3" smd rect (at 10 0) (size 1 1) (layers "F.Cu" "F.Mask"))
+            (fp_line (start -0.86 -0.3) (end -0.86 0.3)
+              (stroke (width 0.15) (type solid)) (layer "F.SilkS"))
+            (fp_line (start -0.86 0.3) (end -1.2 0.3)
+              (stroke (width 0.15) (type solid)) (layer "F.SilkS"))))""")
+        rules = get_profile("jlcpcb").get_design_rules(layers=2)
+        assert _silk_pad_findings(path, 0.12)
+        report = legalize_silk(path, rules)
+        assert [e.action for e in report.footprint_line_edits] == ["moved_marker"] * 2
+        assert not _silk_pad_findings(path, rules.silk_to_pad_warning_mm)
+
     def test_trims_line_crossing_limit(self, clip_pcb):
         # Runs along the top, 0.12 above pad copper at its ends -> must be shortened.
         path = clip_pcb(_line(-1.5, 0.45, 1.5, 0.45))
