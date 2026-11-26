@@ -256,6 +256,8 @@ def ground_copper(pcb: PCB) -> tuple[int, int]:
     )
 
 
+# Each case runs the public router and independently refills and checks its output.
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("prefilled", [False, True], ids=["unfilled", "prefilled"])
 @pytest.mark.parametrize("stitch_planes", [False, True], ids=["default", "stitch"])
 def test_mixed_signal_route_keeps_the_bonded_ground_copper(
