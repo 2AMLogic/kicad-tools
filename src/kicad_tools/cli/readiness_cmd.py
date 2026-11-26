@@ -38,6 +38,7 @@ is a report the gallery's validator accepts.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import hashlib
 import json
@@ -88,7 +89,13 @@ from kicad_tools.core.package_publication import (
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.sexp import ParseError, parse_file
 
-from .board_readiness import ReadinessLayout, read_readiness, readiness_input_hash
+from .board_readiness import (
+    ReadinessLayout,
+    board_directory_for_pcb,
+    declared_readiness_layout,
+    read_readiness,
+    readiness_input_hash,
+)
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
 from .kicad_toolchain import (
     KiCadEnvironmentError,
@@ -449,8 +456,14 @@ def _run_export(
     merge_lcsc_from: Path | None = None,
     quantity: int | None = None,
     inventory_covered: frozenset[str] | None = None,
+    schematic: Path | None = None,
+    project_root: Path | None = None,
 ) -> EngineRun:
-    """Generate a generic bundle without changing the already-checked project rules."""
+    """Generate a generic bundle without changing the already-checked project rules.
+
+    *schematic* is the selected root schematic; without it the exporter would
+    pick whichever schematic sits next to the PCB for the BOM (#10107).
+    """
     from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
     from kicad_tools.export.preflight import PreflightConfig
 
@@ -460,6 +473,7 @@ def _run_export(
             include_bom=assembly,
             include_pnp=assembly,
             emit_drc_constraints=False,
+            project_root=project_root,
             merge_lcsc_from=merge_lcsc_from,
             gerber_source_date_epoch=_readiness_gerber_epoch(),
             preflight=PreflightConfig(
@@ -469,7 +483,10 @@ def _run_export(
         )
         with stdout_to_stderr_when(True):
             result = ManufacturingPackage(
-                pcb_path=pcb, manufacturer=manufacturer, config=config
+                pcb_path=pcb,
+                schematic_path=schematic,
+                manufacturer=manufacturer,
+                config=config,
             ).export(output_dir)
         if not result.success:
             return EngineRun(False, "Generic manufacturing export failed")
@@ -477,12 +494,13 @@ def _run_export(
         sidecars = {pcb.with_suffix(".kicad_pro"), pcb.with_suffix(".kicad_dru")}
         with zipfile.ZipFile(archive, "a", zipfile.ZIP_DEFLATED) as zf:
             present = set(zf.namelist())
-            for source in _project_dependencies(pcb, Path(pcb.anchor)):  # bounded upstream
+            (board_member,) = [Path(name) for name in present if name.endswith(".kicad_pcb")]
+            for source in _project_dependencies(pcb, project_root or pcb.parent):
                 if not source.is_relative_to(pcb.parent):
                     continue  # Collected later by _normalize_project_archive (#5813).
                 if source in sidecars:
                     continue  # Already archived under the project identity's name.
-                relative = source.relative_to(pcb.parent).as_posix()
+                relative = (board_member.parent / source.relative_to(pcb.parent)).as_posix()
                 if relative not in present:
                     zf.write(source, relative)
         return EngineRun(True)
@@ -1016,6 +1034,9 @@ class ReadinessOptions:
     # the staged candidate cannot see a spec above ``board_dir``.
     bom_spec_file: Path | None = None
     bom_spec_error: str | None = None
+    # In-project declaration that selected the implicit schematic, staged with its inputs.
+    schematic_spec: Path | None = None
+    schematic_implicit: bool = False
     # The ORIGINAL board directory the spec lookup started from (#8764); the
     # staged candidate's ``board_dir`` is a temp dir deleted when the run ends.
     bom_spec_searched: Path | None = None
@@ -1026,11 +1047,19 @@ class ReadinessOptions:
     silk_fix: bool = True
     # User-selected PCB before candidate preparation, for render receipt verification.
     source_pcb_bytes: bytes | None = field(default=None, repr=False)
+    # Receipt and archive paths remain relative to the directory containing
+    # the output declaration when an explicit --project-root narrows source access.
+    declared_project_root: Path | None = None
 
     @property
     def root(self) -> Path:
         """The resolved containment boundary for collected dependencies."""
         return (self.project_root or self.board_dir).resolve()
+
+    @property
+    def project_base(self) -> Path:
+        """Portable base for staging the project and naming its archive members."""
+        return (self.declared_project_root or self.project_root or self.board_dir).resolve()
 
     @property
     def assembly(self) -> bool:
@@ -1045,7 +1074,7 @@ def _input_base(options: ReadinessOptions) -> Path:
     the declaring project, so board sources, sibling dependencies and the
     released artifacts under the output root share one portable base.
     """
-    return options.root if options.output_root is not None else options.board_dir
+    return options.project_base if options.output_root is not None else options.board_dir
 
 
 def _report_path(options: ReadinessOptions) -> Path:
@@ -1062,7 +1091,7 @@ def readiness_layout(options: ReadinessOptions) -> ReadinessLayout | None:
     """
     if options.output_root is None:
         return None
-    return ReadinessLayout(report=_report_path(options), input_base=options.root)
+    return ReadinessLayout(report=_report_path(options), input_base=_input_base(options))
 
 
 @dataclass
@@ -1100,67 +1129,25 @@ def _find_pcb(board_dir: Path) -> Path | None:
     return None
 
 
-def _find_sibling(pcb: Path, suffix: str) -> Path | None:
-    """Prefer the PCB or original project stem, then an applicable sibling."""
-    exact = pcb.with_suffix(suffix)
+def _find_project(pcb: Path) -> Path | None:
+    """Prefer the PCB or original project stem, then an unpaired sibling project."""
+    exact = pcb.with_suffix(".kicad_pro")
     if exact.is_file():
         return exact
     stem = pcb.stem.removesuffix("_routed")
-    trimmed = pcb.parent / f"{stem}{suffix}"
+    trimmed = pcb.parent / f"{stem}.kicad_pro"
     if trimmed.is_file():
         return trimmed
-    candidates = sorted(pcb.parent.glob(f"*{suffix}"))
-    if suffix == ".kicad_pro":
-        # A differently named project can be shared. Projects paired with
-        # other boards, including their routed copies, belong to those boards.
-        available = [
-            project
-            for project in candidates
-            if project.is_file()
-            and not project.with_suffix(".kicad_pcb").is_file()
-            and not project.with_name(f"{project.stem}_routed.kicad_pcb").is_file()
-        ]
-        return available[0] if len(available) == 1 else None
-    return candidates[0] if candidates else None
-
-
-def _resolve_declared_output_root(
-    pcb: Path, board_dir: Path
-) -> tuple[Path | None, Path | None, str | None]:
-    """Resolve a project-local ``[readiness] output_root`` declaration (#10106).
-
-    Discovery starts at the selected PCB and resolves the declared value
-    against the declaring TOML's directory.  Returns ``(output_root,
-    declaring_project, error)``; the declaration establishes the project (used
-    as the run's root when ``--project-root`` is not given) and every run with
-    a declaration publishes under ``output_root``.  ``None`` output keeps the
-    historical board-local destinations (Issue #8766 refusals included).
-    """
-    from kicad_tools.config import ConfigError, find_readiness_output_root
-
-    try:
-        declaration = find_readiness_output_root(pcb.parent)
-    except ConfigError as exc:
-        return None, None, str(exc)
-    if declaration is None:
-        return None, None, None
-    output_root, declared_by = declaration
-    project_dir = declared_by.parent.resolve()
-    if output_root == project_dir or not output_root.is_relative_to(project_dir):
-        return (
-            None,
-            None,
-            f"[readiness] output_root in {declared_by.name} must resolve to a directory "
-            f"inside the project {project_dir}; got {output_root}",
-        )
-    if output_root == board_dir.resolve():
-        return (
-            None,
-            None,
-            f"[readiness] output_root in {declared_by.name} must not be the board directory "
-            f"itself ({output_root}); the release must not mix with the editable design",
-        )
-    return output_root, project_dir, None
+    # A differently named project can be shared. Projects paired with
+    # other boards, including their routed copies, belong to those boards.
+    available = [
+        project
+        for project in pcb.parent.glob("*.kicad_pro")
+        if project.is_file()
+        and not project.with_suffix(".kicad_pcb").is_file()
+        and not project.with_name(f"{project.stem}_routed.kicad_pcb").is_file()
+    ]
+    return available[0] if len(available) == 1 else None
 
 
 def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, str | None]:
@@ -1186,14 +1173,16 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         if target.suffix != ".kicad_pcb":
             return None, f"expected a .kicad_pcb file or board directory, got {target.name}"
         pcb = target
-        board_dir = target.parent.parent if target.parent.name == "output" else target.parent
+        board_dir = board_directory_for_pcb(target)
 
     # Project-declared output root (Issue #10106): resolve and validate the
     # declaration before anything is read or created, so an unsafe root refuses
     # here rather than mid-run.
-    output_root, declared_project, declaration_error = _resolve_declared_output_root(pcb, board_dir)
-    if declaration_error is not None:
-        return None, declaration_error
+    try:
+        layout = declared_readiness_layout(pcb, board_dir)
+    except ValueError as exc:
+        return None, str(exc)
+    output_root = layout.report.parent if layout is not None else None
 
     manufacturer = args.manufacturer or _discover_tier(board_dir, pcb, output_root=output_root)
     if manufacturer is None:
@@ -1204,7 +1193,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
     if manufacturer not in get_all_manufacturer_names():
         return None, f"unknown fabrication tier: {manufacturer}"
 
-    project = _find_sibling(pcb, ".kicad_pro")
+    project = _find_project(pcb)
     if project is None:
         return None, (
             f"{pcb.name} has no unambiguous paired .kicad_pro. "
@@ -1212,9 +1201,27 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             "so readiness can use its rules."
         )
 
-    schematic = (
-        Path(args.schematic).resolve() if args.schematic else _find_sibling(pcb, ".kicad_sch")
-    )
+    schematic: Path | None
+    schematic_spec = None
+    if args.schematic:
+        schematic = Path(args.schematic).resolve()
+    else:
+        from kicad_tools.sync.discover import (
+            SOURCE_PROJECT_KCT,
+            project_spec_for_pcb,
+            resolve_schematic_with_spec,
+            unresolved_schematic_candidates,
+        )
+
+        spec = project_spec_for_pcb(pcb)
+        schematic, source = resolve_schematic_with_spec(pcb, spec)
+        if source == SOURCE_PROJECT_KCT and spec is not None:
+            schematic_spec = spec.resolve()
+        if schematic is None:
+            candidates = unresolved_schematic_candidates(pcb)
+            if len(candidates) > 1:
+                names = ", ".join(path.name for path in candidates)
+                return None, f"Multiple schematic candidates for {pcb.name}: {names}. Pass --sch."
 
     project_root: Path | None = None
     if getattr(args, "project_root", None):
@@ -1226,18 +1233,20 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             and pcb.resolve().is_relative_to(project_root)
         ):
             return None, f"--project-root {project_root} must contain the board {board_dir}"
-    if output_root is not None:
-        # The declaration itself establishes the project: its TOML's directory
-        # bounds sources and the declared output root when --project-root is
-        # not given (Issue #10106).  An explicit root must contain the declared
-        # output root; nothing outside the root is ever read (#5813 stands).
-        if project_root is None:
-            project_root = declared_project
-        elif not output_root.is_relative_to(project_root):
+    if layout is not None:
+        # Use the intersection of the declaration and the requested source
+        # boundary. An enclosing checkout cannot authorize sibling projects.
+        if project_root is None or layout.input_base.is_relative_to(project_root):
+            project_root = layout.input_base
+        elif not layout.report.parent.is_relative_to(project_root):
             return None, (
                 f"--project-root {project_root} must contain the declared output root {output_root}"
             )
     boundary = project_root or board_dir.resolve()
+    if schematic_spec is not None and not schematic_spec.is_relative_to(boundary):
+        if project_root is not None:
+            return None, _outside_root_message(str(schematic_spec), "schematic declaration", True)
+        schematic_spec = None  # Board-local receipts only track in-board declarations.
     if schematic is not None and not schematic.resolve().is_relative_to(boundary):
         return None, _outside_root_message(str(schematic), "schematic", project_root is not None)
     if schematic is not None and not schematic.is_file():
@@ -1345,6 +1354,8 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             board_dir=board_dir,
             pcb=pcb,
             schematic=schematic,
+            schematic_spec=schematic_spec,
+            schematic_implicit=not args.schematic,
             project=project,
             manufacturer=manufacturer,
             mode="pcb_only" if args.pcb_only else "assembly",
@@ -1369,6 +1380,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             operation="generate" if args.generate else "verify",
             project_root=project_root,
             output_root=output_root,
+            declared_project_root=layout.input_base if layout is not None else None,
             checked_at=checked_at,
             skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
             skip_fiducials=bool(getattr(args, "skip_fiducials", False)),
@@ -1853,8 +1865,13 @@ def _gate_kct_check(
     right after the cleanup and still blocking here -- and points at
     ``--skip-cleanup``.  No new gate: only the blocker message changes.
     """
+    invocation_args = list(options.check_args)
+    if options.schematic is not None:
+        invocation_args.extend(
+            ["--schematic", options.schematic.relative_to(options.project_base).as_posix()]
+        )
     invocation = " ".join(
-        ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *options.check_args]
+        ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *invocation_args]
     )
     outcome, report = _gate_kct_check_run(options, engines)
     if outcome.status == FAILED and pre_cleanup is not None and post_cleanup is not None:
@@ -1910,7 +1927,7 @@ def _cleanup_introduced_errors(
     means the comparison could not run (a snapshot check failed or a report
     had unidentifiable errors); attribution is then skipped, never guessed.
     """
-    extra = list(options.check_args)
+    extra = _current_board_check_args(options)
     has_current_paths_flag = any(
         token == "--current-paths"
         or token.startswith("--current-paths=")
@@ -1949,10 +1966,19 @@ def _cleanup_introduced_errors(
     ]
 
 
+def _current_board_check_args(options: ReadinessOptions) -> list[str]:
+    extra = list(options.check_args)
+    if options.schematic is not None:
+        extra.extend(["--schematic", str(options.schematic)])
+    return extra
+
+
 def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
     report_path = options.evidence_dir / "kct-check.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    run = engines.kct_check(options.pcb, options.manufacturer, report_path, options.check_args)
+    run = engines.kct_check(
+        options.pcb, options.manufacturer, report_path, _current_board_check_args(options)
+    )
     evidence_rel = _rel(options, report_path)
     if not run.ok:
         return (
@@ -1965,6 +1991,21 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
             {},
         )
     report = _read_json(report_path)
+    from .check_cmd import portable_report_path
+
+    meta = report.get("meta_checks", {}) if isinstance(report.get("meta_checks"), dict) else {}
+    schematic = meta.get("schematic")
+    changed = False
+    # kct check can abbreviate the schematic to a basename. Preserve the explicit
+    # selection in the same portable coordinates the release uses for its sources.
+    if (
+        options.schematic is not None
+        and isinstance(schematic, dict)
+        and schematic.get("source") == "--schematic"
+        and schematic.get("path") == portable_report_path(options.schematic)
+    ):
+        schematic["path"] = options.schematic.relative_to(options.project_base).as_posix()
+        changed = True
     # Record the checked board board-relative: an absolute path would leak the
     # throw-away candidate directory into hash-bound evidence, so identical
     # inputs would never reproduce identical bytes (Issue #6076).
@@ -1987,10 +2028,11 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
             board_rel = None
         if board_rel is not None and board_rel != checked:
             report["file"] = board_rel
-            report_path.write_text(json.dumps(report, indent=2) + "\n")
+            changed = True
+    if changed:
+        report_path.write_text(json.dumps(report, indent=2) + "\n")
     summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
     errors = int(summary.get("errors", 0) or 0)
-    meta = report.get("meta_checks", {}) if isinstance(report.get("meta_checks"), dict) else {}
     counts = _warning_counts(report)
     table = _format_warning_table(counts)
 
@@ -2892,7 +2934,10 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
 def _external_dependencies(options: ReadinessOptions) -> list[Path]:
     """Collected files that live outside ``board_dir`` but inside the project root."""
     board = options.board_dir.resolve()
-    return [p for p in _required_sources(options) if not p.is_relative_to(board)]
+    sources = set(_required_sources(options))
+    if options.schematic_spec is not None:
+        sources.add(options.schematic_spec)
+    return sorted(p for p in sources if not p.is_relative_to(board))
 
 
 def _archive_layout(options: ReadinessOptions, sources: Sequence[Path]) -> ArchiveLayout:
@@ -2913,7 +2958,7 @@ def _archive_layout(options: ReadinessOptions, sources: Sequence[Path]) -> Archi
         return real.parent.relative_to(base).as_posix()
 
     def in_project_root(real: Path) -> str:
-        return real.parent.relative_to(options.root).as_posix()
+        return real.parent.relative_to(options.project_base).as_posix()
 
     directory_of = (
         in_board_directory
@@ -2958,11 +3003,17 @@ def _normalize_project_archive(options: ReadinessOptions) -> None:
                     f"duplicate file identities in kicad_project.zip: {info.filename}"
                 )
             members[info.filename] = zf.read(info)
-    prefix = base.relative_to(options.root).as_posix() if rerooted else "."
+    prefix = base.relative_to(options.project_base).as_posix() if rerooted else "."
     board = options.pcb.resolve()
     board_names = {layout.checked(board), layout.names[board]}
     if prefix != "." and board_names.isdisjoint(members):
-        rebuilt = {f"{prefix}/{name}": data for name, data in members.items()}
+        # The generic ZIP may already be rooted at a narrower --project-root.
+        # Prefix only the part between that boundary and the declaring project.
+        local_board_dir = base.relative_to(options.root)
+        local_names = {(local_board_dir / Path(name).name).as_posix() for name in board_names}
+        if local_board_dir != Path(".") and not local_names.isdisjoint(members):
+            prefix = options.root.relative_to(options.project_base).as_posix()
+        rebuilt = {(Path(prefix) / name).as_posix(): data for name, data in members.items()}
     else:
         if prefix != "." and any(Path(name).name in members for name in board_names):
             raise ProjectIdentityError(
@@ -3404,6 +3455,8 @@ def _write_readme(
                     f"  step {name}: {step.get('status')}" + (f" ({detail})" if detail else "")
                 )
     if options.assembly:
+        from kicad_tools.export.preflight import describe_lookup_sources
+
         _, stock_record, _ = _stock_evaluation(options, _recorded_stock_check(options))
         if stock_record is not None:
             lines.extend(["", "LCSC stock order", "----------------"])
@@ -3415,6 +3468,9 @@ def _write_readme(
                 )
             else:
                 lines.append("  no parts declared as held in operator inventory")
+            recorded = describe_lookup_sources(stock_record.get("sources"))
+            if recorded:
+                lines.append(f"  parts data sources: {recorded}")
             lines.append(f"  stock check {stock_record['status']}: {stock_record['message']}")
     prep = options.assembly_prep_record
     if prep is not None:
@@ -3554,6 +3610,10 @@ def _gate_artifacts(
         export_kwargs["quantity"] = options.quantity
     if options.inventory_covered:
         export_kwargs["inventory_covered"] = options.inventory_covered
+    if options.schematic is not None and options.schematic.is_file():
+        export_kwargs["schematic"] = options.schematic
+    if options.root != options.pcb.parent.resolve():
+        export_kwargs["project_root"] = options.root
     run = engines.export(*export_args, **export_kwargs)
     if not run.ok:
         return CheckOutcome(
@@ -3726,6 +3786,11 @@ def _stock_evaluation(
         "message": result.message,
         "details": result.details,
     }
+    sources = data.get("sources")
+    if isinstance(sources, dict):
+        # Where the producer's lookups reached (issue #10386).  Verification
+        # carries the record forward; it never re-derives it from this host.
+        record["sources"] = dict(sources)
     return result, record, None
 
 
@@ -4152,9 +4217,22 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         options.project,
         options.net_class_map,
         options.hv_voltage_map,
+        options.schematic_spec,
     ):
         if candidate is not None and candidate.is_file():
             paths.add(candidate.resolve())
+
+    # Every sheet reachable from the selected root is evidence too: a child
+    # edit changes the released BOM/drawings (#10107).  The root stays
+    # identifiable by its own path.
+    if options.schematic is not None and options.schematic.is_file():
+        # A ValueError (missing/outside sheet) is reported by the artifacts gate.
+        with contextlib.suppress(ValueError):
+            paths.update(
+                _schematic_hierarchy(
+                    options.schematic, options.root, options.project_root is not None
+                )
+            )
 
     output_dir = options.board_dir / "output"
     if output_dir.is_dir():
@@ -4464,6 +4542,7 @@ def build_report(
     # produced was computed from, so report binding can tell "produced for
     # this PCB" from merely "pinned beside it".
     if options.pcb.is_file():
+        report["source_pcb"] = _rel(options, options.pcb)
         pcb_sha = _sha256_file(options.pcb)
         produced = {
             _rel(options, path): pcb_sha
@@ -4483,8 +4562,11 @@ def build_report(
         # and the released artifacts share one portable input base (the
         # declaring project) and the receipt names both that base and the
         # declared output root explicitly, so a moved project still verifies.
-        report["project_root"] = os.path.relpath(options.root, options.board_dir.resolve())
-        report["output_root"] = options.output_root.resolve().relative_to(options.root).as_posix()
+        report["project_root"] = Path(os.path.relpath(root, options.board_dir.resolve())).as_posix()
+        report["output_root"] = options.output_root.resolve().relative_to(root).as_posix()
+        if options.schematic is not None and options.schematic.is_file():
+            report["schematic_selection"] = "implicit" if options.schematic_implicit else "explicit"
+            report["schematic_root"] = options.schematic.resolve().relative_to(root).as_posix()
     else:
         external = _external_dependencies(options)
         if external:
@@ -4672,7 +4754,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     if options.checked_at is None:
         options = replace(options, checked_at=_iso_now())
     original = options.board_dir.resolve()
-    project_root = options.root
+    source_root = options.root
+    project_base = options.project_base
     # Issue #10106: a project-declared output root publishes the release under
     # a dedicated root.  When that root sits inside the board directory the
     # copy of the board already carries it and the single board-region publish
@@ -4708,15 +4791,18 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         else {}
     )
     release_prefix = (
-        release_region.relative_to(project_root).as_posix() if release_region is not None else None
+        release_region.relative_to(project_base).as_posix() if release_region is not None else None
     )
     diagnostic_name = (
         "readiness-verification" if options.operation == "verify" else "readiness-attempt"
     )
     diagnostics = _diagnostics_dir(options, original, diagnostic_name)
     with tempfile.TemporaryDirectory(prefix="kct-readiness-candidate-") as temporary:
-        candidate_root = Path(temporary) / "board"
-        candidate = candidate_root / original.relative_to(project_root)
+        # Use the same physical path as project_base when TMPDIR names a symlink.
+        temporary_root = Path(temporary).resolve()
+        candidate_root = temporary_root / "board"
+        candidate = candidate_root / original.relative_to(project_base)
+        candidate_source_root = candidate_root / source_root.relative_to(project_base)
         shutil.copytree(
             original,
             candidate,
@@ -4730,7 +4816,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         )
         candidate_release: Path | None = None
         if release_region is not None:
-            candidate_release = candidate_root / release_region.relative_to(project_root)
+            candidate_release = candidate_root / release_region.relative_to(project_base)
             if release_region.is_dir():
                 shutil.copytree(
                     release_region,
@@ -4745,7 +4831,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 )
 
         for source in externals:
-            target = candidate_root / source.relative_to(project_root)
+            target = candidate_source_root / source.relative_to(source_root)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
 
@@ -4757,9 +4843,9 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         if options.bom_spec_file is not None and not options.bom_spec_file.is_relative_to(original):
             spec = options.bom_spec_file
             spec_target = (
-                candidate_root / spec.relative_to(project_root)
-                if spec.is_relative_to(project_root)
-                else Path(temporary) / spec.name
+                candidate_source_root / spec.relative_to(source_root)
+                if spec.is_relative_to(source_root)
+                else temporary_root / spec.name
             )
             spec_target.parent.mkdir(parents=True, exist_ok=True)
             if not spec_target.exists():
@@ -4768,13 +4854,13 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         def remap(path: Path | None) -> Path | None:
             if path is None:
                 return None
-            return candidate_root / path.resolve().relative_to(project_root)
+            return candidate_source_root / path.resolve().relative_to(source_root)
 
         diagnostic_source = None
         try:
             if options.output_root is not None:
                 staged_evidence = (
-                    candidate_root / options.output_root.resolve().relative_to(project_root)
+                    candidate_root / options.output_root.resolve().relative_to(project_base)
                 ) / ("readiness" if options.operation == "generate" else diagnostic_name)
             else:
                 staged_evidence = (
@@ -4785,11 +4871,13 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             staged = replace(
                 options,
                 board_dir=candidate,
-                project_root=candidate_root,
+                project_root=candidate_source_root,
+                declared_project_root=candidate_root if options.declared_project_root else None,
                 pcb=candidate / options.pcb.resolve().relative_to(original),
                 schematic=remap(options.schematic),
+                schematic_spec=remap(options.schematic_spec),
                 project=remap(options.project),
-                output_dir=candidate_root / options.output_dir.resolve().relative_to(project_root),
+                output_dir=candidate_root / options.output_dir.resolve().relative_to(project_base),
                 output_root=remap(options.output_root),
                 net_class_map=remap(options.net_class_map),
                 hv_voltage_map=remap(options.hv_voltage_map),
@@ -5227,9 +5315,9 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Directory containing the board directory and every project dependency "
-            "(schematic hierarchy, sibling symbol/footprint libraries). Referenced "
-            "files outside the board directory but inside this root are collected "
-            "into the staged package and hashed; nothing outside it is ever read."
+            "(schematic hierarchy, sibling symbol/footprint libraries). With a declared "
+            "output root, dependencies must also be inside the declaring project. "
+            "Receipt paths are relative to that declaration."
         ),
     )
     parser.add_argument(

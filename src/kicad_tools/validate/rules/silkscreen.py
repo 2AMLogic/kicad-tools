@@ -1142,20 +1142,33 @@ def _pad_aperture_geometry(
     return aperture
 
 
-def _via_aperture_geometry(via: Via, min_mask_clearance: float) -> _Geometry:
+def _board_mask_margin_or(board_margin: float | None, declared: bool, fallback: float) -> float:
+    """The margin every opening is expanded by when nothing local applies.
+
+    The board's ``pad_to_mask_clearance`` when it declares a finite one, else
+    *fallback* -- the manufacturer profile's
+    ``min_solder_mask_clearance_mm``.  KiCad plots a bare opening when the
+    board declares nothing (measured for pads and untented vias alike on the
+    pinned KiCad 10.0.6 image, #10384), which is tighter than a profile will
+    hold.  Both aperture iterators resolve through this one function, so the
+    pad and via sides cannot size their openings by two different rules again.
+    """
+    if board_margin is None or not declared:
+        return fallback
+    return board_margin
+
+
+def _via_aperture_geometry(via: Via, diameter: float) -> _Geometry:
     """Build a shapely polygon for an untented via's solder-mask opening.
 
-    Aperture = via annular copper (diameter ``via.size``) expanded by the
-    profile's mask margin.  Approximated as an axis-aligned box to
-    first-order-match :func:`_pad_aperture_geometry`'s convention (a circle
-    inscribes the box, so this slightly over-approximates the corners --
-    consistent with the pad/text AABB model used throughout this module).
+    The positive diameter includes the effective mask margin. The opening is
+    a disk centred on the via, with the same resolution as a circular pad's
+    copper outline (:func:`~kicad_tools.geometry.copper.pad_copper_outline`).
     """
-    from shapely.geometry import box
+    from shapely.geometry import Point
 
-    d = via.size + 2.0 * min_mask_clearance
     cx, cy = via.position
-    return box(cx - d / 2.0, cy - d / 2.0, cx + d / 2.0, cy + d / 2.0)
+    return Point(cx, cy).buffer(diameter / 2.0, quad_segs=32)
 
 
 def _via_is_tented(via: Via, setup: Setup | None, side: str) -> bool:
@@ -1211,6 +1224,18 @@ def _iter_via_apertures(
     Tenting is resolved per side via :func:`_via_is_tented` (per-via override
     -> board setup default -> measured absent-token default).
 
+    The opening is the via's copper expanded by the same margin the pad side
+    uses (:func:`_board_mask_margin_or`).  Measured on the pinned KiCad 10.0.6
+    image (#10384): an untented via flashes ``via.size + 2 *
+    pad_to_mask_clearance`` on both mask layers, and a bare ``via.size`` when
+    the board declares no clearance.  A via has no local margin to resolve --
+    the parser rejects a ``solder_mask_margin`` node inside ``(via ...)`` -- so
+    *min_mask_clearance* is only the fallback for a board that declares
+    nothing.  kicad-cli's own ``silk_over_copper`` reaches only to bare copper
+    for pads and vias alike (same measurement), so a positive board clearance
+    makes this opening wider than the native finding. A zero or negative
+    effective diameter leaves no mask opening on either side.
+
     A side is also skipped when the via never reaches it: a blind/micro via
     exposes copper only on the outer layer(s) its ``layers`` name and a
     buried via on neither outer side (Issue #9116, reusing the single
@@ -1218,10 +1243,15 @@ def _iter_via_apertures(
     untented ``F.Cu``--``In1.Cu`` blind via therefore yields no ``B``
     aperture for back silk to collide with.
     """
+    from ..mask_geometry import board_mask_margin
+
     setup = pcb.setup
+    board_margin, declared = board_mask_margin(pcb)
+    margin = _board_mask_margin_or(board_margin, declared, min_mask_clearance)
     ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
     for via in pcb.vias:
-        if via.size <= 0:
+        diameter = via.size + 2.0 * margin
+        if via.size <= 0 or diameter <= 0:
             continue
         reached = _via_silk_sides(getattr(via, "via_type", None), getattr(via, "layers", ()))
         geom: _Geometry | None = None
@@ -1229,7 +1259,7 @@ def _iter_via_apertures(
             if side not in reached or _via_is_tented(via, setup, side):
                 continue
             if geom is None:
-                geom = _via_aperture_geometry(via, min_mask_clearance)
+                geom = _via_aperture_geometry(via, diameter)
             x, y = via.position
             net = f" [{via.net_name}]" if via.net_name else ""
             label = f"via{net} at ({x + ox:.3f}, {y + oy:.3f})"
@@ -1468,8 +1498,7 @@ def _iter_pad_apertures(
     from .clearance import _pad_has_no_copper, _pad_has_no_mask
 
     board_margin, declared = board_mask_margin(pcb)
-    if board_margin is None or not declared:
-        board_margin = min_mask_clearance
+    board_margin = _board_mask_margin_or(board_margin, declared, min_mask_clearance)
     version = pcb._file_version()
     for footprint in pcb.footprints:
         for pad in footprint.pads:
@@ -2064,6 +2093,55 @@ def _painted_chords(
     return members
 
 
+def _positive_lead_mark(
+    footprint: Footprint, outline: FootprintGraphic, center: tuple[float, float], radius: float
+) -> Iterator[tuple[int, int]]:
+    """Find the two strokes of a plus beside pad 1 of a painted radial body."""
+    pads = sorted(footprint.pads, key=lambda pad: pad.number)
+    if (
+        len(pads) != 2
+        or [pad.number for pad in pads] != ["1", "2"]
+        or any(pad.type != "thru_hole" for pad in pads)
+        or pads[0].shape not in ("rect", "roundrect")
+        or pads[1].shape != "circle"
+    ):
+        return
+    positive, negative = (p.position for p in pads)
+    midpoint = tuple((a + b) / 2 for a, b in zip(positive, negative, strict=True))
+    if math.dist(midpoint, center) > 1e-5:
+        return
+
+    # The library draws the sign in footprint-local axes. Match only a
+    # single horizontal and vertical with the same center and length.
+    candidates = defaultdict(list)
+    for index, line in enumerate(footprint.graphics):
+        if (
+            line.graphic_type != "line"
+            or line.layer != outline.layer
+            or line.stroke_width != outline.stroke_width
+        ):
+            continue
+        x1, y1 = line.start
+        x2, y2 = line.end
+        horizontal = y1 == y2
+        if not horizontal and x1 != x2:
+            continue
+        length = math.dist(line.start, line.end)
+        middle = ((x1 + x2) / 2, (y1 + y2) / 2)
+        if (
+            length <= 2 * line.stroke_width
+            or not radius < math.dist(center, middle) <= radius + length
+            or min(math.dist(center, p) for p in (line.start, line.end)) <= radius
+            or math.dist(positive, middle) >= math.dist(negative, middle)
+        ):
+            continue
+        key = tuple(round(n, 6) for n in (*middle, length))
+        candidates[key].append((index, horizontal))
+    for pair in candidates.values():
+        if len(pair) == 2 and pair[0][1] != pair[1][1]:
+            yield pair[0][0], pair[1][0]
+
+
 def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
     """Map authored graphic indices to the painted runs they belong to."""
     from kicad_tools.core.arcs import arc_sweep
@@ -2147,6 +2225,12 @@ def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
                 for offset in run:
                     for index in members[offset]:
                         marks[index].add(mark)
+        if outline_index in marks:
+            for first, second in _positive_lead_mark(footprint, outline, center, radius):
+                # Its own mark: the plus can still collide with the body and other ink.
+                mark = object()
+                marks[first].add(mark)
+                marks[second].add(mark)
     return marks
 
 

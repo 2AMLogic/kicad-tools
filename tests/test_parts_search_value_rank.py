@@ -86,7 +86,7 @@ class _FakeClient:
     def __init__(self, *args, **kwargs):
         pass
 
-    def search(self, query, page_size=20, in_stock=False, basic_only=False):
+    def search(self, query, page_size=20, in_stock=False, basic_only=False, package=None):
         return SearchResult(
             query=query,
             parts=list(self.catalog),

@@ -1199,6 +1199,8 @@ def _run_export_command(args) -> int:
         sub_argv.extend(["--vscore-layer", layer])
     if getattr(args, "export_include_tht", False):
         sub_argv.append("--include-tht")
+    if getattr(args, "export_via_land_overlap", False):
+        sub_argv.append("--via-land-overlap")
     if hasattr(args, "export_format") and args.export_format != "text":
         sub_argv.extend(["--format", args.export_format])
 

@@ -1542,3 +1542,39 @@ def test_refilled_zone_fill_pinch_repairs_instead_of_dropping(monkeypatch, tmp_p
     geometry = result.objects[zone_uuid]["layers_geometry"]["F.Cu"]
     assert geometry.is_valid
     assert geometry.area == pytest.approx(12.0)
+
+
+def test_replot_summary_matches_only_identical_zip_members(tmp_path):
+    from zipfile import ZipFile
+
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry
+    from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
+    from kicad_tools.validate.mask_export_geometry import inspect_exported_mask_geometry
+
+    if find_kicad_cli() is None:
+        pytest.skip("KiCad CLI required to capture the Gerber files")
+    path = _board(tmp_path / "near.kicad_pcb", NATIVE_CASES["merged"])
+    artifact = tmp_path / "plot"
+    export = inspect_exported_mask_geometry(path, artifact_dir=artifact)
+    assert export.complete, export.unsupported
+    result = assess_attributed_geometry(AttributedMaskGeometry(export), POLICY)
+    summary = result.to_dict()["nominal_exposure"]
+    assert summary["artwork_source"] == "internal_replot"
+    hashes = {k: v for face in summary["faces"].values() for k, v in face["gerber_sha256"].items()}
+    assert set(hashes) == {"F.Mask", "F.Cu", "B.Mask", "B.Cu"}
+    for changed in (None, "F.Cu"):
+        archive = tmp_path / "outgoing.zip"
+        with ZipFile(archive, "w") as z:
+            for layer in hashes:
+                name = f"near-{layer.replace('.', '_')}.gbr"
+                data = (artifact / name).read_bytes()
+                z.writestr(name, data + (b"\n" if layer == changed else b""))
+        with ZipFile(archive) as z:
+            mismatches = {
+                layer
+                for layer, expected in hashes.items()
+                if hashlib.sha256(z.read(f"near-{layer.replace('.', '_')}.gbr")).hexdigest()
+                != expected
+            }
+        assert mismatches == ({changed} if changed else set())

@@ -10,32 +10,7 @@
     "pcb_file": "voltage_divider_routed.kicad_pcb"
   },
   "copper_cleanup": {
-    "copper_cleanup": "applied",
-    "removed": {
-      "segments": 0,
-      "vias": 0
-    },
-    "steps": {
-      "dedupe": {
-        "segments": 0,
-        "status": "applied",
-        "vias": 0
-      },
-      "optimize_traces": {
-        "copper_oz": 1.0,
-        "corners_after": 5,
-        "corners_before": 5,
-        "layers": 2,
-        "segments_after": 9,
-        "segments_before": 9,
-        "status": "applied"
-      },
-      "prune": {
-        "ends_snapped": 0,
-        "segments_removed": 0,
-        "status": "applied"
-      }
-    }
+    "copper_cleanup": "skipped"
   },
   "copper_weights": {
     "inner_oz": null,
@@ -43,15 +18,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "019a88a73aed18db88fe1bd59f7e2bd86cde95a6b44fcc74f3b2bf1b4f9d565e",
-      "size": 1825
+      "sha256": "4ba11d647838b1f477e6ec0e5ed2f1d28f286b3cc7a77004fdaeca00bdefee43",
+      "size": 1971
     },
     "assembly-back.pdf": {
-      "sha256": "1f7fb6bac361e583d6b506b03f43c637f8dac57073787215502e2dcfd15ff1a4",
+      "sha256": "640eacd55cd61c3f178d333a16326d8b54d68725caafdc80021124c5d87d1623",
       "size": 8733
     },
     "assembly-front.pdf": {
-      "sha256": "7966311dff1b95058decc6f8ff20585a66a9a74d23174810b9f2fe37513dfc71",
+      "sha256": "f93530fbc6ab9ea7e74e39f36dac14c0e380523d827a909920a33f7f2741097b",
       "size": 19589
     },
     "bom_jlcpcb.csv": {
@@ -59,16 +34,16 @@
       "size": 175
     },
     "check-report.json": {
-      "sha256": "9cef8ab9841765215b33512cfff4eb5876ec8f4fae736c13bd203717a3919c8c",
-      "size": 126109
+      "sha256": "b08664bc446bda962cb3fe07bf3cfc1249c40d924eaf5eef1647a28a8a9678df",
+      "size": 130790
     },
     "cpl_jlcpcb.csv": {
       "sha256": "847457252c291c9086804931f5016de06f78dc1aa1020d4a0068bc98ddd89c36",
       "size": 377
     },
     "gerbers/gerbers.zip": {
-      "sha256": "11c012e6e39df361c3dcb002251b3d97e599b3f8564eec6538cc7014c16a4b0b",
-      "size": 15708
+      "sha256": "dcb49662857e547c5b7f805920bb9bc79c4ff09d18f8b1489426ec40b879b52e",
+      "size": 15704
     },
     "images/assembly.png": {
       "sha256": "40855c76d00618e1505662e335316ebc3cccc140beb05c5b6584dcd0f64e3daf",
@@ -95,12 +70,12 @@
       "size": 200093
     },
     "images/schematic_voltage_divider.png": {
-      "sha256": "02421af6d6d8fcfc31b5d5d4ddbb02bba24ae16635caccd9e9c90b4acb05e10b",
-      "size": 118121
+      "sha256": "27f0d0565c634d8f676c0d0b5e2edc214da86fdaa29c5f495a58dde423e213bf",
+      "size": 118129
     },
     "kicad_project.zip": {
-      "sha256": "d3e695b7b62b620755176457c58ab78611183dcdcb67a385f54cf71d9773b98b",
-      "size": 15740
+      "sha256": "7218769f570c40640017a2966421419f948f6a2d6dd9b7b967333818a4d4dc68",
+      "size": 16076
     },
     "native-drc.json": {
       "sha256": "10bbc584c93b3b2abed0729a49842f4010816c7c2635a2ca2f139e32adee4ad4",
@@ -111,19 +86,19 @@
       "size": 13488
     },
     "report.md": {
-      "sha256": "91bc6fb64d9aee5449bbe9ff791340891327b0d5cfa0b6cdb4b6dbbebad40116",
+      "sha256": "ef85489504ab8ef97900b23ee09c6fa3ce40a6b3210f55e0ab89881a68c86e49",
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "c5d9e538b5ebbf5b1c0d5f80d26ba9a99926f7dd5311d3f046efb2986e7d6958",
-      "size": 905287
+      "sha256": "54498616c07c62f6b1f354e44412d4821cc92eb19c6f8c39da2665b5aa380f81",
+      "size": 914124
     },
     "schematic.pdf": {
-      "sha256": "31ae8587c31b52577ef563637c2df00405b1f45777e8ffbaa97e5c9712eb7e89",
+      "sha256": "d0665bbc8d2676fbe31bbbd4eb21919e9ddf4aa475245bca831bd37a9a7a066b",
       "size": 47876
     }
   },
-  "generated_at": "2026-11-24T17:18:27Z",
+  "generated_at": "2026-11-26T15:50:05Z",
   "kicad_tools_version": "0.29.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -155,7 +130,7 @@
       "status": "OK"
     },
     {
-      "message": "Schematic auto-detected: voltage_divider.kicad_sch",
+      "message": "Schematic file found: voltage_divider.kicad_sch",
       "name": "schematic_file",
       "status": "OK"
     },
@@ -231,7 +206,7 @@
               "R2"
             ],
             "source": "live",
-            "stock": 44589073,
+            "stock": 43985975,
             "verified": false
           },
           {
@@ -247,6 +222,10 @@
             "verified": false
           }
         ],
+        "sources": {
+          "offline_catalog": "hit",
+          "parts_cache": "hit"
+        },
         "strict": false,
         "unresolved": []
       },
@@ -280,6 +259,7 @@
   "producer": "kct readiness",
   "version": "1.0",
   "warning_counts_by_rule": {
-    "mask_to_copper": 8
+    "mask_to_copper": 8,
+    "netclass_sidecar_mismatch": 3
   }
 }

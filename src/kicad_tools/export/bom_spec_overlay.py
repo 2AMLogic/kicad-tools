@@ -18,9 +18,67 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..schema.bom import BOMItem
-    from ..spec.schema import BOMEntry
+    from ..spec.schema import BOMEntry, ProjectSpec
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AssemblySpecErrors:
+    profiles: dict[tuple[int, str | None], str] = field(default_factory=dict)
+    pad_containers: dict[int, str] = field(default_factory=dict)
+    tolerance: str | None = None
+
+
+def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
+    """Keep BOM assignments usable when lead or tolerance declarations are invalid.
+
+    Profile errors identify the BOM row and pad (None for the part-level lead).
+    Other schema errors retain the regular spec loader's strict behavior.
+    """
+    from pydantic import ValidationError
+
+    from ..spec.parser import load_spec_data
+    from ..spec.schema import ProjectSpec
+
+    data = load_spec_data(path)
+    errors = AssemblySpecErrors()
+    try:
+        return ProjectSpec.model_validate(data), errors
+    except ValidationError as exc:
+        for error in exc.errors():
+            loc = error["loc"]
+            if loc in (
+                ("requirements", "manufacturing", "finished_hole_tolerance_mm"),
+                ("requirements", "manufacturing", "finished_hole_tolerance_source"),
+            ):
+                manufacturing = data["requirements"]["manufacturing"]
+                manufacturing.pop("finished_hole_tolerance_mm", None)
+                manufacturing.pop("finished_hole_tolerance_source", None)
+                errors.tolerance = f"invalid {loc[-1]}: {error['msg']}"
+                continue
+            if len(loc) < 3 or loc[0] != "bom_entries" or not isinstance(loc[1], int):
+                raise
+            row = loc[1]
+            if loc[2] == "lead":
+                pad = None
+                data["bom_entries"][row].pop("lead", None)
+            elif loc[2] == "pad_leads" and len(loc) >= 4 and isinstance(loc[3], str):
+                pad = loc[3]
+                overrides = data["bom_entries"][row]["pad_leads"]
+                # Match the raw YAML key to the normalized KiCad pad number.
+                for key in list(overrides):
+                    if str(key) == pad:
+                        del overrides[key]
+            elif loc[2:] == ("pad_leads",):
+                data["bom_entries"][row].pop("pad_leads", None)
+                errors.pad_containers[row] = f"invalid pad_leads: {error['msg']}"
+                continue
+            else:
+                raise
+            field = ".".join(map(str, loc[2:]))
+            errors.profiles[row, pad] = f"invalid {field}: {error['msg']}"
+    return ProjectSpec.model_validate(data), errors
 
 
 # ---------------------------------------------------------------------------

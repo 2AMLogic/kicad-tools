@@ -166,6 +166,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .mask_copper_exposure import construction_uncertainty_mm, nominal_exposure, opening_inventory
+
 if TYPE_CHECKING:
     from .violations import DRCResults
 
@@ -390,6 +392,7 @@ class MaskCopperAssessment:
     intent_audit: list[dict[str, Any]] = field(default_factory=list)
     geometry_provenance: dict[str, Any] = field(default_factory=dict)
     evaluated_pairs: int = 0
+    aperture_inventory: dict[str, list[dict[str, Any]]] | None = None
 
     def __post_init__(self):
         if self.coverage not in ("complete", "incomplete", "not_run"):
@@ -428,7 +431,16 @@ class MaskCopperAssessment:
     def from_dict(cls, data):
         if data.get("schema") != "kct.mask-copper-assessment.v1":
             raise ValueError("Unknown mask assessment schema")
+        summary = data.get("nominal_exposure", {})
+        inventory = {
+            side: face["openings"]
+            for side, face in summary.get("faces", {}).items()
+            if face["openings"] is not None
+        }
         return cls(
+            aperture_inventory=None
+            if summary.get("status", "inventory_unavailable") == "inventory_unavailable"
+            else inventory,
             coverage=data["coverage"],
             reasons=list(data["reasons"]),
             policy=MaskCopperPolicy(**data["policy"]) if data["policy"] else None,
@@ -461,6 +473,7 @@ class MaskCopperAssessment:
             "intent_audit": self.intent_audit,
             "geometry_provenance": committed_geometry_provenance(self.geometry_provenance),
             "evaluated_pairs": self.evaluated_pairs,
+            "nominal_exposure": nominal_exposure(self),
         }
 
 
@@ -682,6 +695,42 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
         if opening.distance(copper.centroid) < drill / 2 + uncertainty:
             return False, excess, 5
     return True, excess, None
+
+
+def clean_own_pad_entry(
+    opening,
+    copper,
+    owner_copper,
+    owner_kind: str,
+    width_mm: float,
+    endpoints,
+    *,
+    clearance_mm: float,
+    uncertainty_mm: float,
+    margin_mm: float = 0.0,
+) -> bool:
+    """Whether a straight track is one clean entry into its own pad.
+
+    The within-own-pad class asked about copper that is not on a board yet
+    (issue #9939): a repairer judging a leg it may draw.  ``opening`` is the
+    pad's modelled mask opening, ``owner_copper`` the pad's copper and
+    ``owner_kind`` its kind (``pad:roundrect`` ...); ``endpoints`` are the
+    track's authored ends.  The caller supplies the policy clearance, the pad's
+    mask margin and the uncertainty it modelled the opening to.
+    """
+    item = {"kind": "segment", "width_mm": width_mm, "endpoints_mm": tuple(endpoints)}
+    return bool(
+        _within_own_pad(
+            opening,
+            copper,
+            owner_copper,
+            {"kind": owner_kind},
+            item,
+            margin_mm,
+            clearance_mm,
+            uncertainty_mm,
+        )[0]
+    )
 
 
 def _separate_mask_land(owner, side, opening, candidates, conductors):
@@ -1439,7 +1488,9 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
     # contribution and the adjacent copper may be independently constructed,
     # so add both bounds, then 4nm for Gerber reconstruction/rounding.
     # This is uncertainty, never a process clearance allowance.
-    uncertainty = 2 * geometry.provenance.get("max_error_mm_per_construction", 0) + 0.000004
+    uncertainty = construction_uncertainty_mm(
+        geometry.provenance.get("max_error_mm_per_construction", 0)
+    )
     approved = {}
     for intent in intents:
         owner = geometry.objects.get(intent.owner_uuid)
@@ -1478,6 +1529,8 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
         )
         if reason is None:
             approved[(intent.owner_uuid, intent.conductor_uuid, intent.mask_side)] = intent
+    inventory: dict[str, list[dict[str, Any]]] = {}
+    result.aperture_inventory = inventory
     runs = _reinforce_runs(geometry.objects, reinforce_wires)
     for side in ("F.Mask", "B.Mask"):
         layer = side.replace(".Mask", ".Cu")
@@ -1576,7 +1629,10 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
         conductor_ids = {entry[0] for entry in conductors}
         index = STRtree([entry[2] for entry in conductors]) if conductors else None
         endpoint_cache: dict[str, Any] = {}
+        attributed_lands = {}
+        measurement_starts = []
         for owners, opening, kind, margin, provenance in openings:
+            measurement_starts.append(len(result.measurements))
             if index is None:
                 continue
             # Only a single-owner, non-merged opening excludes its own UUID.
@@ -1647,6 +1703,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                     owner_items[0]["layers_geometry"].get(layer) if single_pad_owner else None
                 )
                 if area > 0 and owner_copper is not None and not owner_copper.is_empty:
+                    attributed_lands[owners[0]] = owner_items[0]
                     beyond_owner = intersection.difference(owner_copper).area
                 beside_excess = None
                 within_own_pad_failed_condition = None
@@ -1818,6 +1875,15 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         pour_spoke_width_mm=pour_spoke,
                     )
                 )
+        measurement_starts.append(len(result.measurements))
+        inventory[side] = opening_inventory(
+            components,
+            openings,
+            geometry.objects,
+            attributed_lands,
+            layer if layer in geometry.exported.layers else None,
+            measurement_starts,
+        )
     return result
 
 

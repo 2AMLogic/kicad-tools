@@ -265,6 +265,13 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
             "without it the census gate is skipped"
         ),
     )
+    parser.add_argument(
+        "--order-thickness-mm",
+        type=float,
+        metavar="MM",
+        help="Nominal finished board thickness for the per-link creepage checks, in mm. "
+        "Overrides the purchase thickness in project.kct.",
+    )
     parser.add_argument("-o", "--output", help="Write to this file instead of editing in place")
     parser.add_argument("--trace-width", type=float, default=0.2, help="Track width (mm)")
     parser.add_argument(
@@ -362,9 +369,19 @@ def _rules_from_args(args: argparse.Namespace, pcb: Any) -> Any:
         via_size=args.via_diameter,
         via_drill=args.via_drill,
     )
+    names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
+    if Path(args.pcb).with_suffix(".kicad_dru").exists():
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+        project = BoardClearanceRules.from_board(args.pcb)
+        if project.dru_error:
+            raise LinkSpecError(project.dru_error)
+        if any(rule.value("clearance") is not None for rule in project.dru_rules):
+            base = replace(
+                base, board_rules=project, net_names={num: name for name, num in names.items()}
+            )
     if not args.net_clearance:
         return base
-    names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
     return replace(base, clearance_by_net=_parse_net_clearances(args.net_clearance, names))
 
 
@@ -483,7 +500,11 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
             via_size=spec.branch.diameter,
         )
     args._pcb_for_floors = pcb
-    authored = _authored_floors(args)
+    # Project rules (netclass + .kicad_dru) are resolved per pair by
+    # ``board_rules``; authored netclass floors would override a lower pair exception.
+    authored = _authored_floors(args)  # Validate the project even with active .kicad_dru rules.
+    if base.board_rules is not None:
+        authored = {}
     if voltages is None and not spec.net_clearance and not authored:
         return base
     names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
@@ -900,6 +921,7 @@ def _census_failures(
         net_class=net_class,
         board=str(pcb_path),
         project_board=Path(getattr(args, "pcb", pcb_path)),
+        order_thickness_mm=getattr(args, "order_thickness_mm", None),
         **extra,
     )
     failing: dict[tuple[str, str, str, str], float] = {}
@@ -1095,9 +1117,11 @@ def _commit_links_gated(
         # Issue #8573: the collapse has no clearance oracle and KiCad DRC does
         # not know --net-clearance, so re-check it against the per-net floors.
         link_rules = _rules_for_link(args, pcb, rules, spec)
-        if (link_rules.clearance_by_net or spec.branch) and not route_clears_floors(
-            collapsed, model, link_rules
-        ):
+        if (
+            link_rules.clearance_by_net
+            or link_rules.board_rules is not None
+            or spec.branch is not None
+        ) and not route_clears_floors(collapsed, model, link_rules):
             collapsed = route
         candidates = [collapsed, route] if collapsed.segments != route.segments else [route]
         for candidate in candidates:

@@ -131,7 +131,7 @@ def test_run_export_passes_gerber_epoch(tmp_path, monkeypatch):
     seen = {}
 
     class Stub:
-        def __init__(self, pcb_path, manufacturer, config):
+        def __init__(self, pcb_path, manufacturer, config, schematic_path=None):
             seen["config"] = config
 
         def export(self, output_dir):

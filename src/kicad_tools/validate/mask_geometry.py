@@ -16,6 +16,7 @@ from typing import Any
 from kicad_tools._shapely import require_shapely
 from kicad_tools.core.geometry import rotate_pad_offset
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.sexp.parser import SExp
 
 # Maximum chord error per circular construction, mm. Not a process tolerance.
 CURVE_ERROR_MM = 0.000001
@@ -123,7 +124,11 @@ def board_mask_margin(pcb: Any) -> tuple[float | None, bool]:
 
     ``None`` means the declared value is not a finite number.
     """
-    sexp = getattr(pcb, "_sexp", None)
+    return board_mask_margin_from_sexp(getattr(pcb, "_sexp", None))
+
+
+def board_mask_margin_from_sexp(sexp: SExp | None) -> tuple[float | None, bool]:
+    """Read the board's mask margin and declaration flag from its source tree."""
     setup = sexp.find_child("setup") if sexp is not None else None
     node = setup.find_child("pad_to_mask_clearance") if setup else None
     margin = node.get_float(0) if node else 0.0

@@ -291,36 +291,8 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # stitcher repair removes both GND stub slits at U2.B4 and U3.48.
 # The combined seed-42 fixture had zero physical copper gaps and 153
 # identity-allowed mask findings. Either recurring gap must fail the gate.
-DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    # Issue #8858 (measured 2026-11-18 at main 304c70e2c, pinned image
-    # kicad/kicad@sha256:18693567 -- the digest CI's KICAD_IMAGE pins): the
-    # seed-42 regeneration of this board carried 200 ``mask_to_copper``
-    # errors (122 same-net pass-throughs, 78 same-net own-pad entries; the
-    # #9326/#9332 repair path's population) across 22 net signatures.
-    # The sideband and PCIe repairs retired MIPI_RST, both USB_CC nets and
-    # both PCIe pairs. The clock repair (#10083) retired the five MIPI_CLK+
-    # and six MIPI_CLK- findings; the data repair (#10113) retired the two
-    # MIPI_D0+ and four MIPI_D0- findings. The U1.32 ground repair (#9891)
-    # retired both GND findings. The U2/D3, U3/25 and U3/36 repairs (#10267)
-    # retired all six findings on +1V2 and +3V3. The remaining signatures are
-    # listed below.
-    # Two independent regenerations reproduced every original
-    # signature and per-net count exactly, so the entries are keyed by NET
-    # SIGNATURE like the #8957 slits (mask_to_copper's items are
-    # opening/conductor UUIDs, re-minted by every regeneration; the rule
-    # now names ``nets`` on each finding).  A net that starts carrying
-    # mask errors still fails the gate; a net the router stops exposing
-    # goes stale and forces its entry out.  Each entry's value is the
-    # tracking issue number (#8858). The gate judges identities, and
-    # the measured per-net populations are recorded in the
-    # research note.  Verify with:
-    #   KCT_KICAD_DOCKER=1 uv run kct check \
-    #     boards/06-diffpair-test/regression-output/diffpair_test_routed.kicad_pcb \
-    #     --mfr jlcpcb --errors-only --format json
-    ("mask_to_copper", "USB2_D+"): 8858,
-    ("mask_to_copper", "USB2_D-"): 8858,
-    ("mask_to_copper", "USB3_TX2+"): 8858,
-}
+# The USB2 connector exits (#10258) and the TX2+ exit (#10294) clear the last mask findings.
+DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
 #: absent here has no allowance at all: every blocking finding counts.
