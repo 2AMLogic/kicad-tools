@@ -38,6 +38,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 EXIT_HV_UNCLASSIFIED = 2
 
 
+def _unique_exception_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    fields = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError(f"duplicate key {key!r}")
+        fields[key] = value
+    return fields
+
+
 def run_creepage_command(args) -> int:
     """Handle the ``creepage`` command.  Returns the process exit code."""
     from kicad_tools._shapely import has_shapely
@@ -237,7 +246,8 @@ def run_creepage_command(args) -> int:
             print(f"Error: creepage-exceptions file not found: {exc_path}", file=sys.stderr)
             return 1
         try:
-            exceptions = creepage_exceptions_from_dict(json.loads(exc_path.read_text()))
+            data = json.loads(exc_path.read_text(), object_pairs_hook=_unique_exception_fields)
+            exceptions = creepage_exceptions_from_dict(data)
         except json.JSONDecodeError as e:
             print(f"Error: parsing creepage-exceptions JSON: {e}", file=sys.stderr)
             return 1
@@ -568,7 +578,7 @@ def _render_table_selected(report: CreepageReport, *, show_witness: bool = False
     if report.pairs:
         header = (
             f"{'Net A':<14} {'Net B':<14} {'Layer':<11} {'Clnce':>8} {'ReqCl':>8} "
-            f"{'Creep':>8} {'ReqCr':>8} {'Margin':>8} {'dV':>8} {'Govern':>8} {'Result':>7}"
+            f"{'Creep':>8} {'ReqCr':>8} {'Margin':>8} {'dV':>8} {'Govern':>8} {'Rel':>10} {'Result':>7}"
         )
         if show_witness:
             header += "  Witness (A point, A item -> B item)"
@@ -583,7 +593,7 @@ def _render_table_selected(report: CreepageReport, *, show_witness: bool = False
             print(
                 f"{p.net_a:<14} {p.net_b:<14} {p.layer:<11} {p.clearance_mm:>8.3f} {req_cl:>8} "
                 f"{p.creepage_mm:>8.3f} {req_cr:>8} {p.margin_mm:>8.3f} {dv:>8} "
-                f"{p.governing_bound:>8} {_result_token(p):>7}"
+                f"{p.governing_bound:>8} {_rel_token(p):>10} {_result_token(p):>7}"
                 + (f"  {_witness_cell(p)}" if show_witness else "")
             )
             rules = [

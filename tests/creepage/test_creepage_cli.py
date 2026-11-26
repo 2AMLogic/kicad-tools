@@ -1050,6 +1050,69 @@ def test_scoped_exception_table_shows_pads_metric_and_reason(tmp_path, capsys):
     assert "creepage" in out
 
 
+def test_selected_pair_table_identifies_tied_failing_packages(tmp_path, capsys):
+    pcb = _write(tmp_path, board_scoped_exception_source(r1_gap_mm=0.4, r2_gap_mm=0.4))
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            *_STD_ARGS,
+            "--pair",
+            "L_MAINS",
+            "DIV_MID",
+            "--exceptions",
+            str(_exception_file(tmp_path, [_exc_entry()])),
+        ]
+    )
+    assert rc == 1
+    failures = [
+        line.split() for line in capsys.readouterr().out.splitlines() if line.endswith("FAIL")
+    ]
+    assert sorted(row[-2] for row in failures) == ["R1.1-2", "R2.1-2"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    ("key", "first", "second", "template"),
+    [
+        (
+            "footprint",
+            '"R1"',
+            '"R2"',
+            '{"exceptions":[{DUP,"metric":"creepage","pads":[1,2],"reason":"x"}]}',
+        ),
+        (
+            "metric",
+            '"creepage"',
+            '"clearance"',
+            '{"exceptions":[{DUP,"footprint":"R1","pads":[1,2],"reason":"x"}]}',
+        ),
+        ("exceptions", "[]", json.dumps([_exc_entry()]), "{DUP}"),
+    ],
+)
+def test_exception_file_rejects_duplicate_keys(
+    tmp_path, capsys, key, first, second, template, reverse
+):
+    pcb = _write(tmp_path, board_scoped_exception_source(r1_gap_mm=1.6, r2_gap_mm=2.5))
+    if reverse:
+        first, second = second, first
+    exc = tmp_path / "duplicate.json"
+    exc.write_text(template.replace("DUP", f'"{key}":{first},"{key}":{second}'))
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(_hv_map_file(tmp_path)),
+            *_STD_ARGS,
+            "--exceptions",
+            str(exc),
+        ]
+    )
+    assert rc == 1
+    assert f"duplicate key {key!r}" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "entries",
     [
