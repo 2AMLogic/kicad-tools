@@ -1,6 +1,7 @@
 """Tests for ``kct pcb add-fiducials`` (pcb_add_fiducials module)."""
 
 import json
+import math
 
 import pytest
 
@@ -104,6 +105,24 @@ class TestAddFiducials:
             dx = max(3 - x, 0, x - 12)
             assert (dx**2 + (y - 3) ** 2) ** 0.5 >= 2.0
 
+    def test_same_side_printed_ink_blocks_optical_site(self, tmp_path, capsys):
+        # Absolute sheet coordinates, with a mark over the first front grid site.
+        text = '(gr_text "X" (at 103.5 83.5) (layer "F.SilkS") (effects (font (size 1 1))))'
+        board = _write(tmp_path, _board(origin=(100, 80), extra=text))
+        assert run_add_fiducials(board, dry_run=True, output_format="json") == 0
+        plan = json.loads(capsys.readouterr().out)["fiducials"]
+        assert run_add_fiducials(board, output_format="json") == 0
+        assert json.loads(capsys.readouterr().out)["fiducials"] == plan
+        fids = _fids(board)
+        assert (3.5, 3.5) in [f.position for f in fids if f.layer == "B.Cu"]
+        for f in fids:
+            if f.layer == "F.Cu":
+                assert math.dist(f.position, (3.5, 3.5)) > 2.0
+            ref = next(t for t in f.texts if t.text_type == "reference")
+            assert ref.hidden
+        r1 = PCB.load(board).get_footprint("R1")
+        assert not next(t for t in r1.texts if t.text_type == "reference").hidden
+
     def test_no_free_site_fails_without_write(self, tmp_path, capsys):
         p = _write(tmp_path, _board(width=8, height=8))
         before = p.read_text()
@@ -205,7 +224,7 @@ def test_rule_area_limits_fiducials_on_its_copper_layers(
         (polygon (pts (xy 100 100) (xy 111 100) (xy 111 111) (xy 100 111))))"""
     if owner == "footprint":
         zone = f"""(footprint "RF:Antenna" (layer "F.Cu") (at 105 105)
-            (property "Reference" "AE1" (at 0 0) (layer "F.SilkS")) {zone})"""
+            (property "Reference" "AE1" (at 0 0) (layer "F.SilkS") (hide yes)) {zone})"""
     path = _write(tmp_path, _board(origin=(100, 100), extra=zone))
     assert main(["pcb", "add-fiducials", str(path), "--sides", "front,back"]) == 0
 
