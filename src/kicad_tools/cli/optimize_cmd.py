@@ -364,7 +364,7 @@ def _run_pour_slot_pass(written: Path, rules_from: Path | None, pack: bool = Fal
         from kicad_tools.core.project_clearance import resolve_project_clearances
         from kicad_tools.validate.rules.netclass_clearance_copper import load_project
 
-        project = load_project(written)
+        project = load_project(rules_from or written)
         if project is not None:
             names = ["", *(n.name for n in pcb.nets.values() if n.name)]
             clearances = {
@@ -383,19 +383,39 @@ def _run_pour_slot_pass(written: Path, rules_from: Path | None, pack: bool = Fal
     summary = result.to_dict()
     if result.changed:
         pcb.save(str(written))
-        _refill_written_board(written)
+        _refill_written_board(written, rules_from=rules_from)
     return summary
 
 
-def _refill_written_board(written: Path) -> tuple[bool, str | None]:
+def _refill_written_board(written: Path, rules_from: Path | None = None) -> tuple[bool, str | None]:
     """Refill zones in the written board; never raises (Issue #8286).
+
+    With ``rules_from`` the refill runs on a scratch copy beside that project's
+    ``.kicad_pro``/``.kicad_dru`` (the rules the DRC referee uses) and the
+    refilled board is copied back, so the saved fill matches the selected
+    project rather than whatever sits beside the board (Issue #10121).
 
     Returns ``(refilled, error)``; ``error`` is None on success.
     """
+    import shutil
+    import tempfile
+
     from kicad_tools.cli.runner import run_refill_zones
 
     try:
-        result = run_refill_zones(written)
+        if rules_from is None:
+            result = run_refill_zones(written)
+        else:
+            with tempfile.TemporaryDirectory(prefix="kct_refill_") as td:
+                stage = Path(td) / written.name
+                shutil.copy2(written, stage)
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    src = rules_from.with_suffix(suffix)
+                    if src.exists():
+                        shutil.copy2(src, stage.with_suffix(suffix))
+                result = run_refill_zones(stage)
+                if result.success:
+                    shutil.copy2(stage, written)
     except Exception as e:  # degrade like check_cmd: warn, exit code unchanged
         return False, str(e)
     if result.success:
@@ -1332,7 +1352,9 @@ def _run_optimization(args: argparse.Namespace, files: contextlib.ExitStack) -> 
     zones_refilled: bool | None = None
     refill_error: str | None = None
     if not args.dry_run:
-        zones_refilled, refill_error = _refill_written_board(candidate)
+        zones_refilled, refill_error = _refill_written_board(
+            candidate, rules_from=Path(args.project) if args.project else None
+        )
         # --quiet suppresses progress, not a warning that the written file is
         # inconsistent; JSON mode reports it via ``zones_refilled`` instead.
         if zones_refilled is False and not as_json:
@@ -1658,11 +1680,6 @@ def _run_optimization(args: argparse.Namespace, files: contextlib.ExitStack) -> 
                     f"{pour_slots['left_alone']} left alone "
                     f"({pour_slots['pairs_before']} -> {pour_slots['pairs_after']} slot pairs)"
                 )
-                if pour_slots["packed"]:
-                    print(
-                        f"  Note: {pour_slots['packed']} packed pair(s) keep their pour_slot "
-                        "advisory and have no ground strip between them"
-                    )
                 for why, count in sorted(pour_slots.get("left_alone_by_reason", {}).items()):
                     print(f"  left alone: {count} x {why}")
         elif args.pour_slots and args.dry_run:

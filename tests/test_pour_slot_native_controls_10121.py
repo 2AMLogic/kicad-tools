@@ -194,7 +194,7 @@ def test_implicit_default_in_check_and_cleanup(
     # Exercise the public cleanup and its real pair detector. The native
     # refill and DRC subprocesses are independent of candidate selection.
     monkeypatch.setattr(
-        "kicad_tools.cli.optimize_cmd._refill_written_board", lambda _: (True, None)
+        "kicad_tools.cli.optimize_cmd._refill_written_board", lambda *a, **kw: (True, None)
     )
     monkeypatch.setattr("kicad_tools.cli.optimize_cmd._kicad_cli_drc_counts", lambda *a, **kw: {})
     assert main(["optimize-traces", str(board), "--pour-slots", "--format", "json"]) == 0
@@ -275,3 +275,34 @@ def test_board05_witness_band_is_packed_only() -> None:
     witnesses = (0.250, 0.275, 0.395, 0.395, 0.250, 0.250, 0.250, 0.250, 0.250)
     assert all(g <= 2 * CLEARANCE_MM for g in witnesses)
     assert all(g > 0 for g in witnesses)
+
+
+@pytest.mark.parametrize("gap", [0.35, 0.55])
+def test_explicit_project_filename_does_not_change_cleanup(tmp_path, capsys, monkeypatch, gap):
+    """``--project`` selects the rules whatever it is called (Issue #10121)."""
+    from kicad_tools.cli import main
+
+    zone = ZONE.replace("clearance 0.2", "clearance 0")
+    results = {}
+    for name in ("control_p", "elsewhere"):
+        d = tmp_path / name
+        d.mkdir()
+        _control_p(d, zones=(zone,), gap=gap)
+        board = d / "control_p.kicad_pcb"
+        settings = {"net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]}}
+        project = d / f"{name}.kicad_pro"
+        project.write_text(json.dumps(settings))
+        refills = []
+        monkeypatch.setattr(
+            "kicad_tools.cli.optimize_cmd._refill_written_board",
+            lambda written, rules_from=None, _r=refills: _r.append(rules_from) or (True, None),
+        )
+        monkeypatch.setattr(
+            "kicad_tools.cli.optimize_cmd._kicad_cli_drc_counts", lambda *a, **kw: {}
+        )
+        argv = ["optimize-traces", str(board), "--project", str(project)]
+        assert main([*argv, "--pour-slots", "--format", "json"]) == 0
+        out = json.loads(capsys.readouterr().out)["pour_slots"]
+        assert refills and all(r == project for r in refills)
+        results[name] = (out["pairs_before"], board.read_text())
+    assert results["control_p"] == results["elsewhere"]
