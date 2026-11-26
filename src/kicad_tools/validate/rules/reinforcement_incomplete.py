@@ -963,22 +963,21 @@ class ReinforcementIncompleteRule(DRCRule):
                 claimed.add(id(a.via))
         anchors = [a for a in anchors if a not in layer_change]
         # A matching component drill is a possible termination only in an end
-        # window. When both end vias are present they already identify the wire.
-        vias = [a for a in anchors if a.via is not None]
-        if (
-            len(vias) == 2
-            and vias[0].arc <= window(extents[0], vias[0])
-            and total - vias[1].arc <= window(extents[1], vias[1])
+        # window, and each end is resolved on its own: a via in the window is
+        # the end's anchor, otherwise the outermost drill there is (a separate
+        # same-net lead hole further in is not a third anchor). Vias away from
+        # the ends stay candidates so a stray still counts.
+        end_pads: dict[int, _Anchor] = {}
+        for in_window, outer_first in (
+            ([a for a in anchors if a.arc <= window(extents[0], a)], True),
+            ([a for a in anchors if total - a.arc <= window(extents[1], a)], False),
         ):
-            anchors = vias
-        else:
-            anchors = [
-                a
-                for a in anchors
-                if a.via is not None
-                or a.arc <= window(extents[0], a)
-                or total - a.arc <= window(extents[1], a)
-            ]
+            if any(a.via is not None for a in in_window):
+                continue
+            if in_window:
+                pick = min(in_window, key=lambda a: a.arc if outer_first else total - a.arc)
+                end_pads[id(pick)] = pick
+        anchors = [a for a in anchors if a.via is not None or id(a) in end_pads]
         near_start = [a for a in anchors if a.arc <= window(extents[0], a)]
         near_end = [a for a in anchors if total - a.arc <= window(extents[1], a)]
         # With exactly two anchors the (a) window check below reports each

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kicad_tools.manufacturers import DesignRules
 from kicad_tools.pcb.reinforce import reinforce_net
 from kicad_tools.router.current_paths import CurrentPathSpec, PathEndpoint
@@ -194,6 +196,31 @@ def test_same_net_plated_pad_can_serve_as_a_verified_wire_anchor():
     rule = ReinforcementCourtyardRule(specs=[_spec()])
     assert len(rule.fully_wired_legs(pcb, _rules())) == 1
     assert not [v for v in rule.check(pcb, _rules()) if "W1" in v.message]
+
+
+@pytest.mark.parametrize("pad_ends", [(False, True), (True, False), (True, True), (False, False)])
+@pytest.mark.parametrize("drill", [1.70, 1.40])
+def test_component_bore_near_mixed_end_anchors_is_still_checked(pad_ends, drill):
+    """Each end resolves on its own, so a decoy lead hole is never a third anchor."""
+    pcb = _board()
+    vias = list(pcb.vias)
+    for idx, as_pad in enumerate(pad_ends):
+        if not as_pad:
+            continue
+        via = vias[idx]
+        pcb.remove_vias([via])
+        x, y = via.position
+        ref = f"W{idx + 1}"
+        _add_th_pad_footprint(pcb, ref=ref, x=x, y=y, net=NET, drill=via.drill, size=via.size)
+        pcb.get_footprint(ref).layer = "B.Cu"
+    x, y = vias[0].position
+    _add_th_pad_footprint(pcb, ref="R6", x=x + 5.0, y=y + 0.5, net=NET, drill=drill, size=2.8)
+    pcb.get_footprint("R6").layer = "B.Cu"
+    rule = ReinforcementCourtyardRule(specs=[_spec()])
+    assert len(rule.fully_wired_legs(pcb, _rules())) == 1
+    bores = [v for v in rule.check(pcb, _rules()) if "component drill" in v.message]
+    assert [v.items for v in bores] == [(NET, "R6", "1")]
+    assert not [v for v in bores if "W1" in v.message or "W2" in v.message]
 
 
 def test_end_hole_under_opposite_side_body_errors():
