@@ -1215,3 +1215,28 @@ def test_previous_csv_cannot_restore_incompatible_sourcing(tmp_path):
     )
     assert (merged, refs) == (1, {"R10"})
     assert ordinary.lcsc == "C17902" and not precision.lcsc and not remote.lcsc
+
+
+def test_previous_csv_checks_explicit_rating_properties_and_melf_body(tmp_path):
+    from kicad_tools.export.bom_formats import apply_existing_lcsc_assignments
+    from kicad_tools.parts.models import Part
+
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    cache.put(
+        Part(
+            lcsc_part="C17902",
+            mfr_part="1206W4F1002T5E",
+            description="10kΩ ±1% 125mW 1206",
+            package="1206",
+        )
+    )
+    chip = "Resistor_SMD:R_1206_3216Metric"
+    melf = "Resistor_SMD:R_MELF_MMB-0207"
+    r1 = _make_item("R1", "10k", chip)
+    r1.properties = {"Tolerance": "0.1%", "Power": "250 mW"}
+    r2 = _make_item("R2", "10k", chip)  # no stated ratings: compatible
+    r5 = _make_item("R5", "10k", melf)
+    existing = {("10k", chip): "C17902", ("10k", melf): "C17902"}
+    merged, refs = apply_existing_lcsc_assignments([r1, r2, r5], existing, parts_cache=cache)
+    assert (merged, refs) == (1, {"R2"})
+    assert r2.lcsc == "C17902" and not r1.lcsc and not r5.lcsc

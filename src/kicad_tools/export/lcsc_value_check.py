@@ -160,6 +160,9 @@ CHIP_PACKAGES = frozenset(
     {"01005", "0201", "0402", "0603", "0805", "1206", "1210", "1812", "2010", "2220", "2512"}
 )
 
+# Cylindrical MELF bodies: never interchangeable with a rectangular chip.
+_NON_CHIP_BODY_RE = re.compile(r"MELF|MM[ABU]-\d{4}", re.I)
+
 # A chip-size token in free text ("16V 100nF X7R ±10% 0402 MLCC").
 # The lookarounds reject tokens embedded in part numbers like
 # "RC0805FR-0710KL" or "0805W8F1002T5E" -- those are handled by the
@@ -350,7 +353,8 @@ def find_package_mismatch(
         cannot validate).
     """
     requested = extract_package_from_footprint(footprint)
-    if requested not in CHIP_PACKAGES:
+    melf = _NON_CHIP_BODY_RE.search(footprint)
+    if requested not in CHIP_PACKAGES and melf is None:
         return None  # not a chip footprint -- out of scope, accept
 
     # MPN size-code conventions are only reliable for chip passives.
@@ -363,6 +367,14 @@ def find_package_mismatch(
     if candidate is None:
         return None  # cannot validate -- accept
     candidate_package, source = candidate
+
+    if melf is not None and requested not in CHIP_PACKAGES:
+        # A cylindrical MELF body is never a rectangular chip (issue #10424).
+        return PackageMismatch(
+            requested_package=footprint.split(":")[-1],
+            candidate_package=candidate_package,
+            candidate_source=source,
+        )
 
     if candidate_package == requested:
         return None
@@ -594,6 +606,22 @@ def _watts(text: str) -> float | None:
     return float(match[1]) / divisor * (0.001 if match[3].lower() == "mw" else 1)
 
 
+def stated_ratings(item: BOMItem) -> tuple[re.Match[str] | None, float | None]:
+    """Strictest tolerance match and power (W) the row states.
+
+    Reads the Value field and the explicit ``Tolerance`` / ``Power`` /
+    ``Wattage`` KiCad properties (case-insensitive), so ratings written
+    either way constrain the assignment.
+    """
+    props = {k.casefold(): v for k, v in (getattr(item, "properties", None) or {}).items()}
+    tol_texts = [item.value, props.get("tolerance", "")]
+    pow_texts = [item.value, props.get("power", ""), props.get("wattage", "")]
+    tolerances = [m for t in tol_texts if (m := _PERCENT.search(t or ""))]
+    tolerance = min(tolerances, key=lambda m: float(m[1])) if tolerances else None
+    powers = [w for t in pow_texts if (w := _watts(t or "")) is not None]
+    return tolerance, (max(powers) if powers else None)
+
+
 def sourcing_problem(item: BOMItem, part: SuggestedPart | Part | None) -> str | None:
     """Check specifications a broad nominal-value search can lose."""
     mpn = getattr(item, "mpn", "")
@@ -602,12 +630,11 @@ def sourcing_problem(item: BOMItem, part: SuggestedPart | Part | None) -> str | 
     if not re.fullmatch(r"R\d+[A-Z]*", item.reference, re.I):
         return None
     description = (part.description or "") if part else ""
-    tolerance = _PERCENT.search(item.value)
+    tolerance, power = stated_ratings(item)
     if tolerance:
         found = _PERCENT.search(description)
         if not found or float(found[1]) > float(tolerance[1]):
             return f"catalogue does not establish {tolerance[0]} resistor tolerance"
-    power = _watts(item.value)
     if power is not None:
         found_power = _watts(description)
         if found_power is None or found_power < power:

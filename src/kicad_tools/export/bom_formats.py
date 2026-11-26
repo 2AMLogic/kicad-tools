@@ -456,7 +456,12 @@ def apply_existing_lcsc_assignments(
         Tuple of (number of items that received an LCSC, set of
         references that were assigned).
     """
-    from .lcsc_value_check import check_lcsc_against_cache, is_wire_landing, sourcing_problem
+    from .lcsc_value_check import (
+        check_lcsc_against_cache,
+        is_wire_landing,
+        sourcing_problem,
+        stated_ratings,
+    )
 
     merged_count = 0
     merged_refs: set[str] = set()
@@ -466,7 +471,7 @@ def apply_existing_lcsc_assignments(
         if getattr(item, "lcsc", "") or getattr(item, "dnp", False):
             continue
         key = (item.value, item.footprint)
-        sourcing_key = (*key, getattr(item, "mpn", ""))
+        sourcing_key = (*key, getattr(item, "mpn", ""), *(str(r) for r in stated_ratings(item)))
         if sourcing_key in rejected or is_wire_landing(item.footprint):
             continue
         lcsc = existing.get(key)
