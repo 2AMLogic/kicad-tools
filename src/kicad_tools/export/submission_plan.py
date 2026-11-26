@@ -537,13 +537,20 @@ def _purchasing_row(row: Any) -> dict[str, Any]:
     return item
 
 
-def _purchasing(data: bytes) -> list[dict[str, Any]]:
+def purchasing_export_digest(document: dict[str, Any]) -> str:
+    """Bind a manifest-free export to its original purchasing rows."""
+    return _digest(_json(document))
+
+
+def parse_purchasing_list(data: bytes) -> list[dict[str, Any]]:
     """Rows of a frozen per-board purchasing list (Issue #10431)."""
     try:
         document = _load_json(data)
     except SubmissionError as exc:
         # The shared loader's wording names a manifest; this file is not one.
         raise SubmissionError("Purchasing list is not valid JSON") from exc
+    marked = isinstance(document, dict) and "kct_export_sha256" in document
+    recorded = document.pop("kct_export_sha256") if marked else None
     if (
         not isinstance(document, dict)
         or set(document) != {"schema_version", "items"}
@@ -552,7 +559,10 @@ def _purchasing(data: bytes) -> list[dict[str, Any]]:
         or not isinstance(document["items"], list)
     ):
         raise SubmissionError("Unsupported or malformed purchasing list")
-    return [_purchasing_row(row) for row in document["items"]]
+    rows = [_purchasing_row(row) for row in document["items"]]
+    if marked and recorded != purchasing_export_digest(document):
+        raise SubmissionError("Purchasing list differs from its exported contents")
+    return rows
 
 
 def scaled_purchasing(items: Any, board_quantity: int) -> list[dict[str, Any]]:
@@ -671,7 +681,7 @@ def prepare_submission(
             "source": {"path": purchasing_source, **_record(frozen.data)},
             "items": [
                 row | {"required": row["per_board"] * board_quantity}
-                for row in _purchasing(frozen.data)
+                for row in parse_purchasing_list(frozen.data)
             ],
         }
     outputs = {names[role]: snapshots[path].data for role, path in artifacts.items()}

@@ -2887,6 +2887,133 @@ class TestPurchasingList:
         assert "purchasing list" in error and "decisions" in error
         assert not (tmp_path / "treated").exists()
 
+    @pytest.mark.parametrize("project_zip", [False, True])
+    @pytest.mark.parametrize("declared", [False, True])
+    def test_buyer_file_keeps_its_bytes(
+        self, tmp_path, monkeypatch, local_symbol_project, project_zip, declared
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING if declared else "")
+        out = tmp_path / "bundle"
+        out.mkdir()
+        buyer = out / "purchasing.json"
+        buyer.write_bytes(b'{"buyer_note":"retain"}')
+        _, result = self._export(
+            monkeypatch, local_symbol_project, out, include_project_zip=project_zip
+        )
+        assert buyer.read_bytes() == b'{"buyer_note":"retain"}'
+        if declared:
+            assert not result.success and "purchasing.json" in str(result.errors)
+            assert list(out.iterdir()) == [buyer]
+        else:
+            assert result.success, result.errors
+            assert "purchasing.json" not in self._manifest(result)
+
+    @pytest.mark.parametrize("project_zip", [False, True])
+    @pytest.mark.parametrize(
+        "declaration",
+        ["purchasing: false", "purchasing: {}", "purchasing: [unterminated", "decisions: [{}]"],
+    )
+    def test_invalid_declaration_preserves_last_bundle(
+        self, tmp_path, monkeypatch, local_symbol_project, project_zip, declaration
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "bundle"
+        _, first = self._export(
+            monkeypatch, local_symbol_project, out, include_project_zip=project_zip
+        )
+        assert first.success, first.errors
+        before = {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()}
+        self._write_spec(local_symbol_project, declaration + "\n")
+        _, refused = self._export(
+            monkeypatch, local_symbol_project, out, include_project_zip=project_zip
+        )
+        assert not refused.success and "purchasing" in str(refused.errors).lower()
+        assert {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()} == before
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("bom_filename", "purchasing.json"),
+            ("pnp_filename", "nested/../purchasing.json"),
+            ("project_zip_name", "purchasing.json"),
+            ("manifest_name", "purchasing.json"),
+            ("manifest_name", "Purchasing.JSON"),
+            ("gerbers_subdir", "purchasing.json"),
+            ("pnp_filename", "purchasing.json/placement.csv"),
+        ],
+    )
+    def test_purchasing_path_conflict_is_reported_before_writing(
+        self, tmp_path, monkeypatch, local_symbol_project, field, value
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "bundle"
+        _, result = self._export(monkeypatch, local_symbol_project, out, **{field: value})
+        assert not result.success
+        assert "purchasing.json" in str(result.errors) and field in str(result.errors)
+        assert not out.exists()
+
+    @pytest.mark.parametrize("manifest", [False, True])
+    def test_edited_purchasing_list_keeps_last_bundle(
+        self, tmp_path, monkeypatch, local_symbol_project, manifest
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "bundle"
+        _, first = self._export(monkeypatch, local_symbol_project, out, include_manifest=manifest)
+        assert first.success, first.errors
+        path = out / "purchasing.json"
+        data = path.read_text().replace("SYN-CORD-1", "BUYER-CORD-1")
+        path.write_text(data)
+        self._write_spec(local_symbol_project)
+        _, refused = self._export(monkeypatch, local_symbol_project, out, include_manifest=manifest)
+        assert not refused.success and "purchasing.json" in str(refused.errors)
+        assert path.read_text() == data
+
+    @pytest.mark.parametrize("first_manifest", [False, True])
+    def test_purchasing_rerun_without_a_manifest(
+        self, tmp_path, monkeypatch, local_symbol_project, first_manifest
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "bundle"
+        _, first = self._export(
+            monkeypatch, local_symbol_project, out, include_manifest=first_manifest
+        )
+        assert first.success, first.errors
+        self._write_spec(local_symbol_project, FUSE_PURCHASING.replace("SYN-CORD-1", "SYN-CORD-2"))
+        _, updated = self._export(monkeypatch, local_symbol_project, out, include_manifest=False)
+        assert updated.success, updated.errors
+        assert "SYN-CORD-2" in (out / "purchasing.json").read_text()
+        self._write_spec(local_symbol_project, "purchasing: []\n")
+        _, removed = self._export(monkeypatch, local_symbol_project, out, include_manifest=False)
+        assert removed.success and not (out / "purchasing.json").exists()
+
+    @pytest.mark.parametrize("project_zip", [False, True])
+    def test_concurrent_buyer_edit_survives_publication(
+        self, tmp_path, monkeypatch, local_symbol_project, project_zip
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "bundle"
+        _, first = self._export(
+            monkeypatch, local_symbol_project, out, include_project_zip=project_zip
+        )
+        assert first.success, first.errors
+        manifest = first.manifest_path.read_bytes()
+        path = first.purchasing_path
+        edited = path.read_bytes().replace(b"SYN-CORD-1", b"BUYER-CORD-1")
+        generate = ManufacturingPackage._generate_assembly
+
+        def edit_while_generating(package, candidate, result):
+            path.write_bytes(edited)
+            return generate(package, candidate, result)
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_assembly", edit_while_generating)
+        self._write_spec(local_symbol_project)
+        _, refused = self._export(
+            monkeypatch, local_symbol_project, out, include_project_zip=project_zip
+        )
+        assert not refused.success
+        assert path.read_bytes() == edited
+        assert first.manifest_path.read_bytes() == manifest
+
     def test_unreadable_spec_exports_without_the_list(self, tmp_path, monkeypatch, caplog):
         project = tmp_path / "project"
         project.mkdir()

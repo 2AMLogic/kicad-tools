@@ -510,9 +510,16 @@ declaration. The console names the file and every selection still pending:
 
 An invalid row (a zero quantity, a selected part without a part number, a
 pending row that also names one) fails the export and names the row, so a list
-that cannot be trusted never ships. Removing the declaration and exporting
-again withdraws the earlier `purchasing.json`; a rerun cannot leave an old list
-in the bundle.
+that cannot be trusted never ships. Removing the declaration or setting it to
+an empty list withdraws the earlier export. An unreadable spec on a rerun
+preserves the last exported list and reports an error. The exporter checks
+the previous manifest before replacing or withdrawing a list. When the
+manifest is disabled, the list carries a checksum of its original rows.
+
+A buyer can keep an independently created `purchasing.json` in the output
+directory when the project declares no purchasing rows. If a declared list
+would overwrite that file, or if another enabled output uses the same path,
+export reports the collision before writing the package.
 
 ### For the buyer
 

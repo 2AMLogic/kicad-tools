@@ -278,13 +278,17 @@ class _PackageOutputs:
 
     bundle_key = Path("package")
 
-    def __init__(self, out_dir: Path, config: ManufacturingConfig, manufacturer: str) -> None:
+    def __init__(
+        self, out_dir: Path, config: ManufacturingConfig, manufacturer: str, *, purchasing: bool
+    ) -> None:
         from kicad_tools.manufacturers import get_fab_family
 
         config = copy(config)
         family = get_fab_family(manufacturer)
         bom = config.bom_filename.format(manufacturer=family)
-        configured = {"project_zip_name": config.project_zip_name}
+        configured = {}
+        if config.include_project_zip:
+            configured["project_zip_name"] = config.project_zip_name
         if config.include_bom:
             configured["bom_filename"] = bom
         if config.include_pnp:
@@ -302,6 +306,18 @@ class _PackageOutputs:
         for field_name, name in configured.items():
             path = live_bundle / name
             targets[field_name] = path.parent.resolve() / path.name
+        if purchasing:
+            for field_name, target in targets.items():
+                resolved = target.resolve()
+                # Bundle member names travel between case-sensitive and
+                # case-insensitive filesystems, including the buyer's machine.
+                if not resolved.is_relative_to(live_bundle):
+                    continue
+                parts = resolved.relative_to(live_bundle).parts
+                if parts and parts[0].casefold() == PURCHASING_FILENAME:
+                    raise ValueError(
+                        f"{field_name} conflicts with the purchasing list at {live_bundle / PURCHASING_FILENAME}"
+                    )
         # Nested external outputs share one staging subtree, just as they do
         # on disk. Package paths always retain their bundle-relative names.
         parents = sorted(
@@ -322,10 +338,8 @@ class _PackageOutputs:
             relative = os.path.relpath(key, bundle_key)
             if Path(relative) != Path(configured[field_name]):
                 setattr(config, field_name, relative)
-        # Tracked whether or not this export declares a purchasing list, so
-        # that publishing a bundle without one withdraws the previous list
-        # (Issue #10431).
-        members.add(bundle_key / PURCHASING_FILENAME)
+        if purchasing:
+            members.add(bundle_key / PURCHASING_FILENAME)
         if config.include_readme:
             members.add(bundle_key / "README.txt")
         if config.stackup_id:
@@ -974,6 +988,53 @@ def _purchasing_document(entries: list[PurchasingEntry]) -> dict[str, Any]:
     return {"schema_version": 1, "items": items}
 
 
+def _previous_purchasing_digest(out_dir: Path, manifest_name: str) -> str | None:
+    """Identify the prior export before replacing or withdrawing its list."""
+    from .submission_plan import SubmissionError, parse_purchasing_list
+
+    path = out_dir / PURCHASING_FILENAME
+    if not path.is_file() or path.is_symlink():
+        return None
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    try:
+        document = json.loads(data)
+    except ValueError:
+        document = None
+    marked = isinstance(document, dict) and "kct_export_sha256" in document
+    if not marked:
+        try:
+            manifest = json.loads((out_dir / manifest_name).read_bytes())
+        except (FileNotFoundError, ValueError):
+            return None
+        if not isinstance(manifest, dict):
+            return None
+        # Release sign-off can reissue the export manifest as a tapeout receipt.
+        tapeout = manifest.get("tapeout")
+        if not manifest.get("kicad_tools_version") and not (
+            isinstance(tapeout, dict)
+            and "board_sha256" in tapeout
+            and "readiness_sha256" in tapeout
+        ):
+            return None
+        files = manifest.get("files")
+        entry = files.get(PURCHASING_FILENAME) if isinstance(files, dict) else None
+        if not isinstance(entry, dict):
+            return None
+        if entry.get("sha256") != digest or entry.get("size") != len(data):
+            raise ValueError(f"{path} differs from the previous export manifest")
+    try:
+        parse_purchasing_list(data)
+    except SubmissionError as exc:
+        if marked:
+            raise ValueError(
+                f"{path} differs from the previously exported purchasing list"
+            ) from exc
+        # An older export could use this filename for a BOM or another artifact.
+        return None
+    return digest
+
+
 def _spec_fault(error: ErrorDetails, data: Any) -> str:
     """Name one spec validation error the way its author sees the file.
 
@@ -1333,6 +1394,7 @@ class ManufacturingPackage:
         # Issue #10431: the project's supplementary purchasing rows, resolved
         # once per export by :meth:`_load_purchasing`.
         self._purchasing: list[PurchasingEntry] | None = None
+        self._prior_purchasing_digest: str | None = None
 
     @property
     def _lookup_pcb_path(self) -> Path:
@@ -1367,7 +1429,32 @@ class ManufacturingPackage:
         # Issue #10431: read the project's supplementary purchasing rows
         # before anything is written, so a row that cannot be trusted refuses
         # the export instead of shipping a bundle with no list or a stale one.
-        self._load_purchasing(result)
+        try:
+            self._prior_purchasing_digest = _previous_purchasing_digest(
+                out_dir, self.config.manifest_name
+            )
+            self._load_purchasing(result)
+            manage_purchasing = bool(self._purchasing or self._prior_purchasing_digest)
+            layout = (
+                _PackageOutputs(
+                    out_dir, self.config, self.manufacturer, purchasing=manage_purchasing
+                )
+                if self.config.include_project_zip or manage_purchasing
+                else None
+            )
+            purchasing_path = out_dir / PURCHASING_FILENAME
+            if (
+                self._purchasing
+                and self._prior_purchasing_digest is None
+                and os.path.lexists(purchasing_path)
+            ):
+                raise ValueError(
+                    f"Purchasing list conflicts with an existing file at {purchasing_path}"
+                )
+        except (OSError, ValueError) as exc:
+            result.errors.append(str(exc))
+        if not result.success:
+            return result
 
         if dry_run:
             return self._dry_run(out_dir, result)
@@ -1506,16 +1593,19 @@ class ManufacturingPackage:
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.config.include_project_zip:
-            return self._publish_package(out_dir, result, selected_stackup_source_hash)
+        if layout is not None:
+            return self._publish_package(out_dir, result, selected_stackup_source_hash, layout)
         return self._write_package(out_dir, result, selected_stackup_source_hash)
 
     def _publish_package(
-        self, out_dir: Path, result: ManufacturingResult, source_hash: str | None
+        self,
+        out_dir: Path,
+        result: ManufacturingResult,
+        source_hash: str | None,
+        layout: _PackageOutputs,
     ) -> ManufacturingResult:
         """Generate the editable project and its manufacturing files as one candidate."""
         try:
-            layout = _PackageOutputs(out_dir, self.config, self.manufacturer)
             with tempfile.TemporaryDirectory(prefix="kct-export-") as tmp:
                 candidate = Path(tmp)
                 work_bundle = candidate / layout.bundle_key
@@ -2778,6 +2868,10 @@ class ManufacturingPackage:
         try:
             spec_path = self.config.spec_path or find_spec_file(self.pcb_path.parent)
         except OSError as exc:
+            if self._prior_purchasing_digest is not None:
+                result.errors.append(
+                    f"Cannot read the spec for the previous purchasing list: {exc}"
+                )
             logger.warning("Purchasing list not exported: spec lookup failed: %s", exc)
             return
         if spec_path is None:
@@ -2789,15 +2883,24 @@ class ManufacturingPackage:
                 declared = load_spec_data(spec_path)
             except (OSError, ValueError):
                 declared = {}
-            if not declared.get("purchasing"):
+            errors = exc.errors()
+            if (
+                self._prior_purchasing_digest is None
+                and not declared.get("purchasing")
+                and not any(error["loc"][:1] == ("purchasing",) for error in errors)
+            ):
                 return
-            faults = "; ".join(_spec_fault(error, declared) for error in exc.errors())
+            faults = "; ".join(_spec_fault(error, declared) for error in errors)
             result.errors.append(
                 f"Invalid project spec; the purchasing list cannot be read from {spec_path}: {faults}"
             )
             logger.error("Purchasing list could not be read from %s: %s", spec_path, faults)
             return
         except (OSError, ValueError) as exc:
+            if self._prior_purchasing_digest is not None:
+                result.errors.append(
+                    f"Cannot read {spec_path} for the previous purchasing list: {exc}"
+                )
             logger.warning(
                 "Purchasing list not exported: project spec could not be read from %s: %s",
                 spec_path,
@@ -2810,17 +2913,24 @@ class ManufacturingPackage:
 
     def _write_purchasing(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Stage the per-board purchasing list, or withdraw an earlier one."""
+        if self._purchasing is None and self._prior_purchasing_digest is None:
+            return
         path = out_dir / PURCHASING_FILENAME
         try:
+            staged_digest = _sha256_file(path) if path.is_file() else None
+            if staged_digest != self._prior_purchasing_digest:
+                raise OSError(f"{path.name} changed while preparing the export")
             if self._purchasing is None:
-                # The candidate was seeded with the previous export's list.
-                # Nothing declares one now, so it must not survive publication.
-                path.unlink(missing_ok=True)
+                path.unlink()
                 return
+            document = _purchasing_document(self._purchasing)
+            if not self.config.include_manifest:
+                from .submission_plan import purchasing_export_digest
+
+                document["kct_export_sha256"] = purchasing_export_digest(document)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps(_purchasing_document(self._purchasing), indent=2, ensure_ascii=False)
-                + "\n",
+                json.dumps(document, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
         except OSError as exc:
