@@ -47,11 +47,11 @@
       "size": 2415
     },
     "assembly-back.pdf": {
-      "sha256": "283f0aeb412adaf45759aa8c884d983d9060613cfa43d02a2a3cb7757151a40f",
+      "sha256": "e8082f31f55aa536a2f3ac194643bfcd197dd09618ebfdff6d1f2fccddf16001",
       "size": 8804
     },
     "assembly-front.pdf": {
-      "sha256": "f9ab18a1c9e2bfbc5eb3ef60fd4b7c16a99610d2dbe01015392125c2d9cb8500",
+      "sha256": "5e830055de4e9e20470ae05c8958e981edd74278a405009e000cb705d0e35a91",
       "size": 19669
     },
     "bom_jlcpcb.csv": {
@@ -59,7 +59,7 @@
       "size": 175
     },
     "check-report.json": {
-      "sha256": "944e79e920ce955b3b578f241a4470f3bdc530e370ba9e3870b4634ccf816fe8",
+      "sha256": "9ce7ee552662b62c0abe3fc94ae6b6a094b9a33b87d60e1fe9c4c13c8ef42e2d",
       "size": 116399
     },
     "cpl_jlcpcb.csv": {
@@ -115,11 +115,11 @@
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "6545895e2243d0744e6baca11224423f7685153287e186df7e6c437f29915a87",
-      "size": 934949
+      "sha256": "c464d395fc7e39322d9ef11608f039f1148479744e2bd23c6af0f312ee542dcb",
+      "size": 934951
     },
     "schematic.pdf": {
-      "sha256": "c51feea148afd566a2c32784860995f3148675122fc1bb7ef3991a90c1b6adf5",
+      "sha256": "639ebe3cf4bf0902bd27d5fd25c872d2f5f2e88d619244511973114c9f34521e",
       "size": 47852
     }
   },

@@ -1560,10 +1560,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "c35031f64a20f92e0d0dad8add87065089f14cc4c4c88b97f1454de044ba3d23",
-            "B.Mask": "f7d201221323c298de63573657a7ee6548785ee931387a5a712828b1c320dfe7",
-            "F.Cu": "50ef7053d1e2c74db7b5c4ea4313dc9ff5697a0182ecd23e586b6b8688b634d3",
-            "B.Cu": "e32ba7333a22b6210d0f535829926e265da16f2a4ab849b552bbe4882dfda0dc"
+            "F.Mask": "0c1d99d41288829f877b7d6f772f5a45bf7d15cd1287f3de2cb639e54b527ef9",
+            "B.Mask": "555bd8567bb93d3924fac99d51fa6c556091d32dbeaf229870a2c07f31a7f9dc",
+            "F.Cu": "ba5a4b0e1fd1a258874abaac71e2ffc0fdcc6e2ca343f4fc1e66eee14aada569",
+            "B.Cu": "c2a539ac2eb6b830db299f95f1e11fb9b27fccead1c96988616560f271780b59"
           },
           "unsupported": [],
           "source_geometries": {}
@@ -2012,8 +2012,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "F.Mask": "c35031f64a20f92e0d0dad8add87065089f14cc4c4c88b97f1454de044ba3d23",
-              "F.Cu": "50ef7053d1e2c74db7b5c4ea4313dc9ff5697a0182ecd23e586b6b8688b634d3"
+              "F.Mask": "0c1d99d41288829f877b7d6f772f5a45bf7d15cd1287f3de2cb639e54b527ef9",
+              "F.Cu": "ba5a4b0e1fd1a258874abaac71e2ffc0fdcc6e2ca343f4fc1e66eee14aada569"
             },
             "openings": [
               {
@@ -2272,8 +2272,8 @@
             "status": "complete",
             "missing_layers": [],
             "gerber_sha256": {
-              "B.Mask": "f7d201221323c298de63573657a7ee6548785ee931387a5a712828b1c320dfe7",
-              "B.Cu": "e32ba7333a22b6210d0f535829926e265da16f2a4ab849b552bbe4882dfda0dc"
+              "B.Mask": "555bd8567bb93d3924fac99d51fa6c556091d32dbeaf229870a2c07f31a7f9dc",
+              "B.Cu": "c2a539ac2eb6b830db299f95f1e11fb9b27fccead1c96988616560f271780b59"
             },
             "openings": [
               {
