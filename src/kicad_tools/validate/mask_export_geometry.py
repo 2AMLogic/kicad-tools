@@ -52,7 +52,16 @@ GEOMETRY_NEUTRAL_STDERR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def _suppress_geometry_neutral_stderr(stderr: str) -> tuple[list[dict[str, str]], str]:
+# Docker prints this launcher notice before KiCad starts (#10531).
+_DOCKER_PLATFORM_NOTICE = (
+    "WARNING: The requested image's platform (linux/amd64) does not match the detected "
+    "host platform (linux/arm64/v8) and no specific platform was requested"
+)
+
+
+def _suppress_geometry_neutral_stderr(
+    stderr: str, command: Sequence[str]
+) -> tuple[list[dict[str, str]], str]:
     """Split native stderr into geometry-neutral lines and the residual text.
 
     Returns the suppressed lines paired with the pattern name that matched
@@ -62,8 +71,12 @@ def _suppress_geometry_neutral_stderr(stderr: str) -> tuple[list[dict[str, str]]
     """
     suppressed: list[dict[str, str]] = []
     residual: list[str] = []
+    docker_run = len(command) >= 2 and Path(command[0]).name == "docker" and command[1] == "run"
     for line in stderr.splitlines():
         stripped = line.strip()
+        if docker_run and stripped == _DOCKER_PLATFORM_NOTICE:
+            suppressed.append({"pattern": "docker-platform-notice", "line": stripped})
+            continue
         matched = next(
             (
                 name
@@ -458,7 +471,9 @@ def inspect_exported_mask_geometry(
         # named here with the pattern that matched it.
         residual = completed.stderr
         if completed.returncode == 0:
-            suppressed, residual = _suppress_geometry_neutral_stderr(completed.stderr)
+            suppressed, residual = _suppress_geometry_neutral_stderr(
+                completed.stderr, native_command
+            )
             if suppressed:
                 snapshot.export_identity["suppressed_stderr"] = [
                     {**entry, "line": re.sub(re.escape(temp), "<scratch>", entry["line"])}
