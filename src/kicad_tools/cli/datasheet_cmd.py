@@ -1038,7 +1038,7 @@ def _extract_package(args) -> int:
         pages = _parse_pages(args.pages)
         packages = parser.extract_packages(pages)
 
-        if not packages:
+        if not packages and args.format != "json":
             print("No packages found in document", file=sys.stderr)
             return 0
 
@@ -1093,7 +1093,7 @@ def _suggest_footprint(args) -> int:
         pages = _parse_pages(args.pages)
         packages = parser.extract_packages(pages)
 
-        if not packages:
+        if not packages and args.format != "json":
             print("No packages found in document", file=sys.stderr)
             return 0
 
