@@ -19,6 +19,7 @@ class _Seg:
 
 @dataclass
 class _Zone:
+    rule_area_contours: list = field(default_factory=list)
     polygon = ((-50, -50), (100, -50), (100, 100), (-50, 100))
     net_name: str = "GND"
     layer: str = "F.Cu"

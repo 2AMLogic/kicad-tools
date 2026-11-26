@@ -142,9 +142,12 @@ class PourSlotRule(DRCRule):
         """Yield each flagged pair (the single detection path, Issue #8440)."""
         zones: dict[str, list[_Pour]] = defaultdict(list)
         for zone in pcb.zones:
-            if zone.keepout is not None or len(zone.polygon) < 3:
+            if zone.keepout is not None:
                 continue
-            outline = Polygon(zone.polygon)
+            contours = zone.rule_area_contours or [zone.polygon]
+            if any(len(ring) < 3 for ring in contours):
+                continue
+            outline = Polygon(contours[0], holes=contours[1:])
             pour = _Pour(
                 outline if outline.is_valid else outline.buffer(0),
                 max(

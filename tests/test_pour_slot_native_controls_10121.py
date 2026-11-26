@@ -32,6 +32,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import parse_string
 from kicad_tools.validate.rules.pour_slot import iter_pour_slot_pairs
@@ -152,6 +154,27 @@ def test_remote_zone_cannot_change_the_local_fill_band(tmp_path: Path) -> None:
     assert _pair_gaps(_control_p(tmp_path, (local, remote))) == [("NET1", "NET2", 0.55)]
     thin = local.replace("min_thickness 0.3", "min_thickness 0.1")
     assert _pair_gaps(_control_p(tmp_path, (thin, remote))) == []
+
+
+@pytest.mark.parametrize(
+    "contour",
+    [
+        "(arc (start 5 20) (mid 20 5) (end 35 20)) (arc (start 35 20) (mid 20 35) (end 5 20))",
+        "(xy 35 5) (xy 35 35) (xy 34 35) (arc (start 34 35) (mid 10 20) (end 34 5)) (xy 34 5)",
+    ],
+    ids=["two-semicircles", "arc-and-vertices"],
+)
+def test_curved_zone_clips_slot_to_authored_contour(tmp_path: Path, contour: str) -> None:
+    zone = ZONE.replace("(xy 5 5) (xy 45 5) (xy 45 35) (xy 5 35)", contour)
+    assert _pair_gaps(_control_p(tmp_path, (zone,))) == [("NET1", "NET2", 0.55)]
+    thin = zone.replace("min_thickness 0.3", "min_thickness 0.1")
+    assert _pair_gaps(_control_p(tmp_path, (thin,))) == []
+
+
+def test_slot_inside_zone_cutout_stays_clear(tmp_path: Path) -> None:
+    hole = "(polygon (pts (xy 10 14) (xy 20 14) (xy 20 17) (xy 10 17)))"
+    zone = ZONE.rstrip()[:-1] + hole + ")"
+    assert _pair_gaps(_control_p(tmp_path, (zone,))) == []
 
 
 def test_slot_only_partly_inside_zone(tmp_path: Path) -> None:

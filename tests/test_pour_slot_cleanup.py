@@ -11,6 +11,7 @@ from kicad_tools.validate.rules.pour_slot import PourSlotRule, iter_pour_slot_pa
 
 @dataclass
 class _Zone:
+    rule_area_contours: list = field(default_factory=list)
     polygon = ((-50, -50), (100, -50), (100, 100), (-50, 100))
     layer: str = "F.Cu"
     layers: list = field(default_factory=list)

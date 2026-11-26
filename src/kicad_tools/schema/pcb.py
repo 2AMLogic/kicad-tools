@@ -2838,8 +2838,8 @@ class Zone:
     # (Issue #6087).
     parent_reference: str = ""
     parent_uuid: str = ""
-    # For a curved rule area or one with cutouts, the physical exterior followed
-    # by its interior rings. A simple rule area's boundary is already in polygon.
+    # Authored exterior and interior rings for curved zones or zones with cutouts.
+    # The historical field name also covers copper pours. Simple zones use polygon.
     rule_area_contours: list[list[tuple[float, float]]] = field(default_factory=list)
 
     def is_stroked_fill(self) -> bool:
@@ -3050,10 +3050,9 @@ class Zone:
         # Parse boundary polygon - (polygon (pts (xy X Y) ...))
         if polygon := index.get("polygon"):
             zone.polygon = cls._parse_polygon_pts(polygon)
-            if zone.keepout is not None:
-                contours = sexp.find_children("polygon")
-                if len(contours) > 1 or polygon.find("arc") is not None:
-                    zone.rule_area_contours = [_polygon_arc_chain(contour) for contour in contours]
+            contours = sexp.find_children("polygon")
+            if len(contours) > 1 or polygon.find("arc") is not None:
+                zone.rule_area_contours = [_polygon_arc_chain(contour) for contour in contours]
 
         # Parse filled polygons - (filled_polygon (layer X) (pts (xy X Y) ...))
         for filled_poly in sexp.find_all("filled_polygon"):
