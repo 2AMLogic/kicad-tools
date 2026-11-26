@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.core.schematic_uuids import pin_uuid, provisional_uuid
 from kicad_tools.core.symbol_transform import normalize_mirror, symbol_to_sheet_offset
-from kicad_tools.sexp import SExp
+from kicad_tools.sexp import SExp, quote_string
 from kicad_tools.sexp.builders import (
     at,
     pin_uuid_node,
@@ -51,6 +51,24 @@ class SymbolDef:
     # Parsed SExp nodes for structured access (optional, used when parsed with SExp)
     _sexp_node: SExp | None = field(default=None, repr=False)
     _parent_node: SExp | None = field(default=None, repr=False)
+
+    @cached_property
+    def datasheet(self) -> str:
+        """Datasheet in the resolved library symbol, including inherited properties."""
+        if self._sexp_node is None:
+            # Registry and legacy definitions carry raw parent/child S-expressions.
+            definitions = reversed(self.to_sexp_nodes())
+        else:
+            definitions = (self._sexp_node, self._parent_node)
+        for definition in definitions:
+            if definition is None:
+                continue
+            for prop in definition.children:
+                if prop.name == "property" and prop.get_string(0) == "Datasheet":
+                    value = prop.get_string(1)
+                    if value is not None:
+                        return value
+        return "~"
 
     @classmethod
     def from_library(cls, lib_id: str, lib_paths: list[Path] = None) -> "SymbolDef":
@@ -809,6 +827,12 @@ class SymbolInstance:
 
         return True
 
+    @property
+    def datasheet(self) -> str:
+        if "Datasheet" in self.properties:
+            return self.properties["Datasheet"]
+        return self.symbol_def.datasheet
+
     def _pin_uuids(self) -> list[tuple[str, str]]:
         """``(pin number, pin UUID)`` for every pin, in definition order.
 
@@ -853,10 +877,12 @@ class SymbolInstance:
         sym.append(symbol_property_node("Reference", self.reference, self.x, self.y - 5.08))
         sym.append(symbol_property_node("Value", self.value, self.x, self.y - 2.54))
         sym.append(symbol_property_node("Footprint", self.footprint, self.x, self.y, hide=True))
-        sym.append(symbol_property_node("Datasheet", "~", self.x, self.y, hide=True))
+        sym.append(symbol_property_node("Datasheet", self.datasheet, self.x, self.y, hide=True))
 
         # Add custom properties (hidden by default)
         for prop_name, prop_value in self.properties.items():
+            if prop_name == "Datasheet":
+                continue
             sym.append(symbol_property_node(prop_name, prop_value, self.x, self.y, hide=True))
 
         # Add pin UUIDs -- derived from this symbol's UUID (Issue #6076)
@@ -887,6 +913,8 @@ class SymbolInstance:
         # Generate custom properties (hidden by default)
         custom_props = ""
         for prop_name, prop_value in self.properties.items():
+            if prop_name == "Datasheet":
+                continue
             custom_props += f'''\t\t(property "{prop_name}" "{prop_value}"
 \t\t\t(at {x} {y} 0)
 \t\t\t(effects
@@ -932,7 +960,7 @@ class SymbolInstance:
 \t\t\t\t(hide yes)
 \t\t\t)
 \t\t)
-\t\t(property "Datasheet" "~"
+\t\t(property "Datasheet" {quote_string(self.datasheet)}
 \t\t\t(at {x} {y} 0)
 \t\t\t(effects
 \t\t\t\t(font
@@ -1016,6 +1044,7 @@ class SymbolInstance:
         reference = ""
         value = ""
         footprint = ""
+        properties = {}
         for prop_node in node.find_all("property"):
             atoms = prop_node.get_atoms()
             if len(atoms) >= 2:
@@ -1027,6 +1056,8 @@ class SymbolInstance:
                     value = prop_value
                 elif prop_name == "Footprint":
                     footprint = prop_value
+                elif prop_name == "Datasheet":
+                    properties[prop_name] = prop_value
 
         # Get or create SymbolDef
         symbol_def = None
@@ -1072,6 +1103,7 @@ class SymbolInstance:
             unit=unit,
             uuid_str=uuid_str,
             footprint=footprint,
+            properties=properties,
             in_bom=in_bom,
             dnp=dnp,
             mirror=mirror,
