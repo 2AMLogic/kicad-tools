@@ -1254,6 +1254,14 @@ _TIE_ROW_GAP_TOLERANCE_MM = 0.05
 _TIE_VIA_LINK_MAX_MM = 3.5
 
 
+def _via_covered_by_end(via: Via, seg: Segment, end: tuple[float, float]) -> bool:
+    """The endpoint is on the via land and its round cap surrounds the whole bore."""
+    if not 0 < via.drill < via.size:
+        return False
+    distance = math.dist(end, via.position)
+    return distance <= via.size / 2 and distance + via.drill / 2 < seg.width / 2
+
+
 def _layer_changes(
     pcb: PCB,
     net_name: str,
@@ -1309,6 +1317,7 @@ def _layer_changes(
             if (
                 id(seg) in row_contacts.get(_node_key(via.position), ())
                 or point_to_segment_distance(*via.position, *seg.start, *seg.end) <= 0.01
+                or any(_via_covered_by_end(via, seg, end) for end in (seg.start, seg.end))
             )
             and via_spans_layer(via.layers, seg.layer)
         ]
@@ -2184,10 +2193,11 @@ def _build_graph(
     """Build centerline contacts, physical via-row ports and convex pad hubs.
 
     Supported contacts are same-layer track endpoints (including a T landing
-    in a segment interior), via centers on a track, nodes inside supported
-    pad copper, and a single bonded end cap covering a round terminal barrel.
-    A packed pair of vias physically bonded to two common bars may also
-    attach at the nearest track stations on those bars. Collinear
+    in a segment interior), via centers on a track, round track endpoints
+    covering the drilled via barrel, nodes inside supported pad copper, and a
+    single bonded end cap covering a round terminal barrel. A packed pair of
+    vias physically bonded to two common bars may also attach at the nearest
+    track stations on those bars. Collinear
     end caps on a bonded run join at their measured copper neck. Other
     width-only overlaps, zone/arc connectivity and arbitrary pad primitives
     are outside this graph. The via-centre snap is limited to 1 µm (#7210).
@@ -2231,6 +2241,62 @@ def _build_graph(
             if via_spans_layer(via.layers, layer):
                 contacts[layer].add(_node_key(via.position))
                 via_contacts[layer].add(_node_key(via.position))
+
+    # A wide round end cap can surround the entire drill without its
+    # centreline touching the via. Bind only the landing on this layer.
+    # The end must lie inside the via land and leave copper around the bore.
+    # A straight run split at vertices is one bar: bind it to a via once, at
+    # a covered run end in preference to any internal subdivision vertex.
+    # Collinear same-width neighbours sharing an end form one run.
+    run_of = list(range(len(segments)))
+
+    def run_root(i: int) -> int:
+        while run_of[i] != i:
+            run_of[i] = run_of[run_of[i]]
+            i = run_of[i]
+        return i
+
+    at_node: dict[_Node, list[int]] = {}
+    for i, seg in enumerate(segments):
+        for end in (seg.start, seg.end):
+            at_node.setdefault(_copper_node(end, seg.layer), []).append(i)
+    continuations: set[tuple[int, _Node]] = set()
+    for junction, segment_indices in at_node.items():
+        for i in segment_indices:
+            for j in segment_indices:
+                if i < j and segments[i].width == segments[j].width:
+                    overlap = collinear_overlap_length(
+                        segments[i].start,
+                        segments[i].end,
+                        segments[j].start,
+                        segments[j].end,
+                        _PAD_EPS,
+                    )
+                    if overlap is not None and overlap <= _PAD_EPS:
+                        run_of[run_root(i)] = run_root(j)
+                        continuations.update(((i, junction), (j, junction)))
+    offset_ports: set[tuple[_Node, _Node]] = set()
+    for via in vias:
+        best: dict[int, tuple[bool, float, _Node]] = {}
+        # A run whose centreline already reaches the via centre is bound there.
+        on_centre = {
+            run_root(i)
+            for i, seg in enumerate(segments)
+            if via_spans_layer(via.layers, seg.layer)
+            and point_to_segment_distance(*via.position, *seg.start, *seg.end) <= _VIA_CENTRE_EPS
+        }
+        for i, seg in enumerate(segments):
+            if not via_spans_layer(via.layers, seg.layer) or run_root(i) in on_centre:
+                continue
+            for end in (seg.start, seg.end):
+                if _via_covered_by_end(via, seg, end):
+                    node = _copper_node(end, seg.layer)
+                    candidate = ((i, node) in continuations, math.dist(end, via.position), node)
+                    root_i = run_root(i)
+                    if root_i not in best or candidate < best[root_i]:
+                        best[root_i] = candidate
+        for _, _, node in best.values():
+            offset_ports.add((node, _copper_node(via.position, node[2])))
 
     for station, _ in row_ports or ():
         contacts[station[2]].add(station[:2])
@@ -2276,8 +2342,8 @@ def _build_graph(
             edges.append((a, b, edge))
         barrels.append((nodes, barrel_edges))
 
-    # Contract only contacts inside one physical convex pad. Adding a pad hub
-    # plus the original internal track edges instead manufactures false cycles.
+    # Contract physical lands. Adding a hub plus the original internal
+    # track edges instead manufactures false cycles.
     # External branches remain separate edges, so real parallel returns survive.
     parents = {node: node for a, b, _ in edges for node in (a, b)}
 
@@ -2300,8 +2366,8 @@ def _build_graph(
         span = joint.span
         a, b = _copper_node(span.start, span.layer), _copper_node(span.end, span.layer)
         parents[root(a)] = root(b)
-    if row_ports:
-        for station, barrel in sorted(row_ports):
+    if row_ports or offset_ports:
+        for station, barrel in sorted(offset_ports.union(row_ports or ())):
             if station in parents and barrel in parents:
                 parents[root(station)] = root(barrel)
         # A short section between a real barrel and its bar station may also

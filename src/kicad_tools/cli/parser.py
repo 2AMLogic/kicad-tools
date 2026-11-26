@@ -5750,9 +5750,12 @@ def _add_repair_creepage_parser(subparsers) -> None:
 
 def _add_fix_drc_parser(subparsers) -> None:
     """Add fix-drc subcommand parser."""
+    from .fix_drc_creepage import add_mask_creepage_args
+
     fix_drc_parser = subparsers.add_parser(
         "fix-drc", help="Automated DRC violation repair (clearance + drill)"
     )
+    add_mask_creepage_args(fix_drc_parser)
     fix_drc_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_drc_parser.add_argument(
         "--drc-report",
@@ -10869,6 +10872,17 @@ def _add_export_parser(subparsers) -> None:
         dest="export_include_tht",
         action="store_true",
         help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
+    )
+    export_parser.add_argument(
+        "--via-land-overlap",
+        dest="export_via_land_overlap",
+        action="store_true",
+        help=(
+            "Measure the shipped PCBA archive for plated via drills that overlap the "
+            "solder-mask opening, stencil opening and an SMD land on the same face; adds "
+            "the via_land_overlap preflight result to the JSON output and manifest "
+            "(Issue #10357)"
+        ),
     )
     export_parser.add_argument(
         "--format",

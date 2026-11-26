@@ -605,7 +605,7 @@ def _search(args) -> int:
         return 1
 
     heading = f"Found {results.total_count} results for '{args.query}':"
-    keyword_total = results.total_count if results.source == "anonymous" else None
+    keyword_total = results.keyword_total
     if args.package:
         heading = (
             f"Found {len(results.parts)} compatible rows for package '{args.package}' "

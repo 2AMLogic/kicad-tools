@@ -857,6 +857,8 @@ class LCSCClient:
 
         parts = []
         parse_failures = 0
+        excluded = 0
+        missing_package = 0
         # Match the offline catalogue's SQLite NOCASE equality (ASCII case folding).
         package_pattern = (
             re.compile(re.escape(package), re.ASCII | re.IGNORECASE) if package else None
@@ -866,12 +868,17 @@ class LCSCClient:
                 part = self._parse_component(comp)
                 if not part.lcsc_part:
                     raise ValueError("Missing catalog identity")
-                if package_pattern is not None:
-                    if not part.package.strip() or part.package == "-":
-                        raise ValueError("Missing catalogue package")
-                    if not package_pattern.fullmatch(part.package):
-                        continue
-                parts.append(part)
+                if in_stock and (type(comp.get("stockCount")) is not int or part.stock < 0):
+                    raise ValueError("Missing or invalid stock count")
+                # Count stock exclusions across all keyword hits before filtering by package.
+                if in_stock and not part.in_stock:
+                    excluded += 1
+                elif package_pattern is not None and (
+                    not part.package.strip() or part.package == "-"
+                ):
+                    missing_package += 1
+                elif package_pattern is None or package_pattern.fullmatch(part.package):
+                    parts.append(part)
                 # Cache search results
                 if self.cache:
                     self.cache.put(part)
@@ -883,17 +890,28 @@ class LCSCClient:
         diagnostics = []
         if parse_failures:
             diagnostics.append(f"{parse_failures} unparseable results; coverage incomplete")
-        if package_pattern is not None and total > 0 and (page != 1 or len(components) < total):
+        if missing_package:
+            diagnostics.append(
+                f"{missing_package} result(s) had no catalogue package; coverage incomplete"
+            )
+        complete_page = page == 1 and len(components) == total
+        if package_pattern is not None and total > 0 and not complete_page:
             diagnostics.append(
                 f"Examined {len(components)} of {total} keyword hits on this page; coverage incomplete"
+            )
+        if excluded and not complete_page:
+            diagnostics.append(
+                f"Excluded {excluded} zero-stock result(s) on this page; "
+                "the supplier total includes unfiltered rows"
             )
 
         return SearchResult(
             query=query,
             parts=parts,
-            total_count=total,
+            total_count=total - excluded if complete_page else total,
+            keyword_total=total,
             page=page,
-            page_size=min(page_size, 100) if package_pattern is not None else page_size,
+            page_size=min(page_size, 100),
             source="anonymous",
             coverage="incomplete" if diagnostics else "live",
             diagnostics=diagnostics,

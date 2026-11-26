@@ -381,3 +381,37 @@ def test_package_search_unavailable(client, monkeypatch, capsys):
     monkeypatch.setattr("kicad_tools.parts.LCSCClient", lambda: client)
     assert main(["parts", "search", "resistor", "--package", "2512", "--format", "json"]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("keyword_total", [4, 5])
+def test_public_in_stock_package_search(client, monkeypatch, capsys, keyword_total):
+    from kicad_tools.cli import main
+
+    rows = [
+        {"componentCode": f"C{i}", "encapStandard": package, "stockCount": stock}
+        for i, (package, stock) in enumerate(
+            [("2512", 7), ("1206", 5), ("2512", 0), ("1206", 0)], 1
+        )
+    ]
+    response = {"code": 200, "data": {"componentPageInfo": {"list": rows, "total": keyword_total}}}
+    monkeypatch.setattr(client, "_make_request", Mock(return_value=response))
+    monkeypatch.setattr("kicad_tools.parts.LCSCClient", lambda: client)
+    assert (
+        main(["parts", "search", "chip", "--package", "2512", "--in-stock", "--format", "json"])
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert [part["lcsc_part"] for part in result["parts"]] == ["C1"]
+    assert result["compatible_count"] == 1
+    assert result["keyword_total"] == keyword_total
+    if keyword_total == len(rows):
+        assert result["total"] == 2
+        assert result["coverage"] == "live"
+        assert result["diagnostics"] == []
+    else:
+        assert result["total"] == 5
+        assert result["coverage"] == "incomplete"
+        assert result["diagnostics"] == [
+            "Examined 4 of 5 keyword hits on this page; coverage incomplete",
+            "Excluded 2 zero-stock result(s) on this page; the supplier total includes unfiltered rows",
+        ]
