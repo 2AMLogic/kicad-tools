@@ -32,8 +32,10 @@ import fnmatch
 import math
 import re
 import sys
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -1089,15 +1091,14 @@ def _stroke_geometry(
 
 def _pad_aperture_geometry(
     pad: Pad,
-    pad_pos: tuple[float, float],
-    min_mask_clearance: float,
+    footprint: Footprint,
+    margin: float,
 ) -> _Geometry:
     """Build a shapely polygon for a pad's solder-mask aperture (exposed copper).
 
-    Aperture = pad copper expanded by the mask margin (``pad.solder_mask_margin``
-    if set, else the profile default).  Approximated as a rectangle -- rounded
-    corners are over-approximated, matching the text-box approximation used
-    elsewhere in this module.
+    Expand the pad copper by its effective mask margin. Circular pads and
+    supported custom pads use their copper outline. Other shapes use an
+    oriented rectangle.
 
     The rectangle is **oriented by the pad's absolute angle** (``pad.rotation``
     already includes ``footprint.rotation`` per KiCad's file convention, see
@@ -1114,21 +1115,21 @@ def _pad_aperture_geometry(
     from shapely.affinity import rotate
     from shapely.geometry import box
 
-    # A custom pad's aperture follows its real copper -- the anchor plus
-    # filled primitives (Issue #9498) -- not the nominal anchor ``size`` box;
-    # KiCad masks the whole custom shape.  When the builder refuses, the
-    # anchor box below remains the aperture and ``check_silk_over_copper``
-    # emits the matching ``silk_over_copper_incomplete`` finding.
-    from kicad_tools.geometry.copper import custom_pad_board_outline
+    from kicad_tools.geometry.copper import (
+        custom_pad_board_outline,
+        pad_board_center,
+        pad_copper_outline,
+    )
 
-    custom = custom_pad_board_outline(pad, pad_pos)
-    if custom is not None:
-        margin = (
-            pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
-        )
-        return custom.buffer(margin) if margin else custom
+    pad_pos = pad_board_center(pad, footprint.position, footprint.rotation)
+    if pad.shape == "circle":
+        outline = pad_copper_outline(pad, footprint.position, footprint.rotation)
+    else:
+        outline = custom_pad_board_outline(pad, pad_pos)
+    if outline is not None:
+        return outline.buffer(margin) if margin else outline
 
-    margin = pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
+    # The coverage check also reports custom pads whose primitive geometry was refused.
     w = pad.size[0] + 2.0 * margin
     h = pad.size[1] + 2.0 * margin
     cx, cy = pad_pos
@@ -1249,6 +1250,7 @@ def _iter_silk_geometries(
 
 def _iter_silk_elements(
     pcb: PCB,
+    radial_marks: dict[int, set[object]] | None = None,
 ) -> Iterator[tuple[str, _Geometry, str, tuple[float, float], str, str, str]]:
     """Yield ``(side, geom, label, location, layer, uuid, item)`` for every silk element.
 
@@ -1290,7 +1292,8 @@ def _iter_silk_elements(
             label = f"{footprint.reference} ({fp_text.text_type})"
             yield side, geom, label, center, fp_text.layer, fp_text.uuid, label
 
-        for graphic in footprint.graphics:
+        marks = _radial_polarity_strokes(footprint) if radial_marks is not None else {}
+        for index, graphic in enumerate(footprint.graphics):
             side = _silk_side(graphic.layer)
             if side is None:
                 continue
@@ -1298,6 +1301,8 @@ def _iter_silk_elements(
             if geom is None:
                 continue
             label = f"{footprint.reference} (fp_{graphic.graphic_type})"
+            if radial_marks is not None and index in marks:
+                radial_marks[id(geom)] = marks[index]
             item = f"{footprint.reference} ({_graphic_descriptor('fp', graphic)})"
             yield side, geom, label, footprint.position, graphic.layer, graphic.uuid, item
 
@@ -1459,10 +1464,14 @@ def _iter_pad_apertures(
     default).  ``check_silk_over_copper`` chains both iterators into a single
     aperture index.
     """
+    from ..mask_geometry import board_mask_margin, pad_mask_margin
     from .clearance import _pad_has_no_copper, _pad_has_no_mask
 
+    board_margin, declared = board_mask_margin(pcb)
+    if board_margin is None or not declared:
+        board_margin = min_mask_clearance
+    version = pcb._file_version()
     for footprint in pcb.footprints:
-        transform = _fp_transform(footprint)
         for pad in footprint.pads:
             if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
                 # Issue #9528: no copper and no mask opening: no aperture.
@@ -1476,8 +1485,12 @@ def _iter_pad_apertures(
             else:
                 # NPTH / connect / other: no exposed copper to smear silk onto.
                 continue
-            pad_pos = transform(pad.position)
-            geom = _pad_aperture_geometry(pad, pad_pos, min_mask_clearance)
+            margin, _ = pad_mask_margin(
+                pad, footprint, board_margin, declared, board_version=version
+            )
+            if margin is None or not math.isfinite(margin):
+                margin = board_margin
+            geom = _pad_aperture_geometry(pad, footprint, margin)
             label = f"{footprint.reference} pad {pad.number}"
             for side in sides:
                 yield side, geom, label
@@ -1970,6 +1983,173 @@ def check_silk_over_mask_opening(
     return results
 
 
+def _hatch_runs(offsets: Sequence[int], width: float) -> Iterator[list[int]]:
+    """Find runs on a regular pitch in projected nanometres."""
+    # Rounding each authored endpoint to 1 nm perturbs projected spacings.
+    tolerance = 3
+    pitches = Counter(b - a for a, b in pairwise(offsets) if tolerance < b - a < width)
+    remaining = set(offsets)
+    for pitch, _ in pitches.most_common():
+        gaps = (pitch, 2 * pitch) if 2 * pitch < width else (pitch,)
+        for first in offsets:
+            if first not in remaining:
+                continue
+            run = [first]
+            consecutive = 1
+            longest = 1
+            while True:
+                for gap in gaps:
+                    target = run[-1] + gap
+                    following = min(
+                        (
+                            n
+                            for n in range(target - tolerance, target + tolerance + 1)
+                            if 0 < n - run[-1] < width and n in remaining
+                        ),
+                        key=lambda n: abs(n - target),
+                        default=None,
+                    )
+                    if following is not None:
+                        run.append(following)
+                        consecutive = consecutive + 1 if gap == pitch else 1
+                        longest = max(longest, consecutive)
+                        break
+                else:  # Neither the next chord nor one across a cutout overlaps.
+                    break
+            if longest >= 4:
+                yield run
+                remaining.difference_update(run)
+
+
+def _painted_chords(
+    offsets: dict[int, list[tuple[float, float, int]]],
+    radius: float,
+    width: float,
+    pads: Sequence[tuple[float, float, float]],
+) -> dict[int, list[int]]:
+    """Keep rim-to-rim chords and pieces ending at a common pad cutout."""
+    members: dict[int, list[int]] = {}
+    ordered = sorted(offsets)
+    for i, offset in enumerate(ordered):
+        intervals = offsets[offset]
+        neighbours = [
+            span
+            for j in (i - 1, i + 1)
+            if 0 <= j < len(ordered) and abs(ordered[j] - offset) < width * 1e6
+            for span in offsets[ordered[j]]
+        ]
+        lateral = offset / 1e6
+        # Reaching the inner edge of the outline suffices on both sides.
+        reach = math.sqrt(max(0, (radius - width / 2) ** 2 - lateral**2))
+        for start, end, index in intervals:
+            if start > -reach or end < reach:
+                if start > -reach and end < reach:
+                    continue
+                cut_start = start > -reach
+                tip = start if cut_start else end
+                if not any(abs(tip - (a if cut_start else b)) <= 3e-6 for a, b, _ in neighbours):
+                    continue
+                if not any(
+                    abs(across - lateral) <= extent
+                    and 0 < (tip - along if cut_start else along - tip) <= extent
+                    for along, across, extent in pads
+                ):
+                    continue
+            # Overdraw is ambiguous, even when one line is a full chord.
+            chord = members.setdefault(offset, [])
+            if not any(
+                (a, b) != (start, end) and max(a, start) < min(b, end) for a, b, _ in intervals
+            ):
+                chord.append(index)
+    return members
+
+
+def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
+    """Map authored graphic indices to the painted runs they belong to."""
+    from kicad_tools.core.arcs import arc_sweep
+
+    marks: dict[int, set[object]] = defaultdict(set)
+    for outline_index, outline in enumerate(footprint.graphics):
+        if _silk_side(outline.layer) is None or outline.is_filled or outline.stroke_width <= 0:
+            continue
+        arc = None
+        if outline.graphic_type == "circle" and outline.center is not None:
+            center = outline.center
+            radius = math.dist(center, outline.end)
+        elif outline.graphic_type == "arc" and outline.mid is not None:
+            arc = arc_sweep(outline.start, outline.mid, outline.end)
+            if arc is None:
+                continue
+            center, radius = arc.center, arc.radius
+        else:
+            continue
+
+        # Use the longest chord as the projection axis for its direction.
+        # Endpoint rounding moves a parallel segment transversely by a few nm.
+        directions: dict[tuple[float, float], dict[int, list[tuple[float, float, int]]]] = {}
+        lines = sorted(
+            (
+                (index, line)
+                for index, line in enumerate(footprint.graphics)
+                if line.graphic_type == "line"
+            ),
+            key=lambda item: math.dist(item[1].start, item[1].end),
+            reverse=True,
+        )
+        for index, line in lines:
+            if (
+                line.layer != outline.layer
+                or line.stroke_width != outline.stroke_width
+                or line.start == line.end
+            ):
+                continue
+            ends = (line.start, line.end)
+            if max(math.dist(center, p) for p in ends) > radius + line.stroke_width / 2:
+                continue
+            if not any(
+                abs(math.dist(center, (x, y)) - radius) <= line.stroke_width / 2
+                and (arc is None or arc.reaches(math.atan2(y - center[1], x - center[0])))
+                for x, y in ends
+            ):
+                continue
+            dx, dy = line.end[0] - line.start[0], line.end[1] - line.start[1]
+            for ux, uy in directions:
+                if abs(dx * uy - dy * ux) <= 3e-6:
+                    break
+            else:
+                length = math.hypot(dx, dy)
+                ux, uy = dx / length, dy / length
+                directions[ux, uy] = defaultdict(list)
+            offsets = directions[ux, uy]
+            x, y = line.start[0] - center[0], line.start[1] - center[1]
+            offset = round((ux * (y + dy / 2) - uy * (x + dx / 2)) * 1e6)
+            offset = next((n for n in range(offset - 2, offset + 3) if n in offsets), offset)
+            start, end = sorted((x * ux + y * uy, (x + dx) * ux + (y + dy) * uy))
+            offsets[offset].append((start, end, index))
+
+        for (ux, uy), offsets in directions.items():
+            # A pad can clip a chord at either end, including right through
+            # the opposite rim. Look for a repeated cut edge facing the pad.
+            pads = []
+            for pad in footprint.pads:
+                x, y = pad.position[0] - center[0], pad.position[1] - center[1]
+                pads.append(
+                    (
+                        x * ux + y * uy,
+                        y * ux - x * uy,
+                        math.hypot(*pad.size) / 2 + 2 * outline.stroke_width,
+                    )
+                )
+            members = _painted_chords(offsets, radius, outline.stroke_width, pads)
+            for run in _hatch_runs(sorted(members), outline.stroke_width * 1e6):
+                mark = object()
+                marks[outline_index].add(mark)
+                for offset in run:
+                    for index in members[offset]:
+                        marks[index].add(mark)
+    return marks
+
+
 def check_silk_overlap(
     pcb: PCB,
     design_rules: DesignRules,
@@ -2030,7 +2210,8 @@ def check_silk_overlap(
         "F": [],
         "B": [],
     }
-    for side, geom, label, location, layer, uuid in _iter_silk_geometries(pcb):
+    radial_marks: dict[int, set[object]] = {}
+    for side, geom, label, location, layer, uuid, _ in _iter_silk_elements(pcb, radial_marks):
         by_side[side].append((geom, label, location, layer, uuid))
 
     # A library outline is often several joined line primitives. Their round
@@ -2102,6 +2283,11 @@ def check_silk_overlap(
                 other_geom, label_b, _, _, uuid_b = entries[j]
                 if not geom.intersects(other_geom):
                     continue
+                if id(geom) in radial_marks and id(other_geom) in radial_marks:
+                    if radial_marks[id(geom)] & radial_marks[id(other_geom)] and not geom.equals(
+                        other_geom
+                    ):
+                        continue
                 overlap = geom.intersection(other_geom)
                 if overlap.area < _MIN_SILK_OVERLAP_AREA_MM2:
                     continue
