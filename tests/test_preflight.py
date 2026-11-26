@@ -457,6 +457,494 @@ class TestPreflightDrillHoles:
 
 
 # ---------------------------------------------------------------------------
+# PreflightChecker -- assembly lead fit (issue #10299)
+# ---------------------------------------------------------------------------
+
+# The fabricator's lower finished-hole tolerance (4-space indented for the
+# ``requirements.manufacturing`` block).
+_LEAD_FIT_TOLERANCE_YAML = (
+    "    finished_hole_tolerance_mm: -0.08\n"
+    "    finished_hole_tolerance_source: JLCPCB capabilities, through-hole tolerances\n"
+)
+
+# The STW70N60DM2 lead from the original report (issue #10299): a
+# 1.40 x 0.80 mm rectangular lead whose 1.61245 mm diagonal exceeds a
+# 1.50 mm finished hole.
+_RECT_LEAD_YAML = (
+    "  - ref: Q1\n"
+    "    part: STW70N60DM2\n"
+    "    lead:\n"
+    "      shape: rectangular\n"
+    "      width_mm: 1.40\n"
+    "      thickness_mm: 0.80\n"
+    '      source: "STW70N60DM2 datasheet package drawing, pp. 9-10"\n'
+)
+
+
+def _create_pcb_with_lead_pads(
+    directory: Path,
+    ref_pads: dict[str, list[str]],
+    filename: str = "board.kicad_pcb",
+) -> Path:
+    """Create a PCB whose footprints carry raw ``(pad ...)`` node strings.
+
+    Each *ref_pads* value is a list of full pad S-expression strings, so
+    tests control the drill geometry (round, slot, non-plated, SMD)
+    exactly.  A closed board outline is included so other checks pass.
+    """
+    footprints = []
+    for i, (ref, pads) in enumerate(ref_pads.items()):
+        x = 10.0 + i * 10.0
+        pad_block = "\n    ".join(pads)
+        footprints.append(
+            f"""  (footprint "Package_TO_SOT_THT:TO-247-3_Vertical"
+    (layer "F.Cu")
+    (at {x} 25)
+    (attr through_hole)
+    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (fp_text value "PART" (at 0 1.5) (layer "F.Fab") (effects (font (size 1 1) (thickness 0.15))))
+    {pad_block}
+  )"""
+        )
+
+    fp_block = "\n".join(footprints)
+    content = f"""(kicad_pcb (version 20231014) (generator "pcbnew")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 0) (end 50 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 50) (end 0 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 0 50) (end 0 0) (layer "Edge.Cuts") (width 0.1))
+{fp_block}
+)
+"""
+    pcb_path = directory / filename
+    pcb_path.write_text(content)
+    return pcb_path
+
+
+def _tht_pad(number: str, drill: float) -> str:
+    """A plated round-hole through-hole pad."""
+    return (
+        f'(pad "{number}" thru_hole circle (at 0 0) (size 2.7 2.7) '
+        f'(drill {drill}) (layers "*.Cu" "*.Mask") (net 0 ""))'
+    )
+
+
+def _slot_pad(number: str, w: float, h: float) -> str:
+    """A plated slot-hole through-hole pad."""
+    return (
+        f'(pad "{number}" thru_hole oval (at 0 0) (size 2.7 3.9) '
+        f'(drill oval {w} {h}) (layers "*.Cu" "*.Mask") (net 0 ""))'
+    )
+
+
+def _np_pad(number: str, drill: float) -> str:
+    """A non-plated through-hole pad (np_thru_hole)."""
+    return (
+        f'(pad "{number}" np_thru_hole circle (at 0 0) (size 2.7 2.7) '
+        f'(drill {drill}) (layers "*.Cu" "*.Mask") (net 0 ""))'
+    )
+
+
+def _smd_pad(number: str) -> str:
+    return (
+        f'(pad "{number}" smd rect (at 0 0) (size 1.0 1.0) '
+        f'(layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))'
+    )
+
+
+def _write_lead_spec(
+    directory: Path,
+    entries: str = "",
+    manufacturing: str = "",
+) -> Path:
+    """Write ``project.kct`` with optional ``bom_entries`` and manufacturing block.
+
+    *entries* is the (already 2-space indented) ``bom_entries`` list YAML;
+    *manufacturing* is the (already 4-space indented) content of
+    ``requirements.manufacturing``.
+    """
+    text = "kct_version: '1.0'\nproject:\n  name: T\n"
+    if manufacturing:
+        text += "requirements:\n  manufacturing:\n" + manufacturing
+    if entries:
+        text += "bom_entries:\n" + entries
+    spec_file = directory / "project.kct"
+    spec_file.write_text(text)
+    return spec_file
+
+
+def _run_lead_fit(pcb_path: Path):
+    checker = PreflightChecker(
+        pcb_path=pcb_path,
+        config=PreflightConfig(skip_drc=True, skip_erc=True),
+    )
+    results = checker.run_all()
+    result = _find_result(results, "assembly_lead_fit")
+    assert result is not None, "assembly_lead_fit result missing from run_all()"
+    return result
+
+
+class TestPreflightLeadFit:
+    """Through-hole lead dimensions vs the finished plated hole (issue #10299)."""
+
+    def test_rectangular_lead_fails_nominal_fit_on_1_50_mm_hole(self, tmp_path):
+        """The original report's case: 1.61245 mm diagonal vs a 1.50 mm hole."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 1.50)]})
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "FAIL"
+        (finding,) = result.data["pads"]
+        assert finding["status"] == "fail"
+        assert finding["nominal_status"] == "fail"
+        assert finding["nominal_margin_mm"] == pytest.approx(-0.112)
+        assert finding["required_diameter_mm"] == pytest.approx(1.612)
+        assert finding["tolerance"]["minimum_hole_mm"] == pytest.approx(1.42)
+        assert finding["tolerance"]["minimum_margin_mm"] == pytest.approx(-0.192)
+
+    def test_assessed_finding_carries_full_evidence(self, tmp_path):
+        """Each finding identifies MPN, reference, pad, hole, lead and source."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("2", 2.20)]})
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        (finding,) = result.data["pads"]
+        assert finding["reference"] == "Q1"
+        assert finding["pad"] == "2"
+        assert finding["mpn"] == "STW70N60DM2"
+        assert finding["hole"] == {"shape": "round", "diameter_mm": pytest.approx(2.2)}
+        assert finding["lead"]["shape"] == "rectangular"
+        assert finding["lead"]["width_mm"] == pytest.approx(1.4)
+        assert finding["lead"]["thickness_mm"] == pytest.approx(0.8)
+        assert finding["lead"]["source"] == "STW70N60DM2 datasheet package drawing, pp. 9-10"
+        assert finding["status"] == "pass"
+        # details carries the same evidence in prose
+        assert "Q1 pad 2 [STW70N60DM2]" in result.details
+        assert "STW70N60DM2 datasheet package drawing, pp. 9-10" in result.details
+
+    def test_rectangular_lead_passes_on_2_20_mm_hole(self, tmp_path):
+        """2.20 mm hole at -0.08 mm tolerance keeps +0.508 mm clearance."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 2.20)]})
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "OK"
+        (finding,) = result.data["pads"]
+        assert finding["status"] == "pass"
+        assert finding["tolerance"]["minimum_hole_mm"] == pytest.approx(2.12)
+        assert finding["tolerance"]["minimum_margin_mm"] == pytest.approx(0.508)
+        assert finding["tolerance"]["tolerance_mm"] == pytest.approx(-0.08)
+        assert finding["tolerance"]["source"] == "JLCPCB capabilities, through-hole tolerances"
+
+    def test_rectangular_lead_fails_at_tolerance_on_1_65_mm_hole(self, tmp_path):
+        """+0.038 mm nominal turns into -0.042 mm at minimum finish."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 1.65)]})
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "FAIL"
+        (finding,) = result.data["pads"]
+        assert finding["nominal_status"] == "pass"
+        assert finding["nominal_margin_mm"] == pytest.approx(0.038)
+        assert finding["tolerance"]["status"] == "fail"
+        assert finding["tolerance"]["minimum_margin_mm"] == pytest.approx(-0.042)
+        assert finding["status"] == "fail"
+
+    def test_round_lead_passes_with_tolerance_margin(self, tmp_path):
+        """A 1.00 mm round lead in a 1.20 mm hole keeps +0.120 mm minimum."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 1.20)]})
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: Q1\n"
+            "    part: LEAD-R1\n"
+            "    lead:\n"
+            "      shape: round\n"
+            "      diameter_mm: 1.00\n"
+            '      source: "measured with calipers 2026-11-20"\n',
+            _LEAD_FIT_TOLERANCE_YAML,
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "OK"
+        (finding,) = result.data["pads"]
+        assert finding["required_diameter_mm"] == pytest.approx(1.0)
+        assert finding["nominal_margin_mm"] == pytest.approx(0.2)
+        assert finding["tolerance"]["minimum_margin_mm"] == pytest.approx(0.120)
+        assert finding["status"] == "pass"
+
+    def test_slot_hole_unassessed_with_both_axes(self, tmp_path):
+        """A slot's long axis must not be mistaken for a round hole diameter."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_slot_pad("1", 1.00, 2.20)]})
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "WARN"
+        (finding,) = result.data["pads"]
+        assert finding["status"] == "unassessed"
+        assert finding["hole"] == {
+            "shape": "slot",
+            "size_mm": [pytest.approx(1.0), pytest.approx(2.2)],
+        }
+        assert "slot" in finding["reason"]
+        assert "1.000" in finding["reason"]
+        assert "2.200" in finding["reason"]
+        assert "slot hole 1.000 x 2.200 mm" in result.details
+
+    def test_reference_range_and_pad_override(self, tmp_path):
+        """A range entry covers multiple refs; one pad number can override."""
+        pcb = _create_pcb_with_lead_pads(
+            tmp_path,
+            {
+                "Q1": [_tht_pad("1", 2.20), _tht_pad("2", 1.20)],
+                "Q2": [_tht_pad("1", 2.20)],
+            },
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: Q1-Q2\n"
+            "    part: STW70N60DM2\n"
+            "    lead:\n"
+            "      shape: rectangular\n"
+            "      width_mm: 1.40\n"
+            "      thickness_mm: 0.80\n"
+            '      source: "STW70N60DM2 datasheet package drawing, pp. 9-10"\n'
+            "    pad_leads:\n"
+            "      '2':\n"
+            "        shape: round\n"
+            "        diameter_mm: 1.00\n"
+            '        source: "measured with calipers 2026-11-20"\n',
+            _LEAD_FIT_TOLERANCE_YAML,
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "OK"
+        by_pad = {(f["reference"], f["pad"]): f for f in result.data["pads"]}
+        assert set(by_pad) == {("Q1", "1"), ("Q1", "2"), ("Q2", "1")}
+        # The part-level rectangular lead applies to Q1 pad 1 and Q2 pad 1
+        for key in (("Q1", "1"), ("Q2", "1")):
+            f = by_pad[key]
+            assert f["mpn"] == "STW70N60DM2"
+            assert f["lead"]["shape"] == "rectangular"
+            assert f["lead"]["source"] == "STW70N60DM2 datasheet package drawing, pp. 9-10"
+            assert f["status"] == "pass"
+            assert f["tolerance"]["minimum_margin_mm"] == pytest.approx(0.508)
+        # The pad-number override applies to Q1 pad 2 only
+        override = by_pad[("Q1", "2")]
+        assert override["lead"]["shape"] == "round"
+        assert override["lead"]["diameter_mm"] == pytest.approx(1.0)
+        assert override["lead"]["source"] == "measured with calipers 2026-11-20"
+        assert override["tolerance"]["minimum_margin_mm"] == pytest.approx(0.120)
+
+    def test_missing_lead_data_does_not_hide_other_pad_failure(self, tmp_path):
+        """One pad's missing data must not hide another pad's failure."""
+        pcb = _create_pcb_with_lead_pads(
+            tmp_path,
+            {
+                "Q1": [_tht_pad("1", 1.50)],
+                "J1": [_tht_pad("1", 1.00)],
+            },
+        )
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "FAIL"
+        by_ref = {f["reference"]: f for f in result.data["pads"]}
+        assert by_ref["Q1"]["status"] == "fail"
+        unassessed = by_ref["J1"]
+        assert unassessed["status"] == "unassessed"
+        assert unassessed["mpn"] is None
+        assert "J1" in unassessed["reason"]
+        assert "no bom_entries assignment" in unassessed["reason"]
+
+    def test_entry_without_lead_reports_unassessed_with_mpn(self, tmp_path):
+        """A declared part without lead dimensions is named in the reason."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 1.50)]})
+        _write_lead_spec(tmp_path, "  - ref: Q1\n    part: NOPART\n")
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "WARN"
+        (finding,) = result.data["pads"]
+        assert finding["status"] == "unassessed"
+        assert finding["mpn"] == "NOPART"
+        assert "no verified lead dimensions declared for pad 1 of NOPART" in finding["reason"]
+
+    def test_pad_override_missing_on_mixed_package(self, tmp_path):
+        """A pad without an override on an override-only entry is unassessed."""
+        pcb = _create_pcb_with_lead_pads(
+            tmp_path, {"Q1": [_tht_pad("1", 1.20), _tht_pad("2", 1.50)]}
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: Q1\n"
+            "    part: MIXED\n"
+            "    pad_leads:\n"
+            "      '1':\n"
+            "        shape: round\n"
+            "        diameter_mm: 1.00\n"
+            '        source: "measured"\n',
+        )
+
+        result = _run_lead_fit(pcb)
+
+        by_pad = {f["pad"]: f for f in result.data["pads"]}
+        assert by_pad["1"]["status"] == "pass"
+        assert by_pad["2"]["status"] == "unassessed"
+        assert "pad 2" in by_pad["2"]["reason"]
+
+    def test_unknown_tolerance_reports_nominal_and_marks_tolerance_unassessed(self, tmp_path):
+        """Valid lead data + unknown tolerance: nominal fit, tolerance unassessed."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 2.20)]})
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "WARN"
+        (finding,) = result.data["pads"]
+        assert finding["status"] == "pass"
+        assert finding["nominal_margin_mm"] == pytest.approx(0.588)
+        assert finding["tolerance"]["status"] == "unassessed"
+        assert "finished-hole tolerance" in finding["tolerance"]["reason"]
+        assert "minimum_hole_mm" not in finding["tolerance"]
+        assert result.data["summary"]["tolerance_unassessed"] == 1
+        assert "tolerance unassessed" in result.details
+
+    def test_non_plated_smd_and_via_pads_excluded(self, tmp_path):
+        """np_thru_hole, SMD pads and vias never produce lead-fit findings."""
+        pcb = _create_pcb_with_lead_pads(
+            tmp_path,
+            {"Q1": [_np_pad("1", 1.50), _smd_pad("2"), _tht_pad("3", 1.50)]},
+        )
+        content = pcb.read_text()
+        content = content.replace(
+            '(net 0 "")\n',
+            '(net 0 "")\n  (via (at 25 25) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 0))\n',
+        )
+        pcb.write_text(content)
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        findings = result.data["pads"]
+        assert [f["pad"] for f in findings] == ["3"]
+        assert result.status == "FAIL"  # pad 3 is the 1.50 mm failure
+
+    def test_no_declarations_cannot_produce_fit_claim(self, tmp_path):
+        """A board with no lead declarations reports unassessed, never a fit."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 2.20)]})
+        # A spec with BOM entries but no lead declarations anywhere.
+        _write_lead_spec(tmp_path, "  - ref: Q1\n    part: STW70N60DM2\n")
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "WARN"
+        (finding,) = result.data["pads"]
+        assert finding["status"] == "unassessed"
+        assert result.message.startswith("Through-hole lead fit unverified")
+
+    def test_no_spec_cannot_produce_fit_claim(self, tmp_path):
+        """With no .kct at all, every plated pad is unassessed."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 2.20)]})
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "WARN"
+        assert result.data["summary"]["unassessed"] == 1
+        assert result.data["summary"]["failed"] == 0
+
+    def test_no_through_hole_pads_ok(self, tmp_path):
+        """An all-SMD board has nothing to assess."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"R1": [_smd_pad("1"), _smd_pad("2")]})
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "OK"
+        assert "not applicable" in result.message
+        assert result.data["pads"] == []
+
+    def test_run_all_serializes_findings(self, tmp_path):
+        """The normal preflight entry point exposes per-pad evidence."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 1.50)]})
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        results = checker.run_all()
+        lead_result = _find_result(results, "assembly_lead_fit")
+        assert lead_result is not None
+
+        serialized = lead_result.to_dict()
+        assert serialized["status"] == "FAIL"
+        assert "pads" in serialized["data"]
+        # The manifest serializes this dict as JSON.
+        json.dumps(serialized)
+        (finding,) = serialized["data"]["pads"]
+        assert finding["mpn"] == "STW70N60DM2"
+        assert finding["reference"] == "Q1"
+        assert finding["pad"] == "1"
+        assert finding["nominal_margin_mm"] == pytest.approx(-0.112)
+
+    def test_strict_export_blocked_by_lead_fit_failure(self, tmp_path, monkeypatch):
+        """A confirmed interference fails the export through strict preflight."""
+        from kicad_tools.export import assembly
+        from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = _create_pcb_with_lead_pads(project_dir, {"Q1": [_tht_pad("1", 1.50)]})
+        _write_lead_spec(project_dir, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+        (project_dir / "board.kicad_sch").write_text(
+            '(kicad_sch (version 20231120) (generator "eeschema"))'
+        )
+        (project_dir / "board.kicad_pro").write_text("{}")
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            strict_preflight=True,
+            preflight=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "output")
+
+        assert not result.success
+        assert any("assembly_lead_fit" in e for e in result.errors)
+        lead = [pr for pr in result.preflight_results if pr.name == "assembly_lead_fit"]
+        assert lead and lead[0].status == "FAIL"
+
+
+# ---------------------------------------------------------------------------
 # PreflightChecker -- DRC check
 # ---------------------------------------------------------------------------
 
