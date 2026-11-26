@@ -447,6 +447,29 @@ class TestHierarchicalLabelNetMerging:
         built = build_netlist_from_schematic(parent)
         yield {net.name: {f"{n.reference}.{n.pin}" for n in net.nodes} for net in built.nets}
 
+    def test_qualified_power_labels_count_as_power_nets(self, tmp_path):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        parent.write_text((FIXTURES / parent.name).read_text().replace('"I2C_SDA"', '"+5V"'))
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string('(label "VBUS" (at 100 46.19 0))'))
+        child.write_text(doc.to_string())
+
+        netlist = build_netlist_from_schematic(parent)
+        assert {"/+5V", "/ChildWithLabels/VBUS"} <= {net.name for net in netlist.nets}
+        summary = netlist.summary()
+        assert summary["power_net_count"] == 2
+        assert summary["signal_net_count"] == 3
+        assert summary["net_count"] == 5
+
+    def test_flat_sheet_entries_are_read_once(self):
+        path = FIXTURES / "child_with_hlabels.kicad_sch"
+        with patch(
+            "kicad_tools.operations.netlist._get_sheet_entries", wraps=_get_sheet_entries
+        ) as entries:
+            build_netlist_from_schematic(path)
+        entries.assert_called_once_with(path)
+
     def test_single_sheet_local_label_keeps_bare_name(self, tmp_path):
         """The qualification applies to multi-sheet designs; a flat sheet is unchanged."""
         sch = tmp_path / "flat.kicad_sch"
