@@ -85,7 +85,7 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
 # Reference-range expansion
 # ---------------------------------------------------------------------------
 
-_REF_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
+_REF_RE = re.compile(r"^([A-Za-z]+)(\d+)([A-Za-z]*)$")
 
 
 def expand_ref_range(ref_spec: str) -> list[str]:
@@ -95,6 +95,7 @@ def expand_ref_range(ref_spec: str) -> list[str]:
 
         expand_ref_range("U1")        -> ["U1"]
         expand_ref_range("Q1-Q4")     -> ["Q1", "Q2", "Q3", "Q4"]
+        expand_ref_range("Q1A-Q3A")  -> ["Q1A", "Q2A", "Q3A"]
         expand_ref_range("R10-R12")   -> ["R10", "R11", "R12"]
 
     If the string cannot be parsed as a range it is returned as-is in a
@@ -111,11 +112,8 @@ def expand_ref_range(ref_spec: str) -> list[str]:
         # Not a valid range -- return the raw string
         return [ref_spec.strip()]
 
-    prefix_start = start_match.group(1)
-    prefix_end = end_match.group(1)
-
-    if prefix_start != prefix_end:
-        # Different prefixes (e.g. "R1-C4") -- not a valid range
+    prefix, _, suffix = start_match.groups()
+    if (prefix, suffix) != (end_match.group(1), end_match.group(3)):
         return [ref_spec.strip()]
 
     num_start = int(start_match.group(2))
@@ -124,7 +122,7 @@ def expand_ref_range(ref_spec: str) -> list[str]:
     if num_start > num_end:
         return [ref_spec.strip()]
 
-    return [f"{prefix_start}{n}" for n in range(num_start, num_end + 1)]
+    return [f"{prefix}{n}{suffix}" for n in range(num_start, num_end + 1)]
 
 
 # ---------------------------------------------------------------------------

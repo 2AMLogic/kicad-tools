@@ -49,6 +49,14 @@ class TestExpandRefRange:
     def test_range(self):
         assert expand_ref_range("Q1-Q4") == ["Q1", "Q2", "Q3", "Q4"]
 
+    def test_matching_suffix_is_preserved(self):
+        assert expand_ref_range("Q1A-Q4A") == ["Q1A", "Q2A", "Q3A", "Q4A"]
+        assert expand_ref_range("U9b-U10b") == ["U9b", "U10b"]
+
+    def test_different_or_missing_suffix_is_not_a_numeric_interval(self):
+        for ref in ("Q1A-Q4B", "Q1A-Q4", "Q1-Q4A", "Q1A-Q4a", "Q4A-Q1A"):
+            assert expand_ref_range(ref) == [ref]
+
     def test_range_with_higher_numbers(self):
         assert expand_ref_range("R10-R12") == ["R10", "R11", "R12"]
 
