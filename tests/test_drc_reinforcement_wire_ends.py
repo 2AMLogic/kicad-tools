@@ -284,3 +284,68 @@ def test_reversed_adopted_mask_strip_keeps_explanations(native_review, capsys):
     assert drc_cmd.main([str(board), "--format", "json", "--allow-incomplete"]) == 0
     findings = json.loads(capsys.readouterr().out)["violations"]
     assert sum("wire_end" in v for v in findings) == 4
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["filling", "capping", "plugging"],
+)
+def test_unverified_via_copper_or_closed_bore_withholds_only_its_wire(
+    change, native_review, capsys
+):
+    from kicad_tools.sexp import SExp, parse_file
+
+    board, _, _ = native_review
+    tree = parse_file(board)
+    via = tree.find("via")
+    if change == "plugging":
+        via.append(SExp.list("plugging", SExp.list("front", "yes"), SExp.list("back", "no")))
+    else:
+        via.append(SExp.list(change, "yes"))
+    board.write_text(tree.to_string())
+    assert drc_cmd.main([str(board), "--format", "json", "--strict"]) == 2
+    findings = json.loads(capsys.readouterr().out)["violations"]
+    assert len(findings) == 5 and all(v["severity"] == "warning" for v in findings)
+    assert [i for i, v in enumerate(findings) if "wire_end" in v] == [2, 3]
+
+
+def test_wire_layer_via_diameter_decides_contact(native_review):
+    from kicad_tools.drc.reinforcement import _has_wire_side_copper
+    from kicad_tools.router.current_paths import load_current_path_specs
+    from kicad_tools.sexp import SExp, parse_file
+    from kicad_tools.validate.rules.reinforcement_incomplete import ReinforcementIncompleteRule
+
+    board, _, _ = native_review
+    tree = parse_file(board)
+    pgnd = PCB.load(board).get_net_by_name("PGND").number
+    for via in tree.find_all("via"):
+        net = via.find("net")
+        if net is not None and net.get_int(0) == pgnd:
+            size = via.find("size").get_float(0)
+            via.append(
+                SExp.list(
+                    "padstack",
+                    SExp.list("mode", "front_inner_back"),
+                    SExp.list("layer", "F.Cu", SExp.list("size", size)),
+                    SExp.list("layer", "B.Cu", SExp.list("size", 0.2)),
+                )
+            )
+    board.write_text(tree.to_string())
+    pcb = PCB.load(board)
+    assert any(v.padstack_sizes.get("B.Cu") == 0.2 for v in pcb.vias)
+    specs = list(load_current_path_specs(board.parent / "current_paths.json"))
+    leg = next(
+        leg
+        for leg in ReinforcementIncompleteRule(specs=specs).fully_wired_legs(pcb)
+        if leg.net == "PGND"
+    )
+    # The 2 mm track still overlaps a centred 0.2 mm pad; move the track away
+    # so only the B.Cu diameter (not the 0.6+ mm top-level size) is in play.
+    for seg in pcb.segments:
+        if seg.net_number == pgnd:
+            seg.width = 0.2
+    anchor = leg.anchors[0]
+    anchor.pos = (anchor.pos[0], anchor.pos[1] + 0.3)
+    assert not _has_wire_side_copper(pcb, leg)
+    anchor.via.padstack_sizes.clear()  # uniform size: 0.3 mm gap now touches
+    assert _has_wire_side_copper(pcb, leg)

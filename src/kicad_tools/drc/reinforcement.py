@@ -28,7 +28,22 @@ from .violation import DRCViolation, WireEnd
 def _is_through_hole(via: Any) -> bool:
     # A buttress wire passes through the board: blind/buried/micro vias (or any
     # via not spanning both outer layers) are not wire anchors.
-    return via.via_type is None and "F.Cu" in via.layers and "B.Cu" in via.layers
+    # A filled, capped or plugged bore cannot take a through-wire either.
+    return (
+        via.via_type is None
+        and "F.Cu" in via.layers
+        and "B.Cu" in via.layers
+        and not via.hole_closed
+    )
+
+
+def _contact_radius(anchor: Any, layer: str) -> float | None:
+    # Copper on the wire's own layer, not the via's top-level size; None when
+    # that geometry cannot be verified (withhold the explanation).
+    if anchor.via is None:
+        return float(anchor.radius)
+    diameter = anchor.via.copper_diameter(layer)
+    return None if not diameter else diameter / 2.0
 
 
 def _has_wire_side_copper(pcb: PCB, leg: WiredLeg) -> bool:
@@ -66,7 +81,10 @@ def _has_wire_side_copper(pcb: PCB, leg: WiredLeg) -> bool:
     runs = touching(leg.points[0], END_WINDOW_SLACK_MM) & touching(
         leg.points[-1], END_WINDOW_SLACK_MM
     )
-    return bool(leg.anchors) and all(touching(a.pos, a.radius) & runs for a in leg.anchors)
+    radii = [_contact_radius(a, leg.layer) for a in leg.anchors]
+    return bool(leg.anchors) and all(
+        r is not None and touching(a.pos, r) & runs for a, r in zip(leg.anchors, radii, strict=True)
+    )
 
 
 def _wire_candidates(
