@@ -145,3 +145,35 @@ def test_sector_crosses_exposed_pad_and_mask_graphic(tmp_path, rules):
     for check in (check_silk_over_copper, check_silk_over_mask_opening):
         findings = check(pcb, rules).violations
         assert any("C1 (fp_line)" in v.items for v in findings)
+
+
+@pytest.mark.parametrize("face", ["F", "B"])
+@pytest.mark.parametrize("case", ["plus", "shift", "unequal", "wrong_pad", "third", "no_pads"])
+def test_radial_positive_lead_mark(tmp_path, rules, face, case):
+    x = 2.25 if case == "wrong_pad" else -2.25
+    y = 1.1
+    width = 0.35
+    graphics = line((x - width, y), (x + width, y))
+    if case == "shift":
+        x += 0.04
+    if case == "unequal":
+        width -= 0.08
+    graphics += line((x, y - width), (x, y + width))
+    if case != "no_pads":
+        graphics += """
+          (pad "1" thru_hole rect (at -0.75 0) (size 0.6 0.6) (drill 0.3) (layers "*.Cu" "*.Mask"))
+          (pad "2" thru_hole circle (at 0.75 0) (size 0.6 0.6) (drill 0.3) (layers "*.Cu" "*.Mask"))
+        """
+    extra_id = str(uuid.uuid4())
+    if case == "third":
+        graphics += line((x - 0.18, y - 0.18), (x + 0.18, y + 0.18), extra_id)
+    board(tmp_path, graphics=graphics, rotation=38)
+    path = tmp_path / "sector.kicad_pcb"
+    if face == "B":
+        path.write_text(path.read_text().replace('"F.', '"B.'))
+    findings = check_silk_overlap(PCB.load(path), rules).violations
+    if case == "third":
+        assert len(findings) == 2
+        assert all(any(extra_id in item for item in finding.items) for finding in findings)
+    else:
+        assert len(findings) == (0 if case == "plus" else 1)
