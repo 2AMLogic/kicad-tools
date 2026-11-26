@@ -757,6 +757,76 @@ class TestReinforcementSidecar:
         assert (alias.read_bytes(), alias_record.read_bytes()) == original
         assert alias_record.samefile(record)
 
+    @pytest.mark.parametrize("fail_at", ["canonical record", "alias record", "board"])
+    def test_legacy_output_publish_failure_restores_files(self, tmp_path, monkeypatch, fail_at):
+        import os
+        from stat import S_IMODE
+
+        source = _write_reinforced(tmp_path)
+        board = _write_reinforced(tmp_path, "working.kicad_pcb")
+        alias = tmp_path / "review.kicad_pcb"
+        alias.symlink_to(board.name)
+        canonical = sidecar_path(board)
+        legacy = tmp_path / "review.kicad_pcb.reinforcement.json"
+        canonical.rename(legacy)
+        legacy.write_text(render_sidecar([]))
+        legacy.chmod(0o600)
+        before = (source.read_bytes(), sidecar_path(source).read_bytes(), board.read_bytes())
+        old_record = legacy.read_bytes()
+        target = {"canonical record": canonical, "alias record": legacy, "board": board}[fail_at]
+        replace = os.replace
+
+        def fail_write(src, dst):
+            if dst == target:
+                raise OSError("forced publication failure")
+            return replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", fail_write)
+        with pytest.raises(OSError, match="forced publication failure"):
+            center_on_sheet(source, output_path=alias)
+        assert (
+            source.read_bytes(),
+            sidecar_path(source).read_bytes(),
+            board.read_bytes(),
+        ) == before
+        assert alias.is_symlink() and not legacy.is_symlink()
+        assert not os.path.lexists(canonical)
+        assert legacy.read_bytes() == old_record and S_IMODE(legacy.stat().st_mode) == 0o600
+        assert not list(tmp_path.glob(".center-*"))
+
+    @pytest.mark.parametrize("linked_record", [False, True])
+    def test_legacy_input_is_bound_only_when_published_in_place(self, tmp_path, linked_record):
+        pcb = _write_reinforced(tmp_path)
+        center_on_sheet(pcb)
+        original = pcb.stat().st_mtime_ns
+        canonical = sidecar_path(pcb)
+        record_bytes = canonical.read_bytes()
+        alias = tmp_path / "review.kicad_pcb"
+        alias.symlink_to(pcb.name)
+        legacy = tmp_path / "review.kicad_pcb.reinforcement.json"
+        storage = tmp_path / "shared-wires.json" if linked_record else legacy
+        canonical.rename(storage)
+        if linked_record:
+            legacy.symlink_to(storage.name)
+
+        copy = tmp_path / "copy.kicad_pcb"
+        center_on_sheet(alias, output_path=copy)
+        assert sidecar_path(copy).read_bytes() == record_bytes
+        assert center_on_sheet(alias, dry_run=True).sidecar == canonical
+        assert not canonical.exists() and legacy.is_symlink() == linked_record
+        assert storage.read_bytes() == record_bytes and pcb.stat().st_mtime_ns == original
+
+        report = center_on_sheet(alias)
+        assert not report.changed and report.output is None and report.sidecar == canonical
+        assert pcb.stat().st_mtime_ns == original
+        assert canonical.samefile(legacy) and canonical.read_bytes() == record_bytes
+        assert canonical.is_symlink() == linked_record
+        assert legacy.is_symlink()
+        center_on_sheet(pcb, paper="A3")
+        assert legacy.read_bytes() == canonical.read_bytes() != record_bytes
+        if linked_record:
+            assert canonical.samefile(storage)
+
     @pytest.mark.parametrize("existing_record", [False, True])
     def test_list_wires_through_requested_output_alias(self, tmp_path, capsys, existing_record):
         from kicad_tools.cli import main

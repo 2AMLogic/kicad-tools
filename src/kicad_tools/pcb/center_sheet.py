@@ -44,7 +44,8 @@ from __future__ import annotations
 
 import os
 import shutil
-from contextlib import ExitStack
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -638,6 +639,19 @@ def _centering_sidecar(board: Path) -> Path:
     return record
 
 
+def _record_publication_paths(board: Path, record: Path) -> tuple[Path, Path | None]:
+    """Return the record to replace and any second name that needs a link."""
+    target = record.resolve()
+    canonical = sidecar_path(board.resolve())
+    if target == canonical.resolve():
+        return target, None
+    # Only the alias has an inventory. Keep an explicit sidecar symlink's
+    # chosen target. An old regular record moves beside the physical board.
+    if record.is_symlink():
+        return target, canonical
+    return canonical, record
+
+
 def _center_lock(path: Path) -> Path:
     target = path.resolve()
     return target.with_name(f".{target.name}.center.lock")
@@ -652,6 +666,11 @@ def _file_version(path: Path) -> tuple[int, int, int, int, int] | None:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def _staged_path(stack: ExitStack, dest: Path) -> Path:
+    directory = stack.enter_context(TemporaryDirectory(prefix=".center-", dir=dest.parent))
+    return Path(directory) / "new"
+
+
 def _stage_centered_file(stack: ExitStack, dest: Path, content: bytes, source: Path) -> Path:
     """Prepare a sibling replacement with the existing destination's permissions."""
     if dest.exists():
@@ -659,14 +678,40 @@ def _stage_centered_file(stack: ExitStack, dest: Path, content: bytes, source: P
         with dest.open("r+b"):
             pass
         source = dest
-    directory = Path(stack.enter_context(TemporaryDirectory(prefix=".center-", dir=dest.parent)))
-    candidate = directory / "new"
+    candidate = _staged_path(stack, dest)
     with candidate.open("wb") as stream:
         stream.write(content)
         stream.flush()
         os.fsync(stream.fileno())
     shutil.copymode(source, candidate)
     return candidate
+
+
+def _stage_record_link(stack: ExitStack, name: Path, target: Path) -> Path:
+    if name.exists():
+        with name.open("r+b"):
+            pass
+    link = _staged_path(stack, name)
+    parent = name.parent.resolve()
+    link.symlink_to(os.path.relpath(target, parent) if target.anchor == parent.anchor else target)
+    return link
+
+
+@contextmanager
+def _install_centered_record(candidate: Path, target: Path) -> Iterator[None]:
+    """Undo this replacement if publishing the other record name or PCB fails."""
+    backup = candidate.with_name("original")
+    if os.path.lexists(target):
+        shutil.copy2(target, backup, follow_symlinks=False)
+    os.replace(candidate, target)
+    try:
+        yield
+    except BaseException:
+        if os.path.lexists(backup):
+            os.replace(backup, target)
+        else:
+            target.unlink()
+        raise
 
 
 def center_on_sheet(
@@ -684,14 +729,15 @@ def center_on_sheet(
 
     See :func:`center_pcb_text` for parameter semantics.  When *dry_run* is
     True nothing is written; otherwise the result is written to
-    *output_path* (default: in place). An in-place no-op leaves the input alone.
+    *output_path* (default: in place). An in-place no-op leaves the PCB alone.
 
     A ``<board>.reinforcement.json`` sidecar beside the input holds
     sheet-absolute wire coordinates, so it is translated by the same (dx, dy)
     and written beside the output (Issue #10250).  Both files are staged
     before either is replaced and a failure restores the previous state, so
     the PCB and its record never disagree.  An unreadable sidecar raises
-    before anything is written.
+    before anything is written. When the output names a board symlink with a
+    legacy record beside it, both board names are bound to one inventory.
     """
     from kicad_tools.pcb.reinforcement_sidecar import (
         load_wires,
@@ -719,6 +765,7 @@ def center_on_sheet(
     )
     dest = Path(output_path) if output_path is not None else pcb_path
     dest_sidecar = _centering_sidecar(dest)
+    record_target, record_link = _record_publication_paths(dest, dest_sidecar)
     copying = (dest.parent.resolve(), dest.name) != (pcb_path.parent.resolve(), pcb_path.name)
     if _same_file(dest, dest_sidecar) or (
         copying
@@ -727,15 +774,19 @@ def center_on_sheet(
         )
     ):
         raise ValueError("PCB and reinforcement input/output paths overlap")
-    if not report.changed and not copying:
+    if not report.changed and not copying and record_link is None:
         return report
 
     board_target = dest.resolve()
-    record_target = dest_sidecar.resolve()
     with ExitStack() as files:
         if not dry_run:
             files.enter_context(publication_lock(_center_lock(board_target)))
-            if (copying or report.dx_mm or report.dy_mm) and os.path.lexists(src_sidecar):
+            if record_link is not None:
+                if os.path.lexists(sidecar_path(board_target)):
+                    raise ValueError(f"Reinforcement record changed while centering: {dest}")
+                files.enter_context(publication_lock(_center_lock(record_link)))
+            writes_record = copying or report.dx_mm or report.dy_mm or record_link is not None
+            if writes_record and os.path.lexists(src_sidecar):
                 files.enter_context(publication_lock(_center_lock(record_target)))
 
         record: bytes | None = None
@@ -745,14 +796,14 @@ def center_on_sheet(
                 record = render_sidecar(
                     translate_sidecar_wires(wires, report.dx_mm, report.dy_mm)
                 ).encode()
-            elif copying:
+            elif copying or record_link is not None:
                 record = src_sidecar.read_bytes()
         elif os.path.lexists(dest_sidecar):
             raise ValueError(
                 f"Output has a reinforcement record but the input has none: {dest_sidecar}"
             )
         if record is not None:
-            report.sidecar = dest_sidecar
+            report.sidecar = sidecar_path(board_target) if record_link is not None else dest_sidecar
         if source_versions != tuple(_file_version(path) for path in source_pair) or (
             pcb_path.read_bytes() != source_bytes
         ):
@@ -760,22 +811,19 @@ def center_on_sheet(
         if dry_run:
             return report
 
-        pcb_tmp = _stage_centered_file(files, board_target, new_text.encode(), pcb_path)
-        if record is None:
+        pcb_tmp = None
+        if report.changed or copying:
+            pcb_tmp = _stage_centered_file(files, board_target, new_text.encode(), pcb_path)
+        if record is not None:
+            mode_source = dest_sidecar if dest_sidecar.is_file() else src_sidecar
+            record_tmp = _stage_centered_file(files, record_target, record, mode_source)
+            replacements = [(record_tmp, record_target)]
+            if record_link is not None:
+                link_tmp = _stage_record_link(files, record_link, record_target)
+                replacements.append((link_tmp, record_link))
+            for candidate, target in replacements:
+                files.enter_context(_install_centered_record(candidate, target))
+        if pcb_tmp is not None:
             os.replace(pcb_tmp, board_target)
-        else:
-            record_tmp = _stage_centered_file(files, record_target, record, src_sidecar)
-            backup = record_tmp.with_name("original")
-            if record_target.exists():
-                shutil.copy2(record_target, backup)
-            os.replace(record_tmp, record_target)
-            try:
-                os.replace(pcb_tmp, board_target)
-            except BaseException:
-                if backup.exists():
-                    os.replace(backup, record_target)
-                else:
-                    record_target.unlink()
-                raise
-        report.output = dest
+            report.output = dest
     return report

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
 from pathlib import Path
 
 from kicad_tools.cli.commands.pcb import run_pcb_command
@@ -299,6 +300,50 @@ def test_adopt_is_idempotent_and_keeps_existing_records(tmp_path):
     first = sidecar_path(q).read_bytes()
     assert run_pcb_command(_args(q, net=None, adopt=True)) == 0
     assert sidecar_path(q).read_bytes() == first
+
+
+def test_center_exports_legacy_adoption_and_both_names_follow_the_next_move(tmp_path, capsys):
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import parse_file
+
+    board = _board(tmp_path)
+    for net in ("NET_A", "NET_B"):
+        assert run_pcb_command(_args(board, net)) == 0
+    canonical = sidecar_path(board)
+    canonical.unlink()
+    review_dir = tmp_path / "review"
+    review_dir.mkdir()
+    alias = review_dir / "review.kicad_pcb"
+    alias.symlink_to(board)
+    # Older --adopt wrote beside the supplied board name. An existing empty
+    # inventory selects that same location when replaying adoption today.
+    legacy = alias.with_name(alias.name + ".reinforcement.json")
+    legacy.write_text('{"version": 1, "wires": []}')
+    assert run_pcb_command(_args(alias, net=None, adopt=True)) == 0
+    assert len(load_wires(legacy)) == 2 and not canonical.exists()
+
+    source = tmp_path / "source.kicad_pcb"
+    shutil.copyfile(board, source)
+    shutil.copyfile(legacy, sidecar_path(source))
+    source_pair = (source.read_bytes(), sidecar_path(source).read_bytes())
+    capsys.readouterr()
+    for args in ([str(source), "--paper", "keep", "-o", str(alias)], [str(board), "--paper", "A3"]):
+        assert main(["pcb", "center-on-sheet", *args, "--format", "json"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["dx_mm"] or report["dy_mm"]
+        assert Path(report["sidecar"]).samefile(canonical)
+        vias = sorted(
+            tuple(v.find_child("at").get_atoms()[:2])
+            for v in parse_file(board).find_children("via")
+        )
+        assert len(vias) == 4
+        for name in (board, alias):
+            assert main(["pcb", "reinforce", str(name), "--list-wires", "--format", "json"]) == 0
+            wires = json.loads(capsys.readouterr().out)["wires"]
+            anchors = sorted((a["x"], a["y"]) for w in wires for a in w["anchors"])
+            assert len(anchors) == len(vias)
+            assert all(math.dist(a, v) <= 0.0001 for a, v in zip(anchors, vias, strict=True))
+        assert (source.read_bytes(), sidecar_path(source).read_bytes()) == source_pair
 
 
 def test_adopt_dry_run_and_net_filter_write_nothing_extra(tmp_path):
