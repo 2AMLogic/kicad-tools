@@ -458,6 +458,8 @@ class _PairEscape:
     # On U3, the inner taper continues to this measured trunk endpoint.
     # On J1, the barrel has one constant-width approach segment.
     inner_end_offset: XY | None = None
+    # The BGA repair requires the measured full-width front run.
+    front_corners: tuple[XY, ...] = ()
 
 
 def _inner_approach(
@@ -491,52 +493,65 @@ def _rebuild_pair_branch(
     rules: DesignRules,
     width: float,
     diameter: float,
-) -> bool:
+    protected: set[str] | None = None,
+) -> tuple[list[Segment], Via] | None:
     """Reconnect one data pad to its original trunk, pending its partner's checks."""
     center = pcb.get_pad_position(ref, escape.pad)
     if center is None:
-        return False
-    locked = _locked_ids(pcb)
+        return None
+    locked = _locked_ids(pcb) if protected is None else protected
     net = escape.net
     walk = _walk_chain(pcb, net, _xy(center), locked)
     if walk is None:
-        return False
+        return None
     tracks, old = walk
     if _xy((old[0] - center[0], old[1] - center[1])) != escape.old_offset:
-        return False
+        return None
+    if escape.front_corners:
+        points = [_xy(center)]
+        for segment in tracks:
+            points.append(
+                _xy(segment.end) if _xy(segment.start) == points[-1] else _xy(segment.start)
+            )
+        if not _matches_measured(points, center, escape.front_corners):
+            return None
     vias = [(i, v) for i, v in enumerate(pcb.vias) if v.net_name == net and _xy(v.position) == old]
     if len(vias) != 1:
-        return False
+        return None
     via_index, via = vias[0]
     node = pcb.via_source_node(via)
-    if node is None or BoardItemLocks(pcb._sexp).is_locked(node):
-        return False
+    if node is None or BoardItemLocks(pcb._sexp).is_locked(node) or via.uuid.lower() in locked:
+        return None
     size = node.find("size")
     if size is None:
-        return False
+        return None
     if (via.size, via.drill) != (0.6, 0.25) or diameter + _EPS < max(
         rules.min_via_diameter_mm, via.drill + 2 * rules.min_annular_ring_mm
     ):
-        return False
+        return None
     approach = _inner_approach(pcb, escape, _xy(center), old, tracks, locked)
     if approach is None:
-        return False
+        return None
     inner, joint = approach
     edited = [*tracks, *inner]
-    if escape.inner_end_offset is None and any(abs(s.width - width) > _EPS for s in edited):
-        return False
+    if escape.front_corners and (via.via_type or set(via.layers) != {"F.Cu", "B.Cu"}):
+        return None
+    if (escape.inner_end_offset is None or escape.front_corners) and any(
+        abs(s.width - width) > _EPS for s in edited
+    ):
+        return None
     if any(s.width > width + _EPS for s in edited) or abs(inner[-1].width - width) > _EPS:
-        return False
+        return None
 
     original = list(pcb.segments)
     validator = ConnectivityValidator(pcb)
     before = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
     if len(before.components()) != 1:
-        return False
+        return None
     contacts, ends = _external_contacts(before, original, edited, via_index)
     target = _xy((center[0] + escape.new_offset[0], center[1] + escape.new_offset[1]))
     if pcb.remove_segments(edited) != len(edited) or not pcb.relocate_via(via, target):
-        return False
+        return None
     size.set_value(0, diameter)
     via.size = diameter
     added = pcb.add_trace(center, target, width=width, layer="F.Cu", net=net)
@@ -547,7 +562,11 @@ def _rebuild_pair_branch(
             added.extend(pcb.add_trace(a, b, width=width, layer=escape.layer, net=net))
     after = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
     current, current_ends = _external_contacts(after, pcb.segments, added, via_index)
-    return len(after.components()) == 1 and contacts <= current and ends <= current_ends
+    if len(after.components()) != 1 or not contacts <= current or not ends <= current_ends:
+        return None
+    if escape.front_corners and contacts != current:
+        return None
+    return added, via
 
 
 def _raw_trace_skew(pcb: PCB, escapes: tuple[_PairEscape, _PairEscape]) -> float:
@@ -1198,7 +1217,12 @@ def _authored_rules_ok(
     pcb: PCB, path: Path, tracks: list[Segment], vias: list[Via], label: str
 ) -> bool:
     """Have KiCad evaluate authored rules on the replacement copper before publishing it."""
-    if not path.with_suffix(".kicad_dru").exists() and not all_rule_area_zones(pcb):
+    # A project can impose drill spacing on a moved barrel without a custom rules file.
+    if not (
+        path.with_suffix(".kicad_dru").exists()
+        or (vias and path.with_suffix(".kicad_pro").is_file())
+        or all_rule_area_zones(pcb)
+    ):
         return True
     changed = {item.uuid for item in (*tracks, *vias)}
     if not all(changed):
@@ -1275,8 +1299,8 @@ _DATA_WIDTH = 0.225
 class _DataExit:
     """Seed-42 F.Cu corners relative to the pad centre, up to the trunk junction.
 
-    MIPI trunks stay in place or extend to the new junction. USB2 instead
-    shortens a measured trunk, retaining its original far endpoint.
+    MIPI and USB2 keep the far end of the adjoining trunk. USB3 RX2 ends
+    on a fixed through-via with the declared (diameter, drill) in mm.
     """
 
     ref: str
@@ -1287,6 +1311,7 @@ class _DataExit:
     old: tuple[XY, ...]
     new: tuple[XY, ...]
     trunk_end: XY | None = None
+    fixed_via: tuple[float, float] | None = None
 
 
 _DATA_EXITS = (
@@ -1354,16 +1379,57 @@ _USB2_EXITS = (
 )
 
 
+_RX2_NETS = ("USB3_RX2+", "USB3_RX2-")
+_J1_USB = "Connector_USB:USB_C_Receptacle_USB2.0"
+_RX2_EXITS = (
+    _DataExit(
+        "J1",
+        _J1_USB,
+        "A10",
+        (0.3, 0.6),
+        "USB3_RX2-",
+        old=((0, 0), (0, 0.15), (0.1936, 0.15), (0.95, 0.9064), (0.95, 1.10)),
+        new=((0, 0), (0.58, 0.58), (0.71, 0.58), (0.95, 0.82), (0.95, 1.10)),
+        fixed_via=(0.6, 0.25),
+    ),
+    _DataExit(
+        "J1",
+        _J1_USB,
+        "A11",
+        (0.3, 0.6),
+        "USB3_RX2+",
+        old=((0, 0), (0, 0.3436), (0.7564, 1.10), (0.95, 1.10)),
+        new=((0, 0), (0.60, 0.60), (0.60, 1.10), (0.95, 1.10)),
+        fixed_via=(0.6, 0.25),
+    ),
+)
+
+
+def _fixed_via_ok(pcb: PCB, ex: _DataExit, fp, pad, seat: XY, protected: set[str]) -> bool:
+    seated = [v for v in pcb.vias if v.net_name == ex.net and _xy(v.position) == seat]
+    if len(seated) != 1:
+        return False
+    via = seated[0]
+    if (via.size, via.drill) != ex.fixed_via or via.via_type or set(via.layers) != {"F.Cu", "B.Cu"}:
+        return False
+    locks = BoardItemLocks(pcb._sexp)
+    anchors = ((fp, fp._sexp_node), (pad, pad._sexp_node), (via, pcb.via_source_node(via)))
+    return all(
+        node is not None and not locks.is_locked(node) and item.uuid.lower() not in protected
+        for item, node in anchors
+    )
+
+
 def _data_run(
     pcb: PCB, ex: _DataExit, center: XY, junction: XY, protected: set[str], width: float
-) -> tuple[list[Segment], Segment] | None:
-    """The measured escape run and its trunk, or ``None`` to decline.
+) -> tuple[list[Segment], Segment | None] | None:
+    """The measured escape run and any adjoining trunk.
 
     The walk follows the unique continuation from the pad centre, consuming
     only same-width F.Cu pieces of the pad's net; a branch, a stray landing,
     a lock or a group member declines it.  The consumed corner list must
-    match the measured control, and exactly one trunk piece must remain
-    attached at the junction.
+    match the measured control. A fixed via terminates the F.Cu run;
+    otherwise exactly one trunk piece must remain attached at the junction.
     """
     at: dict[XY, list[Segment]] = defaultdict(list)
     for seg in pcb.segments:
@@ -1402,6 +1468,8 @@ def _data_run(
         return None
     consumed = {id(s) for s in chain}
     remaining = [s for s in at.get(junction, []) if id(s) not in consumed]
+    if ex.fixed_via is not None:
+        return None if remaining else (chain, None)
     if len(remaining) != 1:
         return None
     trunk = remaining[0]
@@ -1428,8 +1496,8 @@ def _stage_data_exit(
         or pad.size != ex.pad_size
     ):
         return None
-    if ex.trunk_end is not None:
-        # These two measured USB2 openings have the same outlines as the SMD lands.
+    if ex.trunk_end is not None or ex.fixed_via is not None:
+        # The measured USB openings have the same outlines as the SMD lands.
         if pad.type != "smd" or not {"F.Cu", "F.Mask"} <= set(pad.layers):
             return None
         shapes = _departure_mask_shapes(pcb, fp, pad)
@@ -1437,24 +1505,33 @@ def _stage_data_exit(
             return None
     center = _xy(position)
     junction = _xy((center[0] + ex.old[-1][0], center[1] + ex.old[-1][1]))
+    if ex.fixed_via is not None and not _fixed_via_ok(pcb, ex, fp, pad, junction, protected):
+        return None
     walked = _data_run(pcb, ex, center, junction, protected, width)
     if walked is None:
         return None
-    chain, trunk = walked
-    target = _xy((center[0] + ex.new[-1][0], center[1] + ex.new[-1][1]))
-    far = _xy(trunk.end) if _xy(trunk.start) == junction else _xy(trunk.start)
-    if not _on_line(far, junction, target):
-        return None
-    old_length, new_length = dist(far, junction), dist(far, target)
-    moved = dist(junction, target)
-    if ex.trunk_end is not None:
-        expected_far = _xy((center[0] + ex.trunk_end[0], center[1] + ex.trunk_end[1]))
-        # Only shorten the measured trunk. Never cross or consume its far endpoint.
-        if far != expected_far or target == far or abs(moved + new_length - old_length) > _EPS:
+    edited, trunk = walked
+    points = [_xy((center[0] + dx, center[1] + dy)) for dx, dy in ex.new]
+    target = points[-1]
+    legs = list(pairwise(points))
+    if trunk is None:
+        if target != junction:
             return None
-    elif new_length < old_length - _EPS or abs(new_length - old_length - moved) > _CLK_TOL:
-        return None
-    edited = [*chain, trunk]
+    else:
+        far = _xy(trunk.end) if _xy(trunk.start) == junction else _xy(trunk.start)
+        if not _on_line(far, junction, target):
+            return None
+        old_length, new_length = dist(far, junction), dist(far, target)
+        moved = dist(junction, target)
+        if ex.trunk_end is not None:
+            expected_far = _xy((center[0] + ex.trunk_end[0], center[1] + ex.trunk_end[1]))
+            # Only shorten the measured trunk. Never cross or consume its far endpoint.
+            if far != expected_far or target == far or abs(moved + new_length - old_length) > _EPS:
+                return None
+        elif new_length < old_length - _EPS or abs(new_length - old_length - moved) > _CLK_TOL:
+            return None
+        edited.append(trunk)
+        legs.append((far, target))
     original = list(pcb.segments)
     validator = ConnectivityValidator(pcb)
     before = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
@@ -1464,13 +1541,14 @@ def _stage_data_exit(
     if pcb.remove_segments(edited) != len(edited):
         return None
     added: list[Segment] = []
-    for a, b in pairwise(_xy((center[0] + o[0], center[1] + o[1])) for o in ex.new):
+    for a, b in legs:
         if a != b:
             added.extend(pcb.add_trace(a, b, width=width, layer="F.Cu", net=ex.net))
-    added.extend(pcb.add_trace(far, target, width=width, layer="F.Cu", net=ex.net))
     after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
     current, current_ends = _external_contacts(after, pcb.segments, added, None)
     if len(after.components()) != 1 or not contacts <= current or not ends <= current_ends:
+        return None
+    if ex.fixed_via is not None and contacts != current:
         return None
     return added
 
@@ -1526,6 +1604,101 @@ def _clear_data_pair(
     pcb.save(path)
     print(f"   pad departure {label} pair: {len(exits)} exits rebuilt at {width} mm")
     return len(exits)
+
+
+_BGA_RX2 = (
+    _PairEscape(
+        "F5",
+        "USB3_RX2+",
+        "In1.Cu",
+        (-0.47, -0.34),
+        (-0.56, 0.56),
+        (-5.395, -0.34),
+        ((0, 0), (-0.03, 0), (-0.37, -0.34), (-0.47, -0.34)),
+    ),
+    _PairEscape(
+        "F6",
+        "USB3_RX2-",
+        "In2.Cu",
+        (-0.39, -0.39),
+        (-0.56, -0.56),
+        (-0.99, -0.99),
+        ((0, 0), (-0.39, -0.39)),
+    ),
+)
+
+
+def _clear_bga_rx2(path: Path, rules: DesignRules, policy: MaskCopperPolicy) -> int:
+    """Move both full-width BGA escapes together after checking copper and both mask films."""
+    pcb = PCB.load(path)
+    fp = pcb.get_footprint("U2")
+    protected = _protected_ids(pcb)
+    locks = BoardItemLocks(pcb._sexp)
+    if (
+        fp is None
+        or fp.name != "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"
+        or fp.layer != "F.Cu"
+        or fp.rotation
+        or fp._sexp_node is None
+        or locks.is_locked(fp._sexp_node)
+        or fp.uuid.lower() in protected
+    ):
+        return 0
+    tracks: list[Segment] = []
+    vias: list[Via] = []
+    for escape in _BGA_RX2:
+        pad = next((pad for pad in fp.pads if pad.number == escape.pad), None)
+        if (
+            pad is None
+            or pad.net_name != escape.net
+            or pad.type != "smd"
+            or pad.size != (0.45, 0.45)
+            or pad.shape != "rect"
+            or pad.rotation
+            or not {"F.Cu", "F.Mask"} <= set(pad.layers)
+            or pad._sexp_node is None
+            or locks.is_locked(pad._sexp_node)
+            or pad.uuid.lower() in protected
+        ):
+            return 0
+        shapes = _departure_mask_shapes(pcb, fp, pad)
+        if shapes is None or not shapes[0].equals(shapes[1]):
+            return 0
+        staged = _rebuild_pair_branch(pcb, fp.reference, escape, rules, 0.275, 0.60, protected)
+        if staged is None:
+            return 0
+        added, via = staged
+        tracks.extend(added)
+        vias.append(via)
+    if not _copper_gap_ok(pcb, path, tracks, vias, rules):
+        return 0
+    if not _within_project_skew_budget(pcb, path, _RX2_NETS):
+        return 0
+    if not _authored_rules_ok(pcb, path, tracks, vias, "U2 USB3 RX2"):
+        return 0
+    with TemporaryDirectory(prefix="board06-rx2-mask-") as tmp:
+        candidate = Path(tmp) / path.name
+        pcb.save(candidate)
+        copy_project_sidecars(path, candidate)
+        mask = check_mask_to_copper(candidate, policy)
+    if mask.coverage != "complete":
+        return 0
+    # An exposed via has an opening of its own. Moving it would change the film.
+    sources = mask.geometry_provenance.get("source_objects", {})
+    for via in vias:
+        layers = sources.get(via.uuid, {}).get("layers_wkt", {})
+        if not {"F.Cu", "B.Cu"} <= layers.keys() or {"F.Mask", "B.Mask"} & layers.keys():
+            return 0
+    affected = {item.uuid for item in (*tracks, *vias)}
+    if any(
+        measurement.conductor_uuid in affected
+        and measurement.disposition in {"violation", "uncertain", "warning"}
+        for measurement in mask.measurements
+    ):
+        return 0
+    pcb.save(path)
+    print("   U2 USB3 RX2: moved the F5 and F6 barrels clear of the mask openings")
+    return len(vias)
 
 
 @dataclass(frozen=True)
@@ -1904,6 +2077,8 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
             _PairEscape("32", "PCIE_RX-", "In2.Cu", (1.00, 0.20), (1.20, 0.0), (3.70, 2.90)),
         ),
     )
+    edits += _clear_data_pair(path, rules, _RX2_EXITS, _RX2_NETS, 0.275, "USB3 RX2")
+    edits += _clear_bga_rx2(path, rules, request.policy)
     tx_nets = ("PCIE_TX+", "PCIE_TX-")
     edits += _clear_pcie_taper_pair(
         path,
