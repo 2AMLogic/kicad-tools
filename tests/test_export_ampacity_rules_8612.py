@@ -107,6 +107,7 @@ def test_project_rewrite_reported_when_dru_write_fails(tmp_path: Path) -> None:
         ("editor_replaces", False),
         ("editor_creates", False),
         ("editor_replaces", True),
+        ("editor_replaces_read_only", True),
         ("editor_creates", True),
     ],
 )
@@ -131,6 +132,8 @@ def test_rules_export_refusal_leaves_sidecars_intact(
         expected = b'{"text_variables": {"editor": "newer save"}}'
         editor_save = tmp_path / "editor-save.tmp"
         editor_save.write_bytes(expected)
+        if project == "editor_replaces_read_only":
+            editor_save.chmod(0o444)
         merge = dru_generator.merge_dru_floors
 
         def save_then_merge(*args, **kwargs):

@@ -2034,8 +2034,18 @@ def write_drc_constraints(
         flags |= os.O_CREAT | os.O_EXCL
     try:
         fd = os.open(pro_path, flags, 0o666)
-    except (FileNotFoundError, FileExistsError) as exc:
+    except FileExistsError as exc:
         raise ValueError(conflict) from exc
+    except FileNotFoundError as exc:
+        if original_project is None:
+            raise
+        raise ValueError(conflict) from exc
+    except PermissionError as exc:
+        # A replacement can itself be read-only. Distinguish that conflict
+        # from a write failure on the original project.
+        if original_project is not None and not os.path.samestat(original_project, pro_path.stat()):
+            raise ValueError(conflict) from exc
+        raise
     with os.fdopen(fd, "w", encoding="utf-8") as project:
         current = os.fstat(fd)
         if original_project is not None and (
