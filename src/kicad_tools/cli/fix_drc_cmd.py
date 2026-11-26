@@ -1619,9 +1619,11 @@ def _run_mask_pass(
                 isinstance(action, MaskNudgeAction) or action.action == "pull_in"
                 for action in result.actions
             )
-            has_bends = any(action.bends for action in result.actions)
+            bend_nets = {action.net_name for action in result.actions if action.bends}
+            # Refill can split existing copper even when a move added no segment.
+            contact_nets = edited_nets if has_zones else bend_nets
             before_native = (
-                _mask_native_state(candidate) if has_zones or check_copper or has_bends else None
+                _mask_native_state(candidate) if has_zones or check_copper or bend_nets else None
             )
             # On a partially connected board one new contact can hide a split,
             # even on the same net. Keep KiCad's actual pad groups for that case.
@@ -1639,6 +1641,11 @@ def _run_mask_pass(
                 if not refill.success:
                     raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
 
+            def lost_contacts() -> set[str]:
+                if not contact_nets:
+                    return set()
+                return MaskCopperRepairer(candidate).disconnected_copper_nets(before, contact_nets)
+
             # Refill zone pours before grading so moved tracks and via antipads
             # are checked against the copper that will actually be published (#9939).
             if has_zones:
@@ -1650,14 +1657,12 @@ def _run_mask_pass(
                 pcb_path,
                 candidate,
                 pad_islands,
-                lost_contacts=MaskCopperRepairer(candidate).disconnected_copper_nets(
-                    before, edited_nets
-                ),
+                lost_contacts=lost_contacts(),
             )
             if result.actions and result.repaired < proposed:
                 if has_zones:
                     refill_candidate()
-                lost = MaskCopperRepairer(candidate).disconnected_copper_nets(before, edited_nets)
+                lost = lost_contacts()
                 if lost:
                     raise _MaskPadConnectionLost(
                         f"saved repair disconnected copper on {', '.join(sorted(lost))}"
