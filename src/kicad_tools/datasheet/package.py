@@ -196,19 +196,19 @@ _PITCH_UNITS = ("mm", "millimeter", "millimeters", "millimetre", "millimetres", 
 def _pitch_token_unit(tail: str) -> str | None:
     """Classify the text that follows a pitch number.
 
-    Returns the lower-cased unit ("" when none), or None when a letter glued
+    Returns the lower-cased unit ("" when none), or None when a letter or underscore glued
     onto the number or its unit makes the token incomplete (``1.27B``,
     ``1.27mmA``, ``1.27 mmA``).
     """
     # Scan the entire Unicode suffix so an unsupported unit like µm stays intact.
-    word = re.match(r"(\s*)([^\W\d_]*)", tail)
+    word = re.match(r"(\s*)([^\W\d]*)", tail)
     assert word is not None
-    gap, letters = word.group(1), word.group(2)
-    lowered = letters.lower()
+    gap, suffix = word.group(1), word.group(2)
+    lowered = suffix.lower()
     if lowered in _PITCH_UNITS:
         rest = tail[word.end() :]
         return None if rest[:1].isdigit() else lowered
-    if not letters:
+    if not suffix:
         return ""
     if gap and not lowered.startswith(("mm", "mil")):
         return ""  # a separate word, not part of the measurement

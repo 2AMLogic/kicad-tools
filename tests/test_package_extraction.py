@@ -500,6 +500,8 @@ def test_pitch_token_with_attached_letter_is_ambiguous(text):
         ("0.8 mm pitch", 0.8),
         ("e=1.27mmA pitch 0.8mm", 0.8),
         ("pitch 1.27 B", 1.27),
+        ("pitch 50_mils pitch 0.8mm", 0.8),
+        ("pitch 50mil_A pitch 0.8mm", 0.8),
     ],
 )
 def test_clean_pitch_forms_keep_their_values(text, pitch):
@@ -518,6 +520,8 @@ def test_uppercase_e_still_supplies_body_length_with_malformed_pitch():
         ("e=1.27mmA", None, True),
         ("pitch = 0.65mmX", None, True),
         ("pitch 500µm", None, True),
+        ("P1_GPIO", None, True),
+        ("P2_INT pitch 0.8mm", 0.8, False),
         ("pitch 500μm pitch 0.8mm", 0.8, False),
         ("pitch 0.8 millimeters", 0.8, False),
         ("e=0.8 millimetres", 0.8, False),
