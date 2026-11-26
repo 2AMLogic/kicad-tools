@@ -3404,6 +3404,8 @@ def _write_readme(
                     f"  step {name}: {step.get('status')}" + (f" ({detail})" if detail else "")
                 )
     if options.assembly:
+        from kicad_tools.export.preflight import describe_lookup_sources
+
         _, stock_record, _ = _stock_evaluation(options, _recorded_stock_check(options))
         if stock_record is not None:
             lines.extend(["", "LCSC stock order", "----------------"])
@@ -3415,6 +3417,9 @@ def _write_readme(
                 )
             else:
                 lines.append("  no parts declared as held in operator inventory")
+            recorded = describe_lookup_sources(stock_record.get("sources"))
+            if recorded:
+                lines.append(f"  parts data sources: {recorded}")
             lines.append(f"  stock check {stock_record['status']}: {stock_record['message']}")
     prep = options.assembly_prep_record
     if prep is not None:
@@ -3726,6 +3731,11 @@ def _stock_evaluation(
         "message": result.message,
         "details": result.details,
     }
+    sources = data.get("sources")
+    if isinstance(sources, dict):
+        # Where the producer's lookups reached (issue #10386).  Verification
+        # carries the record forward; it never re-derives it from this host.
+        record["sources"] = dict(sources)
     return result, record, None
 
 

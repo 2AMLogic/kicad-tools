@@ -53,6 +53,7 @@ import zlib
 from datetime import datetime
 from enum import IntEnum
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 from .cache import get_default_cache_path
 from .lcsc import (
@@ -94,6 +95,19 @@ def catalog_tier(library_type: object, preferred: object = None) -> CatalogTier:
     if kind == "preferred" or (kind == "expand" and preferred in (1, "1")):
         return CatalogTier.PREFERRED
     return CatalogTier.EXTENDED
+
+
+#: What became of one exact catalog lookup (issue #10386).  ``hit`` and
+#: ``miss`` mean the query ran; ``missing`` and ``unreadable`` mean it never
+#: could, so the catalog's contents say nothing about the part.
+CatalogLookupStatus = Literal["hit", "miss", "missing", "unreadable"]
+
+
+class CatalogLookup(NamedTuple):
+    """One exact catalog lookup: the part found (if any) and the query's fate."""
+
+    part: Part | None
+    status: CatalogLookupStatus
 
 
 def get_catalog_path() -> Path:
@@ -166,14 +180,34 @@ class JlcpartsCatalog:
 
         Returns:
             A translated :class:`Part` if found, otherwise ``None`` (including
-            when the catalog file does not exist).
+            when the catalog file does not exist).  Use
+            :meth:`lookup_with_status` to tell those outcomes apart.
+        """
+        return self.lookup_with_status(lcsc_part).part
+
+    def lookup_with_status(self, lcsc_part: str) -> CatalogLookup:
+        """Look up a single part, reporting what became of the catalog search.
+
+        :meth:`lookup` answers ``None`` both for a part the catalog does not
+        list and for a catalog file it could not read.  This method separates
+        the two (issue #10386), so evidence derived from a lookup can tell a
+        host without a usable catalog from a catalog that was searched and
+        holds no such row.
+
+        Args:
+            lcsc_part: LCSC part number (e.g. ``"C123456"``). The numeric
+                portion is matched against the ``lcsc`` column.
+
+        Returns:
+            The translated :class:`Part` with status ``hit``, or ``None``
+            with the status that explains its absence.
         """
         if not self.available:
-            return None
+            return CatalogLookup(None, "missing")
 
         lcsc_id = _normalize_lcsc_id(lcsc_part)
         if lcsc_id is None:
-            return None
+            return CatalogLookup(None, "miss")
 
         try:
             with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
@@ -185,12 +219,12 @@ class JlcpartsCatalog:
                 row = cursor.fetchone()
         except sqlite3.Error as e:
             logger.warning(f"jlcparts catalog read failed for {lcsc_part}: {e}")
-            return None
+            return CatalogLookup(None, "unreadable")
 
         if row is None:
-            return None
+            return CatalogLookup(None, "miss")
 
-        return self._part_from_row(row)
+        return CatalogLookup(self._part_from_row(row), "hit")
 
     def lookup_many(self, lcsc_parts: list[str]) -> dict[str, Part]:
         """Look up multiple parts by exact LCSC number.
