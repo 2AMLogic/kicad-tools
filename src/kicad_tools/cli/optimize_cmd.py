@@ -356,11 +356,11 @@ def _run_pour_slot_pass(written: Path, rules_from: Path | None, pack: bool = Fal
     import tempfile
 
     from kicad_tools.optim.pour_slot_cleanup import cleanup_pour_slots
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
     from kicad_tools.schema.pcb import PCB
-    from kicad_tools.validate.rules.pour_slot import load_pour_slot_clearances
 
     pcb = PCB.load(str(written))
-    clearances = load_pour_slot_clearances(rules_from or written, pcb)
+    clearances = BoardClearanceRules.from_board(rules_from or written)
 
     def referee(candidate):
         with tempfile.TemporaryDirectory(prefix="kct_slotref_") as td:

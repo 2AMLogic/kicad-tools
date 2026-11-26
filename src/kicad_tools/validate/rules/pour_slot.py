@@ -14,8 +14,8 @@ nets, overlap along their length, and::
     first_clearance + second_clearance < gap < first_clearance + second_clearance + min_thickness
 
 Each side uses the maximum of the board minimum, the zone clearance, and the
-applicable track and zone netclass clearances. An unconditional custom copper
-clearance replaces the project clearance for all nets.
+applicable track and zone netclass clearances. The last matching custom copper
+clearance replaces the project requirement for that track-to-zone pair.
 Touching/overlapping tracks (``gap <= 0``) are a DRC matter and not reported,
 and so is a *packed* pair whose gap is at or below the sum (Issue #10121): its
 clearance keep-outs already overlap, so no fill strip ever existed between
@@ -48,7 +48,6 @@ import math
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from shapely import get_parts  # type: ignore[import-untyped]
@@ -56,6 +55,7 @@ from shapely.geometry import LineString, Polygon  # type: ignore[import-untyped]
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
 from kicad_tools.core.project_clearance import DEFAULT_NETCLASS_CLEARANCE_MM
+from kicad_tools.router.board_clearance_rules import BoardClearanceRules, ItemProps
 from kicad_tools.schema.pcb import _segment_dedup_key
 
 from ..violations import DRCResults, DRCViolation
@@ -63,7 +63,8 @@ from .base import DRCRule
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules, ItemProps
+from kicad_tools.schema.pcb import PCB
 
 RULE_ID = "pour_slot"
 
@@ -87,6 +88,7 @@ def _unit(seg: Any) -> tuple[float, float, float] | None:
 @dataclass(frozen=True)
 class _Pour:
     outline: BaseGeometry
+    net_name: str
     clearance: float
     min_thickness: float
 
@@ -112,37 +114,11 @@ class PourSlotPair:
         return max(self.first_clearance, self.second_clearance)
 
 
-def load_pour_slot_clearances(path: Path, pcb: PCB) -> dict[str, float]:
-    """Per-net copper clearances for the selected project and its rule sidecar."""
-    from kicad_tools.core.project_clearance import ProjectClearanceError, resolve_project_clearances
-    from kicad_tools.router.board_clearance_rules import CLEARANCE, parse_dru
-    from kicad_tools.router.clearance_resolver import project_min_clearance_mm
-    from kicad_tools.validate.rules.netclass_clearance_copper import load_project
-
-    # KiCad gives the last matching custom rule precedence. Only global
-    # rules can supply one uniform value for this per-net lookup.
-    rules, _ = parse_dru(path.with_suffix(".kicad_dru"))
-    for rule in reversed(rules):
-        clearance = rule.value(CLEARANCE)
-        if rule.condition is None and rule.layer is None and clearance is not None:
-            return {"": 0.0 if rule.ignored else clearance}
-
-    project = load_project(path)
-    if project is None:
-        return {}
-    floor = project_min_clearance_mm(project) or 0.0
-    names = ["", *(n.name for n in pcb.nets.values() if n.name)]
-    try:
-        classes = resolve_project_clearances(project, names)
-    except ProjectClearanceError:
-        classes = {}
-    clearances = {name: max(floor, rule.clearance) for name, rule in classes.items()}
-    clearances.setdefault("", max(floor, DEFAULT_NETCLASS_CLEARANCE_MM))
-    return clearances
+PourSlotClearances = BoardClearanceRules | Mapping[str, float]
 
 
 def iter_pour_slot_pairs(
-    pcb: PCB, netclass_clearances: Mapping[str, float] | None = None
+    pcb: PCB, netclass_clearances: PourSlotClearances | None = None
 ) -> Iterator[PourSlotPair]:
     """Yield every pair :class:`PourSlotRule` would report, with its segments."""
     return PourSlotRule(netclass_clearances).iter_pairs(pcb)
@@ -159,11 +135,20 @@ class PourSlotRule(DRCRule):
         "to the zone (advisory)."
     )
 
-    def __init__(self, netclass_clearances: Mapping[str, float] | None = None) -> None:
-        #: Net name -> authored netclass clearance (mm); optional.
-        self.netclass_clearances = dict(netclass_clearances or {})
-        # The resolver maps the unnamed net to the project's Default class.
-        self.default_clearance = self.netclass_clearances.get("", DEFAULT_NETCLASS_CLEARANCE_MM)
+    def __init__(self, netclass_clearances: PourSlotClearances | None = None) -> None:
+        self.clearances = netclass_clearances or {}
+
+    def _track_clearance(self, track: str, zone_net: str, layer: str) -> float:
+        if isinstance(self.clearances, BoardClearanceRules):
+            track_props = ItemProps(
+                "Track", track, layer=layer, footprint_ref="", footprint_lib_id=""
+            )
+            zone_props = ItemProps(
+                "Zone", zone_net, layer=layer, footprint_ref="", footprint_lib_id=""
+            )
+            return self.clearances.clearance(track_props, zone_props, layer)
+        default = self.clearances.get("", DEFAULT_NETCLASS_CLEARANCE_MM)
+        return max(self.clearances.get(track, default), self.clearances.get(zone_net, default))
 
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         results = DRCResults()
@@ -185,12 +170,8 @@ class PourSlotRule(DRCRule):
             outline = Polygon(contours[0], holes=contours[1:])
             pour = _Pour(
                 outline if outline.is_valid else outline.buffer(0),
-                max(
-                    zone.clearance,
-                    self.netclass_clearances.get(
-                        getattr(zone, "net_name", ""), self.default_clearance
-                    ),
-                ),
+                getattr(zone, "net_name", ""),
+                zone.clearance,
                 zone.min_thickness,
             )
             for layer in {zone.layer, *getattr(zone, "layers", [])}:
@@ -249,11 +230,15 @@ class PourSlotRule(DRCRule):
         items: list[tuple[Any, tuple[float, float, float]]],
         zlist: list[_Pour],
     ) -> Iterator[PourSlotPair]:
-        max_clear = max(
-            [self.default_clearance]
-            + [z.clearance for z in zlist]
-            + list(self.netclass_clearances.values())
-        )
+        # Use the same electrical requirements for the search radius and the
+        # candidate strip width. Zones on one net can have distinct local clearances.
+        nets = {seg.net_name for seg, _ in items}
+        clearances = {
+            (net, zone_net): self._track_clearance(net, zone_net, layer)
+            for zone_net in {z.net_name for z in zlist}
+            for net in nets
+        }
+        max_clear = max(max(clearances.values()), max(z.clearance for z in zlist))
         max_thick = max(z.min_thickness for z in zlist)
         max_w = max(s.width for s, _u in items)
         reach = 2 * max_clear + max_thick + max_w  # centre-to-centre search radius
@@ -275,7 +260,7 @@ class PourSlotRule(DRCRule):
                     if key in seen:
                         continue
                     seen.add(key)
-                    pair = self._check_pair(layer, items[key[0]], items[key[1]], zlist)
+                    pair = self._check_pair(layer, items[key[0]], items[key[1]], zlist, clearances)
                     if pair is not None:
                         yield pair
 
@@ -285,6 +270,7 @@ class PourSlotRule(DRCRule):
         first: tuple[Any, tuple[float, float, float]],
         second: tuple[Any, tuple[float, float, float]],
         zlist: list[_Pour],
+        clearances: dict[tuple[str, str], float],
     ) -> PourSlotPair | None:
         # Use the same projection axis for either serialization of the pair.
         if first[0].net_number > second[0].net_number:
@@ -314,11 +300,9 @@ class PourSlotRule(DRCRule):
         def separation(t: float) -> float:
             return db0 + slope * (t - tb0)
 
-        net_clearance_a = self.netclass_clearances.get(a.net_name, self.default_clearance)
-        net_clearance_b = self.netclass_clearances.get(b.net_name, self.default_clearance)
         for zone in zlist:
-            clearance_a = max(zone.clearance, net_clearance_a)
-            clearance_b = max(zone.clearance, net_clearance_b)
+            clearance_a = max(zone.clearance, clearances[a.net_name, zone.net_name])
+            clearance_b = max(zone.clearance, clearances[b.net_name, zone.net_name])
             packed_gap = clearance_a + clearance_b
             threshold = packed_gap + zone.min_thickness
             # Split the shared projection where either facing gap crosses a

@@ -4143,9 +4143,9 @@ def run_selected_checks(
     # Issue #8435: pour-slot advisory.  CLI-level closure because the netclass
     # clearances come from the sibling ``.kicad_pro`` (needs the PCB *path*).
     def _pour_slot_check() -> DRCResults:
-        from kicad_tools.validate.rules.pour_slot import load_pour_slot_clearances
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 
-        clearances = load_pour_slot_clearances(pcb_path, checker.pcb) if pcb_path else {}
+        clearances = BoardClearanceRules.from_board(pcb_path) if pcb_path else None
         return checker.check_pour_slot(clearances)
 
     # Issue #7292: ``project.kct`` requirements vs the routed board.  CLI-level

@@ -309,7 +309,9 @@ def test_explicit_project_filename_does_not_change_cleanup(tmp_path, capsys, mon
 
 
 @pytest.mark.parametrize(("gap", "expected_gap", "warnings"), [(0.55, 0.55, 0), (0.705, 0.905, 1)])
-def test_board_minimum_in_check_cleanup_and_fill(tmp_path, capsys, gap, expected_gap, warnings):
+def test_clearance_precedence_in_check_cleanup_and_fill(
+    tmp_path, capsys, gap, expected_gap, warnings
+):
     import shutil
 
     from shapely.geometry import LineString, Polygon
@@ -321,7 +323,19 @@ def test_board_minimum_in_check_cleanup_and_fill(tmp_path, capsys, gap, expected
         pytest.skip("native refill requires kicad-cli")
 
     films = []
-    for floor_source, zone_clearance in (("board", 0.1), ("board", 0.3), ("custom", 0.1)):
+    global_rule = '(rule "Global" (constraint clearance (min 0.2mm)))'
+    layer_rule = '(rule "Front" (layer "F.Cu") (constraint clearance (min 0.3mm)))'
+    net_rule = (
+        """(rule "Ground" (condition "A.NetName == 'GND'") (constraint clearance (min 0.3mm)))"""
+    )
+    for floor_source, zone_clearance, rules in (
+        ("board", 0.1, []),
+        ("board", 0.3, []),
+        ("custom", 0.1, ['(rule "Global" (constraint clearance (min 0.3mm)))']),
+        ("layer", 0.1, [global_rule, layer_rule]),
+        ("net", 0.1, [global_rule, net_rule]),
+        ("reversed", 0.1, [layer_rule, global_rule]),
+    ):
         directory = tmp_path / f"{floor_source}-{zone_clearance}"
         directory.mkdir()
         board = directory / "control_p.kicad_pcb"
@@ -344,17 +358,18 @@ def test_board_minimum_in_check_cleanup_and_fill(tmp_path, capsys, gap, expected
             )
         pcb._sexp.append(parse_string(zone))
         pcb.save(board)
-        if floor_source == "custom":
-            board.with_suffix(".kicad_dru").write_text(
-                '(version 1)\n(rule "Global copper clearance" (constraint clearance (min 0.3mm)))\n'
-            )
+        if rules:
+            board.with_suffix(".kicad_dru").write_text("\n".join(["(version 1)", *rules, ""]))
         board_min = 0.3 if floor_source == "board" else 0.0
+        default_clearance = 0.3 if floor_source in {"layer", "net", "reversed"} else 0.2
         project = {
             "board": {"design_settings": {"rules": {"min_clearance": board_min}}},
-            "net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]},
+            "net_settings": {"classes": [{"name": "Default", "clearance": default_clearance}]},
         }
         board.with_suffix(".kicad_pro").write_text(json.dumps(project))
-        assert _public_pour_slot_count(board, capsys) == warnings
+        reversed_order = floor_source == "reversed"
+        expected_warnings = int(gap == 0.55) if reversed_order else warnings
+        assert _public_pour_slot_count(board, capsys) == expected_warnings
         assert (
             main(
                 ["optimize-traces", str(board), "--net", "GND", "--pour-slots", "--format", "json"]
@@ -362,7 +377,7 @@ def test_board_minimum_in_check_cleanup_and_fill(tmp_path, capsys, gap, expected
             == 0
         )
         report = json.loads(capsys.readouterr().out)
-        assert report["pour_slots"]["spread"] == warnings
+        assert report["pour_slots"]["spread"] == expected_warnings
         assert report["pour_slots"]["pairs_after"] == 0
         saved = PCB.load(board)
         lower, upper = sorted(
@@ -370,11 +385,14 @@ def test_board_minimum_in_check_cleanup_and_fill(tmp_path, capsys, gap, expected
         )
         bottom = lower.start[1] + lower.width / 2
         top = upper.start[1] - upper.width / 2
-        assert top - bottom == pytest.approx(expected_gap)
+        assert top - bottom == pytest.approx(0.705 if reversed_order else expected_gap)
         film = unary_union([Polygon(ring).buffer(0) for ring in saved.zones[0].filled_polygons])
         assert film.area > 0
         section = film.intersection(LineString([(15, bottom), (15, top)]))
-        assert section.length == pytest.approx(0.304 if warnings else 0.0, abs=0.002)
-        films.append(film)
+        assert section.length == pytest.approx(
+            0.304 if warnings or reversed_order else 0.0, abs=0.002
+        )
+        if not reversed_order:
+            films.append(film)
     for film in films[1:]:
         assert films[0].symmetric_difference(film).area == pytest.approx(0)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 from kicad_tools.validate.rules.pour_slot import PourSlotRule
 
 
@@ -117,6 +118,25 @@ def test_unequal_netclass_clearances_bound_each_side_of_the_strip():
         assert not _run(_pair(0.65), [thin], rule).violations
         assert not _run(_pair(0.9), [thick], rule).violations
         assert not _run(_pair(0.95), [thick], rule).violations
+
+
+def test_custom_rule_matches_one_track_to_zone_on_its_layer(tmp_path):
+    board = tmp_path / "board.kicad_pcb"
+    board.with_suffix(".kicad_dru").write_text(
+        """(version 1)
+        (rule "Wide A to GND" (layer "F.Cu")
+          (condition "A.NetName == 'GND' && B.NetName == 'A'")
+          (constraint clearance (min 0.4mm)))"""
+    )
+    rule = PourSlotRule(BoardClearanceRules.from_board(board))
+    zone = _Zone(clearance=0.1, min_thickness=0.2)
+    tracks = _pair(0.7)
+    (pair,) = rule.iter_pairs(_PCB(tracks, [zone]))
+    assert (pair.first_clearance, pair.second_clearance) == (0.4, 0.2)
+    zone.layer = "B.Cu"
+    for track in tracks:
+        track.layer = zone.layer
+    assert not _run(tracks, [zone], rule).violations
 
 
 def test_zone_netclass_sets_a_floor_on_both_facing_clearances():

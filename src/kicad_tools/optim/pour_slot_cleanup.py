@@ -40,7 +40,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from kicad_tools.validate.rules.pour_slot import PourSlotPair, iter_pour_slot_pairs
+from kicad_tools.validate.rules.pour_slot import (
+    PourSlotClearances,
+    PourSlotPair,
+    iter_pour_slot_pairs,
+)
 
 #: Margin (mm) added past the threshold so a spread pair is not borderline.
 SPREAD_MARGIN_MM = 0.005
@@ -266,7 +270,7 @@ def _no_worse(after: Mapping[str, int], baseline: Mapping[str, int]) -> bool:
     return all(after.get(k, 0) <= baseline.get(k, 0) for k in set(after) | set(baseline))
 
 
-def _slots(pcb: Any, netclass_clearances: Mapping[str, float] | None) -> list[PourSlotPair]:
+def _slots(pcb: Any, netclass_clearances: PourSlotClearances | None) -> list[PourSlotPair]:
     """Collect the pairs that the advisory would flag on this geometry."""
     return list(iter_pour_slot_pairs(pcb, netclass_clearances))
 
@@ -454,7 +458,7 @@ def _repitch_bus(
 
 def cleanup_pour_slots(
     pcb: Any,
-    netclass_clearances: Mapping[str, float] | None = None,
+    netclass_clearances: PourSlotClearances | None = None,
     *,
     referee: Referee,
     pack: bool = False,
