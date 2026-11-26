@@ -11,6 +11,7 @@ pytest.importorskip("shapely")
 
 from kicad_tools.cli import main  # noqa: E402
 from kicad_tools.cli.route_link_cmd import LinkSpecError, parse_link_spec  # noqa: E402
+from kicad_tools.native_concurrency import configured_limit, slot_wait_ceiling  # noqa: E402
 from kicad_tools.schema.pcb import PCB  # noqa: E402
 
 # R1.1 (110,110) and R2.1 (120,110) are on SIG.  A foreign F.Cu+B.Cu-free wall
@@ -36,6 +37,16 @@ BOARD = """(kicad_pcb
 )
 """
 LINK = "SIG R1.1 R2.1"
+
+# Tests that launch kicad-cli through `_native_plane_link` queue for one of the
+# Test job's two native permits.  The job's 60 s default (`--timeout=60`) was
+# measured at 57.72 s / 46.42 s for these tests and cannot absorb the queue, so
+# the budget is composed like tests/test_route_partial_placement_cli.py: the
+# test's own work plus the gate's fail-open queue bound, only when the gate is
+# configured (local runs keep the tight historical bound).
+_NATIVE_WORK_SECONDS = 60.0
+_NATIVE_QUEUE_CEILING_SECONDS = slot_wait_ceiling() if configured_limit() is not None else 0.0
+native_launching = pytest.mark.timeout(_NATIVE_WORK_SECONDS + _NATIVE_QUEUE_CEILING_SECONDS)
 
 
 @pytest.fixture
@@ -296,6 +307,7 @@ def project_plane_board(plane_board):
     return plane_board
 
 
+@native_launching
 def test_plane_commit_reports_gap_to_saved_project_refill(project_plane_board, capsys):
     original = project_plane_board.read_bytes()
     out = project_plane_board.with_name("routed.kicad_pcb")
@@ -309,6 +321,7 @@ def test_plane_commit_reports_gap_to_saved_project_refill(project_plane_board, c
     assert pcb.zones[0].filled_polygons
 
 
+@native_launching
 def test_plane_commit_vetoes_clearance_above_native_setback(project_plane_board, capsys):
     original = project_plane_board.read_bytes()
     rc, doc = _native_plane_link(capsys, project_plane_board, "--net-clearance", "FOE=1.5")
@@ -316,6 +329,7 @@ def test_plane_commit_vetoes_clearance_above_native_setback(project_plane_board,
     assert project_plane_board.read_bytes() == original
 
 
+@native_launching
 @pytest.mark.parametrize("second_pad", [True, False])
 def test_plane_commit_rolls_back_stranded_island(plane_board, capsys, second_pad):
     # The SIG track now crosses the entire pour. With a pad in the severed
