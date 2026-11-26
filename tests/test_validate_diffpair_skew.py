@@ -1011,3 +1011,17 @@ class TestDefectCopperCorrection9767:
         pcb = _make_pair_pcb(p_len_mm=10.0, n_len_mm=12.0)
         [m] = derive_pair_skews(pcb, self._classes(), num_copper_layers=2)
         assert m.skew_mm == pytest.approx(2.0)
+
+
+def test_power_terminal_pair_with_only_data_rate_retains_skew_budget():
+    from kicad_tools.router.rules import NetClassRouting
+    from kicad_tools.validate.diffpair_skew import derive_pair_skews
+
+    p_name, n_name = "/SENSE_POS", "/SENSE_NEG"
+    pcb = _make_pair_pcb(p_name=p_name, n_name=n_name, p_len_mm=30, n_len_mm=32)
+    routing = dict.fromkeys((p_name, n_name), NetClassRouting(name="Power", data_rate_gbps=10))
+
+    [measurement] = derive_pair_skews(pcb, routing, num_copper_layers=4)
+    assert (measurement.p_name, measurement.n_name) == (p_name, n_name)
+    assert measurement.skew_ps == pytest.approx(11.15, abs=0.01)
+    assert measurement.limits.budget.budget_ps == pytest.approx(2.01, abs=0.01)
