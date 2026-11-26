@@ -416,6 +416,38 @@ class TestSeriesVersusParallelVias:
         out = PathAmpacityRule(specs=[_trunk_spec(3.0)]).check(pcb, _design_rules_2oz())
         assert len([e for e in out.errors if "changes layer" in e.message]) == 2
 
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_packed_row_entered_at_a_bent_track_vertex(self, reverse):
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        pcb = PCB.create(layers=4)
+        _add_pad_footprint(pcb, ref="J1", x=30, y=46, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=47, y=50, net="NET1")
+        pcb.add_trace((30, 46), (40, 50), width=5.5, layer="F.Cu", net="NET1")
+        for layer in ("F.Cu", "B.Cu"):
+            pcb.add_trace((40, 50), (47, 50), width=3.75, layer=layer, net="NET1")
+        for x in (40, 41.53, 43.06, 44.59):
+            pcb.add_via(x, 50, size=1.65, drill=0.95, net="NET1")
+        if reverse:
+            for seg in pcb.segments:
+                seg.start, seg.end = seg.end, seg.start
+        path = resolve_current_path(pcb, _trunk_spec())
+        assert path.ok
+        (change,) = path.series_layer_changes
+        assert change.count == 4
+        assert 14 < change.current_capacity_a() < 15
+
+    def test_same_direction_tracks_do_not_prove_an_entry_to_a_row(self):
+        from kicad_tools.router.current_paths import _layer_changes
+
+        pcb = PCB.create(layers=4)
+        for layer in ("F.Cu", "B.Cu"):
+            pcb.add_trace((40, 50), (47, 50), width=3.75, layer=layer, net="NET1")
+        pcb.add_trace((40, 50), (45, 50), width=3.75, layer="F.Cu", net="NET1")
+        for x in (40, 41.53, 43.06, 44.59):
+            pcb.add_via(x, 50, size=1.65, drill=0.95, net="NET1")
+        assert [change.count for change in _layer_changes(pcb, "NET1", pcb.segments)] == [1] * 4
+
     def test_proved_via_array_meeting_capacity_is_not_flagged(self):
         from kicad_tools.router.current_paths import resolve_current_path
         from tests.test_current_paths_via_array import fixture, spec
