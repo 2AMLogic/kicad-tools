@@ -1435,30 +1435,26 @@ def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
     ]
 
 
+def _check_clear_destination(destination: Path) -> None:
+    """Read the wire records before a clear or replacement writes any files."""
+    from kicad_tools.pcb.reinforcement_sidecar import load_wire_records
+
+    try:
+        mode = destination.lstat().st_mode
+    except FileNotFoundError:
+        return  # No directory entry, so there are no records to drop.
+    if stat.S_ISLNK(mode):
+        mode = destination.stat().st_mode
+    if not stat.S_ISREG(mode):
+        raise ValueError("expected a regular reinforcement sidecar file")
+    load_wire_records(destination)
+
+
 def _finish_reinforce_clear(
     args, pcb, pcb_path: Path, output_path: Path, clear_outcome, dry_run: bool, output_format: str
 ) -> int:
-    """Report and (unless ``--dry-run``) save a ``pcb reinforce --clear`` pass (#8747).
-
-    A clear that would save refuses first when the destination's wire-list
-    sidecar cannot be read: its records are dropped after the board is saved,
-    so an unreadable one must not leave a half-applied clear behind (#10419).
-    """
+    """Report and (unless ``--dry-run``) save a ``pcb reinforce --clear`` pass (#8747)."""
     origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
-    if not dry_run and _cleared_anything(clear_outcome):
-        from kicad_tools.pcb.reinforcement_sidecar import load_wire_records, sidecar_path
-
-        destination = sidecar_path(output_path)
-        try:
-            if not stat.S_ISREG(destination.stat().st_mode):
-                raise ValueError("expected a regular reinforcement sidecar file")
-            load_wire_records(destination)
-        except FileNotFoundError:
-            pass  # A board without a sidecar has no wire records to remove.
-        except (OSError, ValueError) as exc:
-            reason = str(exc).removeprefix(f"{destination}: ")
-            print(f"Error reading {destination}: {reason} -- nothing was written", file=sys.stderr)
-            return 1
     if output_format == "json":
         print(
             json.dumps(
@@ -1823,6 +1819,18 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         except ReinforceError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
+        if not dry_run and _cleared_anything(clear_outcome):
+            from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+
+            destination = sidecar_path(output_path)
+            try:
+                _check_clear_destination(destination)
+            except (OSError, ValueError) as exc:
+                reason = str(exc).removeprefix(f"{destination}: ")
+                print(
+                    f"Error reading {destination}: {reason} -- nothing was written", file=sys.stderr
+                )
+                return 1
         if clear_only:
             return _finish_reinforce_clear(
                 args, pcb, pcb_path, output_path, clear_outcome, dry_run, output_format

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli import main
 from kicad_tools.cli.commands.pcb import run_pcb_command
 from kicad_tools.pcb.reinforcement_sidecar import (
     is_parallel,
@@ -651,20 +652,48 @@ def test_clear_refuses_before_writing_on_unreadable_destination(
     assert captured.out == ""
 
 
-def test_clear_refuses_a_directory_at_the_destination_sidecar(tmp_path, capsys):
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("kind", ["dangling", "directory"])
+@pytest.mark.parametrize(
+    "flags", [["--clear"], ["--replace"], ["--replace", "--anchor-mode", "spaced"]]
+)
+def test_refuses_unreadable_destination_entry(tmp_path, capsys, mode, kind, flags):
     board = _reinforced_source(tmp_path)
-    output = _output_arg(tmp_path, "existing")
-    destination = sidecar_path(Path(output))
-    destination.mkdir()
+    output = _output_arg(tmp_path, mode)
+    destination = sidecar_path(_destination(board, output))
+    destination.unlink(missing_ok=True)
+    target = tmp_path / "missing.json"
+    if kind == "dangling":
+        destination.symlink_to(target)
+    else:
+        destination.mkdir()
     before = _tree_bytes(tmp_path)
 
     capsys.readouterr()
-    assert run_pcb_command(_args(board, clear=True, output=output)) == 1
+    argv = ["pcb", "reinforce", str(board), "--net", "NET_A", *flags]
+    if output:
+        argv.extend(["-o", output])
+    assert main(argv) == 1
 
     captured = capsys.readouterr()
-    assert str(destination) in captured.err
-    assert captured.out == ""
+    assert str(destination) in captured.err and captured.out == ""
     assert _tree_bytes(tmp_path) == before
+    if kind == "dangling":
+        assert destination.readlink() == target and not target.exists()
+    else:
+        assert destination.is_dir()
+
+
+@pytest.mark.parametrize("flag", ["--clear", "--replace"])
+def test_readable_destination_symlink_is_preserved(tmp_path, flag):
+    board = _reinforced_source(tmp_path)
+    destination = sidecar_path(board)
+    target = destination.rename(tmp_path / "records.json")
+    destination.symlink_to(target)
+
+    assert main(["pcb", "reinforce", str(board), "--net", "NET_A", flag]) == 0
+    assert destination.readlink() == target
+    assert len(load_wires(target)) == (0 if flag == "--clear" else 1)
 
 
 def test_clear_refusal_leaves_the_output_directory_as_it_was(tmp_path, capsys):
