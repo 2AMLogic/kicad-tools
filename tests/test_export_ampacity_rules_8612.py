@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -80,8 +81,6 @@ def test_project_line_ending_rewrite_is_reported(tmp_path: Path) -> None:
 
 
 def test_project_rewrite_reported_when_dru_write_fails(tmp_path: Path) -> None:
-    import os
-
     pcb = _stage(tmp_path)
     _export(pcb)
     pro = pcb.with_suffix(".kicad_pro")
@@ -100,44 +99,65 @@ def test_project_rewrite_reported_when_dru_write_fails(tmp_path: Path) -> None:
     assert any(f"Export modified {pro.name}" in w for w in result.warnings)
 
 
+@pytest.mark.parametrize("project", ["authored", "write_only", "editor_replaces", "editor_creates"])
 def test_unloadable_dru_refusal_leaves_project_intact(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch, project: str
 ) -> None:
     from kicad_tools.cli import main
+    from kicad_tools.manufacturers import dru_generator
 
     pcb = _stage(tmp_path)
     _export(pcb)
     pro, dru = pcb.with_suffix(".kicad_pro"), pcb.with_suffix(".kicad_dru")
-    data = json.loads(pro.read_text())
-    data["board"]["design_settings"]["rule_severities"]["lib_footprint_mismatch"] = "warning"
-    pro.write_text(json.dumps(data))
+    expected = b'{"text_variables": {"authored": "keep me"}}'
+    pro.write_bytes(expected)
     dru.write_text(dru.read_text() + "; authored comment\n")
-    pro_before, dru_before = pro.read_bytes(), dru.read_bytes()
+    dru_before = dru.read_bytes()
 
-    rc = main(
-        [
-            "export",
-            str(pcb),
-            "--mfr",
-            "jlcpcb",
-            "--no-silk-fix",
-            "--bom-source",
-            "pcb",
-            "--output",
-            str(tmp_path / "out"),
-        ]
-    )
+    if project.startswith("editor_"):
+        if project == "editor_creates":
+            pro.unlink()
+        expected = b'{"text_variables": {"editor": "newer save"}}'
+        editor_save = tmp_path / "editor-save.tmp"
+        editor_save.write_bytes(expected)
+        merge = dru_generator.merge_dru_floors
+
+        def save_then_merge(*args, **kwargs):
+            editor_save.replace(pro)
+            return merge(*args, **kwargs)
+
+        monkeypatch.setattr(dru_generator, "merge_dru_floors", save_then_merge)
+
+    try:
+        if project == "write_only":
+            pro.chmod(0o200)
+            if os.access(pro, os.R_OK):
+                pytest.skip("write-only file is still readable")
+        rc = main(
+            [
+                "export",
+                str(pcb),
+                "--mfr",
+                "jlcpcb",
+                "--no-silk-fix",
+                "--bom-source",
+                "pcb",
+                "--output",
+                str(tmp_path / "out"),
+            ]
+        )
+    finally:
+        if project == "write_only":
+            pro.chmod(0o644)
     captured = capsys.readouterr()
     assert rc == 1
     assert dru.name in captured.err and "';' comment" in captured.err
     assert "Export modified" not in captured.out + captured.err
-    assert pro.read_bytes() == pro_before
+    assert pro.read_bytes() == expected
     assert dru.read_bytes() == dru_before
 
 
 def test_unreadable_project_replacement_is_reported(tmp_path: Path) -> None:
-    import os
-
     pcb = _stage(tmp_path)
     pro = pcb.with_suffix(".kicad_pro")
     pro.write_text("{}")

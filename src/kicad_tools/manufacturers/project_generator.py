@@ -1923,126 +1923,109 @@ def write_drc_constraints(
             board_net_names(board) if board.exists() else None,
         )
     stamp_kct_project(project_data)
-    # A refused rules merge (DRUUnloadableError, RuleLooseningError, ...) must not
-    # leave the project half-updated: remember the bytes to put back (#10284).
-    try:
-        pro_original: bytes | None = pro_path.read_bytes() if pro_path.exists() else None
-        can_restore = True
-    except OSError:
-        pro_original, can_restore = None, False
+    # Validate and render the rules before touching either live sidecar.
+    if write_dru:
+        from .dru_generator import merge_dru_floors
+
+        # Issue #9448: a project-declared designator height splits the
+        # silkscreen-height rule.  Probe the board being written, then the
+        # authored source board (``-o <scratch>`` must not drop it).
+        if rules.declared_reference_height_mm is None:
+            from kicad_tools.sync.discover import resolve_declared_reference_height_for_pcb
+
+            declared_height = resolve_declared_reference_height_for_pcb(pcb_path)
+            if declared_height is None and source_pcb_path is not None:
+                declared_height = resolve_declared_reference_height_for_pcb(source_pcb_path)
+            if declared_height is not None:
+                rules = replace(rules, declared_reference_height_mm=declared_height)
+
+        dru_path = pcb_path.with_suffix(".kicad_dru")
+        # Name in diagnostics (#9430): the real sidecar when ``pcb_path`` is a
+        # scratch copy (``export --dry-run``), so messages never cite a temp dir.
+        report_path = Path(_report_dru_path) if _report_dru_path is not None else dru_path
+        try:
+            existing_dru: str | None = (
+                dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
+            )
+        except OSError:
+            # Unreadable existing file -- nothing recoverable to preserve;
+            # write cleanly (mirrors the corrupt-``.kicad_pro`` fallback).
+            existing_dru = None
+        from .keepout_dru import apply_keepout_rules
+
+        # Issue #8937: the board's zone ``connect_pads`` clearances feed the
+        # zone arm of the emitted block (and the loosening gate's authored
+        # baselines, together with the merged project's net classes).
+        zone_targets = zone_clearance_targets(board) if board.exists() else []
+        authored_state: dict[str, Any] = {
+            "netclasses": {
+                str(cls.get("name")): cls.get("clearance")
+                for cls in project_data.get("net_settings", {}).get("classes", [])
+                if isinstance(cls.get("clearance"), (int, float))
+                and not isinstance(cls.get("clearance"), bool)
+            },
+            "zones": [[layer, net, value] for layer, net, value in zone_targets],
+        }
+        allow_dru = (
+            ("*",)
+            if preserve_board_rules_mode(project_data, preserve_board_rules) == (PRESERVE_MODE_OFF)
+            else ()
+        )
+        merged_dru = merge_dru_floors(
+            existing_dru,
+            generate_project_dru(
+                rules,
+                project_data,
+                manufacturer_id=manufacturer_id,
+                net_classes=net_classes,
+                preserve_board_rules=preserve_board_rules,
+                max_ampacity_width_mm=max_ampacity_width_mm,
+                route_edge_clearance_mm=route_edge_clearance_mm,
+                zone_clearances=zone_targets,
+            ),
+            path=report_path,
+            authored=authored_state,
+            allow=allow_dru,
+        )
+        # Issue #6039: explicit per-rule-area keepout rules, since headless
+        # kicad-cli < 10.0.6 does not enforce rule areas on its own (#7198).
+        if board.exists():
+            keepout_dru = apply_keepout_rules(
+                merged_dru, board, _installed_kicad_cli_version(), path=report_path
+            )
+            if keepout_dru is not None:
+                merged_dru = keepout_dru
+        # Issue #6390: the router's classes under KCT_PRESERVE_BOARD_RULES=0.
+        merged_dru = apply_netclass_dru_rules(
+            merged_dru, rules, project_data, preserve_board_rules=preserve_board_rules
+        )
+        # Issue #6443: one native diff_pair_gap rule per router-coupled pair.
+        if router_pair_gaps is not None or router_pair_limits is not None:
+            from .netclass_dru import (
+                merge_pair_gap_block,
+                pair_gap_block_rules,
+                pair_limit_rules,
+            )
+
+            on_board = board_net_names(board) if board.exists() else None
+            gap_rules = pair_gap_block_rules(router_pair_gaps or [], on_board)
+            limit_rules = pair_limit_rules(router_pair_limits or [], on_board)
+            merged = merge_pair_gap_block(merged_dru, gap_rules, limit_rules)
+            merged_dru = merged if merged is not None else merged_dru
+        # Issue #8048: attach zones lift the router-class floors.  Merged after
+        # the pair-gap block so a re-write that keeps both blocks (``None``)
+        # reproduces the same bytes: this block always ends the file.
+        merged_dru = apply_attach_zone_dru_rules(
+            merged_dru, rules, project_data, board, zone_targets
+        )
+
     pro_path.write_text(json.dumps(project_data, indent=2), encoding="utf-8")
     written.append(pro_path)
-
-    try:
-        if write_dru:
-            from .dru_generator import merge_dru_floors
-
-            # Issue #9448: a project-declared designator height splits the
-            # silkscreen-height rule.  Probe the board being written, then the
-            # authored source board (``-o <scratch>`` must not drop it).
-            if rules.declared_reference_height_mm is None:
-                from kicad_tools.sync.discover import resolve_declared_reference_height_for_pcb
-
-                declared_height = resolve_declared_reference_height_for_pcb(pcb_path)
-                if declared_height is None and source_pcb_path is not None:
-                    declared_height = resolve_declared_reference_height_for_pcb(source_pcb_path)
-                if declared_height is not None:
-                    rules = replace(rules, declared_reference_height_mm=declared_height)
-
-            dru_path = pcb_path.with_suffix(".kicad_dru")
-            # Name in diagnostics (#9430): the real sidecar when ``pcb_path`` is a
-            # scratch copy (``export --dry-run``), so messages never cite a temp dir.
-            report_path = Path(_report_dru_path) if _report_dru_path is not None else dru_path
-            try:
-                existing_dru: str | None = (
-                    dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
-                )
-            except OSError:
-                # Unreadable existing file -- nothing recoverable to preserve;
-                # write cleanly (mirrors the corrupt-``.kicad_pro`` fallback).
-                existing_dru = None
-            from .keepout_dru import apply_keepout_rules
-
-            # Issue #8937: the board's zone ``connect_pads`` clearances feed the
-            # zone arm of the emitted block (and the loosening gate's authored
-            # baselines, together with the merged project's net classes).
-            zone_targets = zone_clearance_targets(board) if board.exists() else []
-            authored_state: dict[str, Any] = {
-                "netclasses": {
-                    str(cls.get("name")): cls.get("clearance")
-                    for cls in project_data.get("net_settings", {}).get("classes", [])
-                    if isinstance(cls.get("clearance"), (int, float))
-                    and not isinstance(cls.get("clearance"), bool)
-                },
-                "zones": [[layer, net, value] for layer, net, value in zone_targets],
-            }
-            allow_dru = (
-                ("*",)
-                if preserve_board_rules_mode(project_data, preserve_board_rules)
-                == (PRESERVE_MODE_OFF)
-                else ()
-            )
-            merged_dru = merge_dru_floors(
-                existing_dru,
-                generate_project_dru(
-                    rules,
-                    project_data,
-                    manufacturer_id=manufacturer_id,
-                    net_classes=net_classes,
-                    preserve_board_rules=preserve_board_rules,
-                    max_ampacity_width_mm=max_ampacity_width_mm,
-                    route_edge_clearance_mm=route_edge_clearance_mm,
-                    zone_clearances=zone_targets,
-                ),
-                path=report_path,
-                authored=authored_state,
-                allow=allow_dru,
-            )
-            # Issue #6039: explicit per-rule-area keepout rules, since headless
-            # kicad-cli < 10.0.6 does not enforce rule areas on its own (#7198).
-            if board.exists():
-                keepout_dru = apply_keepout_rules(
-                    merged_dru, board, _installed_kicad_cli_version(), path=report_path
-                )
-                if keepout_dru is not None:
-                    merged_dru = keepout_dru
-            # Issue #6390: the router's classes under KCT_PRESERVE_BOARD_RULES=0.
-            merged_dru = apply_netclass_dru_rules(
-                merged_dru, rules, project_data, preserve_board_rules=preserve_board_rules
-            )
-            # Issue #6443: one native diff_pair_gap rule per router-coupled pair.
-            if router_pair_gaps is not None or router_pair_limits is not None:
-                from .netclass_dru import (
-                    merge_pair_gap_block,
-                    pair_gap_block_rules,
-                    pair_limit_rules,
-                )
-
-                on_board = board_net_names(board) if board.exists() else None
-                gap_rules = pair_gap_block_rules(router_pair_gaps or [], on_board)
-                limit_rules = pair_limit_rules(router_pair_limits or [], on_board)
-                merged = merge_pair_gap_block(merged_dru, gap_rules, limit_rules)
-                merged_dru = merged if merged is not None else merged_dru
-            # Issue #8048: attach zones lift the router-class floors.  Merged after
-            # the pair-gap block so a re-write that keeps both blocks (``None``)
-            # reproduces the same bytes: this block always ends the file.
-            merged_dru = apply_attach_zone_dru_rules(
-                merged_dru, rules, project_data, board, zone_targets
-            )
-            dru_path.write_text(merged_dru, encoding="utf-8")
-            written.append(dru_path)
-            # The sidecar is on disk now; tell the user if the engine they have
-            # installed will silently ignore its SMD pad floor (#5724).
-            _warn_if_smd_pad_clearance_is_inert(rules, report_path)
-
-    except OSError:
-        raise  # an I/O failure keeps the saved project; the caller reports it
-    except BaseException:
-        if can_restore:
-            if pro_original is None:
-                pro_path.unlink(missing_ok=True)
-            else:
-                pro_path.write_bytes(pro_original)
-        raise
+    if write_dru:
+        dru_path.write_text(merged_dru, encoding="utf-8")
+        written.append(dru_path)
+        # The sidecar is on disk now; tell the user if the engine they have
+        # installed will silently ignore its SMD pad floor (#5724).
+        _warn_if_smd_pad_clearance_is_inert(rules, report_path)
 
     return written

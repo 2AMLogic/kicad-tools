@@ -1228,7 +1228,7 @@ class ManufacturingPackage:
         self.pcb_path = Path(pcb_path)
         # Live board path while ``pcb_path`` points at a staged copy (#10091).
         self._live_pcb_path: Path | None = None
-        self._pending_mutation_notices: list[str] = []
+        self._pending_mutation_notices: list[tuple[int, str]] = []
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.config = config or ManufacturingConfig()
@@ -1346,7 +1346,9 @@ class ManufacturingPackage:
                         for q in result.drc_constraint_paths
                     ]
                     # The staged changes are now the live files: report them.
-                    result.warnings.extend(self._pending_mutation_notices)
+                    for level, message in self._pending_mutation_notices:
+                        logger.log(level, message)
+                        result.warnings.append(message)
             finally:
                 staged.close()
         if not proceed:
@@ -2186,12 +2188,12 @@ class ManufacturingPackage:
         # the DRU, so a failed DRU write can still have changed the project.
         # Notices from a scratch copy (named-stackup staging) are held back
         # until the staged files are published to the live ones.
-        deferred = self._live_pcb_path is not None
-        notes: list[str] = []
-
-        def note(text: str, *, warn: bool = False) -> None:
-            (logger.warning if warn else logger.info)(text)
-            notes.append(text)
+        def note(text: str, level: int = logging.INFO) -> None:
+            if self._live_pcb_path is not None:
+                self._pending_mutation_notices.append((level, text))
+            else:
+                logger.log(level, text)
+                result.warnings.append(text)
 
         def report_rewrites() -> None:
             for path, before, reason in (
@@ -2215,12 +2217,6 @@ class ManufacturingPackage:
                     )
                 note(msg)
 
-        def flush_notes() -> None:
-            if deferred:
-                self._pending_mutation_notices.extend(notes)
-            else:
-                result.warnings.extend(notes)
-
         try:
             written = write_drc_constraints(
                 self.pcb_path,
@@ -2235,7 +2231,6 @@ class ManufacturingPackage:
             logger.warning("Could not write DRC-constraint files: %s", e)
             result.warnings.append(f"Could not write DRC constraints: {e}")
             report_rewrites()
-            flush_notes()
             return
 
         result.drc_constraint_paths = written
@@ -2249,10 +2244,9 @@ class ManufacturingPackage:
                 "sign-off DRC did not run against them. Re-run "
                 "`kicad-cli pcb drc` against the shipped .kicad_dru."
             )
-            note(msg, warn=True)
+            note(msg, logging.WARNING)
 
         report_rewrites()
-        flush_notes()
 
     def _dry_run_write_drc_constraints(
         self,
