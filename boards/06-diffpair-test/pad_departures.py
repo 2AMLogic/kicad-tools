@@ -42,7 +42,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from math import dist, isfinite
 from pathlib import Path
@@ -1243,12 +1243,19 @@ def _stage_clock_exit(
 
 
 def _authored_rules_ok(
-    pcb: PCB, path: Path, tracks: list[Segment], vias: list[Via], label: str
+    pcb: PCB,
+    path: Path,
+    tracks: list[Segment],
+    vias: list[Via],
+    label: str,
+    *,
+    require_rules: bool = False,
 ) -> bool:
     """Have KiCad evaluate authored rules on the replacement copper before publishing it."""
     # A project can impose drill spacing on a moved barrel without a custom rules file.
     if not (
-        path.with_suffix(".kicad_dru").exists()
+        require_rules
+        or path.with_suffix(".kicad_dru").exists()
         or (vias and path.with_suffix(".kicad_pro").is_file())
         or all_rule_area_zones(pcb)
     ):
@@ -1260,7 +1267,9 @@ def _authored_rules_ok(
         with TemporaryDirectory(prefix="board06-staged-") as tmp:
             candidate = Path(tmp) / path.name
             pcb.save(candidate)
-            copy_project_sidecars(path, candidate)
+            staged = copy_project_sidecars(path, candidate)
+            if require_rules and candidate.with_suffix(".kicad_dru") not in staged:
+                return False
             report = candidate.with_suffix(".json")
             active = active_evidence_toolchain()
             toolchain = (
@@ -1450,7 +1459,14 @@ def _fixed_via_ok(pcb: PCB, ex: _DataExit, fp, pad, seat: XY, protected: set[str
 
 
 def _data_run(
-    pcb: PCB, ex: _DataExit, center: XY, junction: XY, protected: set[str], width: float
+    pcb: PCB,
+    ex: _DataExit,
+    center: XY,
+    junction: XY,
+    protected: set[str],
+    width: float,
+    *,
+    exact: bool = False,
 ) -> tuple[list[Segment], Segment | None] | None:
     """The measured escape run and any adjoining trunk.
 
@@ -1493,7 +1509,10 @@ def _data_run(
         incoming = seg
     else:
         return None
-    if not _matches_measured(points, center, ex.old):
+    if exact:
+        if tuple(_xy((x - center[0], y - center[1])) for x, y in points) != ex.old:
+            return None
+    elif not _matches_measured(points, center, ex.old):
         return None
     consumed = {id(s) for s in chain}
     remaining = [s for s in at.get(junction, []) if id(s) not in consumed]
@@ -1635,6 +1654,26 @@ def _clear_data_pair(
     return len(exits)
 
 
+_TX2_NETS = ("USB3_TX2+", "USB3_TX2-")
+_TX2_EXIT = _DataExit(
+    "J1",
+    "Connector_USB:USB_C_Receptacle_USB2.0",
+    "B2",
+    (0.3, 0.6),
+    _TX2_NETS[0],
+    old=((0, 0), (0, 0.15), (0, 0.3657), (0.5834, 0.9491), (0.6806, 0.9491)),
+    new=(
+        (0, 0),
+        (0, 0.2800),
+        (0.4300, 0.7100),
+        (0.5402, 0.7100),
+        (0.5952, 0.7650),
+        (0.5952, 0.8637),
+        (0.6806, 0.9491),
+    ),
+)
+
+
 _USB3_PADS = {
     "J1": (_J1_USB, (0.30, 0.60)),
     "U2": ("Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm", (0.45, 0.45)),
@@ -1696,6 +1735,143 @@ _TX1_ESCAPES = (
         ),
     ),
 )
+
+
+def _tx2_coupling(checker: DRCChecker) -> float | None:
+    for measurement in checker.check_diffpair_routing_continuity().violations:
+        if set(measurement.nets or ()) == set(_TX2_NETS):
+            return measurement.actual_value
+    return None
+
+
+def _tx2_contacts_follow_trunk(pcb, fp, pad, junction, contacts) -> bool:
+    """The short bends after the junction may touch the launch, but a tap elsewhere may not."""
+    pad_key = ("pad", (pcb.footprints.index(fp), fp.pads.index(pad)))
+    if pad_key not in contacts:
+        return False
+    neighbors = contacts - {pad_key}
+    tracks = [s for s in pcb.segments if ("segment", id(s)) in neighbors]
+    if len(tracks) != len(neighbors):
+        return False
+    point = junction
+    while tracks:
+        joined = [s for s in tracks if point in (_xy(s.start), _xy(s.end))]
+        if len(joined) != 1:
+            return False
+        track = joined[0]
+        tracks.remove(track)
+        point = _xy(track.end) if point == _xy(track.start) else _xy(track.start)
+    return True
+
+
+def _clear_tx2_exit(path: Path, rules: DesignRules, policy: MaskCopperPolicy) -> int:
+    """Replace the four surveyed J1/B2 tracks, retaining the original trunk and pad contacts."""
+    pcb = PCB.load(path)
+    ex = _TX2_EXIT
+    width = 0.275
+    fp = pcb.get_footprint(ex.ref)
+    if fp is None or fp.name != ex.footprint or fp.rotation or fp.layer != "F.Cu":
+        return 0
+    pad = next((p for p in fp.pads if p.number == ex.pad), None)
+    if (
+        pad is None
+        or pad.net_name != ex.net
+        or pad.type != "smd"
+        or pad.shape != "rect"
+        or pad.size != ex.pad_size
+        or pad.rotation
+        or not {"F.Cu", "F.Mask"} <= set(pad.layers)
+    ):
+        return 0
+    protected = _protected_ids(pcb)
+    locks = BoardItemLocks(pcb._sexp)
+    if any(
+        item._sexp_node is None
+        or locks.is_locked(item._sexp_node)
+        or item.uuid.lower() in protected
+        for item in (fp, pad)
+    ):
+        return 0
+    shapes = _departure_mask_shapes(pcb, fp, pad)
+    position = pcb.get_pad_position(ex.ref, ex.pad)
+    if position is None or shapes is None or not shapes[0].equals(shapes[1]):
+        return 0
+    center = _xy(position)
+    junction = _xy((center[0] + ex.old[-1][0], center[1] + ex.old[-1][1]))
+    walked = _data_run(pcb, ex, center, junction, protected, width, exact=True)
+    if walked is None:
+        return 0
+    chain, _ = walked
+    validator = ConnectivityValidator(pcb)
+    before = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    if len(before.components()) != 1:
+        return 0
+    contacts = _external_contacts(before, pcb.segments, chain, None)
+    if not _tx2_contacts_follow_trunk(pcb, fp, pad, junction, contacts[0]):
+        return 0
+    project = BoardClearanceRules.from_board(path)
+    if not project.class_clearance or project.class_clearance_of("GND") < 0.20:
+        return 0
+    try:
+        classes = net_class_map_from_path(path.with_name("net_class_map.json"), pcb_path=path)
+    except (OSError, TypeError, ValueError):
+        return 0
+    if any(n not in classes or not classes[n].target_diff_impedance for n in _TX2_NETS):
+        return 0
+    # The checker takes the first matching spec, and a single-ended target is tried
+    # before a differential one. Drop it so the declared differential target is the
+    # one actually judged before this repair is written.
+    pair_classes = {n: replace(classes[n], target_single_impedance=None) for n in _TX2_NETS}
+    layers = len(pcb.copper_layers)
+    coverage = _tx2_coupling(
+        DRCChecker(pcb, layers=layers, net_class_map=pair_classes, emit_measurements=True)
+    )
+    if coverage is None or pcb.remove_segments(chain) != len(chain):
+        return 0
+    vertices = [_xy((center[0] + x, center[1] + y)) for x, y in ex.new]
+    added = pcb.add_trace(
+        vertices[0], vertices[-1], waypoints=vertices[1:-1], width=width, layer="F.Cu", net=ex.net
+    )
+    after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
+    if len(after.components()) != 1 or contacts != _external_contacts(
+        after, pcb.segments, added, None
+    ):
+        return 0
+    # The pair's ordinary intra-pair spacing is 0.125 mm. A newly written
+    # connector escape must also meet the 0.15 mm local repair floor.
+    local_rules = replace(rules, min_clearance_mm=max(rules.min_clearance_mm, 0.15))
+    if not _copper_gap_ok(pcb, path, added, [], local_rules) or not _within_project_skew_budget(
+        pcb, path, _TX2_NETS
+    ):
+        return 0
+    checker = DRCChecker(pcb, layers=layers, net_class_map=pair_classes, emit_measurements=True)
+    new_coverage = _tx2_coupling(checker)
+    if new_coverage is None or new_coverage < coverage:
+        return 0
+    impedance = checker.check_impedance()
+    if _TX2_NETS in checker.impedance_unmeasured_pairs or any(
+        not finding.items or set(_TX2_NETS).intersection(finding.items)
+        for finding in impedance.violations
+    ):
+        return 0
+    if not _authored_rules_ok(pcb, path, added, [], "J1/B2 USB3_TX2+", require_rules=True):
+        return 0
+    with TemporaryDirectory(prefix="board06-tx2-mask-") as tmp:
+        candidate = Path(tmp) / path.name
+        pcb.save(candidate)
+        copy_project_sidecars(path, candidate)
+        mask = check_mask_to_copper(candidate, policy)
+    changed = {s.uuid for s in added}
+    measured = [m for m in mask.measurements if m.conductor_uuid in changed]
+    if (
+        mask.coverage != "complete"
+        or not any(m.owner_ref == "J1/B2" and m.disposition == "within_own_pad" for m in measured)
+        or any(m.disposition in {"violation", "warning", "uncertain"} for m in measured)
+    ):
+        return 0
+    pcb.save(path)
+    print("   pad departure J1/B2: rebuilt the USB3_TX2+ connector exit")
+    return 1
 
 
 _RX1_NETS = ("USB3_RX1+", "USB3_RX1-")
@@ -2429,6 +2605,7 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
     edits += _clear_data_pair(path, rules, _DATA_EXITS, _DATA_NETS, _DATA_WIDTH, "MIPI data")
     edits += _clear_data_pair(path, rules, _USB2_EXITS, _USB2_NETS, 0.25, "USB2")
     edits += _clear_j1_usb_pair(path, rules, request.policy)
+    edits += _clear_tx2_exit(path, rules, request.policy)
     edits += _center_u1_ground_entry(path, rules, request.policy.warning_clearance_mm)
     return edits + sum(
         _clear_power_exit(path, rules, site, request.policy.clearance_mm) for site in _POWER_EXITS

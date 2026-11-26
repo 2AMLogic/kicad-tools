@@ -908,6 +908,32 @@ def _add_creepage_parser(subparsers) -> None:
             "audit manufacturing-readiness gate."
         ),
     )
+    # Scoped per-pad-pair exceptions (#10317): a reviewed, component-bound
+    # alternative to the all-footprint waiver.  One footprint + one unordered
+    # pad pair + one metric + a reason; everything else keeps failing.
+    creepage_parser.add_argument(
+        "--exceptions",
+        dest="exceptions",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON file of reviewed per-pad-pair exceptions: "
+            '{"exceptions": [{"footprint": "R1", "pads": [1, 2], "metric": '
+            '"creepage", "reason": "why a reviewer accepted it"}]}.  Each '
+            "entry waives ONE metric (creepage or clearance) on ONE pad pair "
+            "of ONE named component: the other metric on the same pads, every "
+            "other package on the same nets (even when its gap is the closest "
+            "or ties), every other pad pair and every board-level approach "
+            "keep gating.  For affected net pairs the census reports each pad "
+            "pair as its own row (footprint, pads, exception, reason in table "
+            "and JSON) instead of the collapsed minimum, and the raw "
+            "measurements/verdicts stay in the JSON.  The exit code follows "
+            "the waiver-aware gate: exit 0 only when every un-waived metric "
+            "clears.  An invalid, ambiguous or unmatched selector is an error "
+            "-- it can never silently waive a finding.  Composes with "
+            "--waive-same-footprint; does NOT affect the kct audit gate."
+        ),
+    )
     # Selected-pair diagnostic (#10342): measure only the named pairs.
     creepage_parser.add_argument(
         "--pair",
@@ -5750,9 +5776,12 @@ def _add_repair_creepage_parser(subparsers) -> None:
 
 def _add_fix_drc_parser(subparsers) -> None:
     """Add fix-drc subcommand parser."""
+    from .fix_drc_creepage import add_mask_creepage_args
+
     fix_drc_parser = subparsers.add_parser(
         "fix-drc", help="Automated DRC violation repair (clearance + drill)"
     )
+    add_mask_creepage_args(fix_drc_parser)
     fix_drc_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_drc_parser.add_argument(
         "--drc-report",
@@ -5916,6 +5945,9 @@ def _add_parts_parser(subparsers) -> None:
     parts_search.add_argument("query", help="Search query")
     parts_search.add_argument("--format", choices=["text", "json", "table"], default="table")
     parts_search.add_argument("--limit", type=int, default=20, help="Max results")
+    parts_search.add_argument(
+        "--package", help="Match the exact catalogue package (case-insensitive)"
+    )
     parts_search.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
     parts_search.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
 
@@ -10866,6 +10898,17 @@ def _add_export_parser(subparsers) -> None:
         dest="export_include_tht",
         action="store_true",
         help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
+    )
+    export_parser.add_argument(
+        "--via-land-overlap",
+        dest="export_via_land_overlap",
+        action="store_true",
+        help=(
+            "Measure the shipped PCBA archive for plated via drills that overlap the "
+            "solder-mask opening, stencil opening and an SMD land on the same face; adds "
+            "the via_land_overlap preflight result to the JSON output and manifest "
+            "(Issue #10357)"
+        ),
     )
     export_parser.add_argument(
         "--format",

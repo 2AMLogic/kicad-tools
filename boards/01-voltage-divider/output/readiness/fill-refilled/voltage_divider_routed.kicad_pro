@@ -59,17 +59,7 @@
     "filename": "voltage_divider.kicad_pro",
     "version": 1,
     "manufacturer": "jlcpcb",
-    "kct_router_netclasses": {
-      "classes": [
-        "Power"
-      ],
-      "assignments": [
-        "GND",
-        "VIN",
-        "VOUT"
-      ]
-    },
-    "kct_sidecar_sha256": "4aacedce1f8ebb755721a507e6555b0a0fd2461f34cdda856182310c6f255aef"
+    "kct_sidecar_sha256": "99ba0206fe2b51f3eecaf3e5ce6f10f422c20b41c6a974cbea5ab471d6137038"
   },
   "net_settings": {
     "classes": [
@@ -102,8 +92,8 @@
         "name": "Power",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.127,
-        "via_diameter": 0.6,
+        "track_width": 0.5,
+        "via_diameter": 0.8,
         "via_drill": 0.3,
         "wire_width": 6
       }
@@ -117,7 +107,20 @@
       "VIN": "Power",
       "VOUT": "Power"
     },
-    "netclass_patterns": []
+    "netclass_patterns": [
+      {
+        "netclass": "Power",
+        "pattern": "GND"
+      },
+      {
+        "netclass": "Power",
+        "pattern": "VIN"
+      },
+      {
+        "netclass": "Power",
+        "pattern": "VOUT"
+      }
+    ]
   },
   "pcbnew": {
     "last_paths": {

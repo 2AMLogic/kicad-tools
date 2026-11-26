@@ -2981,7 +2981,10 @@ def test_outside_elbow_respects_explicit_margin_at_the_boundary(tmp_path, slack,
         (0.0, 0.02, None, 20240108, False),
         (0.0, 0.02, 0.0, 20240108, False),
         (0.0, 0.02, 0.0, 20260206, True),
-        (0.02, None, -0.02, 20260206, True),
+        # The pad's own margin wins, so this pad is solder-mask-defined, and
+        # that opening fails closed in the rule's own class: the swapped entry
+        # leg would keep a finding, so the swap is not proposed.
+        (0.02, None, -0.02, 20260206, False),
     ],
 )
 def test_outside_elbow_uses_the_effective_mask_opening(
@@ -3143,6 +3146,148 @@ def test_verified_elbow_flip_that_leaves_the_finding_restores_every_end(
     result = json.loads(capsys.readouterr().out)["mask_copper"]
     assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [
         ("hug", "finding_not_cleared")
+    ]
+    assert board.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Issue #9939: a swapped elbow whose entry leg is not a clean entry
+# ---------------------------------------------------------------------------
+
+# Board 03's R4/2 neighbourhood, moved so the pad sits at (100, 100).  The pad
+# is rounded because R4/2 fails through its corner arc, which retreats from a
+# cap that a square corner would have covered.  Without a project the board's
+# default clearance is 0.2 mm, so the neighbouring N2 track sits 0.08 mm
+# further right than on the board, where the pair's class asks for 0.15 mm.
+_R4_BOARD = BOARD.replace(
+    '(pad "1" smd rect (at 0 0) (size 2 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N1") (uuid "pad-r1-1"))',
+    '(pad "1" smd roundrect (at 0 0) (size 0.64 0.54) (layers "F.Cu" "F.Paste" "F.Mask")\n'
+    '      (roundrect_rratio 0.25) (net 1 "N1") (uuid "pad-r1-1"))',
+)
+_R3_FOOTPRINT = """\
+  (footprint "test:R3" (layer "F.Cu") (at 101.18 100)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "R" (at 0 1.5 0) (layer "F.Fab")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (pad "2" smd roundrect (at 0 0) (size 0.64 0.54) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 2 "N2") (uuid "pad-r3-2"))
+  )
+"""
+# The public command's displacement: this elbow's plain swap moves 1.08 mm.
+_SLIDE_OPTS = {"max_displacement": 2.0, "clearance_mm": 0.127, "warning_clearance_mm": 0.15}
+
+
+def _lead_elbow_fixture(tmp_path, *, lead=True, extra="", lock=""):
+    """A diagonal overlapping its pad's rounded lower-right corner (Board 03 R4/2).
+
+    ``diag`` ends 0.03 mm right of the pad and 0.063 mm above its bottom edge and
+    hands over to ``stub``; ``lead`` runs on from the stub's end into the pad.
+    The N2 tracks mirror it into the neighbouring pad.  Swapping the legs puts
+    the corner at (99.5121, 100.89) and makes ``stub`` a 45-degree entry whose
+    cap pokes past the corner arc: more copper beside the opening than the rule
+    lets one crossing leave.  The two 90-degree corners fail as on the board:
+    one runs 0.013 mm from the pad's left edge, the other meets the N2 track's
+    corner.
+    """
+    shapes = [
+        _seg("d_lower", (100.8301, 101.4071), (100.393, 100.97), width=0.25, net=2),
+        _seg("d_upper", (100.393, 100.97), (100.8301, 100.5329), width=0.25, net=2),
+        _seg("d_stub", (100.8301, 100.5329), (100.985, 100.5329), width=0.25, net=2),
+        _seg("d_lead", (100.985, 100.5329), (100.985, 100.0), width=0.25, net=2),
+        _seg("run", (100.3499, 102.9), (100.3499, 101.5729), width=0.25),
+        _seg("lower", (100.3499, 101.5729), (99.667, 100.89), width=0.25),
+        _seg("diag", (99.667, 100.89), (100.3499, 100.2071), width=0.25),
+        _seg("stub", (100.3499, 100.2071), (100.195, 100.2071), width=0.25),
+    ]
+    if lead:
+        segment = _seg("lead", (100.195, 100.2071), (100.195, 100.0), width=0.25)
+        shapes.append(segment.replace("(segment ", f"(segment {lock} " if lock else "(segment "))
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(_R4_BOARD % "\n".join([_R3_FOOTPRINT, *shapes, extra]))
+    return path
+
+
+def test_unclean_swapped_entry_slides_out_along_the_pad_lead_and_undoes(tmp_path):
+    board = _lead_elbow_fixture(tmp_path)
+    before = board.read_bytes()
+    names = ("diag", "stub", "lead")
+    original = {n: _end(board, n) for n in names}
+    repairer = MaskCopperRepairer(board)
+    finding = _overlap_pass_through("diag")
+    assert repairer.repair([finding], dry_run=True, **_SLIDE_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair([finding], **_SLIDE_OPTS)
+    assert result.repaired == 1
+    (action,) = result.actions
+    assert action.action == "nudge_clear" and len(action.points) == 4
+    assert action.minimum_mask_gap_mm == pytest.approx(0.09 + 0.02)
+    repairer.save(board)
+    diag, stub, lead = (_end(board, n) for n in names)
+    # The anchors stay put: the diagonal's far end and the lead's end in the pad.
+    assert diag[0] == original["diag"][0] and lead[1] == original["lead"][1]
+    # The stub traded places with the diagonal, then slid out along the lead.
+    assert diag[1] == stub[0] and stub[1] == lead[0]
+    assert stub[1] != original["stub"][1]
+    pad = _pad_poly(board, "R1/1")
+    for segment in (diag, stub):
+        assert LineString(segment).buffer(0.125).distance(pad) >= 0.09 + 0.02 - 1e-9
+    # The lead keeps its line and is now the only way into the pad.
+    assert lead[0][0] == lead[1][0] and pad.buffer(-0.015).contains(Point(lead[1]))
+    assert not repairer.off_angle_tracks()
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert {n: _end(board, n) for n in names} == original
+
+
+def test_unclean_swapped_entry_is_declined_when_no_pad_lead_can_carry_it_out(tmp_path):
+    # The stub ends freely inside the pad, so the swapped entry leg has nothing
+    # to slide along: proposing it would only trade the finding for a new one.
+    board = _lead_elbow_fixture(tmp_path, lead=False)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_overlap_pass_through("diag")], **_SLIDE_OPTS)
+    assert result.repaired == 0
+    assert [u.reason for u in result.unrepaired] == ["not_own_pad_entry"]
+    assert not repairer.modified and repairer.doc.to_string() == before
+
+
+def test_unclean_swapped_entry_vetoed_along_the_lead_restores_everything(tmp_path):
+    cases = {
+        # Foreign copper 0.129 mm from the slid entry leg (the board's default
+        # clearance is 0.2 mm).
+        "foreign-copper": (_seg("foreign", (100.5, 100.7021), (101.1, 100.1021), net=2), ""),
+        # A locked lead cannot be stretched to meet the slid leg.
+        "locked-lead": ("", "locked"),
+    }
+    for name, (extra, lock) in cases.items():
+        sub = tmp_path / name
+        sub.mkdir()
+        board = _lead_elbow_fixture(sub, extra=extra, lock=lock)
+        repairer = MaskCopperRepairer(board)
+        before = repairer.doc.to_string()
+        result = repairer.repair([_overlap_pass_through("diag")], **_SLIDE_OPTS)
+        assert result.repaired == 0, name
+        assert not repairer.modified and repairer.doc.to_string() == before, name
+
+
+def test_verified_slid_elbow_that_leaves_the_finding_restores_every_end(
+    tmp_path, monkeypatch, capsys
+):
+    board = _lead_elbow_fixture(tmp_path)
+    before = board.read_bytes()
+    finding = _overlap_pass_through("diag")
+    _run(
+        monkeypatch,
+        board,
+        [_report(finding), _report(finding)],
+        extra=("--max-displacement", "2.0", "--format", "json"),
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert [(u["uuid"], u["reason"]) for u in result["unrepaired"]] == [
+        ("diag", "finding_not_cleared")
     ]
     assert board.read_bytes() == before
 
