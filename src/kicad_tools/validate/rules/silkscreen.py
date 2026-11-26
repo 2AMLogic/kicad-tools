@@ -1161,17 +1161,14 @@ def _board_mask_margin_or(board_margin: float | None, declared: bool, fallback: 
 def _via_aperture_geometry(via: Via, diameter: float) -> _Geometry:
     """Build a shapely polygon for an untented via's solder-mask opening.
 
-    The positive aperture diameter includes the effective board margin.
-    Approximated as an axis-aligned box to first-order-match
-    :func:`_pad_aperture_geometry`'s convention (a circle inscribes the box, so
-    this slightly over-approximates the corners -- consistent with the
-    pad/text AABB model used throughout this module).
+    The positive diameter includes the effective mask margin. The opening is
+    a disk centred on the via, with the same resolution as a circular pad's
+    copper outline (:func:`~kicad_tools.geometry.copper.pad_copper_outline`).
     """
-    from shapely.geometry import box
+    from shapely.geometry import Point
 
-    radius = diameter / 2.0
     cx, cy = via.position
-    return box(cx - radius, cy - radius, cx + radius, cy + radius)
+    return Point(cx, cy).buffer(diameter / 2.0, quad_segs=32)
 
 
 def _via_is_tented(via: Via, setup: Setup | None, side: str) -> bool:
@@ -2656,6 +2653,19 @@ def check_silk_ref_obscured(
         if ref_text.hidden:
             if is_fiducial_footprint(footprint):
                 continue  # hiding fiducial references is the convention (#8540)
+            if (
+                footprint.exclude_from_bom
+                and footprint.exclude_from_pos_files
+                and footprint.pads
+                and all(
+                    pad.type == "np_thru_hole"
+                    and not pad.number
+                    and not pad.net_number
+                    and not pad.net_name
+                    for pad in footprint.pads
+                )
+            ):
+                continue  # Bare tooling holes have no part to identify (#10350).
             if _has_replacement_silk_text(pcb, footprint, ref_text.layer, Polygon):
                 continue  # hidden on purpose, replaced by a function label (#9435)
             results.add(

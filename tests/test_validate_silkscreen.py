@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import subprocess
 from pathlib import Path
 
@@ -561,6 +562,97 @@ class TestSilkOverUntentedVia:
         assert len(check_silk_over_copper(pcb, _rules())) == 0
 
 
+def _diagonal_stroke(
+    offset: float, length: float = 0.6
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Endpoints of a segment perpendicular to the 45 degree radius of the via
+    at (10, 10), centred ``offset`` mm from the via centre."""
+    ux = uy = math.sqrt(0.5)
+    half = length / 2.0
+    cx, cy = 10.0 + offset * ux, 10.0 + offset * uy
+    return (cx + half * ux, cy - half * uy), (cx - half * ux, cy + half * uy)
+
+
+def _via_opening_probe_pcb(*, stroke_offset: float) -> PCB:
+    """Build the Issue #10390 board: a 2.4 mm via at (10, 10), untented on the
+    front and tented on the back, under one 0.6 x 0.2 mm F.SilkS stroke.
+
+    The stroke runs perpendicular to the 45 degree radius, centred
+    ``stroke_offset`` mm from the via centre, so its nearest edge sits
+    ``stroke_offset - 0.1`` mm out.
+    """
+    start, end = _diagonal_stroke(stroke_offset)
+    text = f"""(kicad_pcb
+    (version 20260206)
+    (generator "pcbnew")
+    (setup
+        (pad_to_mask_clearance 0)
+        (tenting (front no) (back yes))
+    )
+    (net 0 "")
+    (net 1 "GND")
+    (via (at 10 10) (size 2.4) (drill 1.2) (layers "F.Cu" "B.Cu")
+        (net 1) (uuid "1111"))
+    (gr_line (start {start[0]} {start[1]}) (end {end[0]} {end[1]})
+        (stroke (width 0.2) (type solid))
+        (layer "F.SilkS") (uuid "2222-0"))
+)"""
+    from kicad_tools.sexp import parse_string
+
+    return PCB(parse_string(text))
+
+
+def _zero_mask_margin_rules():
+    """The jlcpcb rules with the profile mask margin set to zero."""
+    return dataclasses.replace(_rules(), min_solder_mask_clearance_mm=0.0)
+
+
+class TestUntentedViaOpeningIsRound:
+    """Issue #10390: the opening is the plotted disk, not the square around it."""
+
+    _VIA_LABEL = "via [GND] at (10.000, 10.000)"
+
+    def test_diagonal_stroke_outside_round_opening_is_clean(self):
+        """A stroke 1.4 mm out on the diagonal clears the 1.2 mm round opening.
+
+        Its nearest edge is 1.3 mm from the centre: outside the circle, inside
+        a corner of the 1.2 mm half-side square the checker used to model.
+        """
+        pcb = _via_opening_probe_pcb(stroke_offset=1.4)
+        assert len(check_silk_over_copper(pcb, _zero_mask_margin_rules())) == 0
+
+    def test_centred_stroke_still_flags_naming_the_via(self):
+        """The control: a stroke over the via centre is still reported."""
+        pcb = _via_opening_probe_pcb(stroke_offset=0.0)
+        violations = check_silk_over_copper(pcb, _zero_mask_margin_rules()).violations
+        assert len(violations) == 1
+        assert violations[0].items[1] == self._VIA_LABEL
+        assert violations[0].layer == "F.SilkS"
+        assert violations[0].severity == "info"
+
+    @pytest.mark.parametrize("include_via_obstacles", [True, False])
+    def test_reference_placement_receives_the_round_opening(self, include_via_obstacles):
+        """``collect_apertures`` yields the disk on the untented side only."""
+        from shapely.geometry import LineString, Point
+
+        from kicad_tools.silkscreen.place_refs import collect_apertures
+
+        pcb = _via_opening_probe_pcb(stroke_offset=1.4)
+        apertures = collect_apertures(pcb, 0.0, include_via_obstacles=include_via_obstacles)
+        openings = {
+            side: [geom for geom, label in apertures[side] if label == self._VIA_LABEL]
+            for side in ("F", "B")
+        }
+        assert len(openings["F"]) == int(include_via_obstacles)
+        assert openings["B"] == []
+        for opening in openings["F"]:
+            start, end = _diagonal_stroke(1.4)
+            assert not opening.intersects(LineString([start, end]).buffer(0.1))
+            assert opening.contains(Point(10.0, 10.0))
+        drills = [label for _geom, label in apertures["B"] if label.startswith("drill via")]
+        assert len(drills) == int(include_via_obstacles)
+
+
 # ---------------------------------------------------------------------------
 # silk_over_copper: an untented via's opening follows the board clearance
 # (#10384)
@@ -679,36 +771,22 @@ class TestUntentedViaMaskMargin:
         assert len(violations) == 1
         assert violations[0].items[1] == "via [GND] at (10.000, 10.000)"
 
-    def test_silk_outside_the_bare_opening_is_clear(self):
-        """c=0: the plotted opening is the bare copper, so silk 0.01 mm outside it is clear.
-
-        Before #10384 the profile margin widened this 1.6 mm via's opening to
-        1.7 mm and flagged the line -- which is clear of the copper and which
-        kicad-cli does not report.
+    @pytest.mark.parametrize(("mask_clearance", "expected_count"), [(0.0, 0), (None, 1)])
+    def test_profile_margin_applies_only_when_board_clearance_is_absent(
+        self, mask_clearance, expected_count
+    ):
+        """The stroke clears bare copper by 0.01 mm. With the profile margin,
+        its overlap with the round opening exceeds the 0.05 mm² reporting threshold.
         """
+        rules = dataclasses.replace(_rules(), min_solder_mask_clearance_mm=0.15)
         pcb = _via_probe_pcb(
             setup_tenting=("no", "no"),
             via_tenting=None,
-            mask_clearance=0.0,
+            mask_clearance=mask_clearance,
             via_size=1.6,
-            silk=((10.835, 9.0), (10.835, 11.0), 0.05),
+            silk=((10.91, 9.0), (10.91, 11.0), 0.2),
         )
-        assert check_silk_over_copper(pcb, _rules()).violations == []
-
-    def test_undeclared_clearance_keeps_the_profile_margin(self):
-        """No ``pad_to_mask_clearance`` token: kct keeps its profile fallback.
-
-        KiCad plots the bare copper here; the fallback is the validator's own
-        margin, resolved the same way as on the pad side.
-        """
-        pcb = _via_probe_pcb(
-            setup_tenting=("no", "no"),
-            via_tenting=None,
-            mask_clearance=None,
-            via_size=1.6,
-            silk=((10.835, 9.0), (10.835, 11.0), 0.05),
-        )
-        assert len(check_silk_over_copper(pcb, _rules()).violations) == 1
+        assert len(check_silk_over_copper(pcb, rules).violations) == expected_count
 
 
 # ---------------------------------------------------------------------------

@@ -110,6 +110,11 @@ class LinkRouteRules:
     attach_relax_nets: frozenset[int] = frozenset()
     net_names: Mapping[int, str] | None = None
 
+    width_by_layer: Mapping[str, float] = field(default_factory=dict)
+
+    def width_for(self, layer: str) -> float:
+        return self.width_by_layer.get(layer, self.trace_width)
+
     def clearance_for(self, net_number: int) -> float:
         """Clearance this link must keep from copper on ``net_number``."""
         if self.clearance_by_net is None:
@@ -182,9 +187,16 @@ class LinkRoute:
     segments: list[tuple[float, float, float, float, str]] = field(default_factory=list)
     vias: list[tuple[float, float]] = field(default_factory=list)
 
+    width_by_layer: Mapping[str, float] = field(default_factory=dict)
+
+    def width_for(self, layer: str) -> float:
+        return self.width_by_layer.get(layer, self.width)
+
     def capsules(self) -> list[tuple[float, float, float, float, float]]:
         """``(x1, y1, x2, y2, half_width)`` per segment and via (board-relative)."""
-        caps = [(x1, y1, x2, y2, self.width / 2) for x1, y1, x2, y2, _layer in self.segments]
+        caps = [
+            (x1, y1, x2, y2, self.width_for(layer) / 2) for x1, y1, x2, y2, layer in self.segments
+        ]
         caps.extend((x, y, x, y, self.via_size / 2) for x, y in self.vias)
         return caps
 
@@ -509,6 +521,7 @@ def route_link(
     *,
     model: _BoardModel | None = None,
     allowed_layers: Collection[str] | None = None,
+    grid_anchor: tuple[float, float] | None = None,
 ) -> LinkRoute | None:
     """Route copper from terminal ``a`` to terminal ``b`` on net ``net_number``.
 
@@ -527,7 +540,6 @@ def route_link(
     model = model or _build_model(pcb)
     copper = model.copper
     g = rules.grid
-    half_w = rules.trace_width / 2
 
     (ax, ay), (bx, by) = a.point, b.point
     x0, x1 = min(ax, bx) - rules.margin, max(ax, bx) + rules.margin
@@ -537,7 +549,8 @@ def route_link(
         x0, y0, x1, y1 = max(x0, ob[0]), max(y0, ob[1]), min(x1, ob[2]), min(y1, ob[3])
     # Align the grid on A's anchor (snapped to 0.01 mm, the precision the PCB
     # writer keeps) so the written copper is exactly the copper checked here.
-    gx0, gy0 = round(ax, 2), round(ay, 2)
+    anchor_x, anchor_y = grid_anchor or a.point
+    gx0, gy0 = round(anchor_x, 2), round(anchor_y, 2)
     ix0 = math.floor((x0 - gx0) / g)
     iy0 = math.floor((y0 - gy0) / g)
     nx = int(math.ceil((x1 - gx0) / g)) - ix0 + 1
@@ -549,11 +562,16 @@ def route_link(
     ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, 2)
     gx, gy = np.meshgrid(xs, ys, indexing="ij")
     flat_x, flat_y = gx.ravel(), gy.ravel()
-    window = box(xs[0] - 1.0, ys[0] - 1.0, xs[-1] + 1.0, ys[-1] + 1.0)
+    reach = 1.0
+    if rules.width_by_layer:
+        radius = max(max(rules.width_by_layer.values()), rules.via_size) / 2
+        clearance = max(rules.clearance, max((rules.clearance_by_net or {}).values(), default=0.0))
+        reach = max(reach, radius + clearance + 0.05)
+    window = box(xs[0] - reach, ys[0] - reach, xs[-1] + reach, ys[-1] + reach)
 
     def mask_of(geom: Any) -> Any:
         if geom is None or geom.is_empty:
-            return np.zeros(nx * ny, dtype=bool)
+            return np.zeros((nx, ny), dtype=bool)
         shapely.prepare(geom)
         return shapely.intersects_xy(geom, flat_x, flat_y).reshape(nx, ny)
 
@@ -563,10 +581,14 @@ def route_link(
     foreign_by_layer: dict[str, list[tuple[Any, float]]] = {}
     blocked = np.zeros((nl, nx, ny), dtype=bool)
     fill_cost = np.ones((nl, nx, ny), dtype=float)
-    inside = None
-    if model.outline is not None:
-        inside = mask_of(model.outline.buffer(-(rules.edge_clearance + half_w)))
+    legal_areas = {
+        width: model.outline.buffer(-(rules.edge_clearance + width / 2))
+        for width in {rules.width_for(layer) for layer in copper}
+        if model.outline is not None
+    }
+    inside = {width: mask_of(area) for width, area in legal_areas.items()}
     for li, layer in enumerate(copper):
+        width = rules.width_for(layer)
         by_clearance: dict[float, list[Any]] = {}
         for it in model.items:
             if it.net != net_number and layer in it.layers and it.layers[layer].intersects(window):
@@ -575,9 +597,9 @@ def route_link(
         groups = [(unary_union(geoms), c) for c, geoms in sorted(by_clearance.items())]
         foreign_by_layer[layer] = groups
         for foreign, c in groups:
-            blocked[li] |= mask_of(foreign.buffer(c + half_w + 0.005))
-        if inside is not None:
-            blocked[li] |= ~inside
+            blocked[li] |= mask_of(foreign.buffer(c + width / 2 + 0.005))
+        if inside:
+            blocked[li] |= ~inside[width]
         if allowed_layers is not None and layer not in allowed_layers:
             blocked[li] = True
         fills = [
@@ -628,11 +650,12 @@ def route_link(
             dd / 2 + rules.via_drill / 2 + rules.hole_to_hole + COORD_WRITE_GUARD_MM
         )
         for dx, dy, dd in model.drills
-        if window.distance(Point(dx, dy)) < 2.0
+        if window.distance(Point(dx, dy))
+        <= dd / 2 + rules.via_drill / 2 + rules.hole_to_hole + COORD_WRITE_GUARD_MM
     ]
     if drill_disks:
         via_bad |= mask_of(unary_union(drill_disks))
-    if inside is not None:
+    if model.outline is not None:
         via_bad |= ~mask_of(model.outline.buffer(-(rules.edge_clearance + rules.via_size / 2)))
 
     def terminal_mask(t: LinkTerminal) -> Any:
@@ -718,6 +741,7 @@ def route_link(
         net_number=net_number,
         net_name=net_name,
         width=rules.trace_width,
+        width_by_layer=rules.width_by_layer,
         via_size=rules.via_size,
         via_drill=rules.via_drill,
     )
@@ -730,22 +754,18 @@ def route_link(
             if runs:
                 route.vias.append((float(xs[i]), float(ys[j])))
             runs.append((li, [(i, j)]))
-    legal_area = (
-        model.outline.buffer(-(rules.edge_clearance + half_w))
-        if model.outline is not None
-        else None
-    )
     for li, cells in runs:
         pts = _simplify(cells)
         xy = [(float(xs[i]), float(ys[j])) for i, j in pts]
-        xy = _shortcut(xy, foreign_by_layer.get(copper[li], []), half_w, legal_area)
+        width = rules.width_for(copper[li])
+        xy = _shortcut(xy, foreign_by_layer[copper[li]], width / 2, legal_areas.get(width))
         for (x_a, y_a), (x_b, y_b) in zip(xy, xy[1:], strict=False):
             if (x_a, y_a) == (x_b, y_b):
                 continue  # Issue #8417: never emit a zero-length track
             route.segments.append((x_a, y_a, x_b, y_b, copper[li]))
 
     # Exact check: grid quantisation must never leak a sub-clearance segment.
-    if _route_violates_foreign(route, foreign_by_layer, half_w):
+    if _route_violates_foreign(route, foreign_by_layer):
         return None
     return route
 
@@ -753,7 +773,7 @@ def route_link(
 def _route_violates_foreign(
     route: LinkRoute,
     foreign_by_layer: dict[str, list[tuple[Any, float]]],
-    half_w: float,
+    half_w: float | None = None,
 ) -> bool:
     """True if any segment or via of ``route`` is too close to foreign copper.
 
@@ -767,8 +787,9 @@ def _route_violates_foreign(
         shape = (
             Point(x_a, y_a) if (x_a, y_a) == (x_b, y_b) else LineString([(x_a, y_a), (x_b, y_b)])
         )
+        radius = route.width_for(layer) / 2 if half_w is None else half_w
         for foreign, c in foreign_by_layer.get(layer, []):
-            if shape.distance(foreign) < c + half_w - 1e-4:
+            if shape.distance(foreign) < c + radius - 1e-4:
                 return True
     for vx, vy in route.vias:
         p = Point(vx, vy)
@@ -798,7 +819,7 @@ def route_clears_floors(route: LinkRoute, model: _BoardModel, rules: LinkRouteRu
                 ):
                     by_c.setdefault(c, []).append(part)
         by_layer[layer] = [(unary_union(g), c) for c, g in sorted(by_c.items())]
-    return not _route_violates_foreign(route, by_layer, route.width / 2)
+    return not _route_violates_foreign(route, by_layer)
 
 
 def _via_site_blocker(
@@ -868,6 +889,7 @@ def route_link_via(
     *,
     model: _BoardModel | None = None,
     allowed_layers: Collection[str] | None = None,
+    failure: dict[str, Any] | None = None,
 ) -> LinkRoute | None:
     """Route ``a`` -> forced via at ``via_at`` -> ``b`` (Issue #8310).
 
@@ -886,16 +908,36 @@ def route_link_via(
     layers = [layer for layer in model.copper if allowed_layers is None or layer in allowed_layers]
     if len(layers) < 2:
         return None  # a via needs two layers it may connect
-    disk = Point(site).buffer(rules.via_size / 2)
-    vt = LinkTerminal("via", site, dict.fromkeys(layers, disk))
-    leg1 = route_link(pcb, net_number, net_name, a, vt, rules, model=model, allowed_layers=layers)
+    # A declared current path is traced through the barrel centre. Land both
+    # legs on that grid point, including for an off-grid waypoint.
+    contact = Point(site) if rules.width_by_layer else Point(site).buffer(rules.via_size / 2)
+    vt = LinkTerminal("via", site, dict.fromkeys(layers, contact))
+    leg1 = route_link(
+        pcb,
+        net_number,
+        net_name,
+        a,
+        vt,
+        rules,
+        model=model,
+        allowed_layers=layers,
+        grid_anchor=site if rules.width_by_layer else None,
+    )
     leg2 = route_link(pcb, net_number, net_name, vt, b, rules, model=model, allowed_layers=layers)
     if leg1 is None or leg2 is None:
+        if failure is not None:
+            start, end = (a, vt) if leg1 is None else (vt, b)
+            failure.update(
+                explain_link_failure(
+                    pcb, net_number, start, end, rules, model=model, allowed_layers=layers
+                )
+            )
         return None
     return LinkRoute(
         net_number=net_number,
         net_name=net_name,
         width=rules.trace_width,
+        width_by_layer=rules.width_by_layer,
         via_size=rules.via_size,
         via_drill=rules.via_drill,
         segments=leg1.segments + leg2.segments,
@@ -928,16 +970,15 @@ def explain_link_failure(
         if not usable:
             return {"reason": f"endpoint {label} ({t.label}) has no copper on the allowed layers"}
     line = LineString([a.point, b.point]) if a.point != b.point else Point(a.point)
-    half_w = rules.trace_width / 2
     best: tuple[float, dict[str, Any]] | None = None
     near: list[tuple[float, str, int, Any, float]] = []  # corridor candidates
     for it in model.items:
         if it.net == net_number:
             continue
-        need = rules.clearance_for(it.net) + half_w
         for layer, geom in it.layers.items():
             if allowed_layers is not None and layer not in allowed_layers:
                 continue
+            need = rules.clearance_for(it.net) + rules.width_for(layer) / 2
             d = line.distance(geom)
             near.append((d, layer, it.net, geom, rules.clearance_for(it.net)))
             slack = d - need
@@ -964,13 +1005,20 @@ def explain_link_failure(
             f"are {bound['gap_mm']:.3f} mm apart but the link needs "
             f">= {bound['required_mm']:.3f} mm "
             f"({bound['clearance_a_mm']:.3f} + {bound['clearance_b_mm']:.3f} clearance "
-            f"+ {rules.trace_width:.3f} width)"
+            f"+ {rules.width_for(bound['layer']):.3f} width)"
+        )
+        if rules.width_by_layer:
+            out["reason"] += f"; maximum corridor width {bound['available_width_mm']:.3f} mm"
+    elif rules.width_by_layer:
+        layers = allowed_layers or model.copper
+        out["reason"] += "; required track widths: " + ", ".join(
+            f"{layer} {rules.width_for(layer):.3f} mm" for layer in layers
         )
     return out
 
 
 def _crosses_line(across: Any, link_line: Any) -> bool:
-    """True when ``across`` is more perpendicular than parallel to ``link_line``."""
+    """True when the gap straddles the leg and runs predominantly across it."""
     (ax, ay), (bx, by) = across.coords[0], across.coords[-1]
     (lx1, ly1), (lx2, ly2) = link_line.coords[0], link_line.coords[-1]
     ux, uy = bx - ax, by - ay
@@ -978,7 +1026,10 @@ def _crosses_line(across: Any, link_line: Any) -> bool:
     nu, nv = math.hypot(ux, uy), math.hypot(vx, vy)
     if nu == 0 or nv == 0:
         return False
-    return bool(abs(ux * vx + uy * vy) / (nu * nv) < 0.5)
+    # Parallel rails on the same side also have a perpendicular connector.
+    side_a = vx * (ay - ly1) - vy * (ax - lx1)
+    side_b = vx * (by - ly1) - vy * (bx - lx1)
+    return bool(side_a * side_b < 0 and abs(ux * vx + uy * vy) / (nu * nv) < 0.5)
 
 
 def _corridor_bound(
@@ -999,16 +1050,27 @@ def _corridor_bound(
 
     best: tuple[float, dict[str, Any]] | None = None
     cand = sorted(near, key=lambda t: t[0])[:16]
-    for i, (da, la, na, ga, ca) in enumerate(cand):
-        for db, lb, nb, gb, cb in cand[i + 1 :]:
-            if la != lb or na == nb:
+    if len(cand) < 2 or not link_line.length:
+        return None
+    # Measure only alongside the finite leg. Long rails can have their
+    # nearest edges behind an endpoint, where their gap is irrelevant.
+    reach = max(2 * clearance + rules.width_for(layer) for _, layer, _, _, clearance in cand)
+    window = link_line.buffer(reach, cap_style="flat")
+    clipped = []
+    for _, layer, net, geom, clearance in cand:
+        edge = geom.intersection(window)
+        if not edge.is_empty:
+            clipped.append((link_line.distance(edge), layer, net, edge, clearance))
+    for i, (da, la, na, ga, ca) in enumerate(clipped):
+        for db, lb, nb, gb, cb in clipped[i + 1 :]:
+            if la != lb or (na == nb and not rules.width_by_layer):
                 continue
             # Flanking means the connecting segment runs across the link, not along it.
             p1, p2 = nearest_points(ga, gb)
             across = LineString([p1, p2]) if p1 != p2 else None
             if across is None or not _crosses_line(across, link_line):
                 continue
-            required = ca + cb + rules.trace_width
+            required = ca + cb + rules.width_for(la)
             gap = ga.distance(gb)
             if gap >= required - 1e-9 or da > required or db > required:
                 continue
@@ -1019,6 +1081,11 @@ def _corridor_bound(
                     slack,
                     {
                         "layer": la,
+                        **(
+                            {"available_width_mm": round(max(0.0, gap - ca - cb), 3)}
+                            if rules.width_by_layer
+                            else {}
+                        ),
                         "net_a": name(na),
                         "net_b": name(nb),
                         "gap_mm": round(gap, 3),
@@ -1174,7 +1241,7 @@ def collapse_link_route(route: LinkRoute) -> LinkRoute:
             j += 1
         layer = segs[i][4]
         run = [
-            Segment(x1, y1, x2, y2, route.width, layer, route.net_number, route.net_name)  # type: ignore[arg-type]
+            Segment(x1, y1, x2, y2, route.width_for(layer), layer, route.net_number, route.net_name)  # type: ignore[arg-type]
             for x1, y1, x2, y2, _l in segs[i:j]
         ]
         run = compress_staircase(merge_collinear(run, cfg), cfg)
@@ -1203,7 +1270,7 @@ def _append_route_nodes(
                 start_y=y_a + oy,
                 end_x=x_b + ox,
                 end_y=y_b + oy,
-                width=route.width,
+                width=route.width_for(layer),
                 layer=layer,
                 net=route.net_number,
                 net_name=net_name,
