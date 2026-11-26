@@ -18,6 +18,7 @@ the routing decisions and skip counters exactly as they are untraced.
 
 from __future__ import annotations
 
+import time
 from unittest import mock
 
 import pytest
@@ -178,6 +179,36 @@ def test_a_search_that_did_not_drain_is_not_traced_as_one(stub, outcome) -> None
     assert second["outcome"] == outcome
     # The second attempt is already bounded by the #8485 repeat budget.
     assert second["reduced_budget"] is True
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "one_way_calls", "outcome"), [(6.0, 0, "deadline"), (0.0, 1, "drained")]
+)
+def test_bidirectional_retry_budget_determines_fallback_outcome(
+    elapsed, one_way_calls, outcome, monkeypatch
+) -> None:
+    pathfinder = _pathfinder(_walled_grid(), traced=True)
+    pathfinder._rules.fallback_bidirectional = True
+    now = time.monotonic()
+    bidirectional = Router.route_bidirectional
+
+    def drain_frontier(router, *args, **kwargs):
+        nonlocal now
+        result = bidirectional(router, *args, **kwargs)
+        assert result is None and router.last_route_exhausted
+        now += elapsed
+        return result
+
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    monkeypatch.setattr(Router, "route_bidirectional", drain_frontier)
+    with mock.patch.object(Router, "route", autospec=True, side_effect=Router.route) as retry:
+        (first,) = _route_traces(pathfinder, 1, per_net_timeout=5.0)
+        assert retry.call_count == one_way_calls
+    assert first["outcome"] == outcome
+
+    (repeat,) = _route_traces(pathfinder, 1, per_net_timeout=5.0)
+    assert repeat["request"] == "repeat"
+    assert repeat["prior_outcome"] == outcome
 
 
 @pytest.mark.parametrize(

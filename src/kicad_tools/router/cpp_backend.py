@@ -5416,10 +5416,11 @@ class CppPathfinder:
         router = self._py_router
         if route is not None:
             outcome = "found"
+        elif getattr(router, "last_route_deadline_hit", False) is True:
+            # A drained bidirectional frontier can consume the shared retry budget.
+            outcome = "deadline"
         elif getattr(router, "last_route_exhausted", False) is True:
             outcome = "drained"
-        elif getattr(router, "last_route_deadline_hit", False) is True:
-            outcome = "deadline"
         else:
             outcome = "stopped"
         self._python_attempt_history[pair_key] = (stamp, outcome)
