@@ -16,6 +16,7 @@ from kicad_tools.schema.pcb import PCB, FootprintGraphic
 from kicad_tools.sexp.parser import SExp
 from kicad_tools.silkscreen._silk_defaults import SILK_EDGE_CLEARANCE_MM, SILK_HOLE_CLEARANCE_MM
 from kicad_tools.silkscreen.place_refs import _inverse_fp_transform, collect_apertures
+from kicad_tools.validate.mask_geometry import board_mask_margin
 from kicad_tools.validate.native_silk_text import text_keepout_shapes
 from kicad_tools.validate.rules.factory_clearance import silk_pad_apertures
 from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
@@ -267,8 +268,10 @@ def repair_footprint_lines(
     skipped_pad_refs = {ref for ref, _ in skipped_markers}
     obstacles_by_side: dict[str, list] = {"F": [], "B": []}
     if skipped_markers:
-        margin = pcb.setup.pad_to_mask_clearance if pcb.setup is not None else 0.0
-        exact_pads = silk_pad_apertures(pcb.footprints, margin)
+        margin, declared = board_mask_margin(pcb)
+        exact_pads = silk_pad_apertures(
+            pcb.footprints, margin, board_declared=declared, board_version=pcb._file_version()
+        )
         openings = collect_apertures(pcb, mask_clearance, include_via_obstacles=False)
         drill_floor = SILK_HOLE_CLEARANCE_MM if hole_clearance is None else hole_clearance
         for face in ("F", "B"):
