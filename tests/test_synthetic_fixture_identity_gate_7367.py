@@ -144,9 +144,7 @@ BOARD06_GAP_NETS: tuple[str, ...] = ()
 # the U1.32 ground repair (#9891) retired the GND identity. The J1 connector
 # repair (#10258) retired both USB2_D mask identities. The power repairs (#10267)
 # retired +1V2 and +3V3.
-BOARD06_MASK_NETS = (
-    "USB3_TX2+",
-)
+BOARD06_MASK_NETS = ("USB3_TX2+",)
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
