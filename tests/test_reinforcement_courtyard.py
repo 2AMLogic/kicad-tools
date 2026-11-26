@@ -143,9 +143,92 @@ def test_opposite_side_tht_foreign_pin_errors_own_pin_clean():
     assert [v for v in _run(pcb) if "[run]" in v.message and "Q1" in v.message]
 
     pcb = _board()
-    _body(pcb, "Q1", 70.0, 51.0, side="B", courtyard=False, pads=[tht(NET)])
+    _body(pcb, "Q1", 70.0, 51.3, side="B", courtyard=False, pads=[tht(NET)])
     pcb._footprints[-1].graphics = []
     assert not [v for v in _run(pcb) if "Q1" in v.message]
+
+
+def test_same_net_component_drill_is_clear_of_the_fitted_wire():
+    pcb = _board()
+    from kicad_tools.sexp import parse_string
+
+    # KiCad 10.0.8 exports X70.0Y-51.2 for this offset land, just as for
+    # a plain 1.70 mm drill. The wire runs at y=50.
+    pad = Pad.from_sexp(
+        parse_string(
+            f'(pad "1" thru_hole circle (at 0 0) (size 2.8 2.8) '
+            f'(drill 1.7 (offset 0 0.6)) (layers "*.Cu") (net {pcb.add_net(NET).number} "{NET}"))'
+        )
+    )
+    fp = _body(pcb, "R6", 70, 51.20, side="B", pads=[pad])
+    matches = [v for v in _run(pcb) if "component drill" in v.message and "R6.1" in v.message]
+    assert len(matches) == 1
+    assert round(matches[0].actual_value, 3) == 0.350
+    assert "wire diameter 1.2910 mm" in matches[0].message
+    assert "0.2955 mm interference" in matches[0].message
+    assert matches[0].required_value == 0.6455
+    fp.position = (70, 50)
+    crossing = [v for v in _run(pcb) if "component drill" in v.message and "R6.1" in v.message]
+    assert len(crossing) == 1 and "at least 0.6455 mm" in crossing[0].message
+    fp.position = (70, 52.50)
+    assert not [v for v in _run(pcb) if "R6.1" in v.message]
+    # The end terminal is connected to an unwired copper tail beyond the anchor.
+    fp.position = (20.5, 50)
+    assert not [v for v in _run(pcb) if "R6.1" in v.message]
+
+
+def test_anchor_sized_component_bore_between_verified_end_vias():
+    pcb = _board()
+    _add_th_pad_footprint(pcb, ref="R6", x=70, y=50, net=NET, drill=1.40, size=2.8)
+    pcb.get_footprint("R6").layer = "B.Cu"
+    findings = [v for v in _run(pcb) if "component drill" in v.message]
+    assert len(findings) == 1
+    assert findings[0].items == (NET, "R6", "1")
+
+
+def test_component_bore_projecting_onto_end_via_is_still_checked():
+    pcb = _board()
+    x, y = pcb.vias[0].position
+    _add_th_pad_footprint(pcb, ref="R6", x=x, y=y + 1.1, net=NET, drill=1.40, size=2.8)
+    pcb.get_footprint("R6").layer = "B.Cu"
+    assert any("component drill" in v.message and "R6.1" in v.message for v in _run(pcb))
+
+
+def test_same_net_plated_pad_can_serve_as_a_verified_wire_anchor():
+    pcb = _board()
+    anchor = pcb.vias[0]
+    pcb.remove_vias([anchor])
+    x, y = anchor.position
+    _add_th_pad_footprint(pcb, ref="W1", x=x, y=y, net=NET, drill=anchor.drill, size=anchor.size)
+    pcb.get_footprint("W1").layer = "B.Cu"
+    rule = ReinforcementCourtyardRule(specs=[_spec()])
+    assert len(rule.fully_wired_legs(pcb, _rules())) == 1
+    assert not [v for v in rule.check(pcb, _rules()) if "W1" in v.message]
+
+
+@pytest.mark.parametrize("pad_ends", [(False, True), (True, False), (True, True), (False, False)])
+@pytest.mark.parametrize("drill", [1.70, 1.40])
+def test_component_bore_near_mixed_end_anchors_is_still_checked(pad_ends, drill):
+    """Each end resolves on its own, so a decoy lead hole is never a third anchor."""
+    pcb = _board()
+    vias = list(pcb.vias)
+    for idx, as_pad in enumerate(pad_ends):
+        if not as_pad:
+            continue
+        via = vias[idx]
+        pcb.remove_vias([via])
+        x, y = via.position
+        ref = f"W{idx + 1}"
+        _add_th_pad_footprint(pcb, ref=ref, x=x, y=y, net=NET, drill=via.drill, size=via.size)
+        pcb.get_footprint(ref).layer = "B.Cu"
+    x, y = vias[0].position
+    _add_th_pad_footprint(pcb, ref="R6", x=x + 5.0, y=y + 0.5, net=NET, drill=drill, size=2.8)
+    pcb.get_footprint("R6").layer = "B.Cu"
+    rule = ReinforcementCourtyardRule(specs=[_spec()])
+    assert len(rule.fully_wired_legs(pcb, _rules())) == 1
+    bores = [v for v in rule.check(pcb, _rules()) if "component drill" in v.message]
+    assert [v.items for v in bores] == [(NET, "R6", "1")]
+    assert not [v for v in bores if "W1" in v.message or "W2" in v.message]
 
 
 def test_end_hole_under_opposite_side_body_errors():

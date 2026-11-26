@@ -460,7 +460,8 @@ class SilkscreenRepairer:
         """Trim or remove footprint silk lines too close to same-side pads.
 
         Uses the geometry of the ``silk_pad_clearance`` check (stroke buffered
-        by half its width versus the pad's mask aperture), so a clipped line
+        by half its width versus the pad's effective mask aperture, including
+        footprint and board margin inheritance), so a clipped line
         no longer trips that check.  A line that crosses the limit is
         shortened to its clear part(s) (a line cut in the middle becomes two
         lines); a line wholly inside the limit is removed.  Elements the
@@ -480,6 +481,7 @@ class SilkscreenRepairer:
         from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
         from kicad_tools.schema.pcb import Footprint, FootprintGraphic
+        from kicad_tools.validate.mask_geometry import board_mask_margin_from_sexp
         from kicad_tools.validate.rules.factory_clearance import silk_pad_apertures
         from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
         from kicad_tools.validate.rules.silkscreen import (
@@ -490,16 +492,20 @@ class SilkscreenRepairer:
 
         result = PadClearanceRepairResult(min_clearance_mm=min_clearance_mm)
 
-        setup = self.doc.find("setup")
-        default_margin = 0.0
-        if setup is not None:
-            node = setup.find("pad_to_mask_clearance")
-            if node is not None and node.get_float(0) is not None:
-                default_margin = float(node.get_float(0))  # type: ignore[arg-type]
+        board_margin, board_declared = board_mask_margin_from_sexp(self.doc)
+        version = self.doc.find_child("version")
+        footprints = []
+        for fp_node in _find_all_footprints(self.doc):
+            fp = Footprint.from_sexp(fp_node)
+            fp._sexp_node = fp_node  # pad_mask_margin reads the footprint override here.
+            footprints.append((fp_node, fp))
 
-        footprints = [(node, Footprint.from_sexp(node)) for node in _find_all_footprints(self.doc)]
-
-        apertures = silk_pad_apertures((fp for _, fp in footprints), default_margin)
+        apertures = silk_pad_apertures(
+            (fp for _, fp in footprints),
+            board_margin,
+            board_declared=board_declared,
+            board_version=(version.get_int(0) or 0) if version else 0,
+        )
         per_side = {side: [shape for shape, _ in entries] for side, entries in apertures.items()}
         trees = {side: STRtree(geoms) for side, geoms in per_side.items() if geoms}
         if not trees:

@@ -54,7 +54,7 @@ from .base import DRCRule
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.router.current_paths import CurrentPathSpec, PathResolution
-    from kicad_tools.schema.pcb import PCB, Segment, Via
+    from kicad_tools.schema.pcb import PCB, Pad, Segment, Via
 
 #: Waiver ``rule`` ids whose waiver can claim "the wire carries the current".
 AMPACITY_WAIVER_RULES = ("ampacity", "path_ampacity")
@@ -171,6 +171,7 @@ class _Anchor:
     arc: float
     via: Via | None  # None for a through-hole pad
     radius: float
+    pad: Pad | None = None
 
 
 @dataclass
@@ -228,6 +229,7 @@ class WiredLeg:
     gauge: int
     anchor_arc: tuple[float, float] | None = None
     anchor_centers: tuple[_Point, _Point] | None = None  # physical, board-relative
+    anchor_pad_ids: tuple[int, ...] = ()
 
 
 class ReinforcementIncompleteRule(DRCRule):
@@ -881,6 +883,7 @@ class ReinforcementIncompleteRule(DRCRule):
                         gauge=leg.gauge,
                         anchor_arc=(outcome[0].arc, outcome[1].arc),
                         anchor_centers=(outcome[0].pos, outcome[1].pos),
+                        anchor_pad_ids=tuple(id(a.pad) for a in outcome if a.pad is not None),
                     )
                 )
 
@@ -955,9 +958,9 @@ class ReinforcementIncompleteRule(DRCRule):
         results: DRCResults,
         via_is_tented: Any,
     ) -> tuple[_Anchor, _Anchor] | None:
-        """Check one leg and return its two end holes when both are present.
+        """Check one leg and return its two anchors when identifiable.
 
-        Consumers credit this pair only when the check emitted no findings.
+        Consumers credit the span only when the checks emit no violations.
         """
         pts, cum, total = leg.points, leg.cum, leg.total
         if len(pts) < 2 or total <= 1e-9:
@@ -993,7 +996,7 @@ class ReinforcementIncompleteRule(DRCRule):
             if min(math.dist(pos, pts[0]), math.dist(pos, pts[-1])) <= radius + 0.05:
                 continue
             if self._dist_to_polyline(pts, pos) <= tol:
-                anchors.append(_Anchor(pos, rf._arc_of_point(pts, cum, pos), None, radius))
+                anchors.append(_Anchor(pos, rf._arc_of_point(pts, cum, pos), None, radius, pad))
         anchors.sort(key=lambda a: a.arc)
 
         # The bound the leg was built with (sidecar) wins over the constructor
@@ -1020,6 +1023,22 @@ class ReinforcementIncompleteRule(DRCRule):
             if a.via is not None:
                 claimed.add(id(a.via))
         anchors = [a for a in anchors if a not in layer_change]
+        # A matching component drill is a possible termination only in an end
+        # window, and each end is resolved on its own: a via in the window is
+        # the end's anchor, otherwise the outermost drill there is (a separate
+        # same-net lead hole further in is not a third anchor). Vias away from
+        # the ends stay candidates so a stray still counts.
+        end_pads: dict[int, _Anchor] = {}
+        for in_window, outer_first in (
+            ([a for a in anchors if a.arc <= window(extents[0], a)], True),
+            ([a for a in anchors if total - a.arc <= window(extents[1], a)], False),
+        ):
+            if any(a.via is not None for a in in_window):
+                continue
+            if in_window:
+                pick = min(in_window, key=lambda a: a.arc if outer_first else total - a.arc)
+                end_pads[id(pick)] = pick
+        anchors = [a for a in anchors if a.via is not None or id(a) in end_pads]
         near_start = [a for a in anchors if a.arc <= window(extents[0], a)]
         near_end = [a for a in anchors if total - a.arc <= window(extents[1], a)]
         # With exactly two anchors the (a) window check below reports each
@@ -1124,7 +1143,7 @@ class ReinforcementIncompleteRule(DRCRule):
                     + " and ".join("front" if s == "F" else "back" for s in tented)
                     + " side; both sides must be mask-open",
                 )
-        return (anchors[0], anchors[-1]) if len(anchors) == 2 else None
+        return (anchors[0], anchors[1]) if len(anchors) == 2 else None
 
     # ------------------------------------------------------------ geometry
 
