@@ -265,7 +265,9 @@ def precheck(
                 "current requirement(s))",
             )
         return skipped(category, "no_declared_targets")
-    if category == "path_ampacity" and not getattr(checker, "current_path_specs", None):
+    if category == "path_ampacity" and not (
+        getattr(checker, "current_path_specs", None) or getattr(checker, "current_path_cases", None)
+    ):
         return skipped(category, "no_declared_current_paths")
     if category in ("reinforcement_incomplete", "wire_run_courtyard_overlap") and not any(
         getattr(s, "reinforcement_eligible", False)

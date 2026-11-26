@@ -884,7 +884,8 @@ class TestOverallMatchesExitCode:
         fix -- but the structure machine consumers parse is byte-compatible:
         no new keys, no schema bump.  The remediation hint deliberately
         never enters ``MaskCopperAssessment.to_dict()``.  (Issue #9062
-        later added the additive ``incomplete_categories`` key; every other
+        later added the additive ``incomplete_categories`` key and Issue
+        #10368 the additive ``nominal_exposure`` assessment key; every other
         key is unchanged.)
         """
         from kicad_tools.cli.check_cmd import main
@@ -926,6 +927,7 @@ class TestOverallMatchesExitCode:
             "intent_audit",
             "geometry_provenance",
             "evaluated_pairs",
+            "nominal_exposure",
         }
         assert assessment["schema"] == "kct.mask-copper-assessment.v1"
         # The verdict / exit code pair machine consumers read stays coherent.
