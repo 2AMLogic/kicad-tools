@@ -5050,9 +5050,10 @@ def _run_readiness_candidate(
     if options.operation == "generate" and options.silk_fix:
         from .silk_default_pass import run_default_silk_pass
 
-        metrics["silk_fix"] = run_default_silk_pass(
-            options.pcb, mfr=options.manufacturer, quiet=True
-        )
+        silk_fix = run_default_silk_pass(options.pcb, mfr=options.manufacturer, quiet=True)
+        if silk_fix and silk_fix.get("board"):
+            silk_fix["board"] = _rel(options, options.pcb)
+        metrics["silk_fix"] = silk_fix
 
     checked_sources = {
         path: _sha256_file(path)
