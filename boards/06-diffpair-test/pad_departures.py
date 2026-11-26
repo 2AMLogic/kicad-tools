@@ -1283,8 +1283,8 @@ _DATA_WIDTH = 0.225
 class _DataExit:
     """Seed-42 F.Cu corners relative to the pad centre, up to the trunk junction.
 
-    MIPI trunks stay in place or extend to the new junction. USB2 instead
-    shortens a measured trunk, retaining its original far endpoint.
+    MIPI and USB2 keep the far end of the adjoining trunk. USB3 RX2 ends
+    on a fixed through-via with the declared (diameter, drill) in mm.
     """
 
     ref: str
@@ -1295,6 +1295,7 @@ class _DataExit:
     old: tuple[XY, ...]
     new: tuple[XY, ...]
     trunk_end: XY | None = None
+    fixed_via: tuple[float, float] | None = None
 
 
 _DATA_EXITS = (
@@ -1362,6 +1363,47 @@ _USB2_EXITS = (
 )
 
 
+_RX2_NETS = ("USB3_RX2+", "USB3_RX2-")
+_J1_USB = "Connector_USB:USB_C_Receptacle_USB2.0"
+_RX2_EXITS = (
+    _DataExit(
+        "J1",
+        _J1_USB,
+        "A10",
+        (0.3, 0.6),
+        "USB3_RX2-",
+        old=((0, 0), (0, 0.15), (0.1936, 0.15), (0.95, 0.9064), (0.95, 1.10)),
+        new=((0, 0), (0.58, 0.58), (0.71, 0.58), (0.95, 0.82), (0.95, 1.10)),
+        fixed_via=(0.6, 0.25),
+    ),
+    _DataExit(
+        "J1",
+        _J1_USB,
+        "A11",
+        (0.3, 0.6),
+        "USB3_RX2+",
+        old=((0, 0), (0, 0.3436), (0.7564, 1.10), (0.95, 1.10)),
+        new=((0, 0), (0.60, 0.60), (0.60, 1.10), (0.95, 1.10)),
+        fixed_via=(0.6, 0.25),
+    ),
+)
+
+
+def _fixed_via_ok(pcb: PCB, ex: _DataExit, fp, pad, seat: XY, protected: set[str]) -> bool:
+    seated = [v for v in pcb.vias if v.net_name == ex.net and _xy(v.position) == seat]
+    if len(seated) != 1:
+        return False
+    via = seated[0]
+    if (via.size, via.drill) != ex.fixed_via or via.via_type or set(via.layers) != {"F.Cu", "B.Cu"}:
+        return False
+    locks = BoardItemLocks(pcb._sexp)
+    anchors = ((fp, fp._sexp_node), (pad, pad._sexp_node), (via, pcb.via_source_node(via)))
+    return all(
+        node is not None and not locks.is_locked(node) and item.uuid.lower() not in protected
+        for item, node in anchors
+    )
+
+
 def _data_run(
     pcb: PCB,
     ex: _DataExit,
@@ -1371,14 +1413,14 @@ def _data_run(
     width: float,
     *,
     exact: bool = False,
-) -> tuple[list[Segment], Segment] | None:
-    """The measured escape run and its trunk, or ``None`` to decline.
+) -> tuple[list[Segment], Segment | None] | None:
+    """The measured escape run and any adjoining trunk.
 
     The walk follows the unique continuation from the pad centre, consuming
     only same-width F.Cu pieces of the pad's net; a branch, a stray landing,
     a lock or a group member declines it.  The consumed corner list must
-    match the measured control, and exactly one trunk piece must remain
-    attached at the junction.
+    match the measured control. A fixed via terminates the F.Cu run;
+    otherwise exactly one trunk piece must remain attached at the junction.
     """
     at: dict[XY, list[Segment]] = defaultdict(list)
     for seg in pcb.segments:
@@ -1420,6 +1462,8 @@ def _data_run(
         return None
     consumed = {id(s) for s in chain}
     remaining = [s for s in at.get(junction, []) if id(s) not in consumed]
+    if ex.fixed_via is not None:
+        return None if remaining else (chain, None)
     if len(remaining) != 1:
         return None
     trunk = remaining[0]
@@ -1446,8 +1490,8 @@ def _stage_data_exit(
         or pad.size != ex.pad_size
     ):
         return None
-    if ex.trunk_end is not None:
-        # These two measured USB2 openings have the same outlines as the SMD lands.
+    if ex.trunk_end is not None or ex.fixed_via is not None:
+        # The measured USB openings have the same outlines as the SMD lands.
         if pad.type != "smd" or not {"F.Cu", "F.Mask"} <= set(pad.layers):
             return None
         shapes = _departure_mask_shapes(pcb, fp, pad)
@@ -1455,24 +1499,33 @@ def _stage_data_exit(
             return None
     center = _xy(position)
     junction = _xy((center[0] + ex.old[-1][0], center[1] + ex.old[-1][1]))
+    if ex.fixed_via is not None and not _fixed_via_ok(pcb, ex, fp, pad, junction, protected):
+        return None
     walked = _data_run(pcb, ex, center, junction, protected, width)
     if walked is None:
         return None
-    chain, trunk = walked
-    target = _xy((center[0] + ex.new[-1][0], center[1] + ex.new[-1][1]))
-    far = _xy(trunk.end) if _xy(trunk.start) == junction else _xy(trunk.start)
-    if not _on_line(far, junction, target):
-        return None
-    old_length, new_length = dist(far, junction), dist(far, target)
-    moved = dist(junction, target)
-    if ex.trunk_end is not None:
-        expected_far = _xy((center[0] + ex.trunk_end[0], center[1] + ex.trunk_end[1]))
-        # Only shorten the measured trunk. Never cross or consume its far endpoint.
-        if far != expected_far or target == far or abs(moved + new_length - old_length) > _EPS:
+    edited, trunk = walked
+    points = [_xy((center[0] + dx, center[1] + dy)) for dx, dy in ex.new]
+    target = points[-1]
+    legs = list(pairwise(points))
+    if trunk is None:
+        if target != junction:
             return None
-    elif new_length < old_length - _EPS or abs(new_length - old_length - moved) > _CLK_TOL:
-        return None
-    edited = [*chain, trunk]
+    else:
+        far = _xy(trunk.end) if _xy(trunk.start) == junction else _xy(trunk.start)
+        if not _on_line(far, junction, target):
+            return None
+        old_length, new_length = dist(far, junction), dist(far, target)
+        moved = dist(junction, target)
+        if ex.trunk_end is not None:
+            expected_far = _xy((center[0] + ex.trunk_end[0], center[1] + ex.trunk_end[1]))
+            # Only shorten the measured trunk. Never cross or consume its far endpoint.
+            if far != expected_far or target == far or abs(moved + new_length - old_length) > _EPS:
+                return None
+        elif new_length < old_length - _EPS or abs(new_length - old_length - moved) > _CLK_TOL:
+            return None
+        edited.append(trunk)
+        legs.append((far, target))
     original = list(pcb.segments)
     validator = ConnectivityValidator(pcb)
     before = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
@@ -1482,13 +1535,14 @@ def _stage_data_exit(
     if pcb.remove_segments(edited) != len(edited):
         return None
     added: list[Segment] = []
-    for a, b in pairwise(_xy((center[0] + o[0], center[1] + o[1])) for o in ex.new):
+    for a, b in legs:
         if a != b:
             added.extend(pcb.add_trace(a, b, width=width, layer="F.Cu", net=ex.net))
-    added.extend(pcb.add_trace(far, target, width=width, layer="F.Cu", net=ex.net))
     after = build_copper_contact_graph(validator, pad.net_number, with_bonds=True)
     current, current_ends = _external_contacts(after, pcb.segments, added, None)
     if len(after.components()) != 1 or not contacts <= current or not ends <= current_ends:
+        return None
+    if ex.fixed_via is not None and contacts != current:
         return None
     return added
 
@@ -1825,6 +1879,7 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
             _PairEscape("32", "PCIE_RX-", "In2.Cu", (1.00, 0.20), (1.20, 0.0), (3.70, 2.90)),
         ),
     )
+    edits += _clear_data_pair(path, rules, _RX2_EXITS, _RX2_NETS, 0.275, "USB3 RX2")
     tx_nets = ("PCIE_TX+", "PCIE_TX-")
     edits += _clear_pcie_taper_pair(
         path,
