@@ -259,6 +259,29 @@ def test_through_via_tap_with_unused_barrel_tail(receiving_layer, termination):
     assert result.ok == (termination == "pad"), result.reason
 
 
+@pytest.mark.parametrize("layout", ["one_via", "two_connected", "two_open"])
+def test_vias_in_shared_pad_require_their_own_layer_transfer(layout):
+    pcb = PCB.create(layers=4)
+    for ref, x, y in [("J1", 20, 50), ("J2", 120, 50), ("SHARED", 21, 52), ("LOAD", 32, 62)]:
+        _add_pad_footprint(pcb, ref=ref, x=x, y=y, net="NET1")
+    launch = pcb.get_footprint("J1").pads[0]
+    launch.type, launch.layers = "smd", ["F.Cu"]
+    shared = pcb.get_footprint("SHARED").pads[0]
+    shared.type, shared.shape, shared.size, shared.layers = "smd", "rect", (3, 1), ["B.Cu"]
+    pcb.add_trace((20, 50), (120, 50), width=0.6, layer="F.Cu", net="NET1")
+    pcb.add_trace((20, 50), (20, 52), width=0.6, layer="F.Cu", net="NET1")
+    pcb.add_via(20, 52, net="NET1")
+    if layout != "one_via":
+        pcb.add_via(22, 52, net="NET1")
+    if layout == "two_connected":
+        pcb.add_trace((22, 52), (32, 62), width=0.6, layer="F.Cu", net="NET1")
+
+    result = resolve_current_path(pcb, spec())
+    assert result.status == ("ambiguous" if layout == "two_open" else "resolved"), result.reason
+    eligible = {id(pcb.segments[0])} if layout != "two_open" else set()
+    assert reinforcement_eligible_segment_ids(pcb, [spec()]) == eligible
+
+
 def test_two_unrelated_via_arms_still_ambiguous_without_array_proof():
     """Two candidate via-legs that fail the full array proof stay ambiguous.
 

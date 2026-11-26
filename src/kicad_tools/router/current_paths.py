@@ -1663,6 +1663,9 @@ class _GraphEdge:
     # Authored centreline contacts, before pad hubs and via rows contract nodes.
     span: tuple[tuple[float, float], tuple[float, float]] | None = None
 
+    # This edge belongs to a physical via with contacts on two or more layers.
+    barrel_has_transfer: bool = False
+
     def tracks(self) -> tuple[Segment, ...]:
         return (self.segment, *self.overlaid) if self.segment is not None else ()
 
@@ -1985,14 +1988,20 @@ def _build_graph(
                 edge = _GraphEdge(seg, span=(a[:2], b[:2]))
                 track_spans[span_key] = edge
                 edges.append((a, b, edge))
+    track_nodes = {node for a, b, _ in edges for node in (a, b)}
+    barrels: list[tuple[list[_Node], list[_GraphEdge]]] = []
     for via in vias:
         nodes = [
             _copper_node(via.position, layer)
             for layer in COPPER_LAYER_ORDER
             if layer in layers and via_spans_layer(via.layers, layer)
         ]
+        barrel_edges = []
         for a, b in zip(nodes, nodes[1:], strict=False):
-            edges.append((a, b, _GraphEdge()))
+            edge = _GraphEdge()
+            barrel_edges.append(edge)
+            edges.append((a, b, edge))
+        barrels.append((nodes, barrel_edges))
 
     # Contract only contacts inside one physical convex pad. Adding a pad hub
     # plus the original internal track edges instead manufactures false cycles.
@@ -2067,6 +2076,14 @@ def _build_graph(
             graph.item_nodes[id(pad)] = set(nodes)
             pad_contacts[(component_id, pad.number, occurrence)] = nodes
             pad_nodes.update(nodes)
+
+    # Count contacts at the original via coordinates. A shared pad hub can
+    # connect several barrels, each with different layers carrying traces.
+    used_nodes = track_nodes | pad_nodes
+    for nodes, barrel_edges in barrels:
+        if sum(node in used_nodes for node in nodes) >= 2:
+            for edge in barrel_edges:
+                edge.barrel_has_transfer = True
 
     # A later overlapping pad can contract an earlier group's hub; re-key the
     # centres to the final roots the rest of the graph is keyed by.
@@ -2585,25 +2602,6 @@ def _array_contacts_modeled(
     return True
 
 
-def _barrel_has_layer_transfer(graph: _CopperGraph, tip: _Node, pads: set[_Node]) -> bool:
-    """A dead end in barrel copper is valid if the barrel connects two used layers."""
-    pending = [tip]
-    seen = {tip}
-    used_layers: set[str] = set()
-    while pending:
-        node = pending.pop()
-        neighbours = graph.adjacency[node]
-        if node in pads or any(edge.segment is not None for _, edge in neighbours):
-            used_layers.add(node[2])
-            if len(used_layers) >= 2:
-                return True
-        for other, edge in neighbours:
-            if edge.segment is None and other not in seen:
-                seen.add(other)
-                pending.append(other)
-    return False
-
-
 def _proved_load_exits(
     graph: _CopperGraph,
     array_nodes: set[_Node],
@@ -2623,11 +2621,8 @@ def _proved_load_exits(
                 return False
             visited.add(node)
             onward = [(n, e) for n, e in graph.adjacency[node] if e is not previous]
-            if not onward and node not in terminals:
-                if previous.segment is not None or not _barrel_has_layer_transfer(
-                    graph, node, pad_nodes
-                ):
-                    return False
+            if not onward and node not in terminals and not previous.barrel_has_transfer:
+                return False
             pending.extend(onward)
     return True
 
