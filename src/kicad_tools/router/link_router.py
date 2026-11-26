@@ -32,6 +32,13 @@ https://github.com/drandyhaas/KiCadRoutingTools, MIT).  This module follows the
 same idea -- a small dedicated A* for a single missing link -- on our own PCB
 model; no KRT code is copied.
 
+:func:`route_link_junction` is the ``kct route-link --join-track`` opt-in
+(Issue #10486).  Instead of entering the destination pad it joins a track that
+is already electrically connected to that pad, at a junction outside every
+pad, so the new copper never meets the pad's mask opening.  The route carries
+the junction (:attr:`LinkRoute.junction`) and :func:`append_link_routes`
+splits the track there as it writes the branch.
+
 All coordinates here are the :class:`~kicad_tools.schema.pcb.PCB` model's
 board-relative millimetres.  :func:`append_link_route` adds the board origin
 back when it writes the copper into the file.
@@ -51,9 +58,10 @@ from kicad_tools.router.via_clearance import COORD_WRITE_GUARD_MM
 
 if TYPE_CHECKING:
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.pcb import PCB, Segment
 
 __all__ = [
+    "LinkJunction",
     "LinkRoute",
     "LinkRouteRules",
     "LinkTerminal",
@@ -61,13 +69,29 @@ __all__ = [
     "append_link_routes",
     "collapse_link_route",
     "explain_link_failure",
+    "junction_sites",
     "padless_components",
     "route_link",
+    "route_link_junction",
     "route_link_via",
 ]
 
 #: Route endpoints land at least this far inside the terminal copper (mm).
 _TERMINAL_INSET = 0.03
+
+#: Issue #10486: tracks tried as junction hosts, nearest first.  Each costs one
+#: link search, so the opt-in stays bounded on a net with thousands of tracks.
+_JUNCTION_CANDIDATES = 8
+
+#: Issue #10486: a junction is written to 0.01 mm, so one that was rounded
+#: off a track's own endpoint lands this far from it (half the increment,
+#: diagonally).  The branch then lands on that existing endpoint and the
+#: track is not split (mm).
+_JUNCTION_END_TOL = 0.0075
+
+#: Issue #10486: one candidate junction -- its straight-line distance from the
+#: source, the track, and the point on that track's centreline.
+_JunctionSite = tuple[float, "Segment", tuple[float, float]]
 
 _DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
 
@@ -231,6 +255,23 @@ class LinkTerminal:
     layers: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class LinkJunction:
+    """Where a :class:`LinkRoute` branches off an existing track (Issue #10486).
+
+    ``point`` lies on the centreline of the straight track ``start`` -> ``end``
+    (``width``, ``layer`` and ``uuid`` as the board file has it) that the
+    router chose.  All coordinates are board-relative, like the route's.
+    """
+
+    point: tuple[float, float]
+    layer: str
+    start: tuple[float, float]
+    end: tuple[float, float]
+    width: float
+    uuid: str = ""
+
+
 @dataclass
 class LinkRoute:
     """Copper that closes one link."""
@@ -244,6 +285,8 @@ class LinkRoute:
     vias: list[tuple[float, float]] = field(default_factory=list)
 
     width_by_layer: Mapping[str, float] = field(default_factory=dict)
+    #: Issue #10486: the existing track this route branches off, when it does.
+    junction: LinkJunction | None = None
 
     def width_for(self, layer: str) -> float:
         return self.width_by_layer.get(layer, self.width)
@@ -1031,6 +1074,171 @@ def route_link_via(
     )
 
 
+def junction_sites(
+    pcb: PCB,
+    model: _BoardModel,
+    net_number: int,
+    pad: LinkTerminal,
+    near: tuple[float, float],
+    rules: LinkRouteRules,
+    *,
+    endpoint_layer: str | None = None,
+    allowed_layers: Collection[str] | None = None,
+) -> list[_JunctionSite]:
+    """The straight tracks a branch from ``near`` can join, nearest first.
+
+    Issue #10486.  A track qualifies when it is on ``net_number``, belongs to
+    the copper island holding ``pad`` -- so it is electrically connected to the
+    pad, which a same-net island that merely carries the name is not -- lies on
+    ``endpoint_layer``, and on one of ``allowed_layers`` when that is given.
+    Its junction is the point of its centreline nearest to ``near`` that keeps
+    half the new track's width from every pad, so the branch's end cap stays
+    out of each pad opening.  Returns at most ``_JUNCTION_CANDIDATES`` entries
+    of ``(distance to ``near``, track, junction)``.
+
+    Keeping clear of the pads can only move a junction farther from ``near``,
+    so a track is only measured against the pads while it can still be among the
+    nearest: on a net with thousands of tracks that is a few dozen of them.
+    Consecutive pieces of one drawn track share endpoints, so a junction point
+    is offered once, for the nearest track that has it.
+    """
+    import shapely
+    from shapely.geometry import LineString, Point
+    from shapely.ops import nearest_points, unary_union
+
+    island = next(
+        (
+            comp
+            for comp in net_components(model, net_number)
+            if any(
+                layer in comp and comp[layer].intersects(geom) for layer, geom in pad.layers.items()
+            )
+        ),
+        None,
+    )
+    if island is None:
+        return []
+    for geom in island.values():
+        shapely.prepare(geom)
+    from_here = Point(near)
+    tracks: list[tuple[float, Segment, Any]] = []
+    for seg in pcb.segments:
+        if seg.net_number != net_number or seg.start == seg.end or seg.layer not in island:
+            continue
+        if endpoint_layer is not None and seg.layer != endpoint_layer:
+            continue
+        if allowed_layers is not None and seg.layer not in allowed_layers:
+            continue
+        line = LineString([seg.start, seg.end])
+        if not line.buffer(seg.width / 2).intersects(island[seg.layer]):
+            continue
+        tracks.append((line.distance(from_here), seg, line))
+    tracks.sort(key=lambda track: track[0])
+    pads = unary_union(model.pad_geoms)
+    keep_out: dict[float, Any] = {}
+    taken: set[tuple[float, float, str]] = set()
+    sites: list[_JunctionSite] = []
+    for unkept, seg, line in tracks:
+        if len(sites) == _JUNCTION_CANDIDATES and unkept > sites[-1][0]:
+            break  # every track from here on is farther than the nearest kept
+        margin = rules.width_for(seg.layer) / 2
+        if margin not in keep_out:
+            keep_out[margin] = pads.buffer(margin)
+        outside = line.difference(keep_out[margin])
+        if outside.is_empty:
+            continue
+        junction = nearest_points(outside, from_here)[0].coords[0]
+        # Consecutive pieces of one drawn track can offer the same point.
+        key = (round(junction[0], 2), round(junction[1], 2), seg.layer)
+        if key in taken:
+            continue
+        taken.add(key)
+        sites.append((math.dist(junction, near), seg, junction))
+        sites.sort(key=lambda site: site[0])
+        del sites[_JUNCTION_CANDIDATES:]
+    return sites
+
+
+def route_link_junction(
+    pcb: PCB,
+    net_number: int,
+    net_name: str,
+    source: LinkTerminal,
+    pad: LinkTerminal,
+    rules: LinkRouteRules,
+    *,
+    model: _BoardModel | None = None,
+    endpoint_layer: str | None = None,
+    allowed_layers: Collection[str] | None = None,
+    failure: dict[str, Any] | None = None,
+) -> LinkRoute | None:
+    """Route from ``source`` onto a track electrically connected to ``pad``.
+
+    Issue #10486: the ``kct route-link --join-track`` opt-in.  Each track from
+    :func:`junction_sites` is routed to, nearest first, by :func:`route_link`
+    against a point terminal on its centreline, so every routing rule still
+    validates the branch and it ends exactly where the track is split.  A route
+    counts only when its last segment lies on the track's layer and ends on
+    that point: one that reaches the junction on another layer through a via
+    parked on the track is not a track joining a track, and is passed over.
+    The best route wins (fewest vias, then shortest).  The search stops once a
+    via-free route is shorter than the straight-line distance to every
+    remaining track, measured from inside the source's own copper.  ``None``
+    when no track qualifies or no branch that ends on one routes;
+    ``failure["reason"]`` then says which.
+    """
+    from shapely.geometry import Point
+
+    model = model or _build_model(pcb)
+    sites = junction_sites(
+        pcb,
+        model,
+        net_number,
+        pad,
+        source.point,
+        rules,
+        endpoint_layer=endpoint_layer,
+        allowed_layers=allowed_layers,
+    )
+    if not sites:
+        if failure is not None:
+            failure["reason"] = (
+                "no straight track outside every pad is electrically connected to "
+                "the destination pad on the allowed layers"
+            )
+        return None
+    source_reach = max(g.hausdorff_distance(Point(source.point)) for g in source.layers.values())
+    best: tuple[tuple[int, float], LinkRoute] | None = None
+    for dist, seg, raw in sites:
+        if best is not None and not best[1].vias and dist - source_reach > best[0][1]:
+            break
+        site = (round(raw[0], 2), round(raw[1], 2))
+        target = LinkTerminal(f"junction {seg.layer}", site, {seg.layer: Point(site)})
+        route = route_link(
+            pcb,
+            net_number,
+            net_name,
+            source,
+            target,
+            rules,
+            model=model,
+            allowed_layers=allowed_layers,
+            grid_anchor=site,
+        )
+        if route is None or not route.segments or route.segments[-1][2:] != (*site, seg.layer):
+            continue
+        route.junction = LinkJunction(site, seg.layer, seg.start, seg.end, seg.width, seg.uuid)
+        length = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _ in route.segments)
+        if best is None or (len(route.vias), length) < best[0]:
+            best = (len(route.vias), length), route
+    if best is None and failure is not None:
+        failure["reason"] = (
+            "no routable branch ends on a track connected to the destination pad "
+            f"({len(sites)} tried)"
+        )
+    return best[1] if best is not None else None
+
+
 def explain_link_failure(
     pcb: PCB,
     net_number: int,
@@ -1258,7 +1466,9 @@ def append_link_routes(
     route in the same order: each call only appends nodes to the document
     tail, and the serializer is a fixed point of load/save.  A board-03
     oracle attempt commits ~20 routes, and each separate load+save of the
-    ~750 KB file cost ~0.4 s (Issue #5911).
+    ~750 KB file cost ~0.4 s (Issue #5911).  A route that carries a junction
+    (``LinkRoute.junction``, Issue #10486) also splits its host track, in
+    place, before the branch is appended.
     """
     if not routes:
         return
@@ -1339,6 +1549,127 @@ def collapse_link_route(route: LinkRoute) -> LinkRoute:
     return replace(route, segments=out, vias=list(route.vias))
 
 
+#: Tolerance matching a junction's host track to its board-file node by its
+#: endpoints (mm): the model's board-relative coordinates are the file's less
+#: the board origin, a float subtraction that is not bit-exact.
+_HOST_MATCH_TOL = 1e-6
+
+#: Tolerance for the junction lying on a track (mm): it is written to 0.01 mm,
+#: so it can be that far off a diagonal track's centreline.
+_ON_TRACK_TOL = 0.01
+
+
+#: ``(node, start, end, layer, width)`` of one ``(segment ...)`` board-file node.
+_FileTrack = tuple[Any, tuple[float, float], tuple[float, float], str, float]
+
+
+def _file_track(node: Any) -> _FileTrack | None:
+    """The ``_FileTrack`` of a ``(segment ...)`` node, or ``None``."""
+    start, end, layer, width = (node.get(name) for name in ("start", "end", "layer", "width"))
+    if start is None or end is None or layer is None or width is None:
+        return None
+    return (
+        node,
+        (start.get_float(0) or 0.0, start.get_float(1) or 0.0),
+        (end.get_float(0) or 0.0, end.get_float(1) or 0.0),
+        layer.get_string(0) or "",
+        width.get_float(0) or 0.0,
+    )
+
+
+def _holds(
+    point: tuple[float, float], start: tuple[float, float], end: tuple[float, float]
+) -> bool:
+    """True when ``point`` lies on the segment ``start`` -> ``end``."""
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return math.dist(point, start) <= _ON_TRACK_TOL
+    along = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length
+    across = abs((point[0] - start[0]) * dy - (point[1] - start[1]) * dx) / length
+    return -_ON_TRACK_TOL <= along <= length + _ON_TRACK_TOL and across <= _ON_TRACK_TOL
+
+
+def _split_track(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> None:
+    """Split the track carrying ``route.junction`` at the junction (Issue #10486).
+
+    The track is the one with the endpoints the router saw, else whichever piece
+    of it holds the junction: an earlier link in the same run may already have
+    split it.  Each half is a copy of the node with one endpoint moved, so width,
+    layer, the net reference in the board's own dialect and any lock flag
+    survive verbatim; the half toward the original end takes a fresh uuid.  A
+    junction on an endpoint that already exists leaves the node alone.
+    """
+    from kicad_tools.cli.stitch_cmd import _stitch_uuid
+    from kicad_tools.sexp import SExp, parse_string
+    from kicad_tools.sexp.builders import fmt, uuid_node
+
+    junction = route.junction
+    assert junction is not None  # the caller only splits a route that carries one
+    ox, oy = origin
+    at = (junction.point[0] + ox, junction.point[1] + oy)
+    tracks: list[_FileTrack] = []
+    for node in doc.children:
+        if node.name != "segment":
+            continue
+        track = _file_track(node)
+        if (
+            track is not None
+            and track[3] == junction.layer
+            and abs(track[4] - junction.width) <= _HOST_MATCH_TOL
+        ):
+            tracks.append(track)
+    seen = (
+        (junction.start[0] + ox, junction.start[1] + oy),
+        (junction.end[0] + ox, junction.end[1] + oy),
+    )
+    host = next(
+        (
+            t
+            for t in tracks
+            if all(
+                math.dist(a, b) <= _HOST_MATCH_TOL for a, b in zip((t[1], t[2]), seen, strict=True)
+            )
+        ),
+        None,
+    )
+    if host is None:
+        host = next((t for t in tracks if _holds(at, t[1], t[2])), None)
+    if host is None:
+        raise ValueError(
+            f"no track on {junction.layer} holds the junction at {at[0]:g},{at[1]:g} to split"
+        )
+    node, start, end, _layer, _width = host
+    if min(math.dist(at, start), math.dist(at, end)) <= _JUNCTION_END_TOL:
+        return
+    written = (fmt(at[0]), fmt(at[1]))
+    first, second = parse_string(node.to_string()), parse_string(node.to_string())
+
+    def put(target: SExp, name: str, value: SExp) -> None:
+        target.children[[child.name for child in target.children].index(name)] = value
+
+    put(first, "end", SExp.list("end", *written))
+    put(second, "start", SExp.list("start", *written))
+    if second.get("uuid") is not None:
+        put(
+            second,
+            "uuid",
+            uuid_node(
+                _stitch_uuid(
+                    "junction-seg",
+                    junction.point[0],
+                    junction.point[1],
+                    end[0] - ox,
+                    end[1] - oy,
+                    junction.layer,
+                    route.net_number,
+                )
+            ),
+        )
+    at_node = doc.children.index(node)
+    doc.children[at_node : at_node + 1] = [first, second]
+
+
 def _append_route_nodes(
     doc: Any, route: LinkRoute, origin: tuple[float, float], name_only: bool = False
 ) -> None:
@@ -1346,6 +1677,8 @@ def _append_route_nodes(
     from kicad_tools.sexp.builders import fmt, segment_node, via_node
 
     ox, oy = origin
+    if route.junction is not None:
+        _split_track(doc, route, origin)
     net_name = route.net_name if name_only and route.net_name else None
     for x_a, y_a, x_b, y_b, layer in route.segments:
         # Issue #8495: compare after the rounding ``segment_node`` applies, so a

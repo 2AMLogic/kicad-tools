@@ -13,6 +13,7 @@ pytest.importorskip("shapely")
 
 from kicad_tools.cli import kicad_toolchain, main, route_link_cmd  # noqa: E402
 from kicad_tools.schema.pcb import PCB  # noqa: E402
+from tests.test_route_link_cmd import TEE_TRACK, _tee  # noqa: E402
 
 # Two independent links, each pad pair 10 mm apart on its own row.
 BOARD = """(kicad_pcb
@@ -272,3 +273,26 @@ def test_drc_rollback_reason_names_items(board, capsys, toolchain_ok, monkeypatc
     reason = doc["links"][0]["reason"]
     assert reason.startswith("1 new DRC violation(s): clearance")
     assert "[clearance: SIGA]" in reason
+
+
+def test_rejected_branch_restores_the_unsplit_track(tmp_path, capsys, toolchain_ok, monkeypatch):
+    """Issue #10486: the host split goes with the branch when the gate rejects it."""
+    tee = _tee(tmp_path, TEE_TRACK)
+    before = tee.read_bytes()
+
+    def state(path, args):
+        # The baseline board holds one SENSE track; any added copper fails.
+        sense = sum(s.net_number == 1 for s in PCB.load(str(path)).segments)
+        drc = Counter()
+        if sense > 1:
+            drc[("clearance", "error", ("SENSE",))] += 1
+        return drc, None
+
+    monkeypatch.setattr(route_link_cmd, "_gate_state", state)
+    rc, doc = _run(capsys, str(tee), "--link", "SENSE P3.1 P2.1", "--join-track")
+    link = doc["links"][0]
+    assert rc == 1 and not doc["ok"] and doc["written"] is None
+    assert link["status"] == "rolled-back" and link["failed_check"] == "drc"
+    assert "junction" not in link
+    assert tee.read_bytes() == before
+    assert sum(s.net_number == 1 for s in PCB.load(str(tee)).segments) == 1
