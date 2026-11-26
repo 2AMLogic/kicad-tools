@@ -288,3 +288,36 @@ def test_ending_off_centre_seed_keeps_documented_fallback(tap_layer):
     audit = audit_current_paths(pcb, [_branch_spec()])
     assert audit.all_resolved
     assert audit.fully_covered
+
+
+@pytest.mark.parametrize("back_width", [None, 0.30, 2.75])
+@pytest.mark.parametrize("reverse", [True, False])
+def test_matched_entries_inside_plated_terminal(back_width, reverse):
+    pcb = PCB.create(width=60, height=60, center=False)
+    centre, bend, end = (20, 20), (20.65, 21.5), (20.65, 32.2)
+    for ref, pos, shape, size in [
+        ("J1", centre, "roundrect", (3.15, 3.15)),
+        ("J2", end, "oval", (2.5, 4.5)),
+    ]:
+        _add_pad_footprint(pcb, ref=ref, x=pos[0], y=pos[1], net="NET1")
+        pad = pcb.footprints[-1].pads[0]
+        pad.size, pad.shape = size, shape
+    for layer in ("F.Cu", "B.Cu"):
+        entry_width = 2.75 if layer == "F.Cu" else back_width
+        if entry_width is not None:
+            pcb.add_trace(centre, bend, width=entry_width, layer=layer, net="NET1")
+        pcb.add_trace(bend, end, width=2.75, layer=layer, net="NET1")
+    spec = _branch_spec(source=("J2", "1"), sink=("J1", "1")) if reverse else _branch_spec()
+    resolution = resolve_current_path(pcb, spec)
+    assert resolution.status == "resolved"
+    assert {id(s) for s in resolution.segments} == {id(s) for s in pcb.segments}
+    groups = [
+        group
+        for group in resolution.parallel_groups
+        if any(s.start == centre for s in group.segments)
+    ]
+    if back_width is not None:
+        assert len(groups) == 1
+        assert groups[0].layer_widths() == {"F.Cu": 2.75, "B.Cu": back_width}
+    else:
+        assert not groups
