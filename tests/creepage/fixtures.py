@@ -75,6 +75,26 @@ def board_source(with_slot: bool) -> str:
     return "".join(parts)
 
 
+def board_selected_pairs_source() -> str:
+    """Four pad nets plus a declared copperless net, for selected-pair tests (#10342).
+
+    L_MAINS (x=110), SIG (x=120), AUX (x=125) and GND (x=130) are 2x2 mm F.Cu
+    pads on one row; there is no slot, so each creepage equals its clearance
+    (L_MAINS-GND 18 mm, SIG-GND 8 mm, AUX-GND 3 mm).  ``NOCU`` is declared but
+    has no copper.
+    """
+    header = _HEADER.replace(
+        '(net 2 "GND")', '(net 2 "GND")\n  (net 3 "SIG")\n  (net 4 "AUX")\n  (net 5 "NOCU")'
+    )
+    parts = [header, _OUTLINE]
+    parts.append(_footprint("U1", 110, 110, 1, "L_MAINS"))
+    parts.append(_footprint("U2", 130, 110, 2, "GND"))
+    parts.append(_footprint("U3", 120, 110, 3, "SIG"))
+    parts.append(_footprint("U4", 125, 110, 4, "AUX"))
+    parts.append(")\n")
+    return "".join(parts)
+
+
 def board_close_hv_source() -> str:
     """Two 2x2 pads (L_MAINS at x=110, GND at x=113) -- a ~1 mm HV gap.
 
