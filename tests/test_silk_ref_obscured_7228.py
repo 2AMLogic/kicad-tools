@@ -113,7 +113,17 @@ def test_single_attr_flag_still_flagged(rules, tmp_path, attr):
 
 @pytest.mark.parametrize(
     "case",
-    ["hole", "renamed", "placed", "purchased", "plated", "connector", "netted", "numbered"],
+    [
+        "hole",
+        "renamed",
+        "placed",
+        "purchased",
+        "plated",
+        "connector",
+        "netted",
+        "named_net",
+        "numbered",
+    ],
 )
 def test_hidden_reference_on_unpopulated_mechanical_hole(rules, tmp_path, case):
     attributes = "exclude_from_bom exclude_from_pos_files"
@@ -128,6 +138,10 @@ def test_hidden_reference_on_unpopulated_mechanical_hole(rules, tmp_path, case):
         hole = hole.replace("np_thru_hole", "thru_hole")
     elif case == "netted":
         hole = hole[:-1] + ' (net 1 "GND"))'
+    elif case == "named_net":
+        # KiCad 10 pads carry a net name; a top-level (net 1 "GND") can leave
+        # the number 0 on a pad named CHASSIS (#10350).
+        hole = hole[:-1] + ' (net "CHASSIS"))'
     elif case == "numbered":
         hole = hole.replace('pad ""', 'pad "1"')
     elif case == "connector":

@@ -2443,7 +2443,10 @@ def check_silk_ref_obscured(
                 and footprint.exclude_from_pos_files
                 and footprint.pads
                 and all(
-                    pad.type == "np_thru_hole" and not pad.number and not pad.net_number
+                    pad.type == "np_thru_hole"
+                    and not pad.number
+                    and not pad.net_number
+                    and not pad.net_name
                     for pad in footprint.pads
                 )
             ):
