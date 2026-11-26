@@ -303,6 +303,9 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # MIPI_D0+ and four MIPI_D0- findings. The U1.32 ground repair (#9891)
     # retired both GND findings. The J1 connector repair (#10258) retired
     # the final three USB2_D+ and five USB2_D- findings.
+    # The U2/D3, U3/25 and U3/36 repairs (#10267)
+    # retired all six findings on +1V2 and +3V3. The remaining signatures are
+    # listed below.
     # Two independent regenerations reproduced every original
     # signature and per-net count exactly, so the entries are keyed by NET
     # SIGNATURE like the #8957 slits (mask_to_copper's items are
@@ -316,8 +319,6 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     #   KCT_KICAD_DOCKER=1 uv run kct check \
     #     boards/06-diffpair-test/regression-output/diffpair_test_routed.kicad_pcb \
     #     --mfr jlcpcb --errors-only --format json
-    ("mask_to_copper", "+1V2"): 8858,
-    ("mask_to_copper", "+3V3"): 8858,
     ("mask_to_copper", "USB3_RX1+"): 8858,
     ("mask_to_copper", "USB3_RX1-"): 8858,
     ("mask_to_copper", "USB3_TX1-"): 8858,
