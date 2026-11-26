@@ -114,3 +114,73 @@ def test_gate_stages_project_files_next_to_output(tmp_path):
     assert {f.suffix for f in staged} == {".kicad_pro", ".kicad_dru"}
     assert all(f.stem == "o" and f.is_file() for f in staged)
     assert _stage_project_files(src, src) == []
+
+
+def test_custom_pair_clearance_detours_only_on_authored_layer(tmp_path, capsys):
+    from shapely.geometry import Point
+
+    from kicad_tools.cli import main
+
+    p = _write(tmp_path, BODY)
+    _project(p, 0.2)
+    pcb = PCB.load(str(p))
+    args = _parse(str(p), "--link", "SIG R1.1 R2.1")
+    p.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "front pair" (layer "F.Cu") '
+        "(condition \"A.NetName == 'HV' && B.NetName == 'SIG'\") "
+        "(constraint clearance (min 2mm)))\n"
+    )
+    rules = _rules_for_link(args, pcb, _rules_from_args(args, pcb), args.links[0])
+    point = Point(0, 0)
+    assert rules.clearance_parts("SIG", 2, "F.Cu", point)[0][1] == 2.0
+    assert rules.clearance_parts("SIG", 2, "B.Cu", point)[0][1] == 0.2
+    assert rules.clearance_parts("SIG", 3, "F.Cu", point)[0][1] == 0.2
+    argv = [
+        "route-link",
+        "--format",
+        "json",
+        "--probe",
+        str(p),
+        "--link",
+        "SIG R1.1 R2.1",
+        "--link-layers",
+        "F.Cu",
+    ]
+    main(argv)
+    routed = json.loads(capsys.readouterr().out)["links"][0]
+    p.with_suffix(".kicad_dru").unlink()
+    main(argv)
+    direct = json.loads(capsys.readouterr().out)["links"][0]
+    assert routed["routable"] and direct["routable"]
+    assert routed["length_mm"] > direct["length_mm"]
+
+
+def test_attach_zone_keeps_custom_clearance(tmp_path):
+    from shapely.geometry import Point
+
+    from kicad_tools.cli.route_cmd import _preload_voltage_map
+    from tests.test_route_link_hv_8546 import _two_net_pad
+
+    p = _write(tmp_path, _two_net_pad(1, 105, 110) + _pad(2, 125, 110, 1, "SIG"))
+    vm = tmp_path / "map.json"
+    vm.write_text(json.dumps({"SIG": 0, "HV": 300}))
+    p.with_suffix(".kicad_dru").write_text(
+        "(version 1)\n(rule \"pair\" (condition \"A.NetName == 'SIG' && B.NetName == 'HV'\") "
+        "(constraint clearance (min 1mm)))\n"
+    )
+    pcb = PCB.load(str(p))
+    args = _parse(str(p), "--voltage-map", str(vm), "--link", "SIG Q1.1 R2.1")
+    assert _preload_voltage_map(args) == 0
+    rules = _rules_for_link(args, pcb, _rules_from_args(args, pcb), args.links[0])
+    zone = rules.attach_zones[0]
+    inside = Point((zone.min_x + zone.max_x) / 2, (zone.min_y + zone.max_y) / 2)
+    assert rules.clearance_for(2) > 1.0
+    assert rules.clearance_parts("SIG", 2, "F.Cu", inside)[0][1] == 1.0
+
+
+def test_invalid_dru_refuses_before_routing(tmp_path):
+    p = _write(tmp_path, BODY)
+    p.with_suffix(".kicad_dru").write_text("(version 1) (rule")
+    args = _parse(str(p), "--link", "SIG R1.1 R2.1")
+    with pytest.raises(LinkSpecError):
+        _rules_from_args(args, PCB.load(str(p)))

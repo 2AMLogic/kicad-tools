@@ -321,9 +321,19 @@ def _rules_from_args(args: argparse.Namespace, pcb: Any) -> Any:
         via_size=args.via_diameter,
         via_drill=args.via_drill,
     )
+    names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
+    if Path(args.pcb).with_suffix(".kicad_dru").is_file():
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+        project = BoardClearanceRules.from_board(args.pcb)
+        if project.dru_error:
+            raise LinkSpecError(project.dru_error)
+        if any(rule.value("clearance") is not None for rule in project.dru_rules):
+            base = replace(
+                base, board_rules=project, net_names={num: name for name, num in names.items()}
+            )
     if not args.net_clearance:
         return base
-    names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
     return replace(base, clearance_by_net=_parse_net_clearances(args.net_clearance, names))
 
 
