@@ -135,11 +135,11 @@ def _footprint(
 
 
 def _sheet_path(symbol_key: str) -> str:
-    return f"/{ROOT_UUID}/{SHEET_UUID}/{SYMBOL_UUIDS[symbol_key]}"
+    return f"/{SHEET_UUID}/{SYMBOL_UUIDS[symbol_key]}"
 
 
 def _root_path(symbol_key: str) -> str:
-    return f"/{ROOT_UUID}/{SYMBOL_UUIDS[symbol_key]}"
+    return f"/{SYMBOL_UUIDS[symbol_key]}"
 
 
 def _board_text(
@@ -494,3 +494,10 @@ def test_footprint_path_token_parsed_and_preserved(tmp_path: Path) -> None:
     reloaded = PCB.load(out)
     r1b = next(fp for fp in reloaded.footprints if fp.reference == "R1")
     assert r1b.path == _root_path("R1")
+
+
+def test_pcb_path_with_extra_schematic_root_is_stale(tmp_path: Path) -> None:
+    board = _board_text().replace(_root_path("R1"), f"/{ROOT_UUID}{_root_path('R1')}")
+    sch, pcb = _write_project(tmp_path, board)
+    report = check_instance_links(sch, pcb)
+    assert [(f.reference, f.category) for f in report.findings] == [("R1", "stale_path")]
