@@ -710,6 +710,7 @@ class ReinforcementIncompleteRule(DRCRule):
         located: dict[str, list[Segment]] | None = None,
         row_barrels: set[_Point] | None = None,
         collector: list[WiredLeg] | None = None,
+        include_parallel_wires: bool = False,
     ) -> None:
         from kicad_tools.core.geometry import rotate_pad_offset
         from kicad_tools.physics.wire_gauge import anchor_drill_for_awg
@@ -779,7 +780,8 @@ class ReinforcementIncompleteRule(DRCRule):
         for leg in legs:
             # Issue #8916: a leg reinforced by a parallel copy -- the original
             # or the copy itself -- is not a wire: (a)-(c) do not apply to it.
-            if self._parallel_reinforced(pcb, leg):
+            parallel = self._parallel_reinforced(pcb, leg)
+            if parallel and not include_parallel_wires:
                 continue
             drill = anchor_drill_for_awg(leg.gauge)
             drills_seen.add(round(drill, 4))
@@ -806,7 +808,8 @@ class ReinforcementIncompleteRule(DRCRule):
                     leg,
                     drill,
                     holes_for,
-                    is_change_via,
+                    # A wire anchor can also electrically join a parallel copy.
+                    (lambda _p: False) if parallel else is_change_via,
                     end_offset,
                     claimed,
                     scratch,

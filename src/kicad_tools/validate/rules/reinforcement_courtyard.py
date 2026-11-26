@@ -247,8 +247,29 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         plan = self._plan(pcb, rf, reinforcement_path_resolutions(pcb, self.specs))
         # Use board-verified wire spans only with a matching assembly record.
         # Without a record this rule also checks prospective wire placement.
-        wired = self.fully_wired_legs(pcb, design_rules) if self.wires else []
+        # A parallel copy exempts copper from requiring a wire, but can coexist
+        # with one. Verify wire geometry using the wire records and their gauges.
+        wire_records = [r for r in self.wires if r.get("strategy", "wire") == "wire"]
+        # Gauge lookup uses the first matching record for a leg.
+        self.wires.sort(key=lambda record: record.get("strategy") == "parallel")
+        end_offset = (
+            self.end_offset_mm if self.end_offset_mm is not None else rf.DEFAULT_END_OFFSET_MM
+        )
         for net in sorted(set(plan.resolved) | set(plan.located)):
+            wired: list[WiredLeg] = []
+            if any(r.get("net") == net for r in wire_records):
+                self._check_net(
+                    pcb,
+                    rf,
+                    net,
+                    plan.resolved.get(net, []),
+                    end_offset,
+                    DRCResults(),
+                    located=plan.located.get(net),
+                    row_barrels=plan.row_barrels.get(net),
+                    collector=wired,
+                    include_parallel_wires=True,
+                )
             self._check_net_bodies(
                 pcb,
                 rf,
@@ -256,7 +277,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                 plan.resolved.get(net, []),
                 results,
                 located=plan.located.get(net),
-                fitted=[leg for leg in wired if leg.net == net and self._record_matches_wire(leg)],
+                fitted=[leg for leg in wired if self._record_matches_wire(leg)],
             )
         return results
 
@@ -268,11 +289,9 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         for record in self.wires:
             if record.get("strategy", "wire") != "wire":
                 continue
-            if (record.get("net"), record.get("layer"), record.get("status")) != (
-                leg.net,
-                leg.layer,
-                "full",
-            ):
+            if record.get("status") not in ("full", "adopted"):
+                continue
+            if (record.get("net"), record.get("layer")) != (leg.net, leg.layer):
                 continue
             if self._matches_ends(actual, record.get("anchors")):
                 return True
@@ -331,8 +350,10 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
             v[0] for res in resolutions for ch in res.layer_changes for v in ch.vias
         ]
 
+        fitted_holes = {p for wire in fitted for p in wire.anchor_centers or ()}
+
         def is_change_via(p: _Point) -> bool:
-            return any(math.dist(p, q) < 0.05 for q in change_vias)
+            return p not in fitted_holes and any(math.dist(p, q) < 0.05 for q in change_vias)
 
         legs: list[_Leg] = []
         original_ids: dict[int, int] = {}
@@ -375,11 +396,11 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         reported_holes: set[tuple[int, int, str]] = set()
         for leg in legs:
             side = _side_of_layer(leg.layer)
+            span = installed_spans.get((leg.layer, tuple(leg.points)))
             wire_r = bare_copper_diameter_mm(leg.gauge) / 2.0
             drill = anchor_drill_for_awg(leg.gauge)
             tol = leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM
             anchors = self._leg_holes(holes, leg, drill, tol, is_change_via, rotate_pad_offset)
-            span = installed_spans.get((leg.layer, tuple(leg.points)))
             if span is not None:
                 wire_points = span
             elif self._parallel_reinforced(pcb, leg):
@@ -389,7 +410,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                 or any(
                     r.get("layer") == leg.layer
                     and r.get("strategy", "wire") == "wire"
-                    and r.get("status") in ("partial", "full")
+                    and r.get("status") in ("partial", "full", "adopted")
                     and self._matches_ends(
                         [self._abs(leg.points[0]), self._abs(leg.points[-1])],
                         [r.get("leg_start"), r.get("leg_end")],

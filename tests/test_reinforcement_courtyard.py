@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from kicad_tools.manufacturers import DesignRules
 from kicad_tools.pcb.reinforce import reinforce_net
-from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+from kicad_tools.pcb.reinforcement_sidecar import (
+    build_wire_records,
+    load_wires_if_present,
+    write_sidecar,
+)
 from kicad_tools.router.current_paths import CurrentPathSpec, PathEndpoint
 from kicad_tools.schema.pcb import PCB, Footprint, FootprintGraphic, Pad
 from kicad_tools.validate.checker import DRCChecker
@@ -450,16 +456,31 @@ def test_mixed_wire_assembly_checks_actual_wire_and_anchor_bodies():
     assert any("COPPER_ONLY" in m for m in messages(records))
 
 
-def test_placed_parallel_copper_has_no_wire_body():
+@pytest.mark.parametrize("with_wire", [False, True])
+def test_parallel_copper_checks_only_a_fitted_wire(with_wire):
     pcb = _bare_board()
     spec = _spec()
+    wires = []
+    if with_wire:
+        wire_plan = reinforce_net(pcb, NET, current_paths=[spec], strategy="wire")
+        wires = build_wire_records(wire_plan, *pcb.board_origin)
+        assert [w["status"] for w in wires] == ["full"]
     plan = reinforce_net(pcb, NET, current_paths=[spec], strategy="parallel")
     records = build_wire_records(plan, *pcb.board_origin)
     assert any(r["copy_status"] == "placed" for r in records)
     for side in ("F", "B"):
         _body(pcb, f"OVER_{side}", 70, 50, side=side)
-    checker = DRCChecker(pcb, current_path_specs=[spec], reinforcement_wires=records)
-    assert not list(checker.check_wire_run_courtyard_overlap())
+    if with_wire:
+        anchor = wires[0]["anchors"][0]
+        _body(pcb, "FILLET", anchor["x"], anchor["y"], side="B", half=0.5)
+    checker = DRCChecker(pcb, current_path_specs=[spec], reinforcement_wires=records + wires)
+    messages = _msgs(checker.check_wire_run_courtyard_overlap())
+    if with_wire:
+        assert any("[run]" in m and "OVER_F" in m for m in messages)
+        assert not any("OVER_B" in m for m in messages)
+        assert any("[end hole]" in m and "FILLET" in m and "opposite" in m for m in messages)
+    else:
+        assert messages == []
 
 
 def test_recorded_wire_leaves_bare_copper_between_hole_and_terminal():
@@ -497,3 +518,34 @@ def test_fitted_wire_follows_bend_and_clears_its_chord():
     assert any("[run]" in m and "BEND" in m for m in messages)
     assert any("[run]" in m and "foreign-net pin 1 of PIN" in m for m in messages)
     assert not any("CHORD" in m for m in messages)
+
+
+def test_adopted_wire_sidecar_checks_same_span_as_planned_wire(tmp_path):
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from tests.test_pcb_reinforce import _reinforce_args
+
+    pcb = _bare_board()
+    pcb.add_trace((120, 50), (120, 80), width=5.5, layer="B.Cu", net=NET)
+    path = tmp_path / "planned.kicad_pcb"
+    plan = reinforce_net(pcb, NET, layer="F.Cu")
+    pcb.save(path)
+    write_sidecar(path, build_wire_records(plan, *pcb.board_origin))
+    adopted = tmp_path / "adopted.kicad_pcb"
+    adopted.write_bytes(path.read_bytes())
+    assert run_pcb_command(_reinforce_args(adopted, adopt=True)) == 0
+    assert adopted.read_bytes() == path.read_bytes()
+
+    pcb = PCB.load(path)
+    # The test terminal footprints are in-memory fixtures.
+    for ref, x, y in [("J1", 20, 50), ("J2", 120, 50), ("J3", 120, 80)]:
+        _add_th_pad_footprint(pcb, ref=ref, x=x, y=y, net=NET, drill=1, size=2)
+    spec = replace(_spec(), sink=PathEndpoint("J3", "1"))
+    _body(pcb, "WIRE", 70, 50)
+    _body(pcb, "BARE", 120, 65, side="B")
+    for board, status in [(path, "full"), (adopted, "adopted")]:
+        records = load_wires_if_present(board)
+        assert any(r["status"] == status for r in records)
+        checker = DRCChecker(pcb, current_path_specs=[spec], reinforcement_wires=records)
+        messages = _msgs(checker.check_wire_run_courtyard_overlap())
+        assert any("[run]" in m and "WIRE" in m for m in messages)
+        assert not any("BARE" in m for m in messages)
