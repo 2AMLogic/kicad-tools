@@ -2585,6 +2585,25 @@ def _array_contacts_modeled(
     return True
 
 
+def _barrel_has_layer_transfer(graph: _CopperGraph, tip: _Node, pads: set[_Node]) -> bool:
+    """A dead end in barrel copper is valid if the barrel connects two used layers."""
+    pending = [tip]
+    seen = {tip}
+    used_layers: set[str] = set()
+    while pending:
+        node = pending.pop()
+        neighbours = graph.adjacency[node]
+        if node in pads or any(edge.segment is not None for _, edge in neighbours):
+            used_layers.add(node[2])
+            if len(used_layers) >= 2:
+                return True
+        for other, edge in neighbours:
+            if edge.segment is None and other not in seen:
+                seen.add(other)
+                pending.append(other)
+    return False
+
+
 def _proved_load_exits(
     graph: _CopperGraph,
     array_nodes: set[_Node],
@@ -2593,7 +2612,8 @@ def _proved_load_exits(
     """Every outgoing tree must end at pads, with no loops or return to the array."""
     if not exits:
         return False
-    terminals = set(graph.pads.values()) - array_nodes
+    pad_nodes = set(graph.pads.values())
+    terminals = pad_nodes - array_nodes
     visited: set[_Node] = set()
     for _, first, incoming in exits:
         pending = [(first, incoming)]
@@ -2604,7 +2624,10 @@ def _proved_load_exits(
             visited.add(node)
             onward = [(n, e) for n, e in graph.adjacency[node] if e is not previous]
             if not onward and node not in terminals:
-                return False
+                if previous.segment is not None or not _barrel_has_layer_transfer(
+                    graph, node, pad_nodes
+                ):
+                    return False
             pending.extend(onward)
     return True
 

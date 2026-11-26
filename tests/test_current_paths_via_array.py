@@ -241,6 +241,24 @@ def test_single_via_tap_arm_is_not_a_fanout():
     assert result.ok, result.reason
 
 
+@pytest.mark.parametrize("receiving_layer", ["In1.Cu", "In2.Cu"])
+@pytest.mark.parametrize("termination", ["pad", "open_track", "no_track"])
+def test_through_via_tap_with_unused_barrel_tail(receiving_layer, termination):
+    pcb = PCB.create(layers=4)
+    for ref, x, y in [("J1", 20, 50), ("J2", 120, 50), ("TAP", 60, 60)]:
+        _add_pad_footprint(pcb, ref=ref, x=x, y=y, net="NET1")
+    launch = pcb.get_footprint("J1").pads[0]
+    launch.type, launch.layers = "smd", ["F.Cu"]
+    pcb.add_trace((20, 50), (120, 50), width=0.6, layer="F.Cu", net="NET1")
+    pcb.add_trace((20, 50), (20, 52), width=0.6, layer="F.Cu", net="NET1")
+    pcb.add_via(20, 52, net="NET1")
+    if termination != "no_track":
+        end = (60, 60) if termination == "pad" else (40, 56)
+        pcb.add_trace((20, 52), end, width=0.6, layer=receiving_layer, net="NET1")
+    result = resolve_current_path(pcb, spec())
+    assert result.ok == (termination == "pad"), result.reason
+
+
 def test_two_unrelated_via_arms_still_ambiguous_without_array_proof():
     """Two candidate via-legs that fail the full array proof stay ambiguous.
 
