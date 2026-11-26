@@ -665,10 +665,12 @@ def _collect_hierarchy_components(
     return components, {names[identity]: pins for identity, pins in by_identity.items()}
 
 
-def _placed_symbol_identity(source: SExp | None, sheet_uuids: tuple[str, ...]) -> tuple[str, str]:
-    """Read this placement's annotation (if present) and link from the original symbol."""
+def _placed_symbol_identity(
+    source: SExp | None, sheet_uuids: tuple[str, ...]
+) -> tuple[str, str, int | None]:
+    """Read the reference, schematic link and optional unit for this sheet placement."""
     if source is None or not all(sheet_uuids):
-        return "", ""
+        return "", "", None
     uuid = source.find_child("uuid")
     symbol_uuid = uuid.get_string(0) if uuid is not None else None
     link = "/" + "/".join((*sheet_uuids[1:], symbol_uuid)) if symbol_uuid else ""
@@ -682,8 +684,9 @@ def _placed_symbol_identity(source: SExp | None, sheet_uuids: tuple[str, ...]) -
                 if (path.get_string(0) or "").rstrip("/") == wanted:
                     placed = path.find_child("reference")
                     if placed is not None and (ref := placed.get_string(0)):
-                        return ref, link
-    return "", link
+                        unit = path.find_child("unit")
+                        return ref, link, unit.get_int() if unit is not None else None
+    return "", link, None
 
 
 def _collect_sheet_nets(
@@ -754,17 +757,19 @@ def _collect_sheet_nets(
     ]
     # Old shared sheets with no annotations have only one set of references
     # and net bindings. A second annotated placement has its own references.
-    if resolved in visited and sch.symbols and not any(ref for ref, _ in identities_by_symbol):
+    if resolved in visited and sch.symbols and not any(ref for ref, _, _ in identities_by_symbol):
         return [], {}, False
     visited.add(resolved)
 
     # Collect components from this sheet
     components: list[NetlistComponent] = []
-    for sym, (ref, symbol_path) in zip(sch.symbols, identities_by_symbol, strict=True):
-        # Apply the placement's reference to this private, freshly loaded
-        # sheet before extracting nets so pad bindings use the same identity.
+    for sym, (ref, symbol_path, unit) in zip(sch.symbols, identities_by_symbol, strict=True):
+        # Apply this placement before selecting its pins. Two sheets may
+        # place different units of the same package from one shared file.
         if ref:
             sym.reference = ref
+        if unit is not None:
+            sym.unit = unit
         footprint = ""
         if hasattr(sym, "footprint") and sym.footprint:
             footprint = sym.footprint
