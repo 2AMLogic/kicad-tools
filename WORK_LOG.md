@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-25
 
+- **Issue #10249** (closed): board04: repair_bypass_mask_escapes silently skips when the reviewed path is absent
+- **PR #10259**: fix(board04): verify reviewed mask openings before manufacturing export
+- **PR #10256**: fix(drc): preserve tangent contacts when extending mask escape tracks
+- **Issue #10264** (closed): Connect a directly bonded pad when moving its via clear of the solder-mask opening
+- **PR #10266**: fix: preserve direct pad connections when moving masked vias
+- **Issue #10239** (closed): Correct offline jlcparts tiers in part search and the 3D coverage report
+- **PR #10242**: fix(parts): recognize JLCPCB catalogue tiers before limiting offline search
 - **Issue #10244** (closed): kct sch re-annotate splits native multi-unit packages unless --pcb is passed
 - **PR #10246**: fix(schematic): keep native multi-unit packages together during reannotation
 - **Issue #10257** (closed): MCP placement parity test expects the old capacitor ordering diagnostic and blocks CI
@@ -4210,12 +4217,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **PR #5742**: fix(merge-pr): route the #8248 freshness guard's stale-checks call through the #6074/#6752 credential ladder
 - **Issue #5741** (closed): merge-pr.sh: _check_required_check_freshness's stale-checks call bypasses the #6074/#6752 permission-escalation ladder
 - **PR #5740**: fix(router): keep late keep-outs hard against route-halo refinement
-
-### 2026-09-26
-
-- **PR #5735**: test(conformance): hard-gate the route-halo refinement against kicad-cli
-- **PR #5734**: fix: give the optimizer's grid collision checker an exact narrow phase
-- **Issue #5625** (closed): router/optimizer: GridCollisionChecker and VectorCollisionChecker disagree on near-threshold copper
 
 ### 2026-07-20 (evening)
 
