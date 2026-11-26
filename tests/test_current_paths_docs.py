@@ -51,8 +51,9 @@ DRC_GUIDE = REPO_ROOT / "docs" / "guides" / "drc-and-validation.md"
 SCHEMA_HEADING = "#### Declared branch current paths (`--current-paths`)"
 CASES_HEADING = "##### Operating cases"
 NET = "/VOUT"
-# The example's copper is 1.0 mm wide: it clears 2 A on 1 oz copper (0.781 mm)
-# and not the 4 A of ``load+holdup`` (2.033 mm).
+# The example's copper is 1.0 mm wide on an external layer (``F.Cu``, the
+# checker's default 10 C rise): it clears 2 A on 1 oz copper (0.781 mm) and not
+# the 4 A of ``load+holdup`` (2.033 mm). On an inner layer 2 A would need 2.033 mm.
 COPPER_WIDTH_MM = 1.0
 FEED_MIDPOINT = (40.0, 50.0)  # midway from J1.1 (20, 50) to the junction (60, 50)
 

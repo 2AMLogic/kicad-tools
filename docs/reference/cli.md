@@ -1845,8 +1845,11 @@ that refers to it describes the same physical case.
   declared `continuous_a` / `pulsed_a`, exactly as without `cases`. A case
   reports only copper whose combined current exceeds what those checks
   already judged it at, so `holdup-only` and `holdup-discharge` add nothing
-  here. With 1.0 mm copper on 1 oz, 2 A needs 0.781 mm and 4 A needs
-  2.033 mm: each path passes alone, and only `load+holdup` fails.
+  here. With 1.0 mm copper on 1 oz on an external layer (the checker's
+  default 10 °C rise), 2 A needs 0.781 mm and 4 A needs 2.033 mm: each path
+  passes alone, and only `load+holdup` fails. On an inner layer the same
+  currents need 2.033 mm and 5.288 mm, so 1.0 mm would already fail the
+  independent 2 A check.
 - **Nothing is summed unless a case says so.** A path omitted from a case
   contributes zero to it; omit it rather than listing it with `0.0`: a zero
   contribution keeps the whole case from being evaluated. Currents from
@@ -1869,7 +1872,11 @@ that refers to it describes the same physical case.
   `reinforcement_eligible`, otherwise a `warning`. Where the resolver did
   not record which way a path crosses the copper, the total is a range: the
   `error` is kept when the copper fails at the lowest total of that range
-  as well as the highest, and a `warning` reports the range otherwise.
+  as well as the highest **and** that lowest total exceeds the current the
+  per-path checks already judged the copper at. A `warning` reports the range
+  otherwise, including when a per-path check already covered the lower bound
+  (for example two paths rated 2 A with case contributions of +3 A and +1 A
+  give per-path errors at 2 A and a case warning for 2 A to 4 A).
 - **Where cases are judged.** `kct route` (post-route DRC) and `kct check`
   evaluate them, and `kct route` re-emits them next to the paths.
   `kct pcb reinforce` and `kct pcb prune` read only `paths`.
@@ -1888,10 +1895,12 @@ together is:
 ```
 
 For a pulsed path, a case's `current_a` is its **between-pulse** current;
-the path's declared `pulsed_a` peak rides on top of it with the same sign.
+during a pulse the path carries its declared `pulsed_a`, with the sign of
+`current_a`.
 With `VOUT_LOAD` declaring `"pulsed_a": 6.0` and `VOUT_HOLDUP`
 `"pulsed_a": 4.0`, both at `"duty_cycle": 0.1`, the `burst` case puts 1.0 A
-on the shared feed between pulses and 10 A at the coincident peak, and
+on the shared feed between pulses and, with each path going from +0.5 A to its
++6 A or +4 A pulse, 10 A at the coincident peak, and
 sizes the feed for their 3.30 A RMS (`sqrt(0.1*10² + 0.9*1²)`).
 
 `pulse_overlap` is read only where two or more pulsed members share copper.
