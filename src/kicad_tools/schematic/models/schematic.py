@@ -270,7 +270,7 @@ class Schematic(
         if not self._decoupling_caps:
             return report
         # A local label can carry a power net to a different wire branch.
-        nets = self._pin_nets_from_graph(*self._build_connectivity_graph(connect_named_points=True))
+        nets = self._pin_nets_from_graph(*self._build_connectivity_graph())
         for cap in self.symbols:
             provenance = self._decoupling_caps.get(cap.uuid_str)
             if provenance is None:
