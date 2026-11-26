@@ -483,7 +483,12 @@ def _inner_approach(
         used.append(segment)
         if joint is None or following == joint:
             return used, following
-        if not _on_line(old, joint, following) or dist(following, joint) >= dist(point, joint):
+        # A split approach must stay on the remaining span at each step.
+        if following == point or not _on_line(old, joint, following):
+            return None
+        if not all(
+            min(a, b) <= p <= max(a, b) for a, b, p in zip(point, joint, following, strict=True)
+        ):
             return None
         point = following
 

@@ -139,3 +139,32 @@ def test_rx1_respects_project_only_drill_clearance(rx1, neighbor):
     before = board.read_bytes()
     assert repair(board) == 0
     assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["forward", "reverse"])
+@pytest.mark.parametrize(
+    ("net", "landing", "split", "joint", "edits"),
+    [
+        (NETS[1], (10.3, 9.5), (11.6, 9.5), (11.2, 9.5), 0),
+        (NETS[0], (29.53, 19.69), (29.112, 19.272), (29.132, 19.292), 0),
+        (NETS[1], (10.3, 9.5), (10.75, 9.5), (11.2, 9.5), 2),
+    ],
+    ids=["J1-overshoot", "U2-overshoot", "J1-straight"],
+)
+def test_rx1_split_inner_approach(rx1, net, landing, split, joint, edits, reverse):
+    board, repair = rx1
+    if net == NETS[1]:
+        # Turn the retained trunk so it cannot overlap the approach beyond the junction.
+        board.write_text(board.read_text().replace("(end 18.2 9.5)", "(end 11.2 16.5)"))
+    pcb = PCB.load(board)
+    original = next(s for s in pcb.segments if _ends(s) == {landing, joint})
+    pcb.remove_segments([original])
+    for start, end in [(landing, split), (split, joint)]:
+        if reverse:
+            start, end = end, start
+        pcb.add_trace(start, end, width=original.width, layer=original.layer, net=net)
+    pcb.save(board)
+    before = board.read_bytes()
+    assert repair(board) == edits
+    if edits == 0:
+        assert board.read_bytes() == before
