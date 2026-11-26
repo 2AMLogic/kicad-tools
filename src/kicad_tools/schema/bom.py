@@ -16,6 +16,13 @@ from kicad_tools.sexp.power import is_power_lib_symbol, is_power_symbol, lib_sym
 from .schematic import Schematic
 from .symbol import SymbolInstance
 
+# Purchasing fields understood by both the schematic and board BOM readers.
+PURCHASING_FIELDS = {
+    "Manufacturer": ("manufacturer", "mfr", "mfg"),
+    "MPN": ("mpn", "mfr_pn", "manufacturer_pn", "pn"),
+    "LCSC": ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"),
+}
+
 
 @dataclass
 class BOMItem:
@@ -290,11 +297,11 @@ def _bom_item_from_symbol(
         # Map common property names
         if name.lower() in ("description", "desc"):
             item.description = value
-        elif name.lower() in ("manufacturer", "mfr", "mfg"):
+        elif name.lower() in PURCHASING_FIELDS["Manufacturer"]:
             item.manufacturer = value
-        elif name.lower() in ("mpn", "mfr_pn", "manufacturer_pn", "pn"):
+        elif name.lower() in PURCHASING_FIELDS["MPN"]:
             item.mpn = value
-        elif name.lower() in ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"):
+        elif name.lower() in PURCHASING_FIELDS["LCSC"]:
             item.lcsc = value
         else:
             item.properties[name] = value
@@ -447,11 +454,11 @@ def extract_bom_from_pcb(pcb_path: str) -> BOM:
             name_lower = name.lower()
             if name_lower in ("description", "desc"):
                 description = value
-            elif name_lower in ("manufacturer", "mfr", "mfg"):
+            elif name_lower in PURCHASING_FIELDS["Manufacturer"]:
                 manufacturer = value
-            elif name_lower in ("mpn", "mfr_pn", "manufacturer_pn", "pn"):
+            elif name_lower in PURCHASING_FIELDS["MPN"]:
                 mpn = value
-            elif name_lower in ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"):
+            elif name_lower in PURCHASING_FIELDS["LCSC"]:
                 lcsc = value
             else:
                 extra_props[name] = value

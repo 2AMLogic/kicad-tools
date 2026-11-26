@@ -27,12 +27,12 @@ import re
 import shutil
 import tempfile
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.cost.suggest import parse_component_value
-from kicad_tools.schema.bom import extract_bom
+from kicad_tools.schema.bom import PURCHASING_FIELDS, extract_bom
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import Segment, Via
@@ -188,6 +188,7 @@ class SyncChange:
     old_value: str
     new_value: str
     applied: bool = False
+    property_name: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -197,6 +198,7 @@ class SyncChange:
             "old_value": self.old_value,
             "new_value": self.new_value,
             "applied": self.applied,
+            **({"property": self.property_name} if self.property_name else {}),
         }
 
 
@@ -239,7 +241,7 @@ class SyncAnalysis:
     value_mismatches: list[dict[str, str]] = field(default_factory=list)
     value_suffix_notes: list[dict[str, str]] = field(default_factory=list)
     footprint_mismatches: list[dict[str, str]] = field(default_factory=list)
-    add_footprint_actions: list[dict[str, str]] = field(default_factory=list)
+    add_footprint_actions: list[dict[str, Any]] = field(default_factory=list)
     pad_net_mismatches: list[dict[str, str]] = field(default_factory=list)
     stranded_copper: list[dict[str, str]] = field(default_factory=list)
     scan_gaps: list[dict[str, str]] = field(default_factory=list)
@@ -638,6 +640,32 @@ class Reconciler:
                 matched_sch.add(sch_ref)
                 matched_pcb.add(pcb_ref)
 
+        for index, match in enumerate(analysis.matches):
+            sch = sch_components[match.schematic_ref]
+            board = pcb_components[match.pcb_ref]
+            extra = []
+            swap = next((a for a in match.actions if a["type"] == "update_footprint"), None)
+            for name, aliases in PURCHASING_FIELDS.items():
+                keys = [key for key in board if key.lower() in aliases] or [name]
+                for key in keys:
+                    old = board.get(key, "")
+                    new = sch.get(name) or old
+                    if swap is not None and new:
+                        # Carry fields on the swap itself, only if the replacement succeeds.
+                        swap.setdefault("properties", {})[key] = new
+                    elif new and new != old:
+                        extra.append(
+                            {
+                                "type": "update_property",
+                                "reference": match.schematic_ref,
+                                "property": key,
+                                "old_value": old,
+                                "new_value": new,
+                            }
+                        )
+            if extra:
+                analysis.matches[index] = replace(match, actions=match.actions + tuple(extra))
+
         # Update orphan lists to exclude matched items
         analysis.schematic_orphans = sorted(set(analysis.schematic_orphans) - matched_sch)
         analysis.pcb_orphans = sorted(set(analysis.pcb_orphans) - matched_pcb)
@@ -649,13 +677,16 @@ class Reconciler:
             value = sch.get("value", "")
             lib_id = sch.get("lib_id", "")
             if footprint:
-                action = {
+                action: dict[str, Any] = {
                     "type": "add_footprint",
                     "reference": ref,
                     "value": value,
                     "footprint": footprint,
                     "lib_id": lib_id,
                 }
+                properties = {key: sch[key] for key in PURCHASING_FIELDS if sch.get(key)}
+                if properties:
+                    action["properties"] = properties
                 analysis.add_footprint_actions.append(action)
 
         analysis.pad_net_mismatches = self._find_pad_net_mismatches()
@@ -925,6 +956,9 @@ class Reconciler:
                     "value": item.value or "",
                     "footprint": item.footprint or "",
                     "lib_id": item.lib_id or "",
+                    "Manufacturer": item.manufacturer,
+                    "MPN": item.mpn,
+                    "LCSC": item.lcsc,
                 }
         return components
 
@@ -952,6 +986,11 @@ class Reconciler:
                 components[fp.reference] = {
                     "value": fp.value or "",
                     "footprint": fp.name or "",
+                    **{
+                        key: value
+                        for key, value in fp.properties.items()
+                        if any(key.lower() in aliases for aliases in PURCHASING_FIELDS.values())
+                    },
                 }
         return components
 
@@ -1070,6 +1109,20 @@ class Reconciler:
                 change = self._apply_update_value(pcb, action, dry_run)
                 if change:
                     changes.append(change)
+            elif action["type"] == "update_property":
+                ref = action["reference"]
+                key = action["property"]
+                applied = not dry_run and pcb.set_footprint_property(ref, key, action["new_value"])
+                changes.append(
+                    SyncChange(
+                        reference=ref,
+                        change_type="update_property",
+                        property_name=key,
+                        old_value=action["old_value"],
+                        new_value=action["new_value"],
+                        applied=applied,
+                    )
+                )
             elif action["type"] == "rename":
                 change = self._apply_rename(pcb, action, dry_run)
                 if change:
@@ -1348,6 +1401,18 @@ class Reconciler:
         # Fallback: offset far enough that overlap is impossible
         return cx + 20 * min_spacing, cy
 
+    @staticmethod
+    def _set_new_purchasing_fields(pcb, ref: str, fields: dict[str, str]) -> None:
+        """Carry purchasing data onto a new instance, including library field aliases."""
+        if not fields:
+            return
+        footprint = pcb.get_footprint(ref)
+        for key, value in fields.items():
+            aliases = next(names for names in PURCHASING_FIELDS.values() if key.lower() in names)
+            library_keys = [k for k in footprint.properties if k.lower() in aliases]
+            for field_name in dict.fromkeys([key, *library_keys]):
+                pcb.set_footprint_property(ref, field_name, value)
+
     def _apply_add_footprint(
         self,
         pcb,
@@ -1390,7 +1455,9 @@ class Reconciler:
                 rotation=0.0,
                 layer="F.Cu",
                 value=value,
+                schematic_path=self._schematic_path,
             )
+            self._set_new_purchasing_fields(pcb, ref, action.get("properties", {}))
             return SyncChange(
                 reference=ref,
                 change_type="add_footprint",
@@ -1504,6 +1571,7 @@ class Reconciler:
                 rotation=old_rotation,
                 layer=old_layer,
                 value=old_fp.value or "",
+                schematic_path=self._schematic_path,
             )
         except (FileNotFoundError, ValueError) as e:
             return SyncChange(
@@ -1520,6 +1588,7 @@ class Reconciler:
 
         # Rename the new footprint from the temporary reference to the real one
         pcb.update_footprint_reference(temp_ref, ref)
+        self._set_new_purchasing_fields(pcb, ref, action.get("properties", {}))
 
         # Step 5: Re-assign nets from old pads to new pads by pad number
         new_pad_count = len(new_fp.pads)

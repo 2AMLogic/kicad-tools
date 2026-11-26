@@ -240,6 +240,17 @@ def _output_table(analysis) -> None:
             print(f"    Schematic: {mm['schematic_footprint']}")
             print(f"    PCB:       {mm['pcb_footprint']}")
 
+    field_updates = [
+        a for m in analysis.matches for a in m.actions if a["type"] == "update_property"
+    ]
+    if field_updates:
+        print(f"\nPURCHASING FIELD CHANGES ({len(field_updates)}):")
+        for action in field_updates:
+            print(
+                f"  {action['reference']} {action['property']}: "
+                f"{action['old_value']} -> {action['new_value']}"
+            )
+
     if analysis.pad_net_mismatches:
         print(f"\n{'-' * 60}")
         print(f"PAD NET MISMATCHES ({len(analysis.pad_net_mismatches)}):")
@@ -334,7 +345,10 @@ def _output_changes_table(changes, dry_run: bool) -> None:
             else:
                 status = "(skipped)"
 
-        print(f"\n  {change.change_type}: {change.reference}")
+        elif change.change_type == "update_property" and not dry_run and not change.applied:
+            status = "(skipped)"
+        field_name = f" {change.property_name}" if change.change_type == "update_property" else ""
+        print(f"\n  {change.change_type}: {change.reference}{field_name}")
         if change.change_type == "remove_stranded_copper":
             print(f"    {change.old_value} {status}")
         elif change.change_type == "add_footprint" or change.change_type == "remove_orphan":
