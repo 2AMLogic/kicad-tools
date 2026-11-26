@@ -230,6 +230,8 @@ class WiredLeg:
     anchor_arc: tuple[float, float] | None = None
     anchor_centers: tuple[_Point, _Point] | None = None  # physical, board-relative
     anchor_pad_ids: tuple[int, ...] = ()
+    # The actual holes accepted by the per-leg check, in polyline order.
+    anchors: tuple[_Anchor, ...] = field(default=(), compare=False)
 
 
 class ReinforcementIncompleteRule(DRCRule):
@@ -283,10 +285,10 @@ class ReinforcementIncompleteRule(DRCRule):
 
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         results = DRCResults()
-        self._run(pcb, design_rules, results, collector=None)
+        self._run(pcb, results, collector=None)
         return results
 
-    def fully_wired_legs(self, pcb: PCB, design_rules: DesignRules) -> list[WiredLeg]:
+    def fully_wired_legs(self, pcb: PCB, design_rules: DesignRules | None = None) -> list[WiredLeg]:
         """Legs on this board this rule judges fully wired (Issue #9648).
 
         Runs the same per-leg completeness check as :meth:`check` (its
@@ -299,13 +301,12 @@ class ReinforcementIncompleteRule(DRCRule):
         of re-deriving one, so this can never disagree with :meth:`check`.
         """
         collector: list[WiredLeg] = []
-        self._run(pcb, design_rules, DRCResults(), collector=collector)
+        self._run(pcb, DRCResults(), collector=collector)
         return collector
 
     def _run(
         self,
         pcb: PCB,
-        design_rules: DesignRules,
         results: DRCResults,
         collector: list[WiredLeg] | None,
     ) -> None:
@@ -880,6 +881,7 @@ class ReinforcementIncompleteRule(DRCRule):
                         width=leg.width,
                         gauge=leg.gauge,
                         anchor_arc=(outcome[0].arc, outcome[1].arc),
+                        anchors=outcome,
                         anchor_centers=(outcome[0].pos, outcome[1].pos),
                         anchor_pad_ids=tuple(id(a.pad) for a in outcome if a.pad is not None),
                     )
@@ -956,9 +958,9 @@ class ReinforcementIncompleteRule(DRCRule):
         results: DRCResults,
         via_is_tented: Any,
     ) -> tuple[_Anchor, _Anchor] | None:
-        """Check one leg and return its two anchors when identifiable.
+        """Return the two holes in leg order when present on a wire leg.
 
-        Consumers credit the span only when the checks emit no violations.
+        Callers judging completeness also require that no finding was emitted.
         """
         pts, cum, total = leg.points, leg.cum, leg.total
         if len(pts) < 2 or total <= 1e-9:

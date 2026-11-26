@@ -169,10 +169,71 @@ def _expand_aperture_macro(
     return shape
 
 
+@dataclass(frozen=True)
+class GerberFeature:
+    """One plotted object with the X2 object attributes active when it was drawn.
+
+    Retained by :func:`parse_gerber_geometry` on request (Issue #10422), so a
+    caller can tell copper of one net from another without re-reading the file.
+    ``geometry`` is in the frame of :attr:`GerberGeometry.geometry` (mm, y down)
+    with every later clear-polarity object already erased: a feature is exactly
+    the material it contributes to the final image, and one a clear object
+    erased wholly is not retained. ``net`` is the ``%TO.N`` value (an empty
+    string is a plotted "no net"), ``component`` the ``%TO.C`` reference and
+    ``pad`` the ``%TO.P`` ``(reference, number, function)``; each is ``None``
+    until its attribute is set and again after ``%TD`` resets it, so an object
+    never inherits the identity of the one plotted before it. ``start`` and
+    ``end`` are a draw's end points. ``index`` numbers plotted objects in file
+    order.
+    """
+
+    index: int
+    operation: str
+    geometry: Any
+    net: str | None = None
+    component: str | None = None
+    pad: tuple[str, str, str | None] | None = None
+    start: tuple[float, float] | None = None
+    end: tuple[float, float] | None = None
+
+
 @dataclass
 class GerberGeometry:
     geometry: Any
     command_count: int
+    features: tuple[GerberFeature, ...] = ()
+
+
+def _track_object_attribute(command: str, attributes: dict[str, Any]) -> None:
+    """Apply one X2 object-attribute command to the attributes of the next object.
+
+    A ``%TO`` command replaces the attribute of the same name and leaves the
+    others in force, as the specification's persistence rule requires; ``%TD``
+    with no name deletes them all, ``%TD.N`` (``.P``, ``.C``) only that one.
+    """
+    name, _, value = command.partition(",")
+    if name.startswith("TO."):
+        if name == "TO.N":
+            attributes["net"] = value
+        elif name == "TO.C":
+            attributes["component"] = value
+        elif name == "TO.P":
+            reference, _, rest = value.partition(",")
+            number, _, function = rest.partition(",")
+            attributes["pad"] = (reference, number, function or None)
+    elif command == "TD":
+        attributes.clear()
+    elif name == "TD.N":
+        attributes.pop("net", None)
+    elif name == "TD.P":
+        attributes.pop("pad", None)
+    elif name == "TD.C":
+        attributes.pop("component", None)
+
+
+# A retained feature erased down to less than this (mm²) was removed by a
+# clear object; it contributes no material and is not retained.
+_FEATURE_AREA_EPSILON_MM2 = 1e-12
 
 
 def _arc(start, end, center, clockwise, tolerance):
@@ -231,8 +292,28 @@ def repair_self_touching_polygon(polygon):
     return repaired
 
 
-def parse_gerber_geometry(data: str) -> GerberGeometry:
-    """Read native Gerber with the KiCad %AMRoundRect macro subset; reject the rest."""
+def _flip_y(shape):
+    """A feature mirrored into the image's y-down frame.
+
+    The same arithmetic as ``shapely.affinity.scale(shape, 1, -1, origin=(0, 0))``
+    applied to the whole image, coordinate by coordinate, so a feature and the
+    image it came from agree exactly; done on the coordinate array because
+    the image is mirrored once and a layer's features thousands of times.
+    """
+    import shapely
+
+    coordinates = shapely.get_coordinates(shape)
+    coordinates[:, 1] = coordinates[:, 1] * -1.0 + 0.0
+    return shapely.set_coordinates(shape, coordinates)
+
+
+def parse_gerber_geometry(data: str, *, with_features: bool = False) -> GerberGeometry:
+    """Read native Gerber with the KiCad %AMRoundRect macro subset; reject the rest.
+
+    ``with_features`` also retains every plotted object as a
+    :class:`GerberFeature` with the X2 object attributes active when it was
+    drawn. The image and the command count are the same either way.
+    """
     from shapely.affinity import rotate, scale, translate  # type: ignore[import-untyped]
     from shapely.geometry import (  # type: ignore[import-untyped]
         GeometryCollection,
@@ -261,6 +342,9 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
     count = 0
 
     pending: list[Any] = []
+    # [shape, attributes, operation, start, end] per plotted object.
+    retained: list[list[Any]] = []
+    attributes: dict[str, Any] = {}
 
     def flush():
         # Collapse the same-polarity batch with one unary_union instead of
@@ -272,11 +356,19 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
         batch = unary_union(pending)
         pending.clear()
         geometry = geometry.union(batch) if dark else geometry.difference(batch)
+        if not dark:
+            # A clear object erases everything plotted before it, whatever its
+            # own attributes; the clear objects in this batch erase themselves.
+            for feature in retained:
+                if feature[0].intersects(batch):
+                    feature[0] = feature[0].difference(batch)
 
-    def emit(shape):
+    def emit(shape, operation, start=None, end=None):
         if not shape.is_valid:
             raise GerberGeometryError("Invalid Gerber polygon")
         pending.append(shape)
+        if with_features:
+            retained.append([shape, dict(attributes), operation, start, end])
 
     def coord(value):
         if decimals is None or units is None:
@@ -319,7 +411,10 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
             elif "*" not in command and re.fullmatch(
                 r"(?:TF\.[^*]+|TA\.[^*]+|TO\.[^*]+|TD(?:\.[^*]+)?)", command
             ):
-                pass  # X2 metadata does not change the image.
+                if with_features:
+                    # X2 metadata does not change the image; the object
+                    # attributes do name the objects plotted after them.
+                    _track_object_attribute(command, attributes)
             elif match := re.fullmatch(r"AM([A-Za-z0-9_+\-]+)\*(.+)", command, re.DOTALL):
                 name = match[1]
                 if name in {"C", "R", "O", "P"}:
@@ -439,7 +534,7 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                         raise GerberGeometryError("Invalid region contour")
                     polygon = repaired
                 shape = shape.symmetric_difference(polygon)
-            emit(shape)
+            emit(shape, "region")
             region, contour = None, []
             continue
         if command == "M02":
@@ -492,12 +587,15 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                 if hole or (interpolation != 1 and kind != "C"):
                     raise GerberGeometryError("Unsupported swept aperture")
                 if kind == "C":
-                    emit(_buffer(LineString(points), width / 2))
+                    emit(_buffer(LineString(points), width / 2), "draw", position, endpoint)
                 elif kind in {"R", "O", "P"}:
                     emit(
                         unary_union(
                             [translate(aperture, *position), translate(aperture, *endpoint)]
-                        ).convex_hull
+                        ).convex_hull,
+                        "draw",
+                        position,
+                        endpoint,
                     )
                 else:
                     raise GerberGeometryError(f"Draw with macro aperture: {kind}")
@@ -507,11 +605,27 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
             aperture, _, _, _, nonpositive = apertures[selected]
             if nonpositive:
                 raise GerberGeometryError("Nonpositive aperture")
-            emit(translate(aperture, *endpoint))
+            emit(translate(aperture, *endpoint), "flash")
         else:
             raise GerberGeometryError("Coordinates without valid operation")
         position = endpoint
     if not ended or decimals is None or units is None:
         raise GerberGeometryError("Incomplete Gerber layer")
     flush()
-    return GerberGeometry(scale(geometry, xfact=1, yfact=-1, origin=(0, 0)), count)
+    features = []
+    for index, (shape, attrs, operation, start, end) in enumerate(retained):
+        if shape.is_empty or shape.area <= _FEATURE_AREA_EPSILON_MM2:
+            continue
+        features.append(
+            GerberFeature(
+                index,
+                operation,
+                _flip_y(shape),
+                net=attrs.get("net"),
+                component=attrs.get("component"),
+                pad=attrs.get("pad"),
+                start=None if start is None else (start[0], -start[1]),
+                end=None if end is None else (end[0], -end[1]),
+            )
+        )
+    return GerberGeometry(scale(geometry, xfact=1, yfact=-1, origin=(0, 0)), count, tuple(features))
