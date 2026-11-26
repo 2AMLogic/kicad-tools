@@ -835,8 +835,11 @@ def _create_project_zip(
     if not project_files:
         raise FileNotFoundError(f"No KiCad project files found in {project_dir}")
 
-    project_files.extend(_project_symbol_files(project_dir))
-    project_files.extend(_project_footprint_files(project_dir))
+    library_files = [*_project_symbol_files(project_dir), *_project_footprint_files(project_dir)]
+    # In-project symlinked library members keep the library path they were found
+    # under; the archive layout is keyed by real path for everything else.
+    aliases = sorted({f for f in library_files if f != f.resolve()})
+    project_files.extend(f for f in library_files if f not in aliases)
     project_files = sorted(set(project_files))
 
     project_file = pcb_path.with_suffix(".kicad_pro")
@@ -852,7 +855,10 @@ def _create_project_zip(
         else boundary
     )
     layout = archive_layout(
-        identity, project_files, lambda source: source.parent.relative_to(archive_base).as_posix()
+        identity,
+        project_files,
+        lambda source: source.parent.relative_to(archive_base).as_posix(),
+        aliases,
     )
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for source in project_files:
@@ -862,10 +868,12 @@ def _create_project_zip(
                 zf.writestr(member, layout.member_bytes(real, real.read_bytes()))
             else:
                 zf.write(source, member)
+        for alias in aliases:
+            zf.write(alias, layout.names[alias])
         if layout.record is not None:
             zf.writestr(layout.record_name, layout.record)
 
-    logger.info(f"Created project ZIP: {zip_path} ({len(project_files)} files)")
+    logger.info(f"Created project ZIP: {zip_path} ({len(project_files) + len(aliases)} files)")
     return zip_path
 
 

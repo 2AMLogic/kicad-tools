@@ -91,3 +91,54 @@ def test_local_3d_library_ships_with_license_and_is_verified(project, tmp_path):
             assert archive.read(relative) == member.read_bytes()
         assert "Local.3dshapes/external.step" not in archive.namelist()
     assert shapes / "external.step" not in dependencies
+
+
+def _shared_notice_project(project, tmp_path):
+    (project / "LICENSE.md").write_text("shared notice")
+    for name in ("App.3dshapes", "Other.3dshapes"):
+        shapes = project / name
+        shapes.mkdir()
+        (shapes / "LICENSE.md").symlink_to("../LICENSE.md")
+    pcb = project / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    out = tmp_path / "export"
+    out.mkdir()
+    return pcb, out
+
+
+def test_shared_license_symlinks_keep_their_library_paths(project, tmp_path):
+    pcb, out = _shared_notice_project(project, tmp_path)
+    with zipfile.ZipFile(_create_project_zip(pcb, out)) as archive:
+        names = archive.namelist()
+        assert names.count("App.3dshapes/LICENSE.md") == 1
+        assert names.count("Other.3dshapes/LICENSE.md") == 1
+        assert "LICENSE.md" not in names
+        assert len(names) == len(set(names))
+        assert archive.read("App.3dshapes/LICENSE.md") == b"shared notice"
+
+
+@pytest.mark.parametrize("missing", ["App.3dshapes/LICENSE.md", "Other.3dshapes/LICENSE.md"])
+def test_readiness_names_the_missing_shared_notice(project, tmp_path, missing):
+    pcb, out = _shared_notice_project(project, tmp_path)
+    archive = _create_project_zip(pcb, out)
+    options = readiness_cmd.ReadinessOptions(
+        board_dir=project,
+        pcb=pcb,
+        schematic=None,
+        project=None,
+        manufacturer="jlcpcb",
+        mode="pcb_only",
+        output_dir=out,
+        evidence_dir=tmp_path / "evidence",
+    )
+    assert readiness_cmd._verify_project_provenance(options) == []
+
+    with zipfile.ZipFile(archive) as zf:
+        kept = {name: zf.read(name) for name in zf.namelist() if name != missing}
+    with zipfile.ZipFile(archive, "w") as zf:
+        for name, data in kept.items():
+            zf.writestr(name, data)
+    problems = readiness_cmd._verify_project_provenance(options)
+    assert any(f"{missing} is absent" in p for p in problems)
+    other = ({"App.3dshapes/LICENSE.md", "Other.3dshapes/LICENSE.md"} - {missing}).pop()
+    assert not any(f"{other} is absent" in p for p in problems)

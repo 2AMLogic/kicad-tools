@@ -2905,6 +2905,20 @@ def _kiprjmod_model_bodies(
     return bodies
 
 
+def _library_aliases(options: ReadinessOptions) -> list[Path]:
+    """In-project symlinked library members, by the library path they are found under.
+
+    Their archive name is that path, not their target's, so two notices sharing
+    one target are each delivered (and verified) at their own library path.
+    """
+    if not options.pcb.is_file():
+        return []
+    real_root = options.pcb.parent.resolve()
+    boundary = options.root.resolve()
+    libraries = _project_libraries(real_root, boundary, options.project_root is not None)
+    return sorted(member for member in libraries if member != member.resolve())
+
+
 def _required_sources(options: ReadinessOptions) -> list[Path]:
     """Every (resolved) file the archived project must contain to be the checked design.
 
@@ -2919,8 +2933,11 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
     sources: set[Path] = set()
     if options.pcb.is_file():
         sources.add(options.pcb.resolve())
+        aliases = set(_library_aliases(options))
         sources.update(
-            p.resolve() for p in _project_dependencies(options.pcb, options.root, explicit)
+            p.resolve()
+            for p in _project_dependencies(options.pcb, options.root, explicit)
+            if p not in aliases
         )
         version = options.pcb.parent / VERSION_FILE
         if version.is_file():
@@ -2966,7 +2983,7 @@ def _archive_layout(options: ReadinessOptions, sources: Sequence[Path]) -> Archi
         if all(source.resolve().is_relative_to(base) for source in sources)
         else in_project_root
     )
-    return archive_layout(identity, sources, directory_of)
+    return archive_layout(identity, sources, directory_of, _library_aliases(options))
 
 
 def _normalize_project_archive(options: ReadinessOptions) -> None:
@@ -3102,6 +3119,7 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
         sources = set(_required_sources(options)) | {options.pcb.resolve()}
         if options.schematic is not None:
             sources.add(options.schematic.resolve())
+        sources.update(_library_aliases(options))
         layout = _archive_layout(options, sorted(sources))
         with zipfile.ZipFile(archive) as zf:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
