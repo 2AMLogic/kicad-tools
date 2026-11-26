@@ -357,21 +357,10 @@ def _run_pour_slot_pass(written: Path, rules_from: Path | None, pack: bool = Fal
 
     from kicad_tools.optim.pour_slot_cleanup import cleanup_pour_slots
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.pour_slot import load_pour_slot_clearances
 
     pcb = PCB.load(str(written))
-    clearances: dict[str, float] = {}
-    try:
-        from kicad_tools.core.project_clearance import resolve_project_clearances
-        from kicad_tools.validate.rules.netclass_clearance_copper import load_project
-
-        project = load_project(rules_from or written)
-        if project is not None:
-            names = ["", *(n.name for n in pcb.nets.values() if n.name)]
-            clearances = {
-                n: v.clearance for n, v in resolve_project_clearances(project, names).items()
-            }
-    except Exception:  # advisory-grade input: use the built-in Default netclass
-        clearances = {}
+    clearances = load_pour_slot_clearances(rules_from or written, pcb)
 
     def referee(candidate):
         with tempfile.TemporaryDirectory(prefix="kct_slotref_") as td:

@@ -13,7 +13,8 @@ nets, overlap along their length, and::
 
     first_clearance + second_clearance < gap < first_clearance + second_clearance + min_thickness
 
-Each side uses the larger of its track's and the zone's applicable clearances.
+Each side uses the maximum of the board minimum, the zone clearance, and the
+applicable track and zone netclass clearances.
 Touching/overlapping tracks (``gap <= 0``) are a DRC matter and not reported,
 and so is a *packed* pair whose gap is at or below the sum (Issue #10121): its
 clearance keep-outs already overlap, so no fill strip ever existed between
@@ -46,6 +47,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from shapely import get_parts  # type: ignore[import-untyped]
@@ -107,6 +109,26 @@ class PourSlotPair:
     def clearance(self) -> float:
         """Conservative spacing for moved copper in the repair pass."""
         return max(self.first_clearance, self.second_clearance)
+
+
+def load_pour_slot_clearances(path: Path, pcb: PCB) -> dict[str, float]:
+    """Per-net clearance to copper, including the selected project's board floor."""
+    from kicad_tools.core.project_clearance import ProjectClearanceError, resolve_project_clearances
+    from kicad_tools.router.clearance_resolver import project_min_clearance_mm
+    from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+    project = load_project(path)
+    if project is None:
+        return {}
+    floor = project_min_clearance_mm(project) or 0.0
+    names = ["", *(n.name for n in pcb.nets.values() if n.name)]
+    try:
+        classes = resolve_project_clearances(project, names)
+    except ProjectClearanceError:
+        classes = {}
+    clearances = {name: max(floor, rule.clearance) for name, rule in classes.items()}
+    clearances.setdefault("", max(floor, DEFAULT_NETCLASS_CLEARANCE_MM))
+    return clearances
 
 
 def iter_pour_slot_pairs(

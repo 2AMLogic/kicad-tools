@@ -306,3 +306,69 @@ def test_explicit_project_filename_does_not_change_cleanup(tmp_path, capsys, mon
         assert refills and all(r == project for r in refills)
         results[name] = (out["pairs_before"], board.read_text())
     assert results["control_p"] == results["elsewhere"]
+
+
+@pytest.mark.parametrize(("gap", "expected_gap", "warnings"), [(0.55, 0.55, 0), (0.705, 0.905, 1)])
+def test_board_minimum_in_check_cleanup_and_fill(tmp_path, capsys, gap, expected_gap, warnings):
+    import shutil
+
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+
+    from kicad_tools.cli import main
+
+    if not shutil.which("kicad-cli"):
+        pytest.skip("native refill requires kicad-cli")
+
+    films = []
+    for zone_clearance in (0.1, 0.3):
+        directory = tmp_path / str(zone_clearance)
+        directory.mkdir()
+        board = directory / "control_p.kicad_pcb"
+        zone = ZONE.replace("clearance 0.2", f"clearance {zone_clearance}")
+        pcb = PCB.create(width=50, height=40, center=False)
+        pads = [(7, 7, "GND")]
+        for net, y, pad_y in (("NET1", 15, 12), ("NET2", 15.4 + gap, 19)):
+            pcb.add_trace((11, y), (19, y), width=0.4, layer="F.Cu", net=net)
+            for x in (11, 19):
+                pcb.add_trace((x, y), (x, pad_y), width=0.4, layer="F.Cu", net=net)
+                pads.append((x, pad_y, net))
+        for i, (x, y, net) in enumerate(pads):
+            number = pcb.add_net(net).number
+            pcb._sexp.append(
+                parse_string(
+                    f'(footprint "Test:Pad" (layer "F.Cu") (at {x} {y}) '
+                    f'(property "Reference" "TP{i}" (at 0 0) (layer "F.Fab")) '
+                    f'(pad "1" smd circle (at 0 0) (size 1 1) (layers "F.Cu") (net {number} "{net}")))'
+                )
+            )
+        pcb._sexp.append(parse_string(zone))
+        pcb.save(board)
+        project = {
+            "board": {"design_settings": {"rules": {"min_clearance": 0.3}}},
+            "net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]},
+        }
+        board.with_suffix(".kicad_pro").write_text(json.dumps(project))
+        assert _public_pour_slot_count(board, capsys) == warnings
+        assert (
+            main(
+                ["optimize-traces", str(board), "--net", "GND", "--pour-slots", "--format", "json"]
+            )
+            == 0
+        )
+        report = json.loads(capsys.readouterr().out)
+        assert report["pour_slots"]["spread"] == warnings
+        assert report["pour_slots"]["pairs_after"] == 0
+        saved = PCB.load(board)
+        lower, upper = sorted(
+            (s for s in saved.segments if s.start[1] == s.end[1]), key=lambda seg: seg.start[1]
+        )
+        bottom = lower.start[1] + lower.width / 2
+        top = upper.start[1] - upper.width / 2
+        assert top - bottom == pytest.approx(expected_gap)
+        film = unary_union([Polygon(ring).buffer(0) for ring in saved.zones[0].filled_polygons])
+        assert film.area > 0
+        section = film.intersection(LineString([(15, bottom), (15, top)]))
+        assert section.length == pytest.approx(0.304 if warnings else 0.0, abs=0.002)
+        films.append(film)
+    assert films[0].symmetric_difference(films[1]).area == pytest.approx(0)
