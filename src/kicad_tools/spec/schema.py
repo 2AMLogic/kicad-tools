@@ -58,6 +58,7 @@ __all__ = [
     "ComponentSuggestion",
     "BOMEntry",
     "PurchasingEntry",
+    "TerminalAssignment",
     "LeadProfile",
     "Decision",
     "Progress",
@@ -1022,6 +1023,71 @@ class BOMEntry(SpecModel):
         return self
 
 
+class TerminalAssignment(SpecModel):
+    """One terminal of a purchased part and the board landing it wires to (Issue #10514).
+
+    ``terminal`` is the project's own declaration of the part's terminal
+    number, read by hand from the datasheet; nothing derives it from the part
+    number. ``ref``, ``pad`` and ``net`` name the landing on the board and the
+    net it is expected to carry, which ``kct export`` checks against the PCB. A
+    terminal that is deliberately left unconnected sets ``unused`` and names no
+    landing.
+    """
+
+    terminal: str = Field(
+        ...,
+        description="Terminal of the purchased part, numbered as its datasheet numbers it",
+    )
+    ref: str | None = Field(
+        default=None, description="Board designator of the landing this terminal wires to"
+    )
+    pad: str | None = Field(default=None, description="Pad number of that landing")
+    net: str | None = Field(
+        default=None,
+        description="Net the landing is expected to carry; compared with the PCB at export",
+    )
+    unused: bool = Field(
+        default=False, description="True when the terminal is deliberately left unconnected"
+    )
+
+    @field_validator("terminal", "ref", "pad", "net", mode="before")
+    @classmethod
+    def _number_as_text(cls, value: Any) -> Any:
+        """Keep a pad or terminal number written as a bare YAML integer as text."""
+        if type(value) is int:
+            return str(value)
+        return value
+
+    @field_validator("terminal", "ref", "pad", "net")
+    @classmethod
+    def _text_not_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{info.field_name} must be non-blank when set")
+        return value
+
+    @model_validator(mode="after")
+    def _landing_or_unused(self) -> TerminalAssignment:
+        if self.unused:
+            if self.ref is not None or self.pad is not None or self.net is not None:
+                raise ValueError(
+                    f"terminal '{self.terminal}' is both mapped to a landing and unused"
+                )
+            return self
+        if self.ref is None or self.pad is None or self.net is None:
+            raise ValueError(f"terminal '{self.terminal}' needs ref, pad and net, or unused: true")
+        return self
+
+    @property
+    def landing(self) -> tuple[str, str, str] | None:
+        """The ``(ref, pad, net)`` this terminal wires to; ``None`` for an unused one."""
+        if self.ref is None or self.pad is None or self.net is None:
+            return None
+        return self.ref, self.pad, self.net
+
+
 class PurchasingEntry(SpecModel):
     """One supplementary procurement row: something to buy that is not placed (Issue #10431).
 
@@ -1031,6 +1097,9 @@ class PurchasingEntry(SpecModel):
     fabricator BOM or CPL; the manufacturing export writes them beside those as a
     per-board purchasing list, which the submission handoff scales by the board
     quantity.
+
+    A selected row may add ``terminals`` when the part wires to board landings
+    and its terminal numbers differ from the pad numbers (Issue #10514).
     """
 
     description: str = Field(..., description="What to buy")
@@ -1050,6 +1119,10 @@ class PurchasingEntry(SpecModel):
     pending: str | None = Field(
         default=None,
         description="Set to what is still undecided instead of manufacturer/mpn: the part is not selected yet",
+    )
+    terminals: list[TerminalAssignment] | None = Field(
+        default=None,
+        description="Map of the selected part's terminals to board landings; omit for none",
     )
 
     @field_validator("description")
@@ -1109,6 +1182,38 @@ class PurchasingEntry(SpecModel):
             raise ValueError(
                 "a selected row needs both manufacturer and mpn; "
                 "otherwise pending must say what is still to be selected"
+            )
+        return self
+
+    @field_validator("terminals")
+    @classmethod
+    def _terminals_distinct(
+        cls, value: list[TerminalAssignment] | None
+    ) -> list[TerminalAssignment] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("terminals must list at least one terminal of the part")
+        seen: dict[str, str] = {}
+        for assignment in value:
+            landing = (
+                "unused"
+                if assignment.unused
+                else f"{assignment.ref} pad {assignment.pad} ({assignment.net})"
+            )
+            if assignment.terminal in seen:
+                raise ValueError(
+                    f"terminal '{assignment.terminal}' is declared more than once: "
+                    f"{seen[assignment.terminal]} and {landing}"
+                )
+            seen[assignment.terminal] = landing
+        return value
+
+    @model_validator(mode="after")
+    def _terminals_need_a_selected_part(self) -> PurchasingEntry:
+        if self.pending is not None and self.terminals is not None:
+            raise ValueError(
+                "a pending row must not declare terminals: the part is not selected yet"
             )
         return self
 

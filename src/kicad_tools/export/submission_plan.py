@@ -63,6 +63,10 @@ _PURCHASING_SELECTION = {
     "selected": frozenset({"manufacturer", "mpn"}),
     "pending": frozenset({"pending"}),
 }
+_PURCHASING_TERMINAL_KEYS = (
+    frozenset({"terminal", "ref", "pad", "net"}),
+    frozenset({"terminal", "unused"}),
+)
 
 
 class SubmissionError(ValueError):
@@ -514,7 +518,8 @@ def _purchasing_row(row: Any) -> dict[str, Any]:
     selection = _PURCHASING_SELECTION.get(status) if isinstance(status, str) else None
     if selection is None:
         raise SubmissionError("Purchasing list: row status must be 'selected' or 'pending'")
-    if set(row) != _PURCHASING_ROW_KEYS | selection:
+    expected = _PURCHASING_ROW_KEYS | selection
+    if set(row) not in (expected, expected | {"terminals"}):
         raise SubmissionError("Purchasing list: row has missing or unsupported fields")
     refs = row["refs"]
     if not isinstance(refs, list):
@@ -534,7 +539,47 @@ def _purchasing_row(row: Any) -> dict[str, Any]:
     }
     for key in sorted(selection):
         item[key] = _purchasing_text(row[key], key)
+    if "terminals" in row:
+        if status != "selected":
+            raise SubmissionError("Purchasing list: a pending row must not declare terminals")
+        item["terminals"] = _purchasing_terminals(row["terminals"])
     return item
+
+
+def _purchasing_terminals(terminals: Any) -> list[dict[str, Any]]:
+    """Return a selected row's terminal map (Issue #10514), or refuse it.
+
+    The map is the project's declaration and is carried as written: its shape
+    is checked and no terminal may be declared twice, but nothing is looked
+    up. Each entry is rebuilt with the keys in the exporter's order, so a list
+    the exporter wrote still matches its own bytes when it is read again.
+    """
+    if not isinstance(terminals, list) or not terminals:
+        raise SubmissionError("Purchasing list: terminals must be a non-empty list")
+    assignments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in terminals:
+        if not isinstance(entry, dict) or frozenset(entry) not in _PURCHASING_TERMINAL_KEYS:
+            raise SubmissionError(
+                "Purchasing list: each terminal names a landing (terminal, ref, pad, net) "
+                "or is unused (terminal, unused)"
+            )
+        terminal = _purchasing_text(entry["terminal"], "terminal")
+        if terminal in seen:
+            raise SubmissionError(f"Purchasing list: terminal '{terminal}' is declared twice")
+        seen.add(terminal)
+        if "unused" in entry:
+            if entry["unused"] is not True:
+                raise SubmissionError("Purchasing list: unused must be true")
+            assignments.append({"terminal": terminal, "unused": True})
+        else:
+            assignments.append(
+                {
+                    "terminal": terminal,
+                    **{key: _purchasing_text(entry[key], key) for key in ("ref", "pad", "net")},
+                }
+            )
+    return assignments
 
 
 def purchasing_export_digest(document: dict[str, Any]) -> str:

@@ -927,6 +927,144 @@ class TestPurchasingEntries:
         )
         assert [row.refs for row in self._load(tmp_path, rows).purchasing] == [["F1"], ["F1"]]
 
+    SWITCH_ROW = (
+        "purchasing:\n"
+        "  - description: Panel toggle switch\n"
+        "    quantity: 1\n"
+        "    refs: [SW1]\n"
+        "    manufacturer: Example Switch Co\n"
+        "    mpn: SYN-TOGGLE-1\n"
+    )
+    TERMINAL_MAP = (
+        "    terminals:\n"
+        "      - terminal: 3\n"
+        "        ref: SW1\n"
+        "        pad: 1\n"
+        "        net: VDD_CTRL\n"
+        "      - terminal: 2\n"
+        "        ref: SW1\n"
+        "        pad: 2\n"
+        "        net: ARMED_3V3\n"
+        "      - terminal: 1\n"
+        "        unused: true\n"
+    )
+
+    def test_terminal_map_parses_and_round_trips(self, tmp_path):
+        """A panel switch (Issue #10514) wired to a two-pad landing unlike its terminals.
+
+        A terminal or pad number may be a bare integer, and an unused terminal
+        is a declaration with no landing.
+        """
+        from kicad_tools.spec.parser import load_spec, save_spec
+
+        (switch,) = self._load(tmp_path, self.SWITCH_ROW + self.TERMINAL_MAP).purchasing
+        arm, common, spare = switch.terminals
+        assert (arm.terminal, arm.ref, arm.pad, arm.net, arm.unused) == (
+            "3",
+            "SW1",
+            "1",
+            "VDD_CTRL",
+            False,
+        )
+        assert (common.terminal, common.ref, common.pad, common.net) == (
+            "2",
+            "SW1",
+            "2",
+            "ARMED_3V3",
+        )
+        assert (spare.terminal, spare.ref, spare.pad, spare.net, spare.unused) == (
+            "1",
+            None,
+            None,
+            None,
+            True,
+        )
+        assert arm.landing == ("SW1", "1", "VDD_CTRL") and spare.landing is None
+
+        path = tmp_path / "project.kct"
+        for exclude_none in (True, False):
+            spec = self._load(tmp_path, self.SWITCH_ROW + self.TERMINAL_MAP)
+            save_spec(spec, path, exclude_none=exclude_none)
+            assert load_spec(path).purchasing == [switch]
+
+    @pytest.mark.parametrize(
+        ("terminals", "message"),
+        [
+            (
+                "    terminals:\n"
+                "      - {terminal: 2, ref: SW1, pad: 1, net: VDD_CTRL}\n"
+                "      - {terminal: 2, ref: SW1, pad: 2, net: ARMED_3V3}\n",
+                "terminal '2' is declared more than once: SW1 pad 1 (VDD_CTRL) and "
+                "SW1 pad 2 (ARMED_3V3)",
+            ),
+            (
+                "    terminals:\n"
+                "      - {terminal: 3, ref: SW1, pad: 1, net: VDD_CTRL}\n"
+                "      - {terminal: 3, unused: true}\n",
+                "terminal '3' is declared more than once: SW1 pad 1 (VDD_CTRL) and unused",
+            ),
+            (
+                "    terminals:\n"
+                "      - {terminal: 3, ref: SW1, pad: 1, net: VDD_CTRL, unused: true}\n",
+                "terminal '3' is both mapped to a landing and unused",
+            ),
+            ("    terminals:\n      - {terminal: 3, ref: SW1, pad: 1}\n", "needs ref, pad and net"),
+            ("    terminals:\n      - {terminal: 3, unused: false}\n", "needs ref, pad and net"),
+            ("    terminals:\n      - {ref: SW1, pad: 1, net: VDD_CTRL}\n", "Field required"),
+            (
+                "    terminals:\n      - {terminal: '  ', ref: SW1, pad: 1, net: VDD_CTRL}\n",
+                "terminal must be non-blank",
+            ),
+            (
+                "    terminals:\n      - {terminal: 3, ref: SW1, pad: '', net: VDD_CTRL}\n",
+                "pad must be",
+            ),
+            (
+                "    terminals:\n      - {terminal: 3, ref: SW1, pad: 1.5, net: VDD_CTRL}\n",
+                "valid string",
+            ),
+            (
+                "    terminals:\n      - {terminal: true, ref: SW1, pad: 1, net: VDD_CTRL}\n",
+                "valid string",
+            ),
+            ("    terminals: []\n", "at least one terminal"),
+        ],
+        ids=[
+            "one-terminal-two-landings",
+            "mapped-and-unused",
+            "mapped-and-unused-in-one-entry",
+            "landing-without-net",
+            "neither-mapped-nor-unused",
+            "no-terminal-number",
+            "blank-terminal",
+            "blank-pad",
+            "fractional-pad",
+            "boolean-terminal",
+            "empty-map",
+        ],
+    )
+    def test_terminal_map_that_contradicts_itself_is_refused(self, tmp_path, terminals, message):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as refused:
+            self._load(tmp_path, self.SWITCH_ROW + terminals)
+
+        assert "purchasing.0.terminals" in str(refused.value)
+        assert message in str(refused.value)
+
+    def test_pending_row_must_not_declare_a_terminal_map(self, tmp_path):
+        from pydantic import ValidationError
+
+        pending = self.SWITCH_ROW.replace(
+            "    manufacturer: Example Switch Co\n    mpn: SYN-TOGGLE-1\n",
+            "    pending: the switch is not chosen yet\n",
+        )
+        with pytest.raises(ValidationError) as refused:
+            self._load(tmp_path, pending + self.TERMINAL_MAP)
+
+        assert "a pending row must not declare terminals" in str(refused.value)
+        assert "purchasing.0" in str(refused.value)
+
 
 class TestMountingHoleGroupSpec:
     """Tests for the MountingHoleGroupSpec schema (Issue #3352, P_AS1)."""

@@ -533,6 +533,67 @@ directory when the project declares no purchasing rows. If a declared list
 would overwrite that file, or if another enabled output uses the same path,
 export reports the collision before writing the package.
 
+### Wire landings: mapping pads to a purchased part's terminals
+
+A purchased part can wire to a landing on the board whose pad numbers differ
+from the part's own terminal numbers. A panel switch has lugs numbered in
+another order than its two-pad landing, with a third lug left insulated:
+following the numbers one-to-one would wire the wrong throw, and the list above
+can only carry the correspondence as free text.
+
+A **selected** row declares it as a `terminals` map:
+
+```yaml
+purchasing:
+  - description: Panel toggle switch for the arm position
+    quantity: 1
+    refs: [SW1]
+    manufacturer: Example Switch Co
+    mpn: "SYN-TOGGLE-1"
+    terminals:
+      - terminal: 3          # the part's own numbering, from its datasheet
+        ref: SW1
+        pad: 1
+        net: VDD_CTRL
+      - terminal: 2
+        ref: SW1
+        pad: 2
+        net: ARMED_3V3
+      - terminal: 1          # deliberately left unconnected
+        unused: true
+```
+
+Four identifiers stay distinct, and nothing is inferred from the part number:
+
+- `terminal` is an external terminal of the part the row's `mpn` names,
+  numbered as its datasheet numbers it. **This is your declaration**, read from
+  the datasheet by hand; the tools never derive it.
+- `ref` and `pad` name a landing on the board.
+- `net` is the net that landing is expected to carry.
+
+Each terminal appears once. An `unused` terminal names no landing. The map
+belongs to a selected row: a `pending` row has no part to number the terminals
+of, and must not declare one.
+
+`kct export` checks the board side of every mapped assignment against the PCB
+it is exporting, and refuses the export before anything is written when:
+
+- `ref` is not a footprint on the board;
+- `pad` is not a pad of that footprint;
+- the pad carries a net other than `net`.
+
+The terminal numbers are not checked; they stay the project's declaration. A
+map that contradicts itself is refused the same way, whether one terminal is
+assigned to two landings or a terminal is both mapped and `unused`. Each fault
+names the purchasing row, the terminal and the landing:
+
+```text
+Invalid project spec; the purchasing list cannot be read from project.kct: purchasing row 1 (Panel toggle switch for the arm position) terminal '3': SW1 pad 1 carries ARMED_3V3 on the board, not VDD_CTRL
+```
+
+The part stays out of the fabricator BOM and CPL, and adding or changing a map
+leaves both byte-identical to the export without it.
+
 ### For the buyer
 
 `kct submit-jlcpcb` reads the frozen list, multiplies each row by the ordered
@@ -543,6 +604,13 @@ pending row by description and linked designators. For two boards the example
 above asks for 6 covers, 2 AC cartridges and 4 DC cartridges, the last still
 marked pending and carrying no part number. Resolve the row in the `.kct`,
 then export and submit again: the revised page lists nothing outstanding.
+
+A row with a `terminals` map adds a "Terminal map" table beneath the list: the
+part, every declared terminal, the board landing and net that `kct export`
+checked, and whether the terminal is mapped or unused. An unused terminal shows
+no landing. The column headings separate the project's terminal declarations
+from the board lookups, and the board quantity scales the purchase only: the
+same assignments apply to every board.
 
 The list is for purchasing only. Nothing in it is placed, matched or
 stock-checked by the factory, and it never reaches the JLCPCB stock gate.

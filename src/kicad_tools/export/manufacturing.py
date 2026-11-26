@@ -977,6 +977,30 @@ def _build_manifest(
     return manifest
 
 
+def _frozen_terminals(entry: PurchasingEntry) -> list[dict[str, Any]]:
+    """Freeze a row's terminal map as the handoff reads it back (Issue #10514).
+
+    Each entry keeps the external terminal the project declared and either the
+    landing it was checked against or its disposition as unused. The submission
+    handoff rebuilds the map from these exact keys (``submission_plan``'s
+    ``_purchasing_terminals``); the two change together.
+    """
+    assignments: list[dict[str, Any]] = []
+    for assignment in entry.terminals or ():
+        if assignment.unused:
+            assignments.append({"terminal": assignment.terminal, "unused": True})
+        else:
+            assignments.append(
+                {
+                    "terminal": assignment.terminal,
+                    "ref": assignment.ref,
+                    "pad": assignment.pad,
+                    "net": assignment.net,
+                }
+            )
+    return assignments
+
+
 def _purchasing_document(entries: list[PurchasingEntry]) -> dict[str, Any]:
     """Freeze validated purchasing rows as the per-board list (Issue #10431).
 
@@ -999,6 +1023,8 @@ def _purchasing_document(entries: list[PurchasingEntry]) -> dict[str, Any]:
         else:
             row["manufacturer"] = entry.manufacturer
             row["mpn"] = entry.mpn
+        if entry.terminals is not None:
+            row["terminals"] = _frozen_terminals(entry)
         items.append(row)
     document = {"schema_version": 1, "items": items}
     return {**document, "kct_export_sha256": purchasing_export_digest(document)}
@@ -2999,8 +3025,60 @@ class ManufacturingPackage:
             )
             return
         rows = spec.purchasing or []
+        if any(row.terminals for row in rows):
+            map_faults = self._terminal_map_faults(rows)
+            if map_faults:
+                message = "; ".join(map_faults)
+                result.errors.append(
+                    f"Invalid project spec; the purchasing list cannot be read from "
+                    f"{spec_path}: {message}"
+                )
+                logger.error("Purchasing list could not be read from %s: %s", spec_path, message)
+                return
         self._purchasing = rows or None
         result.purchasing_pending = [row.description for row in rows if row.pending is not None]
+
+    def _terminal_map_faults(self, rows: list[PurchasingEntry]) -> list[str]:
+        """Check each mapped landing against the board being exported (Issue #10514).
+
+        The terminal numbers are the project's declaration and are not checked
+        here; the board side of each assignment is. A reference or pad the
+        board does not have, or a pad on another net, is reported by row,
+        terminal and landing.
+        """
+        from ..schema.pcb import PCB
+
+        try:
+            board = PCB.load(str(self.pcb_path))
+        except (OSError, KiCadToolsError) as exc:
+            return [f"terminal maps cannot be checked: {self.pcb_path} could not be read ({exc})"]
+        faults: list[str] = []
+        for index, row in enumerate(rows, 1):
+            for assignment in row.terminals or ():
+                landing = assignment.landing
+                if landing is None:
+                    continue
+                ref, pad_number, net = landing
+                where = (
+                    f"purchasing row {index} ({row.description}) terminal '{assignment.terminal}'"
+                )
+                footprint = board.get_footprint(ref)
+                pad = (
+                    next((pad for pad in footprint.pads if pad.number == pad_number), None)
+                    if footprint is not None
+                    else None
+                )
+                if footprint is None:
+                    faults.append(f"{where}: {ref} is not on the board")
+                elif pad is None:
+                    faults.append(f"{where}: {ref} has no pad {pad_number}")
+                elif pad.net_name != net:
+                    board_net = pad.net_name or "no net"
+                    faults.append(
+                        f"{where}: {ref} pad {pad_number} carries {board_net} "
+                        f"on the board, not {net}"
+                    )
+        return faults
 
     def _write_purchasing(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Stage the per-board purchasing list, or withdraw an earlier one."""
