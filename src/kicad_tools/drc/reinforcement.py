@@ -62,18 +62,11 @@ def _has_wire_side_copper(pcb: PCB, leg: WiredLeg) -> bool:
             if point_to_segment_distance(*pos, *s.start, *s.end) <= slack + s.width / 2
         }
 
-    def contact(a: Any) -> set[int]:
-        return {
-            find(i)
-            for i, s in enumerate(segs)
-            if point_to_segment_distance(*a.pos, *s.start, *s.end) <= a.radius + s.width / 2
-        }
-
     # Components covering both leg ends (hole-to-pad stubs get the end slack).
     runs = touching(leg.points[0], END_WINDOW_SLACK_MM) & touching(
         leg.points[-1], END_WINDOW_SLACK_MM
     )
-    return bool(leg.anchors) and all(contact(a) & runs for a in leg.anchors)
+    return bool(leg.anchors) and all(touching(a.pos, a.radius) & runs for a in leg.anchors)
 
 
 def _wire_candidates(
