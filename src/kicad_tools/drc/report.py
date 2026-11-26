@@ -279,6 +279,27 @@ class DRCReport:
             return parse_text_report(content, str(path))
 
 
+def _bracketed_tokens(text: str) -> list[str]:
+    """Return top-level ``[...]`` tokens, keeping balanced inner brackets.
+
+    Net names may contain brackets (``BUS[0]``), which KiCad prints verbatim as
+    ``Via [BUS[0]] on F.Cu``; a ``[^\\]]+`` pattern would truncate to ``BUS[0``.
+    """
+    tokens: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(text):
+        if ch == "[":
+            if depth == 0:
+                start = i + 1
+            depth += 1
+        elif ch == "]" and depth:
+            depth -= 1
+            if depth == 0 and i > start:
+                tokens.append(text[start:i])
+    return tokens
+
+
 def _is_json(content: str) -> bool:
     """True for any valid JSON document, so non-object JSON is rejected rather
     than silently parsed as an empty text report (issue #8133)."""
@@ -426,7 +447,7 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
             current_violation["items"].append(description)
 
             # Extract net names from [NetName] pattern
-            net_matches = re.findall(r"\[([^\]]+)\]", description)
+            net_matches = _bracketed_tokens(description)
             for net in net_matches:
                 if net != "<no net>" and net not in current_violation["nets"]:
                     current_violation["nets"].append(net)
@@ -688,7 +709,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
             # Real KiCad-cli JSON has no per-item "net" key; the net lives
             # inside the description, e.g. "Track [Net-(C11-2)] on F.Cu".
             # Mirrors the plain-text parser above (parse_text_report).
-            net_matches = re.findall(r"\[([^\]]+)\]", desc)
+            net_matches = _bracketed_tokens(desc)
             for net in net_matches:
                 if net != "<no net>" and net not in nets:
                     nets.append(net)

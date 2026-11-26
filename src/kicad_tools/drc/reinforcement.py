@@ -24,12 +24,19 @@ from kicad_tools.validate.rules.reinforcement_incomplete import (
 from .violation import DRCViolation, WireEnd
 
 
+def _is_through_hole(via: Any) -> bool:
+    # A buttress wire passes through the board: blind/buried/micro vias (or any
+    # via not spanning both outer layers) are not wire anchors.
+    return via.via_type is None and "F.Cu" in via.layers and "B.Cu" in via.layers
+
+
 def _has_wire_side_copper(pcb: PCB, leg: WiredLeg) -> bool:
     # Completeness uses the widest segment to locate candidate holes. Check
     # actual copper contact using the local track width at each accepted hole.
     net = pcb.get_net_by_name(leg.net)
     return net is not None and all(
-        any(
+        (a.via is None or _is_through_hole(a.via))
+        and any(
             s.net_number == net.number
             and s.layer == leg.layer
             and point_to_segment_distance(*a.pos, *s.start, *s.end) <= a.radius + s.width / 2
@@ -40,14 +47,19 @@ def _has_wire_side_copper(pcb: PCB, leg: WiredLeg) -> bool:
 
 
 def _wire_candidates(
-    pcb: PCB, specs: Sequence[CurrentPathSpec], wires: dict[int, dict[str, Any]]
+    pcb: PCB,
+    specs: Sequence[CurrentPathSpec],
+    wires: dict[int, dict[str, Any]],
+    rule_wires: dict[int, dict[str, Any]] | None = None,
 ) -> list[list[WireEnd]]:
+    # ``wires`` drive anchor-claim ambiguity; ``rule_wires`` (default: all of
+    # them) are the records the completeness rule may evaluate.
     ox, oy = pcb.board_origin or (0.0, 0.0)
 
     def recorded(pos: tuple[float, float]) -> dict[str, float]:
         return {"x": round(pos[0] + ox, 4), "y": round(pos[1] + oy, 4)}
 
-    rule = ReinforcementIncompleteRule(specs=specs, wires=list(wires.values()))
+    rule = ReinforcementIncompleteRule(specs=specs, wires=list((rule_wires or wires).values()))
     candidates: list[list[WireEnd]] = []
     adopted = None
     for leg in rule.fully_wired_legs(pcb):
@@ -108,6 +120,17 @@ def _wire_candidates(
     return candidates
 
 
+_BAD_RECORD = (ValueError, KeyError, TypeError, AttributeError, IndexError, OverflowError)
+
+
+def _record_usable(pcb: PCB, specs: Sequence[CurrentPathSpec], wire: dict[str, Any]) -> bool:
+    try:
+        list(ReinforcementIncompleteRule(specs=specs, wires=[wire]).fully_wired_legs(pcb))
+    except _BAD_RECORD:
+        return False
+    return True
+
+
 def explain_wire_ends(board: Path, findings: list[DRCViolation]) -> None:
     """Attach evidence to uniquely identified native vias on complete recorded wires."""
     wires = load_wires_if_present(board)
@@ -128,13 +151,18 @@ def explain_wire_ends(board: Path, findings: list[DRCViolation]) -> None:
     candidates: list[list[WireEnd]] = []
     for net in {name for v in dangling for name in v.nets}:
         records = {i: w for i, w in enumerate(wires) if isinstance(w, dict) and w.get("net") == net}
-        if records:
+        if not records:
+            continue
+        net_specs = [s for s in specs if s.net_name == net]
+        try:
+            candidates.extend(_wire_candidates(pcb, net_specs, records))
+        except _BAD_RECORD:
+            # Isolate unusable record data to its own wire; the bad record still
+            # counts for anchor-claim ambiguity but is never evaluated.
+            valid = {i: w for i, w in records.items() if _record_usable(pcb, net_specs, w)}
             try:
-                candidates.extend(
-                    _wire_candidates(pcb, [s for s in specs if s.net_name == net], records)
-                )
-            except (ValueError, KeyError, TypeError, AttributeError, IndexError, OverflowError):
-                # Unusable sidecar data on this net must not hide other wires or native DRC.
+                candidates.extend(_wire_candidates(pcb, net_specs, records, valid))
+            except _BAD_RECORD:
                 continue
 
     # Ambiguity at either end invalidates both ends of the affected wire.

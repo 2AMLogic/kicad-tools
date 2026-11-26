@@ -111,6 +111,7 @@ def test_manufacturer_review_preserves_native_warning_gate(native_review, capsys
         "missing",
         "drill",
         "gauge",
+        "blind",
         "copper",
         "narrow_track_gap",
         "wrong_uuid",
@@ -129,6 +130,18 @@ def test_incomplete_evidence_leaves_warnings_visible(change, native_review, caps
         wire["leg_end"]["y"] += 0.0001
     elif change == "gauge":
         wire["wire_gauge_awg"] = 14
+    elif change == "blind":
+        text = board.read_text()
+        start = text.index("(via")
+        end = text.index('(layers "F.Cu" "B.Cu")', start)
+        text = (
+            text[:start]
+            + "(via blind"
+            + text[start + 4 : end]
+            + '(layers "In2.Cu" "B.Cu")'
+            + text[end + len('(layers "F.Cu" "B.Cu")') :]
+        )
+        board.write_text(text)
     elif change == "duplicate":
         data["wires"].append(wire)
     elif change == "shared_end":
@@ -189,3 +202,22 @@ def test_sidecar_endpoint_order_and_adopted_strip_ends(native_review, capsys):
     assert drc_cmd.main([str(board), "--format", "json", "--allow-incomplete"]) == 0
     findings = json.loads(capsys.readouterr().out)["violations"]
     assert [v["wire_end"]["endpoint"] for v in findings[:4]] == ["end", "start", "start", "end"]
+
+
+def test_invalid_gauge_isolated_to_its_wire(native_review, capsys):
+    board, _, _ = native_review
+    path = sidecar_path(board)
+    data = json.loads(path.read_text())
+    data["wires"][0]["wire_gauge_awg"] = 18
+    path.write_text(json.dumps(data))
+    assert drc_cmd.main([str(board), "--format", "json", "--strict"]) == 2
+    findings = json.loads(capsys.readouterr().out)["violations"]
+    assert [i for i, v in enumerate(findings) if "wire_end" in v] == [2, 3]
+
+
+def test_bracketed_net_name_survives_report_parsing():
+    from kicad_tools.drc.report import _bracketed_tokens
+
+    assert _bracketed_tokens("Via [BUS[0]] on F.Cu - B.Cu") == ["BUS[0]"]
+    assert _bracketed_tokens("Track [Net-(C11-2)] on F.Cu") == ["Net-(C11-2)"]
+    assert _bracketed_tokens("Via [<no net>] on F.Cu") == ["<no net>"]
