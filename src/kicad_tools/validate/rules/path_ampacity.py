@@ -278,7 +278,7 @@ class PathAmpacityRule(DRCRule):
             object found on a declared net. Empty when no path is declared.
         """
         results = DRCResults(rules_checked=1)
-        if not self.specs:
+        if not self.specs and not self.cases:
             return results
 
         from kicad_tools.router.current_paths import (

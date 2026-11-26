@@ -1773,6 +1773,31 @@ class TestOperatingCaseViaTransfer:
         assert set(transfer.items) >= {"both", "TRUNK", "SENSE"}
         assert "F.Cu -> B.Cu" in transfer.message
 
+    @pytest.mark.parametrize(("amps", "expected"), [(-2, [4.0]), (2, [])])
+    def test_reversed_via_traversal(self, amps, expected):
+        sense = _sense_spec(2)
+        reverse = dataclasses.replace(sense, source=sense.sink, sink=sense.source)
+        result = _case_check(
+            _series_via_pcb(drill=0.8),
+            [_case("via", ("TRUNK", 2), ("SENSE", amps))],
+            [_trunk_spec(2), reverse],
+        )
+        assert [
+            v.required_value for v in result.violations if "layer change" in v.message
+        ] == expected
+
+    def test_shared_section_of_four_layer_barrel(self):
+        pcb = PCB.create(layers=4, width=200, height=120, center=False)
+        for ref, x, y in [("J1", 20, 50), ("J2", 120, 50), ("U3", 60, 70)]:
+            _add_pad_footprint(pcb, ref=ref, x=x, y=y, net="NET1")
+        for endpoint, layer in [("J1", "F.Cu"), ("J2", "B.Cu"), ("U3", "In1.Cu")]:
+            pcb.add_trace((30, 50), (endpoint, "1"), width=3.0, layer=layer, net="NET1")
+        pcb.add_via(30, 50, size=1.1, drill=0.8, net="NET1")
+        result = _case_check(pcb, [_case("via", ("TRUNK", 2), ("SENSE", 2))])
+        (error,) = result.errors
+        assert "F.Cu -> In1.Cu" in error.message
+        assert error.required_value == 4
+
     def test_opposing_contributions_cancel_through_the_via(self) -> None:
         results = _case_check(
             _series_via_pcb(drill=0.8), [_case("opp", ("TRUNK", 2.0), ("SENSE", -2.0))]
@@ -1785,3 +1810,31 @@ class TestOperatingCaseViaTransfer:
         transfers = [v for v in results.violations if "layer change" in v.message]
         assert len(transfers) == 1
         assert transfers[0].location == pytest.approx((30.0, 50.0))
+
+
+@pytest.mark.parametrize(
+    ("duty", "expected"), [(None, 3.9), (1, 2), (0.5, ((3.9**2 + 2**2) / 2) ** 0.5)]
+)
+def test_opposing_pulse_levels(duty, expected):
+    from kicad_tools.validate.rules.path_operating_cases import Wave, combine_waves
+
+    waves = [Wave("supply", 4), Wave("return", -0.1, -2, duty)]
+    assert combine_waves(waves, None).current_a == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("overlap", ["coincident", "disjoint"])
+def test_no_between_pulse_state_at_full_duty(overlap):
+    from kicad_tools.validate.rules.path_operating_cases import Wave, combine_waves
+
+    duty = 1 if overlap == "coincident" else 0.5
+    waves = [Wave("supply", 6), Wave("A", -0.1, -2, duty), Wave("B", -0.1, -2, duty)]
+    expected = 2 if overlap == "coincident" else 3.9
+    assert combine_waves(waves, overlap).current_a == pytest.approx(expected)
+
+
+def test_many_unknown_directions_bound_mixed_contributions():
+    from kicad_tools.validate.rules.path_operating_cases import Member, _extremes
+
+    members = [(Member(_trunk_spec(2), 2 if i % 2 else -2), 0) for i in range(11)]
+    low, high = _extremes(members, None)
+    assert (low.current_a, high.current_a) == (0, 22)

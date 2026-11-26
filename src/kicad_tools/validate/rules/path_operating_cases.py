@@ -33,15 +33,19 @@ from __future__ import annotations
 import itertools
 import math
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
+
+from kicad_tools.core.types import CopperLayer
+
+_LAYER_AT_DEPTH: dict[float, str] = {layer.stack_order: layer.kicad_name for layer in CopperLayer}
 
 # NOTE: ``kicad_tools.router.current_paths`` is imported lazily (inside
 # :func:`combine_waves`), never at module scope: ``kicad_tools.router`` imports
 # from ``kicad_tools.validate`` at import time, so a module-level import here
 # would be circular -- the same constraint documented in ``path_ampacity``.
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Sequence
 
     from kicad_tools.router.current_paths import (
         CurrentPathSpec,
@@ -125,9 +129,9 @@ def combine_waves(waves: Sequence[Wave], overlap: str | None) -> CombinedCurrent
     if len(pulsed) == 1:
         w = pulsed[0]
         if w.duty is None:
-            return CombinedCurrent(abs(level(0)), "peak-as-continuous")
+            return CombinedCurrent(max(abs(base_sum), abs(level(0))), "peak-as-continuous")
         rms = math.sqrt(w.duty * level(0) ** 2 + (1 - w.duty) * base_sum**2)
-        return CombinedCurrent(max(rms, abs(base_sum)), "rms")
+        return CombinedCurrent(rms, "rms")
 
     names = ", ".join(sorted({w.path for w in pulsed}))
     if overlap is None:
@@ -148,7 +152,7 @@ def combine_waves(waves: Sequence[Wave], overlap: str | None) -> CombinedCurrent
             assert duty is not None
             peak_total = base_sum + sum(w.peak - w.base for w in pulsed if w.peak is not None)
             rms = math.sqrt(duty * peak_total**2 + (1 - duty) * base_sum**2)
-            return CombinedCurrent(max(rms, abs(base_sum)), "rms")
+            return CombinedCurrent(rms, "rms")
         return CombinedCurrent(
             abs(base_sum),
             "continuous",
@@ -159,10 +163,10 @@ def combine_waves(waves: Sequence[Wave], overlap: str | None) -> CombinedCurrent
     # Disjoint: at most one pulse is up at a time.
     if all(d is not None for d in duties) and sum(d for d in duties if d) <= 1 + _EPS:
         total = sum(d for d in duties if d)
-        mean_square = (1 - total) * base_sum**2 + sum(
+        mean_square = max(0.0, 1 - total) * base_sum**2 + sum(
             (w.duty or 0.0) * level(i) ** 2 for i, w in enumerate(pulsed)
         )
-        return CombinedCurrent(max(math.sqrt(mean_square), abs(base_sum)), "rms")
+        return CombinedCurrent(math.sqrt(mean_square), "rms")
     return CombinedCurrent(
         abs(base_sum),
         "continuous",
@@ -179,8 +183,8 @@ class Cover:
         kind: ``"track"``, ``"joint"``, ``"group"`` or ``"transfer"``.
         key: Identity of the physical element, shared by every path that
             covers it.
-        lo, hi: Interval along the element (arc mm from a track's start;
-            ``0..0`` for the others).
+        lo, hi: Distance along a track (mm), stack-order indices for a via
+            transfer, or ``0..0`` for other elements.
         sign: Traversal direction relative to the element's own orientation:
             ``+1`` / ``-1``, or ``0`` when the resolver did not establish it.
         ref: The segment / joint / group / layer change, for reporting.
@@ -251,13 +255,13 @@ def build_covers(resolution: PathResolution, authored_ids: frozenset[int]) -> li
     ):
         if id(change) not in series:
             continue
-        transfer_key: tuple = (
-            "transfer",
-            frozenset((change.from_layer, change.to_layer)),
-            round(change.position[0], 2),
-            round(change.position[1], 2),
-        )
-        covers.append(Cover("transfer", transfer_key, 0.0, 0.0, direction, change, spec))
+        start = CopperLayer.from_kicad_name(change.from_layer).stack_order
+        end = CopperLayer.from_kicad_name(change.to_layer).stack_order
+        barrel_positions = frozenset(v[0] for v in (*change.vias, *change.tie_vias))
+        key = ("transfer", spec.net_name, barrel_positions)
+        lo, hi = sorted((start, end))
+        sign = direction if start < end else -direction
+        covers.append(Cover("transfer", key, lo, hi, sign, change, spec))
     return covers
 
 
@@ -321,17 +325,18 @@ def _extremes(
         result = combine_waves(known, overlap)
         return result, result
     if len(unknown) > _MAX_ENUMERATED_UNKNOWN:
-        choices: Iterable[tuple[int, ...]] = [(1,) * len(unknown), (-1,) * len(unknown)]
-    else:
-        choices = itertools.product((1, -1), repeat=len(unknown))
+        # Align every member's magnitude in each waveform state. The triangle
+        # inequality bounds the absolute current there, hence also its RMS.
+        aligned = [m.wave(1 if m.current_a > 0 else -1) for m, _ in members]
+        hi = combine_waves(aligned, overlap)
+        return replace(hi, current_a=0.0), hi
+    choices = itertools.product((1, -1), repeat=len(unknown))
     results = [
         combine_waves([*known, *(m.wave(s) for m, s in zip(unknown, signs, strict=True))], overlap)
         for signs in choices
     ]
     lo = min(results, key=lambda r: r.current_a)
     hi = max(results, key=lambda r: r.current_a)
-    if len(unknown) > _MAX_ENUMERATED_UNKNOWN:
-        lo = CombinedCurrent(0.0, lo.basis, lo.undetermined, lo.missing)
     return lo, hi
 
 
@@ -350,6 +355,8 @@ def evaluate_case(
             the independent per-path checks judged it at.
         overlap: The case's ``pulse_overlap``.
     """
+    from kicad_tools.router.current_paths import LayerChange
+
     by_key: dict[tuple, list[tuple[Member, Cover]]] = defaultdict(list)
     for member in members:
         for cover in covers_by_path.get(member.spec.name, ()):
@@ -358,7 +365,8 @@ def evaluate_case(
     results: list[ElementResult] = []
     for key, entries in by_key.items():
         first = entries[0][1]
-        if first.kind == "track":
+        has_span = first.kind in ("track", "transfer")
+        if has_span:
             cuts = sorted({x for _, c in entries for x in (c.lo, c.hi)})
             intervals = [
                 (a, b) for a, b in zip(cuts, cuts[1:], strict=False) if b - a > _MIN_INTERVAL_MM
@@ -369,8 +377,7 @@ def evaluate_case(
             here = [
                 (m, c)
                 for m, c in entries
-                if first.kind != "track"
-                or (c.lo <= x0 + _MIN_INTERVAL_MM and c.hi >= x1 - _MIN_INTERVAL_MM)
+                if not has_span or (c.lo <= x0 + _MIN_INTERVAL_MM and c.hi >= x1 - _MIN_INTERVAL_MM)
             ]
             if not here:
                 continue
@@ -378,12 +385,18 @@ def evaluate_case(
             judged = [
                 a
                 for ilo, ihi, a in independent.get(key, ())
-                if first.kind != "track"
-                or (ilo <= x0 + _MIN_INTERVAL_MM and ihi >= x1 - _MIN_INTERVAL_MM)
+                if not has_span or (ilo <= x0 + _MIN_INTERVAL_MM and ihi >= x1 - _MIN_INTERVAL_MM)
             ]
+            cover = here[0][1]
+            if cover.kind == "transfer":
+                assert isinstance(cover.ref, LayerChange)
+                interval = replace(
+                    cover.ref, from_layer=_LAYER_AT_DEPTH[x0], to_layer=_LAYER_AT_DEPTH[x1]
+                )
+                cover = replace(cover, ref=interval)
             results.append(
                 ElementResult(
-                    cover=first,
+                    cover=cover,
                     x0=x0,
                     x1=x1,
                     lo=lo,

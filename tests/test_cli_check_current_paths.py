@@ -856,6 +856,43 @@ class TestOperatingCasesThroughCheck:
         errors = [v for v in _path_ampacity_violations(report) if v["severity"] == "error"]
         assert [e["items"][0] for e in errors] == ["charge+support"]
 
+    def test_route_emits_case_for_the_final_audit(self, shared_feed_pcb, tmp_path, monkeypatch):
+        from argparse import Namespace
+
+        from kicad_tools.cli import route_cmd
+        from tests.test_cli_route_current_paths import _capture_drc_results, _patch_geometric_absent
+
+        _patch_geometric_absent(monkeypatch)
+        captured = _capture_drc_results(monkeypatch)
+        source = _both_loads_sidecar(tmp_path / "authored.json", cases=[_BOTH_LOADS])
+        args = Namespace(current_paths=str(source), quiet=True)
+        assert route_cmd._preload_current_paths(args, shared_feed_pcb) == 0
+        route_cmd.run_post_route_drc(
+            shared_feed_pcb,
+            "jlcpcb",
+            2,
+            quiet=True,
+            current_path_specs=args._loaded_current_paths,
+            current_path_cases=args._loaded_current_path_cases,
+            current_paths_input_path=args._current_paths_input_path,
+        )
+        assert any("combined 4A" in v.message for v in captured["results"].errors)
+        report = tmp_path / "report.json"
+        assert _run_check(shared_feed_pcb, report) == 2
+        assert any("combined 4A" in v["message"] for v in _path_ampacity_violations(report))
+
+    def test_cases_with_no_declared_paths(self, shared_feed_pcb, tmp_path):
+        source = tmp_path / "empty.json"
+        source.write_text(json.dumps({"paths": [], "cases": [_BOTH_LOADS]}))
+        report = tmp_path / "report.json"
+        assert _run_check(shared_feed_pcb, report, extra=["--current-paths", str(source)]) == 2
+        errors = [
+            v["message"] for v in _path_ampacity_violations(report) if v["severity"] == "error"
+        ]
+        assert len(errors) == 2
+        for name in ("TRUNK", "SENSE"):
+            assert any(f"unknown path {name!r}" in message for message in errors)
+
     def test_each_load_alone_passes(self, shared_feed_pcb: Path, tmp_path: Path):
         sidecar = _both_loads_sidecar(tmp_path / "cp.json", cases=_EACH_ALONE)
         report = tmp_path / "report.json"

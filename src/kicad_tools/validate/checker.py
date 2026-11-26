@@ -143,7 +143,6 @@ class DRCChecker:
         copper_oz_inner: float | None = None,
         declared_spec_currents: list[str] | None = None,
         current_path_specs: Sequence[CurrentPathSpec] | None = None,
-        current_path_cases: Sequence[OperatingCase] | None = None,
         reinforcement_wires: Sequence[dict] | None = None,
         reinforcement_waived_nets: Iterable[str] | None = None,
         mask_copper_request: MaskCopperRequest | None = None,
@@ -157,6 +156,7 @@ class DRCChecker:
         strict_copper: bool = True,
         declared_reference_height_mm: float | None = None,
         prove_pour_stubs: bool = False,
+        current_path_cases: Sequence[OperatingCase] | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
