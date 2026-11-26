@@ -28,6 +28,10 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
+import re
+import shutil
+import stat
 import sys
 from collections import Counter
 from contextlib import ExitStack
@@ -1038,6 +1042,18 @@ def _commit_links(
         and any(link.branch for link in links)
         else None
     )
+    out_mode: int | None = None
+    if has_corridor:
+        # Publishing replaces the file, so check write access first and keep its mode.
+        try:
+            if created or not out_path.exists():
+                out_mode = stat.S_IMODE(pcb_path.stat().st_mode)
+            else:
+                with out_path.resolve().open("r+b"):
+                    pass
+                out_mode = stat.S_IMODE(out_path.resolve().stat().st_mode)
+        except OSError as exc:
+            return None, f"cannot write {out_path}: {exc}"
     staged = _stage_project_files(pcb_path, out_path)
     with ExitStack() as stack:
         for f in staged:
@@ -1054,7 +1070,9 @@ def _commit_links(
                 # Keep the destination intact until a link passes all gates.
                 baseline = Path(directory) / "baseline" / out_path.name
                 baseline.parent.mkdir()
-                _stage_project_files(out_path, baseline)
+                # Both sides of the comparison use the input project's rules;
+                # an output-side project file is never read or changed here.
+                _stage_project_files(pcb_path, baseline)
         if baseline != pcb_path:
             baseline.write_bytes(pcb_path.read_bytes())
         written, refusal = _commit_links_gated(
@@ -1071,6 +1089,7 @@ def _commit_links(
             baseline,
             created and baseline == out_path,
             trial,
+            out_mode,
         )
         if previous is not None and written is None:
             out_path.write_bytes(previous)
@@ -1092,6 +1111,20 @@ def _stage_project_files(pcb_path: Path, out_path: Path) -> list[Path]:
         if src.is_file() and not dst.exists():
             dst.write_bytes(src.read_bytes())
             staged.append(dst)
+    table = pcb_path.parent / "fp-lib-table"
+    target = out_path.parent / "fp-lib-table"
+    if table.is_file() and not target.exists():
+        project = str(pcb_path.resolve().parent)
+
+        def absolute(match: re.Match[str]) -> str:
+            uri = match["uri"].replace("${KIPRJMOD}", project)
+            if "${" not in uri and not uri.startswith("/") and not re.match(r"[A-Za-z]:", uri):
+                uri = f"{project}/{uri}"
+            return f'(uri "{uri}")'
+
+        text = table.read_text(encoding="utf-8")
+        target.write_text(re.sub(r'\(uri\s+"(?P<uri>[^"]*)"\)', absolute, text), encoding="utf-8")
+        staged.append(target)
     return staged
 
 
@@ -1221,6 +1254,7 @@ def _commit_links_gated(
     baseline: Path,
     created: bool,
     plane_trial: Path | None,
+    out_mode: int | None = None,
 ) -> tuple[str | None, str | None]:
     from kicad_tools.router.link_router import (
         append_link_routes,
@@ -1351,10 +1385,14 @@ def _commit_links_gated(
         else:
             _commit_to_model(model, route, net_ids[spec.net])
         if path != out_path:
-            from kicad_tools.core.atomic_write import atomic_write_text
-
-            atomic_write_text(out_path.resolve(), path.read_text(encoding="utf-8"))
-        baseline = out_path
+            destination = out_path.resolve()
+            staging = path.parent / f".publish-{destination.name}"
+            shutil.copyfile(path, staging)
+            if out_mode is not None:
+                staging.chmod(out_mode)
+            os.replace(staging, destination)
+        if plane_trial is None:
+            baseline = out_path
         n_committed += 1
     if not n_committed and created:
         out_path.unlink(missing_ok=True)  # nothing committed: leave no unchanged copy

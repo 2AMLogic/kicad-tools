@@ -353,3 +353,102 @@ def test_plane_commit_rolls_back_stranded_island(plane_board, capsys, second_pad
 def test_invalid_plane_corridor_is_rejected(board, corridor):
     with pytest.raises(SystemExit):
         main(["route-link", str(board), "--link", LINK, "--plane-corridor", corridor])
+
+
+class TestCorridorPublish:
+    """Corridor commits keep the destination's mode and the input project's context."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_gate(self, monkeypatch):
+        import contextlib
+        from collections import Counter
+
+        from kicad_tools.cli import kicad_toolchain, route_link_cmd
+
+        monkeypatch.setattr(
+            kicad_toolchain, "evidence_toolchain", lambda *a, **k: contextlib.nullcontext()
+        )
+        monkeypatch.setattr(route_link_cmd, "_gate_state", lambda path, args: (Counter(), None))
+        monkeypatch.setattr(route_link_cmd, "_native_refill", PCB.load)
+        monkeypatch.setattr(
+            route_link_cmd, "_verify_corridor_candidate", lambda path, before, *a: (before, 0.0)
+        )
+
+    def _link(self, capsys, board, *extra):
+        return _run(
+            capsys,
+            str(board),
+            *extra,
+            "--link",
+            LINK,
+            "--link-layers",
+            "In1.Cu",
+            "--plane-corridor",
+            "In1.Cu=109,109.9,121,110.1",
+        )
+
+    def test_read_only_destination_is_refused_untouched(self, plane_board, capsys):
+        import os
+
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses file modes")
+        original = plane_board.read_bytes()
+        plane_board.chmod(0o444)
+        rc, _ = self._link(capsys, plane_board)
+        assert rc == 2
+        assert plane_board.read_bytes() == original
+        assert plane_board.stat().st_mode & 0o777 == 0o444
+
+    @pytest.mark.parametrize("in_place", [True, False])
+    def test_private_mode_survives_publish(self, plane_board, capsys, in_place):
+        original = plane_board.read_bytes()
+        target = plane_board
+        extra: tuple[str, ...] = ()
+        if not in_place:
+            target = plane_board.with_name("out.kicad_pcb")
+            target.write_bytes(original)
+            extra = ("-o", str(target))
+        target.chmod(0o600)
+        rc, doc = self._link(capsys, plane_board, *extra)
+        assert rc == 0 and doc["links"][0]["status"] == "committed"
+        assert target.read_bytes() != original
+        assert target.stat().st_mode & 0o777 == 0o600
+
+    def test_stage_carries_project_libraries_and_input_rules(self, tmp_path):
+        from kicad_tools.cli.route_link_cmd import _stage_project_files
+
+        src = tmp_path / "proj"
+        src.mkdir()
+        board = src / "b.kicad_pcb"
+        board.write_text("")
+        (src / "b.kicad_dru").write_text("(version 1)\n(rule a)")
+        (src / "fp-lib-table").write_text(
+            '(fp_lib_table (lib (name "P")(type "KiCad")(uri "${KIPRJMOD}/P.pretty")(options "")))'
+        )
+        private = tmp_path / "private"
+        private.mkdir()
+        staged = _stage_project_files(board, private / "b.kicad_pcb")
+        assert (private / "b.kicad_dru").read_text() == "(version 1)\n(rule a)"
+        table = (private / "fp-lib-table").read_text()
+        assert f'(uri "{src.resolve()}/P.pretty")' in table and "KIPRJMOD" not in table
+        assert len(staged) == 2
+
+    def test_baseline_uses_input_rules_not_output_sidecars(self, plane_board, capsys, monkeypatch):
+        from kicad_tools.cli import route_link_cmd
+
+        plane_board.with_suffix(".kicad_dru").write_text("(version 1)\n(rule input)")
+        out = plane_board.with_name("out.kicad_pcb")
+        out.write_bytes(plane_board.read_bytes())
+        out_dru = out.with_suffix(".kicad_dru")
+        out_dru.write_text("(version 1)")
+        seen = {}
+
+        def capture(*args):
+            baseline = args[10]
+            seen["dru"] = baseline.with_suffix(".kicad_dru").read_text()
+            return None, None
+
+        monkeypatch.setattr(route_link_cmd, "_commit_links_gated", capture)
+        self._link(capsys, plane_board, "-o", str(out))
+        assert seen["dru"] == "(version 1)\n(rule input)"
+        assert out_dru.read_text() == "(version 1)"
