@@ -2725,13 +2725,23 @@ class TestSimulationEvidence:
         project, pcb = self._project(tmp_path, monkeypatch)
         model = project / "sim" / "supply.lib"
         model.write_text("Rsource in out 10")
+        digest = self._digest(model.read_bytes())
         self._write_result(
-            project, "installed", 85.6, inputs={"sim/supply.lib": self._digest(model.read_bytes())}
+            project,
+            "installed",
+            85.6,
+            inputs={"sim/supply.lib": digest, "sim/absent_from_disk.lib": digest},
         )
         model.write_text("Rsource in out 25")
-        case = self._cases(self._export(pcb, tmp_path))["installed"]
+        result = self._export(pcb, tmp_path)
+        manifest = json.loads(result.manifest_path.read_text())
+        case = next(c for c in manifest["simulation"]["cases"] if c["name"] == "installed")
         assert case["status"] == "invalid"
         assert "sim/supply.lib" in case["diagnostic"]
+        assert "sim/absent_from_disk.lib" in case["diagnostic"]
+        for name in ("supply.lib", "absent_from_disk.lib"):
+            assert not any(rel.endswith(name) for rel in case["evidence"])
+            assert not any(rel.endswith(name) for rel in manifest["files"])
 
     def test_removed_result_is_missing(self, tmp_path, monkeypatch):
         project, pcb = self._project(tmp_path, monkeypatch)
