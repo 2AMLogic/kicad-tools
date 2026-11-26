@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
     from pathlib import Path
 
-    from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.current_paths import CurrentPathSpec, OperatingCase
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.filters import ViolationFilter
@@ -156,6 +156,7 @@ class DRCChecker:
         strict_copper: bool = True,
         declared_reference_height_mm: float | None = None,
         prove_pour_stubs: bool = False,
+        current_path_cases: Sequence[OperatingCase] | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -328,6 +329,12 @@ class DRCChecker:
         # contract).
         self.current_path_specs: list[CurrentPathSpec] = (
             list(current_path_specs) if current_path_specs else []
+        )
+        # Issue #10361: named operating cases of the same sidecar (paths
+        # that run simultaneously, with signed currents). Empty keeps every
+        # path judged independently.
+        self.current_path_cases: list[OperatingCase] = (
+            list(current_path_cases) if current_path_cases else []
         )
         # Issue #8746: wire records (gauge source) and nets whose ampacity
         # waiver cites reinforcement, for ``reinforcement_incomplete``.
@@ -1545,6 +1552,7 @@ class DRCChecker:
         """
         rule = PathAmpacityRule(
             specs=self.current_path_specs,
+            cases=self.current_path_cases,
             # Issue #9648: a leg reinforcement_incomplete judges fully wired
             # credits its buttress wire's cross-section here -- the same
             # board-derived verdict (and sidecar gauge) that rule reports,

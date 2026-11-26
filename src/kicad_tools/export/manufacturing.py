@@ -122,6 +122,8 @@ class ManufacturingConfig(AssemblyConfig):
     # repaired bytes (Issue #9799).  ``False`` (``--no-silk-fix``) leaves
     # authored silk byte-identical.
     silk_fix: bool = True
+    # Readiness resolves the source boundary before it stages the editable project.
+    project_root: Path | None = None
 
 
 @dataclass
@@ -717,6 +719,8 @@ def _create_project_zip(
     output_dir: Path,
     zip_name: str = "kicad_project.zip",
     schematic_path: Path | None = None,
+    *,
+    project_root: Path | None = None,
 ) -> Path:
     """Create a ZIP containing the KiCad project files.
 
@@ -749,6 +753,11 @@ def _create_project_zip(
     # unresolved/relative/symlinked project_dir (e.g. macOS /var -> /private/var
     # TMPDIR) otherwise breaks ``relative_to`` below.
     project_dir = pcb_path.parent.resolve()
+    boundary = project_root.resolve() if project_root is not None else project_dir
+    if not project_dir.is_relative_to(boundary):
+        raise ProjectIdentityError(
+            f"Board {pcb_path} is outside the selected project root {boundary}"
+        )
     pcb_path = project_dir / pcb_path.name
     zip_path = output_dir / zip_name
 
@@ -777,7 +786,7 @@ def _create_project_zip(
     root_sch = Path(schematic_path) if schematic_path else find_schematic(pcb_path)
     walked_sheets: list[Path] = []
     if root_sch is not None and root_sch.is_file():
-        walked = walk_schematic_hierarchy(root_sch, lambda sheet: sheet.is_relative_to(project_dir))
+        walked = walk_schematic_hierarchy(root_sch, lambda sheet: sheet.is_relative_to(boundary))
         project_files.extend(walked.sheets)
         walked_sheets = walked.sheets
         if schematic_path is not None and root_sch.resolve() not in walked_sheets:
@@ -795,7 +804,7 @@ def _create_project_zip(
             listed = ", ".join(str(sheet) for sheet in incomplete)
             raise ProjectIdentityError(
                 f"Cannot bundle the full schematic hierarchy of {root_sch} with {pcb_path}: "
-                f"sheet(s) outside the board directory or missing: {listed}. Keep every "
+                f"sheet(s) outside the project boundary or missing: {listed}. Keep every "
                 "sheet beside the board, or run kct readiness with --sch and --project-root "
                 "pointing to their common project directory"
             )
@@ -822,8 +831,13 @@ def _create_project_zip(
         project_file if project_file in project_files else None,
         archived_root if archived_root in walked_sheets else None,
     )
+    archive_base = (
+        project_dir
+        if all(source.is_relative_to(project_dir) for source in project_files)
+        else boundary
+    )
     layout = archive_layout(
-        identity, project_files, lambda source: source.parent.relative_to(project_dir).as_posix()
+        identity, project_files, lambda source: source.parent.relative_to(archive_base).as_posix()
     )
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for source in project_files:
@@ -3212,6 +3226,7 @@ class ManufacturingPackage:
                 out_dir,
                 self.config.project_zip_name,
                 schematic_path=self.schematic_path,
+                project_root=self.config.project_root,
             )
         except Exception as e:
             result.errors.append(f"Project ZIP creation failed: {e}")

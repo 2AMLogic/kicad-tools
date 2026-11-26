@@ -49,7 +49,8 @@ class PreflightResult:
     message: str
     details: str = ""
     # Optional machine-readable record (Issue #8807): ``bom_lcsc_stock`` stores
-    # its per-part observations so a later ``--verify`` can re-evaluate them.
+    # its per-part observations so a later ``--verify`` can re-evaluate them,
+    # and (Issue #10386) where on this host its lookups reached.
     data: dict | None = None
 
     def to_dict(self) -> dict:
@@ -389,6 +390,59 @@ def _describe_stock_record(rec: dict, boards: int) -> str:
     return f"needs {needed}, stock {rec['stock']} ({when})"
 
 
+# Where the ``bom_lcsc_stock`` lookups reached on the generating host
+# (issue #10386).  Every assigned LCSC number is searched in the parts cache
+# and then, when the cache does not settle it, in the offline catalog;
+# ``data["sources"]`` folds those per-number outcomes into one state per
+# source.  That lets a reader of recorded evidence tell a host that could
+# not check -- no catalog file, or one it could not read -- from a catalog
+# that was searched and does not list the part.
+LOOKUP_SOURCE_CACHE = "parts_cache"
+LOOKUP_SOURCE_CATALOG = "offline_catalog"
+
+# Fold order: the first state a run contains wins, so a query that failed is
+# never summarised as a search that found nothing.
+_LOOKUP_STATE_ORDER: dict[str, tuple[str, ...]] = {
+    LOOKUP_SOURCE_CACHE: ("unreadable", "hit", "miss", "not_consulted"),
+    LOOKUP_SOURCE_CATALOG: ("unreadable", "hit", "missing", "miss", "not_consulted"),
+}
+
+_LOOKUP_SOURCE_LABEL = {
+    LOOKUP_SOURCE_CACHE: "parts cache",
+    LOOKUP_SOURCE_CATALOG: "offline catalog",
+}
+
+_LOOKUP_STATE_TEXT = {
+    "hit": "searched, match found",
+    "miss": "searched, no matching row",
+    "missing": "not available on the generating host (no catalog file)",
+    "unreadable": "could not be read on the generating host",
+    "not_consulted": "not consulted",
+}
+
+
+def summarize_lookup_states(source: str, states: Iterable[str]) -> str:
+    """Fold the per-number lookup states of one source into the run's state."""
+    seen = set(states)
+    return next((s for s in _LOOKUP_STATE_ORDER[source] if s in seen), "not_consulted")
+
+
+def describe_lookup_sources(sources: object) -> str:
+    """Render a recorded ``sources`` block; empty when nothing was recorded.
+
+    ``data["sources"]`` is absent from bundles recorded before issue #10386
+    and from runs that assigned no LCSC number; those make no claim here.
+    """
+    if not isinstance(sources, dict):
+        return ""
+    described = []
+    for key, label in _LOOKUP_SOURCE_LABEL.items():
+        if key in sources:
+            state = str(sources[key])
+            described.append(f"{label} {_LOOKUP_STATE_TEXT.get(state, state)}")
+    return "; ".join(described)
+
+
 def evaluate_lcsc_stock(
     data: dict, boards: int, covered: frozenset[str], strict: bool
 ) -> PreflightResult:
@@ -399,7 +453,9 @@ def evaluate_lcsc_stock(
     on the manifest's recorded ``data``), so a shortfall reads identically in
     both.  ``data`` holds ``parts`` (resolved LCSC ids with ``refs``,
     ``per_board``, ``stock``, ``verified``, ``source``, ``age_days``) and
-    ``unresolved`` (ids in neither the cache nor the catalog).
+    ``unresolved`` (ids in neither the cache nor the catalog).  When it also
+    holds ``sources`` (issue #10386), "Stock not verified" says what became
+    of the lookups the producer made; without it the message is unchanged.
     """
     name = "bom_lcsc_stock"
     boards = max(1, int(boards))
@@ -474,10 +530,12 @@ def evaluate_lcsc_stock(
     checked = len(parts)
     uncovered_unresolved = [u for u in unresolved if u not in covered]
     if checked == 0 and uncovered_unresolved:
+        looked = describe_lookup_sources(data.get("sources"))
         return _result(
             "FAIL" if strict else "WARN",
             f"Stock not verified: {len(uncovered_unresolved)} assigned LCSC number(s) found in "
             f"neither the parts cache nor the offline catalog"
+            + (f"; {looked}" if looked else "")
             + (" (strict preflight)" if strict else ""),
             ", ".join(uncovered_unresolved[:10]),
         )
@@ -1748,6 +1806,10 @@ class PreflightChecker:
         unknown source) it is a WARN -- a legacy cache row with no stock info
         also reads ``stock=0`` -- escalated to FAIL under
         ``strict_report_source`` (``--strict-preflight``).
+
+        The recorded ``data`` also says where the lookups reached on this
+        host (``sources``, issue #10386), so a later reader can tell an
+        unverified part from a host that had no source to check it against.
         """
         name = "bom_lcsc_stock"
         boards = max(1, int(self.config.order_boards))
@@ -1806,8 +1868,12 @@ class PreflightChecker:
 
         records: list[dict] = []
         unresolved: list[str] = []
+        cache_states: set[str] = set()
+        catalog_states: set[str] = set()
         for lcsc, refs in sorted(refs_by_lcsc.items()):
             verdict = verify_lcsc_assignment(cache, catalog, lcsc, "", refs[0])
+            cache_states.add(verdict.lookups.cache)
+            catalog_states.add(verdict.lookups.catalog)
             if verdict.part is None:
                 unresolved.append(lcsc)  # not in any source: also reported by bom_lcsc_values
                 continue
@@ -1833,6 +1899,12 @@ class PreflightChecker:
             "strict": bool(self.config.strict_report_source),
             "parts": records,
             "unresolved": unresolved,
+            "sources": {
+                LOOKUP_SOURCE_CACHE: summarize_lookup_states(LOOKUP_SOURCE_CACHE, cache_states),
+                LOOKUP_SOURCE_CATALOG: summarize_lookup_states(
+                    LOOKUP_SOURCE_CATALOG, catalog_states
+                ),
+            },
         }
         return evaluate_lcsc_stock(
             data,
