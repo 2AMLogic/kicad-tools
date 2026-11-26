@@ -27,7 +27,7 @@ def generation(monkeypatch):
     return _clear_pad_departures
 
 
-def _fixture(path, control=""):
+def _fixture(path, control="", *, extra_items=()):
     from generate_design import usb3_net_class
 
     shutil.copyfile(
@@ -92,8 +92,7 @@ def _fixture(path, control=""):
             f' (pad "1" smd circle (at 0 0) (size .20 .20) (layers "B.Cu" "B.Mask")'
             f' (solder_mask_margin {margin}) (net 3 "OTHER") (uuid "{_id("test point")}")))'
         )
-    items.append(")")
-    path.write_text("\n".join(items))
+    path.write_text("\n".join([*items, *extra_items, ")"]))
 
 
 @pytest.mark.parametrize("control", ["", "back clear"])
@@ -133,3 +132,47 @@ def test_bga_repair_refuses_the_entire_pair(tmp_path, generation, control):
     before = pcb_path.read_bytes()
     assert generation(pcb_path) == 0
     assert pcb_path.read_bytes() == before
+
+
+def _neighbor_drill(x, y):
+    return (
+        f'(via (at {x} {y}) (size 0.45) (drill 0.25) (layers "F.Cu" "B.Cu")'
+        f' (net 3) (uuid "{_id("neighbor drill")}"))'
+    )
+
+
+@pytest.mark.parametrize(
+    ("rule", "item", "clear_minimum"),
+    [
+        pytest.param("hole_to_hole", _neighbor_drill(9.44, 11.26), 0.4, id="F5-drill"),
+        pytest.param("hole_to_hole", _neighbor_drill(11.13, 8.88), 0.4, id="F6-drill"),
+        pytest.param(
+            "copper_edge_clearance",
+            "(gr_rect (start 0 0) (end 20 11.21) (stroke (width 0.05) (type default))"
+            ' (fill none) (layer "Edge.Cuts"))',
+            0.25,
+            id="F5-edge",
+        ),
+    ],
+)
+@pytest.mark.parametrize("blocked", [True, False], ids=["blocked", "clear"])
+def test_bga_barrels_honor_project_only_clearances(
+    tmp_path, generation, rule, item, clear_minimum, blocked
+):
+    board = tmp_path / "rx2.kicad_pcb"
+    _fixture(board, extra_items=[item])
+    project = board.with_suffix(".kicad_pro")
+    settings = json.loads(project.read_text())
+    design = settings["board"]["design_settings"]
+    design["rules"][f"min_{rule}"] = 0.5 if blocked else clear_minimum
+    design["rule_severities"][rule] = "error"
+    project.write_text(json.dumps(settings))
+    assert not board.with_suffix(".kicad_dru").exists()
+
+    before = board.read_bytes()
+    edits = generation(board)
+    if blocked:
+        assert edits == 0
+        assert board.read_bytes() == before
+    else:
+        assert edits == 2
