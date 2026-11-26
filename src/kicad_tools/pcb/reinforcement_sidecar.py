@@ -215,7 +215,13 @@ def drop_wires(
 
 
 def load_wires(path: Path) -> list[dict[str, Any]]:
-    """Read a sidecar's wires. Raises ``OSError``/``ValueError`` if unreadable."""
+    """Read a sidecar's wires, every entry as written. Raises ``OSError``/``ValueError``.
+
+    An entry that is not a JSON object comes back too: the writers
+    (:func:`write_sidecar`, :func:`drop_wires`) read through this and must not
+    drop anything from the owner's file. Read-only consumers go through
+    :func:`load_wires_if_present`.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("version") != SIDECAR_VERSION:
         raise ValueError(f"{path}: not a version {SIDECAR_VERSION} reinforcement sidecar")
@@ -226,12 +232,19 @@ def load_wires(path: Path) -> list[dict[str, Any]]:
 
 
 def load_wires_if_present(board: Path) -> list[dict[str, Any]]:
-    """Wires of the board's sidecar; empty when absent or unreadable (#8746)."""
+    """Wires of the board's sidecar; empty when absent or unreadable (#8746).
+
+    Only the object entries of ``wires`` are returned, in file order and with
+    their fields untouched; an entry that is not a JSON object (``null``, a
+    string, a number, an array) is left out, so a reader can treat every
+    element as a record (Issue #10398). Fields inside a record are not
+    validated, and the file is never rewritten.
+    """
     path = sidecar_path(board)
     if not path.is_file():
         return []
     try:
-        return load_wires(path)
+        return [w for w in load_wires(path) if isinstance(w, dict)]
     except (OSError, ValueError):
         return []
 

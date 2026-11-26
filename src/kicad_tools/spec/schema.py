@@ -14,11 +14,19 @@ from __future__ import annotations
 
 import datetime
 import re
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal
 
 try:
-    from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+    from pydantic import (
+        BaseModel,
+        ConfigDict,
+        Field,
+        ValidationInfo,
+        field_validator,
+        model_validator,
+    )
 except ImportError as e:
     raise ImportError(
         "pydantic is required for the spec module. "
@@ -49,6 +57,7 @@ __all__ = [
     "Suggestions",
     "ComponentSuggestion",
     "BOMEntry",
+    "LeadProfile",
     "Decision",
     "Progress",
     "PhaseProgress",
@@ -659,6 +668,33 @@ class ManufacturingRequirements(SpecModel):
             "before reporting refusal."
         ),
     )
+    finished_hole_tolerance_mm: float | None = Field(
+        default=None,
+        le=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Issue #10299: the fabricator's applicable *lower* "
+            "finished-hole tolerance, in millimetres -- the most the "
+            "finished (plated) hole may fall below the nominal drill.  "
+            "Sign convention: zero or negative; a positive value is "
+            "rejected because it would claim the hole only grows.  "
+            "Worked example: -0.08 means a 2.20 mm nominal hole may "
+            "finish at 2.12 mm minimum, so a lead needing 2.10 mm "
+            "still clears by +0.02 mm at worst.  Assembly preflight "
+            "uses it for the tolerance-adjusted lead-fit margin.  "
+            "Requires ``finished_hole_tolerance_source``."
+        ),
+    )
+    finished_hole_tolerance_source: str | None = Field(
+        default=None,
+        validate_default=True,
+        description=(
+            "Issue #10299: where the finished-hole tolerance was published "
+            "(e.g. 'JLCPCB capabilities, through-hole tolerances').  "
+            "Required when ``finished_hole_tolerance_mm`` is set."
+        ),
+    )
 
     @field_validator("copper_weight", mode="before")
     @classmethod
@@ -667,6 +703,17 @@ class ManufacturingRequirements(SpecModel):
         if v is None:
             return None
         return _parse_copper_weight_oz(v)
+
+    @field_validator("finished_hole_tolerance_source")
+    @classmethod
+    def validate_finished_hole_tolerance_source(
+        cls, source: str | None, info: ValidationInfo
+    ) -> str | None:
+        if info.data.get("finished_hole_tolerance_mm") is not None and not (source or "").strip():
+            raise ValueError(
+                "a declared finished-hole tolerance requires a non-empty finished_hole_tolerance_source"
+            )
+        return source
 
     @field_validator("silkscreen_min_reference_height_mm", mode="before")
     @classmethod
@@ -808,6 +855,98 @@ class BOMSuggestions(SpecModel):
     cost_target: str | None = Field(default=None, description="Target BOM cost")
 
 
+class LeadProfile(SpecModel):
+    """Verified maximum lead dimensions for a part assignment (Issue #10299).
+
+    Assembly preflight compares these against the *finished* plated hole
+    of each matching reference's through-hole pads, so the values must be
+    verified **maxima** -- taken from the part datasheet's package drawing
+    or a measurement record -- and :attr:`source` must say which.  A
+    round lead needs its maximum diameter; a rectangular lead needs its
+    maximum width and thickness (preflight derives the required hole
+    diameter from their diagonal via :meth:`required_diameter_mm`).
+    """
+
+    shape: Literal["round", "rectangular"] = Field(..., description="Lead cross-section shape")
+    diameter_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Maximum lead diameter for a round lead, in millimetres.",
+    )
+    width_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Maximum lead width for a rectangular lead, in millimetres.",
+    )
+    thickness_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Maximum lead thickness for a rectangular lead, in millimetres.",
+    )
+    source: str = Field(
+        ...,
+        description=(
+            "Where the dimensions were verified: a drawing/page reference or "
+            "measurement record, e.g. 'STW70N60DM2 datasheet package drawing "
+            "and dimensions, pp. 9-10'"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_dimensions(self) -> LeadProfile:
+        """Each shape takes exactly its own dimensions; source must be non-blank."""
+        if self.shape == "round":
+            if self.diameter_mm is None:
+                raise ValueError("lead shape 'round' requires diameter_mm")
+            if self.width_mm is not None or self.thickness_mm is not None:
+                raise ValueError(
+                    "lead shape 'round' takes diameter_mm only; "
+                    "width_mm/thickness_mm belong to shape 'rectangular'"
+                )
+        else:
+            if self.width_mm is None or self.thickness_mm is None:
+                raise ValueError("lead shape 'rectangular' requires width_mm and thickness_mm")
+            if self.diameter_mm is not None:
+                raise ValueError(
+                    "lead shape 'rectangular' takes width_mm and thickness_mm; "
+                    "diameter_mm belongs to shape 'round'"
+                )
+        if not (self.source and self.source.strip()):
+            raise ValueError(
+                "lead dimensions require a source (drawing/page reference or measurement record)"
+            )
+        return self
+
+    def required_diameter_mm(self) -> float:
+        """Diameter of the smallest round hole the centred lead can pass through.
+
+        A round lead needs its maximum diameter; a rectangular lead needs the
+        diagonal of its maximum width and thickness -- a centred rectangle
+        only fits a round hole whose diameter clears that diagonal.
+        """
+        return float(self.required_diameter_decimal_mm())
+
+    def required_diameter_decimal_mm(self) -> Decimal:
+        """Calculate clearance against decimal hole and tolerance dimensions."""
+        dimensions = [Decimal(str(x)) for x in self.max_dimensions_mm()]
+        if self.shape == "round":
+            return dimensions[0]
+        width, thickness = dimensions
+        return (width**2 + thickness**2).sqrt()
+
+    def max_dimensions_mm(self) -> tuple[float, ...]:
+        """The declared maximum dimensions, in declaration order."""
+        if self.shape == "round":
+            return (float(self.diameter_mm or 0.0),)
+        return (float(self.width_mm or 0.0), float(self.thickness_mm or 0.0))
+
+
 class BOMEntry(SpecModel):
     """Per-reference BOM mapping for explicit part assignment.
 
@@ -833,6 +972,36 @@ class BOMEntry(SpecModel):
     exempt_reason: str | None = Field(
         default=None, description="Why the ref is exempt (required when 'exempt' is set)"
     )
+    lead: LeadProfile | None = Field(
+        default=None,
+        description=(
+            "Issue #10299: verified maximum lead dimensions for this part "
+            "assignment, compared by assembly preflight against the finished "
+            "plated hole of every matching reference's through-hole pads."
+        ),
+    )
+    pad_leads: dict[str, LeadProfile] | None = Field(
+        default=None,
+        description=(
+            "Issue #10299: per-pad-number lead overrides for packages with "
+            "mixed leads, keyed by KiCad pad number (e.g. '2').  Takes "
+            "precedence over ``lead`` for that pad number only."
+        ),
+    )
+
+    @field_validator("pad_leads", mode="before")
+    @classmethod
+    def normalize_pad_numbers(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = {}
+        for key, profile in value.items():
+            if type(key) is int:
+                key = str(key)
+            if not isinstance(key, str) or key in normalized:
+                raise ValueError("pad numbers must be unique strings or integers")
+            normalized[key] = profile
+        return normalized
 
     @model_validator(mode="after")
     def _validate_exemption(self) -> BOMEntry:

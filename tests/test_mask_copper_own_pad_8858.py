@@ -815,3 +815,153 @@ def test_payload_without_the_new_fields_still_loads():
     loaded = MaskCopperAssessment.from_dict(data)
     assert loaded.measurements[0].exposed_beyond_owner_mm2 is None
     assert loaded.measurements[0].beside_owner_excess_mm2 is None
+
+
+@pytest.mark.parametrize(
+    "net,y,margin,category,overlap,beyond",
+    [
+        ("N", 1.05, 0, "registration_or_near_pad_only", 0.050, 0),
+        ("M", 0.50, 0, "foreign_net", 0.200, 0),
+        ("N", 0.50, 0.05, "same_net_beyond_land", 0.220, 0.020),
+        ("M", 1.10, 0, "registration_or_near_pad_only", 0, None),
+    ],
+)
+def test_nominal_exposure_keeps_the_policy_finding(net, y, margin, category, overlap, beyond):
+    result, row = _only(_segment((-1, y), (2, y), net=net, margin=margin))
+    summary = result.to_dict()["nominal_exposure"]
+    front = summary["faces"]["F.Mask"]
+    assert front["status"] == "complete"
+    assert front["opening_counts"] == {"plotted": 1, "matched": 1, "unresolved": 0, "excluded": 0}
+    assert front["measurement_indices"][category] == [0]
+    assert front["finding_counts"][category] == 1
+    (opening,) = front["openings"]
+    assert opening["opening_uuids"] == [OWNER]
+    assert opening["measurement_indices"] == [0]
+    assert opening["owner_ref"] == "R1/1"
+    assert row.exposed_area_mm2 == pytest.approx(overlap)
+    assert row.exposed_beyond_owner_mm2 == (None if beyond is None else pytest.approx(beyond))
+    if y == 1.05:
+        assert row.beside_owner_excess_mm2 == pytest.approx(0.111704, abs=1e-6)
+        assert (
+            front["finding_counts"]["foreign_net"]
+            == front["finding_counts"]["same_net_beyond_land"]
+            == 0
+        )
+    assert row.disposition == "violation"
+    assert not result.passed
+    assert summary["faces"]["B.Mask"]["status"] == "missing_layer"
+    assert summary["faces"]["B.Mask"]["finding_counts"]["foreign_net"] is None
+
+
+def test_connector_with_mounting_hole_keeps_signal_pin_exposure():
+    geometry = _segment((-1, 0.5), (2, 0.5), net="M")
+    pin = geometry.objects[OWNER]
+    pin.update(
+        footprint_name="Connector_Dsub:DSUB-9_Socket_Vertical_P2.77x2.84mm_MountingHoles",
+        footprint_ref="J1",
+        pad_ref="J1/1",
+        pad_type="thru_hole",
+    )
+    hole = box(4, 0, 5, 1)
+    geometry.objects["hole"] = dict(
+        pin, pad_ref="J1/", pad_type="np_thru_hole", net="", layers_geometry={"F.Mask": hole}
+    )
+    geometry.exported.layers["F.Mask"] = PAD.union(hole)
+
+    result, row = _only(geometry)
+    front = result.to_dict()["nominal_exposure"]["faces"]["F.Mask"]
+    assert {o["owner_ref"]: (o["status"], o["reason"]) for o in front["openings"]} == {
+        "J1/1": ("matched", None),
+        "J1/": ("excluded", "non_plated_hole"),
+    }
+    assert front["finding_counts"]["foreign_net"] == 1
+    assert row.exposed_area_mm2 == pytest.approx(0.200)
+
+
+@pytest.mark.parametrize(
+    "native_error,expected", [(None, None), (0.0, 0.000004), (0.005, 0.010004)]
+)
+def test_nominal_uncertainty_requires_native_error_bound(native_error, expected):
+    geometry = _segment((-1, 0.5), (2, 0.5))
+    if native_error is None:
+        geometry.objects.clear()
+        geometry.errors.append("native attribution unavailable")
+    else:
+        geometry.provenance["max_error_mm_per_construction"] = native_error
+    result = assess_attributed_geometry(geometry, POLICY)
+    assert result.to_dict()["nominal_exposure"]["construction_uncertainty_mm"] == expected
+
+
+def test_nominal_coverage_counts_quiet_opening_and_links_all_conductors():
+    geometry = _segment((-1, 0.5), (2, 0.5), net="M")
+    geometry.objects["second"] = dict(geometry.objects[OTHER], net="P")
+    # A quiet back-side land has no candidate measurement.
+    geometry.objects[OWNER]["layers_geometry"].update({"B.Mask": PAD, "B.Cu": PAD})
+    geometry.exported.layers.update({"B.Mask": PAD, "B.Cu": PAD})
+    result = assess_attributed_geometry(geometry, POLICY)
+    summary = result.to_dict()["nominal_exposure"]
+    assert summary["status"] == "complete"
+    assert summary["opening_counts"]["matched"] == 2
+    assert summary["measured_opening_counts"] == {
+        "evaluated": 2,
+        "foreign_net": 1,
+        "same_net_beyond_land": 0,
+    }
+    assert summary["finding_counts"]["foreign_net"] == 2
+    assert summary["faces"]["F.Mask"]["openings"][0]["measurement_indices"] == [0, 1]
+    back = summary["faces"]["B.Mask"]
+    assert back["opening_counts"]["matched"] == 1
+    assert back["openings"][0]["measurement_indices"] == []
+    assert back["finding_counts"]["foreign_net"] == 0
+    assert MaskCopperAssessment.from_dict(result.to_dict()).to_dict() == result.to_dict()
+
+
+def test_cli_reports_zero_nominal_exposure_on_clearance_failure(tmp_path, capsys, monkeypatch):
+    import hashlib
+    import json
+
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    path = tmp_path / "board.kicad_pcb"
+    PCB.create(width=20, height=20, layers=2).save(path)
+    geometry = _segment((-1, 1.05), (2, 1.05))
+    geometry.objects[OWNER]["pad_ref"] = "C60/1"
+    back_layers = {"B.Cu": PAD, "B.Mask": PAD}
+    geometry.objects["fiducial"] = dict(
+        geometry.objects[OWNER], net="", layers_geometry=back_layers
+    )
+    geometry.exported.layers.update(back_layers)
+    geometry.exported.source_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    result = assess_attributed_geometry(geometry, POLICY)
+    monkeypatch.setattr(
+        "kicad_tools.validate.mask_copper.check_mask_to_copper", lambda *a, **kw: result
+    )
+    args = [str(path), "--drc-only", "--mfr", "jlcpcb", "--only", "mask_to_copper"]
+    saved = tmp_path / "report.json"
+    assert main([*args, "--format", "json", "--output", str(saved)]) == 2
+    stdout = json.loads(capsys.readouterr().out)
+    assert (
+        stdout["mask_copper_assessments"]
+        == json.loads(saved.read_text())["mask_copper_assessments"]
+    )
+    (assessment,) = stdout["mask_copper_assessments"]
+    summary = assessment["nominal_exposure"]
+    assert summary["status"] == "complete"
+    assert (
+        summary["finding_counts"]["foreign_net"]
+        == summary["finding_counts"]["same_net_beyond_land"]
+        == 0
+    )
+    (i,) = summary["faces"]["F.Mask"]["measurement_indices"]["registration_or_near_pad_only"]
+    row = assessment["measurements"][i]
+    assert row["owner_ref"] == "C60/1"
+    assert row["disposition"] == "violation"
+    assert row["exposed_area_mm2"] == pytest.approx(0.05)
+    assert row["exposed_beyond_owner_mm2"] == 0
+    assert row["beside_owner_excess_mm2"] > 0
+    assert main(args) == 2
+    human = capsys.readouterr().out
+    assert "B.Mask (complete): 0/1 matched, 0 unresolved, 1 excluded" in human
+    assert "F.Mask (complete): 1/1 matched" in human
+    assert "0 foreign-net, 0 same-net beyond land, 1 near-pad only" in human

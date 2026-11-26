@@ -410,3 +410,49 @@ be treated as fully attributed merely because other copper covers it. Inspect
 the retained Gerbers, source hashes and native object provenance when reviewing
 results. A passing assessment applies to its recorded inputs and supplied policy;
 it is not supplier approval or qualification of an entire manufacturing order.
+
+### Review nominal exposure and the outgoing artwork
+
+In stdout JSON and the saved report, each `mask_copper_assessments[].nominal_exposure`
+summarizes the board and its two faces. Start with `opening_counts`. Each connected
+plotted opening counts once, including a quiet land. Each face lists its openings
+with their bounds in mm, source instance UUIDs, land reference and net. Merged
+regions and mask-only pads without a proven land are unresolved. Exclusions list
+the source UUID and reason, including unnetted pads, mechanical holes and graphics.
+
+`finding_counts` counts opening–conductor measurements. Follow the zero-based
+`measurement_indices` on an opening or in a face's category to the assessment's
+full `measurements` array. Two traces on one land can contribute two findings.
+`measured_opening_counts` gives the denominator of fully evaluated matched
+openings and the number of those openings exposing each kind of copper. For
+example, two foreign-net traces crossing one land count as two findings and
+one exposed opening. Zeros for this subset apply only to its evaluated lands.
+
+| Category | Nominal geometry on a matched land |
+| --- | --- |
+| `foreign_net` | Any positive intersection of other-net copper with the opening, including inside the land. |
+| `same_net_beyond_land` | Positive area of same-net copper inside the opening and outside the owning land. |
+| `registration_or_near_pad_only` | A policy violation, uncertain measurement or warning with neither nominal exposure. Inspect clearance and beside-owner excess. |
+| `no_nominal_exposure` | A measured pair with neither nominal exposure nor a near-pad policy finding. |
+| `unevaluated` / `excluded` | Ownership, net or geometry was insufficient to classify the pair, or the opening was outside the component check. |
+
+Areas use mm² and distances use mm. The nominal area threshold is zero, so
+touching alone contributes no exposure. The report records the assessor's
+construction uncertainty in mm. A same-net trace can have positive opening
+overlap, zero beyond-land area and positive beside-owner excess. Its clearance
+can still fail the configured fabrication policy. Use the assessment's
+`policy`, `coverage`, `passed` and measurement dispositions for sign-off.
+Physical registration on a manufactured board requires separate evidence.
+
+Check each face's `status`. With partial coverage, positive finding counts are
+observations and an unknown total is `null`. A missing layer or a legacy report
+without an aperture inventory cannot establish zero exposure. An unevaluated
+area in a measurement remains `null`.
+
+The artwork source `internal_replot` identifies the checker's Gerbers. To compare
+an outgoing ZIP, identify each member by layer and hash its uncompressed file
+bytes, for example `unzip -p order.zip 'board-F_Cu.gbr' | sha256sum` for a
+known, unique front copper member. Compare with `faces["F.Mask"].gerber_sha256`
+for both F.Cu and F.Mask, then repeat for B.Cu and B.Mask under B.Mask.
+Only two matching digests bind that face's result to the outgoing files.
+A missing, ambiguous or different member leaves that face unverified.

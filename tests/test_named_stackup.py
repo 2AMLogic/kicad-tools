@@ -489,13 +489,15 @@ def test_linkless_refusal_leaves_missing_sidecars_absent(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
-def test_linkless_refusal_restores_authored_sidecars(tmp_path, monkeypatch):
+def test_linkless_refusal_restores_authored_sidecars(tmp_path, monkeypatch, caplog):
     """Issue #10091: authored project and rules bytes survive the refusal.
 
     The same live run showed both siblings of an authored project change
     before the refusal fired. Existing files must be preserved byte for
     byte -- here an authored text variable and a named custom rule.
     """
+    from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN, DRU_FLOORS_BLOCK_END
+
     _break_hard_link_support(monkeypatch)
     path = _silk_defect_stackup_board(tmp_path)
     pro = path.with_suffix(".kicad_pro")
@@ -504,15 +506,28 @@ def test_linkless_refusal_restores_authored_sidecars(tmp_path, monkeypatch):
         json.dumps({"meta": {"variables": {"my_text_variable": "authored"}}}, indent=2),
         encoding="utf-8",
     )
-    dru.write_text('(rule "my authored rule" (constraint clearance (min 0.5mm)))\n')
+    # The authored clearance suppresses regeneration of the old ampacity floor.
+    dru.write_text(
+        '(rule "my authored rule" (constraint clearance (min 0.1mm)))\n'
+        f"{DRU_FLOORS_BLOCK_BEGIN}\n"
+        '(rule "Ampacity Min Width (old, external)"\n'
+        "  (layer outer)\n"
+        "  (constraint track_width (min 0.3mm)))\n"
+        f"{DRU_FLOORS_BLOCK_END}\n"
+    )
     pro_before, dru_before = pro.read_bytes(), dru.read_bytes()
 
+    caplog.set_level("INFO", logger="kicad_tools.export.manufacturing")
     result = _stackup_package(path).export(tmp_path / "out")
 
     assert not result.success
     assert "Silk legalisation pass could not run" in result.errors[-1]
     assert pro.read_bytes() == pro_before
     assert dru.read_bytes() == dru_before
+    # #10284: a discarded scratch copy must not be reported as a change.
+    for message in ("Export modified", "Export changed the ampacity rules"):
+        assert not any(message in warning for warning in result.warnings)
+        assert message not in caplog.text
 
 
 @pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
