@@ -140,7 +140,7 @@ class LinkRouteRules:
         """
         floor = self.clearance
         if self.board_rules is not None and self.net_names is not None:
-            from .board_clearance_rules import ItemProps
+            from .board_clearance_rules import PAD_TYPE_NAMES, ItemProps
 
             other_name = self.net_names.get(net_number, "")
             if item is None:
@@ -149,7 +149,9 @@ class LinkRouteRules:
                 other = ItemProps(
                     "Pad",
                     other_name,
-                    pad_type="Through-hole" if item.drill else "SMD",
+                    plated=item.pad_type == "thru_hole" if item.pad_type else bool(item.drill),
+                    pad_type=PAD_TYPE_NAMES.get(item.pad_type or "")
+                    or ("Through-hole" if item.drill else "SMD"),
                     layer=item.footprint_layer,
                     footprint_ref=item.ref,
                     footprint_lib_id=item.lib_id,
@@ -160,7 +162,12 @@ class LinkRouteRules:
                 )
             else:
                 other = ItemProps(
-                    "Track", other_name, layer=layer, footprint_ref="", footprint_lib_id=""
+                    "Track",
+                    other_name,
+                    plated=False,
+                    layer=layer,
+                    footprint_ref="",
+                    footprint_lib_id="",
                 )
             # ``moving`` is the item being placed: a track mask and a via mask
             # resolve separately, so a ``A.Type == 'Via'`` rule never leaks
@@ -171,7 +178,12 @@ class LinkRouteRules:
                 )
             else:
                 mover = ItemProps(
-                    "Track", link_net_name, layer=layer, footprint_ref="", footprint_lib_id=""
+                    "Track",
+                    link_net_name,
+                    plated=False,
+                    layer=layer,
+                    footprint_ref="",
+                    footprint_lib_id="",
                 )
             floor = max(floor, self.board_rules.clearance(mover, other, layer))
         full = max(floor, self.clearance_for(net_number))
@@ -313,6 +325,8 @@ class _Item:
     ref: str | None = None
     lib_id: str | None = None
     footprint_layer: str | None = None
+    #: Schema pad ``type`` (``smd`` / ``thru_hole`` / ``connect`` / ...).
+    pad_type: str | None = None
 
 
 @dataclass
@@ -356,6 +370,7 @@ def _build_model(pcb: PCB) -> _BoardModel:
                     getattr(fp, "reference", None) or "",
                     getattr(fp, "name", None) or "",
                     fp.layer,
+                    getattr(pad, "type", None) or None,
                 )
             )
             drill = pad_drill

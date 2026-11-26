@@ -326,6 +326,53 @@ def test_pad_reference_reaches_resolver(tmp_path):
     assert rules.clearance_parts("SIG", 2, "F.Cu", pt, r3)[0][1] == pytest.approx(0.2)
 
 
+def test_pad_type_reaches_resolver(tmp_path):
+    from shapely.geometry import Point
+
+    from kicad_tools.router.link_router import _Item
+
+    rules = _pair_rules(
+        tmp_path,
+        "(rule \"r\" (condition \"A.NetName == 'SIG' && B.Type == 'Pad' && B.Pad_Type != 'SMD'\") "
+        "(constraint clearance (min 6mm)))\n",
+    )
+    pt = Point(0, 0)
+
+    def got(pad_type, drill=0.0):
+        item = _Item(2, {"F.Cu": pt}, True, drill, "J1", "", "F.Cu", pad_type)
+        return rules.clearance_parts("SIG", 2, "F.Cu", pt, item)[0][1]
+
+    assert got("connect") == pytest.approx(6.0)
+    assert got("thru_hole", 0.8) == pytest.approx(6.0)
+    assert got("smd") == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("negate", [False, True])
+def test_plated_state_reaches_resolver(tmp_path, negate):
+    from shapely.geometry import Point
+
+    from kicad_tools.router.link_router import _Item
+
+    pt = Point(0, 0)
+    neg = "!" if negate else ""
+    other = "A.NetName == 'SIG' && B.NetName == 'HV'"
+    for side, typ, item, plated in (
+        ("B", "Pad", _Item(2, {"F.Cu": pt}, True, 0.0, "R3", "", "F.Cu", "smd"), False),
+        ("B", "Pad", _Item(2, {"F.Cu": pt}, True, 0.8, "J1", "", "F.Cu", "thru_hole"), True),
+        ("B", "Track", _Item(2, {"F.Cu": pt}), False),
+        ("A", "Track", _Item(2, {"F.Cu": pt}), False),
+    ):
+        rules = _pair_rules(
+            tmp_path,
+            f'(rule "r" (condition "{other} && {side}.Type == \'{typ}\' && '
+            f'{neg}{side}.isPlated()") (constraint clearance (min 6mm)))\n',
+        )
+        applies = plated != negate
+        assert rules.clearance_parts("SIG", 2, "F.Cu", pt, item)[0][1] == pytest.approx(
+            6.0 if applies else 0.2
+        ), (side, typ, negate)
+
+
 def test_copper_beyond_window_padding_is_still_avoided(tmp_path, capsys):
     from kicad_tools.cli import main
 

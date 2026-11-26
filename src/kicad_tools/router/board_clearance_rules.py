@@ -1153,6 +1153,7 @@ PAD_TYPE_NAMES = {
     "smd": "SMD",
     "thru_hole": "Through-hole",
     "np_thru_hole": "NPTH, mechanical",
+    "connect": "Edge connector",
 }
 
 
