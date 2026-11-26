@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-26
 
+- **Issue #10364** (closed): Identify verified reinforcement wire-end holes when reviewing native KiCad dangling-via warnings
+- **PR #10378**: feat: identify verified wire ends in native dangling-via reports
+- **Issue #10479** (closed): Loom role scripts exit 126: config-resolver.sh passes the 208 KB private defaults as a single jq --argjson argument
+- **Issue #10417** (closed): Pin-1 check misses the visible positive mark on stock radial electrolytics
+- **PR #10418**: fix: recognize visible pin-one marks at the rim of radial capacitors
 - **Issue #10461** (closed): create-pr.sh exits 126 on the dispatch host: private Loom defaults exceed the kernel's per-argument limit
 - **Issue #10442** (closed): Lock the radial positive-lead-mark exemption bounds with regression cases, and cite the issue in changelog.d/10411.fixed.md
 - **PR #10453**: test: pin radial lead-mark exemption bounds, fix fragment citation
