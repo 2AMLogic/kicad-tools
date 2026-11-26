@@ -831,7 +831,7 @@ def _execute_repair(
         if not args.quiet and args.format == "text" and pass_num == 1:
             # Engine-label the detection total so it cannot be read as a
             # contradiction next to the pure-Python --verify counts.
-            print(f"Found {total_targeted} repairable violation(s) ({args.engine} engine):")
+            print(f"Found {total_targeted} targeted violation(s) ({args.engine} engine):")
             if clearance_violations:
                 print(f"  Clearance: {len(clearance_violations)}")
             if drill_violations:
@@ -2967,6 +2967,12 @@ def _print_text(
     remaining = first_violations - total_repaired_all
     if dry_run:
         print("Dry run: predictions only -- the board was not modified or re-checked.")
+        print(f"Targeted findings without a proposed repair: {remaining}")
+        if non_targeted:
+            print(f"Findings outside the repair targets: {non_targeted}")
+        if clearance_result.skipped_exceeds_max + drill_result.skipped_exceeds_max > 0:
+            print(f"    Try increasing --max-displacement (currently {max_displacement}mm)")
+        return
 
     if remaining <= 0 and non_targeted == 0:
         print("All violations repaired!")
