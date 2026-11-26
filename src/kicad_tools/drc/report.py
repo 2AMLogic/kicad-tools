@@ -279,6 +279,25 @@ class DRCReport:
             return parse_text_report(content, str(path))
 
 
+_ITEM_NET_RE = re.compile(r"^[^\[]*\[(.+)\] (?:on|of) ")
+_NET_TOKEN_RE = re.compile(r"\[(.+?)\](?=[\s,;:)]|$)")
+_LEGACY_TOKEN_RE = re.compile(r"\[([^\]]+)\]")
+
+
+def _bracketed_tokens(text: str) -> list[str]:
+    """Return the ``[...]`` net tokens of a KiCad item description.
+
+    A native item's layer ("on F.Cu") or footprint ("of U1") follows
+    the closing bracket. Match that boundary so punctuation and literal
+    brackets inside the net name survive. Other description formats retain
+    the generic token extraction.
+    """
+    if match := _ITEM_NET_RE.match(text):
+        return [match.group(1)]
+    tokens = _NET_TOKEN_RE.findall(text)
+    return tokens if tokens else _LEGACY_TOKEN_RE.findall(text)
+
+
 def _is_json(content: str) -> bool:
     """True for any valid JSON document, so non-object JSON is rejected rather
     than silently parsed as an empty text report (issue #8133)."""
@@ -426,7 +445,7 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
             current_violation["items"].append(description)
 
             # Extract net names from [NetName] pattern
-            net_matches = re.findall(r"\[([^\]]+)\]", description)
+            net_matches = _bracketed_tokens(description)
             for net in net_matches:
                 if net != "<no net>" and net not in current_violation["nets"]:
                     current_violation["nets"].append(net)
@@ -688,7 +707,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
             # Real KiCad-cli JSON has no per-item "net" key; the net lives
             # inside the description, e.g. "Track [Net-(C11-2)] on F.Cu".
             # Mirrors the plain-text parser above (parse_text_report).
-            net_matches = re.findall(r"\[([^\]]+)\]", desc)
+            net_matches = _bracketed_tokens(desc)
             for net in net_matches:
                 if net != "<no net>" and net not in nets:
                     nets.append(net)

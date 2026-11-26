@@ -1610,3 +1610,114 @@ def test_merged_region_nets_carry_every_owner_net(pad_b_net, expected_nets):
     assert [m.owner_nets for m in reloaded.measurements] == [
         m.owner_nets for m in assessment.measurements
     ]
+
+
+def test_merged_plot_is_one_unresolved_opening_with_every_pair():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry
+
+    result = assess_attributed_geometry(_merged_region_geometry("segment"), _POLICY)
+    face = result.to_dict()["nominal_exposure"]["faces"]["F.Mask"]
+    assert face["opening_counts"] == {"plotted": 1, "matched": 0, "unresolved": 1, "excluded": 0}
+    (opening,) = face["openings"]
+    assert len(opening["opening_uuids"]) == 2
+    assert opening["reason"] == "merged_region"
+    assert opening["measurement_indices"] == list(range(len(result.measurements)))
+    assert face["measurement_indices"]["unevaluated"] == opening["measurement_indices"]
+    assert face["finding_counts"]["foreign_net"] is None
+
+
+def test_opening_inventory_lists_exclusions_and_mask_only_pad():
+    from shapely.affinity import translate
+    from shapely.ops import unary_union
+
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry
+
+    geometry, owner, _ = toy_geometry()
+    base = geometry.objects[owner]
+    for n, (identity, kind, footprint) in enumerate(
+        (
+            ("shunt", "pad:rect", "Shunt"),
+            ("fiducial", "pad:circle", "Fiducial:Fiducial_1mm"),
+            ("hole", "pad:circle", "MountingHole:MountingHole_3mm"),
+            ("window", "gr_rect", ""),
+            ("unnetted", "pad:rect", "R"),
+        ),
+        1,
+    ):
+        layers = {k: translate(v, xoff=4 * n) for k, v in base["layers_geometry"].items()}
+        if identity in ("window", "shunt", "hole"):
+            del layers["F.Cu"]
+        geometry.objects[identity] = dict(
+            base, kind=kind, footprint_name=footprint, net="", layers_geometry=layers
+        )
+    for layer in geometry.exported.layers:
+        geometry.exported.layers[layer] = unary_union(
+            [
+                item["layers_geometry"][layer]
+                for item in geometry.objects.values()
+                if layer in item["layers_geometry"]
+            ]
+        )
+    face = assess_attributed_geometry(geometry, _POLICY).to_dict()["nominal_exposure"]["faces"][
+        "F.Mask"
+    ]
+    assert face["opening_counts"] == {"plotted": 6, "matched": 1, "excluded": 4, "unresolved": 1}
+    assert face["status"] == "partial"
+    assert face["measured_opening_counts"] == {
+        "evaluated": 1,
+        "foreign_net": 0,
+        "same_net_beyond_land": 0,
+    }
+    assert {o["opening_uuids"][0]: o["reason"] for o in face["openings"]} == {
+        owner: None,
+        "shunt": "no_attributed_land",
+        "fiducial": "unnetted_fiducial",
+        "hole": "mounting_hole",
+        "window": "non_pad_gr_rect",
+        "unnetted": "unnetted_pad",
+    }
+
+
+def test_missing_copper_and_legacy_inventory_do_not_report_zero():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry
+
+    geometry, _, _ = toy_geometry(overlap_owner=True)
+    del geometry.exported.layers["F.Cu"]
+    result = assess_attributed_geometry(geometry, _POLICY)
+    data = result.to_dict()
+    face = data["nominal_exposure"]["faces"]["F.Mask"]
+    assert face["openings"][0]["reason"] == "missing_copper_layer"
+    assert face["missing_layers"] == ["F.Cu"]
+    assert face["status"] == "missing_layer"
+    assert face["finding_counts"]["same_net_beyond_land"] is None
+    del data["nominal_exposure"]
+    summary = MaskCopperAssessment.from_dict(data).to_dict()["nominal_exposure"]
+    assert summary["status"] == "inventory_unavailable"
+    assert summary["finding_counts"]["foreign_net"] is None
+    assert summary["opening_counts"]["matched"] is None
+
+
+def test_unknown_conductor_net_keeps_overlapping_area_unevaluated():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry
+
+    geometry, _, _ = toy_geometry(overlap_owner=True, conductor_net="")
+    result = assess_attributed_geometry(geometry, _POLICY)
+    front = result.to_dict()["nominal_exposure"]["faces"]["F.Mask"]
+    assert front["status"] == "partial"
+    assert result.measurements[0].exposed_area_mm2 > 0
+    assert front["measurement_indices"]["unevaluated"] == [0]
+    assert front["measured_opening_counts"]["foreign_net"] is None
+    assert front["finding_counts"]["registration_or_near_pad_only"] is None
+
+
+def test_incomplete_geometry_keeps_quiet_opening_but_cannot_establish_zero():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry
+
+    geometry, _, _ = toy_geometry(conductor_x=3.0)
+    geometry.errors.append("native per-object/full-layer material mismatch")
+    result = assess_attributed_geometry(geometry, _POLICY)
+    front = result.to_dict()["nominal_exposure"]["faces"]["F.Mask"]
+    assert front["status"] == "partial"
+    assert front["opening_counts"]["matched"] == 1
+    assert front["finding_counts"]["foreign_net"] is None
+    assert front["measured_opening_counts"]["evaluated"] is None

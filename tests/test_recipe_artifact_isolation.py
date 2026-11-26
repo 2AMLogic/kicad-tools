@@ -102,24 +102,11 @@ def _board06_background(gate):
     return found
 
 
-def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
-    """Issue #7359: identity + issue number, no count cap left."""
+def test_board06_seed42_has_no_remaining_error_allowances():
+    """The repaired seed-42 board needs no finding allowances (issue #10294)."""
     gate = load("check_diffpair_coverage")
     assert not hasattr(gate, "DIFFPAIR_FIXTURE_RULE_CAPS")
-    assert {n for (r, n) in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "impedance"} == (
-        BOARD06_IMPEDANCE_NETS
-    )
-    assert not {
-        n for (r, n) in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "diffpair_uncoupled_length"
-    }
-    # The repaired seed-42 export has no physical-gap or silkscreen allowance.
-    assert all(
-        rule in ("diffpair_length_skew", "mask_to_copper")
-        for rule, _ in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
-    )
-    assert {
-        i for (r, _), i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items() if r == "mask_to_copper"
-    } == {8858}
+    assert gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS == {}
 
 
 def test_board06_listed_impedance_findings_pass():
