@@ -968,3 +968,12 @@ def test_recordless_move_needs_no_lock_file_and_keeps_hard_links(tmp_path):
     assert pcb.read_bytes() == twin.read_bytes()
     assert pcb.samefile(twin)
     assert not list(tmp_path.glob(".*.center.lock"))
+
+
+def test_recordless_move_in_read_only_directory(tmp_path):
+    pcb = _off_center_pcb(tmp_path)
+    tmp_path.chmod(0o555)
+    try:
+        assert center_on_sheet(pcb).changed
+    finally:
+        tmp_path.chmod(0o755)

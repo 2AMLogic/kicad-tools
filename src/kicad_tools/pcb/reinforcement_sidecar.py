@@ -40,6 +40,86 @@ def sidecar_path(board: Path) -> Path:
     return board.with_name(board.name + SIDECAR_SUFFIX)
 
 
+def board_lock_path(path: Path) -> Path:
+    target = path.resolve()
+    return target.with_name(f".{target.name}.center.lock")
+
+
+def _file_version(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Detect replacement, creation, removal or an in-place edit during a read."""
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+@contextmanager
+def board_stream_lock(fd: int, board: Path, *, writing: bool) -> Iterator[None]:
+    """Coordinate ordinary in-place text writes without creating a sibling in a read-only directory."""
+    from kicad_tools.core.package_publication import publication_lock
+
+    try:
+        import fcntl
+    except ImportError:  # Windows uses the same sibling reservation as PCB.save.
+        if writing:
+            with publication_lock(board_lock_path(board)):
+                yield
+        else:
+            yield
+        return
+
+    mode = fcntl.LOCK_EX if writing else fcntl.LOCK_SH
+    try:
+        fcntl.flock(fd, mode | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise ValueError(f"Another operation is publishing the input: {board}") from exc
+    try:
+        if writing and board_lock_path(board).exists():
+            raise ValueError(f"Another operation is publishing the output: {board}")
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def board_versions(board: Path):
+    record = sidecar_path(board)
+    return board.resolve(), record.resolve(), _file_version(board), _file_version(record)
+
+
+@contextmanager
+def reinforce_publication(source: Path, output: Path) -> Iterator[Callable[[], None]]:
+    """Reserve the output before reading geometry. Check a distinct input again before saving."""
+    from kicad_tools.core.package_publication import publication_lock
+
+    versions = board_versions(source)
+    # A save can replace the output symlink itself. Reserve its name as well
+    # as the physical board and either possible inventory.
+    locks = {
+        output.parent.resolve() / f".{output.name}.center.lock",
+        board_lock_path(output),
+        board_lock_path(sidecar_path(output)),
+        board_lock_path(saved_record_path(output, True)),
+    }
+    source_locks = {board_lock_path(source), board_lock_path(sidecar_path(source))}
+
+    def verify() -> None:
+        if versions != board_versions(source) or any(
+            lock.exists() for lock in source_locks - locks
+        ):
+            raise ValueError(f"PCB or reinforcement record changed while reinforcing: {source}")
+
+    with ExitStack() as stack:
+        for lock in sorted(locks):
+            stack.enter_context(publication_lock(lock))
+        for path in {source.resolve(), output.resolve()}:
+            if path.is_file():
+                stream = stack.enter_context(path.open("rb"))
+                stack.enter_context(board_stream_lock(stream.fileno(), path, writing=False))
+        verify()
+        yield verify
+
+
 def edit_seed_record(input_board: Path, output_board: Path) -> Path:
     """The inventory the PCB being saved to ``output_board`` starts from.
 

@@ -53,7 +53,12 @@ from tempfile import TemporaryDirectory
 
 from kicad_tools.core.package_publication import publication_lock
 from kicad_tools.pcb.models3d import _find_matching_paren, _skip_string
-from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+from kicad_tools.pcb.reinforcement_sidecar import (
+    board_lock_path,
+    board_stream_lock,
+    board_versions,
+    sidecar_path,
+)
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS
 
 __all__ = [
@@ -652,20 +657,6 @@ def _record_publication_paths(board: Path, record: Path) -> tuple[Path, Path | N
     return canonical, record
 
 
-def _center_lock(path: Path) -> Path:
-    target = path.resolve()
-    return target.with_name(f".{target.name}.center.lock")
-
-
-def _file_version(path: Path) -> tuple[int, int, int, int, int] | None:
-    """Detect replacement, creation, removal or an in-place edit during a read."""
-    try:
-        info = path.stat()
-    except FileNotFoundError:
-        return None
-    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
-
-
 def _staged_path(stack: ExitStack, dest: Path) -> Path:
     directory = stack.enter_context(TemporaryDirectory(prefix=".center-", dir=dest.parent))
     return Path(directory) / "new"
@@ -759,12 +750,12 @@ def center_on_sheet(
     pcb_path = Path(pcb_path)
     src_sidecar = _centering_sidecar(pcb_path)
     source_pair = (pcb_path, src_sidecar)
-    source_versions = tuple(_file_version(path) for path in source_pair)
+    source_versions = board_versions(pcb_path)
     # A writer can pause between the record and PCB replacements. Check its locks
     # after observing both versions, then verify both again after reading the pair.
     # An export from a read-only directory requires no lock file in the input.
-    if any(os.path.lexists(_center_lock(path)) for path in source_pair):
-        raise ValueError(f"Another centering operation is publishing the input: {pcb_path}")
+    if any(os.path.lexists(board_lock_path(path)) for path in source_pair):
+        raise ValueError(f"Another operation is publishing the input: {pcb_path}")
     source_bytes = pcb_path.read_bytes()
     new_text, report = center_pcb_text(
         source_bytes.decode("utf-8"),
@@ -775,19 +766,43 @@ def center_on_sheet(
         grid=grid,
     )
     dest = Path(output_path) if output_path is not None else pcb_path
+    dest_versions = board_versions(dest)
     dest_sidecar = _centering_sidecar(dest)
     if not any(
         os.path.lexists(record)
         for record in (src_sidecar, dest_sidecar, sidecar_path(dest.resolve()))
     ):
-        # No reinforcement record on either side: the original single-file
-        # behaviour. No lock, no read probe, no staging, and an unchanged board
-        # writes nothing (a no-op must not overwrite a different output).
+        # An unchanged board writes nothing. Update an existing file through its
+        # inode so a write-only output or a hard-linked board still works.
         if report.changed and not dry_run:
-            dest.write_text(new_text)
+
+            def verify_recordless() -> None:
+                if source_versions != board_versions(pcb_path) or os.path.lexists(
+                    sidecar_path(dest)
+                ):
+                    raise ValueError(
+                        f"PCB or reinforcement record changed while centering: {pcb_path}"
+                    )
+
+            with ExitStack() as files:
+                try:
+                    fd = os.open(dest, os.O_WRONLY)
+                except FileNotFoundError:
+                    files.enter_context(publication_lock(board_lock_path(dest)))
+                    verify_recordless()
+                    with dest.resolve().open("x") as output:
+                        output.write(new_text)
+                else:
+                    stream = files.enter_context(os.fdopen(fd, "w"))
+                    files.enter_context(board_stream_lock(fd, dest, writing=True))
+                    verify_recordless()
+                    if not os.path.samestat(os.fstat(fd), dest.stat()):
+                        raise ValueError(f"PCB changed while centering: {dest}")
+                    stream.truncate(0)
+                    stream.write(new_text)
+                    stream.flush()
             report.output = dest
         return report
-    record_target, record_link = _record_publication_paths(dest, dest_sidecar)
     record_target, record_link = _record_publication_paths(dest, dest_sidecar)
     copying = (dest.parent.resolve(), dest.name) != (pcb_path.parent.resolve(), pcb_path.name)
     if _same_file(dest, dest_sidecar) or (
@@ -803,14 +818,16 @@ def center_on_sheet(
     board_target = dest.resolve()
     with ExitStack() as files:
         if not dry_run:
-            files.enter_context(publication_lock(_center_lock(board_target)))
+            files.enter_context(publication_lock(board_lock_path(board_target)))
+            if board_versions(dest) != dest_versions:
+                raise ValueError(f"PCB or reinforcement record changed while centering: {dest}")
             if record_link is not None:
                 if os.path.lexists(sidecar_path(board_target)):
                     raise ValueError(f"Reinforcement record changed while centering: {dest}")
-                files.enter_context(publication_lock(_center_lock(record_link)))
+                files.enter_context(publication_lock(board_lock_path(record_link)))
             writes_record = copying or report.dx_mm or report.dy_mm or record_link is not None
             if writes_record and os.path.lexists(src_sidecar):
-                files.enter_context(publication_lock(_center_lock(record_target)))
+                files.enter_context(publication_lock(board_lock_path(record_target)))
 
         record: bytes | None = None
         if os.path.lexists(src_sidecar):
@@ -827,9 +844,7 @@ def center_on_sheet(
             )
         if record is not None:
             report.sidecar = sidecar_path(board_target) if record_link is not None else dest_sidecar
-        if source_versions != tuple(_file_version(path) for path in source_pair) or (
-            pcb_path.read_bytes() != source_bytes
-        ):
+        if source_versions != board_versions(pcb_path) or (pcb_path.read_bytes() != source_bytes):
             raise ValueError(f"PCB or reinforcement record changed while centering: {pcb_path}")
         if dry_run:
             return report

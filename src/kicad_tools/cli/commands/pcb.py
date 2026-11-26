@@ -1470,34 +1470,33 @@ def _publish_reinforce_outputs(
 ) -> bool:
     """Publish staged reinforcement sidecar and PCB together; preserve both on failure."""
     from kicad_tools.pcb.reinforcement_sidecar import stage_record_update
+    from kicad_tools.sidecars import carry_project_rules
 
+    action = "updating reinforcement sidecar"
     try:
         with stage_record_update(plan, pcb_output=output_path if will_save else None) as commit:
-            if will_save:
-                try:
+            with contextlib.ExitStack() as publication:
+                if will_save:
+                    action = "saving PCB"
+                    publication.enter_context(carry_project_rules(pcb_path, output_path))
                     pcb.save(output_path)
-                except Exception as e:
-                    print(f"Error saving PCB: {e}", file=sys.stderr)
-                    return False
-            try:
+                action = "updating reinforcement sidecar"
                 commit()
-            except OSError as e:
-                print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
-                return False
-            if will_save:
-                try:
-                    _carry_sidecars(pcb_path, output_path)
-                except Exception as e:
-                    print(f"Error saving PCB: {e}", file=sys.stderr)
-                    return False
-    except OSError as e:
-        print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"Error {action}: {e}", file=sys.stderr)
         return False
     return True
 
 
 def _finish_reinforce_clear(
-    args, pcb, pcb_path: Path, output_path: Path, clear_outcome, dry_run: bool, output_format: str
+    args,
+    pcb,
+    pcb_path: Path,
+    output_path: Path,
+    clear_outcome,
+    dry_run: bool,
+    output_format: str,
+    verify_source: Callable[[], None],
 ) -> int:
     """Report and (unless ``--dry-run``) save a ``pcb reinforce --clear`` pass (#8747)."""
     origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
@@ -1532,6 +1531,7 @@ def _finish_reinforce_clear(
         except (OSError, ValueError) as e:
             print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
             return 1
+        verify_source()
         if not _publish_reinforce_outputs(pcb, pcb_path, output_path, plan, will_save=True):
             return 1
         dropped = plan.dropped
@@ -1702,6 +1702,22 @@ def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
 
 
 def _run_reinforce_command(args, pcb_path: Path) -> int:
+    from kicad_tools.core.package_publication import PublicationBusy
+    from kicad_tools.pcb.reinforcement_sidecar import reinforce_publication
+
+    if getattr(args, "list_wires", False) or getattr(args, "dry_run", False):
+        return _reinforce(args, pcb_path, lambda: None)
+    output = getattr(args, "output", None)
+    dest = pcb_path if getattr(args, "adopt", False) or not output else Path(output)
+    try:
+        with reinforce_publication(pcb_path, dest) as verify_source:
+            return _reinforce(args, pcb_path, verify_source)
+    except (PublicationBusy, ValueError, OSError) as e:
+        print(f"Error publishing reinforcement: {e}", file=sys.stderr)
+        return 1
+
+
+def _reinforce(args, pcb_path: Path, verify_source: Callable[[], None]) -> int:
     """Handle the 'pcb reinforce' command (Unit A of #4218; issues #4220, #8742).
 
     Post-route pass that walks a routed net's segments into ordered
@@ -1885,7 +1901,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             return 1
         if clear_only:
             return _finish_reinforce_clear(
-                args, pcb, pcb_path, output_path, clear_outcome, dry_run, output_format
+                args,
+                pcb,
+                pcb_path,
+                output_path,
+                clear_outcome,
+                dry_run,
+                output_format,
+                verify_source,
             )
 
     try:
@@ -2147,6 +2170,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         except (OSError, ValueError) as e:
             print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
             return 1
+        verify_source()
         if not _publish_reinforce_outputs(pcb, pcb_path, output_path, plan, will_save=will_save):
             return 1
         if wire_records:

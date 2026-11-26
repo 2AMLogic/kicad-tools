@@ -799,9 +799,10 @@ def _list_wires_json(board: Path, capsys) -> list[dict]:
     return json.loads(capsys.readouterr().out)["wires"]
 
 
+@pytest.mark.parametrize("failure", ["save", "rules"])
 @pytest.mark.parametrize("op", ["add", "replace", "clear", "spaced"])
 def test_save_failure_through_output_symlink_preserves_pair_and_control_succeeds(
-    tmp_path, monkeypatch, capsys, op
+    tmp_path, monkeypatch, capsys, op, failure
 ):
     """PR #10253 hold: a failed PCB save must preserve the symlink, PCB, and wire inventory."""
     src = tmp_path / "src.kicad_pcb"
@@ -834,13 +835,28 @@ def test_save_failure_through_output_symlink_preserves_pair_and_control_succeeds
         raise OSError("forced save failure")
 
     with monkeypatch.context() as mp:
-        mp.setattr(PCB, "save", fail_save)
+        if failure == "save":
+            mp.setattr(PCB, "save", fail_save)
+        else:
+            src.with_suffix(".kicad_pro").write_text("{}")
+            src.with_suffix(".kicad_dru").write_text("(version 1)")
+            rules = out.with_suffix(".kicad_dru")
+            rules.write_text("existing")
+            read = Path.read_bytes
+
+            def read_rules(path):
+                if path == rules:
+                    raise PermissionError("forced project-rule read failure")
+                return read(path)
+
+            mp.setattr(Path, "read_bytes", read_rules)
         capsys.readouterr()
         assert run_pcb_command(_args(src, "NET_A", output=str(out), **kw)) == 1
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "Error saving PCB" in captured.err
 
+    assert not out.with_suffix(".kicad_pro").exists()
     assert out.is_symlink()
     assert out.readlink() == out_target_before
     assert not out.with_name(out.name + ".reinforcement.json").exists()
@@ -1059,3 +1075,47 @@ def test_low_level_loader_still_reads_every_entry(tmp_path):
     legacy = _wire_record("NET_A", 0.0)
     board, sidecar = _sidecar_with(tmp_path, [None, legacy, "not a record"])
     assert load_wires(sidecar) == [None, legacy, "not a record"]
+
+
+def test_center_between_reinforcement_board_and_record_writes(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from kicad_tools.pcb.center_sheet import center_on_sheet
+
+    board = _board(tmp_path)
+    assert run_pcb_command(_args(board, "NET_B")) == 0
+    save = PCB.save
+    attempts = []
+
+    def save_then_center(pcb, path):
+        save(pcb, path)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "pcb",
+                "center-on-sheet",
+                str(board),
+                "--paper",
+                "keep",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        attempts.append((path, result.returncode, result.stderr))
+
+    monkeypatch.setattr(PCB, "save", save_then_center)
+    assert run_pcb_command(_args(board, "NET_A")) == 0
+    [(path, code, error)] = attempts
+    assert path == board and code == 1
+    assert "publishing the input" in error
+    assert center_on_sheet(board, paper="keep").changed
+    pcb = PCB.load(board)
+    ox, oy = pcb.board_origin or (0, 0)
+    vias = {(round(v.position[0] + ox, 4), round(v.position[1] + oy, 4)) for v in pcb.vias}
+    anchors = {(a["x"], a["y"]) for w in load_wires(sidecar_path(board)) for a in w["anchors"]}
+    assert len(anchors) == 4
+    assert anchors == vias
