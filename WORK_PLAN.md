@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-11-25*
+*Last updated: 2026-11-26*
 
 ---
 
@@ -11,7 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#10129**: ci: run Board 06 rule-area tests in a serial lane with a 120 s budget
+_None._
 
 ## Very Important
 
@@ -30,8 +30,8 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#9033**: Silkscreen-to-hole: kct reports far fewer findings than the fab DFM, and only as warnings
-- **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI
+- **#10268**: kct check misses dangling copper when a dead-end branch is duplicated in reverse
+- **#10269**: Dangling branch tip is masked by the side of its own parent track
 
 ## In Progress
 
@@ -40,72 +40,75 @@ Issues currently being built (`loom:building`).
 - **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
-- **#9891**: Board 06: repair the seed-42 recipe to reproduce its strict release DRC result
 - **#9939**: Repair Board 03’s 16 remaining mask-to-copper findings while preserving legal trace angles
-- **#10097**: Board 06: sharpen the PCIe taper authored-rule guard's keepout regression and its two fail-closed edges
-- **#10108**: Package a native KiCad project with a coherent basename and revision identity
+- **#10107**: Use the declared layout for receipt validation, render output and fabrication handoff
 - **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film
-- **#10125**: test flake: Board 06 permitted-width rule-area refill reaches the 60-second bulk timeout
-- **#10134**: check: report bypass capacitor count per power pin (redundant or missing decoupling)
-- **#10136**: route: avoid power-plane stitches on SMD pads already bonded by filled copper
-- **#10138**: pcb prune: remove verified pour-redundant pad stubs and their terminal vias
-- **#10139**: netclasses: check sidecar/project/track-width agreement and honour project class widths on re-route
-- **#10143**: schematic/blocks: take decoupling-cap counts from one place so blocks do not stack default caps on a shared rail
-- **#10145**: sch re-annotate: carry the renumbering mapping to the .kicad_pcb (--pcb)
-- **#10163**: Readiness render exclusion is keyed on the literal name 'output', so a declared output_root with another name hashes renders as evidence
-- **#10173**: 0.1016 mm traces pass the jlcpcb profile; JLCDFM reports Danger at 0.1 mm
 - **#10189**: router/optimize-traces: honour project netclass track widths on re-route
-- **#10194**: fix(board04): move C15/C16 decoupling caps beside U2 pin 1 and drop bypass_distance waivers
-- **#10198**: JLCPCB CPL: SOT-23-5 parts come out a quarter turn off (the "SOT-23*": 180 rotation entry is wrong for the 5-pin package)
-- **#10208**: bypass_distance: restore the two regression guards PR #10186 dropped, and decide on association reach
-- **#10211**: redundant_copper_pour_stub reports coverage 1 when only some candidate branches were evaluated
-- **#10217**: Pin the 0.25 mm disjoint pass-through slide bound and its chamfer arm with regression tests
-- **#10218**: readiness: the 10106 retained-hold regression's "manufacturing" variant does not place the hold in the manufacturing directory
+- **#10240**: schematic: get_net_for_pin and extract_netlist disagree with KiCad (and each other) when a rail carries two names
+- **#10250**: pcb center-on-sheet moves wire anchors but leaves reinforcement coordinates at their old positions
+- **#10258**: Board 06: clear eight USB2 mask findings at the J1 connector on the seed-42 fixture
+- **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts
+- **#10265**: Board 03 tier-1 USB_D+ route exceeds its 16 mm branch length limit
+- **#10267**: Board 06 clear the six remaining power-net mask findings at U2 and U3
+- **#10270**: Clear a pad-to-pad mask finding by distributing the straight part of an existing bend
+- **#10276**: Board 06 clear both J1 USB3 receive mask findings at A10 and A11
+- **#10277**: Router-generated netclasses disappear from a fresh KiCad schematic netlist
+- **#10285**: Clear the USB3 receive-pair mask openings at BGA pads U2/F5 and F6 on Board 06
+- **#10290**: Clear the USB3 transmitter mask errors at J1/A3 and U2/B3 on Board 06
+- **#10294**: Board 06: clear the J1/B2 USB3_TX2+ mask overlap at its connector exit
+- **#10297**: Board 06: clear three USB3_RX1 mask errors at J1/B10 and U2/B5
+- **#10299**: Assembly preflight should compare through-hole lead dimensions with the finished plated hole
+- **#10300**: Preserve plated-pad ampacity when a straight entry is split at a collinear vertex
+- **#10308**: Grade the final Board 06 manufacturing bundle in the full recipe
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#10101**: test: harden board 06 PCIe taper guard's keepout regression and fail-closed edges
-- **#10120**: fix(export): package the KiCad project under the root sheet's basename
 - **#10128**: fix(validate): stop pour_slot reporting packed parallel track pairs
-- **#10149**: feat: sync footprint references from sch re-annotate via --pcb
-- **#10157**: feat(schematic): report circuit block decoupling by supply net
-- **#10167**: fix: skip power-plane stitches for SMD pads bonded to the plane by current fill
-- **#10178**: feat: warn on JLCPCB 4-layer outer tracks JLCDFM grades Danger
-- **#10190**: feat(check): add netclass_agreement rule for sidecar/project/copper width agreement
 - **#10193**: fix: honour project netclass widths in route and optimize-traces
-- **#10199**: fix(export): apply verified JLCPCB rotations by catalog part
-- **#10201**: feat(explain): inventory decoupling caps by schematic designation
-- **#10204**: fix(board06): center the U1 ground entry on its existing via
-- **#10206**: feat(router): split per-call route traces into native, fallback and other seconds
-- **#10209**: test: pin board-03 unassociated bypass caps and guard Oscillator association
-- **#10213**: fix: disclose partially evaluated pour-stub candidates in the proof
-- **#10214**: fix(board04): place C15/C16 beside U2 pin 1 and drop bypass_distance waivers
-- **#10215**: feat(prune): remove verified pour-redundant pad branches and their vias
-- **#10216**: fix(board05): move unattended silkscreen references clear of routed drills
-- **#10222**: fix: exclude renders under any declared readiness output_root from hashed inputs
-- **#10223**: test: cover a retained hold inside the generated manufacturing and evidence directories
-- **#10224**: test: guard the 0.25 mm pass-through slide clamp in mask-copper repair
+- **#10232**: fix: follow the declared readiness layout through fabrication handoff
+- **#10252**: fix: resolve one net identity across schematic netlist APIs
+- **#10262**: fix(route): stitch power planes after the routed copper is refilled
+- **#10263**: fix: route Board 06 USB2 through clear connector escapes
+- **#10272**: fix(router): shorten aligned differential-pair pad hops
+- **#10273**: fix: clear Board 06 power-net mask errors at U2 and U3
+- **#10274**: fix: preserve trace length when clearing pad-to-pad mask bends
+- **#10278**: Preserve router netclasses in KiCad schematic exports
+- **#10279**: fix(board06): clear the J1 USB3 receive mask openings
+- **#10283**: Recognize the painted polarity sector of KiCad radial capacitors
+- **#10286**: Report project DRC settings changed by manufacturing export
+- **#10288**: fix(board06): clear both USB3 receiver BGA mask openings
+- **#10289**: fix(drc): add orthogonal elbow fallback and refill-safe bend checks
+- **#10296**: Handle unsupported reinforcement trees in manufacturing checks
+- **#10298**: fix(board06): clear the USB3_TX2+ connector exit at J1/B2
+- **#10302**: Expose the datasheet package commands in kct
+- **#10304**: Keep pin count and pitch separate in datasheet footprint suggestions
+- **#10307**: Use circular mask apertures for round pads in silkscreen checks
+- **#10309**: feat: compare through-hole lead dimensions with the finished hole in preflight
+- **#10311**: fix(sync): reconcile schematic purchasing fields on board footprints
+- **#10312**: fix: keep plated-terminal ampacity when a straight entry is split
+- **#10313**: fix(board06): grade the delivered manufacturing bundle in the full recipe
+- **#10315**: fix: validate series topology before reporting chain skew
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#10129**: ci: run Board 06 rule-area tests in a serial lane with a 120 s budget
+- **#10293**: fix(board06): clear the USB3 transmitter mask errors at both ends
+- **#10305**: fix(board06): clear the USB3 RX1 connector and BGA mask openings
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
-- **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
+- **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-10-19 (#7457 / #7084 Q10) *(curated)*
 - **#7856**: [Epic #6441] Phase 5 measurement: coupled-trunk retention >= 95% on boards 03, 06b, 06rf, 07 *(curated)*
 - **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
 - **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors) *(curated)*
 - **#8943**: Record JLCDFM silkscreen line-width selection criterion and per-item rows (residue of #8844) *(curated)*
-- **#8962**: Same-net slit population on fresh regens: repair-pass + route-side producers (stale fixture attribution from #8957) *(curated)*
 - **#9033**: Silkscreen-to-hole: kct reports far fewer findings than the fab DFM, and only as warnings *(curated)*
 - **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI *(curated)*
 - **#9068**: Board 05: clear the strict-gate flood (29 physical_copper_gap errors, 13 silk_hole_overlap, 348 provisional mask_to_copper) and re-pin readiness *(curated)*
@@ -120,33 +123,38 @@ Issues carrying `loom:curated`.
 - **#9748**: optimize-traces --drc-aware --mfr jlcpcb introduces mask_to_copper errors at pad entries that the un-optimised board does not have *(curated)*
 - **#9800**: Boards 02/03/05: drop per-board silk wiring and retire silk tolerances (#9795 phase 4) *(curated)*
 - **#9844**: Router: route turns back past its own via inside the slit band (board 05 RESET V-turn) *(curated)*
-- **#9891**: Board 06: repair the seed-42 recipe to reproduce its strict release DRC result *(curated)*
 - **#9893**: docs: surface JLCPCB assembly and submission automation on kicad-tools.org and in the README *(curated)*
 - **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package *(curated)*
 - **#9939**: Repair Board 03’s 16 remaining mask-to-copper findings while preserving legal trace angles *(curated)*
-- **#10097**: Board 06: sharpen the PCIe taper authored-rule guard's keepout regression and its two fail-closed edges *(curated)*
 - **#10105**: Support a repository layout with editable KiCad sources and a sibling generated-output directory *(curated)*
 - **#10107**: Use the declared layout for receipt validation, render output and fabrication handoff *(curated)*
-- **#10108**: Package a native KiCad project with a coherent basename and revision identity *(curated)*
 - **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film *(curated)*
-- **#10125**: test flake: Board 06 permitted-width rule-area refill reaches the 60-second bulk timeout *(curated)*
-- **#10131**: placement: enforce schematic decoupling constraints in kct placement optimize *(curated)*
-- **#10134**: check: report bypass capacitor count per power pin (redundant or missing decoupling) *(curated)*
-- **#10136**: route: avoid power-plane stitches on SMD pads already bonded by filled copper *(curated)*
-- **#10138**: pcb prune: remove verified pour-redundant pad stubs and their terminal vias *(curated)*
-- **#10139**: netclasses: check sidecar/project/track-width agreement and honour project class widths on re-route *(curated)*
-- **#10143**: schematic/blocks: take decoupling-cap counts from one place so blocks do not stack default caps on a shared rail *(curated)*
-- **#10145**: sch re-annotate: carry the renumbering mapping to the .kicad_pcb (--pcb) *(curated)*
-- **#10163**: Readiness render exclusion is keyed on the literal name 'output', so a declared output_root with another name hashes renders as evidence *(curated)*
-- **#10173**: 0.1016 mm traces pass the jlcpcb profile; JLCDFM reports Danger at 0.1 mm *(curated)*
 - **#10189**: router/optimize-traces: honour project netclass track widths on re-route *(curated)*
-- **#10194**: fix(board04): move C15/C16 decoupling caps beside U2 pin 1 and drop bypass_distance waivers *(curated)*
-- **#10198**: JLCPCB CPL: SOT-23-5 parts come out a quarter turn off (the "SOT-23*": 180 rotation entry is wrong for the 5-pin package) *(curated)*
-- **#10208**: bypass_distance: restore the two regression guards PR #10186 dropped, and decide on association reach *(curated)*
-- **#10211**: redundant_copper_pour_stub reports coverage 1 when only some candidate branches were evaluated *(curated)*
-- **#10217**: Pin the 0.25 mm disjoint pass-through slide bound and its chamfer arm with regression tests *(curated)*
-- **#10218**: readiness: the 10106 retained-hold regression's "manufacturing" variant does not place the hold in the manufacturing directory *(curated)*
-- **#10219**: optimize_placement MCP tool applies the schematic cap association but not the designated-cap side/radius gate *(curated)*
+- **#10240**: schematic: get_net_for_pin and extract_netlist disagree with KiCad (and each other) when a rail carries two names *(curated)*
+- **#10250**: pcb center-on-sheet moves wire anchors but leaves reinforcement coordinates at their old positions *(curated)*
+- **#10258**: Board 06: clear eight USB2 mask findings at the J1 connector on the seed-42 fixture *(curated)*
+- **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts *(curated)*
+- **#10265**: Board 03 tier-1 USB_D+ route exceeds its 16 mm branch length limit *(curated)*
+- **#10267**: Board 06 clear the six remaining power-net mask findings at U2 and U3 *(curated)*
+- **#10268**: kct check misses dangling copper when a dead-end branch is duplicated in reverse *(curated)*
+- **#10269**: Dangling branch tip is masked by the side of its own parent track *(curated)*
+- **#10270**: Clear a pad-to-pad mask finding by distributing the straight part of an existing bend *(curated)*
+- **#10276**: Board 06 clear both J1 USB3 receive mask findings at A10 and A11 *(curated)*
+- **#10280**: silk_overlap reports 1,105 collisions inside one radial capacitor polarity marking *(curated)*
+- **#10281**: fix-silkscreen --all cannot resolve the advertised jlcpcb-tier1 order profile *(curated)*
+- **#10284**: Report project DRC settings rewritten by manufacturing export *(curated)*
+- **#10285**: Clear the USB3 receive-pair mask openings at BGA pads U2/F5 and F6 on Board 06 *(curated)*
+- **#10290**: Clear the USB3 transmitter mask errors at J1/A3 and U2/B3 on Board 06 *(curated)*
+- **#10294**: Board 06: clear the J1/B2 USB3_TX2+ mask overlap at its connector exit *(curated)*
+- **#10295**: Reinforcement checker crashes on an eligible trunk with two T junctions *(curated)*
+- **#10297**: Board 06: clear three USB3_RX1 mask errors at J1/B10 and U2/B5 *(curated)*
+- **#10299**: Assembly preflight should compare through-hole lead dimensions with the finished plated hole *(curated)*
+- **#10300**: Preserve plated-pad ampacity when a straight entry is split at a collinear vertex *(curated)*
+- **#10301**: Public kct datasheet CLI rejects extract-package and suggest-footprint *(curated)*
+- **#10303**: Datasheet package extraction interprets the P48 in LQFP48 as a 48 mm lead pitch *(curated)*
+- **#10308**: Grade the final Board 06 manufacturing bundle in the full recipe *(curated)*
+- **#10310**: kct sync loses or leaves stale purchasing fields when adding, swapping or changing a part *(curated)*
+- **#10314**: Chain skew sums forked gate networks and accepts two links on one conductor *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -163,14 +171,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 0 |
 | Very important | 1 |
 | Important | 2 |
 | Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 24 |
-| PRs awaiting review | 22 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 48 |
+| In Progress (`loom:building`) | 23 |
+| PRs awaiting review | 26 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 52 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
