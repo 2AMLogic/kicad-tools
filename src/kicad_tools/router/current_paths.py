@@ -1899,19 +1899,57 @@ def _via_row_ports(
     return ports, [joint for joint in joints if id(joint.first) in row_tracks]
 
 
+def _single_barrel_contact(
+    pad: Pad, pad_key: tuple[int, int], physical_contacts: Callable[[], CopperContactGraph]
+) -> _Node | None:
+    """Bind a round PTH to the single track end that surrounds its entire barrel."""
+    from kicad_tools.validate.copper_contact import PAD, TRACK
+
+    if (
+        pad.type != "thru_hole"
+        or pad.shape != "circle"
+        or not 0 < pad.drill < min(pad.size)
+        or pad.drill_offset != (0.0, 0.0)
+        or pad.drill_size not in (None, (pad.drill, pad.drill))
+    ):
+        return None
+
+    contacts = physical_contacts()
+    for index, item in enumerate(contacts.items):
+        if item.kind != PAD or item.key != pad_key or item.center is None:
+            continue
+        neighbours = [b if a == index else a for a, b in contacts.bonds if index in (a, b)]
+        if len(neighbours) != 1:
+            return None
+        track = contacts.items[neighbours[0]]
+        if track.kind != TRACK or not track.straight or track.key[0] != "segment":
+            return None
+        ends = [
+            point
+            for point in track.endpoints
+            if math.dist(point, item.center) + pad.drill / 2 < track.half_width
+        ]
+        if len(ends) == 1:
+            return _copper_node(ends[0], next(iter(track.layers)))
+    return None
+
+
 def _build_graph(
     segments: list[Segment],
     pcb: PCB,
     net_name: str,
     row_ports: set[tuple[_Node, _Node]] | None = None,
     cap_joints: Sequence[_CapJoint] = (),
+    *,
+    physical_contacts: Callable[[], CopperContactGraph],
 ) -> _CopperGraph:
     """Build centerline contacts, physical via-row ports and convex pad hubs.
 
     Supported contacts are same-layer track endpoints (including a T landing
-    in a segment interior), via centers on a track, and nodes inside supported
-    pad copper. A packed pair of vias physically bonded to two common bars
-    may also attach at the nearest track stations on those bars. Collinear
+    in a segment interior), via centers on a track, nodes inside supported
+    pad copper, and a single bonded end cap covering a round terminal barrel.
+    A packed pair of vias physically bonded to two common bars may also
+    attach at the nearest track stations on those bars. Collinear
     end caps on a bonded run join at their measured copper neck. Other
     width-only overlaps, zone/arc connectivity and arbitrary pad primitives
     are outside this graph. The via-centre snap is limited to 1 µm (#7210).
@@ -2026,9 +2064,11 @@ def _build_graph(
         # belong to an exiting track. It is internal to this same-layer bond.
         internal_edges.update(edge for a, b, edge in edges if a != b and root(a) == root(b))
     wholly_internal_ids: set[int] = set()
-    for component_id, fp in zip(footprint_keys(pcb.footprints), pcb.footprints, strict=True):
+    for fp_index, (component_id, fp) in enumerate(
+        zip(footprint_keys(pcb.footprints), pcb.footprints, strict=True)
+    ):
         occurrences: dict[str, int] = {}
-        for pad in fp.pads:
+        for pad_index, pad in enumerate(fp.pads):
             occurrence = occurrences.get(pad.number, 0)
             occurrences[pad.number] = occurrence + 1
             if pad.net_name != net_name or pad.type == "np_thru_hole":
@@ -2039,6 +2079,10 @@ def _build_graph(
                 if (node[2] in pad.layers or "*.Cu" in pad.layers)
                 and _physical_pad_covers(fp, pad, node[:2])
             ]
+            if not nodes:
+                terminal = _single_barrel_contact(pad, (fp_index, pad_index), physical_contacts)
+                if terminal is not None and terminal in parents:
+                    nodes.append(terminal)
             # Only a plated through-hole pad establishes interlayer copper.
             groups = (
                 [nodes]
@@ -4015,7 +4059,9 @@ def resolve_current_path(
         return build_copper_contact_graph(ConnectivityValidator(pcb), net_number, with_bonds=True)
 
     row_ports, cap_joints = _via_row_ports(pcb, net_number, physical_contacts)
-    adjacency = _build_graph(net_segments, pcb, spec.net_name, row_ports, cap_joints)
+    adjacency = _build_graph(
+        net_segments, pcb, spec.net_name, row_ports, cap_joints, physical_contacts=physical_contacts
+    )
     # Attach each endpoint by its pad's own extent, not by an exact center
     # hit: a trace terminating anywhere inside the pad is electrically on it,
     # and several traces landing on one pad are shorted by it. Without this,
