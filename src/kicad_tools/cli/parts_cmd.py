@@ -382,14 +382,14 @@ def _alternatives(args) -> int:
         print("No better alternatives with matching catalog specifications and stock found.")
         return 0
     print(
-        f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Type':<10} {'Catalog stock':>13} {'Price':>9}"
+        f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Type':<10} {'Offline catalog stock':>21} {'Price':>9}"
     )
-    print("-" * 78)
+    print("-" * 92)
     for p in alts:
         price = f"${p.best_price:.4f}" if p.best_price is not None else "N/A"
         print(
             f"{p.lcsc_part:<10} {p.mfr_part[:25]:<25} {p.package:<12} "
-            f"{library_tier_name(p):<10} {p.stock:>13} {price:>9}"
+            f"{library_tier_name(p):<10} {p.stock:>21} {price:>9}"
         )
     return 0
 

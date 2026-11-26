@@ -276,6 +276,7 @@ class JlcpartsCatalog:
         *,
         min_stock: int = 0,
         limit: int = 100,
+        attribute: str | None = None,
     ) -> list[Part]:
         """Parametrically search the catalog by free-text value + package.
 
@@ -298,6 +299,8 @@ class JlcpartsCatalog:
         only returns a *candidate pool* shaped like the live-API path.
 
         Args:
+            attribute: If supplied, match the entire query against this flat JSON
+                attribute instead of searching free text.
             query: Free-text search string (e.g. ``"10k 0402"`` or an MPN like
                 ``"UCC27524"``). Split on whitespace into AND-combined terms,
                 each matched against ``description`` OR ``mfr``. An empty/blank
@@ -320,20 +323,22 @@ class JlcpartsCatalog:
         if not terms:
             return []
 
-        # Each term must match the free-text ``description`` *or* the ``mfr``
-        # (manufacturer part number) column.  jlcparts' ``description`` is a
-        # spec string with no MPN, so an MPN query (the most common
-        # BOM-resolution shape, e.g. ``UCC27524``) only resolves via ``mfr``
-        # (issue #4296).  AND-across-terms semantics are preserved; the OR is
-        # per-term.  ``_escape_like`` wildcard escaping is applied to both.
-        conditions = [
-            "(description LIKE ? ESCAPE '\\' COLLATE NOCASE "
-            "OR mfr LIKE ? ESCAPE '\\' COLLATE NOCASE)"
-        ] * len(terms)
+        conditions = []
         params: list[object] = []
-        for t in terms:
-            like = f"%{_escape_like(t)}%"
-            params.extend((like, like))
+        if attribute is not None:
+            # Some snapshots contain malformed JSON. Guard extraction per row.
+            conditions.append(
+                "trim(json_extract(CASE WHEN json_valid(attributes) THEN attributes END, ?)) = ?"
+            )
+            params.extend((f'$."{attribute}"', query))
+        else:
+            for term in terms:
+                conditions.append(
+                    "(description LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                    "OR mfr LIKE ? ESCAPE '\\' COLLATE NOCASE)"
+                )
+                like = f"%{_escape_like(term)}%"
+                params.extend((like, like))
 
         if package:
             conditions.append("package = ? COLLATE NOCASE")
@@ -350,6 +355,8 @@ class JlcpartsCatalog:
             with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
                 conn.row_factory = sqlite3.Row
                 columns = {r["name"] for r in conn.execute("PRAGMA table_info(jlc_components)")}
+                if attribute is not None and "attributes" not in columns:
+                    return []
                 preferred = "preferred" if "preferred" in columns else "NULL"
                 conn.create_function("catalog_tier", 2, catalog_tier, deterministic=True)
                 sql = (
@@ -415,12 +422,13 @@ def _catalog_specs(raw: str) -> dict[str, str]:
         attrs = json.loads(raw) if raw else {}
     except ValueError:
         return {}
-    if not isinstance(attrs, dict) or not all(
-        isinstance(v, str) and v.strip().casefold() not in {"", "-", "n/a", "unknown"}
-        for v in attrs.values()
-    ):
+    if not isinstance(attrs, dict):
         return {}
-    return attrs
+    return {
+        key: value.strip()
+        for key, value in attrs.items()
+        if isinstance(value, str) and value.strip().casefold() not in {"", "-", "n/a", "unknown"}
+    }
 
 
 def _row_to_part(row: sqlite3.Row) -> Part:
