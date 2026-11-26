@@ -486,19 +486,22 @@ def _create_pcb_with_lead_pads(
     directory: Path,
     ref_pads: dict[str, list[str]],
     filename: str = "board.kicad_pcb",
+    lib_ids: dict[str, str] | None = None,
 ) -> Path:
     """Create a PCB whose footprints carry raw ``(pad ...)`` node strings.
 
     Each *ref_pads* value is a list of full pad S-expression strings, so
     tests control the drill geometry (round, slot, non-plated, SMD)
     exactly.  A closed board outline is included so other checks pass.
+    *lib_ids* overrides a reference's footprint library id.
     """
     footprints = []
     for i, (ref, pads) in enumerate(ref_pads.items()):
         x = 10.0 + i * 10.0
         pad_block = "\n    ".join(pads)
+        lib_id = (lib_ids or {}).get(ref, "Package_TO_SOT_THT:TO-247-3_Vertical")
         footprints.append(
-            f"""  (footprint "Package_TO_SOT_THT:TO-247-3_Vertical"
+            f"""  (footprint "{lib_id}"
     (layer "F.Cu")
     (at {x} 25)
     (attr through_hole)
@@ -537,6 +540,14 @@ def _tht_pad(number: str, drill: float) -> str:
     """A plated round-hole through-hole pad."""
     return (
         f'(pad "{number}" thru_hole circle (at 0 0) (size 2.7 2.7) '
+        f'(drill {drill}) (layers "*.Cu" "*.Mask") (net 0 ""))'
+    )
+
+
+def _tht_pad_at(number: str, drill: float, x: float, y: float = 0.0) -> str:
+    """A plated round-hole through-hole pad at a footprint-local position."""
+    return (
+        f'(pad "{number}" thru_hole circle (at {x} {y}) (size 2.7 2.7) '
         f'(drill {drill}) (layers "*.Cu" "*.Mask") (net 0 ""))'
     )
 
@@ -1113,6 +1124,897 @@ class TestPreflightLeadFit:
         assert any("assembly_lead_fit" in e for e in result.errors)
         lead = [pr for pr in result.preflight_results if pr.name == "assembly_lead_fit"]
         assert lead and lead[0].status == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# PreflightChecker -- assembly mounting-hole fit (issue #10476)
+# ---------------------------------------------------------------------------
+
+_MOUNTING_SOURCE = "Nichicon LGU drawing, p. 1"
+_MOUNTING_ORDER_SOURCE = "JLCPCB capabilities, through-hole tolerances"
+_MOUNTING_GUARANTEE_SOURCE = "JLCPCB order 48210 engineering confirmation"
+
+# A conventional relay: lead-only, so it must never grow mounting findings.
+_RELAY_ENTRY_YAML = (
+    "  - ref: K1\n"
+    "    part: RELAY-SPDT\n"
+    "    lead: {shape: round, diameter_mm: 0.90, source: relay datasheet}\n"
+)
+
+
+def _snap_in_pads(drill: float = 2.00, second_y: float = 5.00) -> list[str]:
+    """Pads 1 and 2 of a snap-in capacitor: 10.00 mm apart on a vertical line."""
+    return [_tht_pad_at("1", drill, 0.0, -5.0), _tht_pad_at("2", drill, 0.0, second_y)]
+
+
+def _create_mounting_pcb(
+    directory: Path, c1: list[str] | None = None, c2: list[str] | None = None
+) -> Path:
+    """Snap-in capacitors C1 and C2 beside the four-pad lead-only relay K1."""
+    return _create_pcb_with_lead_pads(
+        directory,
+        {
+            "K1": [_tht_pad_at(str(n), 1.20, (n - 3) * 2.54) for n in (1, 2, 3, 4)],
+            "C1": _snap_in_pads() if c1 is None else c1,
+            "C2": _snap_in_pads() if c2 is None else c2,
+        },
+        lib_ids={
+            "K1": "Relay_THT:Relay_SPDT_Omron-G5LE-1",
+            "C1": "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm",
+            "C2": "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm",
+        },
+    )
+
+
+def _snap_in_order_yaml(upper_mm: str | None = "0.13") -> str:
+    """JLCPCB's ordinary -0.08/+0.13 mm through-hole tolerance for the spec."""
+    text = "    target_fab: jlcpcb\n    finished_hole_tolerance_mm: -0.08\n"
+    if upper_mm is not None:
+        text += f"    finished_hole_tolerance_upper_mm: {upper_mm}\n"
+    return text + f"    finished_hole_tolerance_source: {_MOUNTING_ORDER_SOURCE}\n"
+
+
+def _snap_in_entry_yaml(
+    pitch: bool = True,
+    ref: str = "C1-C2",
+    min_diameter: str = "1.90",
+    max_diameter: str = "2.10",
+) -> str:
+    """The LGU standard snap-in pattern: 2.0 +-0.1 mm holes on 10.0 +-0.1 mm centres."""
+    text = (
+        f"  - ref: {ref}\n"
+        "    part: LGU2E471MELB\n"
+        "    mounting_holes:\n"
+        "      pads: ['1', '2']\n"
+        f"      hole_diameter: {{min_mm: {min_diameter}, max_mm: {max_diameter}}}\n"
+    )
+    if pitch:
+        text += "      pitch: {min_mm: 9.90, max_mm: 10.10}\n"
+    return text + f"      source: {_MOUNTING_SOURCE}\n"
+
+
+def _guarantee_item(
+    refs: str = "C1",
+    low: str = "1.90",
+    high: str = "2.10",
+    source: str = _MOUNTING_GUARANTEE_SOURCE,
+) -> str:
+    """One documented finished-hole interval the fab guaranteed for *refs*."""
+    return (
+        f"      - refs: [{refs}]\n"
+        f"        min_mm: {low}\n"
+        f"        max_mm: {high}\n"
+        f"        source: {source}\n"
+    )
+
+
+def _guarantee_yaml(*items: str) -> str:
+    """The spec's ``finished_hole_guarantees`` block holding *items*."""
+    return "    finished_hole_guarantees:\n" + "".join(items)
+
+
+def _write_snap_in_spec(
+    directory: Path, entries: str | None = None, order: str | None = None
+) -> Path:
+    return _write_lead_spec(
+        directory,
+        _RELAY_ENTRY_YAML + (_snap_in_entry_yaml() if entries is None else entries),
+        _snap_in_order_yaml() if order is None else order,
+    )
+
+
+def _run_mounting_fit(pcb_path: Path, manufacturer: str = "jlcpcb"):
+    checker = PreflightChecker(
+        pcb_path=pcb_path,
+        manufacturer=manufacturer,
+        config=PreflightConfig(skip_drc=True, skip_erc=True),
+    )
+    results = checker.run_all()
+    result = _find_result(results, "assembly_mounting_hole_fit")
+    assert result is not None, "assembly_mounting_hole_fit result missing from run_all()"
+    return result
+
+
+def _holes(result) -> dict[tuple[str, str], dict]:
+    return {(f["reference"], f["pad"]): f for f in result.data["diameters"]}
+
+
+def _fake_assembly_export(self, output_dir=None):
+    from kicad_tools.export import assembly
+
+    od = Path(output_dir) if output_dir else self.config.output_dir
+    od.mkdir(parents=True, exist_ok=True)
+    return assembly.AssemblyPackageResult(output_dir=od)
+
+
+def _export_project(tmp_path) -> Path:
+    """A snap-in project directory whose board and spec sit together."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    pcb = _create_mounting_pcb(project_dir)
+    _write_snap_in_spec(project_dir)
+    (project_dir / "board.kicad_sch").write_text(
+        '(kicad_sch (version 20231120) (generator "eeschema"))'
+    )
+    (project_dir / "board.kicad_pro").write_text("{}")
+    return pcb
+
+
+class TestPreflightMountingHoleFit:
+    """Snap-in mounting holes vs a sourced drawing and the fab's finished-hole interval."""
+
+    def test_snap_in_holes_report_upper_order_overrun(self, tmp_path):
+        """The reported case: four nominally correct 2.00 mm holes overrun 2.10 mm by 0.03 mm."""
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(tmp_path)
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "FAIL"
+        holes = _holes(result)
+        assert set(holes) == {("C1", "1"), ("C1", "2"), ("C2", "1"), ("C2", "2")}
+        for finding in holes.values():
+            assert finding["mpn"] == "LGU2E471MELB"
+            assert finding["hole"] == {"shape": "round", "diameter_mm": pytest.approx(2.00)}
+            assert finding["drawing"] == {
+                "source": _MOUNTING_SOURCE,
+                "min_mm": pytest.approx(1.90),
+                "max_mm": pytest.approx(2.10),
+            }
+            assert finding["nominal"] == {"status": "pass"}
+            order = finding["order"]
+            assert order["kind"] == "general"
+            assert order["source"] == _MOUNTING_ORDER_SOURCE
+            assert order["min_mm"] == pytest.approx(1.92)
+            assert order["max_mm"] == pytest.approx(2.13)
+            assert order["min"] == {"status": "pass"}
+            assert order["max"] == {
+                "status": "fail",
+                "side": "upper",
+                "overrun_mm": pytest.approx(0.03),
+            }
+            assert order["status"] == "fail"
+            assert finding["status"] == "fail"
+        pitch = {f["reference"]: f for f in result.data["pitch"]}
+        assert set(pitch) == {"C1", "C2"}
+        for finding in pitch.values():
+            assert finding["pads"] == ["1", "2"]
+            assert finding["mpn"] == "LGU2E471MELB"
+            assert finding["measured_mm"] == pytest.approx(10.00)
+            assert finding["drawing"] == {
+                "source": _MOUNTING_SOURCE,
+                "min_mm": pytest.approx(9.90),
+                "max_mm": pytest.approx(10.10),
+            }
+            assert finding["nominal"] == {"status": "pass"}
+            assert finding["status"] == "pass"
+        assert result.message == (
+            "Mounting-hole fit fails on 4 measurement(s): C1 pad 1, C1 pad 2, C2 pad 1, C2 pad 2"
+        )
+        assert "C1 pad 1 [LGU2E471MELB]" in result.details
+        assert "exceeds drawing max by 0.030 mm" in result.details
+        assert "C1 pads 1-2 [LGU2E471MELB]: pitch 10.000 mm" in result.details
+
+    def test_lead_only_relay_keeps_its_lead_fit_result(self, tmp_path):
+        """The relay has no mounting findings; the capacitors have no lead findings."""
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(tmp_path)
+
+        checker = PreflightChecker(
+            pcb_path=pcb, config=PreflightConfig(skip_drc=True, skip_erc=True)
+        )
+        results = checker.run_all()
+        by_ref: dict[str, list[dict]] = {}
+        for finding in _find_result(results, "assembly_lead_fit").data["pads"]:
+            by_ref.setdefault(finding["reference"], []).append(finding)
+        assert [f["status"] for f in by_ref["K1"]] == ["pass"] * 4
+        assert {f["mpn"] for f in by_ref["K1"]} == {"RELAY-SPDT"}
+        for finding in by_ref["C1"] + by_ref["C2"]:
+            assert finding["status"] == "unassessed"
+            assert finding["lead"] is None
+            assert "no verified lead dimensions declared" in finding["reason"]
+
+        mounting = _find_result(results, "assembly_mounting_hole_fit")
+        assert {f["reference"] for f in mounting.data["diameters"]} == {"C1", "C2"}
+        assert {f["reference"] for f in mounting.data["pitch"]} == {"C1", "C2"}
+
+    def test_guarantee_takes_precedence_for_the_selected_holes(self, tmp_path):
+        """C1's documented 1.90-2.10 mm guarantee passes; C2 keeps the ordinary overrun."""
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(
+            tmp_path, order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1"))
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "FAIL"
+        holes = _holes(result)
+        for pad in ("1", "2"):
+            guaranteed = holes["C1", pad]
+            assert guaranteed["nominal"] == {"status": "pass"}
+            assert guaranteed["order"] == {
+                "kind": "guarantee",
+                "source": _MOUNTING_GUARANTEE_SOURCE,
+                "min_mm": pytest.approx(1.90),
+                "max_mm": pytest.approx(2.10),
+                "min": {"status": "pass"},
+                "max": {"status": "pass"},
+                "status": "pass",
+            }
+            assert guaranteed["status"] == "pass"
+            ordinary = holes["C2", pad]
+            assert ordinary["order"]["kind"] == "general"
+            assert ordinary["order"]["source"] == _MOUNTING_ORDER_SOURCE
+            assert ordinary["order"]["max"] == {
+                "status": "fail",
+                "side": "upper",
+                "overrun_mm": pytest.approx(0.03),
+            }
+            assert ordinary["status"] == "fail"
+        assert result.message == "Mounting-hole fit fails on 2 measurement(s): C2 pad 1, C2 pad 2"
+
+    @pytest.mark.parametrize(
+        ("drill", "max_diameter", "max_result"),
+        [
+            ("2.00", "2.13", {"status": "pass"}),
+            ("2.001", "2.13", {"status": "fail", "side": "upper", "overrun_mm": 0.001}),
+            ("2.0001", "2.13", {"status": "fail", "side": "upper", "overrun_mm": 0.0}),
+        ],
+    )
+    def test_order_limit_is_inclusive_and_judged_before_display_rounding(
+        self, tmp_path, drill, max_diameter, max_result
+    ):
+        """2.13 mm at a 2.13 mm limit passes; 2.1301 mm fails although it displays as 0.000."""
+        pcb = _create_mounting_pcb(
+            tmp_path,
+            c1=[_tht_pad_at("1", float(drill), 0.0, -5.0), _tht_pad_at("2", 2.00, 0.0, 5.0)],
+            c2=[_tht_pad_at("1", 2.00, 0.0, -5.0), _tht_pad_at("2", 2.00, 0.0, 5.0)],
+        )
+        _write_snap_in_spec(
+            tmp_path,
+            entries=_snap_in_entry_yaml(max_diameter=max_diameter),
+            order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C2")),
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert _holes(result)["C1", "1"]["order"]["max"] == max_result
+        assert _holes(result)["C1", "1"]["status"] == max_result["status"]
+        if max_result["status"] == "fail":
+            assert result.status == "FAIL"
+            assert result.message == "Mounting-hole fit fails on 1 measurement(s): C1 pad 1"
+        else:
+            assert result.status == "OK"
+
+    def test_pitch_verdict_precedes_display_rounding(self, tmp_path):
+        """A 10.1004 mm pitch is over a 10.10 mm limit although the overrun displays as 0.000."""
+        pcb = _create_mounting_pcb(tmp_path, c1=_snap_in_pads(second_y=5.1004))
+        _write_snap_in_spec(
+            tmp_path, order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1, C2"))
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "FAIL"
+        (finding,) = [f for f in result.data["pitch"] if f["reference"] == "C1"]
+        assert finding["measured_mm"] == pytest.approx(10.1004)
+        assert finding["nominal"]["status"] == "fail"
+        assert finding["nominal"]["side"] == "upper"
+        assert finding["nominal"]["overrun_mm"] == 0.0
+
+    def test_rotated_footprint_pitch_honours_inclusive_limit(self, tmp_path):
+        """A -179 degree placement computes 5.079999999999999 mm for an exact 5.08 mm pitch."""
+        pads = [_tht_pad_at("1", 2.00, 0.635, 0.0), _tht_pad_at("2", 2.00, 5.715, 0.0)]
+        pcb = _create_mounting_pcb(tmp_path, c1=pads, c2=pads)
+        pcb.write_text(pcb.read_text().replace("(at 20 25)", "(at 20 25 -179)"))
+        _write_snap_in_spec(
+            tmp_path,
+            entries=_snap_in_entry_yaml().replace(
+                "{min_mm: 9.90, max_mm: 10.10}", "{min_mm: 5.08, max_mm: 5.18}"
+            ),
+            order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1, C2")),
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "OK"
+        pitch = {f["reference"]: f for f in result.data["pitch"]}
+        assert pitch["C1"]["measured_mm"] == pytest.approx(5.08)
+        assert pitch["C1"]["nominal"] == {"status": "pass"}
+        assert pitch["C2"]["measured_mm"] == pytest.approx(5.08)
+
+    def test_missing_upper_tolerance_leaves_upper_side_unassessed(self, tmp_path):
+        """Without an upper tolerance the 1.92 mm minimum is assessed; the maximum is not."""
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(tmp_path, order=_snap_in_order_yaml(upper_mm=None))
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "WARN"
+        for finding in result.data["diameters"]:
+            assert finding["nominal"] == {"status": "pass"}
+            order = finding["order"]
+            assert order["min_mm"] == pytest.approx(1.92)
+            assert order["min"] == {"status": "pass"}
+            assert "max_mm" not in order
+            assert order["max"]["status"] == "unassessed"
+            assert "upper finished-hole tolerance" in order["max"]["reason"]
+            assert order["status"] == "unassessed"
+            assert finding["status"] == "unassessed"
+        assert result.data["summary"]["failed"] == 0
+        assert result.data["summary"]["order_unassessed"] == 4
+        assert result.message.startswith("Mounting-hole fit unverified")
+        assert "max unassessed" in result.details
+
+    def test_missing_upper_tolerance_preserves_lower_overrun(self, tmp_path):
+        """A drawing minimum of 2.00 mm is undercut by the 1.92 mm order minimum."""
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(
+            tmp_path,
+            entries=_snap_in_entry_yaml(min_diameter="2.00"),
+            order=_snap_in_order_yaml(upper_mm=None),
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "FAIL"
+        for finding in result.data["diameters"]:
+            assert finding["nominal"] == {"status": "pass"}
+            assert finding["order"]["min"] == {
+                "status": "fail",
+                "side": "lower",
+                "overrun_mm": pytest.approx(0.08),
+            }
+            assert finding["order"]["max"]["status"] == "unassessed"
+            assert finding["status"] == "fail"
+
+    def test_pitch_mismatch_identifies_the_pair(self, tmp_path):
+        """Moving one hole to 10.20 mm fails that pair's pitch and nothing else."""
+        pcb = _create_mounting_pcb(tmp_path, c1=_snap_in_pads(second_y=5.20))
+        _write_snap_in_spec(
+            tmp_path, order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1, C2"))
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "FAIL"
+        assert [f["status"] for f in result.data["diameters"]] == ["pass"] * 4
+        pitch = {f["reference"]: f for f in result.data["pitch"]}
+        assert pitch["C2"]["status"] == "pass"
+        assert pitch["C1"]["measured_mm"] == pytest.approx(10.20)
+        assert pitch["C1"]["nominal"] == {
+            "status": "fail",
+            "side": "upper",
+            "overrun_mm": pytest.approx(0.10),
+        }
+        assert pitch["C1"]["status"] == "fail"
+        assert result.message == "Mounting-hole fit fails on 1 measurement(s): C1 pads 1-2"
+        assert "C1 pads 1-2 [LGU2E471MELB]: pitch 10.200 mm" in result.details
+
+    @pytest.mark.parametrize(
+        ("drill", "nominal_result"),
+        [
+            ("2.12", {"status": "fail", "side": "upper", "overrun_mm": 0.02}),
+            ("1.85", {"status": "fail", "side": "lower", "overrun_mm": 0.05}),
+        ],
+    )
+    def test_nominal_diameter_mismatch_identifies_the_pad(self, tmp_path, drill, nominal_result):
+        """A 2.12 mm nominal hole is a nominal mismatch, distinct from an order overrun."""
+        pcb = _create_mounting_pcb(
+            tmp_path,
+            c1=[_tht_pad_at("1", float(drill), 0.0, -5.0), _tht_pad_at("2", 2.00, 0.0, 5.0)],
+        )
+        _write_snap_in_spec(
+            tmp_path, order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1, C2"))
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "FAIL"
+        holes = _holes(result)
+        assert holes["C1", "1"]["nominal"] == nominal_result
+        assert holes["C1", "1"]["status"] == "fail"
+        assert holes["C1", "1"]["order"]["status"] == "pass"
+        assert holes["C1", "2"]["status"] == "pass"
+        assert [f["status"] for f in result.data["pitch"]] == ["pass", "pass"]
+        assert result.message == "Mounting-hole fit fails on 1 measurement(s): C1 pad 1"
+
+    def test_missing_pad_unassessed_while_other_holes_report(self, tmp_path):
+        pcb = _create_mounting_pcb(tmp_path, c1=[_tht_pad_at("1", 2.00, 0.0, -5.0)])
+        _write_snap_in_spec(tmp_path)
+
+        result = _run_mounting_fit(pcb)
+
+        holes = _holes(result)
+        assert holes["C1", "2"] == {
+            "reference": "C1",
+            "pad": "2",
+            "mpn": "LGU2E471MELB",
+            "hole": None,
+            "drawing": {
+                "source": _MOUNTING_SOURCE,
+                "min_mm": pytest.approx(1.90),
+                "max_mm": pytest.approx(2.10),
+            },
+            "status": "unassessed",
+            "reason": "declared pad 2 not found on C1",
+        }
+        assert holes["C1", "1"]["nominal"] == {"status": "pass"}
+        assert holes["C1", "1"]["order"]["max"]["status"] == "fail"
+        assert holes["C2", "1"]["status"] == "fail"
+        pitch = {f["reference"]: f for f in result.data["pitch"]}
+        assert pitch["C1"]["status"] == "unassessed"
+        assert pitch["C1"]["reason"] == "declared pad 2 not found on C1"
+        assert pitch["C2"]["status"] == "pass"
+        assert "C1 pad 2 [LGU2E471MELB]: unassessed: declared pad 2 not found on C1" in (
+            result.details
+        )
+
+    def test_slot_unassessed_with_both_axes(self, tmp_path):
+        """A slot's long axis must not be mistaken for a round hole diameter or a pitch."""
+        pcb = _create_mounting_pcb(
+            tmp_path, c2=[_tht_pad_at("1", 2.00, 0.0, -5.0), _slot_pad("2", 1.00, 2.20)]
+        )
+        _write_snap_in_spec(tmp_path)
+
+        result = _run_mounting_fit(pcb)
+
+        holes = _holes(result)
+        slot = holes["C2", "2"]
+        assert slot["status"] == "unassessed"
+        assert slot["hole"] == {
+            "shape": "slot",
+            "size_mm": [pytest.approx(1.0), pytest.approx(2.2)],
+        }
+        assert slot["reason"] == "slot hole 1.000 x 2.200 mm; only round holes are assessed"
+        assert holes["C2", "1"]["order"]["max"]["status"] == "fail"
+        pitch = {f["reference"]: f for f in result.data["pitch"]}
+        assert pitch["C2"]["status"] == "unassessed"
+        assert "slot" in pitch["C2"]["reason"]
+        assert pitch["C1"]["status"] == "pass"
+
+    @pytest.mark.parametrize(
+        ("order", "manufacturer", "reason"),
+        [
+            ("", "jlcpcb", "no finished-hole tolerance declared"),
+            (
+                "    target_fab: jlcpcb\n    finished_hole_tolerance_mm: -0.08\n"
+                f"    finished_hole_tolerance_source: {_MOUNTING_ORDER_SOURCE}\n",
+                "pcbway",
+                "no applicable tolerance for pcbway",
+            ),
+            (
+                "    target_fab: jlcpcb\n"
+                f"    finished_hole_tolerance_source: {_MOUNTING_ORDER_SOURCE}\n"
+                + _guarantee_yaml(_guarantee_item(refs="C1, C2")),
+                "pcbway",
+                "no applicable tolerance for pcbway",
+            ),
+        ],
+    )
+    def test_missing_or_inapplicable_order_evidence_cannot_pass(
+        self, tmp_path, order, manufacturer, reason
+    ):
+        """Neither an undeclared nor another fab's tolerance or guarantee yields a pass."""
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(tmp_path, order=order)
+
+        result = _run_mounting_fit(pcb, manufacturer=manufacturer)
+
+        assert result.status == "WARN"
+        assert result.data["summary"]["failed"] == 0
+        for finding in result.data["diameters"]:
+            assert finding["nominal"] == {"status": "pass"}
+            assert finding["order"]["status"] == "unassessed"
+            assert reason in json.dumps(finding["order"])
+            assert finding["status"] == "unassessed"
+        assert [f["status"] for f in result.data["pitch"]] == ["pass", "pass"]
+        expected = (
+            "order unassessed: no applicable tolerance for pcbway"
+            if manufacturer == "pcbway"
+            else "min unassessed: no finished-hole tolerance declared"
+        )
+        assert expected in result.details
+
+    @pytest.mark.parametrize(
+        ("c2", "hole_reason", "pitch_reason"),
+        [
+            (
+                [_tht_pad_at("1", 2.00, 0.0, -5.0), _np_pad("2", 2.00)],
+                "declared pad 2 on C2 is not a plated through-hole pad",
+                "declared pad 2 on C2 is not a plated through-hole pad",
+            ),
+            (
+                [_tht_pad_at("1", 2.00, 0.0, -5.0), _smd_pad("2")],
+                "declared pad 2 on C2 is not a plated through-hole pad",
+                "declared pad 2 on C2 is not a plated through-hole pad",
+            ),
+            (
+                [
+                    _tht_pad_at("1", 2.00, 0.0, -5.0),
+                    _tht_pad_at("2", 2.00, 0.0, 5.0),
+                    _tht_pad_at("2", 2.00, 0.0, 5.0),
+                ],
+                None,
+                "declared pad 2 matches 2 pads; the pair is ambiguous",
+            ),
+            (
+                [
+                    _tht_pad_at("1", 2.00, 0.0, -5.0),
+                    '(pad "2" thru_hole circle (at 0 5) (size 2.7 2.7) (drill 2.00 (offset 0.5 0)) '
+                    '(layers "*.Cu" "*.Mask") (net 0 ""))',
+                ],
+                None,
+                "declared pad 2 has an offset drill; its hole centre is not measured",
+            ),
+            (
+                [_tht_pad_at("1", 2.00, 0.0, -5.0), _tht_pad_at("2", 0.0, 0.0, 5.0)],
+                "through-hole pad has no drill diameter",
+                "declared pad 2 has no drill diameter",
+            ),
+        ],
+    )
+    def test_unmeasurable_pair_is_unassessed_with_its_reason(
+        self, tmp_path, c2, hole_reason, pitch_reason
+    ):
+        """Each unusable member is named; C1 and C2 pad 1 still report their results."""
+        pcb = _create_mounting_pcb(tmp_path, c2=c2)
+        _write_snap_in_spec(
+            tmp_path, order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1, C2"))
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "WARN"
+        holes = _holes(result)
+        assert holes["C1", "1"]["status"] == "pass"
+        assert holes["C2", "1"]["status"] == "pass"
+        if hole_reason is None:
+            assert all(f["status"] == "pass" for (ref, pad), f in holes.items() if pad == "2")
+        else:
+            unassessed = holes["C2", "2"]
+            assert unassessed["status"] == "unassessed"
+            assert unassessed["reason"] == hole_reason
+        pitch = {f["reference"]: f for f in result.data["pitch"]}
+        assert pitch["C1"]["status"] == "pass"
+        assert pitch["C2"]["status"] == "unassessed"
+        assert pitch["C2"]["reason"] == pitch_reason
+        assert pitch["C2"]["pads"] == ["1", "2"]
+
+    def test_first_guarantee_declared_for_a_reference_applies(self, tmp_path):
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(
+            tmp_path,
+            order=_snap_in_order_yaml()
+            + _guarantee_yaml(
+                _guarantee_item(refs="C1"),
+                _guarantee_item(refs="C1", low="2.00", high="2.00", source="later note"),
+                _guarantee_item(refs="C2"),
+            ),
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "OK"
+        order = _holes(result)["C1", "1"]["order"]
+        assert order["source"] == _MOUNTING_GUARANTEE_SOURCE
+        assert (order["min_mm"], order["max_mm"]) == (pytest.approx(1.90), pytest.approx(2.10))
+
+    def test_guarantee_range_covers_each_reference(self, tmp_path):
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(
+            tmp_path, order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1-C2"))
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "OK"
+        for finding in result.data["diameters"]:
+            assert finding["order"]["kind"] == "guarantee"
+
+    def test_lead_and_mounting_declarations_are_independent(self, tmp_path):
+        """One assignment may declare both; each check reports its own verdict."""
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(
+            tmp_path,
+            entries=_snap_in_entry_yaml().replace(
+                "    mounting_holes:",
+                "    lead: {shape: rectangular, width_mm: 1.00, thickness_mm: 0.80, "
+                "source: snap terminal drawing}\n    mounting_holes:",
+            ),
+            order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1, C2")),
+        )
+
+        checker = PreflightChecker(
+            pcb_path=pcb, config=PreflightConfig(skip_drc=True, skip_erc=True)
+        )
+        results = checker.run_all()
+
+        lead = _find_result(results, "assembly_lead_fit")
+        capacitors = [f for f in lead.data["pads"] if f["reference"] != "K1"]
+        assert [f["status"] for f in capacitors] == ["pass"] * 4
+        assert {f["lead"]["shape"] for f in capacitors} == {"rectangular"}
+        mounting = _find_result(results, "assembly_mounting_hole_fit")
+        assert mounting.status == "OK"
+        assert [f["status"] for f in mounting.data["diameters"]] == ["pass"] * 4
+
+    def test_invalid_lower_tolerance_is_listed_and_leaves_order_unassessed(self, tmp_path):
+        """A dropped tolerance declaration is named once and yields no order verdict."""
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(
+            tmp_path,
+            order=(
+                "    target_fab: jlcpcb\n"
+                "    finished_hole_tolerance_mm: 0.08\n"
+                f"    finished_hole_tolerance_source: {_MOUNTING_ORDER_SOURCE}\n"
+            ),
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "WARN"
+        (listed,) = result.data["invalid_declarations"]
+        assert listed["field"] == "finished_hole_tolerance_mm"
+        assert "finished_hole_tolerance_mm" in listed["reason"]
+        for finding in result.data["diameters"]:
+            assert finding["order"]["status"] == "unassessed"
+            assert finding["order"]["min"]["reason"] == listed["reason"]
+            assert finding["order"]["max"]["reason"] == listed["reason"]
+        assert "invalid declaration finished_hole_tolerance_mm" in result.details
+
+    def test_no_pitch_limits_declares_no_pitch_finding(self, tmp_path):
+        """A drawing without a pitch tolerance verifies only the hole diameters."""
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(
+            tmp_path,
+            entries=_snap_in_entry_yaml(pitch=False),
+            order=_snap_in_order_yaml() + _guarantee_yaml(_guarantee_item(refs="C1, C2")),
+        )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "OK"
+        assert result.data["pitch"] == []
+        assert [f["status"] for f in result.data["diameters"]] == ["pass"] * 4
+        assert "verified" in result.message
+
+    @pytest.mark.parametrize("declarations", [None, "lead", "assignment"])
+    def test_no_mounting_declaration_is_not_applicable(self, tmp_path, declarations):
+        pcb = _create_mounting_pcb(tmp_path)
+        if declarations == "lead":
+            _write_lead_spec(tmp_path, _RELAY_ENTRY_YAML, _snap_in_order_yaml())
+        elif declarations == "assignment":
+            _write_lead_spec(
+                tmp_path,
+                _RELAY_ENTRY_YAML + "  - ref: C1-C2\n    part: LGU2E471MELB\n",
+                _snap_in_order_yaml(),
+            )
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "OK"
+        assert "not applicable" in result.message
+        assert result.data["diameters"] == []
+        assert result.data["pitch"] == []
+        assert result.data["invalid_declarations"] == []
+
+    def test_invalid_mounting_declaration_preserves_assignment(self, tmp_path):
+        """A malformed mounting drawing leaves the BOM assignment and other checks intact."""
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_lead_spec(
+            tmp_path,
+            _RELAY_ENTRY_YAML + "  - ref: C1-C2\n    part: LGU2E471MELB\n    lcsc: C51423\n"
+            "    mounting_holes:\n      pads: ['1', '2']\n"
+            "      hole_diameter: {min_mm: 2.10, max_mm: 1.90}\n"
+            f"      source: {_MOUNTING_SOURCE}\n",
+            _snap_in_order_yaml(),
+        )
+
+        checker = PreflightChecker(
+            pcb_path=pcb, config=PreflightConfig(skip_drc=True, skip_erc=True)
+        )
+        results = checker.run_all()
+        result = _find_result(results, "assembly_mounting_hole_fit")
+
+        assert result.status == "WARN"
+        assert result.data["diameters"] == []
+        assert result.data["pitch"] == []
+        (invalid,) = result.data["invalid_declarations"]
+        assert invalid["field"] == "bom_entries[1].mounting_holes"
+        assert invalid["refs"] == ["C1", "C2"]
+        assert "min_mm <= max_mm" in invalid["reason"]
+        assert "bom_entries[1].mounting_holes" in result.details
+        relay = [
+            f["status"]
+            for f in _find_result(results, "assembly_lead_fit").data["pads"]
+            if f["reference"] == "K1"
+        ]
+        assert relay == ["pass"] * 4
+
+        package = AssemblyPackage(
+            pcb_path=pcb,
+            schematic_path=None,
+            config=AssemblyConfig(bom_source="pcb", auto_lcsc=False),
+        )
+        exported = package.export(tmp_path / "assembly")
+        with exported.bom_path.open(newline="", encoding="utf-8-sig") as bom:
+            grouped = {row["Designator"]: row["LCSC Part #"] for row in csv.DictReader(bom)}
+        assert grouped["C1,C2"] == "C51423"
+
+    def test_invalid_guarantee_is_dropped_alone(self, tmp_path):
+        """One malformed guarantee neither drops the valid one nor the BOM assignments."""
+        from kicad_tools.export.bom_spec_overlay import load_assembly_spec
+
+        pcb = _create_mounting_pcb(tmp_path)
+        spec_file = _write_snap_in_spec(
+            tmp_path,
+            entries=_snap_in_entry_yaml(ref="C1-C2")
+            + _snap_in_entry_yaml(ref="C3", pitch=False).replace(
+                "part: LGU2E471MELB", "part: OTHER"
+            ),
+            order=_snap_in_order_yaml()
+            + _guarantee_yaml(_guarantee_item(refs="C2", high="1.00"), _guarantee_item()),
+        )
+
+        spec, errors = load_assembly_spec(spec_file)
+        assert errors.guarantees == {
+            "finished_hole_guarantees[0]": "invalid finished_hole_guarantees[0]: Value error, "
+            "limits require min_mm <= max_mm"
+        }
+        assert spec is not None and spec.bom_entries is not None
+        assert spec.bom_entries[0].lead is not None
+        assert spec.bom_entries[1].mounting_holes is not None
+        assert spec.bom_entries[2].mounting_holes is not None
+        assert spec.requirements is not None
+        assert spec.requirements.manufacturing is not None
+        assert len(spec.requirements.manufacturing.finished_hole_guarantees or []) == 1
+
+        result = _run_mounting_fit(pcb)
+
+        (invalid,) = result.data["invalid_declarations"]
+        assert invalid == {
+            "field": "finished_hole_guarantees[0]",
+            "refs": [],
+            "reason": "invalid finished_hole_guarantees[0]: Value error, limits require "
+            "min_mm <= max_mm",
+        }
+        assert "finished_hole_guarantees[0]" in result.details
+        holes = _holes(result)
+        assert holes["C1", "1"]["order"]["kind"] == "guarantee"
+        assert holes["C1", "1"]["status"] == "pass"
+        assert holes["C2", "1"]["order"]["kind"] == "general"
+        assert holes["C2", "1"]["status"] == "fail"
+
+    def test_invalid_upper_tolerance_keeps_lower_side(self, tmp_path):
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(tmp_path, order=_snap_in_order_yaml(upper_mm="-0.05"))
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "WARN"
+        for finding in result.data["diameters"]:
+            assert finding["order"]["min"] == {"status": "pass"}
+            assert finding["order"]["max"]["status"] == "unassessed"
+            assert "finished_hole_tolerance_upper_mm" in finding["order"]["max"]["reason"]
+        (invalid,) = result.data["invalid_declarations"]
+        assert invalid["field"] == "finished_hole_tolerance_upper_mm"
+
+    def test_dnp_footprint_excluded(self, tmp_path):
+        pcb = _create_mounting_pcb(tmp_path)
+        pcb.write_text(pcb.read_text().replace("(attr through_hole)", "(attr through_hole dnp)"))
+        _write_snap_in_spec(tmp_path)
+
+        result = _run_mounting_fit(pcb)
+
+        assert result.status == "OK"
+        assert result.data["diameters"] == []
+        assert result.data["pitch"] == []
+
+    def test_run_all_serializes_findings(self, tmp_path):
+        pcb = _create_mounting_pcb(tmp_path)
+        _write_snap_in_spec(tmp_path)
+
+        serialized = _run_mounting_fit(pcb).to_dict()
+        json.dumps(serialized)
+
+        assert serialized["name"] == "assembly_mounting_hole_fit"
+        assert serialized["status"] == "FAIL"
+        assert len(serialized["data"]["diameters"]) == 4
+        assert len(serialized["data"]["pitch"]) == 2
+        assert serialized["data"]["summary"]["holes"] == 4
+        assert serialized["data"]["summary"]["pitch_pairs"] == 2
+        assert serialized["data"]["summary"]["failed"] == 4
+        assert serialized["data"]["summary"]["unassessed"] == 0
+
+    def test_strict_export_blocked_by_overrun(self, tmp_path, monkeypatch):
+        """A confirmed order overrun fails the export through strict preflight."""
+        from kicad_tools.export import assembly
+        from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+
+        pcb = _export_project(tmp_path)
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", _fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            strict_preflight=True,
+            preflight=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "output")
+
+        assert not result.success
+        assert any("assembly_mounting_hole_fit" in e for e in result.errors)
+        assert not any("assembly_lead_fit" in e for e in result.errors)
+        mounting = [
+            pr for pr in result.preflight_results if pr.name == "assembly_mounting_hole_fit"
+        ]
+        assert mounting and mounting[0].status == "FAIL"
+
+    def test_ordinary_export_records_findings_in_manifest(self, tmp_path, monkeypatch):
+        """Without strict preflight the export proceeds and the manifest carries the findings."""
+        from kicad_tools.export import assembly
+        from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+
+        pcb = _export_project(tmp_path)
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", _fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            preflight=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "output")
+
+        assert result.success, result.errors
+        assert any("assembly_mounting_hole_fit" in warning for warning in result.warnings)
+        manifest = json.loads(result.manifest_path.read_text())
+        (recorded,) = [
+            entry
+            for entry in manifest["preflight"]
+            if entry["name"] == "assembly_mounting_hole_fit"
+        ]
+        assert recorded["status"] == "FAIL"
+        overruns = [
+            f for f in recorded["data"]["diameters"] if f["order"]["max"]["status"] == "fail"
+        ]
+        assert {(f["reference"], f["pad"]) for f in overruns} == {
+            ("C1", "1"),
+            ("C1", "2"),
+            ("C2", "1"),
+            ("C2", "2"),
+        }
+        assert all(f["order"]["max"]["overrun_mm"] == pytest.approx(0.03) for f in overruns)
+        assert {f["reference"] for f in recorded["data"]["pitch"]} == {"C1", "C2"}
 
 
 # ---------------------------------------------------------------------------

@@ -23,22 +23,30 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from .bom_spec_overlay import AssemblySpecErrors
+from .bom_spec_overlay import AssemblySpecErrors, expand_ref_range
 from .pnp import _ref_sort_key, is_through_hole_footprint
 
 if TYPE_CHECKING:
     from ..drc.violation import DRCViolation
     from ..manufacturers.base import AssemblyCapabilities, ManufacturerProfile
-    from ..schema.pcb import PCB, Pad
-    from ..spec.schema import BOMEntry, LeadProfile, ProjectSpec
+    from ..schema.pcb import PCB, Footprint, Pad
+    from ..spec.schema import (
+        BOMEntry,
+        DimensionLimits,
+        FinishedHoleGuarantee,
+        LeadProfile,
+        MountingHoleDeclaration,
+        ProjectSpec,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +390,339 @@ def _lead_finding_sort_key(f: dict) -> tuple[int, tuple, tuple[int, int, str]]:
     pad_no = str(f["pad"])
     pad_key: tuple[int, int, str] = (0, int(pad_no), "") if pad_no.isdigit() else (1, 0, pad_no)
     return (order.get(f["status"], 3), _ref_sort_key(f["reference"]), pad_key)
+
+
+_NO_TOLERANCE_REASON = "no finished-hole tolerance declared in requirements.manufacturing"
+_NO_UPPER_TOLERANCE_REASON = (
+    "no upper finished-hole tolerance declared in requirements.manufacturing"
+)
+_PLATED_HOLE_TYPES = ("thru_hole", "through_hole")
+_PITCH_RESOLUTION_MM = 6
+
+
+@dataclass(frozen=True)
+class _FinishedHoleOrder:
+    """Finished-hole evidence of the spec's fab order for one export.
+
+    ``fab_mismatch`` is set when the spec's order was placed with another
+    fabricator than this export's, which leaves none of it applicable.
+    """
+
+    lower_mm: float | None
+    upper_mm: float | None
+    source: str | None
+    fab_mismatch: str | None
+    guarantees: tuple[FinishedHoleGuarantee, ...]
+
+    @property
+    def applicable(self) -> bool:
+        return self.fab_mismatch is None
+
+    @property
+    def reason(self) -> str:
+        return self.fab_mismatch or _NO_TOLERANCE_REASON
+
+
+def _decimal_mm(value: float) -> Decimal:
+    """A declared millimetre value as an exact decimal, kept clear of binary rounding."""
+    return Decimal(str(value))
+
+
+def _limit_result(value: Decimal, low: Decimal, high: Decimal) -> dict:
+    """Compare one dimension with a drawing's inclusive limits.
+
+    The verdict uses the unrounded value; only the reported overrun is
+    rounded for display.
+    """
+    if value < low:
+        return {
+            "status": "fail",
+            "side": "lower",
+            "overrun_mm": round(float(low - value), _LEAD_MARGIN_DECIMALS),
+        }
+    if value > high:
+        return {
+            "status": "fail",
+            "side": "upper",
+            "overrun_mm": round(float(value - high), _LEAD_MARGIN_DECIMALS),
+        }
+    return {"status": "pass"}
+
+
+def _combined_status(results: Iterable[dict]) -> str:
+    """The worst of several independently judged measurements."""
+    statuses = {result["status"] for result in results}
+    return next((status for status in ("fail", "unassessed") if status in statuses), "pass")
+
+
+def _round_hole_mm(pad: Pad) -> float | None:
+    """Diameter of a pad's plated round hole, or ``None`` for a slot or no drill."""
+    if pad.drill_size is not None:
+        return None
+    hole_mm = float(pad.drill)
+    return hole_mm if math.isfinite(hole_mm) and hole_mm > 0 else None
+
+
+def _declared_pads(footprint: Footprint, number: str) -> tuple[list[Pad], str | None]:
+    """The plated through-hole pads a declared pad number names, or why it names none."""
+    matching = [
+        pad for pad in footprint.pads if pad.number == number and pad.type in _PLATED_HOLE_TYPES
+    ]
+    if matching:
+        return matching, None
+    if any(pad.number == number for pad in footprint.pads):
+        return (
+            [],
+            f"declared pad {number} on {footprint.reference} is not a plated through-hole pad",
+        )
+    return [], f"declared pad {number} not found on {footprint.reference}"
+
+
+def _drawing_record(declaration: MountingHoleDeclaration, limits: DimensionLimits) -> dict:
+    """Serialized form of a drawing's inclusive limits and their source."""
+    return {"source": declaration.source, "min_mm": limits.min_mm, "max_mm": limits.max_mm}
+
+
+def _mounting_hole_finding(
+    reference: str,
+    pad: Pad,
+    mpn: str,
+    declaration: MountingHoleDeclaration,
+    order: _FinishedHoleOrder,
+    guarantee: FinishedHoleGuarantee | None,
+    spec_errors: AssemblySpecErrors,
+) -> dict:
+    """Build one per-hole mounting record (Issue #10476).
+
+    The nominal drill and each evidenced end of the finished-hole interval
+    are judged independently against the drawing's inclusive limits, so a
+    nominal mismatch is told apart from a hole that is nominally correct
+    but whose order tolerance exceeds a limit.  A missing order bound
+    leaves that end unassessed and never passes it.
+    """
+    limits = declaration.hole_diameter
+    drawing = _drawing_record(declaration, limits)
+    finding: dict = {"reference": reference, "pad": pad.number, "mpn": mpn}
+    if pad.drill_size is not None:
+        slot_w, slot_h = pad.drill_size
+        finding.update(
+            hole={"shape": "slot", "size_mm": [slot_w, slot_h]},
+            drawing=drawing,
+            status="unassessed",
+            reason=(
+                f"slot hole {slot_w:.{_LEAD_MARGIN_DECIMALS}f} x "
+                f"{slot_h:.{_LEAD_MARGIN_DECIMALS}f} mm; only round holes are assessed"
+            ),
+        )
+        return finding
+
+    hole_mm = _round_hole_mm(pad)
+    if hole_mm is None:
+        finding.update(
+            hole={"shape": "round", "diameter_mm": float(pad.drill)},
+            drawing=drawing,
+            status="unassessed",
+            reason="through-hole pad has no drill diameter",
+        )
+        return finding
+
+    nominal_mm = _decimal_mm(hole_mm)
+    low, high = _decimal_mm(limits.min_mm), _decimal_mm(limits.max_mm)
+    nominal = _limit_result(nominal_mm, low, high)
+    if guarantee is not None:
+        order_result: dict = {
+            "kind": "guarantee",
+            "source": guarantee.source,
+            "min_mm": guarantee.min_mm,
+            "max_mm": guarantee.max_mm,
+            "min": _limit_result(_decimal_mm(guarantee.min_mm), low, high),
+            "max": _limit_result(_decimal_mm(guarantee.max_mm), low, high),
+        }
+    elif not order.applicable:
+        order_result = {"status": "unassessed", "reason": order.reason}
+    else:
+        order_result = {"kind": "general", "source": order.source}
+        ends = {
+            "min": (order.lower_mm, spec_errors.tolerance or order.reason),
+            "max": (
+                order.upper_mm,
+                spec_errors.tolerance_upper or spec_errors.tolerance or _NO_UPPER_TOLERANCE_REASON,
+            ),
+        }
+        for end, (tolerance_mm, reason) in ends.items():
+            if tolerance_mm is None:
+                order_result[end] = {"status": "unassessed", "reason": reason}
+            else:
+                end_mm = nominal_mm + _decimal_mm(tolerance_mm)
+                order_result[f"{end}_mm"] = float(end_mm)
+                order_result[end] = _limit_result(end_mm, low, high)
+    if "min" in order_result:
+        order_result["status"] = _combined_status(order_result[end] for end in ("min", "max"))
+    finding.update(
+        hole={"shape": "round", "diameter_mm": hole_mm},
+        drawing=drawing,
+        nominal=nominal,
+        order=order_result,
+        status=_combined_status((nominal, order_result)),
+    )
+    return finding
+
+
+def _pad_centre_mm(footprint: Footprint, pad: Pad) -> tuple[float, float]:
+    """Board position of a pad's ``(at x y)`` anchor."""
+    from ..core.geometry import rotate_pad_offset
+
+    x, y = rotate_pad_offset(pad.position[0], pad.position[1], footprint.rotation)
+    return (footprint.position[0] + x, footprint.position[1] + y)
+
+
+def _pitch_member_issue(number: str, found: list[Pad], missing_reason: str | None) -> str | None:
+    """Why a declared pad cannot serve as one end of the measured pitch."""
+    if not found:
+        return missing_reason
+    if len(found) > 1:
+        return f"declared pad {number} matches {len(found)} pads; the pair is ambiguous"
+    pad = found[0]
+    if pad.drill_size is not None:
+        slot_w, slot_h = pad.drill_size
+        return (
+            f"declared pad {number} is a slot hole {slot_w:.{_LEAD_MARGIN_DECIMALS}f} x "
+            f"{slot_h:.{_LEAD_MARGIN_DECIMALS}f} mm; only round holes are measured"
+        )
+    if _round_hole_mm(pad) is None:
+        return f"declared pad {number} has no drill diameter"
+    if pad.drill_offset != (0.0, 0.0):
+        return f"declared pad {number} has an offset drill; its hole centre is not measured"
+    return None
+
+
+def _mounting_pitch_finding(
+    footprint: Footprint,
+    mpn: str,
+    declaration: MountingHoleDeclaration,
+    limits: DimensionLimits,
+    located: dict[str, tuple[list[Pad], str | None]],
+) -> dict:
+    """Build the per-pair pitch record: the nominal distance of the two hole centres.
+
+    A board file stores coordinates to 0.000001 mm, so the measured distance
+    is judged at that resolution: placing a footprint at an arbitrary angle
+    otherwise turns an exact 5.08 mm into 5.079999999999999 mm and fails a
+    pitch that sits on an inclusive limit.
+    """
+    finding: dict = {
+        "reference": footprint.reference,
+        "pads": list(declaration.pads),
+        "mpn": mpn,
+        "drawing": _drawing_record(declaration, limits),
+    }
+    centres: list[tuple[float, float]] = []
+    for number in declaration.pads:
+        found, missing_reason = located[number]
+        issue = _pitch_member_issue(number, found, missing_reason)
+        if issue is not None:
+            finding.update(status="unassessed", reason=issue)
+            return finding
+        centres.append(_pad_centre_mm(footprint, found[0]))
+    (x1, y1), (x2, y2) = centres
+    measured_mm = Decimal(f"{math.hypot(x1 - x2, y1 - y2):.{_PITCH_RESOLUTION_MM}f}")
+    nominal = _limit_result(measured_mm, _decimal_mm(limits.min_mm), _decimal_mm(limits.max_mm))
+    finding.update(measured_mm=float(measured_mm), nominal=nominal, status=nominal["status"])
+    return finding
+
+
+def _mounting_where(f: dict) -> str:
+    """``C1 pad 1`` or ``C1 pads 1-2``."""
+    if "pads" in f:
+        return f"{f['reference']} pads {f['pads'][0]}-{f['pads'][1]}"
+    return f"{f['reference']} pad {f['pad']}"
+
+
+def _mounting_tag(f: dict) -> str:
+    """A measurement's location with its MPN."""
+    mpn = f.get("mpn")
+    return _mounting_where(f) + (f" [{mpn}]" if mpn else "")
+
+
+def _format_limit_result(result: dict) -> str:
+    """``pass``, or which drawing limit is crossed, which way, and by how much."""
+    if result["status"] != "fail":
+        return "pass"
+    verb, bound = ("exceeds", "max") if result["side"] == "upper" else ("undercuts", "min")
+    return f"{verb} drawing {bound} by {result['overrun_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm (fail)"
+
+
+def _format_mounting_finding(f: dict) -> str:
+    """One ``details`` line per hole or pair, carrying its full evidence."""
+    tag = _mounting_tag(f)
+    if "reason" in f:
+        return f"{tag}: unassessed: {f['reason']}"
+
+    drawing = f["drawing"]
+    per_drawing = f" per '{drawing['source']}'"
+    fmt = f".{_LEAD_MARGIN_DECIMALS}f"
+    if "pads" in f:
+        return (
+            f"{tag}: pitch {f['measured_mm']:{fmt}} mm; drawing "
+            f"{drawing['min_mm']:{fmt}}-{drawing['max_mm']:{fmt}} mm{per_drawing}: "
+            f"{_format_limit_result(f['nominal'])}"
+        )
+
+    order = f["order"]
+    described = ["order"]
+    if order.get("kind") == "guarantee":
+        described.append("(guarantee)")
+    if order.get("source"):
+        described.append(f"per '{order['source']}'")
+    values = {end: order[f"{end}_mm"] for end in ("min", "max") if f"{end}_mm" in order}
+    if len(values) == 2:
+        described.insert(1, f"{values['min']:{fmt}}-{values['max']:{fmt}} mm")
+    elif values:
+        described.insert(1, f"{next(iter(values))} {next(iter(values.values())):{fmt}} mm")
+
+    def _end(end: str) -> str:
+        result = order[end]
+        if result["status"] == "unassessed":
+            return f"{end} unassessed: {result['reason']}"
+        return f"{end} {_format_limit_result(result)}"
+
+    if "min" not in order:
+        order_text = f"order unassessed: {order['reason']}"
+    else:
+        order_text = " ".join(described) + ": " + ", ".join(_end(end) for end in ("min", "max"))
+    return (
+        f"{tag}: hole {f['hole']['diameter_mm']:{fmt}} mm round; drawing "
+        f"{drawing['min_mm']:{fmt}}-{drawing['max_mm']:{fmt}} mm{per_drawing}: "
+        f"nominal {_format_limit_result(f['nominal'])}; {order_text}"
+    )
+
+
+def _mounting_finding_sort_key(
+    f: dict,
+) -> tuple[int, tuple, tuple[int, int, str], int]:
+    """Failures first, then unassessed, then passes; ref/pad order within, a pair after its holes."""
+    pair = int("pads" in f)
+    key = _lead_finding_sort_key({**f, "pad": f["pads"][0] if pair else f["pad"]})
+    return (*key, pair)
+
+
+def _mounting_summary(
+    holes: list[dict], pitches: list[dict], invalid: list[dict], order: _FinishedHoleOrder
+) -> dict:
+    """Counts behind the check's verdict, with the order evidence it applied."""
+    records = [*holes, *pitches]
+    order_unassessed = [f for f in holes if f.get("order", {}).get("status") == "unassessed"]
+    return {
+        "holes": len(holes),
+        "pitch_pairs": len(pitches),
+        "failed": sum(f["status"] == "fail" for f in records),
+        "unassessed": sum(f["status"] == "unassessed" for f in records),
+        "order_unassessed": len(order_unassessed),
+        "invalid_declarations": len(invalid),
+        "finished_hole_tolerance_mm": order.lower_mm,
+        "finished_hole_tolerance_upper_mm": order.upper_mm,
+        "finished_hole_tolerance_source": order.source,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -876,6 +1217,7 @@ class PreflightChecker:
             # verified lead dimensions report *unassessed* rather than
             # passing silently.
             results.append(self._check_assembly_lead_fit())
+            results.append(self._check_assembly_mounting_hole_fit())
             results.append(self._check_stackup_copper())
 
         # THT-in-CPL warning
@@ -1343,6 +1685,45 @@ class PreflightChecker:
             logger.warning("Project spec load failed: %s", exc)
         return None, AssemblySpecErrors()
 
+    def _assembly_assignments(
+        self,
+    ) -> tuple[ProjectSpec | None, AssemblySpecErrors, dict[str, tuple[int, BOMEntry]]]:
+        """The export's selected spec with its retained errors and per-reference assignments."""
+        spec, spec_errors = self._load_project_spec()
+        entries: dict[str, tuple[int, BOMEntry]] = {}
+        if spec is not None:
+            for row, assignment in enumerate(spec.bom_entries or []):
+                for ref in expand_ref_range(assignment.ref):
+                    entries[ref] = (row, assignment)
+        return spec, spec_errors, entries
+
+    def _finished_hole_order(self, spec: ProjectSpec | None) -> _FinishedHoleOrder:
+        """The spec's finished-hole tolerance and guarantees when its fab is this export's."""
+        not_declared = _FinishedHoleOrder(
+            lower_mm=None,
+            upper_mm=None,
+            source=None,
+            fab_mismatch=None,
+            guarantees=(),
+        )
+        if spec is None or spec.requirements is None or spec.requirements.manufacturing is None:
+            return not_declared
+        mfg = spec.requirements.manufacturing
+        from ..manufacturers import get_fab_family
+
+        if mfg.target_fab and get_fab_family(mfg.target_fab) != self._fab_family:
+            mismatch = (
+                f"no applicable tolerance for {self.manufacturer} (spec targets {mfg.target_fab})"
+            )
+            return replace(not_declared, fab_mismatch=mismatch)
+        return replace(
+            not_declared,
+            lower_mm=mfg.finished_hole_tolerance_mm,
+            upper_mm=mfg.finished_hole_tolerance_upper_mm,
+            source=mfg.finished_hole_tolerance_source,
+            guarantees=tuple(mfg.finished_hole_guarantees or ()),
+        )
+
     def _check_assembly_lead_fit(self) -> PreflightResult:
         """Compare declared maximum lead dimensions with the finished hole.
 
@@ -1373,29 +1754,13 @@ class PreflightChecker:
                 data={"pads": [], "summary": {"pads": 0}},
             )
 
-        spec, spec_errors = self._load_project_spec()
-        tolerance_reason = (
-            spec_errors.tolerance
-            or "no finished-hole tolerance declared in requirements.manufacturing"
-        )
-        tolerance_mm: float | None = None
-        tolerance_source: str | None = None
-        entries: dict[str, tuple[int, BOMEntry]] = {}
-        if spec is not None:
-            mfg = spec.requirements.manufacturing if spec.requirements else None
-            if mfg is not None:
-                from ..manufacturers import get_fab_family
-
-                if mfg.target_fab and get_fab_family(mfg.target_fab) != self._fab_family:
-                    tolerance_reason = f"no applicable tolerance for {self.manufacturer} (spec targets {mfg.target_fab})"
-                else:
-                    tolerance_mm = mfg.finished_hole_tolerance_mm
-                    tolerance_source = mfg.finished_hole_tolerance_source
-            from .bom_spec_overlay import expand_ref_range
-
-            for row, assignment in enumerate(spec.bom_entries or []):
-                for ref in expand_ref_range(assignment.ref):
-                    entries[ref] = (row, assignment)
+        spec, spec_errors, entries = self._assembly_assignments()
+        order = self._finished_hole_order(spec)
+        tolerance_reason = spec_errors.tolerance or order.reason
+        if order.fab_mismatch is not None:
+            tolerance_reason = order.fab_mismatch
+        tolerance_mm = order.lower_mm
+        tolerance_source = order.source
 
         findings: list[dict] = []
         for fp in self._pcb.footprints:
@@ -1492,6 +1857,194 @@ class PreflightChecker:
             lines = lines[:40] + [f"(and {len(lines) - 40} more pads in data.pads)"]
         lines.append(
             "Assessment covers centred geometric fit only (not lead pitch or placement tolerances)."
+        )
+        return PreflightResult(
+            name=name,
+            status=status,
+            message=message,
+            details="\n".join(lines),
+            data=data,
+        )
+
+    def _check_assembly_mounting_hole_fit(self) -> PreflightResult:
+        """Compare declared mounting holes with their drawing and the order's hole interval.
+
+        Issue #10476: a part assignment declares the mounting-hole pattern
+        its package drawing requires (``bom_entries`` ``mounting_holes``:
+        two pad numbers, inclusive finished-hole diameter limits and, when
+        the drawing gives them, inclusive pitch limits).  For every placed,
+        non-DNP reference this check judges the nominal drill and each
+        evidenced end of the fabricator's finished-hole interval -- the
+        general tolerance, or a documented guarantee covering the reference
+        -- against the diameter limits, and the nominal pitch between the
+        two holes against the pitch limits.  Limits are inclusive and the
+        verdicts precede display rounding.  A nominal mismatch is reported
+        apart from a nominally correct hole whose order tolerance crosses a
+        limit.  Missing or inapplicable order evidence, a slot or a missing
+        pad leaves that measurement unassessed, never passed, and never
+        hides another hole's result.  It is independent of
+        :meth:`_check_assembly_lead_fit`.
+        """
+        name = "assembly_mounting_hole_fit"
+        holes: list[dict] = []
+        pitches: list[dict] = []
+        invalid: list[dict] = []
+        if self._pcb is None:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No PCB loaded; mounting-hole fit not assessed",
+                data={
+                    "diameters": holes,
+                    "pitch": pitches,
+                    "summary": _mounting_summary(
+                        holes, pitches, invalid, _FinishedHoleOrder(None, None, None, None, ())
+                    ),
+                    "invalid_declarations": invalid,
+                },
+            )
+
+        spec, spec_errors, entries = self._assembly_assignments()
+        order = self._finished_hole_order(spec)
+        assignments = list(spec.bom_entries or []) if spec is not None else []
+        if spec_errors.tolerance:
+            field = spec_errors.tolerance.partition(":")[0].removeprefix("invalid ")
+            invalid.append({"field": field, "refs": [], "reason": spec_errors.tolerance})
+        if spec_errors.tolerance_upper:
+            invalid.append(
+                {
+                    "field": "finished_hole_tolerance_upper_mm",
+                    "refs": [],
+                    "reason": spec_errors.tolerance_upper,
+                }
+            )
+        for row, reason in sorted(spec_errors.mounting.items()):
+            refs = expand_ref_range(assignments[row].ref) if row < len(assignments) else []
+            invalid.append(
+                {"field": f"bom_entries[{row}].mounting_holes", "refs": refs, "reason": reason}
+            )
+
+        def _guarantee_index(item: tuple[str, str]) -> tuple[int, str]:
+            index = item[0].partition("[")[2].partition("]")[0]
+            return (int(index) if index.isdigit() else -1), item[0]
+
+        for where, reason in sorted(spec_errors.guarantees.items(), key=_guarantee_index):
+            invalid.append({"field": where, "refs": [], "reason": reason})
+
+        guarantees: dict[str, FinishedHoleGuarantee] = {}
+        for guarantee in order.guarantees:
+            for ref_spec in guarantee.refs:
+                for ref in expand_ref_range(ref_spec):
+                    guarantees.setdefault(ref, guarantee)
+
+        for fp in self._pcb.footprints:
+            if fp.dnp or fp.reference not in entries:
+                continue
+            entry = entries[fp.reference][1]
+            declaration = entry.mounting_holes
+            if declaration is None:
+                continue
+            located = {number: _declared_pads(fp, number) for number in declaration.pads}
+            for number, (found, missing_reason) in located.items():
+                if not found:
+                    holes.append(
+                        {
+                            "reference": fp.reference,
+                            "pad": number,
+                            "mpn": entry.part,
+                            "hole": None,
+                            "drawing": _drawing_record(declaration, declaration.hole_diameter),
+                            "status": "unassessed",
+                            "reason": missing_reason,
+                        }
+                    )
+                    continue
+                for pad in found:
+                    holes.append(
+                        _mounting_hole_finding(
+                            fp.reference,
+                            pad,
+                            entry.part,
+                            declaration,
+                            order,
+                            guarantees.get(fp.reference),
+                            spec_errors,
+                        )
+                    )
+            if declaration.pitch is not None:
+                pitches.append(
+                    _mounting_pitch_finding(fp, entry.part, declaration, declaration.pitch, located)
+                )
+
+        records = [*holes, *pitches]
+        failed = [f for f in records if f["status"] == "fail"]
+        unassessed = [f for f in records if f["status"] == "unassessed"]
+        data: dict = {
+            "diameters": holes,
+            "pitch": pitches,
+            "summary": _mounting_summary(holes, pitches, invalid, order),
+            "invalid_declarations": invalid,
+        }
+        if not records and not invalid:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message=(
+                    "No placed references with a mounting-hole declaration; "
+                    "mounting-hole fit not applicable"
+                ),
+                data=data,
+            )
+
+        def _listed(fs: list[dict], limit: int = 5) -> str:
+            shown = ", ".join(_mounting_where(f) for f in fs[:limit])
+            if len(fs) > limit:
+                shown += f" (and {len(fs) - limit} more)"
+            return shown
+
+        if failed:
+            status: Literal["OK", "WARN", "FAIL"] = "FAIL"
+            message = f"Mounting-hole fit fails on {len(failed)} measurement(s): {_listed(failed)}"
+        elif unassessed or invalid:
+            status = "WARN"
+            bits = []
+            unassessed_holes = [f for f in holes if f["status"] == "unassessed"]
+            unassessed_pitch = [f for f in pitches if f["status"] == "unassessed"]
+            if unassessed_holes:
+                bits.append(
+                    f"{len(unassessed_holes)} hole(s) unassessed "
+                    "(unsupported geometry or incomplete order evidence)"
+                )
+            if unassessed_pitch:
+                bits.append(f"{len(unassessed_pitch)} pitch pair(s) unassessed")
+            if invalid:
+                bits.append(
+                    f"{len(invalid)} invalid declaration(s): "
+                    + ", ".join(item["field"] for item in invalid)
+                )
+            message = "Mounting-hole fit unverified: " + "; ".join(bits) + "; no failures"
+        else:
+            status = "OK"
+            message = (
+                f"Mounting-hole fit verified: all {len(holes)} mounting hole(s) "
+                "within drawing limits"
+            )
+            if pitches:
+                message += f" and {len(pitches)} pitch pair(s)"
+
+        lines = [
+            _format_mounting_finding(f) for f in sorted(records, key=_mounting_finding_sort_key)
+        ]
+        for item in invalid:
+            where = item["field"]
+            if item["refs"]:
+                where += f" ({', '.join(item['refs'])})"
+            lines.append(f"invalid declaration {where}: {item['reason']}")
+        if len(lines) > 40:  # pragma: no cover - large boards
+            lines = lines[:40] + [f"(and {len(lines) - 40} more in data.diameters and data.pitch)"]
+        lines.append(
+            "Pitch is the nominal distance between hole centres on the PCB; "
+            "fabricated hole-position tolerances are not assessed."
         )
         return PreflightResult(
             name=name,
