@@ -548,7 +548,8 @@ Examples:
     # Determine output path used for saving
     output_path = Path(args.output) if args.output else pcb_path
 
-    run_repair = _audited_repair if args.creepage else _execute_repair
+    stage_output = args.creepage or (args.dry_run and _guard_mask(args))
+    run_repair = _staged_repair if stage_output else _execute_repair
 
     # --transactional (issue #4541): wrap the whole multi-pass run in a
     # file-scoped snapshot/rollback transaction.  Exceptions and Ctrl-C roll
@@ -576,13 +577,12 @@ Examples:
         return _MASK_ASSESSMENT_FAILED
 
 
-def _audited_repair(
+def _staged_repair(
     args: argparse.Namespace, pcb_path: Path, output_path: Path, report: DRCReport
 ) -> int:
-    """Publish only the complete, verified run, including across multiple passes."""
+    """Evaluate private copper for a guarded preview or an audited repair."""
     from kicad_tools.creepage.output_audit import publish_board, staged_board
 
-    audit: MaskCreepageAudit = args.creepage
     try:
         with staged_board(pcb_path, output_path) as candidate:
             code = _execute_repair(args, pcb_path, candidate, report)
@@ -592,6 +592,7 @@ def _audited_repair(
                 publish_board(candidate, output_path)
             return code
     except CreepageVerificationError as error:
+        audit: MaskCreepageAudit = args.creepage
         if not args.quiet:
             if args.format == "json":
                 print(
@@ -854,7 +855,7 @@ def _execute_repair(
     original = pcb_path.read_text() if audit else ""
     if audit:
         audit.compare(original, original, "input")
-    if audit and preview:
+    if preview and (audit or _guard_mask(args)):
         # Grade actual geometry in the private output even for a preview.
         args = argparse.Namespace(**vars(args))
         args.dry_run = False
@@ -1913,6 +1914,8 @@ def _run_mask_pass(
                 refill = run_refill_zones(candidate, require_save=True)
                 if not refill.success:
                     message = f"could not persist repaired zone fills: {refill.stderr}"
+                    if _guard_mask(args):
+                        raise _MaskAssessmentFailed(message)
                     if audit:
                         raise CreepageVerificationError(message)
                     raise RuntimeError(message)

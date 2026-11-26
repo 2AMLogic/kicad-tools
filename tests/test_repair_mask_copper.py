@@ -618,8 +618,9 @@ def test_a_preexisting_warning_keeps_the_move_under_no_new_warnings(tmp_path, mo
     assert _end(board, "trk-a")[1] == (100.0, 100.0)
 
 
+@pytest.mark.parametrize("preview", [False, True])
 @pytest.mark.parametrize("old_covered", [True, False])
-def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_covered):
+def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_covered, preview):
     from kicad_tools.drc.compat import drc_results_to_report
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.schema.pcb import PCB
@@ -629,6 +630,7 @@ def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_co
     if old_covered:
         copper.append(_seg("old", (99.74, 100.30), (99.84, 100.30)))
     board = _board(tmp_path, "\n".join(copper))
+    original = board.read_bytes()
     covered = []
 
     def assess(path, **kwargs):
@@ -645,7 +647,10 @@ def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_co
         return report
 
     monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
-    fix_drc_cmd.main(
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    code = fix_drc_cmd.main(
         [
             str(board),
             "--only",
@@ -653,14 +658,67 @@ def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_co
             "--no-new-warnings",
             "--max-displacement",
             "1",
+            "--no-connectivity-check",
+            "--format",
+            "json",
+            *(["--dry-run"] if preview else []),
             "--mfr",
             "lcsc",
         ]
     )
     assert covered[0] == ([["old"]] if old_covered else [])
     assert [["new"]] in covered
-    assert "new_drc_error" in capsys.readouterr().out
-    assert _end(board, "trk-a")[1] == (100.7, 100.3)
+    result = json.loads(capsys.readouterr().out)
+    assert code == (2 if old_covered else 1)
+    assert result["dry_run"] is preview
+    assert result["total_repaired"] == 0
+    assert result["mask_copper"]["unrepaired"][-1]["reason"] == "new_drc_error"
+    assert board.read_bytes() == original
+
+
+def test_guard_preview_keeps_verified_move_private(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    output = tmp_path / "prior.kicad_pcb"
+    output.write_bytes(b"prior output")
+    code = _run(
+        monkeypatch,
+        board,
+        [_report(_finding("trk-a")), _report()],
+        extra=["--no-new-warnings", "--dry-run", "--format", "json", "--output", str(output)],
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert result["dry_run"] and result["total_repaired"] == 1
+    assert board.read_bytes() == original
+    assert output.read_bytes() == b"prior output"
+
+
+@pytest.mark.parametrize("voltage_map", [False, True])
+def test_guard_refill_failure_exits_four(tmp_path, monkeypatch, voltage_map):
+    from unittest.mock import Mock
+
+    from kicad_tools.cli import runner
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(tmp_path, ENTRY + zone)
+    original = board.read_bytes()
+    idle = tmp_path / "idle.json"
+    idle.write_text(json.dumps({"N1": 0, "N2": 0}))
+    refill = Mock(return_value=runner.KiCadCLIResult(success=False, stderr="refill failed"))
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    code = _run(
+        monkeypatch,
+        board,
+        [_report(_finding("trk-a"))],
+        extra=["--no-new-warnings", *(["--voltage-map", str(idle)] if voltage_map else [])],
+    )
+    refill.assert_called_once()
+    assert code == 4
+    assert board.read_bytes() == original
 
 
 def test_guard_rejects_unattributed_mask_warning_at_proposal(tmp_path, monkeypatch, capsys):
