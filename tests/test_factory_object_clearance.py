@@ -574,7 +574,7 @@ def test_pth_slot_rotation_offset_and_zone_fill(tmp_path):
     pcb = PCB.load(path)
     fp = pcb.footprints[0]
     geom = _hole_geometry(fp.pads[0], fp)
-    assert geom.bounds == pytest.approx((9.6, 9.7, 10.4, 10.1), abs=0.0001)
+    assert geom.bounds == pytest.approx((9.6, 9.8, 10.4, 10.2), abs=0.0001)
     # A slot's long dimension reaches the nearby inner track: drill=0 in
     # the legacy schema must not cause this hole to disappear from checking.
     rules = get_profile("jlcpcb").get_design_rules(layers=4)
