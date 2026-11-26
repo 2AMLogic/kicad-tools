@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
+
+import pytest
 
 from kicad_tools.export.manufacturing import (
     ManufacturingConfig,
@@ -46,7 +49,145 @@ def test_unwaived_nets_keep_floors(tmp_path: Path) -> None:
     pcb.with_suffix(".kicad_dru").write_text("(version 1)\n")
     dru, result = _export(pcb)
     assert "Ampacity Min Width" in dru
-    assert any("Export modified" in w for w in result.warnings)
+    assert any("Export modified" in w and ".kicad_dru" in w for w in result.warnings)
+
+
+def test_project_only_rewrite_reports_changed_settings(tmp_path: Path) -> None:
+    pcb = _stage(tmp_path)
+    _export(pcb)
+    pro = pcb.with_suffix(".kicad_pro")
+    data = json.loads(pro.read_text())
+    data["board"]["design_settings"]["rule_severities"]["lib_footprint_mismatch"] = "warning"
+    pro.write_text(json.dumps(data))
+
+    _, changed = _export(pcb)
+    assert any(
+        f"Export modified {pro.name}" in w and f"`kicad-cli pcb drc` on {pcb.name}" in w
+        for w in changed.warnings
+    )
+    assert not any("Export modified" in w and ".kicad_dru" in w for w in changed.warnings)
+    _, unchanged = _export(pcb)
+    assert not any("Export modified" in w for w in unchanged.warnings)
+
+
+def test_project_line_ending_rewrite_is_reported(tmp_path: Path) -> None:
+    pcb = _stage(tmp_path)
+    _export(pcb)
+    pro = pcb.with_suffix(".kicad_pro")
+    pro.write_bytes(pro.read_bytes().replace(b"\n", b"\r\n"))
+
+    _, result = _export(pcb)
+    assert any(f"Export modified {pro.name}" in w for w in result.warnings)
+
+
+def test_project_rewrite_reported_when_dru_write_fails(tmp_path: Path) -> None:
+    pcb = _stage(tmp_path)
+    _export(pcb)
+    pro = pcb.with_suffix(".kicad_pro")
+    dru = pcb.with_suffix(".kicad_dru")
+    data = json.loads(pro.read_text())
+    data["board"]["design_settings"]["rule_severities"]["lib_footprint_mismatch"] = "warning"
+    pro.write_text(json.dumps(data))
+    dru.chmod(0o444)
+    try:
+        if os.access(dru, os.W_OK):
+            pytest.skip("read-only file is still writable (running as root)")
+        _, result = _export(pcb)
+    finally:
+        dru.chmod(0o644)
+    assert any("Could not write DRC constraints" in w for w in result.warnings)
+    assert any(f"Export modified {pro.name}" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    ("project", "valid_dru"),
+    [
+        ("authored", False),
+        ("write_only", False),
+        ("editor_replaces", False),
+        ("editor_creates", False),
+        ("editor_replaces", True),
+        ("editor_replaces_read_only", True),
+        ("editor_creates", True),
+    ],
+)
+def test_rules_export_refusal_leaves_sidecars_intact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch, project: str, valid_dru: bool
+) -> None:
+    from kicad_tools.cli import main
+    from kicad_tools.manufacturers import dru_generator
+
+    pcb = _stage(tmp_path)
+    _export(pcb)
+    pro, dru = pcb.with_suffix(".kicad_pro"), pcb.with_suffix(".kicad_dru")
+    expected = b'{"text_variables": {"authored": "keep me"}}'
+    pro.write_bytes(expected)
+    if not valid_dru:
+        dru.write_text(dru.read_text() + "; authored comment\n")
+    dru_before = dru.read_bytes()
+
+    if project.startswith("editor_"):
+        if project == "editor_creates":
+            pro.unlink()
+        expected = b'{"text_variables": {"editor": "newer save"}}'
+        editor_save = tmp_path / "editor-save.tmp"
+        editor_save.write_bytes(expected)
+        if project == "editor_replaces_read_only":
+            editor_save.chmod(0o444)
+        merge = dru_generator.merge_dru_floors
+
+        def save_then_merge(*args, **kwargs):
+            editor_save.replace(pro)
+            return merge(*args, **kwargs)
+
+        monkeypatch.setattr(dru_generator, "merge_dru_floors", save_then_merge)
+
+    try:
+        if project == "write_only":
+            pro.chmod(0o200)
+            if os.access(pro, os.R_OK):
+                pytest.skip("write-only file is still readable")
+        rc = main(
+            [
+                "export",
+                str(pcb),
+                "--mfr",
+                "jlcpcb",
+                "--no-silk-fix",
+                "--bom-source",
+                "pcb",
+                "--output",
+                str(tmp_path / "out"),
+            ]
+        )
+    finally:
+        if project == "write_only":
+            pro.chmod(0o644)
+    captured = capsys.readouterr()
+    assert rc == 1
+    if valid_dru:
+        assert f"{pro.name} changed while rendering DRC constraints" in captured.err
+    else:
+        assert dru.name in captured.err and "';' comment" in captured.err
+    assert "Export modified" not in captured.out + captured.err
+    assert pro.read_bytes() == expected
+    assert dru.read_bytes() == dru_before
+
+
+def test_unreadable_project_replacement_is_reported(tmp_path: Path) -> None:
+    pcb = _stage(tmp_path)
+    pro = pcb.with_suffix(".kicad_pro")
+    pro.write_text("{}")
+    pro.chmod(0o200)
+    try:
+        if os.access(pro, os.R_OK):
+            pytest.skip("write-only file is still readable (running as root)")
+        _, result = _export(pcb)
+    finally:
+        pro.chmod(0o644)
+    assert any(
+        f"Export replaced {pro.name}" in w and "could not be read" in w for w in result.warnings
+    )
 
 
 def test_waived_net_gets_no_rule(tmp_path: Path) -> None:

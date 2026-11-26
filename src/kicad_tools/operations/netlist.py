@@ -180,6 +180,8 @@ class Netlist:
     sheets: list[SheetInfo] = field(default_factory=list)
     components: list[NetlistComponent] = field(default_factory=list)
     nets: list[NetlistNet] = field(default_factory=list)
+    # Qualified output name -> literal winning local/hierarchical label.
+    qualified_labels: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Netlist:
@@ -379,7 +381,8 @@ class Netlist:
 
         # Categorize nets
         power_names = {"GND", "PGND", "AGND", "VCC", "VDD", "VBUS"}
-        power_nets = [n for n in self.nets if n.name.startswith("+") or n.name in power_names]
+        labels = (self.qualified_labels.get(net.name, net.name) for net in self.nets)
+        power_count = sum(label.startswith("+") or label in power_names for label in labels)
 
         return {
             "source_file": self.source_file,
@@ -389,8 +392,8 @@ class Netlist:
             "component_count": len(self.components),
             "components_by_type": dict(by_prefix),
             "net_count": len(self.nets),
-            "power_net_count": len(power_nets),
-            "signal_net_count": len(self.nets) - len(power_nets),
+            "power_net_count": power_count,
+            "signal_net_count": len(self.nets) - power_count,
         }
 
 
@@ -599,10 +602,11 @@ def _collect_hierarchy_components(
     visited: set[Path] | None = None,
     *,
     include_symbol_pins: bool = False,
+    qualified_labels: dict[str, str] | None = None,
 ) -> tuple[list[NetlistComponent], dict[str, list]]:
     """Resolve names after collecting bindings from every sheet in the hierarchy."""
     aliases = _ParentNetAliases()
-    components, nets = _collect_sheet_nets(
+    components, nets, multi_sheet = _collect_sheet_nets(
         sch_path,
         sheet_path,
         visited,
@@ -615,14 +619,20 @@ def _collect_hierarchy_components(
     for identity, pins in nets.items():
         by_identity[aliases.resolve(identity)].extend(pins)
 
-    # Preserve short names when unique. For a collision, qualify each local
-    # label with its sheet instance path and keep the global name bare.
+    # In a multi-sheet design a local or hierarchical label is always rendered
+    # with its owning sheet-instance path, so a net's exported name never
+    # depends on whether an unrelated sheet reuses the same text (#10334).
+    # Global and power names stay bare. A single-sheet schematic and the
+    # automatically generated names (priority 4) keep their short spelling
+    # unless they collide, in which case the local one is qualified.
     counts = Counter(identity.name for identity in by_identity)
-    names = {
-        identity: identity.name
-        for identity in by_identity
-        if not identity.scope or counts[identity.name] == 1
-    }
+
+    def keeps_bare_name(identity: _NetIdentity) -> bool:
+        if multi_sheet and identity.priority in (2, 3):
+            return False
+        return not identity.scope or counts[identity.name] == 1
+
+    names = {identity: identity.name for identity in by_identity if keeps_bare_name(identity)}
     used = set(names.values())
     for identity in by_identity:
         if identity in names:
@@ -636,6 +646,8 @@ def _collect_hierarchy_components(
             suffix += 1
         names[identity] = name
         used.add(name)
+        if qualified_labels is not None and identity.priority in (2, 3):
+            qualified_labels[name] = identity.name
     return components, {names[identity]: pins for identity, pins in by_identity.items()}
 
 
@@ -648,7 +660,7 @@ def _collect_sheet_nets(
     net_scope: str,
     parent_nets_by_port: dict[str, _NetIdentity],
     aliases: _ParentNetAliases,
-) -> tuple[list[NetlistComponent], dict[_NetIdentity, list]]:
+) -> tuple[list[NetlistComponent], dict[_NetIdentity, list], bool]:
     """Recursively collect components and nets from a schematic hierarchy.
 
     Loads the schematic at *sch_path*, collects its components and
@@ -673,10 +685,11 @@ def _collect_sheet_nets(
         aliases: Parent nets joined by ports anywhere in this traversal.
 
     Returns:
-        A ``(components, net_dict)`` tuple where *components* is a flat
+        A ``(components, net_dict, has_children)`` tuple where *components* is a flat
         list of :class:`NetlistComponent` from all sheets and *net_dict*
         maps net identities to lists of :class:`PinRef`-like objects (each
-        with ``symbol_ref`` and ``pin`` attributes).
+        with ``symbol_ref`` and ``pin`` attributes). *has_children* indicates
+        whether this sheet declares any sub-sheets.
     """
     from kicad_tools.schematic.models import Schematic
     from kicad_tools.schematic.models.netlist_mixin import _component_root
@@ -687,12 +700,12 @@ def _collect_sheet_nets(
     resolved = sch_path.resolve()
     if resolved in visited:
         logger.warning("Circular sheet reference detected, skipping: %s", sch_path)
-        return [], {}
+        return [], {}, False
     visited.add(resolved)
 
     if not sch_path.exists():
         logger.warning("Sub-sheet file not found, skipping: %s", sch_path)
-        return [], {}
+        return [], {}, False
 
     # Load single sheet
     sch = Schematic.load(str(sch_path))
@@ -771,13 +784,14 @@ def _collect_sheet_nets(
     except Exception:
         logger.warning("Failed to extract netlist from %s, skipping connectivity", sch_path)
 
-    for entry in _get_sheet_entries(sch_path):
+    entries = _get_sheet_entries(sch_path)
+    for entry in entries:
         child_bindings = {}
         for pin_name, pin_pos in zip(entry.pin_names, entry.pin_positions, strict=False):
             parent_net = net_at(pin_pos)
             if parent_net:
                 child_bindings[pin_name] = parent_names.get(parent_net, identities[parent_net])
-        sub_components, sub_nets = _collect_sheet_nets(
+        sub_components, sub_nets, _ = _collect_sheet_nets(
             sch_path.parent / entry.filename,
             f"{sheet_path}{entry.filename}/",
             visited,
@@ -790,7 +804,7 @@ def _collect_sheet_nets(
         for identity, pins in sub_nets.items():
             net_dict.setdefault(identity, []).extend(pins)
 
-    return components, net_dict
+    return components, net_dict, bool(entries)
 
 
 def build_netlist_from_schematic(
@@ -825,8 +839,9 @@ def build_netlist_from_schematic(
         raise FileNotFoundError(f"Schematic not found: {sch_path}")
 
     # Recursively collect components and nets from all sheets
+    qualified_labels: dict[str, str] = {}
     components, net_dict = _collect_hierarchy_components(
-        sch_path, "/", include_symbol_pins=include_symbol_pins
+        sch_path, "/", include_symbol_pins=include_symbol_pins, qualified_labels=qualified_labels
     )
 
     # Build nets from merged connectivity data
@@ -846,6 +861,7 @@ def build_netlist_from_schematic(
         tool="kicad-tools (Python fallback)",
         components=components,
         nets=nets,
+        qualified_labels=qualified_labels,
     )
 
 
