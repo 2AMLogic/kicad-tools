@@ -93,11 +93,17 @@ def test_probe_detours_for_authored_floor(tmp_path, capsys):
     assert bent > free
 
 
-def test_malformed_project_exits_nonzero(tmp_path, capsys):
+@pytest.mark.parametrize("with_clearance_rule", [False, True])
+def test_malformed_project_exits_nonzero(tmp_path, capsys, with_clearance_rule):
     from kicad_tools.cli import main
 
     p = _write(tmp_path, BODY)
     p.with_suffix(".kicad_pro").write_text("{not json")
+    if with_clearance_rule:
+        p.with_suffix(".kicad_dru").write_text(
+            '(version 1)\n(rule "unused" (condition "A.NetName == \'NEVER\'") '
+            "(constraint clearance (min 2mm)))"
+        )
     rc = main(["route-link", "--format", "json", "--probe", str(p), "--link", "SIG R1.1 R2.1"])
     assert rc == 1
 
@@ -257,3 +263,49 @@ def test_copper_beyond_window_padding_is_still_avoided(tmp_path, capsys):
     ruled = json.loads(capsys.readouterr().out)["links"][0]
     assert plain["routable"]
     assert not ruled["routable"] or ruled["length_mm"] > plain["length_mm"]
+
+
+@pytest.mark.parametrize(
+    "predicate", ["B.memberOfFootprint('R9')", "B.Type == 'Pad' && B.Layer == 'B.Cu'"]
+)
+def test_probe_resolves_foreign_footprint_properties(tmp_path, capsys, predicate):
+    from kicad_tools.cli import main
+
+    p = _write(tmp_path, BODY + _pad(3, 110, 111, 2, "HV") + _pad(9, 128, 119, 2, "HV"))
+    _project(p, 0.2)
+    argv = [
+        "route-link",
+        "--probe",
+        "--format",
+        "json",
+        str(p),
+        "--link",
+        "SIG R1.1 R2.1",
+        "--link-layers",
+        "F.Cu",
+    ]
+    assert main(argv) == 0
+    direct = json.loads(capsys.readouterr().out)["links"][0]
+    p.with_suffix(".kicad_dru").write_text(
+        f"(version 1)\n(rule \"select pad\" (condition \"A.NetName == 'SIG' && B.NetName == 'HV' && {predicate}\") "
+        "(constraint clearance (min 6mm)))"
+    )
+    assert main(argv) == 0
+    routed = json.loads(capsys.readouterr().out)["links"][0]
+    assert routed["routable"] and direct["routable"]
+    assert routed["length_mm"] == direct["length_mm"]
+
+    # A through-hole R9 on a back-side footprint has copper on F.Cu and
+    # matches either predicate. Put it near the terminal to force a blocker.
+    blocker_pad = (
+        '(footprint "R" (layer "B.Cu") (at 106 111) '
+        '(fp_text reference "R9" (at 0 -1.5) (layer "B.SilkS")) '
+        '(pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.5) '
+        '(layers "*.Cu" "*.Mask") (net 2 "HV")))'
+    )
+    _write(tmp_path, BODY + blocker_pad)
+    assert main(argv) == 1
+    blocked = json.loads(capsys.readouterr().out)["links"][0]
+    assert not blocked["routable"]
+    assert blocked["blocker"]["kind"] == "pad"
+    assert blocked["blocker"]["required_mm"] == pytest.approx(6.1)

@@ -374,7 +374,9 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
     args._pcb_for_floors = pcb
     # Project rules (netclass + .kicad_dru) are resolved per pair by
     # ``board_rules``; authored netclass floors would override a lower pair exception.
-    authored = {} if base.board_rules is not None else _authored_floors(args)
+    authored = _authored_floors(args)  # Validate the project even with active .kicad_dru rules.
+    if base.board_rules is not None:
+        authored = {}
     if voltages is None and not spec.net_clearance and not authored:
         return base
     names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}

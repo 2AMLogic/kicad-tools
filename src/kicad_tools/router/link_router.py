@@ -145,20 +145,29 @@ class LinkRouteRules:
                     "Pad",
                     other_name,
                     pad_type="Through-hole" if item.drill else "SMD",
+                    layer=item.footprint_layer,
                     footprint_ref=item.ref,
                     footprint_lib_id=item.lib_id,
                 )
             elif len(item.layers) > 1:
-                other = ItemProps("Via", other_name, plated=True)
+                other = ItemProps(
+                    "Via", other_name, plated=True, footprint_ref="", footprint_lib_id=""
+                )
             else:
-                other = ItemProps("Track", other_name, layer=layer)
+                other = ItemProps(
+                    "Track", other_name, layer=layer, footprint_ref="", footprint_lib_id=""
+                )
             # ``moving`` is the item being placed: a track mask and a via mask
             # resolve separately, so a ``A.Type == 'Via'`` rule never leaks
             # onto tracks (or the reverse).
             if moving == "Via":
-                mover = ItemProps("Via", link_net_name, plated=True)
+                mover = ItemProps(
+                    "Via", link_net_name, plated=True, footprint_ref="", footprint_lib_id=""
+                )
             else:
-                mover = ItemProps("Track", link_net_name, layer=layer)
+                mover = ItemProps(
+                    "Track", link_net_name, layer=layer, footprint_ref="", footprint_lib_id=""
+                )
             floor = max(floor, self.board_rules.clearance(mover, other, layer))
         full = max(floor, self.clearance_for(net_number))
         if (
@@ -291,6 +300,7 @@ class _Item:
     #: Pad identity for project rules (``B.Reference`` / ``memberOfFootprint``).
     ref: str | None = None
     lib_id: str | None = None
+    footprint_layer: str | None = None
 
 
 @dataclass
@@ -333,6 +343,7 @@ def _build_model(pcb: PCB) -> _BoardModel:
                     pad_drill,
                     getattr(fp, "reference", None) or "",
                     getattr(fp, "name", None) or "",
+                    fp.layer,
                 )
             )
             drill = pad_drill
