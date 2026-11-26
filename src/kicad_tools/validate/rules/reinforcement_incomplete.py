@@ -54,7 +54,7 @@ from .base import DRCRule
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.router.current_paths import CurrentPathSpec, PathResolution
-    from kicad_tools.schema.pcb import PCB, Segment, Via
+    from kicad_tools.schema.pcb import PCB, Pad, Segment, Via
 
 #: Waiver ``rule`` ids whose waiver can claim "the wire carries the current".
 AMPACITY_WAIVER_RULES = ("ampacity", "path_ampacity")
@@ -171,6 +171,7 @@ class _Anchor:
     arc: float
     via: Via | None  # None for a through-hole pad
     radius: float
+    pad: Pad | None = None
 
 
 @dataclass
@@ -227,6 +228,7 @@ class WiredLeg:
     width: float
     gauge: int
     anchor_arc: tuple[float, float] | None = None
+    anchor_pad_ids: tuple[int, ...] = ()
 
 
 class ReinforcementIncompleteRule(DRCRule):
@@ -819,7 +821,8 @@ class ReinforcementIncompleteRule(DRCRule):
                             points=tuple(leg.points),
                             width=leg.width,
                             gauge=leg.gauge,
-                            anchor_arc=outcome,
+                            anchor_arc=(outcome[0].arc, outcome[1].arc),
+                            anchor_pad_ids=tuple(id(a.pad) for a in outcome if a.pad is not None),
                         )
                     )
 
@@ -893,18 +896,10 @@ class ReinforcementIncompleteRule(DRCRule):
         claimed: set[int],
         results: DRCResults,
         via_is_tented: Any,
-    ) -> tuple[float, float] | None:
-        """Check one leg's (a)-(c); ``None`` when it is not a wire leg.
+    ) -> tuple[_Anchor, _Anchor] | None:
+        """Check one leg and return its two anchors when identifiable.
 
-        Returns ``None`` for a leg no wire layout applies to (degenerate
-        geometry, a pad covering the whole leg, or an inner layer with no
-        solder mask), else the ``(first, last)`` cumulative-arc range of the
-        leg's anchors -- the stretch the wire is soldered over, which
-        consumers use to keep the unwired hole-to-pad stubs at bare copper
-        (Issue #9654). A leg with fewer than two anchors always carries an
-        (a) finding, so its whole-leg placeholder span is never credited.
-        Callers judging completeness (Issue #9648) additionally require that
-        no finding was emitted into ``results``.
+        Consumers credit the span only when the checks emit no violations.
         """
         pts, cum, total = leg.points, leg.cum, leg.total
         if len(pts) < 2 or total <= 1e-9:
@@ -940,7 +935,7 @@ class ReinforcementIncompleteRule(DRCRule):
             if min(math.dist(pos, pts[0]), math.dist(pos, pts[-1])) <= radius + 0.05:
                 continue
             if self._dist_to_polyline(pts, pos) <= tol:
-                anchors.append(_Anchor(pos, rf._arc_of_point(pts, cum, pos), None, radius))
+                anchors.append(_Anchor(pos, rf._arc_of_point(pts, cum, pos), None, radius, pad))
         anchors.sort(key=lambda a: a.arc)
 
         # The bound the leg was built with (sidecar) wins over the constructor
@@ -967,6 +962,23 @@ class ReinforcementIncompleteRule(DRCRule):
             if a.via is not None:
                 claimed.add(id(a.via))
         anchors = [a for a in anchors if a not in layer_change]
+        # A matching component drill is a possible termination only in an end
+        # window. When both end vias are present they already identify the wire.
+        vias = [a for a in anchors if a.via is not None]
+        if (
+            len(vias) == 2
+            and vias[0].arc <= window(extents[0], vias[0])
+            and total - vias[1].arc <= window(extents[1], vias[1])
+        ):
+            anchors = vias
+        else:
+            anchors = [
+                a
+                for a in anchors
+                if a.via is not None
+                or a.arc <= window(extents[0], a)
+                or total - a.arc <= window(extents[1], a)
+            ]
         near_start = [a for a in anchors if a.arc <= window(extents[0], a)]
         near_end = [a for a in anchors if total - a.arc <= window(extents[1], a)]
         # With exactly two anchors the (a) window check below reports each
@@ -1071,7 +1083,7 @@ class ReinforcementIncompleteRule(DRCRule):
                     + " and ".join("front" if s == "F" else "back" for s in tented)
                     + " side; both sides must be mask-open",
                 )
-        return (anchors[0].arc, anchors[-1].arc) if len(anchors) >= 2 else (0.0, total)
+        return (anchors[0], anchors[1]) if len(anchors) == 2 else None
 
     # ------------------------------------------------------------ geometry
 

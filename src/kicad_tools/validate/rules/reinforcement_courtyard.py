@@ -258,7 +258,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         from shapely.geometry import LineString
         from shapely.ops import nearest_points, substring  # type: ignore[import-untyped]
 
-        from kicad_tools.physics.wire_gauge import anchor_drill_for_awg, bare_copper_diameter_mm
+        from kicad_tools.physics.wire_gauge import bare_copper_diameter_mm
 
         from .factory_clearance import _hole_geometry
 
@@ -269,26 +269,21 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
             side = _side_of_layer(leg.layer)
             centreline = LineString(leg.points)
             fitted = substring(centreline, *leg.anchor_arc)
-            radius = bare_copper_diameter_mm(leg.gauge) / 2
+            diameter = bare_copper_diameter_mm(leg.gauge)
+            radius = diameter / 2
             for fp in pcb.footprints:
                 if _fp_side(fp) == side:
                     continue
                 for pad in fp.pads:
                     if pad.type != "thru_hole" or pad.net_number != net_numbers.get(leg.net):
                         continue
+                    if id(pad) in leg.anchor_pad_ids:
+                        continue
                     bore = _hole_geometry(pad, fp)
                     if bore is None:
                         continue
                     gap = fitted.distance(bore)
                     if gap >= radius - 1e-6:
-                        continue
-                    # A plated pad may itself be either of the two verified anchors.
-                    arc = centreline.project(bore.centroid)
-                    if abs(
-                        pad.drill - anchor_drill_for_awg(leg.gauge)
-                    ) <= DRILL_TOLERANCE_MM and any(
-                        abs(arc - end) <= 1e-4 for end in leg.anchor_arc
-                    ):
                         continue
                     point = nearest_points(fitted, bore)[0]
                     qualifier = "at least " if gap == 0 else ""
@@ -299,7 +294,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                             message=(
                                 f"Wire run overlaps component drill [run] on {leg.layer}: "
                                 f"{fp.reference}.{pad.number} on {leg.net!r} has {qualifier}{radius - gap:.4f} mm "
-                                f"interference (centreline to bore {gap:.4f} mm, wire radius {radius:.4f} mm)"
+                                f"interference (centreline to bore {gap:.4f} mm, wire diameter {diameter:.4f} mm)"
                             ),
                             location=(point.x, point.y),
                             layer=leg.layer,
