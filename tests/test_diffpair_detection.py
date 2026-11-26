@@ -30,6 +30,7 @@ from kicad_tools.router.diffpair import (
 )
 from kicad_tools.router.diffpair_detection import (
     DetectionSource,
+    coupled_engaged_pairs,
     detect_diff_pairs,
     parse_diff_pair_templates_from_pcb,
 )
@@ -169,14 +170,20 @@ class TestPowerRailFilter:
         "intent",
         [{"coupled_routing": True}, {"target_diff_impedance": 90.0}, {"skew_tolerance_mm": 0.0}],
     )
-    def test_power_class_explicit_pair_settings(self, intent):
-        names = {1: "/BANK_POS", 2: "/BANK_NEG"}
+    @pytest.mark.parametrize("base", ["/BANK", "/scope/VCC"])
+    def test_power_class_explicit_pair_settings(self, intent, base):
+        names = {1: f"{base}_POS", 2: f"{base}_NEG"}
         routing = {
-            "/BANK_POS": NetClassRouting(name="Power", **intent),
-            "/BANK_NEG": NetClassRouting(name="Power"),
+            names[1]: NetClassRouting(name="Power", **intent),
+            names[2]: NetClassRouting(name="Power"),
         }
         pairs = detect_diff_pairs(names, net_class_routing=routing)
         assert [p.source for p in pairs] == [DetectionSource.SUFFIX]
+
+    def test_hierarchical_supply_pair_engages_when_coupled(self):
+        names = ("/scope/VCC_POS", "/scope/VCC_NEG")
+        routing = dict.fromkeys(names, NetClassRouting(name="Power", coupled_routing=True))
+        assert coupled_engaged_pairs(list(names), routing) == [names]
 
     def test_declared_power_partner_overrides_suffix_refusal(self):
         nets = {1: "/BANK_POS", 2: "/BANK_NEG"}

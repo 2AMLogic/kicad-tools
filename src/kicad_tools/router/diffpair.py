@@ -390,11 +390,14 @@ def should_engage_coupled(
     return False, "opt_in_disabled"
 
 
-def parse_differential_signal(net_name: str) -> tuple[str, str, str] | None:
+def parse_differential_signal(
+    net_name: str, *, include_power_rails: bool = False
+) -> tuple[str, str, str] | None:
     """Parse a net name to extract differential pair information.
 
     Args:
         net_name: The net name to parse
+        include_power_rails: Return POS/NEG power-rail candidates for class-aware filtering.
 
     Returns:
         Tuple of (base_name, polarity, notation) if this is a differential signal,
@@ -405,7 +408,7 @@ def parse_differential_signal(net_name: str) -> tuple[str, str, str] | None:
       - Names matching the single-ended refusal pattern (CC1/CC2, SBU1/SBU2,
         prefix variants like ``USB_CC1``).  See Issue #2558.
       - ``pos_neg`` matches whose base name is a known power rail prefix
-        (e.g. ``VCC_NEG``, ``VBUS_POS``).  See Issue #2558.
+        (e.g. ``VCC_NEG``, ``VBUS_POS``), unless include_power_rails is set.
     """
     # Reject known single-ended pairs up front -- suffix inference only.
     # Explicit declarations and KiCad group declarations bypass this in
@@ -443,7 +446,7 @@ def parse_differential_signal(net_name: str) -> tuple[str, str, str] | None:
     match = _POS_NEG_PATTERN.match(net_name)
     if match:
         base_name = match.group(1)
-        if _is_power_rail_base(base_name):
+        if not include_power_rails and _is_power_rail_base(base_name):
             return None
         polarity = "P" if match.group(2).upper() == "POS" else "N"
         return (base_name, polarity, "pos_neg")
@@ -453,6 +456,8 @@ def parse_differential_signal(net_name: str) -> tuple[str, str, str] | None:
 
 def detect_differential_signals(
     net_names: dict[int, str],
+    *,
+    include_power_rails: bool = False,
 ) -> list[DifferentialSignal]:
     """Detect differential pair signals from net names.
 
@@ -465,7 +470,7 @@ def detect_differential_signals(
     signals: list[DifferentialSignal] = []
 
     for net_id, net_name in net_names.items():
-        parsed = parse_differential_signal(net_name)
+        parsed = parse_differential_signal(net_name, include_power_rails=include_power_rails)
         if parsed:
             base_name, polarity, notation = parsed
             signals.append(
