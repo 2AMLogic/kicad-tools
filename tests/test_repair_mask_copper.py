@@ -520,7 +520,7 @@ def _pour_slot_warning(x: float = 99.0, y: float = 100.3) -> DRCViolation:
         severity=Severity.WARNING,
         message="Pour slot beside the move",
         locations=[Location(x_mm=x, y_mm=y, layer="F.Cu")],
-        items=["Trace@F.Cu:w0.2:95/100.3~100/100"],
+        items=["trk-a", "trk-b"],
         nets=["N1", "N2"],
     )
 
@@ -534,6 +534,8 @@ def _pour_slot_warning(x: float = 99.0, y: float = 100.3) -> DRCViolation:
         ("jlcpcb", ["complete", "incomplete"], False, 4),
         ("jlcpcb", ["not_run"], False, 4),
         ("jlcpcb", ["complete"], False, 0),
+        ("jlc", ["complete"], False, 0),
+        ("lcsc", ["complete"], False, 0),
     ],
 )
 def test_guard_requires_mask_coverage(tmp_path, manufacturer, coverage, target, expected_code):
@@ -614,6 +616,51 @@ def test_a_preexisting_warning_keeps_the_move_under_no_new_warnings(tmp_path, mo
     after = _report(_pour_slot_warning(x=99.0, y=100.3))
     _run(monkeypatch, board, [before, after, after], extra=["--no-new-warnings"])
     assert _end(board, "trk-a")[1] == (100.0, 100.0)
+
+
+@pytest.mark.parametrize("old_covered", [True, False])
+def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_covered):
+    from kicad_tools.drc.compat import drc_results_to_report
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+    copper = [ENTRY, _seg("new", (99.76, 100.24), (99.86, 100.14))]
+    if old_covered:
+        copper.append(_seg("old", (99.74, 100.30), (99.84, 100.30)))
+    board = _board(tmp_path, "\n".join(copper))
+    covered = []
+
+    def assess(path, **kwargs):
+        assert kwargs["manufacturer"] == "jlcpcb"
+        pcb = PCB.load(path)
+        results = RedundantCopperRule().check(pcb, get_profile("jlcpcb").get_design_rules(2))
+        report = drc_results_to_report(results, path)
+        covered.append(
+            [v.items for v in report.violations if v.type_str == "redundant_copper_covered"]
+        )
+        report.mask_copper_assessments = [MaskCopperAssessment(coverage="complete")]
+        if _end(path, "trk-a")[1] == (100.7, 100.3):
+            report.violations.append(_finding("trk-a"))
+        return report
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--max-displacement",
+            "1",
+            "--mfr",
+            "lcsc",
+        ]
+    )
+    assert covered[0] == ([["old"]] if old_covered else [])
+    assert [["new"]] in covered
+    assert "new_drc_error" in capsys.readouterr().out
+    assert _end(board, "trk-a")[1] == (100.7, 100.3)
 
 
 def test_a_new_mask_warning_on_the_moved_conductor_reverts_the_move(tmp_path, monkeypatch, capsys):

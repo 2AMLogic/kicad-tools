@@ -71,6 +71,7 @@ from typing import TYPE_CHECKING, Any
 from kicad_tools._shapely import require_shapely
 from kicad_tools.core.layers import via_spans_layer
 
+from ..copper_refs import board_origin, via_ref
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
 from .clearance import _collect_zone_fills, _pad_on_layer, _pad_polygon
@@ -732,7 +733,10 @@ class DanglingCopperRule(DRCRule):
                     layer=top,
                     actual_value=float(bonded_layers),
                     required_value=float(_VIA_MIN_BONDED_LAYERS),
-                    items=(f"net:{net_label}",),
+                    items=(
+                        getattr(via, "uuid", "") or via_ref(via, board_origin(pcb)),
+                        f"net:{net_label}",
+                    ),
                     nets=(net_label,),
                 )
             )

@@ -501,6 +501,7 @@ Examples:
         args.layers = _board_layer_count(pcb_path)
 
     if _guard_mask(args):
+        args.mfr = get_profile(args.mfr).id
         request = default_request_for_manufacturer(args.mfr)
         if request is None or request.policy is None:
             print(f"Error: no mask assessment policy for {args.mfr}", file=sys.stderr)
@@ -1355,18 +1356,21 @@ _MASK_RULE_TYPES = (ViolationType.MASK_TO_COPPER, ViolationType.MASK_TO_COPPER_I
 
 
 def _error_class(v: DRCViolation) -> tuple:
-    """Class of a ``kct check`` finding: its rule plus its net pair.
-
-    Deliberately free of ``items`` and exact locations.  This engine names a
-    track in ``items`` by its geometry (``Trace@F.Cu:w0.2:...``, issue
-    #6088) -- clearance findings carry no uuids to key on, the way
-    ``new_mask_finding`` names a mask finding by uuid -- and a clearance
-    error's ``locations`` hold the closest-approach point, so both move with
-    the copper for exactly the errors the re-centre touches (Issue #9365).
-    Rule and net pair survive the move; position is compared separately,
-    with a move-scale tolerance, by :func:`_new_errors`.
-    """
-    return (v.type_str, tuple(sorted(v.nets)))
+    """Group topology findings by witness and clearance findings by net pair."""
+    key = (v.type_str, tuple(sorted(v.nets)))
+    if v.type_str.startswith("redundant_copper_") or v.type_str in {
+        "pour_slot",
+        "track_dangling",
+        "via_dangling",
+        "isolated_copper",
+    }:
+        # Distinguish nearby traces even when both fit inside the move tolerance.
+        # Older and net-only reports have only the location to identify the witness.
+        if any(not item.startswith("net:") for item in v.items):
+            return (*key, tuple(sorted(v.items)), tuple(loc.layer for loc in v.locations))
+        return (*key, tuple((loc.layer, loc.x_mm, loc.y_mm) for loc in v.locations))
+    # Clearance reports name tracks by geometry, which changes with the move.
+    return key
 
 
 def _new_errors(
