@@ -2260,6 +2260,115 @@ def _hub_continuation_segments(
     return _pad_continuation_chains(internal, centres, entries, branch_exits)
 
 
+def _pad_entry_branch(
+    internal: Sequence[Segment],
+    centre: tuple[float, float],
+    landing: tuple[float, float],
+    layer: str,
+) -> tuple[Segment, ...]:
+    """One layer's chained pad copper from the terminal centre to a landing.
+
+    A straight entry subdivided at collinear vertices is still one branch:
+    the original pieces chain from the centre to the landing (#10300), so
+    :meth:`ParallelGroup.layer_widths` judges the layer on its narrowest
+    piece. Copper hanging off the chain -- a sense tap sharing a split
+    vertex -- is a dead end the shortest chain never rides.
+    """
+    candidates = [seg for seg in internal if seg.layer == layer]
+    if not candidates:
+        return ()
+
+    def _touches_point(seg: Segment, point: tuple[float, float]) -> bool:
+        return point_to_segment_distance(*point, *seg.start, *seg.end) <= _PAD_EPS
+
+    seeds = {i for i, seg in enumerate(candidates) if _touches_point(seg, centre)}
+    if not seeds or not any(_touches_point(seg, landing) for seg in candidates):
+        return ()
+    # Dijkstra over the segment-touching graph, as in
+    # :func:`_pad_continuation_chains`; the pad hub carries a handful of
+    # internal segments, so a plain scan is plenty.
+    dist: dict[int, float] = dict.fromkeys(range(len(candidates)), math.inf)
+    for i in seeds:
+        dist[i] = 0.0
+    prev: dict[int, int] = {}
+    chain: list[int] | None = None
+    unvisited = set(dist)
+    while unvisited:
+        i = min(unvisited, key=lambda k: dist[k])
+        if dist[i] == math.inf:
+            break
+        unvisited.remove(i)
+        if _touches_point(candidates[i], landing):
+            chain = []
+            while i in prev:
+                chain.append(i)
+                i = prev[i]
+            chain.append(i)
+            break
+        for j in unvisited:
+            if dist[i] + _seg_length(candidates[j]) < dist[j] and _pad_segments_touch(
+                candidates[i], candidates[j]
+            ):
+                dist[j] = dist[i] + _seg_length(candidates[j])
+                prev[j] = i
+    if chain is None:
+        return ()
+    return tuple(candidates[i] for i in reversed(chain))
+
+
+def _parallel_pad_entries(
+    graph: _CopperGraph,
+    hub: _Node,
+    groups: Sequence[ParallelGroup],
+) -> list[ParallelGroup]:
+    """Credit matching terminal entries on both arms of a proved two-layer link.
+
+    Each proved front/back arm lands inside the plated terminal at the
+    same off-centre point, and the copper from that shared landing to the
+    pad centre -- the current's terminal -- is in series with both arms,
+    so the two layers' entries pair into one parallel group judged at each
+    layer's narrowest chained piece. A straight entry subdivided at
+    collinear vertices keeps its original segments as that layer's branch
+    (#10300); the pair fires only when both layers carry a chained entry
+    to the same landing, so removing or narrowing one layer's entry
+    leaves the other layer's width standing alone.
+    """
+    centres = graph.pad_centres.get(hub, set())
+    if len(centres) != 1:
+        return []
+    centre = next(iter(centres))
+    internal = graph.internal.get(hub, [])
+    if not internal:
+        return []
+    pairs = []
+    seen = set()
+    for group in groups:
+        if len(group.branches) != 2 or {arm[0].layer for arm in group.branches} != {
+            "F.Cu",
+            "B.Cu",
+        }:
+            continue
+        arm_ends = [
+            {_node_key(point) for seg in arm for point in (seg.start, seg.end)}
+            for arm in group.branches
+        ]
+        for landing in sorted(set.intersection(*arm_ends)):
+            if landing in seen or math.dist(landing, centre) <= _PAD_EPS:
+                continue
+            branches = [
+                branch
+                for branch in (
+                    _pad_entry_branch(internal, centre, landing, layer)
+                    for layer in ("F.Cu", "B.Cu")
+                )
+                if branch
+            ]
+            if len(branches) == 2:
+                seen.add(landing)
+                pairs.append(ParallelGroup(tuple(branches)))
+    return pairs
+
+
 def _bfs_path(
     graph: _CopperGraph, start: _Node, goal: _Node
 ) -> tuple[list[Segment], list[_GraphEdge]] | None:
@@ -4225,9 +4334,12 @@ def resolve_current_path(
             if edge.segment is not None and id(edge.segment) in group_ids
         }
         arm_hubs = {hub for edge in arm_edges for hub, _ in adjacency.attachments.get(edge, [])}
-        path_segments.extend(
-            seg for hub in arm_hubs for seg in _hub_continuation_segments(adjacency, hub, arm_edges)
-        )
+        entry_groups = []
+        for hub in arm_hubs:
+            entries = _hub_continuation_segments(adjacency, hub, arm_edges)
+            path_segments.extend(entries)
+            entry_groups.extend(_parallel_pad_entries(adjacency, hub, parallel_groups))
+        parallel_groups.extend(entry_groups)
 
     on_path_groups = [
         group for group in via_groups if _path_changes_layer_through(path_segments, group)

@@ -19,11 +19,15 @@ copper is identical with tracing off and on.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from kicad_tools.router import cpp_backend
 from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
+from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
 
@@ -91,6 +95,41 @@ def _assert_breakdown_adds_up(record: dict) -> None:
     assert record["native_search_seconds"] == pytest.approx(
         sum(s["elapsed"] for s in record["searches"]), abs=1e-9
     )
+
+
+def test_lineage_scan_runs_after_the_fallback_with_the_same_budget(monkeypatch) -> None:
+    now = 0.0
+    events = []
+    budgets = []
+    original_stamp = CppPathfinder._py_grid_state_stamp
+    original_route = Router.route
+
+    def scan(pathfinder, grid):
+        nonlocal now
+        now += 0.020  # Enough to trip the 50 ms guard if spent before the search.
+        events.append("scan")
+        return original_stamp(pathfinder, grid)
+
+    def search(router, *args, **kwargs):
+        budgets.append(kwargs["per_net_timeout"])
+        result = original_route(router, *args, **kwargs)
+        events.append("search finished")
+        return result
+
+    monkeypatch.setattr(cpp_backend, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(CppPathfinder, "_py_grid_state_stamp", scan)
+    monkeypatch.setattr(Router, "route", search)
+
+    off, _ = _carpet_pathfinder(traced=False)
+    on, _ = _carpet_pathfinder(traced=True)
+    expected = off.route(*_via_pads(), per_net_timeout=0.056)
+    actual = on.route(*_via_pads(), per_net_timeout=0.056)
+    assert expected is not None and _copper(actual) == _copper(expected)
+    assert budgets == pytest.approx([0.056, 0.056])
+    assert events == ["search finished", "search finished", "scan"]
+    (record,) = on.get_and_clear_per_call_timings()
+    assert record["python_fallback"]["outcome"] == "found"
+    assert record["python_fallback"]["budget_s"] == pytest.approx(budgets[0])
 
 
 def test_unchanged_via_obstruction_repeats_pay_native_then_fallback_each_call() -> None:

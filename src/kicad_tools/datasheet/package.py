@@ -89,6 +89,7 @@ class PackageInfo:
         height: Package height in mm (if available)
         exposed_pad: Exposed pad dimensions as (width, height) in mm
         source_page: Page number where package info was found
+        pitch_inferred: Pitch was supplied by a package-family default
         confidence: Confidence score (0-1) for the extraction
     """
 
@@ -102,6 +103,7 @@ class PackageInfo:
     exposed_pad: tuple[float, float] | None = None
     source_page: int = 0
     confidence: float = 0.0
+    pitch_inferred: bool = False
 
     def to_dict(self) -> dict:
         """Convert to dictionary representation."""
@@ -112,6 +114,7 @@ class PackageInfo:
             "body_width": self.body_width,
             "body_length": self.body_length,
             "pitch": self.pitch,
+            "pitch_inferred": self.pitch_inferred,
             "height": self.height,
             "exposed_pad": list(self.exposed_pad) if self.exposed_pad else None,
             "source_page": self.source_page,
@@ -180,8 +183,8 @@ def parse_package_name(name: str) -> dict:
         result["body_size"] = (width, length)
 
     # Try to extract pitch from name (e.g., "P0.5", "_0.5mm")
-    pitch_match = re.search(r"[Pp_]?(\d+\.?\d*)\s*mm", name)
-    if pitch_match and result["pitch"] is None:
+    pitch_match = re.search(r"(?:(?<![A-Za-z0-9])[Pp]|_)(\d+(?:\.\d+)?)\s*mm\b", name)
+    if pitch_match:
         result["pitch"] = float(pitch_match.group(1))
 
     return result
@@ -206,7 +209,8 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
     )
 
     for match in labeled_pattern.finditer(text):
-        label = match.group(1).upper()
+        # JEDEC uses uppercase E for body length and lowercase e for pitch.
+        label = "PITCH" if match.group(1) == "e" else match.group(1).upper()
         value = float(match.group(2))
         unit = match.group(3)
 
@@ -227,13 +231,17 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
         dimensions["E"] = float(body_match.group(2))
 
     # Pattern for pitch (e.g., "pitch: 0.5mm", "e = 0.5")
-    pitch_pattern = re.compile(
-        r"(?:pitch|[Ee]\s*[=:])\s*(\d+\.?\d*)\s*(mm)?",
-        re.IGNORECASE,
+    pitch_match = re.search(
+        r"(?<![A-Za-z0-9])(?:(?i:pitch|p)\s*[=:]?|e\s*[=:])\s*"
+        r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))?\b",
+        text,
     )
-    pitch_match = pitch_pattern.search(text)
+    if not pitch_match:
+        pitch_match = re.search(r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))\s+(?i:pitch)\b", text)
     if pitch_match:
-        dimensions["PITCH"] = float(pitch_match.group(1))
+        value = float(pitch_match.group(1))
+        unit = (pitch_match.group(2) or "").lower()
+        dimensions["PITCH"] = value * 0.0254 if unit in ("mil", "mils") else value
 
     return dimensions
 
