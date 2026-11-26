@@ -762,7 +762,7 @@ def _same_footprint_pads(owner_items, item) -> bool:
 
 
 @dataclass
-class _ReinforceRun:
+class ReinforceRun:
     """One ``<board>.reinforcement.json`` record resolved for attribution (#9315).
 
     Sidecar coordinates are sheet-absolute and the native object inventory
@@ -775,6 +775,11 @@ class _ReinforceRun:
     with those confirmed anchors -- never through the net alone, so an
     unrelated ``gr_line`` opening over the same net elsewhere on the board
     attributes to nothing (#9315).
+
+    :func:`reinforcement_run_records` builds the runs unconfirmed; the mask
+    assessment confirms them against the native object inventory
+    (:func:`_reinforce_runs`) and the Gerber-archive measurement against the
+    plotted X2 copper (``export.reinforcement_clearance``, #10422).
     """
 
     label: str
@@ -808,24 +813,18 @@ def _reinforce_run_label(record: dict[str, Any]) -> str:
     return net
 
 
-def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
-    """Resolve wire records against the native inventory; empty when unusable.
+def reinforcement_run_records(wires: Any) -> list[ReinforceRun]:
+    """Sidecar wire records as runs, not yet confirmed against any copper (#10422).
 
     A record needs a net, at least one anchor and an outer copper layer (an
     inner layer has no strip to attribute). Malformed records are skipped,
     never fail the assessment (#8886 resolves the same records for
     ``reinforcement_incomplete``; this is the mask side of that split).
     """
-    if not wires:
-        return []
-    from shapely.geometry import Point
-
     from kicad_tools.pcb.reinforce import MASK_LAYER_FOR_COPPER
 
-    from .rules.reinforcement_incomplete import MASK_TOLERANCE_MM
-
-    runs: list[_ReinforceRun] = []
-    for record in wires:
+    runs: list[ReinforceRun] = []
+    for record in wires or ():
         if not isinstance(record, dict):
             continue
         net = record.get("net")
@@ -841,33 +840,48 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
         mask_side = MASK_LAYER_FOR_COPPER.get(layer)
         if mask_side is None or not anchors:
             continue
-        net_copper: list[Any] = []
-        for item in objects.values():
-            if item.get("net") != net:
-                continue
-            copper = item.get("layers_geometry", {}).get(layer)
-            if copper is None or copper.is_empty:
-                continue
-            net_copper.append(copper)
-        confirmed: tuple[tuple[float, float], ...] = ()
-        if net_copper:
-            from shapely.ops import unary_union  # type: ignore[import-untyped]
-
-            union = unary_union(net_copper)
-            confirmed = tuple(
-                anchor for anchor in anchors if union.distance(Point(anchor)) <= MASK_TOLERANCE_MM
-            )
         runs.append(
-            _ReinforceRun(
+            ReinforceRun(
                 label=_reinforce_run_label(record),
                 net=net,
                 layer=layer,
                 mask_side=mask_side,
                 anchors=tuple(anchors),
-                confirmed_anchors=confirmed,
+                confirmed_anchors=(),
                 wire_gauge_awg=_record_awg(record),
             )
         )
+    return runs
+
+
+def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[ReinforceRun]:
+    """Resolve wire records against the native inventory; empty when unusable.
+
+    Each run's confirmed anchors are its recorded anchors that same-net copper
+    really stands on, within the strip tolerance (Issue #9315).
+    """
+    from shapely.geometry import Point
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+    from .rules.reinforcement_incomplete import MASK_TOLERANCE_MM
+
+    runs = reinforcement_run_records(wires)
+    for run in runs:
+        net_copper: list[Any] = []
+        for item in objects.values():
+            if item.get("net") != run.net:
+                continue
+            copper = item.get("layers_geometry", {}).get(run.layer)
+            if copper is None or copper.is_empty:
+                continue
+            net_copper.append(copper)
+        if net_copper:
+            union = unary_union(net_copper)
+            run.confirmed_anchors = tuple(
+                anchor
+                for anchor in run.anchors
+                if union.distance(Point(anchor)) <= MASK_TOLERANCE_MM
+            )
     return runs
 
 
@@ -902,6 +916,46 @@ def _mid_run_circle_limit_mm(awg):
         return anchor_drill_for_awg(awg) + 2 * _MID_RUN_CIRCLE_FLASH_MM
     except ValueError:
         return None
+
+
+def grow_reinforce_chain(
+    pieces: list[tuple[Any, Any, Any]], seeds: Any, tolerance: float
+) -> list[tuple[Any, Any, Any]]:
+    """Grow a strip chain to a fixpoint from ``seeds``; the admitted pieces in order.
+
+    A strip (#8743) is one continuous cutout from anchor to anchor, so a piece
+    joins the chain when its ``probe`` lies within ``tolerance`` of a confirmed
+    anchor point or of a piece already in the chain, and reaches further
+    pieces itself. ``pieces`` are ``(key, material, probe)``: ``material`` is
+    what later pieces may attach to, ``probe`` the geometry tested against the
+    seeds and the admitted materials -- the convex hull for the native object
+    inventory (:func:`_attribute_reinforce_openings`) and the end points of a
+    plotted stroke for the Gerber archive (``export.reinforcement_clearance``,
+    #10422). An opening merely over the same net's copper elsewhere on the
+    board is continuous with nothing and stays out (#9315).
+    """
+    from shapely.geometry import Point
+
+    anchors = [Point(a) for a in seeds]
+    admitted: list[tuple[Any, Any, Any]] = []
+    pending = list(pieces)
+    while pending:
+        remaining = []
+        progressed = False
+        for piece in pending:
+            probe = piece[2]
+            near = any(probe.distance(anchor) <= tolerance for anchor in anchors) or any(
+                probe.distance(other[1]) <= tolerance for other in admitted
+            )
+            if near:
+                admitted.append(piece)
+                progressed = True
+            else:
+                remaining.append(piece)
+        pending = remaining
+        if not progressed:
+            break
+    return admitted
 
 
 def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs=()):
@@ -948,7 +1002,7 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
 
     tolerance = MASK_TOLERANCE_MM + uncertainty
     claimants = [(run, False) for run in runs] + [(run, True) for run in far_runs]
-    candidates: dict[str, list[tuple[_ReinforceRun, float]]] = {}
+    candidates: dict[str, list[tuple[ReinforceRun, float]]] = {}
     strip_materials: dict[str, Any] = {}
     # Mid-run candidates (#9444): same-net vias and board-graphic circles whose
     # claim rests on continuity with the run's strip, not on an anchor.
@@ -990,37 +1044,30 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
     for run, far in claimants:
         if not run.confirmed_anchors:
             continue
-        anchor_points = [Point(a) for a in run.confirmed_anchors]
         if far:
-            pending = [
-                (uuid, item["layers_geometry"][run.mask_side])
+            # The far run's strip lives on the opposite mask layer, so its
+            # chain is grown from the source ``gr_line`` objects there.
+            chain_pieces = [
+                (
+                    uuid,
+                    item["layers_geometry"][run.mask_side],
+                    item["layers_geometry"][run.mask_side].convex_hull,
+                )
                 for uuid, item in objects.items()
                 if item.get("kind") == "gr_line"
                 and run.mask_side in item.get("layers_geometry", {})
                 and not item["layers_geometry"][run.mask_side].is_empty
             ]
         else:
-            pending = list(strip_materials.items())
-        admitted_hulls: list[Any] = []
-        while pending:
-            remaining = []
-            progressed = False
-            for uuid, material in pending:
-                hull = material.convex_hull
-                near = any(hull.distance(point) <= tolerance for point in anchor_points) or any(
-                    hull.distance(other) <= tolerance for other in admitted_hulls
-                )
-                if not near:
-                    remaining.append((uuid, material))
-                    continue
-                if not far and not any(r is run for r, _ in candidates.get(uuid, ())):
+            chain_pieces = [
+                (uuid, material, material.convex_hull) for uuid, material in strip_materials.items()
+            ]
+        admitted = grow_reinforce_chain(chain_pieces, run.confirmed_anchors, tolerance)
+        if not far:
+            for uuid, _material, _probe in admitted:
+                if not any(r is run for r, _ in candidates.get(uuid, ())):
                     candidates.setdefault(uuid, []).append((run, float("inf")))
-                admitted_hulls.append(hull)
-                progressed = True
-            pending = remaining
-            if not progressed:
-                break
-        chain_hulls[id(run)] = admitted_hulls
+        chain_hulls[id(run)] = [material for _uuid, material, _probe in admitted]
 
     # Mid-run holes (#9444): a same-net layer-change via, or an anchor-size
     # board circle, standing on the run's strip is soldered with the rest of
@@ -1048,7 +1095,7 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
             if distance <= _CENTRE_EPS_MM:
                 candidates.setdefault(uuid, []).append((run, distance))
 
-    run_by_uuid: dict[str, _ReinforceRun] = {}
+    run_by_uuid: dict[str, ReinforceRun] = {}
     pieces: dict[int, list[Any]] = {}
     for uuid, pairs in candidates.items():
         best = None

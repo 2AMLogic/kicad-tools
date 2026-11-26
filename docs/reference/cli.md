@@ -484,6 +484,22 @@ both mask sides. Wires the sidecar already records are kept, so a re-run changes
 nothing; strips that cannot be resolved (branched, or an end with no anchor hole)
 are reported, never guessed.
 
+**Export preflight measurement (#10422).** `kct export` reads the Gerber archive
+it has just written back and, for a board with a wire list sidecar, adds a
+`reinforcement_clearance` entry to the package's preflight report
+(`manifest.json`, `--format json`, `README.txt`). For the joined mask strip on its
+own face and for each anchor's opening on both faces it reports two edge-to-edge
+minima in mm: one to any other net's plotted copper, covered or not, and one to
+the part of that copper the same face's mask leaves exposed. Each minimum names
+its own nearest net, the pad when the X2 attributes identify one, and the copper
+and mask archive members with their SHA-256 digests. The distances are nominal
+geometry for review and carry no verdict: they never fail the export and feed
+neither `reinforcement_incomplete` nor the creepage rule. An opening the artwork
+cannot vouch for -- a missing or mislabelled archive member, a missing X2 net
+attribute, an anchor that stands neither on its net's plotted copper nor on a
+plotted mask opening, two records claiming one strip -- is reported `incomplete`
+with its reason, and the results on the other face stand.
+
 Declared current paths that do not resolve (moved/removed pad, ambiguous
 loop) are listed under `unresolved_paths` and warned about on stderr; they
 get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
