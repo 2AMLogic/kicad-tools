@@ -776,6 +776,18 @@ def center_on_sheet(
     )
     dest = Path(output_path) if output_path is not None else pcb_path
     dest_sidecar = _centering_sidecar(dest)
+    if not any(
+        os.path.lexists(record)
+        for record in (src_sidecar, dest_sidecar, sidecar_path(dest.resolve()))
+    ):
+        # No reinforcement record on either side: the original single-file
+        # behaviour. No lock, no read probe, no staging, and an unchanged board
+        # writes nothing (a no-op must not overwrite a different output).
+        if report.changed and not dry_run:
+            dest.write_text(new_text)
+            report.output = dest
+        return report
+    record_target, record_link = _record_publication_paths(dest, dest_sidecar)
     record_target, record_link = _record_publication_paths(dest, dest_sidecar)
     copying = (dest.parent.resolve(), dest.name) != (pcb_path.parent.resolve(), pcb_path.name)
     if _same_file(dest, dest_sidecar) or (

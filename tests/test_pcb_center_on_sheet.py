@@ -935,3 +935,36 @@ def test_distinct_output_alias_migration_keeps_private_destination_record_mode(t
     finally:
         os.umask(old)
     assert sidecar_path(out).stat().st_mode & 0o777 == 0o600
+
+
+def _off_center_pcb(tmp_path: Path, name: str = "plain.kicad_pcb") -> Path:
+    pcb = tmp_path / name
+    pcb.write_text(make_pcb())
+    return pcb
+
+
+def test_recordless_noop_keeps_a_different_existing_output(tmp_path):
+    """No record on either side: an already-centered input must not rewrite -o."""
+    src = _off_center_pcb(tmp_path)
+    center_on_sheet(src)  # now centered
+    other = tmp_path / "other.kicad_pcb"
+    other.write_text(make_pcb(extra='(net 9 "OUTPUT_ONLY")'))
+    before = other.read_bytes()
+    report = center_on_sheet(src, output_path=other)
+    assert report.changed is False
+    assert other.read_bytes() == before
+    fresh = tmp_path / "fresh.kicad_pcb"
+    center_on_sheet(src, output_path=fresh)
+    assert not fresh.exists()
+
+
+def test_recordless_move_needs_no_lock_file_and_keeps_hard_links(tmp_path):
+    """No record: plain in-place write, no lock file, hard-linked names stay one inode."""
+    pcb = _off_center_pcb(tmp_path)
+    twin = tmp_path / "twin.kicad_pcb"
+    twin.hardlink_to(pcb)
+    report = center_on_sheet(pcb)
+    assert report.changed is True
+    assert pcb.read_bytes() == twin.read_bytes()
+    assert pcb.samefile(twin)
+    assert not list(tmp_path.glob(".*.center.lock"))
