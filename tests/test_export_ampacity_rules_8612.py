@@ -6,6 +6,8 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.export.manufacturing import (
     ManufacturingConfig,
     ManufacturingPackage,
@@ -80,8 +82,6 @@ def test_project_line_ending_rewrite_is_reported(tmp_path: Path) -> None:
 def test_project_rewrite_reported_when_dru_write_fails(tmp_path: Path) -> None:
     import os
 
-    import pytest
-
     pcb = _stage(tmp_path)
     _export(pcb)
     pro = pcb.with_suffix(".kicad_pro")
@@ -100,10 +100,10 @@ def test_project_rewrite_reported_when_dru_write_fails(tmp_path: Path) -> None:
     assert any(f"Export modified {pro.name}" in w for w in result.warnings)
 
 
-def test_unloadable_dru_refusal_leaves_project_intact(tmp_path: Path) -> None:
-    import pytest
-
-    from kicad_tools.manufacturers.dru_generator import DRUUnloadableError
+def test_unloadable_dru_refusal_leaves_project_intact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from kicad_tools.cli import main
 
     pcb = _stage(tmp_path)
     _export(pcb)
@@ -114,16 +114,29 @@ def test_unloadable_dru_refusal_leaves_project_intact(tmp_path: Path) -> None:
     dru.write_text(dru.read_text() + "; authored comment\n")
     pro_before, dru_before = pro.read_bytes(), dru.read_bytes()
 
-    with pytest.raises(DRUUnloadableError):
-        _export(pcb)
+    rc = main(
+        [
+            "export",
+            str(pcb),
+            "--mfr",
+            "jlcpcb",
+            "--no-silk-fix",
+            "--bom-source",
+            "pcb",
+            "--output",
+            str(tmp_path / "out"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert dru.name in captured.err and "';' comment" in captured.err
+    assert "Export modified" not in captured.out + captured.err
     assert pro.read_bytes() == pro_before
     assert dru.read_bytes() == dru_before
 
 
 def test_unreadable_project_replacement_is_reported(tmp_path: Path) -> None:
     import os
-
-    import pytest
 
     pcb = _stage(tmp_path)
     pro = pcb.with_suffix(".kicad_pro")
