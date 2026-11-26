@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 from kicad_tools.router.via_clearance import COORD_WRITE_GUARD_MM
 
 if TYPE_CHECKING:
-    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules, ItemProps
     from kicad_tools.schema.pcb import PCB
 
 __all__ = [
@@ -83,7 +83,9 @@ class LinkRouteRules:
     hole_to_hole: float = 0.5
     #: Issue #10393: copper-to-hole clearance (mm) kept between a track or via
     #: and the edge of a non-plated hole (KiCad's board-setup default
-    #: ``min_hole_clearance``, ``KICAD_DEFAULT_HOLE_CLEARANCE_MM``).
+    #: ``min_hole_clearance``, ``KICAD_DEFAULT_HOLE_CLEARANCE_MM``).  A floor:
+    #: with project rules attached the board's own ``hole_clearance`` raises
+    #: it (Issue #10504).
     hole_clearance: float = 0.25
     edge_clearance: float = 0.5
     grid: float = 0.05
@@ -116,6 +118,11 @@ class LinkRouteRules:
     net_names: Mapping[int, str] | None = None
     #: Project clearance rules for this board, evaluated on each copper layer.
     board_rules: BoardClearanceRules | None = None
+    #: Issue #10504: the project rules the drill floor resolves against
+    #: (``min_hole_clearance``, custom ``hole_clearance`` rules).  Attached on
+    #: its own when the board declares no copper rule: ``board_rules`` present
+    #: is what makes the CLI drop its authored netclass floors.
+    hole_rules: BoardClearanceRules | None = None
 
     width_by_layer: Mapping[str, float] = field(default_factory=dict)
 
@@ -141,29 +148,34 @@ class LinkRouteRules:
 
         Inside a shared attach zone, a map-derived floor may relax to the
         larger of the base clearance and the applicable KiCad copper rule.
+        A bare drill keeps the board's ``hole_clearance`` instead of a copper
+        rule (Issue #10504).
         """
         floor = self.clearance
         if item is not None and item.hole:
             # Issue #10393: a bare non-plated drill is no copper item, so the
-            # copper-pair rules do not apply; it keeps the hole clearance.
-            return [(geom, max(self.hole_clearance, self.clearance_for(net_number)))]
+            # copper-pair rules do not apply; it keeps the hole clearance,
+            # raised to the board's own ``hole_clearance`` where project rules
+            # are attached (Issue #10504).
+            floor = max(self.hole_clearance, self.clearance_for(net_number))
+            hole_rules = self.hole_rules if self.hole_rules is not None else self.board_rules
+            if hole_rules is not None:
+                other = _pad_props(item, (self.net_names or {}).get(net_number, ""))
+                floor = max(
+                    floor,
+                    hole_rules.hole_clearance(
+                        _mover_props(link_net_name, layer, moving), other, layer
+                    ),
+                )
+            return [(geom, floor)]
         if self.board_rules is not None and self.net_names is not None:
-            from .board_clearance_rules import PAD_TYPE_NAMES, ItemProps
+            from .board_clearance_rules import ItemProps
 
             other_name = self.net_names.get(net_number, "")
             if item is None:
                 other = ItemProps(None, other_name)
             elif item.is_pad:
-                other = ItemProps(
-                    "Pad",
-                    other_name,
-                    plated=item.pad_type == "thru_hole" if item.pad_type else bool(item.drill),
-                    pad_type=PAD_TYPE_NAMES.get(item.pad_type or "")
-                    or ("Through-hole" if item.drill else "SMD"),
-                    layer=item.footprint_layer,
-                    footprint_ref=item.ref,
-                    footprint_lib_id=item.lib_id,
-                )
+                other = _pad_props(item, other_name)
             elif len(item.layers) > 1:
                 other = ItemProps(
                     "Via", other_name, plated=True, footprint_ref="", footprint_lib_id=""
@@ -177,22 +189,7 @@ class LinkRouteRules:
                     footprint_ref="",
                     footprint_lib_id="",
                 )
-            # ``moving`` is the item being placed: a track mask and a via mask
-            # resolve separately, so a ``A.Type == 'Via'`` rule never leaks
-            # onto tracks (or the reverse).
-            if moving == "Via":
-                mover = ItemProps(
-                    "Via", link_net_name, plated=True, footprint_ref="", footprint_lib_id=""
-                )
-            else:
-                mover = ItemProps(
-                    "Track",
-                    link_net_name,
-                    plated=False,
-                    layer=layer,
-                    footprint_ref="",
-                    footprint_lib_id="",
-                )
+            mover = _mover_props(link_net_name, layer, moving)
             floor = max(floor, self.board_rules.clearance(mover, other, layer))
         full = max(floor, self.clearance_for(net_number))
         if (
@@ -336,8 +333,40 @@ class _Item:
     #: Schema pad ``type`` (``smd`` / ``thru_hole`` / ``connect`` / ...).
     pad_type: str | None = None
     #: Issue #10393: the opening of a non-plated hole -- it pierces every copper
-    #: layer and demands ``LinkRouteRules.hole_clearance`` from tracks and vias.
+    #: layer and demands ``LinkRouteRules.hole_clearance`` from tracks and vias,
+    #: raised to the board's resolved ``hole_clearance`` (Issue #10504).
     hole: bool = False
+
+
+def _mover_props(link_net_name: str, layer: str, moving: str) -> ItemProps:
+    """The item being placed, as a rule condition sees it.
+
+    A track mask and a via mask resolve separately, so a ``A.Type == 'Via'``
+    rule never leaks onto tracks (or the reverse).
+    """
+    from .board_clearance_rules import ItemProps
+
+    if moving == "Via":
+        return ItemProps("Via", link_net_name, plated=True, footprint_ref="", footprint_lib_id="")
+    return ItemProps(
+        "Track", link_net_name, plated=False, layer=layer, footprint_ref="", footprint_lib_id=""
+    )
+
+
+def _pad_props(item: _Item, net_name: str) -> ItemProps:
+    """A pad's -- or a bare drill's NPTH pad's -- identity for the project rules."""
+    from .board_clearance_rules import PAD_TYPE_NAMES, ItemProps
+
+    return ItemProps(
+        "Pad",
+        net_name,
+        plated=item.pad_type == "thru_hole" if item.pad_type else bool(item.drill),
+        pad_type=PAD_TYPE_NAMES.get(item.pad_type or "")
+        or ("Through-hole" if item.drill else "SMD"),
+        layer=item.footprint_layer,
+        footprint_ref=item.ref,
+        footprint_lib_id=item.lib_id,
+    )
 
 
 @dataclass
@@ -1118,7 +1147,7 @@ def explain_link_failure(
                         {
                             "net": name,
                             "layer": layer,
-                            "kind": "pad" if it.is_pad else "copper",
+                            "kind": "hole" if it.hole else "pad" if it.is_pad else "copper",
                             "distance_mm": round(d, 3),
                             "required_mm": round(need, 3),
                         },
