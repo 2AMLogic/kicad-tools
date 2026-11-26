@@ -42,6 +42,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -1885,7 +1886,12 @@ def write_drc_constraints(
     pro_path = pcb_path.with_suffix(".kicad_pro")
     written: list[Path] = []
 
-    if pro_path.exists():
+    try:
+        original_project = pro_path.stat()
+    except FileNotFoundError:
+        original_project = None
+
+    if original_project is not None:
         try:
             project_data = json.loads(pro_path.read_text(encoding="utf-8"))
             merge_project_rules(project_data, rules, preserve_board_rules=preserve_board_rules)
@@ -1923,9 +1929,7 @@ def write_drc_constraints(
             board_net_names(board) if board.exists() else None,
         )
     stamp_kct_project(project_data)
-    pro_path.write_text(json.dumps(project_data, indent=2), encoding="utf-8")
-    written.append(pro_path)
-
+    # Validate and render the rules before touching either live sidecar.
     if write_dru:
         from .dru_generator import merge_dru_floors
 
@@ -2003,7 +2007,11 @@ def write_drc_constraints(
         )
         # Issue #6443: one native diff_pair_gap rule per router-coupled pair.
         if router_pair_gaps is not None or router_pair_limits is not None:
-            from .netclass_dru import merge_pair_gap_block, pair_gap_block_rules, pair_limit_rules
+            from .netclass_dru import (
+                merge_pair_gap_block,
+                pair_gap_block_rules,
+                pair_limit_rules,
+            )
 
             on_board = board_net_names(board) if board.exists() else None
             gap_rules = pair_gap_block_rules(router_pair_gaps or [], on_board)
@@ -2016,6 +2024,47 @@ def write_drc_constraints(
         merged_dru = apply_attach_zone_dru_rules(
             merged_dru, rules, project_data, board, zone_targets
         )
+
+    content = json.dumps(project_data, indent=2)
+    conflict = f"{pro_path.name} changed while rendering DRC constraints"
+    # Create exclusively or open without truncating. Verify the descriptor we
+    # will write through, so a later rename cannot redirect us to an editor's save.
+    flags = os.O_WRONLY
+    if original_project is None:
+        flags |= os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(pro_path, flags, 0o666)
+    except FileExistsError as exc:
+        raise ValueError(conflict) from exc
+    except FileNotFoundError as exc:
+        if original_project is None:
+            raise
+        raise ValueError(conflict) from exc
+    except PermissionError as exc:
+        # A replacement can itself be read-only. Distinguish that conflict
+        # from a write failure on the original project.
+        if original_project is not None and not os.path.samestat(original_project, pro_path.stat()):
+            raise ValueError(conflict) from exc
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8") as project:
+        current = os.fstat(fd)
+        if original_project is not None and (
+            not os.path.samestat(original_project, current)
+            or original_project.st_ctime_ns != current.st_ctime_ns
+            or original_project.st_mtime_ns != current.st_mtime_ns
+            or original_project.st_size != current.st_size
+        ):
+            raise ValueError(conflict)
+        project.write(content)
+        project.truncate()
+        try:
+            published = pro_path.stat()
+        except FileNotFoundError as exc:
+            raise ValueError(conflict) from exc
+        if not os.path.samestat(current, published):
+            raise ValueError(conflict)
+    written.append(pro_path)
+    if write_dru:
         dru_path.write_text(merged_dru, encoding="utf-8")
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have
