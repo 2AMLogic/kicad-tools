@@ -1614,9 +1614,9 @@ def _run_mask_pass(
                 if not refill.success:
                     raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
 
-            # The barrel's old antipad belongs to the old drill position. Grade
-            # a pad bridge against the copper that will actually be published.
-            refilled = has_zones and any(a.action == "bridge_via" for a in result.actions)
+            # Refill zone pours before grading so moved tracks and via antipads
+            # are checked against the copper that will actually be published (#9939).
+            refilled = has_zones
             if refilled:
                 refill_candidate()
             _verify_mask_actions(

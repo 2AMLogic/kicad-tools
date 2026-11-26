@@ -4289,3 +4289,58 @@ def test_bonded_via_is_graded_on_refilled_copper(tmp_path, monkeypatch, capsys):
     )
     assert json.loads(capsys.readouterr().out)["mask_copper"]["repaired"] == 1
     assert filled == [_saved_copper(board, "via-bond")[1]] and filled[0] != start
+
+
+def test_mask_track_repair_refills_zones_before_grading_on_zoned_board(
+    tmp_path, monkeypatch, capsys
+):
+    """A moved track on a zoned board is graded against refilled pours (#9939)."""
+    from collections import Counter
+    from types import SimpleNamespace
+
+    from kicad_tools.cli import fix_drc_cmd, runner
+    from tests.test_repair_mask_copper import (
+        _board,
+        _end,
+        _overlap_pass_through,
+        _report,
+        _run,
+        _seg,
+    )
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(
+        tmp_path,
+        "\n".join(
+            [
+                _seg("hug", (98.5, 99.5), (98.9, 99.5)),
+                _seg("turn", (98.9, 99.5), (99.3, 99.9)),
+                zone,
+            ]
+        ),
+    )
+    filled: list[tuple[float, float]] = []
+    grade = fix_drc_cmd._verify_mask_actions
+
+    def refill(candidate, *, require_save):
+        assert require_save
+        filled.append(_end(candidate, "hug")[1])
+        return SimpleNamespace(success=True)
+
+    def grade_saved(result, report, args, pcb_path, candidate, *rest, **kwargs):
+        assert filled == [_end(candidate, "hug")[1]]
+        return grade(result, report, args, pcb_path, candidate, *rest, **kwargs)
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(fix_drc_cmd, "_verify_mask_actions", grade_saved)
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda path: [frozenset({"pad"})])
+    _run(
+        monkeypatch,
+        board,
+        [_report(_overlap_pass_through("hug")), _report(), _report()],
+        extra=("--mfr", "jlcpcb-tier1", "--format", "json"),
+        connectivity=True,
+    )
+    assert json.loads(capsys.readouterr().out)["mask_copper"]["repaired"] == 1
+    assert filled == [(98.5, 99.9)]

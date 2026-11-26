@@ -2887,9 +2887,10 @@ def test_elbow_keeps_native_clearance_when_pad_connectivity_is_disabled(
         assert board.read_bytes() == original
 
 
-def test_elbow_flip_declines_when_the_mirror_corner_stays_outside_the_pad(tmp_path):
-    # The mirror corner (98.9, 99.9) is left of the pad edge (x = 99).
-    board = _elbow_fixture(tmp_path, end=(99.3, 99.9))
+def test_elbow_flip_declines_when_every_corner_and_far_end_stay_outside_the_pad(tmp_path):
+    # Neither the mirror corner (98.55, 99.55) nor the orthogonal corners reach
+    # inside the pad (x = 99), and the far end itself stays outside.
+    board = _elbow_fixture(tmp_path, end=(98.95, 99.55))
     repairer = MaskCopperRepairer(board)
     before = repairer.doc.to_string()
     result = repairer.repair([_overlap_pass_through("hug")], **_ELBOW_OPTS)
@@ -3578,3 +3579,223 @@ def test_direct_pad_via_veto_preserves_the_copper(tmp_path, obstacle):
     result = repairer.repair([_bonded_via_finding()], **opts)
     assert not result.actions and not repairer.modified
     assert result.unrepaired and board.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Issue #9939: orthogonal corner fallback when mirror elbow cannot clear
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "hug_pts", "turn_pts", "expected_corner"),
+    [
+        # SW1/1 shape: horizontal run hugs top pad edge y=99.5, 45-deg turns in.
+        # Mirror corner (98.9, 99.9) stays outside and overlaps x=99.0; orthogonal
+        # corner (98.5, 99.9) clears the opening and enters perpendicularly.
+        (
+            "horizontal-approach",
+            ((98.5, 99.5), (98.9, 99.5)),
+            ((98.9, 99.5), (99.3, 99.9)),
+            (98.5, 99.9),
+        ),
+        # R12/2 shape: vertical run hugs left pad edge x=98.95, 45-deg turns in.
+        # Mirror corner (99.2, 99.35) overlaps the top edge y=99.5; orthogonal
+        # corner (99.2, 99.1) clears the opening and enters perpendicularly.
+        (
+            "vertical-approach",
+            ((98.95, 99.1), (98.95, 99.55)),
+            ((98.95, 99.55), (99.2, 99.8)),
+            (99.2, 99.1),
+        ),
+    ],
+)
+def test_orthogonal_elbow_flip_clears_pad_corner_and_undoes(
+    tmp_path, name, hug_pts, turn_pts, expected_corner
+):
+    board = _board(tmp_path, "\n".join([_seg("hug", *hug_pts), _seg("turn", *turn_pts)]))
+    before = board.read_bytes()
+    original = {uid: _end(board, uid) for uid in ("hug", "turn")}
+    repairer = MaskCopperRepairer(board)
+    assert (
+        repairer.repair([_overlap_pass_through("hug")], dry_run=True, **_ELBOW_OPTS).repaired == 1
+    ), name
+    assert board.read_bytes() == before
+
+    result = repairer.repair([_overlap_pass_through("hug")], **_ELBOW_OPTS)
+    assert result.repaired == 1, name
+    (action,) = result.actions
+    repairer.save(board)
+    hug, turn = _end(board, "hug"), _end(board, "turn")
+    assert hug[0] == original["hug"][0] and turn[1] == original["turn"][1]
+    assert hug[1] == turn[0] == expected_corner
+    pad = _pad_poly(board, "R1/1")
+    assert LineString(hug).buffer(0.1).distance(pad) >= 0.09 + 0.02 - 1e-9
+    assert pad.buffer(-0.015).contains(Point(turn[1]))
+    assert not repairer.off_angle_tracks()
+
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert {uid: _end(board, uid) for uid in original} == original
+
+
+@pytest.mark.parametrize(
+    ("case", "hug_pts", "turn_pts", "extra", "lock"),
+    [
+        # Foreign-net track blocks the only clear orthogonal corner (98.5, 99.9).
+        (
+            "foreign-copper",
+            ((98.5, 99.5), (98.9, 99.5)),
+            ((98.9, 99.5), (99.3, 99.9)),
+            _seg("foreign", (98.5, 99.8), (98.8, 99.8), net=2),
+            "",
+        ),
+        # Locked neighbour prevents moving the shared elbow corner.
+        (
+            "locked-neighbour",
+            ((98.5, 99.5), (98.9, 99.5)),
+            ((98.9, 99.5), (99.3, 99.9)),
+            "",
+            "locked",
+        ),
+        # Anchor too close to the pad edge so neither mirror nor orthogonal leg clears.
+        (
+            "anchor-inside-opening",
+            ((98.8, 99.5), (98.95, 99.5)),
+            ((98.95, 99.5), (99.1, 99.65)),
+            "",
+            "",
+        ),
+        # Non-coincident junction offset would bend the orthogonal entry leg off angle.
+        (
+            "off-angle-junction-offset",
+            ((98.5, 99.5), (98.9, 99.5)),
+            ((98.905, 99.505), (99.3, 99.9)),
+            "",
+            "",
+        ),
+    ],
+)
+def test_orthogonal_elbow_flip_vetoed_by_clearance_lock_or_offset_restores_copper(
+    tmp_path, case, hug_pts, turn_pts, extra, lock
+):
+    turn_seg = _seg("turn", *turn_pts).replace(
+        "(segment ", f"(segment {lock} " if lock else "(segment "
+    )
+    board = _board(tmp_path, "\n".join([_seg("hug", *hug_pts), turn_seg, extra]))
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_overlap_pass_through("hug")], **_ELBOW_OPTS)
+    assert result.repaired == 0, case
+    assert [u.reason for u in result.unrepaired] == ["not_own_pad_entry"], case
+    assert not repairer.modified and repairer.doc.to_string() == before, case
+
+
+def test_disconnected_bends_survives_reordered_copper_after_refill_and_catches_splits(tmp_path):
+    """KiCad zone refill reorders segments/vias and regenerates fills (#9939)."""
+    from kicad_tools.drc.repair_mask_copper import MaskNudgeAction
+
+    seg_a = _seg("seg-a", (100.0, 100.0), (102.0, 100.0))
+    seg_b = _seg("seg-b", (102.0, 100.0), (103.0, 100.0))
+    seg_other = _seg("seg-other", (105.0, 105.0), (106.0, 105.0), net=2)
+    zone_two_fills = (
+        '(zone (net 1) (net_name "N1") (layer "F.Cu") (uuid "z1")'
+        " (polygon (pts (xy 98 98) (xy 104 98) (xy 104 102) (xy 98 102)))"
+        ' (filled_polygon (layer "F.Cu") (pts (xy 98 98) (xy 101 98) (xy 101 101) (xy 98 101)))'
+        ' (filled_polygon (layer "F.Cu") (pts (xy 101.5 98) (xy 104 98) (xy 104 101) (xy 101.5 101))))'
+    )
+    zone_one_fill = (
+        '(zone (net 1) (net_name "N1") (layer "F.Cu") (uuid "z1")'
+        " (polygon (pts (xy 98 98) (xy 104 98) (xy 104 102) (xy 98 102)))"
+        ' (filled_polygon (layer "F.Cu") (pts (xy 98 98) (xy 104 98) (xy 104 101) (xy 98 101))))'
+    )
+    before_dir = tmp_path / "before"
+    reordered_dir = tmp_path / "reordered"
+    broken_dir = tmp_path / "broken"
+    for d in (before_dir, reordered_dir, broken_dir):
+        d.mkdir()
+    before_path = _board(before_dir, "\n".join([seg_a, seg_b, seg_other, zone_two_fills]))
+    # Same connected copper, but segments reversed (different list indices) and fills merged.
+    reordered_path = _board(reordered_dir, "\n".join([seg_other, seg_b, seg_a, zone_one_fill]))
+    # Reordered AND genuinely disconnected (seg-b moved off seg-a and outside the zone).
+    seg_b_broken = _seg("seg-b", (108.0, 100.0), (109.0, 100.0))
+    broken_path = _board(broken_dir, "\n".join([seg_other, seg_b_broken, seg_a, zone_one_fill]))
+    dummy_action = MaskNudgeAction(
+        action="nudge_clear",
+        uuid="seg-a",
+        kind="segment",
+        pad_uuid=PAD,
+        pad_ref="R1/1",
+        net_name="N1",
+        layer="F.Cu",
+        old_x=102.0,
+        old_y=100.0,
+        new_x=102.0,
+        new_y=100.0,
+        dx=0.0,
+        dy=0.0,
+        displacement_mm=0.0,
+        bends=[object()],  # type: ignore[list-item]
+    )
+    before = MaskCopperRepairer(before_path)
+    assert MaskCopperRepairer(reordered_path).disconnected_bends(before, [dummy_action]) == set()
+    assert MaskCopperRepairer(broken_path).disconnected_bends(before, [dummy_action]) == {"N1"}
+
+
+def test_orthogonal_elbow_flip_waits_for_anchor_via_to_relocate_first(tmp_path):
+    """When the outer anchor sits on a reported via, let the via move before flipping."""
+    # Via at x=98.65 (radius 0.30 -> edge 98.95) is 0.05 mm from pad left edge x=99.0.
+    # Mirror corner (98.9, 99.75) stays outside the pad, so only the orthogonal
+    # corner would apply; deferring lets the via relocate to its final seat first.
+    board = _board(
+        tmp_path,
+        "\n".join(
+            [
+                _via("anchor-via", (98.65, 99.5)),
+                _seg("hug", (98.65, 99.5), (98.9, 99.5)),
+                _seg("turn", (98.9, 99.5), (99.15, 99.75)),
+            ]
+        ),
+    )
+    repairer = MaskCopperRepairer(board)
+    findings = [_overlap_pass_through("hug"), _pt_finding("anchor-via", measured=0.05)]
+    result = repairer.repair(findings, **_ELBOW_OPTS)
+    # Pass 1 moves the via instead of anchoring an orthogonal leg at its old seat.
+    assert [a.uuid for a in result.actions] == ["anchor-via"]
+    assert [(u.uuid, u.reason) for u in result.unrepaired] == [("hug", "not_own_pad_entry")]
+
+
+@pytest.mark.parametrize(("neighbor_net", "expected_repaired"), [(2, 1), (3, 0)])
+def test_orthogonal_elbow_flip_uses_pairwise_netclass_clearance(
+    tmp_path, neighbor_net, expected_repaired
+):
+    """A Default net checks 0.15 mm to another Default net and 0.20 mm to a Power net."""
+    # Orthogonal lead at x=98.5 (hw=0.10 -> left edge 98.40); neighbor at x=98.13 (hw=0.10 -> right
+    # edge 98.23) gives a 0.17 mm copper gap: legal for Default/Default (0.15), illegal for Power (0.20).
+    extra = '  (net 3 "PWR")\n' + _seg("neighbor", (98.13, 99.4), (98.13, 100.0), net=neighbor_net)
+    board = _board(
+        tmp_path,
+        "\n".join(
+            [
+                _seg("hug", (98.5, 99.5), (98.9, 99.5)),
+                _seg("turn", (98.9, 99.5), (99.3, 99.9)),
+                extra,
+            ]
+        ),
+    )
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "net_settings": {
+                    "meta": {"version": 3},
+                    "classes": [
+                        {"name": "Default", "clearance": 0.15},
+                        {"name": "Power", "clearance": 0.2},
+                    ],
+                    "netclass_patterns": [{"netclass": "Power", "pattern": "PWR"}],
+                }
+            }
+        )
+    )
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_overlap_pass_through("hug")], **_ELBOW_OPTS)
+    assert result.repaired == expected_repaired
