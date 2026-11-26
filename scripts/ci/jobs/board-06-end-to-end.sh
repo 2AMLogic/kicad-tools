@@ -15,6 +15,7 @@
 #   * the synthetic routing gate on the regenerated bundle copied into the
 #     git-ignored regression-output/ directory (matching PCB and sidecars;
 #     historical pair/group baselines never permit new physical errors);
+#   * zero blocking JLCPCB DRC errors on the fresh nine-pair fixture (#9406);
 #   * plane-net completion (raw unconnected-pad gate, #4531);
 #   * artifacts + lvs.json clean via the --lvs-only asserter.
 set -euo pipefail
@@ -56,13 +57,9 @@ cp -a /tmp/board06-ci/. boards/06-diffpair-test/regression-output/
 uv run python scripts/ci/check_diffpair_coverage.py \
   boards/06-diffpair-test --skip-route --seed 42
 
-# NOTE: deliberately NO converged DRC re-check here, unlike boards 03/04.
-# CI's board-06 job never ran one on main, and converging it turned the gate
-# red (46 blocking errors from check_routed_drc_internal.py on the fresh
-# PCB; PR #9392 review, finding 2). The residuals are #6396/#8839/#8842
-# territory; convergence re-lands deliberately via the tracking issue, not
-# silently. (Main's local-gate --full ran this step for board 06 and fails
-# the same way -- that latent failure is filed, not silently dropped.)
+step "Check strict JLCPCB release DRC on the regenerated nine-pair fixture"
+check_fresh_routed_drc /tmp/board06-ci/diffpair_test_routed.kicad_pcb
+
 step "Emit board.json via kct board-metrics"
 rm -rf /tmp/board06-staging
 mkdir -p /tmp/board06-staging/06-diffpair-test/output
