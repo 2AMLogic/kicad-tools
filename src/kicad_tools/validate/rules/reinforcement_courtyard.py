@@ -33,6 +33,7 @@ from .reinforcement_incomplete import (
     ANCHOR_ON_LEG_SLACK_MM,
     DRILL_TOLERANCE_MM,
     ReinforcementIncompleteRule,
+    WiredLeg,
     _Leg,
 )
 
@@ -243,11 +244,49 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         # from the mask strip and anchor holes. "No wire" / unlocatable paths
         # are reported by that rule, not here.
         plan = self._plan(pcb, rf, reinforcement_path_resolutions(pcb, self.specs))
+        # Use board-verified wire spans only with a matching assembly record.
+        # Without a record this rule also checks prospective wire placement.
+        wired = self.fully_wired_legs(pcb, design_rules) if self.wires else []
         for net in sorted(set(plan.resolved) | set(plan.located)):
             self._check_net_bodies(
-                pcb, rf, net, plan.resolved.get(net, []), results, located=plan.located.get(net)
+                pcb,
+                rf,
+                net,
+                plan.resolved.get(net, []),
+                results,
+                located=plan.located.get(net),
+                fitted=[leg for leg in wired if leg.net == net and self._record_matches_wire(leg)],
             )
         return results
+
+    def _record_matches_wire(self, leg: WiredLeg) -> bool:
+        """Match the assembly record to both independently verified hole locations."""
+        from shapely.geometry import LineString
+
+        if leg.anchor_arc is None:
+            return False
+        route = LineString(leg.points)
+        actual = [self._abs(route.interpolate(station).coords[0]) for station in leg.anchor_arc]
+        for record in self.wires:
+            if (record.get("net"), record.get("layer"), record.get("status")) != (
+                leg.net,
+                leg.layer,
+                "full",
+            ):
+                continue
+            try:
+                ends = [(float(p["x"]), float(p["y"])) for p in record["anchors"]]
+            except (KeyError, ValueError, TypeError):
+                continue
+            if len(ends) == 2 and any(
+                all(
+                    math.dist(p, q) <= ANCHOR_ON_LEG_SLACK_MM
+                    for p, q in zip(actual, order, strict=True)
+                )
+                for order in (ends, ends[::-1])
+            ):
+                return True
+        return False
 
     # ------------------------------------------------------------- per net
 
@@ -258,6 +297,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         net: str,
         resolutions: list,
         results: DRCResults,
+        fitted: list[WiredLeg],
         located: dict[str, list] | None = None,
     ) -> None:
         from shapely.geometry import LineString, Point, Polygon, box
@@ -311,20 +351,45 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                 cache[key] = _body_polygon(fp, side, Polygon, box)
             return cache[key]
 
+        # A documented assembly may reinforce just one layer of a branch.
+        # Preserve checks for every planned layer and any unrecorded mask strip.
+        intended_layers = {r.get("layer") for r in self.wires if r.get("net") == net}
+        if fitted:
+            strips, _, _ = self._locate_wire(pcb, rf, net, set(), list(pcb.segments))
+            intended_layers.update(strips)
+
         reported_holes: set[tuple[int, int, str]] = set()
         for leg in legs:
             side = _side_of_layer(leg.layer)
             wire_r = bare_copper_diameter_mm(leg.gauge) / 2.0
             drill = anchor_drill_for_awg(leg.gauge)
             tol = leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM
-            line = LineString(leg.points)
+            anchors = self._leg_holes(holes, leg, drill, tol, is_change_via, rotate_pad_offset)
+            if fitted and leg.layer not in intended_layers and not anchors:
+                continue
+            wire_points = leg.points
+            for installed in fitted:
+                if installed.layer == leg.layer and installed.points in (
+                    tuple(leg.points),
+                    tuple(reversed(leg.points)),
+                ):
+                    # Retain all bends between the verified anchors. The
+                    # remaining hole-to-pad stubs carry current on copper.
+                    from shapely.ops import substring
+
+                    assert installed.anchor_arc is not None
+                    wire_points = list(
+                        substring(LineString(installed.points), *installed.anchor_arc).coords
+                    )
+                    break
+            line = LineString(wire_points)
             desc = f"run {self._fmt(leg.points[0])} -> {self._fmt(leg.points[-1])}"
 
             # ---- run vs same-side bodies / opposite-side THT pins ----------
             if side is not None:
                 inflate = wire_r + RUN_CLEARANCE_MM
                 for fp, length in run_courtyard_overlaps(
-                    leg.points, side, pcb.footprints, inflate, body
+                    wire_points, side, pcb.footprints, inflate, body
                 ):
                     poly = body(fp, side)
                     hit = line.intersection(poly.buffer(inflate)) if poly is not None else None
@@ -354,9 +419,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                                 break
 
             # ---- end holes vs courtyards on both sides ---------------------
-            for pos, radius, owner in self._leg_holes(
-                holes, leg, drill, tol, is_change_via, rotate_pad_offset
-            ):
+            for pos, radius, owner in anchors:
                 for fp, hside in hole_courtyard_overlaps(
                     pos, radius, pcb.footprints, net_number, body, owner
                 ):

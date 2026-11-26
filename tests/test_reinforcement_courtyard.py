@@ -402,3 +402,53 @@ def test_reinforce_cli_dry_run_lists_courtyard_refusal(tmp_path, capsys, monkeyp
     assert run_pcb_command(_reinforce_args(path, dry_run=True)) == 0
     text = capsys.readouterr().out
     assert "refused at" in text and "courtyard of U9" in text and "in U9" in text
+
+
+def test_mixed_wire_assembly_checks_actual_wire_and_anchor_bodies():
+    """An eligible path continues from the wired front side on bare back copper."""
+    pcb = _board()
+    pcb.add_trace((120.0, 50.0), (120.0, 85.0), width=5.5, layer="B.Cu", net=NET)
+    _add_th_pad_footprint(pcb, ref="J3", x=120, y=85, net=NET, drill=1, size=2)
+    spec = CurrentPathSpec(
+        name="LOAD",
+        net_name=NET,
+        source=PathEndpoint("J1", "1"),
+        sink=PathEndpoint("J3", "1"),
+        continuous_a=10.0,
+        reinforcement_eligible=True,
+    )
+    anchors = [{"x": v.position[0], "y": v.position[1]} for v in pcb.vias]
+    assert len(anchors) == 2
+    record = {"kind": "run", "net": NET, "layer": "F.Cu", "status": "full", "anchors": anchors}
+    _body(pcb, "COPPER_ONLY", 120, 70, side="B")
+    _body(pcb, "OVER_WIRE", 70, 50)
+    _body(pcb, "OVER_TAIL", anchors[0]["x"], anchors[0]["y"], side="B")
+
+    def messages(records):
+        return _msgs(ReinforcementCourtyardRule(specs=[spec], wires=records).check(pcb, _rules()))
+
+    fitted = messages([record])
+    assert all("COPPER_ONLY" not in m for m in fitted)
+    assert any("[run]" in m and "OVER_WIRE" in m for m in fitted)
+    assert any("[end hole]" in m and "OVER_TAIL" in m for m in fitted)
+    # Stale and absent assembly records still screen the prospective back run.
+    for records in ([], [dict(record, anchors=[anchors[0], anchors[0]])]):
+        assert any("COPPER_ONLY" in m for m in messages(records))
+
+
+def test_recorded_wire_leaves_bare_copper_between_hole_and_terminal():
+    pcb = _bare_board()
+    result = reinforce_net(pcb, NET, design_rules=_rules(), end_offset_mm=12)
+    assert result.placed_count == 2
+    ends = [{"x": a.x, "y": a.y} for a in result.legs[0].anchors]
+    assert min(p["x"] for p in ends) > 29
+    _body(pcb, "BARE_STUB", 24, 50, half=0.5)
+    _body(pcb, "OVER_WIRE", 60, 50)
+    rule = ReinforcementCourtyardRule(
+        specs=[_spec()],
+        wires=[{"net": NET, "layer": "F.Cu", "status": "full", "anchors": ends}],
+        end_offset_mm=12,
+    )
+    messages = _msgs(rule.check(pcb, _rules()))
+    assert not any("BARE_STUB" in m for m in messages)
+    assert any("OVER_WIRE" in m for m in messages)
