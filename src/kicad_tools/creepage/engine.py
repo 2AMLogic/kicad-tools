@@ -44,6 +44,7 @@ from kicad_tools._shapely import has_shapely, require_shapely
 from kicad_tools.creepage.standards import (
     DEFAULT_DIMENSION_X_MM,
     DEFAULT_INSULATION,
+    StandardLookupError,
     dimension_x_mm,
 )
 
@@ -188,7 +189,25 @@ def voltage_map_from_dict(data: Any) -> tuple[dict[str, VoltageInterval], float]
 _PAIR_BOUNDS_KEY = "_pair_bounds"
 
 
-def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
+def board_net_key(pcb: PCB) -> Callable[[str], str]:
+    """Resolve exact board names first, then unique leading-slash aliases."""
+    names = {net.name for net in pcb.nets.values() if net.number and net.name}
+    aliases: dict[str, list[str]] = {}
+    for name in names:
+        aliases.setdefault(_norm_net_key(name), []).append(name)
+
+    def resolve(name: str) -> str:
+        if name in names:
+            return name
+        candidates = aliases.get(_norm_net_key(name), [])
+        return candidates[0] if len(candidates) == 1 else name
+
+    return resolve
+
+
+def pair_bounds_from_dict(
+    data: Any, *, net_key: Callable[[str], str] = _norm_net_key
+) -> dict[frozenset[str], tuple[float, str]]:
     """Parse the reserved ``_pair_bounds`` list of a voltage map (#8043).
 
     Each entry is ``{"nets": [a, b], "max_dv": volts, "why": "reason"}`` and
@@ -198,7 +217,7 @@ def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
     pair's ΔV, never raise it.  Transitive pairs are the author's to declare.
 
     Returns ``{frozenset({norm_a, norm_b}): (max_dv, why)}`` keyed by the
-    :func:`_norm_net_key`-normalised, unordered pair.  A map without the key
+    ``net_key``-normalised, unordered pair.  A map without the key
     yields ``{}``.
 
     Raises:
@@ -226,7 +245,7 @@ def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
             or not all(isinstance(n, str) and n for n in nets)
         ):
             raise ValueError(f"{where}.nets must be a list of exactly two net names")
-        a, b = _norm_net_key(nets[0]), _norm_net_key(nets[1])
+        a, b = net_key(nets[0]), net_key(nets[1])
         if a == b:
             raise ValueError(f"{where}.nets must name two distinct nets, got {nets[0]!r} twice")
         max_dv = _coerce_voltage(f"{where}.max_dv", entry.get("max_dv"))
@@ -245,9 +264,11 @@ def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
 def pair_bounds_unmapped_nets(
     bounds: Mapping[frozenset[str], tuple[float, str]],
     voltage_nets: Iterable[str],
+    *,
+    net_key: Callable[[str], str] = _norm_net_key,
 ) -> list[str]:
     """Return sorted net names in *bounds* absent from the voltage map (typo guard)."""
-    mapped = {_norm_net_key(n) for n in voltage_nets}
+    mapped = {net_key(n) for n in voltage_nets}
     return sorted({n for pair in bounds for n in pair} - mapped)
 
 
@@ -2456,15 +2477,21 @@ def compute_creepage_census(
         )
 
     # --- Per-pair |dV| requirement machinery (map mode only, #4371) ---------
+    selected_mode = selected_pairs is not None
+    net_key = board_net_key(pcb) if selected_mode else _norm_net_key
     norm_vmap: dict[str, VoltageInterval] = {}
     if map_mode:
         assert voltage_map is not None
-        norm_vmap = {_norm_net_key(k): _as_interval(v) for k, v in voltage_map.items()}
+        for name, voltage in voltage_map.items():
+            voltage_key = net_key(name)
+            if selected_mode and name != voltage_key and voltage_key in voltage_map:
+                continue  # The map supplies the exact board spelling as well.
+            norm_vmap[voltage_key] = _as_interval(voltage)
     _req_cache: dict[float, tuple[float, float, dict[str, Any], dict[str, Any]]] = {}
 
     def _voltage(name: str) -> VoltageInterval:
         # Unmapped nets default to the degenerate 0 V interval.
-        return norm_vmap.get(_norm_net_key(name), VoltageInterval(0.0, 0.0))
+        return norm_vmap.get(net_key(name), VoltageInterval(0.0, 0.0))
 
     def _required_for_dv(
         dv: float,
@@ -2521,7 +2548,7 @@ def compute_creepage_census(
             dv, a_ep, b_ep, va, vb = dv_lo_hi, "lo", "hi", a.lo, b.hi
         bound_prov: dict[str, Any] | None = None
         if pair_bounds and not edge:
-            bound = pair_bounds.get(frozenset((_norm_net_key(name_a), _norm_net_key(name_b or ""))))
+            bound = pair_bounds.get(frozenset((net_key(name_a), net_key(name_b or ""))))
             if bound is not None and bound[0] < dv:
                 bound_prov = {
                     "unbounded_delta_v_v": round(dv, 4),
@@ -2551,12 +2578,16 @@ def compute_creepage_census(
             prov["clearance"] = clprov
         return req_creep, req_clear, prov
 
-    selected_mode = selected_pairs is not None
     sel_partners: dict[int, list[int]] = {}
     sel_keys: list[tuple[int, int]] = []
     if selected_pairs is not None:
         hv_nets, sel_partners, sel_keys = _resolve_selected_pairs(
-            pcb, selected_pairs, set(norm_vmap) if map_mode else None, report
+            pcb,
+            selected_pairs,
+            set(norm_vmap) if map_mode else None,
+            report,
+            net_key,
+            _pair_requirement if map_mode else None,
         )
         report.hv_nets = []
 
@@ -2686,6 +2717,8 @@ def compute_creepage_census(
     order_lookup = project_board if order_thickness_mm is None else None
     _copper = pcb.copper_layers
     _faces = [_copper[0].name, _copper[-1].name] if _copper else []
+    thickness_errors: dict[tuple[int, int], str] = {}
+    project_error: str | None = None
     thickness_evaluated = False
     if len(_faces) == 2 and _faces[0] != _faces[1]:
         rims = _cross_face_rims(pcb, obstacles)
@@ -2708,11 +2741,19 @@ def compute_creepage_census(
                 for other_num, gb in _partners(hv_num, unions_by_face[fb]):
                     # Read the project once, on the first actual opposing-face pair.
                     if order_lookup is not None:
-                        order_thickness_mm = _project_order_thickness(order_lookup)
+                        try:
+                            order_thickness_mm = _project_order_thickness(order_lookup)
+                        except BoardThicknessError as exc:
+                            if not selected_mode:
+                                raise
+                            project_error = str(exc)
                         order_lookup = None
                         if order_thickness_mm is not None:
                             thickness_mm, thickness_source = order_thickness_mm, "project.kct"
                     key = (hv_num, other_num)
+                    if project_error is not None:
+                        thickness_errors[key] = project_error
+                        continue
                     prev = best.get(key)
                     if prev is not None:
                         # Existing (same-face) row: a cross-face path binds
@@ -2759,7 +2800,7 @@ def compute_creepage_census(
                         if thickness_mm is None:
                             if surface_legs >= limit:
                                 continue
-                            raise BoardThicknessError(
+                            error = BoardThicknessError(
                                 f"Board header thickness {declarations['general']:g} mm and stackup "
                                 f"thickness {declarations['stackup']:g} mm disagree. Supply "
                                 "the nominal finished thickness selected for purchase with "
@@ -2767,12 +2808,22 @@ def compute_creepage_census(
                                 "in the board's project.kct.",
                                 declarations,
                             )
+                            if not selected_mode:
+                                raise error
+                            thickness_errors[key] = str(error)
+                            break
                         thickness_evaluated = True
                         cand = surface_legs + thickness_mm
                         if cand < best_cand:
                             best_cand, best_label = cand, label
                     if best_label is not None and best_cand < bound:
                         cross_best[key] = (best_cand, best_label, fa, fb, ga, gb)
+    for (a, b), detail in thickness_errors.items():
+        best.pop((a, b), None)
+        cross_best.pop((a, b), None)
+        report.unresolved_pairs.append(
+            {"nets": [hv_nets[a], number_to_name[b]], "reason": "board_thickness", "detail": detail}
+        )
     if thickness_evaluated:
         report.board_thickness_mm = thickness_mm
         report.board_thickness_source = thickness_source
@@ -2955,7 +3006,11 @@ def compute_creepage_census(
     if selected_mode:
         copper_nets = {n for unions in layer_unions.values() for n in unions}
         for a_num, b_num in sel_keys:
-            if (a_num, b_num) in best or (a_num, b_num) in cross_best:
+            if (
+                (a_num, b_num) in thickness_errors
+                or (a_num, b_num) in best
+                or (a_num, b_num) in cross_best
+            ):
                 continue
             na, nb = hv_nets[a_num], number_to_name.get(b_num, f"net{b_num}")
             bare = [n for n, num in ((na, a_num), (nb, b_num)) if num not in copper_nets]
@@ -3028,30 +3083,20 @@ def _resolve_selected_pairs(
     selected_pairs: Sequence[tuple[str, str]],
     mapped_keys: set[str] | None,
     report: CreepageReport,
+    net_key: Callable[[str], str],
+    requirement: Callable[[str, str], tuple[float, float, dict[str, Any]]] | None,
 ) -> tuple[dict[int, str], dict[int, list[int]], list[tuple[int, int]]]:
     """Resolve requested net-name pairs to board net numbers (#10342).
 
     Records the de-duplicated request on ``report.selected_pairs`` and every pair
     that cannot be measured on ``report.unresolved_pairs`` (``unknown_net``,
-    ``identical_nets``, ``no_potential``).  ``mapped_keys`` is the normalised
+    ``identical_nets``, ``no_potential``).  ``mapped_keys`` is the board-resolved
     voltage-map key set, or ``None`` when no per-net potentials are in play.
     Returns ``(first_endpoint_nets, partners, ordered (a, b) number pairs)``;
     each unordered pair appears once, oriented as first requested.
     """
-    by_name: dict[str, int] = {}
-    by_key: dict[str, set[int]] = {}
-    for net in pcb.nets.values():
-        if net.number == 0 or not net.name:
-            continue
-        by_name[net.name] = net.number
-        by_key.setdefault(_norm_net_key(net.name), set()).add(net.number)
+    by_name = {net.name: net.number for net in pcb.nets.values() if net.number and net.name}
     number_to_name = {num: name for name, num in by_name.items()}
-
-    def lookup(name: str) -> int | None:
-        if name in by_name:
-            return by_name[name]
-        nums = by_key.get(_norm_net_key(name), set())
-        return next(iter(nums)) if len(nums) == 1 else None
 
     first_nets: dict[int, str] = {}
     partners: dict[int, list[int]] = {}
@@ -3059,7 +3104,7 @@ def _resolve_selected_pairs(
     seen: set[frozenset[Any]] = set()
     report.selected_pairs = []
     for raw_a, raw_b in selected_pairs:
-        a_num, b_num = lookup(raw_a), lookup(raw_b)
+        a_num, b_num = by_name.get(net_key(raw_a)), by_name.get(net_key(raw_b))
         ident = frozenset(
             (a_num if a_num is not None else ("?", _norm_net_key(raw_a)),)
             + (b_num if b_num is not None else ("?", _norm_net_key(raw_b)),)
@@ -3090,9 +3135,7 @@ def _resolve_selected_pairs(
             continue
         if mapped_keys is not None:
             absent = [
-                number_to_name[n]
-                for n in (a_num, b_num)
-                if _norm_net_key(number_to_name[n]) not in mapped_keys
+                number_to_name[n] for n in (a_num, b_num) if number_to_name[n] not in mapped_keys
             ]
             if absent:
                 report.unresolved_pairs.append(
@@ -3104,6 +3147,14 @@ def _resolve_selected_pairs(
                             "an unmapped selected net is not assumed to be 0 V"
                         ),
                     }
+                )
+                continue
+        if requirement is not None:
+            try:
+                requirement(number_to_name[a_num], number_to_name[b_num])
+            except StandardLookupError as exc:
+                report.unresolved_pairs.append(
+                    {"nets": [raw_a, raw_b], "reason": "standard_lookup", "detail": str(exc)}
                 )
                 continue
         first_nets[a_num] = number_to_name[a_num]

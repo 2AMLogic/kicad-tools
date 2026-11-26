@@ -45,6 +45,7 @@ def run_creepage_command(args) -> int:
         SELV_WORKING_VOLTAGE_V,
         BoardThicknessError,
         apply_census_waivers,
+        board_net_key,
         compute_creepage_census,
         mains_suspect_nets,
         pair_bounds_from_dict,
@@ -89,6 +90,10 @@ def run_creepage_command(args) -> int:
         )
         return 1
 
+    pcb = PCB.load(pcb_path)
+    net_class = getattr(args, "net_class", "HV") or "HV"
+    selected_pairs = [(a, b) for a, b in (getattr(args, "pairs", None) or [])] or None
+
     # --- Optional per-net voltage map (#4371) --------------------------------
     # When supplied, the required creepage/clearance is derived PER PAIR from
     # |V_a - V_b| instead of a single global --working-voltage.  It requires a
@@ -113,8 +118,14 @@ def run_creepage_command(args) -> int:
         try:
             _vm_raw = json.loads(vmap_path.read_text())
             voltage_map, edge_voltage = voltage_map_from_dict(_vm_raw)
-            pair_bounds = pair_bounds_from_dict(_vm_raw)  # #8043
-            for _n in pair_bounds_unmapped_nets(pair_bounds, voltage_map):
+            if selected_pairs:
+                key = board_net_key(pcb)
+                pair_bounds = pair_bounds_from_dict(_vm_raw, net_key=key)
+                unmapped = pair_bounds_unmapped_nets(pair_bounds, voltage_map, net_key=key)
+            else:
+                pair_bounds = pair_bounds_from_dict(_vm_raw)
+                unmapped = pair_bounds_unmapped_nets(pair_bounds, voltage_map)
+            for _n in unmapped:
                 print(
                     f"Warning: _pair_bounds names net {_n!r} absent from the voltage map",
                     file=sys.stderr,
@@ -209,10 +220,6 @@ def run_creepage_command(args) -> int:
         except (TypeError, ValueError) as e:
             print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
             return 1
-
-    pcb = PCB.load(pcb_path)
-    net_class = getattr(args, "net_class", "HV") or "HV"
-    selected_pairs = [(a, b) for a, b in (getattr(args, "pairs", None) or [])] or None
 
     # Voltage-derived census membership (issue #4401): when a voltage map is
     # supplied, a high-|V| net whose routing class is not HV must still enter
@@ -525,18 +532,15 @@ def _render_table_selected(report: CreepageReport, *, show_witness: bool = False
     if report.unresolved_pairs:
         print()
 
-    n_measured = len(report.pairs)
-    failures = [p for p in report.pairs if not p.passed and not p.waived]
-    if report.unresolved_pairs or failures:
-        print(
-            f"FAIL (limited diagnostic): {len(failures)} measured row(s) violate their bound; "
-            f"{len(report.unresolved_pairs)} requested pair(s) could not be measured."
-        )
-    else:
-        print(
-            f"PASS (limited diagnostic): all {n_measured} measured row(s) clear their bound. "
-            "This is NOT a full-board result."
-        )
+    passed = sum(p.passed for p in report.pairs)
+    waived = sum(p.waived and not p.passed for p in report.pairs)
+    failures = len(report.pairs) - passed - waived
+    verdict = "PASS" if report.gate_passed else "FAIL"
+    print(
+        f"{verdict} (limited diagnostic): {passed} measured row(s) clear their bound, "
+        f"{waived} failing row(s) waived, {failures} unwaived failure(s), "
+        f"{len(report.unresolved_pairs)} unmeasured pair(s). This is NOT a full-board result."
+    )
 
 
 def _render_table(

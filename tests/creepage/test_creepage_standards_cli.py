@@ -21,6 +21,7 @@ from .fixtures import (
     board_close_hv_source,
     board_cross_face_edge_wrap_source,
     board_no_hv_source,
+    board_same_footprint_only_source,
     board_selected_pairs_source,
     board_source,
     board_two_pad_gap_source,
@@ -928,3 +929,128 @@ def test_pair_works_with_manual_minimum(tmp_path, capsys):
     assert rc == 1  # AUX-GND is 3 mm
     assert _row(rep, "SIG", "GND")["pass"] and not _row(rep, "AUX", "GND")["pass"]
     assert "governing_voltage_v" not in _row(rep, "SIG", "GND")
+
+
+@pytest.mark.parametrize("missing", [None, "/AUX", "AUX"])
+def test_pair_distinct_slash_nets(tmp_path, capsys, missing):
+    pcb = _write(tmp_path, board_selected_pairs_source().replace('"SIG"', '"/AUX"'))
+    potentials = {"/AUX": 307, "AUX": 0}
+    if missing:
+        del potentials[missing]
+    argv = [
+        "creepage",
+        str(pcb),
+        *_STD,
+        "--voltage-map",
+        _state(tmp_path, potentials),
+        "--format",
+        "json",
+        "--pair",
+        "/AUX",
+        "AUX",
+    ]
+    rc, rep = _json_run(argv, capsys)
+    assert rc == 1
+    if missing:
+        assert rep["unresolved_pairs"][0]["reason"] == "no_potential"
+        assert f"net(s) {missing} absent" in rep["unresolved_pairs"][0]["detail"]
+    else:
+        assert _row(rep, "/AUX", "AUX")["governing_voltage_v"] == 307
+
+
+def test_pair_bound_resolves_board_names(tmp_path, capsys):
+    pcb = _write(tmp_path, board_selected_pairs_source().replace('"SIG"', '"/AUX"'))
+    state = _state(
+        tmp_path,
+        {
+            "/AUX": 307,
+            "AUX": 300,
+            "/GND": 0,
+            "_pair_bounds": [{"nets": ["AUX", "/GND"], "max_dv": 5, "why": "device rating"}],
+        },
+    )
+    rc, rep = _json_run(
+        [
+            "creepage",
+            str(pcb),
+            *_STD,
+            "--voltage-map",
+            state,
+            "--format",
+            "json",
+            "--pair",
+            "/AUX",
+            "GND",
+            "--pair",
+            "AUX",
+            "GND",
+        ],
+        capsys,
+    )
+    assert rc == 0
+    assert _row(rep, "/AUX", "GND")["governing_voltage_v"] == 307
+    assert _row(rep, "AUX", "GND")["governing_voltage_v"] == 5
+
+
+@pytest.mark.parametrize("problem", ["standard_lookup", "board_thickness"])
+def test_pair_failure_preserves_independent_row(tmp_path, capsys, problem):
+    if problem == "standard_lookup":
+        pcb = _write(tmp_path, board_selected_pairs_source())
+        state = _state(tmp_path, {"L_MAINS": 0, "GND": 1_000_000, "SIG": 5})
+        threshold = [*_STD, "--voltage-map", state]
+    else:
+        source = (
+            board_cross_face_edge_wrap_source()
+            .replace(
+                "(setup (pad_to_mask_clearance 0))",
+                '(setup (stackup (layer "dielectric 1" (type "core") (thickness 0.8))))',
+            )
+            .replace('(net 2 "GND")\n', '(net 2 "GND")\n  (net 3 "SIG")\n', 1)
+        )
+        source = source.rstrip()[:-1] + (
+            '(segment (start 120 110) (end 126 110) (width 1) (layer "F.Cu") (net 3 "SIG")))'
+        )
+        pcb = _write(tmp_path, source)
+        threshold = ["--min", "1"]
+    argv = [
+        "creepage",
+        str(pcb),
+        *threshold,
+        "--pair",
+        "L_MAINS",
+        "GND",
+        "--pair",
+        "L_MAINS",
+        "SIG",
+    ]
+    rc, rep = _json_run([*argv, "--format", "json"], capsys)
+    assert rc == 1 and not rep["gate_passed"] and rep["diagnostic"]["limited"]
+    assert _row(rep, "L_MAINS", "SIG")["pass"]
+    assert [(p["nets"], p["reason"]) for p in rep["unresolved_pairs"]] == [
+        (["L_MAINS", "GND"], problem)
+    ]
+    assert _run(argv) == 1
+    table = capsys.readouterr().out
+    assert "UNMEASURED: L_MAINS -- GND" in table and "1 measured row(s) clear" in table
+
+
+@pytest.mark.parametrize("extra,rc", [([], 0), (["--pair", "missing", "SRC_NEG"], 1)])
+def test_pair_waiver_summary(tmp_path, capsys, extra, rc):
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    assert (
+        _run(
+            [
+                "creepage",
+                str(pcb),
+                "--pair",
+                "L_MAINS",
+                "SRC_NEG",
+                "--min",
+                "1",
+                "--waive-same-footprint",
+                *extra,
+            ]
+        )
+        == rc
+    )
+    assert "1 measured row(s) clear their bound, 1 failing row(s) waived" in capsys.readouterr().out
