@@ -1126,28 +1126,25 @@ def _find_pcb(board_dir: Path) -> Path | None:
     return None
 
 
-def _find_sibling(pcb: Path, suffix: str) -> Path | None:
-    """Prefer the PCB or original project stem, then an applicable sibling."""
-    exact = pcb.with_suffix(suffix)
+def _find_project(pcb: Path) -> Path | None:
+    """Prefer the PCB or original project stem, then an unpaired sibling project."""
+    exact = pcb.with_suffix(".kicad_pro")
     if exact.is_file():
         return exact
     stem = pcb.stem.removesuffix("_routed")
-    trimmed = pcb.parent / f"{stem}{suffix}"
+    trimmed = pcb.parent / f"{stem}.kicad_pro"
     if trimmed.is_file():
         return trimmed
-    candidates = sorted(pcb.parent.glob(f"*{suffix}"))
-    if suffix == ".kicad_pro":
-        # A differently named project can be shared. Projects paired with
-        # other boards, including their routed copies, belong to those boards.
-        available = [
-            project
-            for project in candidates
-            if project.is_file()
-            and not project.with_suffix(".kicad_pcb").is_file()
-            and not project.with_name(f"{project.stem}_routed.kicad_pcb").is_file()
-        ]
-        return available[0] if len(available) == 1 else None
-    return candidates[0] if candidates else None
+    # A differently named project can be shared. Projects paired with
+    # other boards, including their routed copies, belong to those boards.
+    available = [
+        project
+        for project in pcb.parent.glob("*.kicad_pro")
+        if project.is_file()
+        and not project.with_suffix(".kicad_pcb").is_file()
+        and not project.with_name(f"{project.stem}_routed.kicad_pcb").is_file()
+    ]
+    return available[0] if len(available) == 1 else None
 
 
 def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, str | None]:
@@ -1193,7 +1190,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
     if manufacturer not in get_all_manufacturer_names():
         return None, f"unknown fabrication tier: {manufacturer}"
 
-    project = _find_sibling(pcb, ".kicad_pro")
+    project = _find_project(pcb)
     if project is None:
         return None, (
             f"{pcb.name} has no unambiguous paired .kicad_pro. "
@@ -1201,9 +1198,20 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             "so readiness can use its rules."
         )
 
-    schematic = (
-        Path(args.schematic).resolve() if args.schematic else _find_sibling(pcb, ".kicad_sch")
-    )
+    if args.schematic:
+        schematic = Path(args.schematic).resolve()
+    else:
+        from kicad_tools.sync.discover import (
+            resolve_schematic_for_pcb,
+            unresolved_schematic_candidates,
+        )
+
+        schematic = resolve_schematic_for_pcb(pcb)
+        if schematic is None:
+            candidates = unresolved_schematic_candidates(pcb)
+            if len(candidates) > 1:
+                names = ", ".join(path.name for path in candidates)
+                return None, f"Multiple schematic candidates for {pcb.name}: {names}. Pass --sch."
 
     project_root: Path | None = None
     if getattr(args, "project_root", None):

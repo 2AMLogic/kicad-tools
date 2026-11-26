@@ -7,7 +7,7 @@ import shutil
 
 import pytest
 
-from kicad_tools.cli import submit_jlcpcb_cmd
+from kicad_tools.cli import readiness_cmd, submit_jlcpcb_cmd
 from kicad_tools.cli.board_readiness import ReadinessLayout, read_readiness
 from kicad_tools.cli.readiness_cmd import EngineRun
 from kicad_tools.cli.render_cmd import PROVENANCE_FILE
@@ -88,23 +88,40 @@ def _submission_preview(bundle, pcb, schematic, destination):
     )
 
 
-@pytest.mark.parametrize("with_sibling", [True, False])
-def test_electrical_check_uses_the_exported_schematic(tmp_path, with_sibling):
+@pytest.mark.parametrize("selection", ["explicit", "explicit-with-sibling", "spec", "paired"])
+def test_electrical_check_uses_the_exported_schematic(tmp_path, selection):
     from kicad_tools.cli.check_cmd import _resolve_check_schematic_with_source, portable_report_path
 
     project = make_project(tmp_path)
-    if with_sibling:
-        (project / "kicad/board.kicad_sch").write_text("(kicad_sch other)")
+    pcb = project / "kicad/board.kicad_pcb"
     selected = (project / "schematics/board.kicad_sch").rename(
         project / "schematics/rev_b.kicad_sch"
     )
+    extra = []
+    if selection in {"explicit-with-sibling", "spec"}:
+        pcb.with_suffix(".kicad_sch").write_text("(kicad_sch other)")
+    if selection == "spec":
+        (project / "project.kct").write_text(
+            'kct_version: "1.0"\n'
+            "project:\n"
+            "  name: board\n"
+            "  artifacts:\n"
+            "    schematic: schematics/rev_b.kicad_sch\n"
+            "    pcb: kicad/board.kicad_pcb\n"
+        )
+    elif selection == "paired":
+        selected = selected.rename(pcb.with_suffix(".kicad_sch"))
+        pcb = pcb.rename(pcb.with_name("board_v07.kicad_pcb"))
+        pcb.with_name("auxiliary.kicad_sch").write_text("(kicad_sch other)")
+    else:
+        extra = ["--sch", str(selected)]
 
     class ElectricalEngines(HandoffEngines):
         def kct_check(self, pcb, mfr, report_path, extra):
             result = super().kct_check(pcb, mfr, report_path, extra)
             explicit = extra[extra.index("--schematic") + 1] if "--schematic" in extra else None
             self.checked, source = _resolve_check_schematic_with_source(explicit, pcb)
-            assert self.checked == pcb.parent.parent / "schematics/rev_b.kicad_sch"
+            assert self.checked == pcb.parent.parent / selected.relative_to(project)
             assert self.checked != selected  # Gate 1 must check the staged copy.
             report = json.loads(report_path.read_bytes())
             report["meta_checks"]["schematic"] = {
@@ -115,14 +132,29 @@ def test_electrical_check_uses_the_exported_schematic(tmp_path, with_sibling):
             return result
 
     engines = ElectricalEngines(project / "kicad")
-    assert run(project, "--generate", "--sch", str(selected), fake=engines)[0] == 0
+    args = [str(pcb), "--mfr", "jlcpcb", "--generate", *extra]
+    assert readiness_cmd.main(args, engines=engines.bundle()) == 0
     assert engines.export_schematic == engines.checked
     receipt = json.loads((project / "output/readiness.json").read_bytes())
+    assert receipt["schematic_root"] == selected.relative_to(project).as_posix()
     report = json.loads((project / "output/readiness/kct-check.json").read_bytes())
     assert report["meta_checks"]["schematic"] == {
         "source": "--schematic",
         "path": receipt["schematic_root"],
     }
+
+
+def test_ambiguous_schematics_require_selection_before_generation(tmp_path, capsys):
+    project = make_project(tmp_path)
+    pcb = project / "kicad/board.kicad_pcb"
+    for stem in ("rev_a", "rev_b"):
+        pcb.with_name(f"{stem}.kicad_sch").write_text("(kicad_sch)")
+    engines = HandoffEngines(pcb.parent)
+    args = [str(pcb), "--mfr", "jlcpcb", "--generate"]
+    assert readiness_cmd.main(args, engines=engines.bundle()) == 2
+    assert "--sch" in capsys.readouterr().err
+    assert not engines.calls
+    assert not (project / "output").exists()
 
 
 @pytest.mark.parametrize("location", ["readiness.json", "readiness-verification/readiness.json"])
