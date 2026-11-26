@@ -90,14 +90,54 @@ def test_measured_pitch_and_body_on_separate_pages(tmp_path, monkeypatch, pitch_
     assert package.source_page == (1 if pitch_first else 2)
 
 
+@pytest.mark.parametrize("token", ["(P48)", "Pin-P48", "P48", "p 113 thermal"])
+def test_bare_pitch_token_falls_back_to_inferred_pitch(tmp_path, monkeypatch, token):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+    parser = DatasheetParser(pdf)
+
+    def package_with(notes):
+        table = ExtractedTable(1, [], [["LQFP32", "7 x 7 mm", notes]])
+        monkeypatch.setattr(parser, "extract_tables", lambda pages: [table])
+        (package,) = parser.extract_packages()
+        return package
+
+    control = package_with("")
+    package = package_with(token)
+    assert package.pin_count == 32
+    assert (package.body_width, package.body_length) == (7, 7)
+    assert package.pitch == control.pitch == get_default_pitch("qfp", 32)
+    assert package.pitch_inferred and package.confidence == control.confidence < 1
+
+
+def test_measured_pitch_survives_earlier_bare_pitch_token(tmp_path, monkeypatch):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+    parser = DatasheetParser(pdf)
+    table = ExtractedTable(1, [], [["LQFP32", "7 x 7 mm", "P48 pitch = 0.80"]])
+    monkeypatch.setattr(parser, "extract_tables", lambda pages: [table])
+    (package,) = parser.extract_packages()
+    assert (package.pitch, package.pitch_inferred, package.confidence) == (0.8, False, 1.0)
+
+
 def test_pitch_labels_and_body_dimensions():
     assert "PITCH" not in extract_dimension_from_text("LQFP48, E=7.0 mm")
     assert extract_dimension_from_text("P0.8 mm")["PITCH"] == 0.8
+    assert extract_dimension_from_text("P0.8mm")["PITCH"] == 0.8
+    assert extract_dimension_from_text("P50 mil")["PITCH"] == 1.27
+    assert extract_dimension_from_text("P=0.80")["PITCH"] == 0.8
     assert extract_dimension_from_text("0.8 mm pitch")["PITCH"] == 0.8
     assert extract_dimension_from_text("e=0.8")["PITCH"] == 0.8
+    assert extract_dimension_from_text("e = 0.80")["PITCH"] == 0.8
     assert extract_dimension_from_text("Pitch 50 mil")["PITCH"] == 1.27
+    assert extract_dimension_from_text("P48 pitch = 0.80")["PITCH"] == 0.8
     assert parse_package_name("QFP32_7x7mm")["pitch"] is None
     assert parse_package_name("QFP32_7x7mm_P0.8mm")["pitch"] == 0.8
+
+
+@pytest.mark.parametrize("token", ["(P48) 7 x 7 mm", "Pin-P48 7 x 7 mm", "P48", "p 113 thermal"])
+def test_bare_pitch_token_is_not_a_measurement(token):
+    assert "PITCH" not in extract_dimension_from_text(token)
 
 
 class TestPackageInfo:
