@@ -154,7 +154,7 @@ def via_exit_doglegs(
 
 
 def authored_arc_copper(
-    pcb: PCB, net_map: dict[str, int]
+    pcb: PCB, net_map: dict[str, int], excluded_nets: frozenset[str] = frozenset()
 ) -> dict[str, list[tuple[int, BaseGeometry | None]]]:
     """Collect retained track arcs in the sheet coordinates used by the routing grid."""
     from shapely.affinity import translate  # type: ignore[import-untyped]
@@ -170,6 +170,10 @@ def authored_arc_copper(
         net_node = node.find_child("net")
         value = net_node.get_first_atom() if net_node else 0
         net = value if isinstance(value, int) else net_map.get(str(value), 0)
+        if excluded_nets:
+            declared = pcb.get_net(value) if isinstance(value, int) else None
+            if (declared.name if declared else str(value)) in excluded_nets:
+                continue
         try:
             copper = track_arc_copper_geometry(node, pcb.board_origin)
             copper = translate(copper, *pcb.board_origin)

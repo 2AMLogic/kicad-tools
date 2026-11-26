@@ -319,9 +319,6 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     #   KCT_KICAD_DOCKER=1 uv run kct check \
     #     boards/06-diffpair-test/regression-output/diffpair_test_routed.kicad_pcb \
     #     --mfr jlcpcb --errors-only --format json
-    ("mask_to_copper", "USB3_RX1+"): 8858,
-    ("mask_to_copper", "USB3_RX1-"): 8858,
-    ("mask_to_copper", "USB3_TX1-"): 8858,
     ("mask_to_copper", "USB3_TX2+"): 8858,
 }
 

@@ -145,9 +145,6 @@ BOARD06_GAP_NETS: tuple[str, ...] = ()
 # repair (#10258) retired both USB2_D mask identities. The power repairs (#10267)
 # retired +1V2 and +3V3.
 BOARD06_MASK_NETS = (
-    "USB3_RX1+",
-    "USB3_RX1-",
-    "USB3_TX1-",
     "USB3_TX2+",
 )
 
@@ -504,15 +501,16 @@ def test_board06_measured_mask_population_passes_and_drains():
         "PCIE_RX-",
         "USB2_D+",
         "USB2_D-",
+        "USB3_RX1+",
+        "USB3_RX1-",
     ):
         regressed = found + [mask_violation(net)]
         assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", net)]
-    last_mask_net = BOARD06_MASK_NETS[-1]
-    drained = [
-        v for v in found if not (v["rule_id"] == "mask_to_copper" and v["nets"] == [last_mask_net])
-    ]
-    stale = gate.stale_allowances(BOARD06_KEY, identities_of(drained))
-    assert stale == [("mask_to_copper", last_mask_net, 8858)]
+    # Reinstall the retired RX1 identity on this isolated gate to exercise
+    # stale detection even after every real allowance has been removed.
+    retired = ("mask_to_copper", "USB3_RX1+")
+    gate.DIFFPAIR_ALLOWANCES[BOARD06_KEY][retired] = 8858
+    assert gate.stale_allowances(BOARD06_KEY, ids) == [(*retired, 8858)]
 
 
 def test_board06_unmodified_clock_exits_are_rejected():
@@ -534,6 +532,18 @@ def test_board06_unmodified_clock_exits_are_rejected():
     assert gate.unexpected_baseline_errors(
         BOARD06_KEY, rule_counts(unmodified), identities_of(unmodified)
     ) == {"mask_to_copper": 2}  # the two newly unallowed net identities
+
+
+def test_board06_tx1_mask_findings_fail_the_fixture_gate():
+    gate = load("check_diffpair_coverage")
+    assert ("mask_to_copper", "USB3_TX1-") not in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+    others = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, others) == []
+    both_exits = [mask_violation("USB3_TX1-")] * 4
+    assert (
+        gate.unallowed_blocking(BOARD06_KEY, others + both_exits)
+        == [("mask_to_copper", "USB3_TX1-")] * 4
+    )
 
 
 def test_board06_unmodified_ground_entry_is_rejected():

@@ -47,6 +47,7 @@ from itertools import pairwise
 from math import dist, isfinite
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 
 from shapely import make_valid
 from shapely.geometry import LineString, Point, Polygon
@@ -466,8 +467,13 @@ class _PairEscape:
     # On U3, the inner taper continues to this measured trunk endpoint.
     # On J1, the barrel has one constant-width approach segment.
     inner_end_offset: XY | None = None
-    # The BGA repair requires the measured full-width front run.
+    # A measured front run must be full width and match these original corners.
     front_corners: tuple[XY, ...] = ()
+    # Offset from the pad center for a replacement that needs a 45-degree bend.
+    front_bend: XY | None = None
+    # A direct exit joins the far junction. An extension keeps the measured
+    # inner copper and starts at its old barrel landing.
+    inner_path: Literal["dogleg", "direct", "extend"] = "dogleg"
 
 
 def _inner_approach(
@@ -489,7 +495,12 @@ def _inner_approach(
         used.append(segment)
         if joint is None or following == joint:
             return used, following
-        if not _on_line(old, joint, following) or dist(following, joint) >= dist(point, joint):
+        # A split approach must stay on the remaining span at each step.
+        if following == point or not _on_line(old, joint, following):
+            return None
+        if not all(
+            min(a, b) <= p <= max(a, b) for a, b, p in zip(point, joint, following, strict=True)
+        ):
             return None
         point = following
 
@@ -551,6 +562,10 @@ def _rebuild_pair_branch(
     if any(s.width > width + _EPS for s in edited) or abs(inner[-1].width - width) > _EPS:
         return None
 
+    if escape.inner_path == "extend":
+        edited = tracks
+        joint = old
+
     original = list(pcb.segments)
     validator = ConnectivityValidator(pcb)
     before = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
@@ -562,9 +577,15 @@ def _rebuild_pair_branch(
         return None
     size.set_value(0, diameter)
     via.size = diameter
-    added = pcb.add_trace(center, target, width=width, layer="F.Cu", net=net)
+    bend = escape.front_bend
+    waypoints = [_xy((center[0] + bend[0], center[1] + bend[1]))] if bend is not None else None
+    added = pcb.add_trace(center, target, width=width, layer="F.Cu", net=net, waypoints=waypoints)
     # On U3 the measured clear corridor leaves the barrel diagonally.
-    points = dogleg_points(*joint, *target, axis_first=escape.inner_end_offset is not None)
+    points = (
+        dogleg_points(*joint, *target, axis_first=escape.inner_end_offset is not None)
+        if escape.inner_path == "dogleg"
+        else [joint, target]
+    )
     for a, b in pairwise(points):
         if a != b:
             added.extend(pcb.add_trace(a, b, width=width, layer=escape.layer, net=net))
@@ -1614,53 +1635,134 @@ def _clear_data_pair(
     return len(exits)
 
 
+_USB3_PADS = {
+    "J1": (_J1_USB, (0.30, 0.60)),
+    "U2": ("Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm", (0.45, 0.45)),
+}
 _BGA_RX2 = (
-    _PairEscape(
-        "F5",
-        "USB3_RX2+",
-        "In1.Cu",
-        (-0.47, -0.34),
-        (-0.56, 0.56),
-        (-5.395, -0.34),
-        ((0, 0), (-0.03, 0), (-0.37, -0.34), (-0.47, -0.34)),
+    (
+        "U2",
+        _PairEscape(
+            "F5",
+            "USB3_RX2+",
+            "In1.Cu",
+            (-0.47, -0.34),
+            (-0.56, 0.56),
+            (-5.395, -0.34),
+            ((0, 0), (-0.03, 0), (-0.37, -0.34), (-0.47, -0.34)),
+        ),
     ),
-    _PairEscape(
-        "F6",
-        "USB3_RX2-",
-        "In2.Cu",
-        (-0.39, -0.39),
-        (-0.56, -0.56),
-        (-0.99, -0.99),
-        ((0, 0), (-0.39, -0.39)),
+    (
+        "U2",
+        _PairEscape(
+            "F6",
+            "USB3_RX2-",
+            "In2.Cu",
+            (-0.39, -0.39),
+            (-0.56, -0.56),
+            (-0.99, -0.99),
+            ((0, 0), (-0.39, -0.39)),
+        ),
+    ),
+)
+_TX1_NETS = ("USB3_TX1+", "USB3_TX1-")
+_TX1_ESCAPES = (
+    (
+        "J1",
+        _PairEscape(
+            "A3",
+            "USB3_TX1-",
+            "In1.Cu",
+            (0.30, 0.50),
+            (0.53, 0.73),
+            (9.60, 9.80),
+            ((0, 0), (0, 0.15), (0.30, 0.45), (0.30, 0.50)),
+            front_bend=(0, 0.20),
+        ),
+    ),
+    # Moving this barrel another 0.02 mm west and 0.025 mm south cuts off
+    # 2.47 mm² of the filled +1V2 plane beyond the BGA escape (issue #10290).
+    (
+        "U2",
+        _PairEscape(
+            "B3",
+            "USB3_TX1-",
+            "B.Cu",
+            (-0.48, 0.34),
+            (-0.63, 0.445),
+            (-28.53, 0.34),
+            ((0, 0), (0, 0.01), (-0.33, 0.34), (-0.48, 0.34)),
+            front_bend=(-0.445, 0.445),
+        ),
     ),
 )
 
 
-def _clear_bga_rx2(path: Path, rules: DesignRules, policy: MaskCopperPolicy) -> int:
-    """Move both full-width BGA escapes together after checking copper and both mask films."""
+_RX1_NETS = ("USB3_RX1+", "USB3_RX1-")
+_RX1_ESCAPES = (
+    (
+        "J1",
+        _PairEscape(
+            "B10",
+            "USB3_RX1-",
+            "B.Cu",
+            (0.30, -0.50),
+            (-0.025, -0.7625),
+            (1.20, -0.50),
+            ((0, 0), (0.30, -0.30), (0.30, -0.50)),
+            front_bend=(0, -0.7375),
+            inner_path="direct",
+        ),
+    ),
+    (
+        "U2",
+        _PairEscape(
+            "B5",
+            "USB3_RX1+",
+            "B.Cu",
+            (-0.47, -0.31),
+            (0.575, 0.525),
+            (-0.868, -0.708),
+            ((0, 0), (-0.16, 0), (-0.47, -0.31)),
+            front_bend=(0.05, 0),
+            inner_path="extend",
+        ),
+    ),
+)
+
+
+def _clear_usb3_barrels(
+    path: Path,
+    rules: DesignRules,
+    policy: MaskCopperPolicy,
+    nets: tuple[str, str],
+    exits: tuple[tuple[str, _PairEscape], ...],
+) -> int:
+    """Move the measured USB3 barrels together after checking copper and both mask films."""
     pcb = PCB.load(path)
-    fp = pcb.get_footprint("U2")
     protected = _protected_ids(pcb)
     locks = BoardItemLocks(pcb._sexp)
-    if (
-        fp is None
-        or fp.name != "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"
-        or fp.layer != "F.Cu"
-        or fp.rotation
-        or fp._sexp_node is None
-        or locks.is_locked(fp._sexp_node)
-        or fp.uuid.lower() in protected
-    ):
-        return 0
     tracks: list[Segment] = []
     vias: list[Via] = []
-    for escape in _BGA_RX2:
+    for ref, escape in exits:
+        footprint, pad_size = _USB3_PADS[ref]
+        fp = pcb.get_footprint(ref)
+        if (
+            fp is None
+            or fp.name != footprint
+            or fp.layer != "F.Cu"
+            or fp.rotation
+            or fp._sexp_node is None
+            or locks.is_locked(fp._sexp_node)
+            or fp.uuid.lower() in protected
+        ):
+            return 0
         pad = next((pad for pad in fp.pads if pad.number == escape.pad), None)
         if (
             pad is None
             or pad.net_name != escape.net
             or pad.type != "smd"
-            or pad.size != (0.45, 0.45)
+            or pad.size != pad_size
             or pad.shape != "rect"
             or pad.rotation
             or not {"F.Cu", "F.Mask"} <= set(pad.layers)
@@ -1680,11 +1782,11 @@ def _clear_bga_rx2(path: Path, rules: DesignRules, policy: MaskCopperPolicy) -> 
         vias.append(via)
     if not _copper_gap_ok(pcb, path, tracks, vias, rules):
         return 0
-    if not _within_project_skew_budget(pcb, path, _RX2_NETS):
+    if not _within_project_skew_budget(pcb, path, nets):
         return 0
-    if not _authored_rules_ok(pcb, path, tracks, vias, "U2 USB3 RX2"):
+    if not _authored_rules_ok(pcb, path, tracks, vias, nets[1]):
         return 0
-    with TemporaryDirectory(prefix="board06-rx2-mask-") as tmp:
+    with TemporaryDirectory(prefix="board06-usb3-mask-") as tmp:
         candidate = Path(tmp) / path.name
         pcb.save(candidate)
         copy_project_sidecars(path, candidate)
@@ -1705,7 +1807,8 @@ def _clear_bga_rx2(path: Path, rules: DesignRules, policy: MaskCopperPolicy) -> 
     ):
         return 0
     pcb.save(path)
-    print("   U2 USB3 RX2: moved the F5 and F6 barrels clear of the mask openings")
+    pads = ", ".join(f"{ref}/{escape.pad}" for ref, escape in exits)
+    print(f"   {nets[1][:-1]}: moved the {pads} barrels clear of the mask openings")
     return len(vias)
 
 
@@ -2291,7 +2394,9 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
         ),
     )
     edits += _clear_data_pair(path, rules, _RX2_EXITS, _RX2_NETS, 0.275, "USB3 RX2")
-    edits += _clear_bga_rx2(path, rules, request.policy)
+    edits += _clear_usb3_barrels(path, rules, request.policy, _RX2_NETS, _BGA_RX2)
+    edits += _clear_usb3_barrels(path, rules, request.policy, _TX1_NETS, _TX1_ESCAPES)
+    edits += _clear_usb3_barrels(path, rules, request.policy, _RX1_NETS, _RX1_ESCAPES)
     tx_nets = ("PCIE_TX+", "PCIE_TX-")
     edits += _clear_pcie_taper_pair(
         path,
