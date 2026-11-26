@@ -635,8 +635,12 @@ class DanglingCopperRule(DRCRule):
                 if (
                     point_segment_distance(other_end, start, end) <= half_width + _TOUCH_TOL_MM
                     and point_segment_distance(point_xy, start, end) > _TOUCH_TOL_MM
-                    and min(math.dist(point_xy, start), math.dist(point_xy, end))
-                    > half_width + reach
+                    # A cap at the spur root already accounts for that end.
+                    and not any(
+                        math.dist(point_xy, cap) <= half_width + reach
+                        and math.dist(other_end, cap) > _TOUCH_TOL_MM
+                        for cap in (start, end)
+                    )
                 ):
                     continue
             return True

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from kicad_tools.validate import DRCChecker
 from kicad_tools.validate.rules.dangling_copper import DanglingCopperRule
 
@@ -458,6 +460,46 @@ _ARC_BOARD = """(kicad_pcb (version 20240108) (generator "test")
 
 
 class TestEndToEndParsedBoard:
+    @pytest.mark.parametrize("split_trunk", [False, True])
+    @pytest.mark.parametrize("reverse_spur", [False, True])
+    @pytest.mark.parametrize("tip", [(11.9, 9.15), (12.0, 9.18)])
+    @pytest.mark.parametrize("contact", ["open", "pad", "cap"])
+    def test_short_spur_needs_independent_tip_contact(
+        self, tmp_path, split_trunk, reverse_spur, tip, contact
+    ):
+        from kicad_tools.schema.pcb import PCB
+
+        left, root, right = (6, 9), (12, 9), (19, 9)
+        segments = [(left, root), (root, right)] if split_trunk else [(left, right)]
+        segments.append((tip, root) if reverse_spur else (root, tip))
+        pads = [left, right]
+        if contact == "pad":
+            pads.append(tip)
+        elif contact == "cap":
+            # A separate track approaches within the two 0.1 mm cap radii.
+            far_end = (tip[0], 12)
+            segments.append(((tip[0], tip[1] + 0.18), far_end))
+            pads.append(far_end)
+
+        board = tmp_path / "spur.kicad_pcb"
+        parts = [
+            '(kicad_pcb (version 20240108) (generator "test")',
+            '(layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 1 "SIG")',
+        ]
+        for (x1, y1), (x2, y2) in segments:
+            parts.append(
+                f'(segment (start {x1} {y1}) (end {x2} {y2}) (width 0.2) (layer "F.Cu") (net 1))'
+            )
+        for x, y in pads:
+            parts.append(
+                f'(footprint "Test:Pad" (layer "F.Cu") (at {x} {y}) '
+                '(pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "SIG")))'
+            )
+        board.write_text("\n".join([*parts, ")"]))
+        checker = DRCChecker(PCB.load(str(board)), manufacturer="jlcpcb", layers=2)
+        findings = _by_rule(checker.check_dangling_copper(), "track_dangling")
+        assert [v.location for v in findings] == ([tip] if contact == "open" else [])
+
     def test_arc_terminates_track_ends_and_stubs_flagged(self, tmp_path):
         """On a parsed board: a segment-arc-segment chain closed through
         two vias is clean (the arc terminates both adjacent segment
