@@ -538,7 +538,7 @@ def _purchasing_row(row: Any) -> dict[str, Any]:
 
 
 def purchasing_export_digest(document: dict[str, Any]) -> str:
-    """Bind a manifest-free export to its original purchasing rows."""
+    """Bind an export to its original purchasing rows."""
     return _digest(_json(document))
 
 
@@ -633,6 +633,8 @@ def prepare_submission(
     ):
         raise SubmissionError("Select exactly one distinct listed artifact per role")
     purchasing_source = _purchasing_source(purchasing_path, allowed)
+    if purchasing_source in artifacts.values():
+        raise SubmissionError("Purchasing list cannot serve as a fabrication artifact")
     names = dict(_DEFAULT_NAMES if output_names is None else output_names)
     if set(names) != _ROLES:
         raise SubmissionError("Output names must specify all artifact roles")

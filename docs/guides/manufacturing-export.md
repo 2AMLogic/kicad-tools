@@ -512,9 +512,10 @@ An invalid row (a zero quantity, a selected part without a part number, a
 pending row that also names one) fails the export and names the row, so a list
 that cannot be trusted never ships. Removing the declaration or setting it to
 an empty list withdraws the earlier export. An unreadable spec on a rerun
-preserves the last exported list and reports an error. The exporter checks
-the previous manifest before replacing or withdrawing a list. When the
-manifest is disabled, the list carries a checksum of its original rows.
+preserves the last exported list and reports an error. Each generated list carries a checksum of its original rows, so the exporter
+can recognize it after the manifest is renamed or removed. For an older list
+without that checksum, the exporter checks the configured manifest. If neither
+identifies a valid purchasing list, export asks you to move it aside.
 
 A buyer can keep an independently created `purchasing.json` in the output
 directory when the project declares no purchasing rows. If a declared list

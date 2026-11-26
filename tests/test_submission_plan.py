@@ -1135,6 +1135,18 @@ def test_purchasing_list_is_verified_scaled_and_bound_into_the_plan(inputs, tmp_
     assert purchase(inputs, tmp_path, "again") == one
 
 
+@pytest.mark.parametrize("role", ["gerber", "bom", "cpl"])
+@pytest.mark.parametrize("path", ["purchasing.json", "accessories/list.json"])
+def test_purchasing_source_cannot_be_uploaded_for_any_role(inputs, role, path):
+    add_purchasing(inputs, path=path)
+    inputs["artifacts"][role] = path
+    if path != "purchasing.json":
+        inputs["purchasing_path"] = path
+    with pytest.raises(sp.SubmissionError, match="fabrication artifact"):
+        sp.prepare_submission(**inputs)
+    assert not inputs["destination"].exists()
+
+
 def test_edited_purchasing_file_fails_its_checksum(inputs, tmp_path):
     target = add_purchasing(inputs)
     target.write_bytes(target.read_bytes().replace(b"SYN-COVER-1", b"SYN-COVER-9"))

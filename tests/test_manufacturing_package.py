@@ -2732,6 +2732,15 @@ class TestPurchasingList:
     def _manifest(result):
         return json.loads(result.manifest_path.read_text())["files"]
 
+    @staticmethod
+    def _read_exported_list(path):
+        from kicad_tools.export.submission_plan import purchasing_export_digest
+
+        document = json.loads(path.read_bytes())
+        checksum = document.pop("kct_export_sha256")
+        assert checksum == purchasing_export_digest(document)
+        return document
+
     def test_export_stages_the_per_board_list(self, tmp_path, monkeypatch, local_symbol_project):
         self._write_spec(local_symbol_project, FUSE_PURCHASING)
         out = tmp_path / "out"
@@ -2740,7 +2749,7 @@ class TestPurchasingList:
         assert result.success, result.errors
         path = out / "purchasing.json"
         assert result.purchasing_path == path
-        assert json.loads(path.read_text(encoding="utf-8")) == FUSE_PER_BOARD
+        assert self._read_exported_list(path) == FUSE_PER_BOARD
         assert path in result.all_files
         assert self._manifest(result)["purchasing.json"] == {
             "sha256": _sha256_file(path),
@@ -2968,6 +2977,55 @@ class TestPurchasingList:
         assert not refused.success and "purchasing.json" in str(refused.errors)
         assert path.read_text() == data
 
+    @pytest.mark.parametrize("field", ["bom_filename", "pnp_filename", "project_zip_name"])
+    def test_external_manifest_key_collision_preserves_outputs(
+        self, tmp_path, monkeypatch, local_symbol_project, field
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "bundle"
+        external = tmp_path / "external" / "purchasing.json"
+        external.parent.mkdir()
+        external.write_bytes(b"previous")
+        _, result = self._export(monkeypatch, local_symbol_project, out, **{field: str(external)})
+        assert not result.success and field in str(result.errors)
+        assert not out.exists() and external.read_bytes() == b"previous"
+
+    @pytest.mark.parametrize(
+        "old,new",
+        [
+            ("manifest.json", "release.json"),
+            ("release.json", "manifest.json"),
+            ("manifest.json", "manifest.json"),
+        ],
+    )
+    def test_withdraw_after_manifest_rename_or_removal(
+        self, tmp_path, monkeypatch, local_symbol_project, old, new
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "bundle"
+        _, first = self._export(monkeypatch, local_symbol_project, out, manifest_name=old)
+        assert first.success, first.errors
+        if old == new:
+            first.manifest_path.unlink()
+        self._write_spec(local_symbol_project)
+        _, removed = self._export(monkeypatch, local_symbol_project, out, manifest_name=new)
+        assert removed.success, removed.errors
+        assert not (out / "purchasing.json").exists()
+        assert "purchasing.json" not in self._manifest(removed)
+
+    def test_unmarked_list_without_ownership_evidence_is_preserved(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        self._write_spec(local_symbol_project)
+        out = tmp_path / "bundle"
+        out.mkdir()
+        buyer = out / "purchasing.json"
+        original = json.dumps(FUSE_PER_BOARD).encode()
+        buyer.write_bytes(original)
+        _, result = self._export(monkeypatch, local_symbol_project, out)
+        assert not result.success and "ownership" in str(result.errors)
+        assert buyer.read_bytes() == original and list(out.iterdir()) == [buyer]
+
     @pytest.mark.parametrize("first_manifest", [False, True])
     def test_purchasing_rerun_without_a_manifest(
         self, tmp_path, monkeypatch, local_symbol_project, first_manifest
@@ -3047,7 +3105,7 @@ class TestPurchasingList:
 
         assert absent.success and disabled.success and found.success
         assert absent.purchasing_path is None and disabled.purchasing_path is None
-        assert json.loads(found.purchasing_path.read_text(encoding="utf-8")) == FUSE_PER_BOARD
+        assert self._read_exported_list(found.purchasing_path) == FUSE_PER_BOARD
 
     def test_dry_run_lists_the_file_without_writing(
         self, tmp_path, monkeypatch, local_symbol_project
@@ -3117,7 +3175,7 @@ class TestPurchasingList:
         )
         assert [row[0] for row in rows[1:]] == ["R1", "R2"]
         assert verify_manifest(treated.manifest_path) == []
-        assert json.loads(treated.purchasing_path.read_text(encoding="utf-8")) == {
+        assert self._read_exported_list(treated.purchasing_path) == {
             "schema_version": 1,
             "items": [
                 {
