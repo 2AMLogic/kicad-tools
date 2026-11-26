@@ -76,4 +76,5 @@ def drc_results_to_report(
         created_at=None,
         pcb_name=pcb_name,
         violations=violations,
+        mask_copper_assessments=list(results.mask_copper_assessments),
     )

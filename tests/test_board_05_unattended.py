@@ -296,6 +296,7 @@ def test_nightly_gate_rejects_failed_mask_detection_and_accepts_completed_check(
     from unittest.mock import Mock
 
     from kicad_tools.drc import DRCReport
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
 
     original = b'(kicad_pcb (version 20240108) (generator "test") (net 0 ""))'
     failures = []
@@ -323,7 +324,12 @@ def test_nightly_gate_rejects_failed_mask_detection_and_accepts_completed_check(
     monkeypatch.setattr("kicad_tools.cli.pcb_add_fiducials.run_add_fiducials", lambda *a, **kw: 0)
     monkeypatch.setattr("kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **kw: 0)
     monkeypatch.setattr("kicad_tools.cli.place_silk_refs_cmd.main", lambda argv: 0)
-    report = DRCReport(source_file="", created_at=None, pcb_name="", violations=[])
+    report = DRCReport(
+        source_file="",
+        created_at=None,
+        pcb_name="",
+        mask_copper_assessments=[MaskCopperAssessment(coverage="complete")],
+    )
     for assessment, expected_code in [(None, 1), (report, 0)]:
         monkeypatch.setattr(
             "kicad_tools.cli.fix_drc_cmd._run_python_drc", lambda *a, **kw: assessment

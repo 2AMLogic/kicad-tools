@@ -152,10 +152,15 @@ def _guard_mask(args: argparse.Namespace) -> bool:
     return args.only == "mask-copper" and bool(getattr(args, "no_new_warnings", False))
 
 
-def _mask_assessment_missing(report: DRCReport | None) -> bool:
-    return report is None or any(
-        v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in report.violations
-    )
+def _mask_assessment_missing(report: DRCReport | None, *, require_coverage: bool = True) -> bool:
+    if report is None:
+        return True
+    if require_coverage and (
+        not report.mask_copper_assessments
+        or any(a.coverage != "complete" for a in report.mask_copper_assessments)
+    ):
+        return True
+    return any(v.type == ViolationType.MASK_TO_COPPER_INCOMPLETE for v in report.violations)
 
 
 def _mask_in_scope(args: argparse.Namespace) -> bool:
@@ -494,6 +499,12 @@ Examples:
     # ``kct check``; an explicit flag still wins.
     if args.layers is None:
         args.layers = _board_layer_count(pcb_path)
+
+    if _guard_mask(args):
+        request = default_request_for_manufacturer(args.mfr)
+        if request is None or request.policy is None:
+            print(f"Error: no mask assessment policy for {args.mfr}", file=sys.stderr)
+            return _MASK_ASSESSMENT_FAILED
 
     # Get initial DRC report (detection only -- does not mutate the board).
     # ``mask-copper`` and ``copper-gap`` findings only exist in ``kct check``'s
@@ -1792,7 +1803,9 @@ def _run_mask_pass(
                     guard_warnings=guard_baseline is not None,
                     elbow_gaps=final_gaps,
                 )
-                if final is None or _mask_assessment_missing(final):
+                if final is None or _mask_assessment_missing(
+                    final, require_coverage=guard_baseline is not None
+                ):
                     raise RuntimeError("could not verify mask openings on the final saved board")
                 remaining = {finding_key(v) for v in mask_copper_violations(final.violations)}
                 new_keys = _new_mask_keys(
@@ -1927,7 +1940,7 @@ def _verify_mask_actions(
         guard_warnings=guard_baseline is not None,
         elbow_gaps=gaps,
     )
-    if _mask_assessment_missing(after):
+    if _mask_assessment_missing(after, require_coverage=guard_baseline is not None):
         if guard_baseline is not None:
             raise _MaskAssessmentFailed(
                 "could not complete the mask assessment of the proposed board"

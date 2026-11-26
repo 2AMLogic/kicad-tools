@@ -28,6 +28,7 @@ from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 from kicad_tools.router.quantize import _is_quantum_aligned
 from kicad_tools.sexp import parse_file
+from kicad_tools.validate.mask_copper import MaskCopperAssessment
 
 PAD = "pad-r1-1"
 
@@ -237,6 +238,7 @@ def _report(*violations: DRCViolation) -> DRCReport:
         created_at=None,
         pcb_name="b.kicad_pcb",
         violations=list(violations),
+        mask_copper_assessments=[MaskCopperAssessment(coverage="complete")],
     )
 
 
@@ -518,6 +520,72 @@ def _pour_slot_warning(x: float = 99.0, y: float = 100.3) -> DRCViolation:
         items=["Trace@F.Cu:w0.2:95/100.3~100/100"],
         nets=["N1", "N2"],
     )
+
+
+@pytest.mark.parametrize(
+    ("manufacturer", "coverage", "target", "expected_code"),
+    [
+        ("pcbway", [], True, 4),
+        ("pcbway", ["complete"], True, 4),
+        ("jlcpcb", [], False, 4),
+        ("jlcpcb", ["complete", "incomplete"], False, 4),
+        ("jlcpcb", ["not_run"], False, 4),
+        ("jlcpcb", ["complete"], False, 0),
+    ],
+)
+def test_guard_requires_mask_coverage(tmp_path, manufacturer, coverage, target, expected_code):
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    finding = _finding("trk-a")
+    report = tmp_path / "check.json"
+    report.write_text(
+        json.dumps(
+            {
+                "manufacturer": "jlcpcb",
+                "violations": [
+                    {
+                        "rule_id": finding.type_str,
+                        "severity": "error",
+                        "message": finding.message,
+                        "items": finding.items,
+                        "location": [100.0, 100.3],
+                        "layer": "F.Cu",
+                    }
+                ]
+                if target
+                else [],
+                "mask_copper_assessments": [
+                    MaskCopperAssessment(coverage=status).to_dict() for status in coverage
+                ],
+            }
+        )
+    )
+    code = fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--transactional",
+            "--mfr",
+            manufacturer,
+            "--max-displacement",
+            "1.0",
+            "--drc-report",
+            str(report),
+        ]
+    )
+    assert code == expected_code
+    assert board.read_bytes() == original
+
+
+def test_live_report_preserves_mask_coverage():
+    from kicad_tools.drc.compat import drc_results_to_report
+    from kicad_tools.validate.violations import DRCResults
+
+    assessment = MaskCopperAssessment(coverage="complete")
+    results = DRCResults(mask_copper_assessments=[assessment])
+    assert drc_results_to_report(results).mask_copper_assessments == [assessment]
 
 
 def test_a_new_warning_reverts_the_move_only_under_no_new_warnings(tmp_path, monkeypatch, capsys):
