@@ -228,9 +228,9 @@ class WiredLeg:
     width: float
     gauge: int
     anchor_arc: tuple[float, float] | None = None
+    anchor_pad_ids: tuple[int, ...] = ()
     # The actual holes accepted by the per-leg check, in polyline order.
     anchors: tuple[_Anchor, ...] = field(default=(), compare=False)
-    anchor_pad_ids: tuple[int, ...] = ()
 
 
 class ReinforcementIncompleteRule(DRCRule):
