@@ -55,9 +55,10 @@ class SymbolDef:
     @cached_property
     def datasheet(self) -> str:
         """Datasheet in the resolved library symbol, including inherited properties."""
+        definitions: tuple[SExp | None, ...]
         if self._sexp_node is None:
             # Registry and legacy definitions carry raw parent/child S-expressions.
-            definitions = reversed(self.to_sexp_nodes())
+            definitions = tuple(reversed(self.to_sexp_nodes()))
         else:
             definitions = (self._sexp_node, self._parent_node)
         for definition in definitions:
