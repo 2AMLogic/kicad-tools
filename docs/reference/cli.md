@@ -1868,9 +1868,11 @@ that refers to it describes the same physical case.
   one shared by several declarations, lists a path twice, or includes a path
   that is `unresolved` or `ambiguous` is an `error` (`Operating case ...
   cannot be evaluated`) and yields no finding from a partial total. A
-  malformed case (a contribution without a numeric `current_a`, a repeated
-  case name, an unknown `pulse_overlap`) is rejected when the sidecar loads,
-  like any other malformed path.
+  contribution whose `current_a` is zero or non-finite, and a case that
+  lists no contributions, are that same `error`; neither is silently
+  skipped. A malformed case (a contribution without a numeric `current_a`,
+  a repeated case name, an unknown `pulse_overlap`) is rejected when the
+  sidecar loads, like any other malformed path.
 - **What a case reports.** Shared copper that cannot carry the combined
   current is an `error` naming the case, the contributing paths with their
   signed currents, the combined current and the location. A shared layer
