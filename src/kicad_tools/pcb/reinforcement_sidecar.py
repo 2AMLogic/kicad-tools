@@ -40,11 +40,56 @@ def edit_seed_record(input_board: Path, output_board: Path) -> Path:
 
     Through a board symlink the unsaved name resolves to the alias target's
     record. That is the saved PCB's inventory only when the alias is the board
-    being edited; a distinct input leaves the output name's own pairing.
+    being edited. For a distinct input the saved PCB is the edited input, so it
+    starts from the input's own inventory, never the alias target's or a record
+    that happens to sit beside the alias name.
     """
     if output_board.is_symlink() and not _same_board(input_board, output_board):
-        return output_board.with_name(output_board.name + SIDECAR_SUFFIX)
+        return sidecar_path(input_board)
     return sidecar_path(output_board)
+
+
+def alias_export_conflict(
+    input_board: Path, output_board: Path, will_save: bool, writes_records: bool
+) -> str | None:
+    """Why an export through a board symlink must be refused, or ``None``.
+
+    Checked before anything is written. ``output_board`` being a symlink to a
+    board other than ``input_board`` means the wire list could land in the
+    other board's record (Issue #10250):
+
+    * nothing is saved but wire records would be written: they would describe
+      a PCB that is not written and pair with the alias target;
+    * a PCB is saved and a record already sits beside the alias name with a
+      different inventory than the edited input's: the saved PCB cannot have
+      both.
+    """
+    if not output_board.is_symlink() or _same_board(input_board, output_board):
+        return None
+    if not will_save:
+        if writes_records:
+            return (
+                f"{output_board} is a symlink to a different board and nothing would be "
+                "saved, so its wire records cannot be paired with a PCB; refusing before "
+                "writing. Point -o at a plain path or at the input board."
+            )
+        return None
+    beside = output_board.with_name(output_board.name + SIDECAR_SUFFIX)
+    if not os.path.lexists(beside):
+        return None
+    seed = sidecar_path(input_board)
+    try:
+        if beside.resolve() == seed.resolve():
+            return None
+        if seed.is_file() and beside.is_file() and beside.read_bytes() == seed.read_bytes():
+            return None
+    except OSError:
+        pass
+    return (
+        f"{beside} already holds a different wire list than the input board's; saving "
+        f"through the symlink {output_board} would pair the wrong inventory with the "
+        "saved PCB. Move or remove it, or point -o at a plain path."
+    )
 
 
 def _same_board(a: Path, b: Path) -> bool:

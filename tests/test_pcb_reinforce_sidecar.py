@@ -479,3 +479,68 @@ def test_new_detached_record_never_widens_the_creation_mask(tmp_path):
     finally:
         os.umask(old)
     assert sidecar_path(alias).stat().st_mode & 0o777 == 0o600
+
+
+def _loop_pcb(net: str) -> PCB:
+    """A closed rectangular loop: reinforce places no anchor, one wire is unhandled."""
+    pcb = PCB.create(width=200, height=100, center=False)
+    pts = [(20.0, 20.0), (80.0, 20.0), (80.0, 60.0), (20.0, 60.0), (20.0, 20.0)]
+    for a, b in zip(pts, pts[1:], strict=False):
+        pcb.add_trace(a, b, width=2.0, layer="F.Cu", net=net)
+    return pcb
+
+
+def test_zero_anchor_export_to_foreign_symlink_is_refused_untouched(tmp_path, capsys):
+    """Issue #10250 review: no wire record may reach another board's list."""
+    src = tmp_path / "src.kicad_pcb"
+    _loop_pcb("FRESH").save(src)
+    other = tmp_path / "other.kicad_pcb"
+    _two_net_pcb().save(other)
+    assert run_pcb_command(_args(other, "NET_B")) == 0
+    other_pcb, other_record = other.read_bytes(), sidecar_path(other).read_bytes()
+    out = tmp_path / "out.kicad_pcb"
+    out.symlink_to(other)
+    rc = run_pcb_command(_args(src, "FRESH", output=str(out), all_runs=True, format="json"))
+    assert rc == 1
+    assert out.is_symlink()
+    assert other.read_bytes() == other_pcb
+    assert sidecar_path(other).read_bytes() == other_record
+    assert not out.with_name(out.name + ".reinforcement.json").exists()
+    assert "symlink" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("op", ["add", "replace", "clear"])
+def test_conflicting_record_beside_alias_is_refused_before_any_write(tmp_path, op):
+    src = tmp_path / "src.kicad_pcb"
+    _two_net_pcb().save(src)
+    assert run_pcb_command(_args(src, "NET_B")) == 0
+    other = tmp_path / "other.kicad_pcb"
+    _two_net_pcb().save(other)
+    assert run_pcb_command(_args(other, "NET_A")) == 0
+    legacy = sidecar_path(other).read_bytes()
+    out = tmp_path / "out.kicad_pcb"
+    out.symlink_to(other)
+    beside = out.with_name(out.name + ".reinforcement.json")
+    beside.write_bytes(legacy)
+    snap = (src.read_bytes(), other.read_bytes(), sidecar_path(src).read_bytes())
+    kw = {"replace": {"replace": True}, "clear": {"clear": True}}.get(op, {})
+    assert run_pcb_command(_args(src, "NET_B", output=str(out), **kw)) == 1
+    assert out.is_symlink()
+    assert beside.read_bytes() == legacy
+    assert (src.read_bytes(), other.read_bytes(), sidecar_path(src).read_bytes()) == snap
+
+
+def test_distinct_output_symlink_seeds_from_the_edited_inputs_inventory(tmp_path):
+    """An unrelated input wire is preserved; the alias target's wire is not."""
+    src = tmp_path / "src.kicad_pcb"
+    _two_net_pcb().save(src)
+    assert run_pcb_command(_args(src, "NET_B")) == 0
+    other = tmp_path / "other.kicad_pcb"
+    _two_net_pcb().save(other)
+    assert run_pcb_command(_args(other, "NET_A")) == 0
+    out = tmp_path / "out.kicad_pcb"
+    out.symlink_to(other)
+    assert run_pcb_command(_args(src, "NET_A", output=str(out))) == 0
+    nets = {w["net"] for w in load_wires(sidecar_path(out))}
+    assert nets == {"NET_A", "NET_B"}
+    assert len(load_wires(sidecar_path(out))) == 2

@@ -1494,12 +1494,17 @@ def _finish_reinforce_clear(
 
     if not dry_run and _cleared_anything(clear_outcome):
         from kicad_tools.pcb.reinforcement_sidecar import (
+            alias_export_conflict,
             carry_record,
             edit_seed_record,
             sidecar_path,
         )
 
         # The inventory of the PCB being edited, not of whatever the output name resolves to.
+        conflict = alias_export_conflict(pcb_path, output_path, True, False)
+        if conflict:
+            print(f"Error: {conflict}", file=sys.stderr)
+            return 1
         seed_record = edit_seed_record(pcb_path, output_path)
         was_alias = output_path.is_symlink()
         try:
@@ -2017,6 +2022,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         or outcome.copies
         or (clear_outcome is not None and _cleared_anything(clear_outcome))
     )
+    from kicad_tools.pcb.reinforcement_sidecar import alias_export_conflict, build_wire_records
+
+    wire_records = build_wire_records(outcome, origin_x, origin_y)
+    if not dry_run:
+        conflict = alias_export_conflict(pcb_path, output_path, will_save, bool(wire_records))
+        if conflict:
+            print(f"Error: {conflict}", file=sys.stderr)
+            return 1
     seed_record = edit_seed_record(pcb_path, output_path)
     was_alias = output_path.is_symlink()
     record = saved_record_path(output_path, will_save)
@@ -2048,9 +2061,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 return 1
 
     # Issue #8744: wire list sidecar (ends mode only; never on a dry run).
-    from kicad_tools.pcb.reinforcement_sidecar import build_wire_records, write_sidecar
+    from kicad_tools.pcb.reinforcement_sidecar import write_sidecar
 
-    wire_records = build_wire_records(outcome, origin_x, origin_y)
     result["wires"] = wire_records
     result["wire_sidecar"] = None
     if not dry_run and wire_records:
