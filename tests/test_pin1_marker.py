@@ -17,11 +17,13 @@ Fixture layout (sheet-absolute, all front side):
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.cli import check_cmd
+from kicad_tools.geometry.courtyard import _fp_transform
 from kicad_tools.schema.pcb import (
     PCB,
     BoardGraphic,
@@ -693,3 +695,88 @@ class TestCLI:
         out = capsys.readouterr().out
         assert rc == 0
         assert "WAIVED" in out
+
+
+@pytest.mark.parametrize("side", ["F", "B"])
+@pytest.mark.parametrize(
+    "case", ["stock", "opposite", "loose", "removed", "board_ink", "wrong_face", "covered"]
+)
+def test_large_radial_positive_mark(side, case):
+    # KiCad CP_Radial_D16.0mm_P7.50mm sign and pad positions.
+    silk = f"{side}.SilkS"
+    mark_layer = ("B.SilkS" if side == "F" else "F.SilkS") if case == "wrong_face" else silk
+    x = 11.889491 if case == "opposite" else -4.139491
+    y = -4.555
+    body_radius = 10.5 if case == "covered" else 8
+    # The first stroke of the negative half's hatch is a diameter midway
+    # between the two lands. The rest of the hatch runs toward pad 2.
+    hatch = []
+    for index in range(202):
+        offset = index * 0.04
+        half_height = math.sqrt(8.08**2 - offset**2)
+        hatch.append(
+            _g(
+                "line",
+                layer=silk,
+                start=(3.75 + offset, -half_height),
+                end=(3.75 + offset, half_height),
+            )
+        )
+    graphics = [
+        *hatch,
+        _g("circle", layer=f"{side}.Fab", center=(3.75, 0), end=(3.75 + body_radius, 0)),
+        _g("circle", layer=silk, center=(3.75, 0), end=(11.87, 0)),
+        _g("line", layer=mark_layer, start=(x - 0.8, y), end=(x + 0.8, y)),
+        _g("line", layer=mark_layer, start=(x, y - 0.8), end=(x, y + 0.8)),
+    ]
+    if case == "loose":
+        graphics.pop()
+    elif case == "removed":
+        del graphics[-2:]
+    pads = [
+        Pad(
+            number=num,
+            type="thru_hole",
+            shape=shape,
+            position=(px, 0),
+            rotation=37,
+            size=(2.4, 2.4),
+            drill=1.2,
+            layers=["*.Cu", "*.Mask"],
+        )
+        for num, shape, px in (("1", "roundrect", 0), ("2", "circle", 7.5))
+    ]
+    fp = _fp(
+        name="Capacitor_THT:CP_Radial",
+        reference="C1",
+        pads=pads,
+        graphics=graphics,
+        layer=f"{side}.Cu",
+        rotation=37,
+    )
+    board_ink = []
+    if case == "board_ink":
+        transform = _fp_transform(fp)
+        for arm in graphics[-2:]:
+            board_ink.append(
+                BoardGraphic(
+                    graphic_type="line",
+                    layer=silk,
+                    stroke_width=arm.stroke_width,
+                    start=transform(arm.start),
+                    end=transform(arm.end),
+                )
+            )
+        del graphics[-2:]
+    rule = Pin1MarkerRule()
+    findings = rule.check(_pcb(fp, board_graphics=board_ink)).violations
+    if case == "stock":
+        assert not findings
+        assert rule.marker_graphic_indices(fp, list(reversed(graphics))) == {0, 1}
+        assert not rule.marker_graphic_indices(fp, graphics[:-1])
+    else:
+        expected = (
+            PIN1_MARKER_OBSCURED_RULE_ID if case == "covered" else PIN1_MARKER_MISSING_RULE_ID
+        )
+        assert [v.rule_id for v in findings] == [expected]
+        assert not rule.marker_graphic_indices(fp, graphics)
