@@ -100,6 +100,46 @@ def test_project_rewrite_reported_when_dru_write_fails(tmp_path: Path) -> None:
     assert any(f"Export modified {pro.name}" in w for w in result.warnings)
 
 
+def test_unloadable_dru_refusal_leaves_project_intact(tmp_path: Path) -> None:
+    import pytest
+
+    from kicad_tools.manufacturers.dru_generator import DRUUnloadableError
+
+    pcb = _stage(tmp_path)
+    _export(pcb)
+    pro, dru = pcb.with_suffix(".kicad_pro"), pcb.with_suffix(".kicad_dru")
+    data = json.loads(pro.read_text())
+    data["board"]["design_settings"]["rule_severities"]["lib_footprint_mismatch"] = "warning"
+    pro.write_text(json.dumps(data))
+    dru.write_text(dru.read_text() + "; authored comment\n")
+    pro_before, dru_before = pro.read_bytes(), dru.read_bytes()
+
+    with pytest.raises(DRUUnloadableError):
+        _export(pcb)
+    assert pro.read_bytes() == pro_before
+    assert dru.read_bytes() == dru_before
+
+
+def test_unreadable_project_replacement_is_reported(tmp_path: Path) -> None:
+    import os
+
+    import pytest
+
+    pcb = _stage(tmp_path)
+    pro = pcb.with_suffix(".kicad_pro")
+    pro.write_text("{}")
+    pro.chmod(0o200)
+    try:
+        if os.access(pro, os.R_OK):
+            pytest.skip("write-only file is still readable (running as root)")
+        _, result = _export(pcb)
+    finally:
+        pro.chmod(0o644)
+    assert any(
+        f"Export replaced {pro.name}" in w and "could not be read" in w for w in result.warnings
+    )
+
+
 def test_waived_net_gets_no_rule(tmp_path: Path) -> None:
     pcb = _stage(tmp_path)
     baseline, _ = _export(pcb)

@@ -1228,6 +1228,7 @@ class ManufacturingPackage:
         self.pcb_path = Path(pcb_path)
         # Live board path while ``pcb_path`` points at a staged copy (#10091).
         self._live_pcb_path: Path | None = None
+        self._pending_mutation_notices: list[str] = []
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.config = config or ManufacturingConfig()
@@ -1298,6 +1299,7 @@ class ManufacturingPackage:
         # runs them on a scratch copy and publishes only on success, so a
         # refused repair leaves the board and its siblings untouched (#10091).
         staged: _StagedSource | None = None
+        self._pending_mutation_notices = []
         live_pcb = self.pcb_path
         if (
             self.config.emit_drc_constraints
@@ -1343,6 +1345,8 @@ class ManufacturingPackage:
                         live_pcb.with_name(Path(os.path.relpath(q, staged_dir)).name)
                         for q in result.drc_constraint_paths
                     ]
+                    # The staged changes are now the live files: report them.
+                    result.warnings.extend(self._pending_mutation_notices)
             finally:
                 staged.close()
         if not proceed:
@@ -2115,18 +2119,31 @@ class ManufacturingPackage:
 
         rules = self._apply_stackup_copper(rules)
 
-        def existing_bytes(path: Path) -> bytes | None:
+        unreadable = object()
+
+        def existing_bytes(path: Path):
             # Bytes, not text: read_text() normalizes line endings and would
-            # hide a rewrite that only changed them.
+            # hide a rewrite that only changed them. A file that exists but
+            # cannot be read is not "absent": the writer regenerates it.
             try:
                 return path.read_bytes()
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return unreadable if path.exists() else None
+
+        def stat_sig(path: Path):
+            try:
+                st = path.stat()
             except OSError:
                 return None
+            return (st.st_mtime_ns, st.st_size)
 
         dru_path = Path(self.pcb_path).with_suffix(".kicad_dru")
         pro_path = Path(self.pcb_path).with_suffix(".kicad_pro")
         dru_bytes_before = existing_bytes(dru_path)
         pro_bytes_before = existing_bytes(pro_path)
+        sig_before = {dru_path: stat_sig(dru_path), pro_path: stat_sig(pro_path)}
         dru_before = self._ampacity_block(dru_path)
 
         max_width_mm: float | None = None
@@ -2138,7 +2155,7 @@ class ManufacturingPackage:
 
             if has_designer_clearance_rule(
                 dru_bytes_before.decode("utf-8", errors="replace")
-                if dru_bytes_before is not None
+                if isinstance(dru_bytes_before, bytes)
                 else None
             ):
                 result.warnings.append(
@@ -2167,21 +2184,42 @@ class ManufacturingPackage:
         # #8612: the designer owns these files; say so whenever export rewrote
         # one. Runs on the write-error path too: the project is saved before
         # the DRU, so a failed DRU write can still have changed the project.
+        # Notices from a scratch copy (named-stackup staging) are held back
+        # until the staged files are published to the live ones.
+        deferred = self._live_pcb_path is not None
+        notes: list[str] = []
+
+        def note(text: str, *, warn: bool = False) -> None:
+            (logger.warning if warn else logger.info)(text)
+            notes.append(text)
+
         def report_rewrites() -> None:
             for path, before, reason in (
                 (dru_path, dru_bytes_before, "generated DRC rules"),
                 (pro_path, pro_bytes_before, "project DRC settings"),
             ):
                 after = existing_bytes(path)
-                if before is not None and after is not None and before != after:
-                    note = f"Export modified {path.name} ({reason})."
-                    if path == pro_path:
-                        note += (
-                            f" Re-run `kicad-cli pcb drc` on {Path(self.pcb_path).name} "
-                            "with the packaged project settings."
-                        )
-                    logger.info(note)
-                    result.warnings.append(note)
+                if before is unreadable and stat_sig(path) not in (None, sig_before[path]):
+                    msg = (
+                        f"Export replaced {path.name} ({reason}); its prior contents "
+                        "could not be read, so the changes could not be compared."
+                    )
+                elif isinstance(before, bytes) and isinstance(after, bytes) and before != after:
+                    msg = f"Export modified {path.name} ({reason})."
+                else:
+                    continue
+                if path == pro_path:
+                    msg += (
+                        f" Re-run `kicad-cli pcb drc` on {Path(self.pcb_path).name} "
+                        "with the packaged project settings."
+                    )
+                note(msg)
+
+        def flush_notes() -> None:
+            if deferred:
+                self._pending_mutation_notices.extend(notes)
+            else:
+                result.warnings.extend(notes)
 
         try:
             written = write_drc_constraints(
@@ -2197,6 +2235,7 @@ class ManufacturingPackage:
             logger.warning("Could not write DRC-constraint files: %s", e)
             result.warnings.append(f"Could not write DRC constraints: {e}")
             report_rewrites()
+            flush_notes()
             return
 
         result.drc_constraint_paths = written
@@ -2210,10 +2249,10 @@ class ManufacturingPackage:
                 "sign-off DRC did not run against them. Re-run "
                 "`kicad-cli pcb drc` against the shipped .kicad_dru."
             )
-            logger.warning(msg)
-            result.warnings.append(msg)
+            note(msg, warn=True)
 
         report_rewrites()
+        flush_notes()
 
     def _dry_run_write_drc_constraints(
         self,

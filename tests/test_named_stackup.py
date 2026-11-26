@@ -513,6 +513,8 @@ def test_linkless_refusal_restores_authored_sidecars(tmp_path, monkeypatch):
     assert "Silk legalisation pass could not run" in result.errors[-1]
     assert pro.read_bytes() == pro_before
     assert dru.read_bytes() == dru_before
+    # #10284: a discarded scratch copy must not be reported as a change.
+    assert not [w for w in result.warnings if "Export modified" in w]
 
 
 @pytest.mark.skipif(not has_shapely(), reason="silk pass needs shapely")
