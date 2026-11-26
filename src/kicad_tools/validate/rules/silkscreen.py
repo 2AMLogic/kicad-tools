@@ -1142,18 +1142,35 @@ def _pad_aperture_geometry(
     return aperture
 
 
-def _via_aperture_geometry(via: Via, min_mask_clearance: float) -> _Geometry:
+def _board_mask_margin_or(board_margin: float | None, declared: bool, fallback: float) -> float:
+    """The margin every opening is expanded by when nothing local applies.
+
+    The board's ``pad_to_mask_clearance`` when it declares a finite one, else
+    *fallback* -- the manufacturer profile's
+    ``min_solder_mask_clearance_mm``.  KiCad plots a bare opening when the
+    board declares nothing (measured for pads and untented vias alike on the
+    pinned KiCad 10.0.6 image, #10384), which is tighter than a profile will
+    hold.  Both aperture iterators resolve through this one function, so the
+    pad and via sides cannot size their openings by two different rules again.
+    """
+    if board_margin is None or not declared:
+        return fallback
+    return board_margin
+
+
+def _via_aperture_geometry(via: Via, mask_margin: float) -> _Geometry:
     """Build a shapely polygon for an untented via's solder-mask opening.
 
-    Aperture = via annular copper (diameter ``via.size``) expanded by the
-    profile's mask margin.  Approximated as an axis-aligned box to
-    first-order-match :func:`_pad_aperture_geometry`'s convention (a circle
-    inscribes the box, so this slightly over-approximates the corners --
-    consistent with the pad/text AABB model used throughout this module).
+    Aperture = via annular copper (diameter ``via.size``) expanded by
+    *mask_margin*, the effective board margin :func:`_iter_via_apertures`
+    resolves.  Approximated as an axis-aligned box to first-order-match
+    :func:`_pad_aperture_geometry`'s convention (a circle inscribes the box, so
+    this slightly over-approximates the corners -- consistent with the
+    pad/text AABB model used throughout this module).
     """
     from shapely.geometry import box
 
-    d = via.size + 2.0 * min_mask_clearance
+    d = via.size + 2.0 * mask_margin
     cx, cy = via.position
     return box(cx - d / 2.0, cy - d / 2.0, cx + d / 2.0, cy + d / 2.0)
 
@@ -1211,6 +1228,17 @@ def _iter_via_apertures(
     Tenting is resolved per side via :func:`_via_is_tented` (per-via override
     -> board setup default -> measured absent-token default).
 
+    The opening is the via's copper expanded by the same margin the pad side
+    uses (:func:`_board_mask_margin_or`).  Measured on the pinned KiCad 10.0.6
+    image (#10384): an untented via flashes ``via.size + 2 *
+    pad_to_mask_clearance`` on both mask layers, and a bare ``via.size`` when
+    the board declares no clearance.  A via has no local margin to resolve --
+    the parser rejects a ``solder_mask_margin`` node inside ``(via ...)`` -- so
+    *min_mask_clearance* is only the fallback for a board that declares
+    nothing.  kicad-cli's own ``silk_over_copper`` reaches only to bare copper
+    for pads and vias alike (same measurement), so wherever the board declares
+    a clearance this opening is wider than the native finding.
+
     A side is also skipped when the via never reaches it: a blind/micro via
     exposes copper only on the outer layer(s) its ``layers`` name and a
     buried via on neither outer side (Issue #9116, reusing the single
@@ -1218,7 +1246,11 @@ def _iter_via_apertures(
     untented ``F.Cu``--``In1.Cu`` blind via therefore yields no ``B``
     aperture for back silk to collide with.
     """
+    from ..mask_geometry import board_mask_margin
+
     setup = pcb.setup
+    board_margin, declared = board_mask_margin(pcb)
+    margin = _board_mask_margin_or(board_margin, declared, min_mask_clearance)
     ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
     for via in pcb.vias:
         if via.size <= 0:
@@ -1229,7 +1261,7 @@ def _iter_via_apertures(
             if side not in reached or _via_is_tented(via, setup, side):
                 continue
             if geom is None:
-                geom = _via_aperture_geometry(via, min_mask_clearance)
+                geom = _via_aperture_geometry(via, margin)
             x, y = via.position
             net = f" [{via.net_name}]" if via.net_name else ""
             label = f"via{net} at ({x + ox:.3f}, {y + oy:.3f})"
@@ -1468,8 +1500,7 @@ def _iter_pad_apertures(
     from .clearance import _pad_has_no_copper, _pad_has_no_mask
 
     board_margin, declared = board_mask_margin(pcb)
-    if board_margin is None or not declared:
-        board_margin = min_mask_clearance
+    board_margin = _board_mask_margin_or(board_margin, declared, min_mask_clearance)
     version = pcb._file_version()
     for footprint in pcb.footprints:
         for pad in footprint.pads:
