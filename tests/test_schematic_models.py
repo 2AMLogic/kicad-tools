@@ -2239,6 +2239,11 @@ class TestSchematicValidationAdvanced:
         for index, (ref, unit, listed) in enumerate(
             [
                 ("Q1A", 1, True),
+                ("Q1_A", 1, True),
+                ("Q2-A", 1, True),
+                ("D3.A", 1, True),
+                ("LED_RED", 1, True),
+                ("R99\u03a9", 1, True),
                 ("R2", 1, True),
                 ("D_TVS2", 1, True),
                 ("U3", 1, True),
@@ -2261,10 +2266,11 @@ class TestSchematicValidationAdvanced:
             )
 
         findings = [i for i in sch.validate(fix_auto=True) if i["type"] == "native_bom_reference"]
-        assert len(findings) == 1
-        assert findings[0]["severity"] == "warning"
-        assert "'Q1A?'" in findings[0]["message"]
-        assert not findings[0]["fix_applied"]
+        assert len(findings) == 6
+        assert all(f["severity"] == "warning" for f in findings)
+        assert not any(f["fix_applied"] for f in findings)
+        for ref in ["Q1A", "Q1_A", "Q2-A", "D3.A", "LED_RED", "R99\u03a9"]:
+            assert any(f"'{ref}?'" in f["message"] for f in findings), ref
         assert sch.symbols[0].reference == "Q1A"
 
     def test_validate_duplicate_references(self):

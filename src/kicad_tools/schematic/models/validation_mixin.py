@@ -6,7 +6,6 @@ Provides validation and statistics functionality.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -81,10 +80,12 @@ class SchematicValidationMixin:
             refs.setdefault(sym.reference, []).append(sym)
 
         for ref, instances in refs.items():
-            # Native BOM export interprets an authored numeric reference followed
-            # by letters as an unannotated prefix. Real multi-unit lettering lives
-            # in the unit field and leaves the common reference unchanged.
-            if not ref.startswith("#") and re.search(r"[0-9][A-Za-z]+\Z", ref):
+            # Native BOM export treats any reference that does not end in an
+            # ASCII digit (``Q1A``, ``Q1_A``, ``D3.A``, ``LED_RED``, ``R99Ω``)
+            # as unannotated and appends ``?``. A reference already ending in
+            # ``?`` is exported unchanged. Real multi-unit lettering lives in
+            # the unit field and leaves the common reference unchanged.
+            if ref and not ref.startswith("#") and ref[-1] not in "0123456789?":
                 listed = next((sym for sym in instances if sym.in_bom), None)
                 if listed is not None:
                     issues.append(
