@@ -1073,3 +1073,160 @@ def test_genuine_footprint_mismatch_names_ref_and_values(inputs):
     assert "R1" in message
     assert "Resistor_SMD:R_0402" in message
     assert "R_0603" in message
+
+
+# --- Issue #10431: the supplementary purchasing list ---
+
+
+def add_purchasing(inputs, document=None, path="purchasing.json"):
+    """Freeze a per-board purchasing list into the bundle and list it in the manifest."""
+    from tests.test_manufacturing_package import FUSE_PER_BOARD
+
+    target = inputs["bundle_root"] / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = document if isinstance(document, bytes) else sp._json(document or FUSE_PER_BOARD)
+    target.write_bytes(data)
+    inputs["bundle_files"] = (*inputs["bundle_files"], path)
+    refresh_manifest(inputs)
+    return target
+
+
+def purchase(inputs, tmp_path, name="handoff", **overrides):
+    return json.loads(
+        sp.prepare_submission(**(inputs | {"destination": tmp_path / name} | overrides)).plan_bytes
+    )
+
+
+def test_purchasing_list_is_verified_scaled_and_bound_into_the_plan(inputs, tmp_path):
+    from tests.test_manufacturing_package import FUSE_PER_BOARD
+
+    control = purchase(inputs, tmp_path, "control")
+    data = add_purchasing(inputs).read_bytes()
+    one = purchase(inputs, tmp_path, "one")
+    two = purchase(inputs, tmp_path, "two", board_quantity=2)
+
+    assert "purchasing" not in control
+    assert one["purchasing"] == {
+        "source": {"path": "purchasing.json", "sha256": digest(data), "size": len(data)},
+        "items": [row | {"required": row["per_board"]} for row in FUSE_PER_BOARD["items"]],
+    }
+    items = two["purchasing"]["items"]
+    assert [(row["description"], row["per_board"], row["required"]) for row in items] == [
+        ("Snap-on cover for the 5 x 20 mm fuse holder", 3, 6),
+        ("5 x 20 mm cartridge, AC", 1, 2),
+        ("5 x 20 mm cartridge, DC", 2, 4),
+        ("Chassis ballast resistor, wire wound", 1, 2),
+        ("Mains cord set", 1, 2),
+    ]
+    # The pending line keeps its quantity and carries no part number at all.
+    assert items[2] == {
+        "description": "5 x 20 mm cartridge, DC",
+        "per_board": 2,
+        "required": 4,
+        "refs": ["F2", "F3"],
+        "status": "pending",
+        "pending": "DC rating and breaking capacity still to be chosen",
+    }
+    # The fabricator side is untouched: the same catalog demand and handoff files.
+    assert two["demand"] == [row | {"required": row["per_board"] * 2} for row in control["demand"]]
+    assert set(two["outputs"]) == set(control["outputs"])
+    assert set(two["sources"]) == set(control["sources"])
+    assert "purchasing.json" in two["bundle_files"]
+    assert purchase(inputs, tmp_path, "again") == one
+
+
+def test_edited_purchasing_file_fails_its_checksum(inputs, tmp_path):
+    target = add_purchasing(inputs)
+    target.write_bytes(target.read_bytes().replace(b"SYN-COVER-1", b"SYN-COVER-9"))
+
+    with pytest.raises(sp.SubmissionError, match="mismatch"):
+        sp.prepare_submission(**inputs)
+    assert not inputs["destination"].exists()
+
+
+def test_purchasing_list_must_be_declared_and_present(inputs):
+    (inputs["bundle_root"] / "purchasing.json").write_bytes(b"{}")
+    with pytest.raises(sp.SubmissionError, match="allowlist"):
+        sp.prepare_submission(**inputs)
+
+    inputs["bundle_files"] = (*inputs["bundle_files"], "purchasing.json")
+    (inputs["bundle_root"] / "purchasing.json").unlink()
+    with pytest.raises(sp.SubmissionError, match="allowlist"):
+        sp.prepare_submission(**inputs)
+    assert not inputs["destination"].exists()
+
+
+def _fuse_list(row=None, fields=None, drop=(), **top):
+    """The fuse list with one row edited: ``fields`` replace, ``drop`` removes."""
+    from copy import deepcopy
+
+    from tests.test_manufacturing_package import FUSE_PER_BOARD
+
+    document = deepcopy(FUSE_PER_BOARD)
+    if row is not None:
+        for key in drop:
+            del document["items"][row][key]
+        document["items"][row].update(fields or {})
+    document.update(top)
+    return document
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param(b"not json", id="not-json"),
+        pytest.param(b"[]", id="not-an-object"),
+        pytest.param(b'{"schema_version": 1, "items": [], "items": []}', id="duplicate-key"),
+        pytest.param(_fuse_list(schema_version=2), id="version"),
+        pytest.param(_fuse_list(board="x"), id="unknown-key"),
+        pytest.param(_fuse_list(items={"description": "Cover"}), id="items-not-a-list"),
+        pytest.param(_fuse_list(items=["description"]), id="row-not-an-object"),
+        pytest.param(_fuse_list(0, {"required": 3}), id="build-quantity-in-per-board-list"),
+        pytest.param(_fuse_list(0, {"colour": "black"}), id="unknown-row-key"),
+        pytest.param(_fuse_list(0, drop=("status",)), id="no-status"),
+        pytest.param(_fuse_list(0, {"status": "ordered"}), id="unknown-status"),
+        pytest.param(_fuse_list(0, drop=("mpn",)), id="selected-without-mpn"),
+        pytest.param(_fuse_list(0, {"manufacturer": " "}), id="blank-manufacturer"),
+        pytest.param(_fuse_list(0, {"mpn": 12345}), id="numeric-mpn"),
+        pytest.param(_fuse_list(2, {"mpn": "SYN-CART-DC"}), id="pending-with-part-number"),
+        pytest.param(_fuse_list(2, drop=("pending",)), id="pending-without-note"),
+        pytest.param(_fuse_list(2, {"pending": ""}), id="blank-note"),
+        pytest.param(_fuse_list(1, {"per_board": 0}), id="zero-quantity"),
+        pytest.param(_fuse_list(1, {"per_board": True}), id="boolean-quantity"),
+        pytest.param(_fuse_list(1, {"per_board": 2.5}), id="fractional-quantity"),
+        pytest.param(_fuse_list(1, {"per_board": "2"}), id="numeric-string-quantity"),
+        pytest.param(_fuse_list(1, {"description": " "}), id="blank-description"),
+        pytest.param(_fuse_list(1, {"refs": "F1"}), id="refs-not-a-list"),
+        pytest.param(_fuse_list(1, {"refs": ["F1", ""]}), id="blank-ref"),
+        pytest.param(_fuse_list(1, {"refs": ["F1", "F1"]}), id="repeated-ref"),
+        pytest.param(_fuse_list(1, {"refs": [1]}), id="numeric-ref"),
+        pytest.param(_fuse_list(1, drop=("refs",)), id="no-refs-key"),
+    ],
+)
+def test_malformed_purchasing_list_refuses_the_handoff(inputs, document):
+    add_purchasing(inputs, document)
+
+    with pytest.raises(sp.SubmissionError, match="[Pp]urchasing"):
+        sp.prepare_submission(**inputs)
+    assert not inputs["destination"].exists()
+
+
+def test_purchasing_list_is_found_by_its_reserved_name_or_an_explicit_path(inputs, tmp_path):
+    nested = add_purchasing(inputs, path="docs/purchasing.json")
+    assert "purchasing" not in purchase(inputs, tmp_path, "unlisted-name")
+
+    named = purchase(inputs, tmp_path, "named", purchasing_path="docs/purchasing.json")
+
+    assert named["purchasing"]["source"]["path"] == "docs/purchasing.json"
+    nested.unlink()
+    inputs["bundle_files"] = inputs["bundle_files"][:-1]
+    refresh_manifest(inputs)
+    with pytest.raises(sp.SubmissionError, match="listed bundle file"):
+        sp.prepare_submission(**(inputs | {"purchasing_path": "docs/purchasing.json"}))
+    assert not inputs["destination"].exists()
+
+
+def test_exporter_and_handoff_agree_on_the_purchasing_file_name():
+    from kicad_tools.export import manufacturing
+
+    assert manufacturing.PURCHASING_FILENAME == sp.PURCHASING_FILENAME

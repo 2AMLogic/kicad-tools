@@ -1,5 +1,7 @@
 """Tests for the manufacturing package generator."""
 
+import csv
+import io
 import json
 import logging
 import shutil
@@ -9,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.export.manufacturing import (
     ManufacturingConfig,
     ManufacturingPackage,
@@ -2599,3 +2602,413 @@ class TestPreflightLCSCReconciliation:
         assert result.preflight_results == []
         manifest = json.loads((out_dir / "manifest.json").read_text())
         assert "preflight" not in manifest
+
+
+# ---------------------------------------------------------------------------
+# Issue #10431: supplementary purchasing list
+# ---------------------------------------------------------------------------
+
+# The fuse section of a two-layer bench controller: three placed holders (one
+# merged JLCPCB row) and a wire-land footprint. Every identifier is synthetic.
+FUSE_BOM = (
+    b"\xef\xbb\xbfComment,Designator,Footprint,LCSC Part #\r\n"
+    b'SYN-HOLDER-5X20,"F1,F2,F3",Fuseholder:Fuseholder_5x20_SMD,C7000001\r\n'
+    b"Wire land,J2,Connector:WireLand_2pin,C7000002\r\n"
+)
+FUSE_CPL = (
+    b"\xef\xbb\xbfDesignator,Val,Package,Mid X,Mid Y,Rotation,Layer\r\n"
+    b"F1,SYN-HOLDER-5X20,Fuseholder_5x20_SMD,10mm,20mm,0,Top\r\n"
+    b"F2,SYN-HOLDER-5X20,Fuseholder_5x20_SMD,15mm,20mm,0,Top\r\n"
+    b"F3,SYN-HOLDER-5X20,Fuseholder_5x20_SMD,20mm,20mm,0,Top\r\n"
+    b"J2,Wire land,WireLand_2pin,25mm,20mm,0,Top\r\n"
+)
+FUSE_PURCHASING = (
+    "purchasing:\n"
+    "  - description: Snap-on cover for the 5 x 20 mm fuse holder\n"
+    "    quantity: 3\n"
+    "    refs: [F1, F2, F3]\n"
+    "    manufacturer: Example Fuse Co\n"
+    "    mpn: SYN-COVER-1\n"
+    "  - description: 5 x 20 mm cartridge, AC\n"
+    "    quantity: 1\n"
+    "    refs: [F1]\n"
+    "    manufacturer: Example Fuse Co\n"
+    "    mpn: SYN-CART-AC\n"
+    "  - description: 5 x 20 mm cartridge, DC\n"
+    "    quantity: 2\n"
+    "    refs: [F2, F3]\n"
+    "    pending: DC rating and breaking capacity still to be chosen\n"
+    "  - description: Chassis ballast resistor, wire wound\n"
+    "    quantity: 1\n"
+    "    refs: [J2]\n"
+    "    manufacturer: Example Resistor Co\n"
+    "    mpn: SYN-BALLAST-1\n"
+    "  - description: Mains cord set\n"
+    "    quantity: 1\n"
+    "    manufacturer: Example Cable Co\n"
+    "    mpn: SYN-CORD-1\n"
+)
+#: What the export freezes for one board, in the declaration's order.
+FUSE_PER_BOARD = {
+    "schema_version": 1,
+    "items": [
+        {
+            "description": "Snap-on cover for the 5 x 20 mm fuse holder",
+            "per_board": 3,
+            "refs": ["F1", "F2", "F3"],
+            "status": "selected",
+            "manufacturer": "Example Fuse Co",
+            "mpn": "SYN-COVER-1",
+        },
+        {
+            "description": "5 x 20 mm cartridge, AC",
+            "per_board": 1,
+            "refs": ["F1"],
+            "status": "selected",
+            "manufacturer": "Example Fuse Co",
+            "mpn": "SYN-CART-AC",
+        },
+        {
+            "description": "5 x 20 mm cartridge, DC",
+            "per_board": 2,
+            "refs": ["F2", "F3"],
+            "status": "pending",
+            "pending": "DC rating and breaking capacity still to be chosen",
+        },
+        {
+            "description": "Chassis ballast resistor, wire wound",
+            "per_board": 1,
+            "refs": ["J2"],
+            "status": "selected",
+            "manufacturer": "Example Resistor Co",
+            "mpn": "SYN-BALLAST-1",
+        },
+        {
+            "description": "Mains cord set",
+            "per_board": 1,
+            "refs": [],
+            "status": "selected",
+            "manufacturer": "Example Cable Co",
+            "mpn": "SYN-CORD-1",
+        },
+    ],
+}
+
+
+def _fuse_assembly_export(self, output_dir=None):
+    """Stand in for AssemblyPackage.export: the holders and the land are placed."""
+    from kicad_tools.export import assembly
+
+    od = Path(output_dir) if output_dir else self.config.output_dir
+    od.mkdir(parents=True, exist_ok=True)
+    bom_path = od / self.config.bom_filename.format(manufacturer=self.fab_family)
+    cpl_path = od / self.config.pnp_filename.format(manufacturer=self.fab_family)
+    bom_path.write_bytes(FUSE_BOM)
+    cpl_path.write_bytes(FUSE_CPL)
+    return assembly.AssemblyPackageResult(output_dir=od, bom_path=bom_path, pnp_path=cpl_path)
+
+
+class TestPurchasingList:
+    """Supplementary procurement rows travel with the bundle (Issue #10431)."""
+
+    @staticmethod
+    def _write_spec(pcb, purchasing=""):
+        (pcb.parent / "project.kct").write_text(
+            "kct_version: '1.0'\nproject:\n  name: Fuse bench controller\n" + purchasing
+        )
+
+    @staticmethod
+    def _export(monkeypatch, pcb, out_dir, **config):
+        from kicad_tools.export import assembly
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", _fuse_assembly_export)
+        config = ManufacturingConfig(
+            include_report=False, preflight=PreflightConfig(skip_all=True), **config
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        return pkg, pkg.export(out_dir)
+
+    @staticmethod
+    def _manifest(result):
+        return json.loads(result.manifest_path.read_text())["files"]
+
+    def test_export_stages_the_per_board_list(self, tmp_path, monkeypatch, local_symbol_project):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "out"
+        _, result = self._export(monkeypatch, local_symbol_project, out)
+
+        assert result.success, result.errors
+        path = out / "purchasing.json"
+        assert result.purchasing_path == path
+        assert json.loads(path.read_text(encoding="utf-8")) == FUSE_PER_BOARD
+        assert path in result.all_files
+        assert self._manifest(result)["purchasing.json"] == {
+            "sha256": _sha256_file(path),
+            "size": path.stat().st_size,
+        }
+        assert verify_manifest(result.manifest_path) == []
+        assert "purchasing.json" in result.readme_path.read_text()
+        summary = str(result)
+        assert "purchasing.json" in summary
+        assert "1 selection(s) pending: 5 x 20 mm cartridge, DC" in summary
+
+    def test_supplementary_rows_leave_bom_and_cpl_byte_identical(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        self._write_spec(local_symbol_project)
+        _, control = self._export(monkeypatch, local_symbol_project, tmp_path / "control")
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        _, treated = self._export(monkeypatch, local_symbol_project, tmp_path / "treated")
+        assert control.success and treated.success
+
+        def fabricator_files(result):
+            assembly_result = result.assembly_result
+            return {
+                name: (path.read_bytes(), self._manifest(result)[name])
+                for name, path in (
+                    ("bom_jlcpcb.csv", assembly_result.bom_path),
+                    ("cpl_jlcpcb.csv", assembly_result.pnp_path),
+                )
+            }
+
+        assert fabricator_files(treated) == fabricator_files(control)
+        bom = treated.assembly_result.bom_path.read_text(encoding="utf-8-sig")
+        cpl = treated.assembly_result.pnp_path.read_text(encoding="utf-8-sig")
+        assert [line.split(",")[0] for line in cpl.splitlines()[1:]] == ["F1", "F2", "F3", "J2"]
+        for supplementary in ("cover", "cartridge", "ballast", "cord"):
+            assert supplementary not in bom.lower()
+            assert supplementary not in cpl.lower()
+
+    @pytest.mark.parametrize("purchasing", ["", "purchasing: []\n"], ids=["absent", "empty"])
+    def test_project_without_rows_exports_no_list(
+        self, tmp_path, monkeypatch, local_symbol_project, purchasing
+    ):
+        self._write_spec(local_symbol_project, purchasing)
+        out = tmp_path / "out"
+        _, result = self._export(monkeypatch, local_symbol_project, out)
+
+        assert result.success, result.errors
+        assert result.purchasing_path is None and result.purchasing_pending == []
+        assert not (out / "purchasing.json").exists()
+        assert "purchasing.json" not in self._manifest(result)
+
+    @pytest.mark.parametrize("project_zip", [True, False], ids=["published", "direct"])
+    def test_rerun_without_the_declaration_withdraws_the_stale_list(
+        self, tmp_path, monkeypatch, local_symbol_project, project_zip
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "out"
+        _, first = self._export(monkeypatch, local_symbol_project, out)
+        assert first.success, first.errors
+        assert (out / "purchasing.json").is_file()
+
+        self._write_spec(local_symbol_project)
+        _, second = self._export(
+            monkeypatch, local_symbol_project, out, include_project_zip=project_zip
+        )
+
+        assert second.success, second.errors
+        assert second.purchasing_path is None and second.purchasing_pending == []
+        assert not (out / "purchasing.json").exists()
+        assert "purchasing.json" not in self._manifest(second)
+        assert verify_manifest(second.manifest_path) == []
+        assert (out / "bom_jlcpcb.csv").is_file()
+
+    @pytest.mark.parametrize(
+        ("row", "fault"),
+        [
+            ("    quantity: 0\n", "positive whole number"),
+            ("    quantity: 1\n    manufacturer: Example Fuse Co\n", "needs both"),
+            (
+                "    quantity: 1\n    mpn: SYN-CART-AC\n    pending: undecided\n",
+                "must not set manufacturer or mpn",
+            ),
+            (
+                "    quantity: 1\n    refs: [F2, F2]\n    pending: undecided\n",
+                "repeat a designator",
+            ),
+        ],
+        ids=["nonpositive-quantity", "incomplete-selected-row", "pending-with-part", "bad-refs"],
+    )
+    def test_invalid_row_refuses_the_export_and_names_it(
+        self, tmp_path, monkeypatch, local_symbol_project, row, fault
+    ):
+        self._write_spec(
+            local_symbol_project,
+            "purchasing:\n"
+            "  - description: Cover\n"
+            "    quantity: 3\n"
+            "    manufacturer: Example Fuse Co\n"
+            "    mpn: SYN-COVER-1\n"
+            "  - description: 5 x 20 mm cartridge, DC\n" + row,
+        )
+        out = tmp_path / "out"
+        _, result = self._export(monkeypatch, local_symbol_project, out)
+
+        assert not result.success
+        [error] = result.errors
+        assert "project.kct" in error
+        assert "purchasing row 2" in error and "5 x 20 mm cartridge, DC" in error
+        assert fault in error
+        assert not out.exists()
+
+    def test_refused_rerun_leaves_the_previous_bundle_intact(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "out"
+        _, first = self._export(monkeypatch, local_symbol_project, out)
+        assert first.success, first.errors
+        before = {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()}
+
+        (local_symbol_project.parent / "project.kct").write_text(
+            "kct_version: '1.0'\nproject:\n  name: Fuse bench controller\n"
+            "purchasing:\n  - description: Cover\n    quantity: 3\n"
+        )
+        _, refused = self._export(monkeypatch, local_symbol_project, out)
+
+        assert not refused.success
+        assert {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()} == before
+        assert verify_manifest(out / "manifest.json") == []
+
+    def test_invalid_spec_elsewhere_refuses_only_when_rows_are_declared(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        broken = "decisions:\n  - topic: unfinished\n"
+        self._write_spec(local_symbol_project, broken)
+        _, control = self._export(monkeypatch, local_symbol_project, tmp_path / "control")
+        assert control.success, control.errors
+
+        self._write_spec(local_symbol_project, broken + FUSE_PURCHASING)
+        _, refused = self._export(monkeypatch, local_symbol_project, tmp_path / "treated")
+
+        assert not refused.success
+        [error] = refused.errors
+        assert "purchasing list" in error and "decisions" in error
+        assert not (tmp_path / "treated").exists()
+
+    def test_unreadable_spec_exports_without_the_list(self, tmp_path, monkeypatch, caplog):
+        project = tmp_path / "project"
+        project.mkdir()
+        pcb = project / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project / "board.kicad_sch").write_text("(kicad_sch)")
+        (project / "project.kct").write_text("purchasing: [unterminated\n")
+
+        with caplog.at_level("WARNING"):
+            _, result = self._export(monkeypatch, pcb, tmp_path / "out")
+
+        assert result.success, result.errors
+        assert result.purchasing_path is None
+        assert not (tmp_path / "out" / "purchasing.json").exists()
+        assert any("purchasing list" in record.message.lower() for record in caplog.records)
+
+    def test_explicit_spec_path_is_used_and_no_spec_disables_the_list(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        spec = tmp_path / "elsewhere.kct"
+        spec.write_text("kct_version: '1.0'\nproject:\n  name: Fuse bench controller\n")
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+
+        _, absent = self._export(
+            monkeypatch, local_symbol_project, tmp_path / "elsewhere", spec_path=spec
+        )
+        _, disabled = self._export(
+            monkeypatch, local_symbol_project, tmp_path / "disabled", no_spec=True
+        )
+        _, found = self._export(monkeypatch, local_symbol_project, tmp_path / "found")
+
+        assert absent.success and disabled.success and found.success
+        assert absent.purchasing_path is None and disabled.purchasing_path is None
+        assert json.loads(found.purchasing_path.read_text(encoding="utf-8")) == FUSE_PER_BOARD
+
+    def test_dry_run_lists_the_file_without_writing(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        from kicad_tools.export import assembly
+
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", _fuse_assembly_export)
+        out = tmp_path / "out"
+        pkg = ManufacturingPackage(
+            pcb_path=local_symbol_project,
+            manufacturer="jlcpcb",
+            config=ManufacturingConfig(include_report=False),
+        )
+
+        result = pkg.export(out, dry_run=True)
+
+        assert result.purchasing_path == out / "purchasing.json"
+        assert result.purchasing_path in result.all_files
+        assert result.purchasing_pending == ["5 x 20 mm cartridge, DC"]
+        assert not out.exists()
+
+    @pytest.mark.skipif(find_kicad_cli() is None, reason="Native KiCad CLI is not installed")
+    def test_real_assembly_output_is_untouched_by_purchasing_rows(self, tmp_path):
+        """The real BOM/CPL pipeline sees no supplementary row, whatever the spec declares."""
+        design = tmp_path / "board" / "output"
+        shutil.copytree(Path(__file__).parent / "fixtures" / "project_archive_10108", design)
+        spec = design.parent / "project.kct"
+        spec.write_text("kct_version: '1.0'\nproject:\n  name: t\n")
+
+        def export(bundle):
+            config = ManufacturingConfig(
+                output_dir=bundle,
+                include_gerbers=False,
+                include_report=False,
+                silk_fix=False,
+                emit_drc_constraints=False,
+                auto_lcsc=False,
+                preflight=PreflightConfig(skip_all=True),
+            )
+            result = ManufacturingPackage(
+                design / "board_v07.kicad_pcb", design / "board.kicad_sch", config=config
+            ).export()
+            assert result.success, result.errors
+            return result
+
+        control = export(tmp_path / "control")
+        spec.write_text(
+            spec.read_text() + "purchasing:\n"
+            "  - description: Heatsink for the regulator\n"
+            "    quantity: 1\n"
+            "    refs: [R1]\n"
+            "    manufacturer: Example\n"
+            "    mpn: SYN-HS-1\n"
+            "  - description: Mounting bracket\n"
+            "    quantity: 2\n"
+            "    pending: finish still to be chosen\n"
+        )
+        treated = export(tmp_path / "treated")
+
+        for name in ("bom_jlcpcb.csv", "cpl_jlcpcb.csv"):
+            assert (tmp_path / "treated" / name).read_bytes() == (
+                tmp_path / "control" / name
+            ).read_bytes()
+        rows = list(
+            csv.reader(io.StringIO(treated.assembly_result.pnp_path.read_text("utf-8-sig")))
+        )
+        assert [row[0] for row in rows[1:]] == ["R1", "R2"]
+        assert verify_manifest(treated.manifest_path) == []
+        assert json.loads(treated.purchasing_path.read_text(encoding="utf-8")) == {
+            "schema_version": 1,
+            "items": [
+                {
+                    "description": "Heatsink for the regulator",
+                    "per_board": 1,
+                    "refs": ["R1"],
+                    "status": "selected",
+                    "manufacturer": "Example",
+                    "mpn": "SYN-HS-1",
+                },
+                {
+                    "description": "Mounting bracket",
+                    "per_board": 2,
+                    "refs": [],
+                    "status": "pending",
+                    "pending": "finish still to be chosen",
+                },
+            ],
+        }
+        assert control.purchasing_path is None
+        assert not (tmp_path / "control" / "purchasing.json").exists()

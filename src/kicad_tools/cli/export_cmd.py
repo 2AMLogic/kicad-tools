@@ -528,13 +528,27 @@ def run_export(args: argparse.Namespace) -> int:
     if args.dry_run:
         result = pkg.export(output_dir, dry_run=True)
         if output_format == "json":
-            print(json.dumps({"dry_run": True, "files": [f.name for f in result.all_files]}))
+            print(
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "files": [f.name for f in result.all_files],
+                        "errors": result.errors,
+                    }
+                )
+            )
         else:
             print("Dry run -- the following files would be generated:")
             print(f"  Output directory: {result.output_dir}")
             for f in result.all_files:
                 print(f"  - {f.name}")
-        return 0
+        # A refusal the real run would raise (Issue #10431: an invalid
+        # purchasing row) must not hide behind a dry run's file listing.
+        if result.errors:
+            print(f"\n{len(result.errors)} error(s) during dry run:", file=sys.stderr)
+            for err in result.errors:
+                print(f"  - {err}", file=sys.stderr)
+        return 0 if result.success else 1
 
     # Normal run with progress output
     quiet = getattr(args, "global_quiet", False)
@@ -618,6 +632,14 @@ def run_export(args: argparse.Namespace) -> int:
                 print()
                 for line in enrichment.summary_lines():
                     print(f"  {line}")
+        # Issue #10431: the supplementary purchasing list, and what is still
+        # undecided in it, so an unresolved selection is never only in a file.
+        if result.purchasing_path:
+            print(f"  [ok] Purchasing list: {result.bundle_relpath(result.purchasing_path)}")
+            if result.purchasing_pending:
+                print(f"  {len(result.purchasing_pending)} purchasing selection(s) still pending:")
+                for description in result.purchasing_pending:
+                    print(f"    - {description}")
         if result.report_path:
             print(f"  [ok] Report: {result.report_path.name}")
         if result.project_zip_path:

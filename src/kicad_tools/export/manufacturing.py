@@ -24,7 +24,7 @@ from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import kicad_tools
 from kicad_tools.core.atomic_write import SourceChangedError, checked_write_text
@@ -47,7 +47,17 @@ from .preflight import (
 )
 from .rotation_overrides import placement_preview_instructions
 
+if TYPE_CHECKING:
+    from pydantic_core import ErrorDetails
+
+    from ..spec.schema import PurchasingEntry
+
 logger = logging.getLogger(__name__)
+
+#: Name of the supplementary purchasing list inside a bundle (Issue #10431).
+#: Reserved rather than configurable: the submission handoff finds the list by
+#: this name (``submission_plan.PURCHASING_FILENAME``), so the two must agree.
+PURCHASING_FILENAME = "purchasing.json"
 
 
 @dataclass
@@ -169,6 +179,13 @@ class ManufacturingResult:
     # compared against.  Read-only: broken links are surfaced as warnings,
     # never repaired here.
     instance_links: dict | None = None
+    # Issue #10431: the supplementary per-board purchasing list staged with
+    # the bundle, or ``None`` when the project declares none.  It addresses
+    # the buyer, never the fabricator: nothing in it becomes a BOM or CPL
+    # row, a placement, a factory match or a stock request.
+    purchasing_path: Path | None = None
+    # Descriptions of the purchasing rows whose part is not selected yet.
+    purchasing_pending: list[str] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -199,6 +216,8 @@ class ManufacturingResult:
                 files.append(self.assembly_result.pnp_path)
             if self.assembly_result.gerber_path:
                 files.append(self.assembly_result.gerber_path)
+        if self.purchasing_path:
+            files.append(self.purchasing_path)
         if self.report_path:
             files.append(self.report_path)
         if self.report_md_path:
@@ -223,6 +242,13 @@ class ManufacturingResult:
                 lines.append(f"  CPL: {self.assembly_result.pnp_path.name}")
             if self.assembly_result.gerber_path:
                 lines.append(f"  Gerbers: {self.bundle_relpath(self.assembly_result.gerber_path)}")
+        if self.purchasing_path:
+            lines.append(f"  Purchasing: {self.bundle_relpath(self.purchasing_path)}")
+            if self.purchasing_pending:
+                lines.append(
+                    f"    {len(self.purchasing_pending)} selection(s) pending: "
+                    + "; ".join(self.purchasing_pending)
+                )
         if self.report_path:
             lines.append(f"  Report: {self.report_path.name}")
         if self.image_paths:
@@ -289,6 +315,10 @@ class _PackageOutputs:
             relative = os.path.relpath(key, bundle_key)
             if Path(relative) != Path(configured[field_name]):
                 setattr(config, field_name, relative)
+        # Tracked whether or not this export declares a purchasing list, so
+        # that publishing a bundle without one withdraws the previous list
+        # (Issue #10431).
+        members.add(bundle_key / PURCHASING_FILENAME)
         if config.include_readme:
             members.add(bundle_key / "README.txt")
         if config.stackup_id:
@@ -913,6 +943,53 @@ def _build_manifest(
     return manifest
 
 
+def _purchasing_document(entries: list[PurchasingEntry]) -> dict[str, Any]:
+    """Freeze validated purchasing rows as the per-board list (Issue #10431).
+
+    The submission handoff parses this exact shape (``submission_plan``'s
+    ``_purchasing``); the two change together.  A pending row carries its
+    note and no part number, so nothing invents one for it.
+    """
+    items: list[dict[str, Any]] = []
+    for entry in entries:
+        row: dict[str, Any] = {
+            "description": entry.description,
+            "per_board": entry.quantity,
+            "refs": list(entry.refs or []),
+            "status": "pending" if entry.pending is not None else "selected",
+        }
+        if entry.pending is not None:
+            row["pending"] = entry.pending
+        else:
+            row["manufacturer"] = entry.manufacturer
+            row["mpn"] = entry.mpn
+        items.append(row)
+    return {"schema_version": 1, "items": items}
+
+
+def _spec_fault(error: ErrorDetails, data: Any) -> str:
+    """Name one spec validation error the way its author sees the file.
+
+    Pydantic locates a row as ``purchasing.1.quantity``; a person editing
+    YAML counts the ``- description:`` entries from one and recognises the
+    row by what it says, so a purchasing fault is reported as
+    ``purchasing row 2 (<description>) quantity: ...``.
+    """
+    location = error["loc"]
+    name = ".".join(map(str, location))
+    if location[:1] == ("purchasing",) and len(location) >= 2 and isinstance(location[1], int):
+        index = location[1]
+        rows = data.get("purchasing") if isinstance(data, dict) else None
+        row = rows[index] if isinstance(rows, list) and index < len(rows) else None
+        description = row.get("description") if isinstance(row, dict) else None
+        name = f"purchasing row {index + 1}"
+        if isinstance(description, str) and description.strip():
+            name += f" ({description.strip()})"
+        if len(location) > 2:
+            name += " " + ".".join(map(str, location[2:]))
+    return f"{name}: {error['msg'].removeprefix('Value error, ')}"
+
+
 class _SidecarRecoveryError(OSError):
     """The filesystem refused rollback; the staging directory must be retained."""
 
@@ -1246,6 +1323,9 @@ class ManufacturingPackage:
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.config = config or ManufacturingConfig()
+        # Issue #10431: the project's supplementary purchasing rows, resolved
+        # once per export by :meth:`_load_purchasing`.
+        self._purchasing: list[PurchasingEntry] | None = None
 
     @property
     def _lookup_pcb_path(self) -> Path:
@@ -1276,6 +1356,11 @@ class ManufacturingPackage:
             selected_stackup_source_hash = self._stackup_source_hash(self.config.stackup_id, result)
             if selected_stackup_source_hash is None:
                 return result
+
+        # Issue #10431: read the project's supplementary purchasing rows
+        # before anything is written, so a row that cannot be trusted refuses
+        # the export instead of shipping a bundle with no list or a stale one.
+        self._load_purchasing(result)
 
         if dry_run:
             return self._dry_run(out_dir, result)
@@ -1461,6 +1546,7 @@ class ManufacturingPackage:
         result.stackup_path = published(result.stackup_path)
         result.manifest_path = published(result.manifest_path)
         result.readme_path = published(result.readme_path)
+        result.purchasing_path = published(result.purchasing_path)
         result.report_path = published(result.report_path)
         result.report_md_path = published(result.report_md_path)
         result.image_paths = (
@@ -1492,6 +1578,10 @@ class ManufacturingPackage:
         # "missing LCSC part number" clause is a prediction that
         # ``--auto-lcsc`` may have already invalidated (issue #4591).
         self._reconcile_preflight_lcsc(result)
+
+        # Step 1.6: Supplementary purchasing list (Issue #10431).  Staged, or
+        # an earlier one withdrawn, without touching the fabricator files.
+        self._write_purchasing(out_dir, result)
 
         # Step 2: Report (optional)
         if self.config.include_report:
@@ -2556,6 +2646,8 @@ class ManufacturingPackage:
             result.project_zip_path = out_dir / self.config.project_zip_name
         if self.config.include_manifest:
             result.manifest_path = out_dir / self.config.manifest_name
+        if self._purchasing:
+            result.purchasing_path = out_dir / PURCHASING_FILENAME
         return result
 
     def _generate_assembly(self, out_dir: Path, result: ManufacturingResult) -> bool:
@@ -2608,6 +2700,78 @@ class ManufacturingPackage:
             return True  # files may already have been written
 
         return True
+
+    def _load_purchasing(self, result: ManufacturingResult) -> None:
+        """Resolve the project's supplementary purchasing rows (Issue #10431).
+
+        The rows come from the ``.kct`` spec the BOM overlay reads.  A row
+        that fails validation refuses the export: a list that cannot be
+        trusted must neither ship nor quietly disappear.  A project that
+        declares no rows is untouched by this feature, even when its spec is
+        invalid elsewhere -- that is the BOM overlay's warning to raise.
+        """
+        self._purchasing = None
+        if self.config.no_spec:
+            return
+        from pydantic import ValidationError
+
+        from ..spec.parser import load_spec_data
+        from .bom_spec_overlay import find_spec_file, load_assembly_spec
+
+        try:
+            spec_path = self.config.spec_path or find_spec_file(self.pcb_path.parent)
+        except OSError as exc:
+            logger.warning("Purchasing list not exported: spec lookup failed: %s", exc)
+            return
+        if spec_path is None:
+            return
+        try:
+            spec, _ = load_assembly_spec(spec_path)
+        except ValidationError as exc:
+            try:
+                declared = load_spec_data(spec_path)
+            except (OSError, ValueError):
+                declared = {}
+            if not declared.get("purchasing"):
+                return
+            faults = "; ".join(_spec_fault(error, declared) for error in exc.errors())
+            result.errors.append(
+                f"Invalid project spec; the purchasing list cannot be read from {spec_path}: {faults}"
+            )
+            logger.error("Purchasing list could not be read from %s: %s", spec_path, faults)
+            return
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Purchasing list not exported: project spec could not be read from %s: %s",
+                spec_path,
+                exc,
+            )
+            return
+        rows = spec.purchasing or []
+        self._purchasing = rows or None
+        result.purchasing_pending = [row.description for row in rows if row.pending is not None]
+
+    def _write_purchasing(self, out_dir: Path, result: ManufacturingResult) -> None:
+        """Stage the per-board purchasing list, or withdraw an earlier one."""
+        path = out_dir / PURCHASING_FILENAME
+        try:
+            if self._purchasing is None:
+                # The candidate was seeded with the previous export's list.
+                # Nothing declares one now, so it must not survive publication.
+                path.unlink(missing_ok=True)
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(_purchasing_document(self._purchasing), indent=2, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            result.errors.append(f"Purchasing list generation failed: {exc}")
+            logger.error("Purchasing list generation failed: %s", exc)
+            return
+        result.purchasing_path = path
+        logger.info(f"Generated purchasing list: {path}")
 
     def _generate_report(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Generate a Markdown design report."""
@@ -3160,6 +3324,10 @@ class ManufacturingPackage:
                 "Source KiCad project files (.kicad_pcb, .kicad_sch, .kicad_pro)",
             ),
             "manifest": ("Manifest", "SHA256 checksums for all output files"),
+            "purchasing": (
+                "Purchasing list (supplementary)",
+                "Accessories and off-board parts to buy per board; not placed or supplied by the factory",
+            ),
         }
 
         if result.assembly_result:
@@ -3189,6 +3357,17 @@ class ManufacturingPackage:
                 lines.append(f"  {result.bundle_relpath(result.assembly_result.gerber_path)}")
                 lines.append(f"    {desc[0]}: {desc[1]}")
                 lines.append("")
+
+        if result.purchasing_path:
+            desc = file_descriptions["purchasing"]
+            lines.append(f"  {result.bundle_relpath(result.purchasing_path)}")
+            lines.append(f"    {desc[0]}: {desc[1]}")
+            if result.purchasing_pending:
+                lines.append(
+                    f"    {len(result.purchasing_pending)} selection(s) still pending: "
+                    + "; ".join(result.purchasing_pending)
+                )
+            lines.append("")
 
         if result.report_path:
             desc = file_descriptions["report"]

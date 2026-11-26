@@ -458,6 +458,76 @@ R1,10k,0402,30.00,20.00,0,top
 U1,ATmega328P,TQFP-32,50.00,40.00,0,top
 ```
 
+## Accessories and Off-Board Parts: the Purchasing List
+
+The BOM and CPL describe what the factory places. A complete assembly often
+needs more: a cover for each fuse holder, a cartridge bought separately,
+chassis resistors wired to land footprints on the board. None of those has a
+placement, so none can appear in the BOM or CPL, and a prose list kept beside
+the project goes stale as soon as the board quantity or the revision changes.
+
+Declare them in the project `.kct` instead. Each `purchasing` row has a
+description, a whole-number `quantity` **per board**, optional `refs` naming the
+board designators the item belongs to (wire lands included), and either a
+`manufacturer` and `mpn` or a `pending` note saying what is still undecided:
+
+```yaml
+purchasing:
+  - description: Snap-on cover for the 5 x 20 mm fuse holder
+    quantity: 3            # one for each holder: F1, F2 and F3
+    refs: [F1, F2, F3]
+    manufacturer: Example Fuse Co
+    mpn: "SYN-COVER-1"     # quote a part number that begins with a digit
+  - description: 5 x 20 mm cartridge, AC
+    quantity: 1
+    refs: [F1]
+    manufacturer: Example Fuse Co
+    mpn: "SYN-CART-AC"
+  - description: 5 x 20 mm cartridge, DC
+    quantity: 2
+    refs: [F2, F3]
+    pending: DC rating and breaking capacity still to be chosen
+  - description: Mains cord set
+    quantity: 1            # nothing on the board to link it to
+    manufacturer: Example Cable Co
+    mpn: "SYN-CORD-1"
+```
+
+A row's `quantity` already covers all of its `refs`, and several rows may name
+the same designator (the holder's cover and its cartridge both link to `F1`).
+The holder itself stays in the BOM through `bom_entries`, exactly as before.
+
+`kct export` reads the declaration and writes `purchasing.json` into the
+manufacturing bundle, with its SHA-256 and size in `manifest.json`. The
+fabricator BOM and CPL are byte-for-byte what they would be without the
+declaration. The console names the file and every selection still pending:
+
+```text
+  [ok] Purchasing list: purchasing.json
+  1 purchasing selection(s) still pending:
+    - 5 x 20 mm cartridge, DC
+```
+
+An invalid row (a zero quantity, a selected part without a part number, a
+pending row that also names one) fails the export and names the row, so a list
+that cannot be trusted never ships. Removing the declaration and exporting
+again withdraws the earlier `purchasing.json`; a rerun cannot leave an old list
+in the bundle.
+
+### For the buyer
+
+`kct submit-jlcpcb` reads the frozen list, multiplies each row by the ordered
+board quantity and publishes it as `purchasing.json` in the review page, listed
+in `review-page-manifest.json`. The page's "Purchasing list" section shows the
+per-board and build quantities, and "Outstanding selections" names every
+pending row by description and linked designators. For two boards the example
+above asks for 6 covers, 2 AC cartridges and 4 DC cartridges, the last still
+marked pending and carrying no part number. Resolve the row in the `.kct`,
+then export and submit again: the revised page lists nothing outstanding.
+
+The list is for purchasing only. Nothing in it is placed, matched or
+stock-checked by the factory, and it never reaches the JLCPCB stock gate.
+
 ## CLI Commands
 
 ### Export Gerbers

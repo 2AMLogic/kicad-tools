@@ -54,6 +54,15 @@ _RESERVED = {"plan.json", "plan.sha256", "expected-matches.json", "bundle-manife
 _DEFAULT_NAMES = {"gerber": "gerbers.zip", "bom": "bom.csv", "cpl": "cpl.csv"}
 _REF = re.compile(r"[A-Za-z][A-Za-z0-9_.+-]*\Z")
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
+#: Bundle-relative name ``kct export`` gives a project's supplementary purchasing
+#: list (Issue #10431).  A bundle that lists a file of this name carries one.
+#: It is the same reserved name as ``manufacturing.PURCHASING_FILENAME``.
+PURCHASING_FILENAME = "purchasing.json"
+_PURCHASING_ROW_KEYS = frozenset({"description", "per_board", "refs", "status"})
+_PURCHASING_SELECTION = {
+    "selected": frozenset({"manufacturer", "mpn"}),
+    "pending": frozenset({"pending"}),
+}
 
 
 class SubmissionError(ValueError):
@@ -491,6 +500,85 @@ def _write_bytes(path: Path, data: bytes) -> None:
         os.fsync(stream.fileno())
 
 
+def _purchasing_text(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SubmissionError(f"Purchasing list: {name} must be a non-empty string")
+    return value
+
+
+def _purchasing_row(row: Any) -> dict[str, Any]:
+    """Return one validated per-board purchasing row, or refuse it."""
+    if not isinstance(row, dict):
+        raise SubmissionError("Purchasing list: each row must be an object")
+    status = row.get("status")
+    selection = _PURCHASING_SELECTION.get(status) if isinstance(status, str) else None
+    if selection is None:
+        raise SubmissionError("Purchasing list: row status must be 'selected' or 'pending'")
+    if set(row) != _PURCHASING_ROW_KEYS | selection:
+        raise SubmissionError("Purchasing list: row has missing or unsupported fields")
+    refs = row["refs"]
+    if not isinstance(refs, list):
+        raise SubmissionError("Purchasing list: refs must be a list")
+    for ref in refs:
+        _purchasing_text(ref, "refs entries")
+    if len(set(refs)) != len(refs):
+        raise SubmissionError("Purchasing list: refs must not repeat a designator")
+    per_board = row["per_board"]
+    if type(per_board) is not int or per_board < 1:
+        raise SubmissionError("Purchasing list: per_board must be a positive integer")
+    item: dict[str, Any] = {
+        "description": _purchasing_text(row["description"], "description"),
+        "per_board": per_board,
+        "refs": list(refs),
+        "status": status,
+    }
+    for key in sorted(selection):
+        item[key] = _purchasing_text(row[key], key)
+    return item
+
+
+def _purchasing(data: bytes) -> list[dict[str, Any]]:
+    """Rows of a frozen per-board purchasing list (Issue #10431)."""
+    try:
+        document = _load_json(data)
+    except SubmissionError as exc:
+        # The shared loader's wording names a manifest; this file is not one.
+        raise SubmissionError("Purchasing list is not valid JSON") from exc
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema_version", "items"}
+        or type(document["schema_version"]) is not int
+        or document["schema_version"] != 1
+        or not isinstance(document["items"], list)
+    ):
+        raise SubmissionError("Unsupported or malformed purchasing list")
+    return [_purchasing_row(row) for row in document["items"]]
+
+
+def scaled_purchasing(items: Any, board_quantity: int) -> list[dict[str, Any]]:
+    """Validate the purchasing rows a plan carries against its board quantity."""
+    scaled: list[dict[str, Any]] = []
+    for entry in items:
+        if not isinstance(entry, dict) or type(entry.get("required")) is not int:
+            raise SubmissionError("Malformed plan purchasing row")
+        required = entry["required"]
+        row = _purchasing_row({key: value for key, value in entry.items() if key != "required"})
+        if required != row["per_board"] * board_quantity:
+            raise SubmissionError("Purchasing row quantity disagrees with the board quantity")
+        scaled.append(row | {"required": required})
+    return scaled
+
+
+def _purchasing_source(purchasing_path: str | None, allowed: Sequence[str]) -> str | None:
+    """Locate the purchasing list among the listed bundle files, if there is one."""
+    if purchasing_path is None:
+        return PURCHASING_FILENAME if PURCHASING_FILENAME in allowed else None
+    name = _path(purchasing_path)
+    if name not in allowed:
+        raise SubmissionError("Purchasing list must be a listed bundle file")
+    return name
+
+
 def prepare_submission(
     *,
     bundle_root: Path,
@@ -504,12 +592,20 @@ def prepare_submission(
     manifest_path: str = "manifest.json",
     output_names: Mapping[str, str] | None = None,
     exclusions: Mapping[str, str] | None = None,
+    purchasing_path: str | None = None,
 ) -> SubmissionPlan:
     """Validate frozen inputs and atomically publish a new read-only handoff.
 
     All input bytes are read and verified before staging. Revalidation after
     copying rejects mutation; existing destinations are never updated. No
     credentials, supplier clients, or network calls occur on any path.
+
+    A bundle that lists the project's supplementary purchasing list (Issue
+    #10431; ``purchasing.json`` unless ``purchasing_path`` names another listed
+    file) has it verified like every other file, then carried into the plan
+    under ``purchasing`` with each row's build quantity. The list is the
+    buyer's: it adds nothing to the fabricator population or the catalog
+    demand.
     """
     if type(board_quantity) is not int or board_quantity <= 0:
         raise SubmissionError("Board quantity must be a positive integer")
@@ -526,6 +622,7 @@ def prepare_submission(
         or not set(artifacts.values()) <= set(allowed)
     ):
         raise SubmissionError("Select exactly one distinct listed artifact per role")
+    purchasing_source = _purchasing_source(purchasing_path, allowed)
     names = dict(_DEFAULT_NAMES if output_names is None else output_names)
     if set(names) != _ROLES:
         raise SubmissionError("Output names must specify all artifact roles")
@@ -567,6 +664,16 @@ def prepare_submission(
         exclusions,
     )
     counts = Counter(match["catalog_id"] for match in matches)
+    purchasing: dict[str, Any] | None = None
+    if purchasing_source is not None:
+        frozen = snapshots[purchasing_source]
+        purchasing = {
+            "source": {"path": purchasing_source, **_record(frozen.data)},
+            "items": [
+                row | {"required": row["per_board"] * board_quantity}
+                for row in _purchasing(frozen.data)
+            ],
+        }
     outputs = {names[role]: snapshots[path].data for role, path in artifacts.items()}
     outputs["expected-matches.json"] = _json(matches)
     outputs["bundle-manifest.json"] = manifest.data
@@ -603,6 +710,8 @@ def prepare_submission(
             "order": "not-performed",
         },
     }
+    if purchasing is not None:
+        core["purchasing"] = purchasing
     plan_bytes = _json(core)
     outputs["plan.json"] = plan_bytes
     outputs["plan.sha256"] = (_digest(plan_bytes) + "  plan.json\n").encode("ascii")
