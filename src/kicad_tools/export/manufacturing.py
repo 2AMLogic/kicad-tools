@@ -176,6 +176,11 @@ class ManufacturingResult:
     # compared against.  Read-only: broken links are surfaced as warnings,
     # never repaired here.
     instance_links: dict | None = None
+    # Issue #10422: nominal reinforcement-clearance measurements of the
+    # shipped Gerber archive (``to_dict()`` of
+    # :class:`~kicad_tools.export.reinforcement_clearance.ReinforcementClearanceReport`),
+    # or ``None`` when the board has no reinforcement sidecar.
+    reinforcement_clearance: dict | None = None
 
     @property
     def success(self) -> bool:
@@ -1500,6 +1505,10 @@ class ManufacturingPackage:
         # ``--auto-lcsc`` may have already invalidated (issue #4591).
         self._reconcile_preflight_lcsc(result)
 
+        # Step 1.6: measure the Gerber archive that will ship (Issue #10422),
+        # before the report, README and manifest are written from it.
+        self._measure_reinforcement_clearance(result)
+
         if self.config.via_land_overlap:
             self._measure_via_land_overlap(result)
 
@@ -1887,6 +1896,66 @@ class ManufacturingPackage:
             entry.message = "All BOM items have required fields (LCSC resolved by enrichment)"
 
         entry.details = "; ".join(remaining_issues + notes)
+
+    def _gerber_plot_origin(self) -> tuple[float, float]:
+        """Origin of the shipped Gerbers in the sheet frame, as kicad-cli plotted them (Issue #10422).
+
+        ``--use-drill-file-origin`` (every preset but OSH Park's, and the
+        default ``GerberConfig``) moves the artwork's origin to the board's aux
+        origin while the sidecar's coordinates stay sheet-absolute. The value
+        resolves exactly as ``AssemblyPackage._generate_gerbers`` resolves the
+        Gerber options, and it is a claim: the measurement corroborates it
+        against the plotted copper before trusting any anchor.
+        """
+        from ..manufacturers import get_fab_family
+        from .gerber import MANUFACTURER_PRESETS, GerberConfig
+
+        family = get_fab_family(self.manufacturer)
+        if family in MANUFACTURER_PRESETS:
+            use_aux = MANUFACTURER_PRESETS[family].config.use_aux_origin
+        else:
+            use_aux = (self.config.gerber_config or GerberConfig()).use_aux_origin
+        if not use_aux:
+            return (0.0, 0.0)
+        try:
+            setup = parse_file(self.pcb_path).find_child("setup")
+            origin = setup.find_child("aux_axis_origin") if setup is not None else None
+            values = origin.get_atoms() if origin is not None else []
+        except (OSError, ValueError, KiCadToolsError):
+            return (0.0, 0.0)
+        try:
+            return (float(values[0]), float(values[1]))
+        except (IndexError, TypeError, ValueError):
+            return (0.0, 0.0)
+
+    def _measure_reinforcement_clearance(self, result: ManufacturingResult) -> None:
+        """Step 1.6: measure the finished Gerber archive against the sidecar (Issue #10422).
+
+        Only a board with a ``<board>.reinforcement.json`` sidecar is measured;
+        without one nothing is recorded and the package is byte-for-byte what
+        it was. The measurements are nominal geometry with no verdict: they
+        become one preflight entry, whose status says only whether every
+        measurement could be made, so they never turn into an export error or
+        into a fabrication verdict.
+        """
+        from ..pcb.reinforcement_sidecar import load_wires_if_present
+        from .reinforcement_clearance import measure_reinforcement_clearance
+
+        wires = load_wires_if_present(self._lookup_pcb_path)
+        if not wires:
+            return
+        try:
+            assembly = result.assembly_result
+            report = measure_reinforcement_clearance(
+                assembly.gerber_path if assembly is not None else None,
+                wires,
+                plot_origin_mm=self._gerber_plot_origin(),
+            )
+        except Exception as e:  # noqa: BLE001 - a nominal measurement must never fail an export
+            logger.warning("Reinforcement clearance measurement skipped: %s", e)
+            return
+        result.reinforcement_clearance = report.to_dict()
+        result.preflight_results.append(report.preflight_result())
 
     def _measure_via_land_overlap(self, result: ManufacturingResult) -> None:
         """Measure the shipped archive's plated via drills against same-face SMD lands.
@@ -3323,6 +3392,23 @@ class ManufacturingPackage:
                 lines.append(
                     "  Board-only footprints (excluded from the check): " + ", ".join(skipped)
                 )
+            lines.append("")
+
+        if result.reinforcement_clearance:
+            from .reinforcement_clearance import summary_lines
+
+            clearance = result.reinforcement_clearance
+            title = "Reinforcement clearance (nominal, measured on the shipped Gerbers):"
+            lines.append(title)
+            lines.append("-" * len(title))
+            lines.append(f"  Gerber archive: {clearance['archive']['member']}")
+            lines.extend(summary_lines(clearance))
+            lines.append(
+                "  Nominal geometry for engineering review, with no spacing verdict: the "
+                "board's electrical spacing decision and the fabrication checks are separate. "
+                "Distances and artwork digests: manifest.json, preflight entry "
+                "reinforcement_clearance."
+            )
             lines.append("")
 
         readme_path = out_dir / "README.txt"
