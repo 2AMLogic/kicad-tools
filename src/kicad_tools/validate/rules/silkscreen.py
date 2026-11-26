@@ -1145,17 +1145,19 @@ def _pad_aperture_geometry(
 def _via_aperture_geometry(via: Via, min_mask_clearance: float) -> _Geometry:
     """Build a shapely polygon for an untented via's solder-mask opening.
 
-    Aperture = via annular copper (diameter ``via.size``) expanded by the
-    profile's mask margin.  Approximated as an axis-aligned box to
-    first-order-match :func:`_pad_aperture_geometry`'s convention (a circle
-    inscribes the box, so this slightly over-approximates the corners --
-    consistent with the pad/text AABB model used throughout this module).
+    Aperture = a filled disk centred on ``via.position`` with radius
+    ``via.size / 2`` expanded by the profile's mask margin -- the round
+    opening KiCad plots (Issue #10390).  It was modelled as the axis-aligned
+    square around that disk, so silk lying in a square's corner but outside
+    the circle was a false ``silk_over_copper``; a round pad's corner error
+    was #10306, fixed the same way by #10307.  The ``quad_segs=32``
+    resolution matches a circular pad's copper outline
+    (:func:`~kicad_tools.geometry.copper.pad_copper_outline`).
     """
-    from shapely.geometry import box
+    from shapely.geometry import Point
 
-    d = via.size + 2.0 * min_mask_clearance
     cx, cy = via.position
-    return box(cx - d / 2.0, cy - d / 2.0, cx + d / 2.0, cy + d / 2.0)
+    return Point(cx, cy).buffer(via.size / 2.0 + min_mask_clearance, quad_segs=32)
 
 
 def _via_is_tented(via: Via, setup: Setup | None, side: str) -> bool:
@@ -2624,6 +2626,19 @@ def check_silk_ref_obscured(
         if ref_text.hidden:
             if is_fiducial_footprint(footprint):
                 continue  # hiding fiducial references is the convention (#8540)
+            if (
+                footprint.exclude_from_bom
+                and footprint.exclude_from_pos_files
+                and footprint.pads
+                and all(
+                    pad.type == "np_thru_hole"
+                    and not pad.number
+                    and not pad.net_number
+                    and not pad.net_name
+                    for pad in footprint.pads
+                )
+            ):
+                continue  # Bare tooling holes have no part to identify (#10350).
             if _has_replacement_silk_text(pcb, footprint, ref_text.layer, Polygon):
                 continue  # hidden on purpose, replaced by a function label (#9435)
             results.add(
