@@ -709,6 +709,38 @@ def test_guard_rechecks_geometry_left_by_selective_undo(tmp_path, monkeypatch):
     assert board.read_bytes() == original
 
 
+def test_guard_restores_whole_pass_when_connectivity_regresses(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    other = _seg("trk-b", (105, 100.3), (110.7, 100.3), net=2)
+    board = _board2(tmp_path, ENTRY + other, r2_at="110 100")
+    board.write_text(
+        board.read_text().replace(
+            '(net 1 "N1") (uuid "pad-r2-1")', '(net 2 "N2") (uuid "pad-r2-1")'
+        )
+    )
+    original = board.read_bytes()
+    second = replace(_finding("trk-b"), items=["pad-r2-1", "trk-b"])
+
+    def connected_nets(path):
+        if path.read_bytes() == original:
+            return 2
+        assert _end(path, "trk-a")[1] == (100, 100)
+        return 1 if _end(path, "trk-b")[1] == (110, 100) else 2
+
+    monkeypatch.setattr(fix_drc_cmd, "_count_connected_nets", connected_nets)
+    monkeypatch.setattr(fix_drc_cmd, "_regressed_nets", lambda before, after: {"N2"})
+    code = _run(
+        monkeypatch,
+        board,
+        [_report(_finding("trk-a"), second), _report()],
+        extra=["--no-new-warnings"],
+        connectivity=True,
+    )
+    assert code == 3
+    assert board.read_bytes() == original
+
+
 def test_later_mask_detection_failure_rolls_back_saved_pass(tmp_path, monkeypatch):
     board = _board(tmp_path, ENTRY)
     original = board.read_bytes()

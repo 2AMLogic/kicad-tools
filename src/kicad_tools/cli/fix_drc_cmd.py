@@ -968,9 +968,12 @@ def _execute_repair(
                 if mask_result.repaired:
                     from kicad_tools.schema.pcb import PCB
 
-                    if any(zone.keepout is None for zone in PCB.load(output_path).zones):
-                        # Undoing only some moves would invalidate freshly saved fills.
-                        # Restore the complete pre-pass copper and its matching fills.
+                    if _guard_mask(args) or any(
+                        zone.keepout is None for zone in PCB.load(output_path).zones
+                    ):
+                        # Selective undo changes the geometry the guard verified.
+                        # With pours it also invalidates the saved fills. Use the
+                        # bulk rollback path to restore the complete pre-pass board.
                         regressed = set()
 
                 reverted_all, kept_count, reverted_uuid_list = _attempt_granular_rollback(
