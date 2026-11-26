@@ -565,6 +565,25 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
     return entries
 
 
+class _ParentNetAliases:
+    """Equivalences between parent nets joined through child-sheet wiring."""
+
+    def __init__(self) -> None:
+        self.parents: dict[str, str] = {}
+
+    def resolve(self, name: str) -> str:
+        while name in self.parents:
+            parent = self.parents[name]
+            self.parents[name] = self.parents.get(parent, parent)
+            name = self.parents[name]
+        return name
+
+    def join(self, first: str, second: str) -> None:
+        first, second = sorted((self.resolve(first), self.resolve(second)))
+        if first != second:
+            self.parents[second] = first
+
+
 def _collect_hierarchy_components(
     sch_path: Path,
     sheet_path: str,
@@ -572,6 +591,7 @@ def _collect_hierarchy_components(
     *,
     include_symbol_pins: bool = False,
     parent_nets_by_port: dict[str, str] | None = None,
+    aliases: _ParentNetAliases | None = None,
 ) -> tuple[list[NetlistComponent], dict[str, list]]:
     """Recursively collect components and nets from a schematic hierarchy.
 
@@ -593,6 +613,7 @@ def _collect_hierarchy_components(
         include_symbol_pins: Retain library pin definitions and include the
             pins of placed power symbols in the connectivity.
         parent_nets_by_port: Parent net names at this sheet instance's ports.
+        aliases: Parent nets joined by ports anywhere in this traversal.
 
     Returns:
         A ``(components, net_dict)`` tuple where *components* is a flat
@@ -602,6 +623,10 @@ def _collect_hierarchy_components(
     """
     from kicad_tools.schematic.models import Schematic
     from kicad_tools.schematic.models.netlist_mixin import _component_root
+
+    root_call = aliases is None
+    if aliases is None:
+        aliases = _ParentNetAliases()
 
     if visited is None:
         visited = set()
@@ -662,7 +687,9 @@ def _collect_hierarchy_components(
         if parent_nets_by_port and label.text in parent_nets_by_port:
             local_net = net_at((label.x, label.y))
             if local_net:
-                parent_names[local_net] = parent_nets_by_port[label.text]
+                parent_name = parent_nets_by_port[label.text]
+                first_parent = parent_names.setdefault(local_net, parent_name)
+                aliases.join(first_parent, parent_name)
 
     net_dict: dict[str, list] = {}
     try:
@@ -683,10 +710,18 @@ def _collect_hierarchy_components(
             visited,
             include_symbol_pins=include_symbol_pins,
             parent_nets_by_port=child_bindings,
+            aliases=aliases,
         )
         components.extend(sub_components)
         for name, pins in sub_nets.items():
             net_dict.setdefault(name, []).extend(pins)
+
+    if root_call:
+        # A later sheet can connect nets whose pins were already collected.
+        merged: dict[str, list] = {}
+        for name, pins in net_dict.items():
+            merged.setdefault(aliases.resolve(name), []).extend(pins)
+        return components, merged
 
     return components, net_dict
 

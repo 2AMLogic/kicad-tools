@@ -274,6 +274,44 @@ class TestHierarchicalLabelNetMerging:
             assert names["R1.1"] == "I2C_SDA"
             assert names["R5.1"] == ("I2C_SDA" if connected else "CHILD_ALIAS")
 
+    @pytest.mark.parametrize("connected", [True, False], ids=["wired", "disconnected"])
+    @pytest.mark.parametrize("reverse_ports", [False, True], ids=["sda-first", "thru-first"])
+    def test_child_wire_joins_parent_nets(self, tmp_path, connected, reverse_ports):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.add(
+            parse_string(
+                '(symbol (lib_id "Device:R") (at 90 60 0) (unit 1) '
+                '(property "Reference" "R2") (property "Value" "10k"))'
+            )
+        )
+        doc.add(parse_string("(wire (pts (xy 90 56.19) (xy 130 56.19)))"))
+        doc.add(parse_string('(label "SDA" (at 90 56.19 0))'))
+        doc.find("sheet").add(parse_string('(pin "THRU" input (at 130 56.19 180))'))
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        sda = doc.find("hierarchical_label")
+        doc.add(parse_string('(hierarchical_label "THRU" (shape input) (at 80 46.19 0))'))
+        if reverse_ports:
+            doc.remove(sda)
+            doc.add(sda)
+        if not connected:
+            doc.remove(doc.find("wire"))
+        child.write_text(doc.to_string())
+
+        extracted = Schematic.load(parent).extract_netlist(hierarchical=True)
+        pin_nets = {str(pin): name for name, pins in extracted.items() for pin in pins}
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=None):
+            exported = export_netlist(parent, fallback=True)
+        export_nets = {
+            f"{node.reference}.{node.pin}": net.name for net in exported.nets for node in net.nodes
+        }
+        for names in (pin_nets, export_nets):
+            assert names["R1.1"] == "I2C_SDA"
+            assert names["R2.1"] == names["R5.1"] == ("I2C_SDA" if connected else "SDA")
+
     def test_child_components_collected(self):
         """Components from child sheet with hierarchical labels are collected."""
         netlist = build_netlist_from_schematic(FIXTURES / "parent_with_pins.kicad_sch")
