@@ -22,11 +22,11 @@
       "size": 1971
     },
     "assembly-back.pdf": {
-      "sha256": "0c7733a1a107e612f57463aa6ebf86d03aa42d9f9f13df7e9ef108ca27994096",
+      "sha256": "640eacd55cd61c3f178d333a16326d8b54d68725caafdc80021124c5d87d1623",
       "size": 8733
     },
     "assembly-front.pdf": {
-      "sha256": "4fcb507d6fed2d5397ef0f011003c3faeff8284892e70561d0088dc55d111e92",
+      "sha256": "f93530fbc6ab9ea7e74e39f36dac14c0e380523d827a909920a33f7f2741097b",
       "size": 19589
     },
     "bom_jlcpcb.csv": {
@@ -34,7 +34,7 @@
       "size": 175
     },
     "check-report.json": {
-      "sha256": "f5c16dbc7d62e90ca884a78061c2b84bf994ac56ecb5faca5ab2fb3e9c0054f3",
+      "sha256": "b08664bc446bda962cb3fe07bf3cfc1249c40d924eaf5eef1647a28a8a9678df",
       "size": 130790
     },
     "cpl_jlcpcb.csv": {
@@ -42,8 +42,8 @@
       "size": 377
     },
     "gerbers/gerbers.zip": {
-      "sha256": "e1c32c65fa6cef7936224883ca08fde4cb289b80d8de0f9caa620c5aa08e3beb",
-      "size": 15657
+      "sha256": "dcb49662857e547c5b7f805920bb9bc79c4ff09d18f8b1489426ec40b879b52e",
+      "size": 15704
     },
     "images/assembly.png": {
       "sha256": "40855c76d00618e1505662e335316ebc3cccc140beb05c5b6584dcd0f64e3daf",
@@ -70,8 +70,8 @@
       "size": 200093
     },
     "images/schematic_voltage_divider.png": {
-      "sha256": "02421af6d6d8fcfc31b5d5d4ddbb02bba24ae16635caccd9e9c90b4acb05e10b",
-      "size": 118121
+      "sha256": "27f0d0565c634d8f676c0d0b5e2edc214da86fdaa29c5f495a58dde423e213bf",
+      "size": 118129
     },
     "kicad_project.zip": {
       "sha256": "7218769f570c40640017a2966421419f948f6a2d6dd9b7b967333818a4d4dc68",
@@ -86,15 +86,15 @@
       "size": 13488
     },
     "report.md": {
-      "sha256": "0b0b82f775f26c8900d5165507051682cf775926f352be6d6cb05bd17b86f213",
+      "sha256": "ef85489504ab8ef97900b23ee09c6fa3ce40a6b3210f55e0ab89881a68c86e49",
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "eee8bbe8d4eb1222f8c170bf3d0ba1c80fa1017bf1ab049cc59bf8bc5aca079a",
-      "size": 905288
+      "sha256": "54498616c07c62f6b1f354e44412d4821cc92eb19c6f8c39da2665b5aa380f81",
+      "size": 914124
     },
     "schematic.pdf": {
-      "sha256": "b6677a026f049dac1ad99fff0389870196ac10c4ea4b29dc3bd9ace0479e3fb8",
+      "sha256": "d0665bbc8d2676fbe31bbbd4eb21919e9ddf4aa475245bca831bd37a9a7a066b",
       "size": 47876
     }
   },
@@ -198,7 +198,7 @@
         "order_boards": 5,
         "parts": [
           {
-            "age_days": 0,
+            "age_days": 1,
             "lcsc": "C17414",
             "per_board": 2,
             "refs": [
@@ -206,8 +206,8 @@
               "R2"
             ],
             "source": "live",
-            "stock": 43938128,
-            "verified": true
+            "stock": 43985975,
+            "verified": false
           },
           {
             "age_days": null,

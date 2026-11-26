@@ -2194,10 +2194,10 @@
             }
           },
           "gerber_sha256": {
-            "F.Mask": "bd991187073d9bb7479354c359f65281bdabbbd9ea66c63ba629c4fcae35deb2",
-            "B.Mask": "2594cb431f09d011cddcb028dba9015f277c350937d1141386aeddf7974f85aa",
-            "F.Cu": "1277d5c892cc7f901b4c0df3b21db14fdf6f73993cef352d82747c6e128d5890",
-            "B.Cu": "2f8882b0bf92e0846837c318a37cba1e5a102e23fac267586999dc99d4d6024d"
+            "F.Mask": "cfbd3c91ca7715f3824260acaf1cfd7fc8da01cba91d4a98910aebc7876be4df",
+            "B.Mask": "2699f525c5d80299a5643f0c5189129ac0a84c62de8ae76ac6e9e8ed744f08a9",
+            "F.Cu": "c8870c419674be014ec3677c53248ffa5d604f99e4afd5c0db63f2554dc748b9",
+            "B.Cu": "d6f6a526b04ca567c671e575c75fd00d32e73be1f7fef9b22dfe6e9a8b0d5c06"
           },
           "unsupported": [],
           "source_geometries": {}
