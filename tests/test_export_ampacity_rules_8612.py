@@ -49,6 +49,21 @@ def test_unwaived_nets_keep_floors(tmp_path: Path) -> None:
     assert any("Export modified" in w for w in result.warnings)
 
 
+def test_project_only_rewrite_reports_changed_settings(tmp_path: Path) -> None:
+    pcb = _stage(tmp_path)
+    _export(pcb)
+    pro = pcb.with_suffix(".kicad_pro")
+    data = json.loads(pro.read_text())
+    data["board"]["design_settings"]["rule_severities"]["lib_footprint_mismatch"] = "warning"
+    pro.write_text(json.dumps(data))
+
+    _, changed = _export(pcb)
+    assert any(f"Export modified {pro.name}" in w for w in changed.warnings)
+    assert not any("Export modified" in w and ".kicad_dru" in w for w in changed.warnings)
+    _, unchanged = _export(pcb)
+    assert not any("Export modified" in w for w in unchanged.warnings)
+
+
 def test_waived_net_gets_no_rule(tmp_path: Path) -> None:
     pcb = _stage(tmp_path)
     baseline, _ = _export(pcb)

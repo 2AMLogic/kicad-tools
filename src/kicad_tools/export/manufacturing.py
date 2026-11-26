@@ -2114,11 +2114,17 @@ class ManufacturingPackage:
                 logger.info(fab_override_msg)
 
         rules = self._apply_stackup_copper(rules)
+
+        def existing_text(path: Path) -> str | None:
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError:
+                return None
+
         dru_path = Path(self.pcb_path).with_suffix(".kicad_dru")
-        try:
-            dru_text_before = dru_path.read_text(encoding="utf-8")
-        except OSError:
-            dru_text_before = None
+        pro_path = Path(self.pcb_path).with_suffix(".kicad_pro")
+        dru_text_before = existing_text(dru_path)
+        pro_text_before = existing_text(pro_path)
         dru_before = self._ampacity_block(dru_path)
 
         max_width_mm: float | None = None
@@ -2182,18 +2188,18 @@ class ManufacturingPackage:
             result.warnings.append(msg)
 
         # #8612: the designer owns this file; say so whenever export rewrote it.
-        try:
-            dru_text_after = dru_path.read_text(encoding="utf-8")
-        except OSError:
-            dru_text_after = None
-        if (
-            dru_text_before is not None
-            and dru_text_after is not None
-            and dru_text_after != dru_text_before
+        for path, before, reason in (
+            (dru_path, dru_text_before, "generated DRC rules"),
+            (pro_path, pro_text_before, "project DRC settings"),
         ):
-            note = f"Export modified {dru_path.name} (generated DRC rules)."
-            logger.info(note)
-            result.warnings.append(note)
+            after = existing_text(path)
+            if before is not None and after is not None and before != after:
+                note = f"Export modified {path.name} ({reason})."
+                if path == pro_path:
+                    note += " Re-run KiCad DRC against the packaged project settings."
+                logger.info(note)
+                result.warnings.append(note)
+
 
     def _dry_run_write_drc_constraints(
         self,
