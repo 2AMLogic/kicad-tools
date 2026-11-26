@@ -4043,8 +4043,7 @@ class PCB:
 
         # KiCad 10 --save-board: no header table survived. Synthesize one from
         # the inline name-only references so the recovery loop below has a map.
-        if not self._nets:
-            self._synthesize_net_table()
+        self._synthesize_net_table()
 
         # Build bidirectional lookups from the header declarations
         name_to_number: dict[str, int] = {}
@@ -4122,7 +4121,12 @@ class PCB:
         No-op if a header table already exists or if there are no named
         inline references to recover from.
         """
-        if self._nets:
+        # A lone (net 0 "") declares only the no-net sentinel. Name-only
+        # copper on such a board still needs the same in-memory net table.
+        lone_sentinel = (
+            self._nets.keys() == {0} and not self._nets[0].name and self._net_name_only_dialect
+        )
+        if self._nets and not lone_sentinel:
             return
 
         # Iterate elements in a stable order and collect (name, surviving_num).
@@ -6708,6 +6712,32 @@ class PCB:
             return True
 
         return False
+
+    def set_footprint_property(self, reference: str, name: str, value: str) -> bool:
+        """Set a custom footprint field, retaining its existing display settings."""
+        fp = self.get_footprint(reference)
+        if fp is None or fp._sexp_node is None:
+            return False
+        for prop in fp._sexp_node.find_children("property"):
+            if prop.get_string(0) == name:
+                prop.children[1] = SExp.quoted_atom(value)
+                break
+        else:
+            prop = SExp.list(
+                "property",
+                SExp.quoted_atom(name),
+                SExp.quoted_atom(value),
+                SExp.list("at", 0, 0),
+                SExp.list("layer", fp.layer.replace(".Cu", ".Fab")),
+                SExp.list("hide", "yes"),
+                SExp.list("uuid", self.mint_uuid("property", fp.uuid, name)),
+                SExp.list("effects", SExp.list("font", SExp.list("size", 1, 1))),
+            )
+            if fp.layer == "B.Cu":
+                _mirror_text_effects(prop)
+            fp._sexp_node.append(prop)
+        fp.properties[name] = value
+        return True
 
     # Silkscreen management methods
 

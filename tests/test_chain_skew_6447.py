@@ -76,6 +76,42 @@ def test_one_series_part_is_not_a_chain():
     assert derive_chain_skew(pcb, _classes()) == []
 
 
+@pytest.mark.parametrize("second_link", [("A_D+", "B_D+"), ("B_D+", "A_D+")])
+def test_parallel_parts_on_one_conductor_cannot_supply_the_other_conductor(second_link):
+    lengths = {"A_D+": 10, "A_D-": 12, "B_D+": 5, "B_D-": 7}
+    pcb = _board(lengths, [("A_D+", "B_D+"), second_link])
+    assert derive_chain_skew(pcb, _classes()) == []
+
+
+@pytest.mark.parametrize(
+    "connections",
+    [
+        [("A", "B"), ("B", "C"), ("B", "D")],
+        [("A", "B"), ("B", "C"), ("C", "A")],
+    ],
+    ids=["fork", "ring"],
+)
+def test_only_independent_series_chain_is_measured(connections):
+    links = [
+        (f"{a}_D{sign}", f"{b}_D{sign}")
+        for a, b in [*connections, ("X", "Y")]
+        for sign in ("+", "-")
+    ]
+    lengths = {name: 5 for link in links for name in link}
+    classes = dict.fromkeys(lengths, NetClassRouting(name="HS", coupled_routing=True))
+    (chain,) = derive_chain_skew(_board(lengths, links), classes)
+    assert set(chain.segments) == {("X_D+", "X_D-"), ("Y_D+", "Y_D-")}
+
+
+def test_three_pair_chain_with_reverse_pad_order_and_crossed_final_link():
+    links = [*STRAIGHT, ("C_D-", "B_D+"), ("C_D+", "B_D-")]
+    lengths = {"A_D+": 10, "A_D-": 12, "B_D+": 5, "B_D-": 7, "C_D+": 5, "C_D-": 9}
+    classes = dict.fromkeys(lengths, NetClassRouting(name="HS", coupled_routing=True))
+    (chain,) = derive_chain_skew(_board(lengths, links), classes)
+    assert chain.side_a_mm == pytest.approx(24.0)
+    assert chain.side_b_mm == pytest.approx(24.0)
+
+
 def test_no_class_map_is_a_no_op():
     pcb = _board({"A_D+": 10, "A_D-": 12, "B_D+": 5, "B_D-": 7}, STRAIGHT)
     assert derive_chain_skew(pcb, None) == []

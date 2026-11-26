@@ -23,6 +23,7 @@ import json
 import sys
 from pathlib import Path
 
+from kicad_tools.cli.commands.datasheet import add_package_parsers
 from kicad_tools.cli.format_options import add_format_flag, emit_json
 from kicad_tools.utils import ensure_parent_dir
 
@@ -246,47 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     info_parser.add_argument("pdf", help="Path to PDF file")
     info_parser.add_argument("--format", choices=["text", "json"], default="text")
 
-    # extract-package subcommand
-    pkg_parser = subparsers.add_parser(
-        "extract-package", help="Extract package information from PDF"
-    )
-    pkg_parser.add_argument("pdf", help="Path to PDF file")
-    pkg_parser.add_argument(
-        "-o",
-        "--output",
-        help="Output file path (default: stdout)",
-    )
-    pkg_parser.add_argument(
-        "--pages",
-        help="Page range to search (e.g., '1-10' or '1,2,5')",
-    )
-    pkg_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format (default: text)",
-    )
-
-    # suggest-footprint subcommand
-    footprint_parser = subparsers.add_parser(
-        "suggest-footprint", help="Suggest matching footprints for packages in PDF"
-    )
-    footprint_parser.add_argument("pdf", help="Path to PDF file")
-    footprint_parser.add_argument(
-        "-o",
-        "--output",
-        help="Output file path (default: stdout)",
-    )
-    footprint_parser.add_argument(
-        "--pages",
-        help="Page range to search (e.g., '1-10' or '1,2,5')",
-    )
-    footprint_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format (default: text)",
-    )
+    add_package_parsers(subparsers)
 
     args = parser.parse_args(argv)
 
@@ -1077,7 +1038,7 @@ def _extract_package(args) -> int:
         pages = _parse_pages(args.pages)
         packages = parser.extract_packages(pages)
 
-        if not packages:
+        if not packages and args.format != "json":
             print("No packages found in document", file=sys.stderr)
             return 0
 
@@ -1092,7 +1053,7 @@ def _extract_package(args) -> int:
             for pkg in packages:
                 lines.append(
                     f"  {pkg.name}: {pkg.body_width}x{pkg.body_length}mm, "
-                    f"{pkg.pitch}mm pitch, {pkg.pin_count} pins"
+                    f"{pkg.pitch}mm pitch{' (estimated)' if pkg.pitch_inferred else ''}, {pkg.pin_count} pins"
                 )
                 if pkg.exposed_pad:
                     lines.append(f"    Exposed pad: {pkg.exposed_pad[0]}x{pkg.exposed_pad[1]}mm")
@@ -1132,7 +1093,7 @@ def _suggest_footprint(args) -> int:
         pages = _parse_pages(args.pages)
         packages = parser.extract_packages(pages)
 
-        if not packages:
+        if not packages and args.format != "json":
             print("No packages found in document", file=sys.stderr)
             return 0
 
@@ -1157,6 +1118,8 @@ def _suggest_footprint(args) -> int:
             for pkg in packages:
                 lines.append(f"\n{pkg.name}:")
 
+                if pkg.pitch_inferred:
+                    lines.append(f"  Estimated lead pitch: {pkg.pitch} mm (package-family default)")
                 matches = matcher.find_matches(pkg)
                 if matches:
                     lines.append("  Matches:")

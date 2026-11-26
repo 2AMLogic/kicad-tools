@@ -423,7 +423,7 @@ class ReinforcementIncompleteRule(DRCRule):
             ):
                 any_strip = True
                 located.setdefault(seg.layer, []).append(seg)
-        drill = anchor_drill_for_awg(self._gauge(net, "", [(0.0, 0.0), (0.0, 0.0)]))
+        drill = anchor_drill_for_awg(self._net_gauge(net))
         holes = self._anchor_holes(pcb, net_number, rotate_pad_offset)
         any_anchor = any(
             abs(v.drill - drill) <= DRILL_TOLERANCE_MM for v, _ in holes["vias"]
@@ -686,8 +686,10 @@ class ReinforcementIncompleteRule(DRCRule):
             for a, b in ((ws, we), (we, ws)):
                 if math.dist(a, ends[0]) < 0.05 and math.dist(b, ends[1]) < 0.05:
                     return awg
-        if fallback is not None:
-            return fallback
+        return fallback if fallback is not None else self._net_gauge(net)
+
+    def _net_gauge(self, net: str) -> int:
+        """Use the recorded gauge for a net when there is no matching leg."""
         for w in self.wires:
             if isinstance(w, dict) and w.get("net") == net and "wire_gauge_awg" in w:
                 try:
@@ -753,8 +755,10 @@ class ReinforcementIncompleteRule(DRCRule):
             spans = by_layer[layer]
             if resolutions:
                 spans = rf._declared_leg_spans(spans, resolutions, {})
+            unhandled: dict[str, _Point] = {}
             for cand in rf._derive_legs(spans, layer, original_ids):
-                if cand.status is not None:  # unhandled topology: no wire layout implied
+                if cand.status is not None:
+                    unhandled.setdefault(cand.reason, cand.run[0].start)
                     continue
                 pts = rf._run_points(cand.run)
                 width = max((s.width for s in cand.run), default=0.0)
@@ -762,8 +766,10 @@ class ReinforcementIncompleteRule(DRCRule):
                 leg.cum = rf._cumulative_arc(pts)
                 leg.max_end_shift_mm = self._recorded_end_shift(net, layer, pts)
                 legs.append(leg)
+            for reason, position in unhandled.items():
+                self._emit(results, net, layer, "skipped", position, "wire layout", reason)
 
-        net_gauge = legs[0].gauge if legs else self._gauge(net, "", [])
+        net_gauge = legs[0].gauge if legs else self._net_gauge(net)
         # --- candidate anchor holes on this net -----------------------------
         holes_for = self._anchor_holes(pcb, net_number, rotate_pad_offset)
 

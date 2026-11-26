@@ -575,16 +575,17 @@ def derive_chain_skew(
             links.append((a, b))
 
     # A pair link needs a part on each conductor, with one polarity relation.
-    relation: dict[tuple[int, int], list[bool]] = {}
+    relation: dict[tuple[int, int], set[tuple[int, int]]] = {}
     for a, b in links:
-        (ia, sa), (ib, sb) = net_to_pair[a], net_to_pair[b]
-        relation.setdefault((min(ia, ib), max(ia, ib)), []).append(sa == sb)
+        (ia, sa), (ib, sb) = sorted((net_to_pair[a], net_to_pair[b]))
+        relation.setdefault((ia, ib), set()).add((sa, sb))
     adjacency: dict[int, list[tuple[int, bool]]] = {}
-    for (i, j), kinds in relation.items():
-        if len(kinds) < 2 or len(set(kinds)) != 1:
-            continue  # one conductor only, or contradictory polarity
-        adjacency.setdefault(i, []).append((j, kinds[0]))
-        adjacency.setdefault(j, []).append((i, kinds[0]))
+    for (i, j), conductors in relation.items():
+        same = conductors == {(0, 0), (1, 1)}
+        if not same and conductors != {(0, 1), (1, 0)}:
+            continue
+        adjacency.setdefault(i, []).append((j, same))
+        adjacency.setdefault(j, []).append((i, same))
 
     name_to_id = {v: k for k, v in net_names.items()}
 
@@ -616,6 +617,11 @@ def derive_chain_skew(
                     flip[nxt] = flip[cur] if same else not flip[cur]
                     stack.append(nxt)
         seen.update(flip)
+        # A single series path has two ends and no branches. Summing a fork
+        # or a ring would include copper outside any one end-to-end path.
+        degrees = [len(adjacency[i]) for i in flip]
+        if degrees.count(1) != 2 or max(degrees) > 2:
+            continue
         members = sorted(flip)
         if not all(
             _net_has_geometry(pcb, n.net_id)

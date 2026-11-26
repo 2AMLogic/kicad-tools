@@ -582,6 +582,8 @@ def net_class_map(pcb: PCB, pcb_path: Path | str | None, nets: set[str]) -> dict
     import fnmatch
     import json
 
+    from kicad_tools.core.netclass_diagnostics import matches_encoded_netclass
+
     assigned: dict[str, str] = {}
     for name, net_class in pcb.net_classes.items():
         for net in net_class.nets:
@@ -604,6 +606,13 @@ def net_class_map(pcb: PCB, pcb_path: Path | str | None, nets: set[str]) -> dict
     for net in nets:
         cls = assigned.get(net)
         if cls is None:
-            cls = next((c for pat, c in patterns if fnmatch.fnmatchcase(net, pat)), "Default")
+            cls = next(
+                (
+                    c
+                    for pat, c in patterns
+                    if matches_encoded_netclass(pat, net) or fnmatch.fnmatchcase(net, pat)
+                ),
+                "Default",
+            )
         out[net] = cls
     return out
