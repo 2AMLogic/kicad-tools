@@ -684,6 +684,42 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
     return True, excess, None
 
 
+def _separate_mask_land(owner, side, opening, candidates, conductors):
+    """Resolve a technical mask pad to the single numbered land beneath it."""
+    parent = owner.get("parent_uuid")
+    layers = owner["layers_geometry"]
+    if (
+        not parent
+        or not owner["kind"].startswith("pad:")
+        or owner.get("net")
+        or owner.get("pad_ref")
+        or any(layer.endswith(".Cu") for layer in layers)
+        or opening.is_empty
+    ):
+        return None
+
+    shape = layers[side]
+    land = None
+    for position in candidates:
+        _, item, copper = conductors[position]
+        if not item["kind"].startswith("pad:") or item.get("parent_uuid") != parent:
+            continue
+        if not copper.intersects(shape) and not copper.intersects(opening):
+            continue
+        # A second touching pad, an overhang, or an unidentified land makes
+        # the assembly's intended electrical owner ambiguous.
+        if (
+            land is not None
+            or not item.get("pad_ref")
+            or not item.get("net")
+            or not copper.covers(shape)
+            or not copper.covers(opening)
+        ):
+            return None
+        land = item
+    return land
+
+
 def _same_footprint_pads(owner_items, item) -> bool:
     """True when the conductor and every opening owner are pads of one footprint.
 
@@ -1553,6 +1589,12 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 candidates = sorted(
                     index.query(box(minx - reach, miny - reach, maxx + reach, maxy + reach))
                 )
+            source_items = [geometry.objects[o] for o in owners]
+            land = (
+                _separate_mask_land(source_items[0], side, opening, candidates, conductors)
+                if excluded is not None
+                else None
+            )
             for position in candidates:
                 identity, item, copper = conductors[position]
                 if identity == excluded:
@@ -1576,7 +1618,9 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 # copper is exposed, and whether the exposure is the pad's
                 # own escape or an unrelated crossing. Never gates the
                 # measurement itself -- the comparison set stays all objects.
-                owner_items = [geometry.objects[o] for o in owners]
+                owner_items = source_items
+                if land is not None and (item is land or not item["kind"].startswith("pad:")):
+                    owner_items = [land]
                 owner_nets = sorted({o["net"] for o in owner_items if o["net"]})
                 conductor_net = item["net"] or None
                 same_net = (
