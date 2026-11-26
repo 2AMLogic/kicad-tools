@@ -533,7 +533,7 @@ def _run_channel_intent(args) -> int:
         findings = check_channel_intent(
             Path(args.channel_intent), Path(designs[0]), Path(boards[0])
         )
-    except (ValueError, OSError, KiCadToolsError) as exc:
+    except (ValueError, OSError, RuntimeError, KiCadToolsError) as exc:
         print(f"Channel intent check failed: {exc}", file=sys.stderr)
         return 2
     if args.validate_format == "json":

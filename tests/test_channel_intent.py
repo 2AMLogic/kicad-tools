@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -211,17 +212,7 @@ def test_missing_value_and_undeclared_field(bank, capsys):
     assert check(bank, "net", capsys, 1) == [("27", "C127", "pcb", None, "Value", "1 µF", None)]
 
 
-@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="needs kicad-cli for a native export")
-def test_swapped_placement_references_match_native_export(bank, capsys, tmp_path):
-    """Swapped placement annotations: direct schematic input agrees with a fresh native netlist."""
-    import subprocess
-
-    sch = bank / "bank.kicad_sch"
-    text = sch.read_text()
-    text = text.replace('(reference "R327")', '(reference "TMP")')
-    text = text.replace('(reference "R427")', '(reference "R327")')
-    sch.write_text(text.replace('(reference "TMP")', '(reference "R427")'))
-    native = tmp_path / "native.net"
+def export_bank_netlist(bank):
     subprocess.run(
         [
             "kicad-cli",
@@ -231,14 +222,57 @@ def test_swapped_placement_references_match_native_export(bank, capsys, tmp_path
             "--format",
             "kicadsexpr",
             "-o",
-            str(native),
-            str(sch),
+            str(bank / "bank.net"),
+            str(bank / "bank.kicad_sch"),
         ],
         check=True,
         capture_output=True,
     )
+
+
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="needs kicad-cli for a native export")
+@pytest.mark.parametrize("miswired", [False, True])
+def test_wired_private_nets_match_native_export(bank, capsys, miswired):
+    sch = bank / "bank.kicad_sch"
+    doc = parse_string(sch.read_text())
+    doc.children = [
+        node
+        for node in doc.children
+        if node.tag != "label" or node.get_string(0) not in {"REF27", "REF28"}
+    ]
+    # Each capacitor and upper resistor share a wire. Move just R427 pin 1
+    # from that pair in channel 27 to the capacitor in channel 28.
+    for start, end in [
+        ("25.40 53.34", "38.10 53.34"),
+        ("63.50 53.34" if miswired else "38.10 53.34", "50.80 48.26"),
+        ("63.50 53.34", "76.20 53.34"),
+        ("76.20 53.34", "88.90 48.26"),
+    ]:
+        doc.children.append(
+            parse_string(f"(wire (pts (xy {start}) (xy {end})) (stroke (width 0) (type default)))")
+        )
+    sch.write_text(doc.to_string())
+    for path in [bank / "intent.json", bank / "bank.kicad_pcb"]:
+        text = path.read_text()
+        for channel in (27, 28):
+            text = text.replace(f"/REF{channel}", f"Net-(C1{channel}-Pad2)")
+        path.write_text(text)
+    export_bank_netlist(bank)
+    for ext, source in [("net", "netlist"), ("kicad_sch", "schematic")]:
+        expected = [("27", "R427", source, "1", None, "Net-(C127-Pad2)", "Net-(C128-Pad2)")]
+        assert check(bank, ext, capsys, int(miswired)) == (expected if miswired else [])
+
+
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="needs kicad-cli for a native export")
+def test_swapped_placement_references_match_native_export(bank, capsys):
+    """Swapped placement annotations: direct schematic input agrees with a fresh native netlist."""
+    sch = bank / "bank.kicad_sch"
+    text = sch.read_text()
+    text = text.replace('(reference "R327")', '(reference "TMP")')
+    text = text.replace('(reference "R427")', '(reference "R327")')
+    sch.write_text(text.replace('(reference "TMP")', '(reference "R427")'))
+    export_bank_netlist(bank)
     direct = check(bank, "kicad_sch", capsys, 1)
-    (bank / "bank.net").write_bytes(native.read_bytes())
     exported = check(bank, "net", capsys, 1)
     assert direct
     # Drop the source label: the same defects are reported against either input.

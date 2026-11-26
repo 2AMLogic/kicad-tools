@@ -847,6 +847,9 @@ kct validate --sync project.kicad_sch board.kicad_pcb
 
 Use `--channel-intent` when a project specifies what each repeated circuit must contain.
 It checks a native schematic or KiCad S-expression netlist and the PCB independently.
+When a checked schematic pin is on an unlabelled wire, the command uses
+`kicad-cli` to resolve KiCad’s generated net name. An exported netlist already
+contains those names and can be checked without KiCad installed.
 Run sync and copper LVS separately to check agreement and physical connectivity.
 
 ```bash
