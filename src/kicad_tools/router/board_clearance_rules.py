@@ -82,8 +82,11 @@ these item properties:
   false under both readings (it never names the footprint's layer), and
   unknown otherwise.
 
-Everything else -- ``A.insideArea(...)`` / ``intersectsArea`` /
-``enclosedByArea``, numeric properties -- evaluates to **unknown**.  A track's
+``A.intersectsArea('NAME')`` / ``A.enclosedByArea('NAME')`` of a track are
+decided when the caller supplies the track's measured geometry against each
+named rule area (#10121); otherwise they are unknown.
+
+Everything else -- ``A.insideArea(...)``, numeric properties -- evaluates to **unknown**.  A track's
 or via's ``Pad_Type``, and a via's ``Layer``, is KiCad's null, which
 compares false under both ``==`` and ``!=``.  The evaluator is
 three-valued, and an unknown rule is handled **conservatively**: it is
@@ -260,6 +263,7 @@ class ItemProps:
     footprint_ref: str | None = None
     footprint_lib_id: str | None = None
     areas: tuple[tuple[str, bool | None], ...] | None = None
+    enclosed: tuple[tuple[str, bool | None], ...] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -755,15 +759,22 @@ class _PairContext:
         item, name = self._split(text)
         if item is None:
             return _UNKNOWN
-        if name == "intersectsarea" and len(args) == 1 and isinstance(args[0], str):
+        if (
+            name in ("intersectsarea", "enclosedbyarea")
+            and len(args) == 1
+            and isinstance(args[0], str)
+        ):
             # Decided only where the caller measured the item's geometry
             # against every named rule area (#10121); anything else is unknown.
-            if item.type != "Track" or item.areas is None:
+            # ``enclosedByArea`` (fully inside) is measured separately from
+            # ``intersectsArea`` (touching): a track beside an area is neither.
+            measured = item.areas if name == "intersectsarea" else item.enclosed
+            if item.type != "Track" or measured is None:
                 return _UNKNOWN
             # Same-named areas are all evaluated, so serialization order
             # cannot change the result: any hit decides True; otherwise an
             # undecided area keeps it unknown.
-            hits = [hit for area_name, hit in item.areas if area_name == args[0]]
+            hits = [hit for area_name, hit in measured if area_name == args[0]]
             if not hits:
                 return _UNKNOWN
             if any(hit is True for hit in hits):

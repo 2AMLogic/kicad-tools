@@ -486,6 +486,23 @@ def test_undecided_rule_needs_a_confirmed_slot(tmp_path):
     assert list(iter_pour_slot_pairs(pcb, rules)) == []
 
 
+def test_enclosed_by_area_is_decided_from_geometry(tmp_path):
+    """A distant area leaves the rule inapplicable; one over the tracks applies it.
+
+    Review of #10128: the undecided reading used to decide the warning, so a
+    distant exemption/tightening flipped the answer for the same tracks.
+    """
+    cond = "A.Type == 'Track' && A.enclosedByArea('WideSpacing')"
+    for area_x, gap, expected in (
+        ((32, 42), 0.55, 1),  # distant: default clearance, genuine slot
+        ((32, 42), 0.705, 0),  # distant: default clearance, no slot
+        ((5, 25), 0.55, 0),  # local: 0.3 mm applies, 0.55 is packed
+        ((5, 25), 0.705, 1),  # local: 0.3 mm applies, slot in (0.6, 0.9)
+    ):
+        pcb, rules = _rules_board(tmp_path, cond, gap=gap, area_x=area_x)
+        assert len(list(iter_pour_slot_pairs(pcb, rules))) == expected, (area_x, gap)
+
+
 @pytest.mark.parametrize("local_first", [True, False])
 def test_same_named_rule_areas_ignore_serialization_order(tmp_path, local_first):
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules

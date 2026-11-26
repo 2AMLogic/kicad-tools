@@ -165,6 +165,7 @@ class PourSlotRule(DRCRule):
         self.clearances = netclass_clearances or {}
         self._rule_areas: list[tuple[str, frozenset[str], BaseGeometry]] = []
         self._areas_cache: dict[int, tuple[tuple[str, bool | None], ...]] = {}
+        self._enclosed_cache: dict[int, tuple[tuple[str, bool | None], ...]] = {}
 
     def _track_clearance(self, track: str, zone_net: str, layer: str) -> float:
         if isinstance(self.clearances, BoardClearanceRules):
@@ -197,6 +198,7 @@ class PourSlotRule(DRCRule):
             footprint_ref="",
             footprint_lib_id="",
             areas=areas,
+            enclosed=self._segment_enclosed(seg, layer),
         )
         pour = ItemProps(
             "Zone",
@@ -222,6 +224,20 @@ class PourSlotRule(DRCRule):
         self._areas_cache[key] = result
         return result
 
+    def _segment_enclosed(self, seg: Any, layer: str) -> tuple[tuple[str, bool | None], ...]:
+        """Per named rule area: is ``seg``'s copper fully inside it (``None``: other layer)."""
+        key = id(seg)
+        cached = self._enclosed_cache.get(key)
+        if cached is not None:
+            return cached
+        shape = LineString([seg.start, seg.end]).buffer(seg.width / 2)
+        result = tuple(
+            (name, None if layers and layer not in layers else bool(outline.covers(shape)))
+            for name, layers, outline in self._rule_areas
+        )
+        self._enclosed_cache[key] = result
+        return result
+
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         results = DRCResults()
         results.rules_checked = 1
@@ -235,6 +251,7 @@ class PourSlotRule(DRCRule):
         zones: dict[str, list[_Pour]] = defaultdict(list)
         self._rule_areas = []
         self._areas_cache = {}
+        self._enclosed_cache = {}
         for zone in pcb.zones:
             if zone.keepout is not None:
                 contours = getattr(zone, "rule_area_contours", None) or [zone.polygon]
