@@ -119,6 +119,38 @@ class TestRule:
         assert rows["C1"].distance_mm == pytest.approx(1.0)
         assert rows["C2"].distance_mm == pytest.approx(1.0)
 
+    @pytest.mark.parametrize("near_first", [False, True])
+    def test_repeated_supply_lands_use_nearest_copper_pair(self, tmp_path, near_first):
+        board = _board(tmp_path, c1=30.5)
+        text = board.read_text()
+        # U1 at x=20 and C1 at x=30.5. Their closest lands are at x=26 and 28.
+        lead = '(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "+3V3"))'
+        tab = lead.replace("(at 0 0)", "(at 6 0)")
+        mask = lead.replace("(at 0 0)", "(at 8 0)").replace("F.Cu", "F.Mask")
+        cap = '(pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "+3V3"))'
+        other = cap.replace("(at -0.5 0)", "(at -2.5 0)")
+        text = text.replace(lead, mask + (tab + lead if near_first else lead + tab), 1)
+        board.write_text(text.replace(cap, other + cap if near_first else cap + other, 1))
+        rows = measure_bypass_pairs(PCB.load(str(board)), board.with_suffix(".kicad_sch"))
+        row = next(r for r in rows if r.cap == "C1")
+        assert row.distance_mm == pytest.approx(2)
+        assert row.cap_position == pytest.approx((28, 10))
+        assert not _run(board).violations
+
+    @pytest.mark.parametrize(("ref", "hole_x"), [("U1", 8), ("C1", -8.5)])
+    def test_numbered_non_plated_hole_cannot_clear_distance_warning(self, tmp_path, ref, hole_x):
+        board = _board(tmp_path, c1=30.5)
+        # Copper centres are 10 mm apart. The hole is 2 mm from the opposite land.
+        reference = f'(property "Reference" "{ref}")'
+        hole = (
+            f'(pad "1" np_thru_hole circle (at {hole_x} 0) (size 1 1) '
+            '(drill 1) (layers "*.Cu" "*.Mask"))'
+        )
+        board.write_text(board.read_text().replace(reference, f"{reference} {hole}"))
+        found = _by_rule(_run(board), BYPASS_DISTANCE_RULE_ID)
+        assert [v.items for v in found] == [("C1", "U1")]
+        assert found[0].actual_value == pytest.approx(10)
+
     def test_max_distance_is_configurable(self, tmp_path):
         board = _board(tmp_path, c1=24.5)  # C1 supply pad at 24.0 -> 4.0mm from U1 pin 1
         assert _by_rule(_run(board), BYPASS_DISTANCE_RULE_ID)  # default 3.0

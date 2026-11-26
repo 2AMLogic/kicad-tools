@@ -23,6 +23,7 @@ from kicad_tools.validate.mask_copper import (
     MaskEscapeIntent,
     assess_attributed_geometry,
     assessment_results,
+    clean_own_pad_entry,
     source_binding,
 )
 
@@ -154,6 +155,33 @@ def test_45_degree_entry_is_within_own_pad():
     result, m = _only(_segment((0.6, 0.4), (1.6, 1.4)))
     assert m.disposition == "within_own_pad"
     assert result.passed
+
+
+def test_clean_own_pad_entry_judges_copper_that_is_not_on_a_board_yet():
+    """Issue #9939: the repairer asks the class about copper it may draw."""
+    rounded = box(99.25, 99.75, 100.75, 100.25).buffer(0.25, quad_segs=64)
+
+    def ask(pad, a, b, width=0.2):
+        copper, source = track(a, b, width)
+        return clean_own_pad_entry(
+            pad,
+            copper,
+            pad,
+            "pad:roundrect",
+            source["width_mm"],
+            source["endpoints_mm"],
+            clearance_mm=0.09,
+            uncertainty_mm=0.0101,
+        )
+
+    assert ask(PAD, (0.6, 0.4), (1.6, 1.4))
+    # No authored end inside the pad: a pass-through, however it is drawn.
+    assert not ask(PAD, (-0.5, 1.05), (1.5, 1.05))
+    # Board 03 R4/2: a 45-degree entry whose end sits 0.063 mm above the pad's
+    # bottom edge leaves its cap past the corner arc, over one crossing's
+    # budget; the same pad entered squarely from below stays within it.
+    assert not ask(rounded, (100.1921, 101.12), (100.875, 100.4371), width=0.25)
+    assert ask(rounded, (100.875, 100.8), (100.875, 100.0), width=0.25)
 
 
 def test_track_lying_wholly_on_its_pad_is_within_own_pad():

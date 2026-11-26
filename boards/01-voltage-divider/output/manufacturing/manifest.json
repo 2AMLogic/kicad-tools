@@ -43,15 +43,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "b7640f5f4d6396708fe51bb5ea5a9735c6f31ecbab8bc9084d4daf02ee1668ec",
-      "size": 2415
+      "sha256": "d1791370956962913fac6bd16314506702a6021bfb14b9e396bc02e90a1a592f",
+      "size": 2212
     },
     "assembly-back.pdf": {
-      "sha256": "e8082f31f55aa536a2f3ac194643bfcd197dd09618ebfdff6d1f2fccddf16001",
+      "sha256": "762635aca8889ca42736c0092b14ba962cd829e534f554c04e9c0d802593f6d0",
       "size": 8804
     },
     "assembly-front.pdf": {
-      "sha256": "5e830055de4e9e20470ae05c8958e981edd74278a405009e000cb705d0e35a91",
+      "sha256": "1aeabcc7772acd60b33c6f5348db4aceddc474e372229824bba5c05a0b7a8575",
       "size": 19669
     },
     "bom_jlcpcb.csv": {
@@ -59,7 +59,7 @@
       "size": 175
     },
     "check-report.json": {
-      "sha256": "9ce7ee552662b62c0abe3fc94ae6b6a094b9a33b87d60e1fe9c4c13c8ef42e2d",
+      "sha256": "1c99bb3e249fe9daa4f60be1a36befc2e0fac508f2b952fafce473837a306c41",
       "size": 116399
     },
     "cpl_jlcpcb.csv": {
@@ -95,8 +95,8 @@
       "size": 202618
     },
     "images/schematic_voltage_divider.png": {
-      "sha256": "27f0d0565c634d8f676c0d0b5e2edc214da86fdaa29c5f495a58dde423e213bf",
-      "size": 118129
+      "sha256": "02421af6d6d8fcfc31b5d5d4ddbb02bba24ae16635caccd9e9c90b4acb05e10b",
+      "size": 118121
     },
     "kicad_project.zip": {
       "sha256": "8fd6c865dc088d580c9b729aada791afa3cff50d6bf5e0cb830c71b79cf71d46",
@@ -115,15 +115,15 @@
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "c464d395fc7e39322d9ef11608f039f1148479744e2bd23c6af0f312ee542dcb",
-      "size": 934951
+      "sha256": "be21e7683751f06608e7fffbc0a41824551c012cb10daab54f5d46db87e8c882",
+      "size": 925915
     },
     "schematic.pdf": {
-      "sha256": "639ebe3cf4bf0902bd27d5fd25c872d2f5f2e88d619244511973114c9f34521e",
+      "sha256": "f5d79356a1d6c5ca854e3d4fce1ccb70e5f445cb5de9ef2180ebd23fbaebba1a",
       "size": 47852
     }
   },
-  "generated_at": "2026-11-26T17:30:00Z",
+  "generated_at": "2026-11-26T19:43:14Z",
   "kicad_tools_version": "0.29.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -279,30 +279,50 @@
       "status": "OK"
     },
     {
-      "details": "unverified: J1 -> C7501260, R1 -> C17414, R2 -> C17414, J2 -> C7501260",
-      "message": "0 of 4 assigned item(s) verified (no source); 4 unverifiable (not in parts cache or offline catalog)",
+      "message": "4 of 4 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches",
       "name": "bom_lcsc_values",
-      "status": "WARN"
+      "status": "OK"
     },
     {
       "data": {
         "inventory_covered": [],
         "order_boards": 5,
-        "parts": [],
+        "parts": [
+          {
+            "age_days": 0,
+            "lcsc": "C17414",
+            "per_board": 2,
+            "refs": [
+              "R1",
+              "R2"
+            ],
+            "source": "live",
+            "stock": 43938128,
+            "verified": true
+          },
+          {
+            "age_days": null,
+            "lcsc": "C7501260",
+            "per_board": 2,
+            "refs": [
+              "J1",
+              "J2"
+            ],
+            "source": "offline_catalog",
+            "stock": 27339,
+            "verified": false
+          }
+        ],
         "sources": {
-          "offline_catalog": "missing",
-          "parts_cache": "miss"
+          "offline_catalog": "hit",
+          "parts_cache": "hit"
         },
         "strict": false,
-        "unresolved": [
-          "C17414",
-          "C7501260"
-        ]
+        "unresolved": []
       },
-      "details": "C17414, C7501260",
-      "message": "Stock not verified: 2 assigned LCSC number(s) found in neither the parts cache nor the offline catalog; parts cache searched, no matching row; offline catalog not available on the generating host (no catalog file)",
+      "message": "2 LCSC part(s) have recorded stock for 5 board(s)",
       "name": "bom_lcsc_stock",
-      "status": "WARN"
+      "status": "OK"
     },
     {
       "message": "BOM and PCB references match (4 components)",
