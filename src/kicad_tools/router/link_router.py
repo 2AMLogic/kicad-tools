@@ -81,6 +81,10 @@ class LinkRouteRules:
     via_size: float = 0.6
     via_drill: float = 0.3
     hole_to_hole: float = 0.5
+    #: Issue #10393: copper-to-hole clearance (mm) kept between a track or via
+    #: and the edge of a non-plated hole (KiCad's board-setup default
+    #: ``min_hole_clearance``, ``KICAD_DEFAULT_HOLE_CLEARANCE_MM``).
+    hole_clearance: float = 0.25
     edge_clearance: float = 0.5
     grid: float = 0.05
     margin: float = 4.0
@@ -139,6 +143,10 @@ class LinkRouteRules:
         larger of the base clearance and the applicable KiCad copper rule.
         """
         floor = self.clearance
+        if item is not None and item.hole:
+            # Issue #10393: a bare non-plated drill is no copper item, so the
+            # copper-pair rules do not apply; it keeps the hole clearance.
+            return [(geom, max(self.hole_clearance, self.clearance_for(net_number)))]
         if self.board_rules is not None and self.net_names is not None:
             from .board_clearance_rules import PAD_TYPE_NAMES, ItemProps
 
@@ -327,6 +335,9 @@ class _Item:
     footprint_layer: str | None = None
     #: Schema pad ``type`` (``smd`` / ``thru_hole`` / ``connect`` / ...).
     pad_type: str | None = None
+    #: Issue #10393: the opening of a non-plated hole -- it pierces every copper
+    #: layer and demands ``LinkRouteRules.hole_clearance`` from tracks and vias.
+    hole: bool = False
 
 
 @dataclass
@@ -354,6 +365,36 @@ def _build_model(pcb: PCB) -> _BoardModel:
                     geom = _pad_geometry(fp, pad)
                     c = geom.centroid
                     drills.append((c.x, c.y, drill))
+                    # Issue #10393: the opening itself, on every copper layer,
+                    # plus any annular copper the pad carries.  Both are
+                    # unnetted (net 0), so any link net must keep clear.
+                    items.append(
+                        _Item(
+                            0,
+                            dict.fromkeys(copper, Point(c.x, c.y).buffer(drill / 2)),
+                            True,
+                            drill,
+                            getattr(fp, "reference", None) or "",
+                            getattr(fp, "name", None) or "",
+                            fp.layer,
+                            "np_thru_hole",
+                            hole=True,
+                        )
+                    )
+                    npth_layers = _pad_layers(list(getattr(pad, "layers", []) or []), copper)
+                    if npth_layers:
+                        items.append(
+                            _Item(
+                                0,
+                                dict.fromkeys(npth_layers, geom),
+                                True,
+                                drill,
+                                getattr(fp, "reference", None) or "",
+                                getattr(fp, "name", None) or "",
+                                fp.layer,
+                                "np_thru_hole",
+                            )
+                        )
                 continue
             layers = _pad_layers(list(getattr(pad, "layers", []) or []), copper)
             if not layers:

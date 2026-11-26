@@ -1201,6 +1201,63 @@ def test_exception_on_unaudited_net_pair_warns(tmp_path, capsys):
     assert "X1 pads 1-2" in captured.err
 
 
+@pytest.mark.parametrize(
+    ("gap", "exit_code", "raw_pass", "waived_count", "summary"),
+    [
+        (0.4, 1, False, 0, "1/4 board pair(s) fail"),
+        (1.6, 0, False, 1, "3/4 pair(s) clear"),
+        (2.5, 0, True, 0, "4/4 pair(s) clear"),
+    ],
+)
+def test_scoped_exception_summary_counts_the_row_verdict(
+    tmp_path, capsys, gap, exit_code, raw_pass, waived_count, summary
+):
+    board = _write(tmp_path, board_scoped_exception_source(r1_gap_mm=gap, r2_gap_mm=2.5))
+    args = [
+        "creepage",
+        str(board),
+        "--net-class-map",
+        str(_hv_map_file(tmp_path)),
+        *_STD_ARGS,
+        "--exceptions",
+        str(_exception_file(tmp_path, [_exc_entry()])),
+    ]
+    assert _run(args) == exit_code
+    output = capsys.readouterr().out
+    assert _EXC_REASON in output
+    assert summary in output.splitlines()[-1]
+    assert f"{waived_count} pair(s) WAIVED" in output.splitlines()[-1]
+
+    assert _run([*args, "--format", "json"]) == exit_code
+    report = json.loads(capsys.readouterr().out)
+    assert report["passed"] is raw_pass
+    assert report["gate_passed"] is (exit_code == 0)
+    assert report["waived_count"] == 0  # No whole-row waiver was requested.
+    assert report["gate_waived_count"] == waived_count
+
+
+def test_empty_hv_selection_reports_every_unused_metric(tmp_path, capsys):
+    board = _write(tmp_path, board_scoped_exception_source().replace("L_MAINS", "SIGNAL_A"))
+    entries = [_exc_entry(metric="clearance"), _exc_entry(metric="creepage")]
+    args = [
+        "creepage",
+        str(board),
+        "--min",
+        "2",
+        "--format",
+        "json",
+        "--exceptions",
+        str(_exception_file(tmp_path, entries)),
+    ]
+    assert _run(args) == 0
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["pair_count"] == 0
+    assert report["exceptions_unused"] == ["R1 pads 1-2 (clearance)", "R1 pads 1-2 (creepage)"]
+    assert report["gate_waived_count"] == 0
+    assert all(description in captured.err for description in report["exceptions_unused"])
+
+
 def test_scoped_exception_keeps_cross_face_bore(tmp_path, capsys):
     rc, payload, _ = _scoped_run(
         tmp_path, capsys, scoped_bore_source(), [_exc_entry()], "--min", "4", std=False
