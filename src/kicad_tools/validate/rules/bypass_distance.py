@@ -99,7 +99,9 @@ def _copper_land_centers(footprint: Footprint, number: str) -> list[tuple[float,
     return [
         physical_pad_position(footprint, pad)
         for pad in footprint.pads
-        if pad.number == number and any(layer.endswith(".Cu") for layer in pad.layers)
+        if pad.number == number
+        and pad.type != "np_thru_hole"
+        and any(layer.endswith(".Cu") for layer in pad.layers)
     ]
 
 
