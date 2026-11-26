@@ -44,6 +44,7 @@ from itertools import pairwise
 from math import dist, isfinite
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 
 from shapely import make_valid
 from shapely.geometry import LineString, Point, Polygon
@@ -458,6 +459,9 @@ class _PairEscape:
     front_corners: tuple[XY, ...] = ()
     # Offset from the pad center for a replacement that needs a 45-degree bend.
     front_bend: XY | None = None
+    # A direct exit joins the far junction. An extension keeps the measured
+    # inner copper and starts at its old barrel landing.
+    inner_path: Literal["dogleg", "direct", "extend"] = "dogleg"
 
 
 def _inner_approach(
@@ -541,6 +545,10 @@ def _rebuild_pair_branch(
     if any(s.width > width + _EPS for s in edited) or abs(inner[-1].width - width) > _EPS:
         return None
 
+    if escape.inner_path == "extend":
+        edited = tracks
+        joint = old
+
     original = list(pcb.segments)
     validator = ConnectivityValidator(pcb)
     before = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
@@ -556,7 +564,11 @@ def _rebuild_pair_branch(
     waypoints = [_xy((center[0] + bend[0], center[1] + bend[1]))] if bend is not None else None
     added = pcb.add_trace(center, target, width=width, layer="F.Cu", net=net, waypoints=waypoints)
     # On U3 the measured clear corridor leaves the barrel diagonally.
-    points = dogleg_points(*joint, *target, axis_first=escape.inner_end_offset is not None)
+    points = (
+        dogleg_points(*joint, *target, axis_first=escape.inner_end_offset is not None)
+        if escape.inner_path == "dogleg"
+        else [joint, target]
+    )
     for a, b in pairwise(points):
         if a != b:
             added.extend(pcb.add_trace(a, b, width=width, layer=escape.layer, net=net))
@@ -1664,6 +1676,39 @@ _TX1_ESCAPES = (
 )
 
 
+_RX1_NETS = ("USB3_RX1+", "USB3_RX1-")
+_RX1_ESCAPES = (
+    (
+        "J1",
+        _PairEscape(
+            "B10",
+            "USB3_RX1-",
+            "B.Cu",
+            (0.30, -0.50),
+            (-0.025, -0.7625),
+            (1.20, -0.50),
+            ((0, 0), (0.30, -0.30), (0.30, -0.50)),
+            front_bend=(0, -0.7375),
+            inner_path="direct",
+        ),
+    ),
+    (
+        "U2",
+        _PairEscape(
+            "B5",
+            "USB3_RX1+",
+            "B.Cu",
+            (-0.47, -0.31),
+            (0.575, 0.525),
+            (-0.868, -0.708),
+            ((0, 0), (-0.16, 0), (-0.47, -0.31)),
+            front_bend=(0.05, 0),
+            inner_path="extend",
+        ),
+    ),
+)
+
+
 def _clear_usb3_barrels(
     path: Path,
     rules: DesignRules,
@@ -1873,6 +1918,7 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
     edits += _clear_data_pair(path, rules, _RX2_EXITS, _RX2_NETS, 0.275, "USB3 RX2")
     edits += _clear_usb3_barrels(path, rules, request.policy, _RX2_NETS, _BGA_RX2)
     edits += _clear_usb3_barrels(path, rules, request.policy, _TX1_NETS, _TX1_ESCAPES)
+    edits += _clear_usb3_barrels(path, rules, request.policy, _RX1_NETS, _RX1_ESCAPES)
     tx_nets = ("PCIE_TX+", "PCIE_TX-")
     edits += _clear_pcie_taper_pair(
         path,
