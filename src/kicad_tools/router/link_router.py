@@ -889,6 +889,7 @@ def route_link_via(
     *,
     model: _BoardModel | None = None,
     allowed_layers: Collection[str] | None = None,
+    failure: dict[str, Any] | None = None,
 ) -> LinkRoute | None:
     """Route ``a`` -> forced via at ``via_at`` -> ``b`` (Issue #8310).
 
@@ -924,6 +925,13 @@ def route_link_via(
     )
     leg2 = route_link(pcb, net_number, net_name, vt, b, rules, model=model, allowed_layers=layers)
     if leg1 is None or leg2 is None:
+        if failure is not None:
+            start, end = (a, vt) if leg1 is None else (vt, b)
+            failure.update(
+                explain_link_failure(
+                    pcb, net_number, start, end, rules, model=model, allowed_layers=layers
+                )
+            )
         return None
     return LinkRoute(
         net_number=net_number,
@@ -1010,7 +1018,7 @@ def explain_link_failure(
 
 
 def _crosses_line(across: Any, link_line: Any) -> bool:
-    """True when ``across`` is more perpendicular than parallel to ``link_line``."""
+    """True when the gap straddles the leg and runs predominantly across it."""
     (ax, ay), (bx, by) = across.coords[0], across.coords[-1]
     (lx1, ly1), (lx2, ly2) = link_line.coords[0], link_line.coords[-1]
     ux, uy = bx - ax, by - ay
@@ -1018,7 +1026,10 @@ def _crosses_line(across: Any, link_line: Any) -> bool:
     nu, nv = math.hypot(ux, uy), math.hypot(vx, vy)
     if nu == 0 or nv == 0:
         return False
-    return bool(abs(ux * vx + uy * vy) / (nu * nv) < 0.5)
+    # Parallel rails on the same side also have a perpendicular connector.
+    side_a = vx * (ay - ly1) - vy * (ax - lx1)
+    side_b = vx * (by - ly1) - vy * (bx - lx1)
+    return bool(side_a * side_b < 0 and abs(ux * vx + uy * vy) / (nu * nv) < 0.5)
 
 
 def _corridor_bound(
@@ -1039,8 +1050,19 @@ def _corridor_bound(
 
     best: tuple[float, dict[str, Any]] | None = None
     cand = sorted(near, key=lambda t: t[0])[:16]
-    for i, (da, la, na, ga, ca) in enumerate(cand):
-        for db, lb, nb, gb, cb in cand[i + 1 :]:
+    if len(cand) < 2 or not link_line.length:
+        return None
+    # Measure only alongside the finite leg. Long rails can have their
+    # nearest edges behind an endpoint, where their gap is irrelevant.
+    reach = max(2 * clearance + rules.width_for(layer) for _, layer, _, _, clearance in cand)
+    window = link_line.buffer(reach, cap_style="flat")
+    clipped = []
+    for _, layer, net, geom, clearance in cand:
+        edge = geom.intersection(window)
+        if not edge.is_empty:
+            clipped.append((link_line.distance(edge), layer, net, edge, clearance))
+    for i, (da, la, na, ga, ca) in enumerate(clipped):
+        for db, lb, nb, gb, cb in clipped[i + 1 :]:
             if la != lb or (na == nb and not rules.width_by_layer):
                 continue
             # Flanking means the connecting segment runs across the link, not along it.

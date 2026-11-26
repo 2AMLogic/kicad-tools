@@ -13,7 +13,7 @@ from kicad_tools.physics.ampacity import required_widths_for, via_barrel_current
 from kicad_tools.schema.pcb import PCB
 
 
-def _pad(ref, x, y, *, through=False):
+def _pad(ref, x, y, *, through=False, net="PWR"):
     shape = (
         'thru_hole circle (size 2.4 2.4) (drill 1) (layers "*.Cu" "*.Mask")'
         if through
@@ -21,7 +21,7 @@ def _pad(ref, x, y, *, through=False):
     )
     return f'''(footprint "" (layer "F.Cu") (at {x} {y})
        (fp_text reference "{ref}" (at 0 -2) (layer "F.SilkS"))
-       (pad "1" {shape} (at 0 0) (net 1 "PWR")))'''
+       (pad "1" {shape} (at 0 0) (net 1 "{net}")))'''
 
 
 @pytest.fixture
@@ -160,7 +160,7 @@ def test_inner_corridor_reports_width_left_after_clearance(board, capsys):
     # reach the layer-qualified destination pad.
     rails = "".join(
         f'(segment (start 105 {y}) (end 125 {y}) (width 0.2) (layer "In1.Cu") (net 2))'
-        for y in (109, 111)
+        for y in (109, 111, 111.3)
     )
     board.write_text(
         board.read_text().replace('(net 0 "")', '(net 2 "OTHER") (net 0 "")').rstrip()[:-1]
@@ -172,6 +172,60 @@ def test_inner_corridor_reports_width_left_after_clearance(board, capsys):
     failure = doc["links"][0]
     assert failure["corridor"]["available_width_mm"] == pytest.approx(1.4)
     assert all(token in failure["reason"] for token in ("2.300", "In1.Cu", "1.400"))
+    sidecar = board.with_name("current_paths.json")
+    paths = json.loads(sidecar.read_text())
+    paths["paths"][0]["continuous_a"] = 0.83
+    sidecar.write_text(json.dumps(paths))
+    rc, doc = run(board, capsys, *CHARGE, "--probe")
+    assert rc == 0, doc
+    assert doc["links"][0]["widths_mm"]["In1.Cu"] == 1.21
+
+
+@pytest.mark.parametrize("gauge", [16, 12])
+def test_commit_checks_reinforcement_from_input_project(tmp_path, capsys, monkeypatch, gauge):
+    from dataclasses import replace
+
+    from kicad_tools.pcb.reinforcement_sidecar import write_sidecar
+    from kicad_tools.router.current_paths import PathEndpoint
+    from tests.test_path_ampacity_check import _force_spec, _wired_trunk
+
+    pcb, wires = _wired_trunk(trace_width=2.0, end_width=14.0)
+    spec = replace(_force_spec(), sink=PathEndpoint("J3", "1"))
+    board = tmp_path / "input.kicad_pcb"
+    pcb.save(board)
+    # The wired-trunk helper's connector pads exist only in memory.
+    pads = "".join(
+        _pad(ref, x, 50, through=True, net=spec.net_name)
+        for ref, x in (("J1", 20), ("J2", 120), ("J3", 137))
+    )
+    board.write_text(board.read_text().rstrip()[:-1] + pads + ")")
+    # A declared 12 AWG wire cannot fit the existing 16 AWG anchor holes.
+    write_sidecar(board, [dict(wire, wire_gauge_awg=gauge) for wire in wires])
+    board.with_name("current_paths.json").write_text(json.dumps({"paths": [spec.to_dict()]}))
+    output = tmp_path / "out" / "renamed.kicad_pcb"
+    output.parent.mkdir()
+    monkeypatch.setattr(
+        kicad_toolchain, "evidence_toolchain", lambda **kw: contextlib.nullcontext()
+    )
+    monkeypatch.setattr(route_link_cmd, "_gate_state", lambda *a, **kw: (Counter(), None))
+    rc, report = run(
+        board,
+        capsys,
+        "--link",
+        "FUSED_LINE J2.1 J3.1",
+        "--current-path",
+        "FORCE",
+        "--link-layers",
+        "F.Cu",
+        "-o",
+        str(output),
+    )
+    if gauge == 16:
+        assert rc == 0, report
+        assert any(s.width == 12.59 for s in PCB.load(str(output)).segments)
+    else:
+        assert rc == 1 and report["links"][0]["failed_check"] == "path_ampacity", report
+        assert not output.exists()
 
 
 def test_ampacity_gate_rolls_back_unresolved_declaration(board, capsys, monkeypatch):

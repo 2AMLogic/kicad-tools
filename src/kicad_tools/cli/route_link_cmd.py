@@ -696,9 +696,22 @@ def _route_one(
         if site_why is not None:
             entry["reason"] = site_why
             return entry, None
+        failure: dict[str, Any] = {}
         route = route_link_via(
-            pcb, net_number, spec.net, ta, tb, site, rules, model=model, allowed_layers=allowed
+            pcb,
+            net_number,
+            spec.net,
+            ta,
+            tb,
+            site,
+            rules,
+            model=model,
+            allowed_layers=allowed,
+            failure=failure,
         )
+        if failure:
+            entry.update(failure)
+            return entry, None
     else:
         route = route_link(
             pcb, net_number, spec.net, ta, tb, rules, model=model, allowed_layers=allowed
@@ -983,13 +996,15 @@ def _stage_project_files(pcb_path: Path, out_path: Path) -> list[Path]:
 
 def _check_branch_candidate(
     path: Path,
+    project_path: Path,
     link: LinkSpec,
     accepted: dict[str, _BranchSizing],
     before: Counter[str],
     after: Counter[str],
 ) -> tuple[str | None, str]:
+    from kicad_tools.pcb.reinforcement_sidecar import load_wires_if_present
     from kicad_tools.schema.pcb import PCB
-    from kicad_tools.validate.rules.path_ampacity import PathAmpacityRule
+    from kicad_tools.validate.checker import DRCChecker
 
     # Ratsnest anchors can move after a refill. Compare counts by net.
     new_opens = after - before
@@ -1006,9 +1021,19 @@ def _check_branch_candidate(
         branches[link.branch.spec.name] = link.branch
     if branches:
         relevant = list(branches.values())
-        result = PathAmpacityRule([b.spec for b in relevant]).check(
-            PCB.load(str(path)), relevant[0].design_rules
+        pcb = PCB.load(str(path))
+        design = relevant[0].design_rules
+        checker = DRCChecker(
+            pcb,
+            layers=len(pcb.copper_layers),
+            copper_oz=design.outer_copper_oz or 1.0,
+            copper_oz_outer=design.outer_copper_oz,
+            copper_oz_inner=design.inner_copper_oz,
+            strict_copper=False,
+            current_path_specs=[b.spec for b in relevant],
+            reinforcement_wires=load_wires_if_present(project_path),
         )
+        result = checker.check_path_ampacity()
         if result.error_count:
             return "path_ampacity", "; ".join(v.message for v in result.violations if v.is_error)
     return None, ""
@@ -1103,7 +1128,7 @@ def _commit_links_gated(
                         )
                 if failed is None and (spec.branch or accepted_branches):
                     failed, reason = _check_branch_candidate(
-                        out_path, spec, accepted_branches, base_opens, opens
+                        out_path, pcb_path, spec, accepted_branches, base_opens, opens
                     )
             except Exception as exc:
                 failed = "gate-error"
