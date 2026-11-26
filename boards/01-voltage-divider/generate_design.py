@@ -20,7 +20,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.core.project_clearance import netclass_assignment_value
+from kicad_tools.core.project_file import (
+    add_netclass_definition,
+    add_netclass_patterns,
+    create_minimal_project,
+    get_net_settings,
+    save_project,
+)
 from kicad_tools.core.schematic_uuids import UuidSequence
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
@@ -49,6 +56,13 @@ def generate_uuid() -> str:
 # the courtyards does not shift any pre-existing item's UUID.
 _CRTYD_UUIDS = UuidSequence("boards/01-voltage-divider/voltage_divider.kicad_pcb:courtyard")
 
+POWER_NETCLASS = "Power"
+POWER_NETS = ("GND", "VIN", "VOUT")
+POWER_TRACK_WIDTH_MM = 0.5
+POWER_CLEARANCE_MM = 0.2
+POWER_VIA_DIAMETER_MM = 0.8
+POWER_VIA_DRILL_MM = 0.3
+
 
 def courtyard_rect(x0: float, y0: float, x1: float, y1: float) -> str:
     """An ``F.CrtYd`` rectangle in footprint-local coordinates (Issue #7204).
@@ -64,6 +78,43 @@ def courtyard_rect(x0: float, y0: float, x1: float, y1: float) -> str:
         f'(stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") '
         f'(uuid "{_CRTYD_UUIDS()}"))'
     )
+
+
+def author_power_netclass(project_data: dict) -> dict:
+    """Declare the board's ``Power`` net class in ``project_data``.
+
+    The reviewed board carries 0.50 mm VIN and VOUT copper in 0.8 mm vias,
+    above the 0.30 mm ``min_trace`` ``project.kct`` declares. While the recipe
+    left the class to ``kct route``, the router's ``Power`` class reached the
+    routed project as a clone of ``Default`` -- whose ``track_width`` is the
+    fabrication floor, 0.127 mm -- and the release packager's cleanup, which
+    honours project class widths (Issue #10189), narrowed all nine segments
+    to it (Issue #10421). A router-declared class never replaces an authored
+    one, so the recipe states the class it reviewed: its track width, the
+    router's own 0.2 mm Power clearance and 0.8 mm via, and the three nets it
+    covers, both as schematic-visible literal patterns and as the PCB
+    assignment cache.
+
+    Args:
+        project_data: Project data from ``create_minimal_project``.
+
+    Returns:
+        The same ``project_data`` dict.
+    """
+    add_netclass_definition(
+        project_data,
+        POWER_NETCLASS,
+        track_width=POWER_TRACK_WIDTH_MM,
+        clearance=POWER_CLEARANCE_MM,
+        via_diameter=POWER_VIA_DIAMETER_MM,
+        via_drill=POWER_VIA_DRILL_MM,
+    )
+    add_netclass_patterns(project_data, POWER_NETCLASS, list(POWER_NETS))
+    settings = get_net_settings(project_data)
+    settings["netclass_assignments"] = {
+        net: netclass_assignment_value(settings, POWER_NETCLASS) for net in POWER_NETS
+    }
+    return project_data
 
 
 def create_voltage_divider_schematic(output_dir: Path) -> Path:
@@ -981,7 +1032,7 @@ def create_project(output_dir: Path, project_name: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     filename = f"{project_name}.kicad_pro"
-    project_data = create_minimal_project(filename)
+    project_data = author_power_netclass(create_minimal_project(filename))
 
     project_path = output_dir / filename
     save_project(project_data, project_path)
