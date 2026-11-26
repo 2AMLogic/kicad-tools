@@ -24,10 +24,17 @@ def line(start, end, item_id=None):
     )
 
 
-def chord(offset, horizontal=False, item_id=None):
+def chord(offset, horizontal=False, item_id=None, angle=0):
     reach = math.sqrt(2**2 - offset**2)
     if horizontal:
         return line((-reach, offset), (reach, offset), item_id)
+    if angle:
+        cos, sin = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+
+        def rotate(y):
+            return (round(offset * cos - y * sin, 6), round(offset * sin + y * cos, 6))
+
+        return line(rotate(-reach), rotate(reach), item_id)
     return line((offset, -reach), (offset, reach), item_id)
 
 
@@ -39,6 +46,7 @@ def board(
     arc=False,
     horizontal=False,
     rotation=0,
+    chord_angle=0,
     ref_layer="F.Fab",
     other="",
 ):
@@ -52,7 +60,7 @@ def board(
         (footprint "ProjectMark" (layer "F.Cu") (at 10 10 {rotation})
             (property "Reference" "C1" (at 0.4 0) (layer "{ref_layer}")
               (effects (font (size 1 1) (thickness 0.15))))
-            {perimeter} {" ".join(chord(x, horizontal) for x in offsets)} {graphics}) {other})""")
+            {perimeter} {" ".join(chord(x, horizontal, angle=chord_angle) for x in offsets)} {graphics}) {other})""")
     return PCB.load(path)
 
 
@@ -66,6 +74,8 @@ def rules():
     [
         {},
         {"rotation": 45},
+        {"chord_angle": 30},
+        {"chord_angle": 45},
         {"arc": True},
         {"horizontal": True, "offsets": tuple(-x for x in OFFSETS)},
     ],
@@ -75,7 +85,7 @@ def test_sector_has_no_internal_pairs(tmp_path, rules, options):
 
 
 @pytest.mark.parametrize(
-    "extra", ["crossing", "duplicate", "off_pitch", "overdraw", "tick", "foreign"]
+    "extra", ["crossing", "duplicate", "off_pitch", "overdraw", "tick", "on_pitch_tick", "foreign"]
 )
 def test_independent_stroke_is_identified(tmp_path, rules, extra):
     item_id = str(uuid.uuid4())
@@ -85,6 +95,7 @@ def test_independent_stroke_is_identified(tmp_path, rules, extra):
         "off_pitch": chord(0.37, item_id=item_id),
         "overdraw": line((0.38, 0.5), (0.38, math.sqrt(4 - 0.38**2)), item_id),
         "tick": line((0.1, 1.6), (0.1, math.sqrt(3.99)), item_id),
+        "on_pitch_tick": line((0.26, 1.68), (0.26, math.sqrt(4 - 0.26**2)), item_id),
         "foreign": "",
     }[extra]
     other = ""
@@ -101,6 +112,16 @@ def test_independent_stroke_is_identified(tmp_path, rules, extra):
         assert len(findings) == 1
     if extra == "foreign":
         assert all("X1" in v.message and "C1" in v.message for v in findings)
+
+
+@pytest.mark.parametrize("with_pad", [True, False])
+def test_partial_chords_need_a_pad_at_the_cut_edge(tmp_path, rules, with_pad):
+    # The clearance around this pad extends through the top of the circle.
+    graphics = " ".join(line((x, -math.sqrt(4 - x * x)), (x, 0.8)) for x in OFFSETS)
+    if with_pad:
+        graphics += '(pad "1" smd rect (at 0.4 1.5) (size 1 1) (layers "F.Cu" "F.Mask"))'
+    pcb = board(tmp_path, offsets=(), graphics=graphics)
+    assert bool(check_silk_overlap(pcb, rules).violations) == (not with_pad)
 
 
 def test_reference_on_sector(tmp_path, rules):

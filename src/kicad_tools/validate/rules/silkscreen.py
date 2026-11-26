@@ -1978,29 +1978,83 @@ def check_silk_over_mask_opening(
 
 def _hatch_runs(offsets: Sequence[int], width: float) -> Iterator[list[int]]:
     """Find runs on a regular pitch in projected nanometres."""
-    pitches = Counter(b - a for a, b in pairwise(offsets) if b - a < width)
+    # Rounding each authored endpoint to 1 nm perturbs projected spacings.
+    tolerance = 3
+    pitches = Counter(b - a for a, b in pairwise(offsets) if tolerance < b - a < width)
     remaining = set(offsets)
-    for pitch, count in pitches.most_common():
-        if count < 2:
-            break
-        # An independent tick between two hatches is on a different lattice.
-        phases: dict[int, list[int]] = defaultdict(list)
-        for offset in offsets:
-            if offset in remaining:
-                phases[offset % pitch].append(offset)
-        for phase in phases.values():
-            # A pad cutout can remove a whole chord. Bridge one missing
-            # offset only if its neighbours still overlap.
-            cuts = [
-                i
-                for i, (a, b) in enumerate(pairwise(phase), 1)
-                if b - a >= width or b - a > 2 * pitch
-            ]
-            for start, end in pairwise([0, *cuts, len(phase)]):
-                run = phase[start:end]
-                if any(b - a == 3 * pitch for a, b in zip(run, run[3:], strict=False)):
-                    yield run
-                    remaining.difference_update(run)
+    for pitch, _ in pitches.most_common():
+        gaps = (pitch, 2 * pitch) if 2 * pitch < width else (pitch,)
+        for first in offsets:
+            if first not in remaining:
+                continue
+            run = [first]
+            consecutive = 1
+            longest = 1
+            while True:
+                for gap in gaps:
+                    target = run[-1] + gap
+                    following = min(
+                        (
+                            n
+                            for n in range(target - tolerance, target + tolerance + 1)
+                            if 0 < n - run[-1] < width and n in remaining
+                        ),
+                        key=lambda n: abs(n - target),
+                        default=None,
+                    )
+                    if following is not None:
+                        run.append(following)
+                        consecutive = consecutive + 1 if gap == pitch else 1
+                        longest = max(longest, consecutive)
+                        break
+                else:  # Neither the next chord nor one across a cutout overlaps.
+                    break
+            if longest >= 4:
+                yield run
+                remaining.difference_update(run)
+
+
+def _painted_chords(
+    offsets: dict[int, list[tuple[float, float, int]]],
+    radius: float,
+    width: float,
+    pads: Sequence[tuple[float, float, float]],
+) -> dict[int, list[int]]:
+    """Keep rim-to-rim chords and pieces ending at a common pad cutout."""
+    members: dict[int, list[int]] = {}
+    ordered = sorted(offsets)
+    for i, offset in enumerate(ordered):
+        intervals = offsets[offset]
+        neighbours = [
+            span
+            for j in (i - 1, i + 1)
+            if 0 <= j < len(ordered) and abs(ordered[j] - offset) < width * 1e6
+            for span in offsets[ordered[j]]
+        ]
+        lateral = offset / 1e6
+        # Reaching the inner edge of the outline suffices on both sides.
+        reach = math.sqrt(max(0, (radius - width / 2) ** 2 - lateral**2))
+        for start, end, index in intervals:
+            if start > -reach or end < reach:
+                if start > -reach and end < reach:
+                    continue
+                cut_start = start > -reach
+                tip = start if cut_start else end
+                if not any(abs(tip - (a if cut_start else b)) <= 3e-6 for a, b, _ in neighbours):
+                    continue
+                if not any(
+                    abs(across - lateral) <= extent
+                    and 0 < (tip - along if cut_start else along - tip) <= extent
+                    for along, across, extent in pads
+                ):
+                    continue
+            # Overdraw is ambiguous, even when one line is a full chord.
+            chord = members.setdefault(offset, [])
+            if not any(
+                (a, b) != (start, end) and max(a, start) < min(b, end) for a, b, _ in intervals
+            ):
+                chord.append(index)
+    return members
 
 
 def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
@@ -2023,18 +2077,26 @@ def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
         else:
             continue
 
-        directions: dict[float, dict[int, list[tuple[float, float, int]]]] = defaultdict(
-            lambda: defaultdict(list)
+        # Use the longest chord as the projection axis for its direction.
+        # Endpoint rounding moves a parallel segment transversely by a few nm.
+        directions: dict[tuple[float, float], dict[int, list[tuple[float, float, int]]]] = {}
+        lines = sorted(
+            (
+                (index, line)
+                for index, line in enumerate(footprint.graphics)
+                if line.graphic_type == "line"
+            ),
+            key=lambda item: math.dist(item[1].start, item[1].end),
+            reverse=True,
         )
-        for index, line in enumerate(footprint.graphics):
+        for index, line in lines:
             if (
-                line.graphic_type != "line"
-                or line.layer != outline.layer
+                line.layer != outline.layer
                 or line.stroke_width != outline.stroke_width
                 or line.start == line.end
             ):
                 continue
-            ends = sorted((line.start, line.end))
+            ends = (line.start, line.end)
             if max(math.dist(center, p) for p in ends) > radius + line.stroke_width / 2:
                 continue
             if not any(
@@ -2043,26 +2105,40 @@ def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
                 for x, y in ends
             ):
                 continue
-            (x, y), (ex, ey) = ends
-            angle = math.atan2(ey - y, ex - x)
-            ux, uy = math.cos(angle), math.sin(angle)
-            offset = round(((x - center[0]) * -uy + (y - center[1]) * ux) * 1e6)
-            directions[round(angle, 6)][offset].append((x * ux + y * uy, ex * ux + ey * uy, index))
+            dx, dy = line.end[0] - line.start[0], line.end[1] - line.start[1]
+            for ux, uy in directions:
+                if abs(dx * uy - dy * ux) <= 3e-6:
+                    break
+            else:
+                length = math.hypot(dx, dy)
+                ux, uy = dx / length, dy / length
+                directions[ux, uy] = defaultdict(list)
+            offsets = directions[ux, uy]
+            x, y = line.start[0] - center[0], line.start[1] - center[1]
+            offset = round((ux * (y + dy / 2) - uy * (x + dx / 2)) * 1e6)
+            offset = next((n for n in range(offset - 2, offset + 3) if n in offsets), offset)
+            start, end = sorted((x * ux + y * uy, (x + dx) * ux + (y + dy) * uy))
+            offsets[offset].append((start, end, index))
 
-        for offsets in directions.values():
-            for run in _hatch_runs(sorted(offsets), outline.stroke_width * 1e6):
+        for (ux, uy), offsets in directions.items():
+            # A pad can clip a chord at either end, including right through
+            # the opposite rim. Look for a repeated cut edge facing the pad.
+            pads = []
+            for pad in footprint.pads:
+                x, y = pad.position[0] - center[0], pad.position[1] - center[1]
+                pads.append(
+                    (
+                        x * ux + y * uy,
+                        y * ux - x * uy,
+                        math.hypot(*pad.size) / 2 + 2 * outline.stroke_width,
+                    )
+                )
+            members = _painted_chords(offsets, radius, outline.stroke_width, pads)
+            for run in _hatch_runs(sorted(members), outline.stroke_width * 1e6):
                 mark = object()
                 marks[outline_index].add(mark)
                 for offset in run:
-                    intervals = offsets[offset]
-                    for start, end, index in intervals:
-                        # Disjoint pieces of a pad-clipped chord are integral.
-                        # Ambiguous partial overdraw remains reportable.
-                        if any(
-                            (a, b) != (start, end) and max(a, start) < min(b, end)
-                            for a, b, _ in intervals
-                        ):
-                            continue
+                    for index in members[offset]:
                         marks[index].add(mark)
     return marks
 
