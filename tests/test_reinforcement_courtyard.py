@@ -578,7 +578,12 @@ def test_parallel_copper_checks_only_a_fitted_wire(wire):
         assert incomplete == []
 
 
-def test_recorded_wire_leaves_bare_copper_between_hole_and_terminal():
+@pytest.mark.parametrize(
+    ("has_record", "malformed"),
+    [(True, []), (True, [None, "invalid"]), (False, ["invalid"])],
+    ids=["recorded", "mixed-records", "malformed-only"],
+)
+def test_recorded_wire_leaves_bare_copper_between_hole_and_terminal(has_record, malformed):
     pcb = _bare_board()
     result = reinforce_net(pcb, NET, design_rules=_rules(), end_offset_mm=12)
     assert result.placed_count == 2
@@ -586,13 +591,12 @@ def test_recorded_wire_leaves_bare_copper_between_hole_and_terminal():
     assert min(p["x"] for p in ends) > 29
     _body(pcb, "BARE_STUB", 24, 50, half=0.5)
     _body(pcb, "OVER_WIRE", 60, 50)
-    rule = ReinforcementCourtyardRule(
-        specs=[_spec()],
-        wires=[{"net": NET, "layer": "F.Cu", "status": "full", "anchors": ends}],
-        end_offset_mm=12,
-    )
+    wires = list(malformed)
+    if has_record:
+        wires.append({"net": NET, "layer": "F.Cu", "status": "full", "anchors": ends})
+    rule = ReinforcementCourtyardRule(specs=[_spec()], wires=wires, end_offset_mm=12)
     messages = _msgs(rule.check(pcb, _rules()))
-    assert not any("BARE_STUB" in m for m in messages)
+    assert any("BARE_STUB" in m for m in messages) == (not has_record)
     assert any("OVER_WIRE" in m for m in messages)
 
 

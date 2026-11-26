@@ -273,10 +273,8 @@ class ReinforcementIncompleteRule(DRCRule):
                 bound (:func:`kicad_tools.pcb.reinforce.end_shift_bound`).
         """
         self.specs = list(specs) if specs else []
-        self.wires = list(wires) if wires else []
-        self.wires.sort(
-            key=lambda record: isinstance(record, dict) and record.get("strategy") == "parallel"
-        )
+        self.wires = [record for record in (wires or ()) if isinstance(record, dict)]
+        self.wires.sort(key=lambda record: record.get("strategy") == "parallel")
         self.waived_nets = frozenset(waived_nets or ())
         self.end_offset_mm = end_offset_mm
         self.max_end_shift_mm = max_end_shift_mm
