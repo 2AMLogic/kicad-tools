@@ -125,8 +125,6 @@ def test_control_p_genuine_slot_still_warns(tmp_path: Path) -> None:
 
 
 def test_public_check_uses_the_sibling_project_on_both_sides(tmp_path, capsys):
-    from kicad_tools.cli import check_cmd
-
     board = tmp_path / "control_p.kicad_pcb"
     settings = {
         "meta": {"version": 5},
@@ -140,12 +138,41 @@ def test_public_check_uses_the_sibling_project_on_both_sides(tmp_path, capsys):
         _control_p(tmp_path, gap=gap)
         settings["classes"][0]["clearance"] = default
         board.with_suffix(".kicad_pro").write_text(json.dumps({"net_settings": settings}))
-        check_cmd.main(
-            [str(board), "--mfr", "jlcpcb", "--only", "pour_slot", "--drc-only", "--format", "json"]
-        )
-        report = json.loads(capsys.readouterr().out)
-        assert report["coverage"]["pour_slot"]["state"] == "checked"
-        assert len([f for f in report["findings"] if f["rule_id"] == "pour_slot"]) == warnings
+        assert _public_pour_slot_count(board, capsys) == warnings
+
+
+def _public_pour_slot_count(board: Path, capsys) -> int:
+    from kicad_tools.cli import check_cmd
+
+    check_cmd.main(
+        [str(board), "--mfr", "jlcpcb", "--only", "pour_slot", "--drc-only", "--format", "json"]
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["coverage"]["pour_slot"]["state"] == "checked"
+    return sum(f["rule_id"] == "pour_slot" for f in report["findings"])
+
+
+@pytest.mark.parametrize("zone_clearance", [0.0, 0.1])
+@pytest.mark.parametrize(("min_thickness", "warnings"), [(0.3, 1), (0.04, 0)])
+def test_public_check_at_netclass_clearance(
+    tmp_path, capsys, zone_clearance, min_thickness, warnings
+):
+    # Pinned native film at a 0.350 mm gap: the 0.149 mm strip survives only
+    # at the smaller minimum thickness, for either authored zone clearance.
+    zone = ZONE.replace("clearance 0.2", f"clearance {zone_clearance}").replace(
+        "min_thickness 0.3", f"min_thickness {min_thickness}"
+    )
+    _control_p(tmp_path, zones=(zone,), gap=0.35)
+    board = tmp_path / "control_p.kicad_pcb"
+    settings = {"meta": {"version": 5}, "classes": [{"name": "Default", "clearance": 0.1}]}
+    board.with_suffix(".kicad_pro").write_text(json.dumps({"net_settings": settings}))
+    assert _public_pour_slot_count(board, capsys) == warnings
+
+
+def test_missing_zone_clearance_uses_default(tmp_path):
+    zone = ZONE.replace("(clearance 0.2)", "")
+    pcb = _control_p(tmp_path, zones=(zone,))
+    assert pcb.zones[0].clearance == CLEARANCE_MM
 
 
 def test_remote_zone_cannot_change_the_local_fill_band(tmp_path: Path) -> None:

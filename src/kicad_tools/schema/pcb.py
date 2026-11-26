@@ -3031,7 +3031,8 @@ class Zone:
 
             # Extract clearance if present
             if clearance := connect_pads.find("clearance"):
-                zone.clearance = clearance.get_float(0) or 0.2
+                if (value := clearance.get_float(0)) is not None:
+                    zone.clearance = value
 
         # Fill settings - (fill yes/no (thermal_gap X) (thermal_bridge_width X))
         if fill := index.get("fill"):
