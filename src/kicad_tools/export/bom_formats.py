@@ -465,7 +465,7 @@ def apply_existing_lcsc_assignments(
 
     merged_count = 0
     merged_refs: set[str] = set()
-    rejected: set[tuple[str, str, str]] = set()
+    rejected: set[tuple[str, ...]] = set()
 
     for item in items:
         if getattr(item, "lcsc", "") or getattr(item, "dnp", False):
