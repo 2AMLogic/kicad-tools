@@ -783,8 +783,7 @@ class LCSCClient:
             page_size: Results per page (max 100)
             in_stock: Only return in-stock parts
             basic_only: Only return JLCPCB basic parts
-            package: Optional package filter applied to the offline-catalog
-                fallback (e.g. ``"0402"``); ignored by the live API path.
+            package: Exact, case-insensitive catalogue package (e.g. ``"0402"``).
 
         Returns:
             SearchResult with matching parts
@@ -858,11 +857,20 @@ class LCSCClient:
 
         parts = []
         parse_failures = 0
+        # Match the offline catalogue's SQLite NOCASE equality (ASCII case folding).
+        package_pattern = (
+            re.compile(re.escape(package), re.ASCII | re.IGNORECASE) if package else None
+        )
         for comp in components:
             try:
                 part = self._parse_component(comp)
                 if not part.lcsc_part:
                     raise ValueError("Missing catalog identity")
+                if package_pattern is not None:
+                    if not part.package.strip() or part.package == "-":
+                        raise ValueError("Missing catalogue package")
+                    if not package_pattern.fullmatch(part.package):
+                        continue
                 parts.append(part)
                 # Cache search results
                 if self.cache:
@@ -872,17 +880,23 @@ class LCSCClient:
                 logger.debug("Failed to parse component: %s", type(e).__name__)
                 continue
 
+        diagnostics = []
+        if parse_failures:
+            diagnostics.append(f"{parse_failures} unparseable results; coverage incomplete")
+        if package_pattern is not None and total > 0 and (page != 1 or len(components) < total):
+            diagnostics.append(
+                f"Examined {len(components)} of {total} keyword hits on this page; coverage incomplete"
+            )
+
         return SearchResult(
             query=query,
             parts=parts,
             total_count=total,
             page=page,
-            page_size=page_size,
+            page_size=min(page_size, 100) if package_pattern is not None else page_size,
             source="anonymous",
-            coverage="incomplete" if parse_failures else "live",
-            diagnostics=[f"{parse_failures} unparseable results; coverage incomplete"]
-            if parse_failures
-            else [],
+            coverage="incomplete" if diagnostics else "live",
+            diagnostics=diagnostics,
         )
 
     def _catalog_search(

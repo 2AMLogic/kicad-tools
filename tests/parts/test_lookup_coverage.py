@@ -300,3 +300,84 @@ def test_missing_dependency_retains_batch_results(client, monkeypatch):
         lambda: SimpleNamespace(get_component_detail_by_codes=lambda numbers: {}),
     )
     assert client.lookup_many(["C1", "C2"]) == {"C1": part}
+
+
+@pytest.mark.parametrize("output_format", ["json", "table"])
+@pytest.mark.parametrize(
+    ("packages", "total", "coverage", "matches"),
+    [
+        (["1206", "2512", "2512-wide"], 181, "incomplete", 1),
+        (["1206"] * 100, 100, "live", 0),
+        (["1206"] * 100, 101, "incomplete", 0),
+        (["1206", None], 2, "incomplete", 0),
+        (["1206", {"unexpected": 1}], 2, "incomplete", 0),
+    ],
+)
+def test_public_package_search(
+    client, monkeypatch, capsys, output_format, packages, total, coverage, matches
+):
+    from kicad_tools.cli import main
+
+    query = "330kΩ ±0.1%"
+    rows = [
+        {
+            "componentCode": f"C{i + 1}",
+            "componentSpecificationEn": package,
+            "describe": "330kΩ resistor for 2512 search",
+            "stockCount": 10,
+        }
+        for i, package in enumerate(packages)
+    ]
+    request = Mock(
+        return_value={"code": 200, "data": {"componentPageInfo": {"list": rows, "total": total}}}
+    )
+    monkeypatch.setattr(client, "_make_request", request)
+    monkeypatch.setattr("kicad_tools.parts.LCSCClient", lambda: client)
+    rc = main(
+        ["parts", "search", query, "--package", "2512", "--limit", "200", "--format", output_format]
+    )
+    assert rc == (0 if matches else 1)
+    assert request.call_args.args[1] == {"keyword": query, "currentPage": 1, "pageSize": 100}
+    out, err = capsys.readouterr()
+    if output_format == "json":
+        result = json.loads(out)
+        assert result["source"] == "anonymous"
+        assert result["coverage"] == coverage
+        assert bool(result["diagnostics"]) == (coverage == "incomplete")
+        assert result["compatible_count"] == matches
+        assert result["keyword_total"] == total
+        assert [part["package"] for part in result["parts"]] == ["2512"] * matches
+        if matches:
+            assert result["parts"][0]["inventory"]["stock_verified"]
+    else:
+        display = out + err
+        assert f"{matches} compatible" in display
+        assert f"{total} keyword hits" in display
+        assert ("incomplete" in display) == (coverage == "incomplete")
+        assert ("All keyword hits evaluated" in display) == (not matches and coverage == "live")
+        assert [line.split()[0] for line in out.splitlines() if line.startswith("C")] == [
+            "C2"
+        ] * matches
+        assert "1206" not in display
+        assert "2512-wide" not in display
+
+
+def test_package_search_matches_literal_package_ignoring_case(client, monkeypatch):
+    rows = [
+        {"componentCode": f"C{i}", "encapStandard": pkg}
+        for i, pkg in enumerate(["SOIC-8(3.9mm)", "SOIC-8(3x9mm)", "SOIC-8"])
+    ]
+    response = {"code": 200, "data": {"componentPageInfo": {"list": rows, "total": len(rows)}}}
+    monkeypatch.setattr(client, "_make_request", Mock(return_value=response))
+    result = client.search("chip", package="soic-8(3.9mm)")
+    assert [part.package for part in result.parts] == ["SOIC-8(3.9mm)"]
+    assert result.coverage == "live"
+
+
+def test_package_search_unavailable(client, monkeypatch, capsys):
+    from kicad_tools.cli import main
+
+    monkeypatch.setattr(client, "_make_request", Mock(side_effect=requests.Timeout()))
+    monkeypatch.setattr("kicad_tools.parts.LCSCClient", lambda: client)
+    assert main(["parts", "search", "resistor", "--package", "2512", "--format", "json"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "unavailable"

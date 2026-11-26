@@ -34,6 +34,8 @@ def run_parts_command(args) -> int:
             sub_argv.extend(["--format", args.format])
         if args.limit != 20:
             sub_argv.extend(["--limit", str(args.limit)])
+        if args.package is not None:
+            sub_argv.extend(["--package", args.package])
         if args.in_stock:
             sub_argv.append("--in-stock")
         if args.basic:

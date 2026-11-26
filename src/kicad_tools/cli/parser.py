@@ -5916,6 +5916,9 @@ def _add_parts_parser(subparsers) -> None:
     parts_search.add_argument("query", help="Search query")
     parts_search.add_argument("--format", choices=["text", "json", "table"], default="table")
     parts_search.add_argument("--limit", type=int, default=20, help="Max results")
+    parts_search.add_argument(
+        "--package", help="Match the exact catalogue package (case-insensitive)"
+    )
     parts_search.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
     parts_search.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
 
