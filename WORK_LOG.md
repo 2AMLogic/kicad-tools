@@ -16,6 +16,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-26
 
+- **Issue #10458** (closed): Intermittent empty staged-board path in the lint-gate SIGTERM test
+- **PR #10464**: test: publish lint-gate readiness atomically before signaling
+- **Issue #10457** (closed): Coupling test misses the inner-layer widths published in the current-paths cases section
+- **PR #10460**: docs(reference): cover inner-layer widths and unevaluated cases
+- **Issue #10478** (closed): Verify the X2 %TO.N premise on the pinned KiCad image: a track reported plotted under a stale net attribute on 10.0.8
+- **Issue #10421** (closed): Board 01 release regeneration narrows nine Power tracks below its declared minimum trace width
+- **PR #10446**: fix(board01): author the Power net class so release cleanup keeps the 0.5 mm tracks
+- **Issue #10422** (closed): Export preflight: measure reinforcement mask strips against covered and exposed foreign copper in Gerbers
+- **PR #10443**: feat: measure reinforcement runs against the shipped Gerbers in export preflight
 - **Issue #10364** (closed): Identify verified reinforcement wire-end holes when reviewing native KiCad dangling-via warnings
 - **PR #10378**: feat: identify verified wire ends in native dangling-via reports
 - **Issue #10479** (closed): Loom role scripts exit 126: config-resolver.sh passes the 208 KB private defaults as a single jq --argjson argument
