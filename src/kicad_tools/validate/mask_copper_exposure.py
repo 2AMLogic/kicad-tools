@@ -21,16 +21,16 @@ _OPENING_COUNTS = ("plotted", "matched", "unresolved", "excluded")
 _MEASURED_COUNTS = ("evaluated", "foreign_net", "same_net_beyond_land")
 
 
-def construction_uncertainty_mm(provenance):
+def construction_uncertainty_mm(native_error_mm: float) -> float:
     """Two independent native constructions plus 4 nm of Gerber rounding."""
-    return 2 * provenance.get("max_error_mm_per_construction", 0) + 0.000004
+    return 2 * native_error_mm + 0.000004
 
 
 def _ownership(item, component, layer):
     if not item["kind"].startswith("pad:"):
         return "excluded", "non_pad_" + item["kind"]
     footprint = (item.get("footprint_name") or "").lower()
-    if "mountinghole" in footprint:
+    if footprint.startswith("mountinghole:"):
         return "excluded", "mounting_hole"
     if item.get("pad_type") == "np_thru_hole":
         return "excluded", "non_plated_hole"
@@ -202,13 +202,16 @@ def nominal_exposure(assessment: MaskCopperAssessment) -> dict[str, Any]:
     status = "complete" if all(f["status"] == "complete" for f in faces.values()) else "partial"
     if assessment.aperture_inventory is None:
         status = "inventory_unavailable"
+    native_error = assessment.geometry_provenance.get("objects", {}).get(
+        "max_error_mm_per_construction"
+    )
     return {
         "artwork_source": "internal_replot" if export else None,
         "status": status,
         "nominal_area_threshold_mm2": 0.0,
         "construction_uncertainty_mm": (
-            construction_uncertainty_mm(assessment.geometry_provenance.get("objects", {}))
-            if assessment.aperture_inventory is not None
+            construction_uncertainty_mm(native_error)
+            if assessment.aperture_inventory is not None and native_error is not None
             else None
         ),
         "opening_counts": totals("opening_counts", _OPENING_COUNTS),

@@ -853,6 +853,45 @@ def test_nominal_exposure_keeps_the_policy_finding(net, y, margin, category, ove
     assert summary["faces"]["B.Mask"]["finding_counts"]["foreign_net"] is None
 
 
+def test_connector_with_mounting_hole_keeps_signal_pin_exposure():
+    geometry = _segment((-1, 0.5), (2, 0.5), net="M")
+    pin = geometry.objects[OWNER]
+    pin.update(
+        footprint_name="Connector_Dsub:DSUB-9_Socket_Vertical_P2.77x2.84mm_MountingHoles",
+        footprint_ref="J1",
+        pad_ref="J1/1",
+        pad_type="thru_hole",
+    )
+    hole = box(4, 0, 5, 1)
+    geometry.objects["hole"] = dict(
+        pin, pad_ref="J1/", pad_type="np_thru_hole", net="", layers_geometry={"F.Mask": hole}
+    )
+    geometry.exported.layers["F.Mask"] = PAD.union(hole)
+
+    result, row = _only(geometry)
+    front = result.to_dict()["nominal_exposure"]["faces"]["F.Mask"]
+    assert {o["owner_ref"]: (o["status"], o["reason"]) for o in front["openings"]} == {
+        "J1/1": ("matched", None),
+        "J1/": ("excluded", "non_plated_hole"),
+    }
+    assert front["finding_counts"]["foreign_net"] == 1
+    assert row.exposed_area_mm2 == pytest.approx(0.200)
+
+
+@pytest.mark.parametrize(
+    "native_error,expected", [(None, None), (0.0, 0.000004), (0.005, 0.010004)]
+)
+def test_nominal_uncertainty_requires_native_error_bound(native_error, expected):
+    geometry = _segment((-1, 0.5), (2, 0.5))
+    if native_error is None:
+        geometry.objects.clear()
+        geometry.errors.append("native attribution unavailable")
+    else:
+        geometry.provenance["max_error_mm_per_construction"] = native_error
+    result = assess_attributed_geometry(geometry, POLICY)
+    assert result.to_dict()["nominal_exposure"]["construction_uncertainty_mm"] == expected
+
+
 def test_nominal_coverage_counts_quiet_opening_and_links_all_conductors():
     geometry = _segment((-1, 0.5), (2, 0.5), net="M")
     geometry.objects["second"] = dict(geometry.objects[OTHER], net="P")

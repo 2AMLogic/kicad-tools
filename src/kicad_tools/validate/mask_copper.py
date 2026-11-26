@@ -1452,7 +1452,9 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
     # contribution and the adjacent copper may be independently constructed,
     # so add both bounds, then 4nm for Gerber reconstruction/rounding.
     # This is uncertainty, never a process clearance allowance.
-    uncertainty = construction_uncertainty_mm(geometry.provenance)
+    uncertainty = construction_uncertainty_mm(
+        geometry.provenance.get("max_error_mm_per_construction", 0)
+    )
     approved = {}
     for intent in intents:
         owner = geometry.objects.get(intent.owner_uuid)
