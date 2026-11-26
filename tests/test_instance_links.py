@@ -501,3 +501,35 @@ def test_pcb_path_with_extra_schematic_root_is_stale(tmp_path: Path) -> None:
     sch, pcb = _write_project(tmp_path, board)
     report = check_instance_links(sch, pcb)
     assert [(f.reference, f.category) for f in report.findings] == [("R1", "stale_path")]
+
+
+def test_created_component_saves_native_sheet_link(tmp_path: Path) -> None:
+    from kicad_tools.operations.netlist import Netlist, NetlistComponent
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.workflow import PCBFromSchematic
+
+    sch, pcb = _write_project(tmp_path, _board_text())
+    local = sch.parent / "Fixture.pretty"
+    local.mkdir()
+    (local / "Land.kicad_mod").write_text('(footprint "Land" (layer "F.Cu") (attr smd))')
+    (sch.parent / "fp-lib-table").write_text(
+        '(fp_lib_table (version 7) (lib (name "Fixture")(type "KiCad")(uri "${KIPRJMOD}/Fixture.pretty")(options "")(descr "")))'
+    )
+    workflow = PCBFromSchematic(sch)
+    refs = ["R1", "C1", "U2"]
+    workflow._netlist = Netlist(
+        components=[NetlistComponent(ref, "part", "Fixture:Land", "Device:R") for ref in refs]
+    )
+    workflow.create_pcb()
+    for i, ref in enumerate(refs):
+        assert workflow.add_component(ref, 5 + 5 * i, 10) is not None
+    workflow.save(pcb)
+    saved = {fp.reference: fp.path for fp in PCB.load(pcb).footprints}
+    assert saved["R1"] == _root_path("R1")
+    assert saved["C1"] == _sheet_path("C1")
+    assert saved["U2"] in {
+        _root_path("U2_A"),
+        _root_path("U2_B"),
+        _root_path("U2_C"),
+        _root_path("U2_D"),
+    }

@@ -1904,9 +1904,7 @@ class Footprint:
     # Schematic symbol-instance link ``(path "/<sheet-uuid>/<symbol-uuid>")``
     # (KiCad 8+ quoted form; KiCad 7 wrote the legacy bare hex form).  What
     # lets KiCad's editors cross-probe this footprint back to its symbol and
-    # update it from the schematic.  Read-only: saving goes through the
-    # parsed tree, and no placement-synced field writes back into it
-    # (Issue #10109).
+    # update it from the schematic (issues #10109, #10428).
     path: str = ""
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
     _board_origin: tuple[float, float] = field(
@@ -1994,6 +1992,16 @@ class Footprint:
                 origin = self.__dict__.get("_board_origin", (0.0, 0.0))
                 at_node.set_value(0, x + origin[0])
                 at_node.set_value(1, y + origin[1])
+
+        elif name == "path":
+            path_node = sexp_node.find_child("path")
+            if path_node is not None:
+                if value:
+                    path_node.set_value(0, str(value))
+                else:
+                    sexp_node.remove(path_node)
+            elif value:
+                sexp_node.append(SExp.list("path", str(value)))
 
         elif name == "rotation":
             at_node = sexp_node.find_child("at")
