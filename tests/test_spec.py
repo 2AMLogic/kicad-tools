@@ -742,6 +742,174 @@ class TestBOMEntryLeadDeclarations:
         assert spec.requirements.manufacturing.finished_hole_tolerance_mm == pytest.approx(-0.08)
 
 
+class TestSmdLandPattern:
+    """Verified SMD land-pattern declarations on a BOM entry (Issue #10505)."""
+
+    def test_outer_span_derives_pitch(self):
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        pattern = SmdLandPattern(
+            pad_shape="rect",
+            pad_depth_mm=3.00,
+            pad_width_mm=3.50,
+            outer_span_mm=8.00,
+            source="Stackpole RHC series, page 2",
+        )
+        assert pattern.resolved_pitch_mm() == pytest.approx(5.00)
+        assert pattern.resolved_outer_span_mm() == pytest.approx(8.00)
+
+    def test_pitch_derives_outer_span(self):
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        pattern = SmdLandPattern(
+            pad_shape="roundrect",
+            pad_depth_mm=1.225,
+            pad_width_mm=3.35,
+            pitch_mm=5.925,
+            source="KiCad R_2512_6332Metric",
+        )
+        assert pattern.resolved_pitch_mm() == pytest.approx(5.925)
+        assert pattern.resolved_outer_span_mm() == pytest.approx(7.150)
+
+    def test_both_pitch_and_outer_span_consistent(self):
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        pattern = SmdLandPattern(
+            pad_shape="rect",
+            pad_depth_mm=3.00,
+            pad_width_mm=3.50,
+            pitch_mm=5.00,
+            outer_span_mm=8.00,
+            source="Stackpole RHC series, page 2",
+        )
+        assert pattern.resolved_pitch_mm() == pytest.approx(5.00)
+        assert pattern.resolved_outer_span_mm() == pytest.approx(8.00)
+
+    def test_inconsistent_pitch_and_outer_span_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="outer_span_mm"):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                pitch_mm=5.00,
+                outer_span_mm=8.50,
+                source="Stackpole RHC series, page 2",
+            )
+
+    def test_missing_both_pitch_and_outer_span_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="pitch_mm"):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                source="Stackpole RHC series, page 2",
+            )
+
+    def test_overlapping_pads_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="overlap"):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                outer_span_mm=6.00,
+                source="Stackpole RHC series, page 2",
+            )
+
+    def test_blank_or_missing_source_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="source"):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                outer_span_mm=8.00,
+                source="   ",
+            )
+
+    def test_non_positive_or_invalid_shape_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError):
+            SmdLandPattern(
+                pad_shape="rect",
+                pad_depth_mm=0.0,
+                pad_width_mm=3.50,
+                outer_span_mm=8.00,
+                source="Stackpole RHC series, page 2",
+            )
+        with pytest.raises(ValidationError):
+            SmdLandPattern(
+                pad_shape="trapezoid",  # type: ignore[arg-type]
+                pad_depth_mm=3.00,
+                pad_width_mm=3.50,
+                outer_span_mm=8.00,
+                source="Stackpole RHC series, page 2",
+            )
+
+    def test_circle_with_unequal_axes_rejected(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import SmdLandPattern
+
+        with pytest.raises(ValidationError, match="circle"):
+            SmdLandPattern(
+                pad_shape="circle",
+                pad_depth_mm=1.0,
+                pad_width_mm=1.5,
+                pitch_mm=3.0,
+                source="drawing, p. 1",
+            )
+
+    def test_land_pattern_parses_and_round_trips(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec, save_spec
+        from kicad_tools.spec.schema import (
+            BOMEntry,
+            ProjectMetadata,
+            ProjectSpec,
+            SmdLandPattern,
+        )
+
+        spec = ProjectSpec(
+            project=ProjectMetadata(name="T"),
+            bom_entries=[
+                BOMEntry(
+                    ref="R40-R41",
+                    part="RHC2512FT4K70",
+                    land_pattern=SmdLandPattern(
+                        pad_shape="rect",
+                        pad_depth_mm=3.00,
+                        pad_width_mm=3.50,
+                        outer_span_mm=8.00,
+                        source="Stackpole RHC series, page 2",
+                    ),
+                )
+            ],
+        )
+        path = tmp_path / "project.kct"
+        save_spec(spec, path)
+        loaded = load_spec(path)
+        assert loaded.bom_entries is not None
+        entry = loaded.bom_entries[0]
+        assert entry.land_pattern == spec.bom_entries[0].land_pattern
+
+
 class TestMountingHoleGroupSpec:
     """Tests for the MountingHoleGroupSpec schema (Issue #3352, P_AS1)."""
 
