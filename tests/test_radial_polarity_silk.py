@@ -145,3 +145,29 @@ def test_sector_crosses_exposed_pad_and_mask_graphic(tmp_path, rules):
     for check in (check_silk_over_copper, check_silk_over_mask_opening):
         findings = check(pcb, rules).violations
         assert any("C1 (fp_line)" in v.items for v in findings)
+
+
+@pytest.mark.parametrize("face", ["F", "B"])
+@pytest.mark.parametrize("case", ["aligned", "stray", "opposite_pad", "no_pad"])
+def test_round_pad_cutout_hatch(tmp_path, rules, face, case):
+    graphics = []
+    for i, x in enumerate(OFFSETS):
+        outer = math.sqrt(4 - x**2)
+        tip = math.sqrt(0.55**2 - (x - 0.4) ** 2)
+        graphics.append(line((x, -outer), (x, -tip)))
+        if case == "stray" and i == 2:
+            tip += 0.09
+        graphics.append(line((x, tip), (x, outer)))
+    if case != "no_pad":
+        side = "B" if case == "opposite_pad" else "F"
+        graphics.append(
+            f'(pad "2" smd circle (at 0.4 0) (size 0.8 0.8) (layers "{side}.Cu" "{side}.Mask"))'
+        )
+    board(tmp_path, offsets=(), graphics=" ".join(graphics))
+    path = tmp_path / "sector.kicad_pcb"
+    if face == "B":
+        path.write_text(
+            path.read_text().replace('"B.', '"TMP.').replace('"F.', '"B.').replace('"TMP.', '"F.')
+        )
+    findings = check_silk_overlap(PCB.load(path), rules).violations
+    assert bool(findings) == (case != "aligned")
