@@ -156,3 +156,139 @@ class TestCommit:
     def test_no_link_is_error(self, board, capsys):
         rc, doc = _run(capsys, str(board))
         assert rc == 1 and not doc["ok"]
+
+
+@pytest.fixture
+def plane_board(tmp_path):
+    """Plated SIG terminals span a partial inner pour bonded to a remote pad."""
+    text = BOARD.replace('(31 "B.Cu"', '(1 "In1.Cu" power) (2 "In2.Cu" signal) (31 "B.Cu"')
+    text = text.replace("smd rect", "thru_hole circle").replace(
+        '(layers "F.Cu" "F.Paste" "F.Mask")', '(drill 0.4) (layers "*.Cu" "*.Mask")'
+    )
+    # The remote connection sits north of the corridor. The baseline pour's
+    # southern edge exactly touches the authorized rectangle.
+    pts = "(pts (xy 106 104) (xy 124 104) (xy 124 109.85) (xy 106 109.85))"
+    extra = f"""
+    (footprint "R" (layer "F.Cu") (at 115 106)
+      (fp_text reference "J3" (at 0 -1) (layer "F.SilkS"))
+      (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4)
+        (layers "*.Cu" "*.Mask") (net 2 "FOE")))
+    (zone (net 2) (net_name "FOE") (layer "In1.Cu")
+      (uuid "00000000-0000-0000-0000-000000000011")
+      (hatch edge 0.5) (connect_pads yes (clearance 0.5)) (min_thickness 0.1)
+      (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+      (polygon {pts}) (filled_polygon (layer "In1.Cu") {pts}))
+    """
+    path = tmp_path / "partial.kicad_pcb"
+    path.write_text(text.rstrip()[:-1] + extra + ")\n")
+    return path
+
+
+def test_plane_corridor_probe_is_per_link_and_contains_full_track(plane_board, capsys):
+    original = plane_board.read_bytes()
+    args = ("--link", LINK, "--link-layers", "In1.Cu")
+    rc, doc = _run(
+        capsys,
+        str(plane_board),
+        "--probe",
+        *args,
+        "--plane-corridor",
+        "In1.Cu=109,109.85,121,110.15",
+        *args,
+        "--plane-corridor",
+        "In1.Cu=109,109.95,121,110.05",
+        *args,
+    )
+    assert rc == 1
+    ok, narrow, default = doc["links"]
+    assert ok["routable"] and ok["layers"] == ["In1.Cu"]
+    assert not narrow["routable"] and "corridor" in narrow["reason"]
+    assert not default["routable"]
+    assert plane_board.read_bytes() == original
+
+
+def _native_plane_link(capsys, board, *args):
+    from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION, version_number
+    from kicad_tools.cli.runner import find_kicad_cli, get_kicad_version
+
+    cli = find_kicad_cli()
+    if cli is None or version_number(get_kicad_version(cli) or "") != PINNED_KICAD_VERSION:
+        pytest.skip(f"native plane refill requires KiCad {PINNED_KICAD_VERSION}")
+    return _run(
+        capsys,
+        str(board),
+        "--link",
+        LINK,
+        "--link-layers",
+        "In1.Cu",
+        "--plane-corridor",
+        "In1.Cu=109,109.85,121,110.15",
+        *args,
+    )
+
+
+def test_plane_commit_reports_gap_to_saved_project_refill(plane_board, capsys):
+    plane_board.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "meta": {"version": 3},
+                "net_settings": {
+                    "meta": {"version": 3},
+                    "classes": [{"name": "Default", "clearance": 0.8}],
+                },
+            }
+        )
+    )
+    original = plane_board.read_bytes()
+    out = plane_board.with_name("routed.kicad_pcb")
+    rc, doc = _native_plane_link(capsys, plane_board, "-o", str(out))
+    assert rc == 0, doc
+    gap = doc["links"][0]["min_plane_gap_mm"]
+    assert 0.8 <= gap < 0.81  # project floor exceeds zone (0.5) and CLI (0.2)
+    assert plane_board.read_bytes() == original
+    pcb = PCB.load(out)
+    assert [s.layer for s in pcb.segments if pcb.nets[s.net_number].name == "SIG"] == ["In1.Cu"]
+    assert pcb.zones[0].filled_polygons
+    # An explicit floor larger than the native setback must veto the same route.
+    rc, doc = _native_plane_link(capsys, plane_board, "--net-clearance", "FOE=1.5")
+    assert rc == 1 and "requires 1.5 mm" in doc["links"][0]["reason"]
+    assert plane_board.read_bytes() == original
+
+
+@pytest.mark.parametrize("second_pad", [True, False])
+def test_plane_commit_rolls_back_stranded_island(plane_board, capsys, second_pad):
+    # The SIG track now crosses the entire pour. With a pad in the severed
+    # half native KiCad keeps both islands. Without it native removes that half.
+    text = plane_board.read_text().replace("(xy 106 ", "(xy 112 ").replace("(xy 124 ", "(xy 118 ")
+    text = text.replace("109.85)", "116)")
+    if second_pad:
+        text = (
+            text.rstrip()[:-1]
+            + """
+        (footprint "R" (layer "F.Cu") (at 114 114)
+          (fp_text reference "J4" (at 0 -1) (layer "F.SilkS"))
+          (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4)
+            (layers "*.Cu" "*.Mask") (net 2 "FOE"))))
+        """
+        )
+    plane_board.write_text(text)
+    rc, doc = _native_plane_link(capsys, plane_board)
+    assert rc == 1, doc
+    link = doc["links"][0]
+    assert link["status"] == "rolled-back" and link["failed_check"] == "plane-corridor"
+    assert "stranded FOE island on In1.Cu" in link["reason"]
+    assert plane_board.read_text() == text
+
+
+@pytest.mark.parametrize(
+    "corridor",
+    [
+        "F.Cu=1,2,3,4",
+        "In1.Cu=nan,2,3,4",
+        "In1.Cu=3,2,1,4",
+        "In1.Cu=1,2,3",
+    ],
+)
+def test_invalid_plane_corridor_is_rejected(board, corridor):
+    with pytest.raises(SystemExit):
+        main(["route-link", str(board), "--link", LINK, "--plane-corridor", corridor])
