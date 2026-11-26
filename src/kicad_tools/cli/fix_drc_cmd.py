@@ -7,7 +7,9 @@ This command repairs multiple types of DRC violations:
 - hole_to_hole_clearance (formerly dimension_drill_clearance, #4353): de-duplicate
   or slide vias via DrillClearanceRepairer
 - physical_copper_gap same-net slits (#9332): move a via clear of its own pad
-  or onto its own track via CopperGapRepairer
+  or onto its own track via CopperGapRepairer; rewrite a same-net trace shelf
+  at a routed branch (#10367) with a shortcut that keeps the trunk node, the
+  far end and the widths
 
 Success is never self-reported (Issues #6431 / #6434): after the last pass
 ``fix-drc`` re-checks the output with ``kct check``'s own rule set (the
@@ -352,7 +354,8 @@ Examples:
             "detected with kct check's rules, not kicad-cli, and is also part "
             "of the default set when the report carries such findings. "
             "'copper-gap' moves a via that sits too close to its own pad or "
-            "track (same-net physical_copper_gap slits), also detected with "
+            "track and rewrites a short same-net trace shelf at a routed "
+            "branch (same-net physical_copper_gap slits), also detected with "
             "kct check's rules and part of the default set."
         ),
     )
@@ -1269,7 +1272,9 @@ def _run_single_pass(
             ):
                 load_path = output_path
 
-            copper_repairer = CopperGapRepairer(load_path)
+            # The input board's reinforcement sidecar protects branch
+            # endpoints from the shelf rewrite (Issue #10367).
+            copper_repairer = CopperGapRepairer(load_path, project_pcb_path=pcb_path)
             copper_result = copper_repairer.repair_gaps(
                 copper_violations,
                 max_displacement=max_displacement,
@@ -2518,6 +2523,7 @@ def _print_json(
             "snapped_to_pad": copper_result.snapped_to_pad,
             "snapped_to_track": copper_result.snapped_to_track,
             "opened": copper_result.opened,
+            "rewritten_shelves": copper_result.rewritten_shelves,
             "actions": [
                 {
                     "action": a.action,
@@ -2528,6 +2534,7 @@ def _print_json(
                     "displacement_mm": round(a.displacement_mm, 4),
                     "detail": a.detail,
                     "reverted": (bool(rolled_back) or (a.uuid in reverted_uuids)),
+                    **({"shelf": a.shelf.to_dict()} if a.shelf is not None else {}),
                 }
                 for a in copper_result.actions
             ],

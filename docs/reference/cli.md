@@ -887,7 +887,7 @@ the run to a single repair pass:
 | `clearance` | Copper-clearance violations between tracks, vias and pads (nudge traces) |
 | `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
 | `mask-copper` | A track entering its own pad's opening off-centre (see below) |
-| `copper-gap` | Same-net `physical_copper_gap` slits: a via beside its own pad, or a track tangent to its own via (see below) |
+| `copper-gap` | Same-net `physical_copper_gap` slits: a via beside its own pad, a track tangent to its own via, or a short trace shelf at a routed branch (see below) |
 
 ```bash
 kct fix-drc board.kicad_pcb --only mask-copper --dry-run
@@ -918,7 +918,22 @@ fails the board): a via beside its own pad is moved along the pad-centre ray
 until the gap clears the finding's required value (or snapped to the pad
 centre when the profile declares a via-in-pad process), and a track tangent
 to its own via has the via snapped onto the track's centreline so the copper
-fully merges. Different-net gaps, zone fills and pad-pad / track-track pairs
+fully merges. A track-track slit between a trunk segment and a short same-net
+staircase leaving one of its ends (a "shelf" at a routed branch) is repaired by
+replacing that branch chain with a straight or 45-degree-plus-H/V shortcut that
+keeps the trunk node, the branch's far end and the chain's first and last
+widths (at most one width step). The shelf is the shorter of the finding's two
+segments; the chain is at most eight segments. A pad, via, tap, layer change
+or reinforcement endpoint on an interior node protects the chain
+(`protected_pad`, `protected_via`, `protected_tap`, `protected_layer_change`,
+`protected_reinforcement`), a locked segment is never rewritten
+(`locked_segment`), and the rewrite is kept only when the new copper clears all
+foreign copper (`would_violate_clearance`) and leaves no slit below the
+finding's required value (`gap_not_cleared`) under the physical-gap rule's own
+copper model; `--dry-run` lists the shelf and both end nodes. The shortcut
+changes the branch's routed length, so length-constrained nets need the same
+review as for a via move. Different-net gaps, zone fills, pad-pad pairs and
+other track-track pairs
 are never touched and are listed as unrepaired with a reason; a move that
 would crowd foreign copper or drill too close to another hole is declined,
 and same-net track ends anchored at the via move with it. A via move
