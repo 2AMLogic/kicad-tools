@@ -2009,7 +2009,7 @@ def _build_graph(
     # centreline touching the via. Bind only the landing on this layer.
     # The end must lie inside the via land and leave copper around the bore.
     # A straight run split at vertices is one bar: bind it to a via once, at
-    # the covered point farthest from the bore, so no measured span contracts.
+    # a covered run end in preference to any internal subdivision vertex.
     # Collinear same-width neighbours sharing an end form one run.
     run_of = list(range(len(segments)))
 
@@ -2023,7 +2023,8 @@ def _build_graph(
     for i, seg in enumerate(segments):
         for end in (seg.start, seg.end):
             at_node.setdefault(_copper_node(end, seg.layer), []).append(i)
-    for segment_indices in at_node.values():
+    continuations: set[tuple[int, _Node]] = set()
+    for junction, segment_indices in at_node.items():
         for i in segment_indices:
             for j in segment_indices:
                 if i < j and segments[i].width == segments[j].width:
@@ -2036,9 +2037,10 @@ def _build_graph(
                     )
                     if overlap is not None and overlap <= _PAD_EPS:
                         run_of[run_root(i)] = run_root(j)
+                        continuations.update(((i, junction), (j, junction)))
     offset_ports: set[tuple[_Node, _Node]] = set()
     for via in vias:
-        best: dict[int, tuple[float, _Node]] = {}
+        best: dict[int, tuple[bool, float, _Node]] = {}
         # A run whose centreline already reaches the via centre is bound there.
         on_centre = {
             run_root(i)
@@ -2051,11 +2053,12 @@ def _build_graph(
                 continue
             for end in (seg.start, seg.end):
                 if _via_covered_by_end(via, seg, end):
-                    candidate = (math.dist(end, via.position), _copper_node(end, seg.layer))
+                    node = _copper_node(end, seg.layer)
+                    candidate = ((i, node) in continuations, math.dist(end, via.position), node)
                     root_i = run_root(i)
-                    if root_i not in best or candidate > best[root_i]:
+                    if root_i not in best or candidate < best[root_i]:
                         best[root_i] = candidate
-        for _, node in best.values():
+        for _, _, node in best.values():
             offset_ports.add((node, _copper_node(via.position, node[2])))
 
     for station, _ in row_ports or ():

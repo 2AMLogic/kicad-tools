@@ -872,6 +872,24 @@ class TestPhysicalLayerGraph:
         pcb.add_via(60, 50, size=1.6, drill=0.8, net="NET1")
         return pcb
 
+    @pytest.mark.parametrize("split", [False, True])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_horizontal_offset_landing_keeps_all_copper(self, split, reverse):
+        pcb = self._offset_via_pcb()
+        if split:
+            vertex = (59.6, 50.632)
+            pcb.segments[0].end = vertex
+            pcb.add_trace(vertex, (60, 50.632), width=2.45, layer="In1.Cu", net="NET1")
+        if reverse:
+            pcb._segments.reverse()
+            for segment in pcb.segments:
+                segment.start, segment.end = segment.end, segment.start
+        result = resolve_current_path(pcb, _trunk_spec())
+        assert result.ok
+        assert result.length_mm == pytest.approx(80)
+        assert [change.count for change in result.layer_changes] == [1]
+        assert audit_current_paths(pcb, [_trunk_spec()]).fully_covered
+
     def test_straight_stub_keeps_offset_via_contact(self):
         pcb = self._offset_via_pcb()
         pcb.add_trace((60, 50.632), (62, 50.632), width=2.45, layer="In1.Cu", net="NET1")
