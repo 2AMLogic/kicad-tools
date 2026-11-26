@@ -5,6 +5,7 @@ import shutil
 from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,6 +40,7 @@ def specimen(tmp_path, monkeypatch):
         },
     }
     path.with_suffix(".kicad_pro").write_text(json.dumps(project))
+    path.with_suffix(".kicad_dru").write_text("(version 1)\n")
     path.with_name("net_class_map.json").write_text(
         json.dumps(net_class_map_to_dict(dict.fromkeys(NETS, usb3_net_class())))
     )
@@ -56,10 +58,53 @@ def geometry(board, net):
     return {s.uuid: (s.start, s.end, s.width, s.layer) for s in board.segments if s.net_name == net}
 
 
-def test_tx2_changes_only_the_positive_exit_and_is_idempotent(specimen):
-    path, _ = specimen
-    before = PCB.load(path)
+@pytest.fixture
+def local_specimen(specimen, monkeypatch):
+    path, departures = specimen
+    original_ids = set(geometry(PCB.load(path), NETS[0]))
+
+    def accept_drc(candidate, *, output_path, **kwargs):
+        assert (
+            candidate.with_suffix(".kicad_dru").read_bytes()
+            == path.with_suffix(".kicad_dru").read_bytes()
+        )
+        output_path.write_text(json.dumps({"violations": [], "unconnected_items": []}))
+        return SimpleNamespace(success=True)
+
+    def accept_mask(candidate, policy):
+        changed = geometry(PCB.load(candidate), NETS[0]).keys() - original_ids
+        return SimpleNamespace(
+            coverage="complete",
+            measurements=[
+                SimpleNamespace(
+                    conductor_uuid=uuid, owner_ref="J1/B2", disposition="within_own_pad"
+                )
+                for uuid in changed
+            ],
+        )
+
+    monkeypatch.setattr(
+        departures, "active_evidence_toolchain", lambda: SimpleNamespace(kicad_cli="kicad-cli")
+    )
+    monkeypatch.setattr(departures, "run_drc", accept_drc)
+    monkeypatch.setattr(departures, "check_mask_to_copper", accept_mask)
+    return specimen
+
+
+def test_tx2_native_rules_and_mask_accept_the_exit(specimen):
+    from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION, version_number
+    from kicad_tools.cli.runner import find_kicad_cli, get_kicad_version
+
+    cli = find_kicad_cli()
+    if cli is None or version_number(get_kicad_version(cli)) != PINNED_KICAD_VERSION:
+        pytest.skip("The native TX2 regression uses the pinned KiCad toolchain")
     assert run(specimen) == 1
+
+
+def test_tx2_changes_only_the_positive_exit_and_is_idempotent(local_specimen):
+    path, _ = local_specimen
+    before = PCB.load(path)
+    assert run(local_specimen) == 1
     after = PCB.load(path)
     assert geometry(before, NETS[1]) == geometry(after, NETS[1])
     original, repaired = (geometry(board, NETS[0]) for board in (before, after))
@@ -86,16 +131,28 @@ def test_tx2_changes_only_the_positive_exit_and_is_idempotent(specimen):
     for key in original.keys() & repaired.keys():
         assert original[key] == repaired[key]
     applied = path.read_bytes()
-    assert run(specimen) == 0
+    assert run(local_specimen) == 0
     assert path.read_bytes() == applied
 
 
 @pytest.mark.parametrize(
     "control",
-    ["partner", "ground", "group", "source", "branch", "tap", "mask", "project", "invalid_project"],
+    [
+        "partner",
+        "ground",
+        "group",
+        "source",
+        "branch",
+        "tap",
+        "mask",
+        "project",
+        "invalid_project",
+        "missing_rules",
+        "nonfile_rules",
+    ],
 )
-def test_tx2_veto_preserves_the_source(specimen, monkeypatch, control):
-    path, departures = specimen
+def test_tx2_veto_preserves_the_source(local_specimen, monkeypatch, control):
+    path, departures = local_specimen
     text = path.read_text()
     if control == "partner":
         # This mask-clean launch retains length, but comes within 0.127061 mm of TX2−.
@@ -115,6 +172,11 @@ def test_tx2_veto_preserves_the_source(specimen, monkeypatch, control):
             text.rstrip()[:-1]
             + '(via (at 19.5 10.09) (size .2) (drill .1) (layers "F.Cu" "B.Cu") (net 1))\n)\n'
         )
+    elif control in {"missing_rules", "nonfile_rules"}:
+        rules = path.with_suffix(".kicad_dru")
+        rules.unlink()
+        if control == "nonfile_rules":
+            rules.mkdir()
     elif control == "project":
         path.with_suffix(".kicad_pro").unlink()
     elif control == "invalid_project":
@@ -128,5 +190,5 @@ def test_tx2_veto_preserves_the_source(specimen, monkeypatch, control):
         text = text.replace("(pad_to_mask_clearance 0)", "(pad_to_mask_clearance 0.12)")
     path.write_text(text)
     original = path.read_bytes()
-    assert run(specimen) == 0
+    assert run(local_specimen) == 0
     assert path.read_bytes() == original

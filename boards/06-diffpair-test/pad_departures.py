@@ -1191,10 +1191,20 @@ def _stage_clock_exit(
 
 
 def _authored_rules_ok(
-    pcb: PCB, path: Path, tracks: list[Segment], vias: list[Via], label: str
+    pcb: PCB,
+    path: Path,
+    tracks: list[Segment],
+    vias: list[Via],
+    label: str,
+    *,
+    require_rules: bool = False,
 ) -> bool:
     """Have KiCad evaluate authored rules on the replacement copper before publishing it."""
-    if not path.with_suffix(".kicad_dru").exists() and not all_rule_area_zones(pcb):
+    if (
+        not require_rules
+        and not path.with_suffix(".kicad_dru").exists()
+        and not all_rule_area_zones(pcb)
+    ):
         return True
     changed = {item.uuid for item in (*tracks, *vias)}
     if not all(changed):
@@ -1203,7 +1213,9 @@ def _authored_rules_ok(
         with TemporaryDirectory(prefix="board06-staged-") as tmp:
             candidate = Path(tmp) / path.name
             pcb.save(candidate)
-            copy_project_sidecars(path, candidate)
+            staged = copy_project_sidecars(path, candidate)
+            if require_rules and candidate.with_suffix(".kicad_dru") not in staged:
+                return False
             report = candidate.with_suffix(".json")
             active = active_evidence_toolchain()
             toolchain = (
@@ -1668,7 +1680,7 @@ def _clear_tx2_exit(path: Path, rules: DesignRules, policy: MaskCopperPolicy) ->
         for finding in impedance.violations
     ):
         return 0
-    if not _authored_rules_ok(pcb, path, added, [], "J1/B2 USB3_TX2+"):
+    if not _authored_rules_ok(pcb, path, added, [], "J1/B2 USB3_TX2+", require_rules=True):
         return 0
     with TemporaryDirectory(prefix="board06-tx2-mask-") as tmp:
         candidate = Path(tmp) / path.name
