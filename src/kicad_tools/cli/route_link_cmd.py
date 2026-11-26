@@ -265,6 +265,13 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
             "without it the census gate is skipped"
         ),
     )
+    parser.add_argument(
+        "--order-thickness-mm",
+        type=float,
+        metavar="MM",
+        help="Nominal finished board thickness for the per-link creepage checks, in mm. "
+        "Overrides the purchase thickness in project.kct.",
+    )
     parser.add_argument("-o", "--output", help="Write to this file instead of editing in place")
     parser.add_argument("--trace-width", type=float, default=0.2, help="Track width (mm)")
     parser.add_argument(
@@ -900,6 +907,7 @@ def _census_failures(
         net_class=net_class,
         board=str(pcb_path),
         project_board=Path(getattr(args, "pcb", pcb_path)),
+        order_thickness_mm=getattr(args, "order_thickness_mm", None),
         **extra,
     )
     failing: dict[tuple[str, str, str, str], float] = {}

@@ -66,9 +66,10 @@ from kicad_tools.pcb.reinforcement_sidecar import load_wires_if_present
 from kicad_tools.physics.stackup import stackup_copper_oz
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
+    OperatingCase,
     current_paths_sidecar_candidates,
     discover_current_paths_sidecar,
-    load_current_path_specs,
+    load_current_path_sidecar,
 )
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
@@ -2520,6 +2521,7 @@ def main(argv: list[str] | None = None) -> int:
     # explicit-wins / auto-discover / degrade-gracefully-on-auto-discovered-
     # malformed-file contract as --net-class-map above.
     current_path_specs: list[CurrentPathSpec] = []
+    current_path_cases: list[OperatingCase] = []
     cp_explicit = args.current_paths is not None
     cp_suppressed = bool(getattr(args, "no_current_paths", False))
     cp_candidates: list[Path] = []
@@ -2538,7 +2540,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: current-paths file not found: {cp_path}", file=sys.stderr)
             return 1
         try:
-            current_path_specs = load_current_path_specs(cp_path)
+            sidecar = load_current_path_sidecar(cp_path)
+            current_path_specs, current_path_cases = sidecar.specs, sidecar.cases
         except (OSError, ValueError) as e:
             if cp_explicit:
                 print(f"Error: parsing current-paths JSON: {e}", file=sys.stderr)
@@ -2548,6 +2551,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             current_path_specs = []
+            current_path_cases = []
         else:
             if not cp_explicit:
                 print(
@@ -2809,6 +2813,7 @@ def main(argv: list[str] | None = None) -> int:
             # Issue #4980/#5124: declared branch-specific current-path
             # intent (--current-paths sidecar, auto-discovered).
             current_path_specs=current_path_specs,
+            current_path_cases=current_path_cases,
             # Issue #8746: gauge source + reinforcement-citing ampacity waivers
             # for reinforcement_incomplete.
             reinforcement_wires=load_wires_if_present(pcb_path),
@@ -3215,11 +3220,30 @@ def main(argv: list[str] | None = None) -> int:
         # at a wider stdout bound -- and print one remediation line naming
         # what to configure.  JSON/SARIF output is untouched (the guard
         # above); the machine report already carries the full reasons list.
+        from kicad_tools.validate.mask_copper_exposure import nominal_exposure
+
         for assessment in results.mask_copper_assessments:
             print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
-            # Issue #8991: a ``complete`` assessment with nothing to report
-            # prints only the header; the "no reason reported" placeholder is
-            # kept for non-complete states (and for any reasons present).
+            exposure = nominal_exposure(assessment)
+            artwork = (exposure["artwork_source"] or "unavailable").replace("_", " ")
+            print(f"  Nominal artwork exposure ({artwork}, {exposure['status']})")
+            for side, face in exposure["faces"].items():
+                counts = face["finding_counts"] | face["opening_counts"]
+                shown = {k: v if v is not None else "unknown" for k, v in counts.items()}
+                print(
+                    f"    {side} ({face['status']}): {shown['matched']}/{shown['plotted']} matched, "
+                    f"{shown['unresolved']} unresolved, {shown['excluded']} excluded; "
+                    f"{shown['foreign_net']} foreign-net, {shown['same_net_beyond_land']} "
+                    f"same-net beyond land, {shown['registration_or_near_pad_only']} near-pad only"
+                )
+                measured = face["measured_opening_counts"]
+                if face["status"] == "partial" and measured["evaluated"]:
+                    print(
+                        f"      Of {measured['evaluated']} fully evaluated component openings, "
+                        f"{measured['foreign_net']} expose foreign-net copper and "
+                        f"{measured['same_net_beyond_land']} expose same-net copper beyond the land"
+                    )
+            # Keep placeholder reasons out of a complete assessment (#8991).
             if assessment.reasons or assessment.coverage != "complete":
                 print(f"  {collapse_reasons(assessment.reasons, limit=_MASK_STDOUT_REASON_LIMIT)}")
             remediation = assessment.remediation
@@ -3806,10 +3830,12 @@ def build_check_rule_set(
             notes.append(f"ignoring malformed courtyard-waivers sidecar {cw_path}: {exc}")
 
     current_path_specs: list[CurrentPathSpec] = []
+    current_path_cases: list[OperatingCase] = []
     cp_path = discover_current_paths_sidecar(project_pcb_path)
     if cp_path is not None:
         try:
-            current_path_specs = load_current_path_specs(cp_path)
+            sidecar = load_current_path_sidecar(cp_path)
+            current_path_specs, current_path_cases = sidecar.specs, sidecar.cases
         except (OSError, ValueError) as exc:
             notes.append(f"ignoring malformed current-paths sidecar {cp_path}: {exc}")
 
@@ -3850,6 +3876,7 @@ def build_check_rule_set(
         courtyard_waivers=courtyard_waivers,
         strict_connectivity=True,
         current_path_specs=current_path_specs,
+        current_path_cases=current_path_cases,
         reinforcement_wires=load_wires_if_present(project_pcb_path),
         declared_spec_currents=resolve_declared_currents_for_pcb(project_pcb_path),
     )

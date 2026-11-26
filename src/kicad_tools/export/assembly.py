@@ -486,9 +486,9 @@ class AssemblyPackage:
                     # Auto-detect from schematic/PCB directory
                     spec_file = find_spec_file(self.pcb_path.parent)
                 if spec_file is not None:
-                    from ..spec.parser import load_spec
+                    from .bom_spec_overlay import load_assembly_spec
 
-                    spec = load_spec(spec_file)
+                    spec, _ = load_assembly_spec(spec_file)
                     if spec.bom_entries:
                         overlay_report = apply_spec_overlay(items, spec.bom_entries)
                         if result is not None:
