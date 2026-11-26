@@ -2,9 +2,9 @@
   "reviewed_on": "2026-11-22",
   "method": "Reviewed physical routing with independently regenerated logical circuit and fresh validation on every build. Not a promise of fresh autorouter equivalence.",
   "authored_source_sha256": {
-    "net_class_map.json": "585f0a4f1611d7582fdbe257465fde740d31ad7badec1dd6982bcca9cb4b3c28",
+    "net_class_map.json": "a362225403d2962e7da424ab289a285ac62d417538f4ed05167f9c55e12c224f",
     "sdram_demo.kicad_pcb": "ebff1f52709d4cb1a56d6b1558ca1051c223b746c37825ecd93c38ea81bc7575",
-    "sdram_demo.kicad_pro": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198"
+    "sdram_demo.kicad_pro": "b912b224a3f36a5ff763a9f61f79581572294f1b980bab036d2b6740af51886c"
   },
   "sha256": {
     "sdram_demo.kicad_pcb": "45943c244519945ee5d51c4b58a28a901cf67b092129c64dcd2ea90a11d2bc84"

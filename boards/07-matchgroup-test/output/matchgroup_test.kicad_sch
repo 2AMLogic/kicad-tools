@@ -5250,7 +5250,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" "https://www.st.com/resource/en/datasheet/stm32f429zi.pdf"
 			(at 106.68 127 0)
 			(effects
 				(font
@@ -5606,7 +5606,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" "http://www.issi.com/WW/pdf/42-45S16400J.pdf"
 			(at 238.76 81.28 0)
 			(effects
 				(font
@@ -5782,7 +5782,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" "https://www.diodes.com/assets/Datasheets/AP2112.pdf"
 			(at 335.28 45.72 0)
 			(effects
 				(font
@@ -5860,7 +5860,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 304.8 45.72 0)
 			(effects
 				(font
@@ -5932,7 +5932,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 335.28 86.36 0)
 			(effects
 				(font
@@ -6012,7 +6012,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 378.46 86.36 0)
 			(effects
 				(font
@@ -6086,7 +6086,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 210.82 160.02 0)
 			(effects
 				(font
@@ -6158,7 +6158,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 233.68 160.02 0)
 			(effects
 				(font
@@ -6230,7 +6230,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 256.54 160.02 0)
 			(effects
 				(font
@@ -6302,7 +6302,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 279.4 160.02 0)
 			(effects
 				(font
@@ -6374,7 +6374,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 302.26 160.02 0)
 			(effects
 				(font
@@ -6446,7 +6446,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 325.12 160.02 0)
 			(effects
 				(font
@@ -6518,7 +6518,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 347.98 160.02 0)
 			(effects
 				(font
@@ -6590,7 +6590,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 370.84 160.02 0)
 			(effects
 				(font
@@ -6662,7 +6662,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 210.82 187.96 0)
 			(effects
 				(font
@@ -6734,7 +6734,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 233.68 187.96 0)
 			(effects
 				(font
@@ -6806,7 +6806,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 256.54 187.96 0)
 			(effects
 				(font
@@ -6878,7 +6878,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 279.4 187.96 0)
 			(effects
 				(font
@@ -6950,7 +6950,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 302.26 187.96 0)
 			(effects
 				(font
@@ -7022,7 +7022,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 325.12 187.96 0)
 			(effects
 				(font
@@ -7094,7 +7094,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 347.98 187.96 0)
 			(effects
 				(font
@@ -7166,7 +7166,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 370.84 187.96 0)
 			(effects
 				(font
@@ -7238,7 +7238,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 210.82 215.9 0)
 			(effects
 				(font
@@ -7310,7 +7310,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 233.68 215.9 0)
 			(effects
 				(font
@@ -7382,7 +7382,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 256.54 215.9 0)
 			(effects
 				(font
@@ -7454,7 +7454,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 279.4 215.9 0)
 			(effects
 				(font
@@ -7526,7 +7526,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 302.26 215.9 0)
 			(effects
 				(font
@@ -7598,7 +7598,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 325.12 215.9 0)
 			(effects
 				(font
@@ -7670,7 +7670,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 347.98 215.9 0)
 			(effects
 				(font
@@ -7742,7 +7742,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 370.84 215.9 0)
 			(effects
 				(font
@@ -7814,7 +7814,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 210.82 243.84 0)
 			(effects
 				(font
@@ -7886,7 +7886,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 233.68 243.84 0)
 			(effects
 				(font
@@ -7958,7 +7958,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 256.54 243.84 0)
 			(effects
 				(font
@@ -8030,7 +8030,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 279.4 243.84 0)
 			(effects
 				(font
@@ -8102,7 +8102,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 302.26 243.84 0)
 			(effects
 				(font
@@ -8174,7 +8174,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 325.12 243.84 0)
 			(effects
 				(font
@@ -8246,7 +8246,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 304.8 279.4 0)
 			(effects
 				(font
@@ -8318,7 +8318,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 327.66 279.4 0)
 			(effects
 				(font
@@ -8390,7 +8390,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 350.52 279.4 0)
 			(effects
 				(font
@@ -8462,7 +8462,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 373.38 279.4 0)
 			(effects
 				(font
@@ -8534,7 +8534,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 396.24 279.4 0)
 			(effects
 				(font
@@ -8606,7 +8606,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 358.14 307.34 0)
 			(effects
 				(font
@@ -8678,7 +8678,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 386.08 307.34 0)
 			(effects
 				(font
@@ -8750,7 +8750,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 304.8 25.4 0)
 			(effects
 				(font
@@ -8802,7 +8802,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 325.12 25.4 0)
 			(effects
 				(font
@@ -8854,7 +8854,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" ""
 			(at 345.44 25.4 0)
 			(effects
 				(font

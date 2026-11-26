@@ -5,7 +5,7 @@
   "fill_identical": true,
   "native_rule_sha256": {
     ".kicad_dru": "51c411e4dbbb48d70364da6ada60a327b4c61ad718c503b5db7503836919d2b3",
-    ".kicad_pro": "631b225f4cd529c8a2d8ce94d5e40cbedb01139984528a132430dcc3adae63b7"
+    ".kicad_pro": "50360572adf6d64ea127da337dccb79a0c9758a428070fa6c69ab73698e6c44c"
   },
   "native_unconnected_items": 0,
   "native_violations": 0,

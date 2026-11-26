@@ -8,8 +8,10 @@ release: use only a final package whose readiness evidence passes all gates.
 - Copper order: F signal / In1 ground / In2 signal / In3 signal / In4 3.3 V /
   B signal. Do not replace the reference planes with routed signal layers.
 - Outer copper 0.035 mm, inner copper 0.0152 mm. Finished bus trace width
-  0.18 mm; reviewed 50 ohm ±10% single-ended geometry. Factory stack/material
-  substitutions or width changes require recalculation and routing review.
+  0.18 mm; reviewed 50 ohm ±10% single-ended geometry. Supply, ground and
+  the other auxiliary tracks are 0.18 mm minimum; 23 reviewed auxiliary
+  segments are 0.20 mm. Factory stack/material substitutions or width changes
+  require recalculation and routing review.
 - Ordinary full-span plated through vias, 0.5 mm diameter and 0.2 mm drill.
   No microvias, blind/buried vias, or via-in-pad processing is intended.
 - Two-sided SMT assembly: 40 SMT components, including 25 back-side capacitors.

@@ -149,3 +149,89 @@ The order package uses the same filled PCB and the production DRU for both
 plots and checks. Its assembly CSV contains all 43 placements. The six
 board-only fiducials are present in the fabrication artwork. Hardware
 testing remains pending.
+
+## Reviewed class widths (Issue #10451)
+
+`kct check`'s `netclass_agreement` rule (#10139) landed after this evidence
+was pinned. It compares each routed net's sidecar class and `trace_width`
+with the class the sibling project resolves for that net. On this board it
+reported 55 `netclass_sidecar_mismatch` warnings: the six router classes in
+the routed project inherited the 0.160 mm `track_width` of `Default`
+(`apply_router_netclasses` clones `Default` and overrides only the name and
+clearance), while `net_class_map.json` declared 0.180 mm for the 39 SDRAM
+and `SWD_CLOCK` nets and 0.200 mm for the 16 `AUX` nets. `build.py` requires
+zero warnings, so the replay stopped at its own design gate (#10447).
+
+The reviewed widths are now declared in the maintained source, where they
+resolve before the first zone fill. `authored-source/sdram_demo.kicad_pro`
+gives `Default` the reviewed 0.180 mm that every declared class inherits, and
+`authored-source/net_class_map.json` declares `AUX` at 0.180 mm. No copper
+changed.
+
+**AUX width, 0.180 mm.** The class holds the sixteen non-SDRAM nets: the
+`+5V`, `+3V3` and `+3V3_A` supplies, `GND`, the `VCAP1`/`VCAP2` capacitor
+links, reset, boot, debug, UART and the LED nets. On the reviewed routing,
+229 of 252 `AUX` segments are 0.180 mm. That includes every supply and ground
+segment and is the width the authored power routing and package escapes
+carry. The other 23 segments, on `BOOT0`, `NRST`, `SWO`, `UART_TX`,
+`UART_RX`, `LED_PASS_A` and `LED_FAIL_A`, are 0.200 mm. The class width is a
+minimum, so those stay legal. No `AUX` net is impedance-controlled or
+length-matched. IPC-2221 screening with the board's own stackup
+(`kicad_tools.physics.ampacity`) needs 0.040 mm for the 230 mA bench
+envelope on the 35 µm outer copper, where a 0.180 mm track screens near
+0.69 A at a 10 °C rise; the inner-layer `AUX` copper carries only the
+filtered analog supply and signal currents. Declaring 0.200 mm would have
+reported the 229 reviewed segments as narrow and required re-routing supply
+and ground to satisfy a width the copper never carried.
+
+**Pad escapes.** No pad escape narrows below its class. Every reviewed
+escape carries its class width, none of the 55 sidecar entries declares a
+`neck_trace_width`, and the rule's track-width arm reports nothing on this
+copper. A trunk segment narrowed below its class does fail it, and
+`tests/test_board07_real_design.py` checks both.
+
+**The two writes.** `validate.py` writes the rules once before the first
+zone fill (`write_reviewed_rules`) and `kct check --emit-drc-constraints`
+writes them again after the copper measurements. `class_width_errors`
+resolves the written project against the sidecar after the first write and
+names each drifting net before any native step runs. The validator still
+requires both native sidecars to be byte-identical across the second.
+
+**Published files.** `output/matchgroup_test_routed.kicad_pro` is the
+authored project with `write_reviewed_rules` applied to the published routed
+PCB. It is byte-identical to what `build.py` checks and publishes:
+`50360572adf6d64ea127da337dccb79a0c9758a428070fa6c69ab73698e6c44c`.
+`declare_router_netclasses_6390.py` alone re-declares the classes on
+whatever `Default` width the old routed project carried, so it does not
+refresh this file. The routed `.kicad_dru`
+(`51c411e4dbbb48d70364da6ada60a327b4c61ad718c503b5db7503836919d2b3`) and
+the saved, filled routed PCB
+(`716d270e82df33950d7bc65c27aecc02cd4932ca9c6112429361a13db21791fb`) are
+unchanged. The re-pinned source digests are `net_class_map.json`
+`a362225403d2962e7da424ab289a285ac62d417538f4ed05167f9c55e12c224f` and
+`sdram_demo.kicad_pro`
+`b912b224a3f36a5ff763a9f61f79581572294f1b980bab036d2b6740af51886c`; both
+PCBs above are unchanged.
+
+The regenerated schematic carries the instance `Datasheet` the generator
+now writes from each symbol definition instead of `~` (#10385); all 46
+placed instances changed. `output/matchgroup_test.kicad_sch` and
+`output/readiness/checked.kicad_sch` are byte-identical:
+`802a7c20582e120f30878c6ae2f1f119243eaa60158da64f1bddbf544204b185`.
+
+**Re-pin.** `scripts/boards/refresh_bundles_6404.py` rebuilt the design from
+a fresh build directory and republished the evidence on the pinned
+toolchain: `kicad-cli` 10.0.6 through CI's image, the synced 3D model subset
+for the renders. The full `kct check` reports 0 errors and 0 warnings, the
+saved and the refilled fills are byte-identical with 0 native violations and
+0 unconnected items, label and copper LVS are clean, and the receipt is
+`ready`. A repeat publish and a dry run from another fresh build directory,
+each with the receipt's own timestamp, list 0 files.
+
+**Package.** The re-pinned `cpl_jlcpcb.csv` differs from the previous package
+in one cell: `U3` (`AP2112K-3.3TRG1`, LCSC C51118) now exports at 270°, the
+catalog correction the shipped JLCPCB table gives that part on SOT-23-5
+(issue #10198). The committed CPL predated it at the 180° SOT-23 default.
+The bundle driver accepts only coordinate-frame changes from a fresh export,
+so the corrected row was written into the committed CPL before the re-pin
+and `kct export` then reproduced it byte for byte. No placement moved.

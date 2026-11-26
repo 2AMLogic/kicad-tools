@@ -42,6 +42,22 @@ through-hole assembly eligibility and stock, and placement orientation)
 before ordering assembly. This note records the export change only: it is
 not a re-review, and no new supplier lookup or stock check was performed.
 
+## U3 CPL rotation follows the catalog correction — 2026-11-26 (issue #10198)
+
+Re-issuing this package for issue #10451 carried the exporter's catalog
+rotation for U3 (`AP2112K-3.3TRG1`, LCSC C51118, SOT-23-5) into
+`cpl_jlcpcb.csv`: the shipped JLCPCB table gives that part 270° on its KiCad
+footprint (issue #10198), where the earlier package carried the 180° SOT-23
+default. Only U3's `Rotation` cell changed (`180.0` → `270.0`). Its
+`Mid X`/`Mid Y` and every other row are those of the 2026-10-18 package.
+The bundle driver accepts only coordinate-frame changes from a fresh
+export, so the corrected row was written into the committed CPL before the
+re-pin; `kct export` then reproduced it byte for byte. Copper is unchanged.
+
+**Check U3's pin 1 in JLCPCB's placement preview before ordering
+assembly.** This note records the export change only: it is not a re-review,
+and no new supplier lookup or stock check was performed.
+
 ## Circuit and references
 
 The MCU uses the 144-pin LQFP and the SDRAM uses the 54-pin TSOP-II, both actual
