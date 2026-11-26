@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -163,6 +164,36 @@ def test_public_cli_all_legalizes_fixture(tmp_path: Path, capsys):
 
     findings = _check_cli_silk_findings(path, capsys)
     assert [f for f in findings if f["severity"] in ("error", "warning")] == []
+
+
+@pytest.mark.parametrize("profile", ["jlcpcb-tier1", "jlcpcb_tier1"])
+def test_all_resolves_order_profile_and_alias(tmp_path, profile, capsys):
+    from kicad_tools.cli import main as kct_main
+    from kicad_tools.manufacturers import get_profile
+
+    path = _write(tmp_path, MAIN_BODY)
+    before = path.read_bytes()
+    args = [
+        "fix-silkscreen",
+        str(path),
+        "--all",
+        "--dry-run",
+        "--format",
+        "json",
+        "--mfr",
+        profile,
+        "--layers",
+        "4",
+        "--copper",
+        "2",
+    ]
+    with patch("kicad_tools.drc.repair_silkscreen.legalize_silk", wraps=legalize_silk) as legalize:
+        assert kct_main(args) == 0
+
+    expected = get_profile("jlcpcb-tier1").get_design_rules(layers=4, copper_oz=2)
+    legalize.assert_called_once_with(path, expected, output=None, dry_run=True)
+    assert json.loads(capsys.readouterr().out)["total_fixed"] > 0
+    assert path.read_bytes() == before
 
 
 def test_legalize_silk_report_names_every_edit(tmp_path: Path):

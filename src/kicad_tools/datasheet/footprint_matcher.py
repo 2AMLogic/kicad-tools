@@ -162,6 +162,9 @@ class FootprintMatcher:
             dimension_match = self._check_dimension_match(pattern, package)
             confidence = self._calculate_confidence(base_confidence, dimension_match)
 
+            if package.pitch_inferred:
+                confidence = min(confidence, package.confidence)
+
             matches.append(
                 FootprintMatch(
                     library=library,
@@ -207,7 +210,7 @@ class FootprintMatcher:
             params["ep_length"] = package.exposed_pad[1]
 
         # Calculate confidence based on available information
-        pitch_bonus = 0.2 if package.pitch > 0 else 0.0
+        pitch_bonus = 0.2 if package.pitch > 0 and not package.pitch_inferred else 0.0
         body_bonus = 0.2 if package.body_width > 0 and package.body_length > 0 else 0.0
         pkg_confidence_bonus = 0.1 if package.confidence > 0.7 else 0.0
 
@@ -241,25 +244,21 @@ class FootprintMatcher:
         pitch = package.pitch
 
         # Format body size
-        if width == length:
-            body_str = f"{width}x{width}mm"
-        else:
-            body_str = f"{width}x{length}mm"
+        body_str = f"{width:g}x{length:g}mm"
 
         # Format pitch
-        pitch_str = f"P{pitch}mm"
+        pitch_str = f"P{pitch:g}mm"
 
         # Standard KiCad naming patterns
         if pkg_type in ("QFP", "LQFP", "TQFP"):
             # LQFP-48_7x7mm_P0.5mm
-            patterns.append(
-                (f"{name.split('-')[0].split('_')[0]}-{pins}_{body_str}_{pitch_str}", 0.9)
-            )
+            family = re.split(r"[\d_-]", name, maxsplit=1)[0]
+            patterns.append((f"{family}-{pins}_{body_str}_{pitch_str}", 0.9))
             # With exposed pad variant
             ep_size = min(width, length) * 0.5  # Estimate EP size
             patterns.append(
                 (
-                    f"{name.split('-')[0].split('_')[0]}-{pins}_{body_str}_{pitch_str}_EP{ep_size:.1f}x{ep_size:.1f}mm",
+                    f"{family}-{pins}_{body_str}_{pitch_str}_EP{ep_size:.1f}x{ep_size:.1f}mm",
                     0.75,
                 )
             )
@@ -327,7 +326,7 @@ class FootprintMatcher:
 
         # Check pitch
         pitch_match = re.search(r"P(\d+\.?\d*)mm", pattern)
-        if pitch_match:
+        if pitch_match and not package.pitch_inferred:
             pp = float(pitch_match.group(1))
             if abs(pp - package.pitch) < 0.05:
                 match_info["pitch"] = True
