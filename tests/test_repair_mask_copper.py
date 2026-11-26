@@ -2981,7 +2981,10 @@ def test_outside_elbow_respects_explicit_margin_at_the_boundary(tmp_path, slack,
         (0.0, 0.02, None, 20240108, False),
         (0.0, 0.02, 0.0, 20240108, False),
         (0.0, 0.02, 0.0, 20260206, True),
-        (0.02, None, -0.02, 20260206, True),
+        # The pad's own margin wins, so this pad is solder-mask-defined, and
+        # that opening fails closed in the rule's own class: the swapped entry
+        # leg would keep a finding, so the swap is not proposed.
+        (0.02, None, -0.02, 20260206, False),
     ],
 )
 def test_outside_elbow_uses_the_effective_mask_opening(

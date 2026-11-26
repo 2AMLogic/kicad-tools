@@ -719,16 +719,18 @@ def clean_own_pad_entry(
     mask margin and the uncertainty it modelled the opening to.
     """
     item = {"kind": "segment", "width_mm": width_mm, "endpoints_mm": tuple(endpoints)}
-    return _within_own_pad(
-        opening,
-        copper,
-        owner_copper,
-        {"kind": owner_kind},
-        item,
-        margin_mm,
-        clearance_mm,
-        uncertainty_mm,
-    )[0]
+    return bool(
+        _within_own_pad(
+            opening,
+            copper,
+            owner_copper,
+            {"kind": owner_kind},
+            item,
+            margin_mm,
+            clearance_mm,
+            uncertainty_mm,
+        )[0]
+    )
 
 
 def _separate_mask_land(owner, side, opening, candidates, conductors):
