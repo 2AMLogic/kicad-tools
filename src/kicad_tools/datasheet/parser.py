@@ -657,8 +657,7 @@ class DatasheetParser:
         )
 
         tables = self.extract_tables(pages)
-        packages: list[PackageInfo] = []
-        seen_packages: set[str] = set()
+        by_name: dict[str, PackageInfo] = {}
 
         # Package pattern for names
         package_pattern = re.compile(
@@ -675,21 +674,14 @@ class DatasheetParser:
         dimension_pattern = re.compile(
             r"(\d+\.?\d*)\s*[xX×]\s*(\d+\.?\d*)\s*(mm)?",
         )
-        pitch_pattern = re.compile(
-            r"(?:pitch|[Pp])[:\s]*(\d+\.?\d*)\s*(mm)?|"
-            r"(\d+\.?\d*)\s*mm\s+pitch",
-            re.IGNORECASE,
-        )
-
-        # Search tables for package information
+        # Keep adjacent variants in a comparison table independent. A table
+        # for one package may instead put its dimensions on separate rows.
         for table in tables:
-            # Check headers and cells for package names
-            all_text = " ".join(table.headers)
-            for row in table.rows:
-                all_text += " " + " ".join(str(cell) for cell in row)
-
-            # Find package names
-            for match in package_pattern.finditer(all_text):
+            rows = [table.headers, *table.rows]
+            text = "\n".join(" ".join(str(cell).replace("\n", " ") for cell in row) for row in rows)
+            matches = list(package_pattern.finditer(text))
+            variants = {(m[1].upper(), m[2]) for m in matches}
+            for match in matches:
                 pkg_prefix = match.group(1).upper()
                 pkg_pins = match.group(2)
 
@@ -698,11 +690,6 @@ class DatasheetParser:
                     pkg_name = f"{pkg_prefix}{pkg_pins}"
                 else:
                     pkg_name = pkg_prefix
-
-                # Skip if already processed
-                if pkg_name in seen_packages:
-                    continue
-                seen_packages.add(pkg_name)
 
                 # Parse the package name
                 parsed = parse_package_name(pkg_name)
@@ -713,13 +700,13 @@ class DatasheetParser:
                     continue  # Skip packages without pin count
 
                 # Try to extract dimensions from surrounding text
-                context_start = max(0, match.start() - 200)
-                context_end = min(len(all_text), match.end() + 200)
-                context = all_text[context_start:context_end]
+                context = text[max(0, match.start() - 200) : match.end() + 200]
+                if len(variants) > 1:
+                    start = text.rfind("\n", 0, match.start()) + 1
+                    context = text[start:].split("\n", 1)[0]
 
                 # Look for dimensions
                 body_width, body_length = 0.0, 0.0
-                pitch = 0.0
 
                 # Check parsed body size from name
                 if parsed.get("body_size"):
@@ -731,58 +718,50 @@ class DatasheetParser:
                     body_width = float(dim_match.group(1))
                     body_length = float(dim_match.group(2))
 
-                # Look for pitch
-                if parsed.get("pitch"):
-                    pitch = parsed["pitch"]
-                else:
-                    pitch_match = pitch_pattern.search(context)
-                    if pitch_match:
-                        pitch = float(pitch_match.group(1) or pitch_match.group(3) or 0)
-
                 # Extract additional dimensions from text
                 extracted_dims = extract_dimension_from_text(context)
                 if "D" in extracted_dims and body_width == 0:
                     body_width = extracted_dims["D"]
                 if "E" in extracted_dims and body_length == 0:
                     body_length = extracted_dims["E"]
-                if "PITCH" in extracted_dims and pitch == 0:
-                    pitch = extracted_dims["PITCH"]
+                pitch = extracted_dims.get("PITCH", 0.0)
+                pitch_inferred = pitch == 0
 
                 # Use defaults if dimensions not found
                 if body_width == 0 or body_length == 0:
                     body_width, body_length = get_default_body_size(pkg_type, pin_count)
 
                 if pitch == 0:
-                    pitch = get_default_pitch(pkg_type, pin_count)
+                    pitch = parsed.get("pitch") or get_default_pitch(pkg_type, pin_count)
 
                 # Calculate confidence based on what was extracted vs defaulted
                 confidence = 0.3  # Base confidence
                 if parsed.get("body_size") or dim_match:
                     confidence += 0.3
-                if parsed.get("pitch") or pitch_pattern.search(context):
+                if not pitch_inferred:
                     confidence += 0.2
                 if pkg_pins:
                     confidence += 0.2
 
-                packages.append(
-                    PackageInfo(
-                        name=pkg_name,
-                        type=pkg_type,
-                        pin_count=pin_count,
-                        body_width=body_width,
-                        body_length=body_length,
-                        pitch=pitch,
-                        height=None,
-                        exposed_pad=None,
-                        source_page=table.page,
-                        confidence=min(confidence, 1.0),
-                    )
+                package = PackageInfo(
+                    name=pkg_name,
+                    type=pkg_type,
+                    pin_count=pin_count,
+                    body_width=body_width,
+                    body_length=body_length,
+                    pitch=pitch,
+                    height=None,
+                    exposed_pad=None,
+                    source_page=table.page,
+                    confidence=min(confidence, 1.0),
+                    pitch_inferred=pitch_inferred,
                 )
+                previous = by_name.get(pkg_name)
+                if previous is None or package.confidence > previous.confidence:
+                    by_name[pkg_name] = package
 
         # Sort by confidence, then by name
-        packages.sort(key=lambda p: (-p.confidence, p.name))
-
-        return packages
+        return sorted(by_name.values(), key=lambda p: (-p.confidence, p.name))
 
     def extract_pins_dataframe(
         self,

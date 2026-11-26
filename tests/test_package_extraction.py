@@ -15,6 +15,49 @@ from kicad_tools.datasheet.package import (
     get_default_pitch,
     parse_package_name,
 )
+from kicad_tools.datasheet.parser import DatasheetParser
+from kicad_tools.datasheet.tables import ExtractedTable
+
+
+def test_thermal_table_pin_counts_do_not_become_pitch(tmp_path, monkeypatch):
+    pdf = tmp_path / "packages.pdf"
+    pdf.touch()
+    parser = DatasheetParser(pdf)
+    thermal = ExtractedTable(
+        113,
+        ["Package", "Junction to case"],
+        [["LQFP48 7 × 7 mm", "42"], ["TSSOP20 6.4 × 4.4 mm", "19"], ["LQFP32 7 × 7 mm", "42"]],
+    )
+    tables = [thermal]
+    monkeypatch.setattr(parser, "extract_tables", lambda pages: tables)
+    found = {pkg.name: pkg for pkg in parser.extract_packages()}
+    package = found["LQFP32"]
+    assert package.pitch == get_default_pitch("qfp", 32)
+    assert package.pitch_inferred and package.confidence < 1
+    match = FootprintMatcher().find_matches(package)[0]
+    assert not match.dimension_match["pitch"]
+    assert match.confidence <= package.confidence
+    assert found["TSSOP20"].body_width == 6.4
+    assert found["TSSOP20"].body_length == 4.4
+
+    # A measured pitch takes precedence when it appears later in the PDF.
+    tables.append(
+        ExtractedTable(115, ["Package", "Dimensions"], [["LQFP32", "7 × 7 mm, pitch = 0.8 mm"]])
+    )
+    measured = next(pkg for pkg in parser.extract_packages() if pkg.name == "LQFP32")
+    assert measured.pitch == 0.8 and not measured.pitch_inferred
+    assert measured.source_page == 115
+    assert FootprintMatcher().find_matches(measured)[0].footprint == "LQFP-32_7x7mm_P0.8mm"
+
+
+def test_pitch_labels_and_body_dimensions():
+    assert "PITCH" not in extract_dimension_from_text("LQFP48, E=7.0 mm")
+    assert extract_dimension_from_text("P0.8 mm")["PITCH"] == 0.8
+    assert extract_dimension_from_text("0.8 mm pitch")["PITCH"] == 0.8
+    assert extract_dimension_from_text("e=0.8")["PITCH"] == 0.8
+    assert extract_dimension_from_text("Pitch 50 mil")["PITCH"] == 1.27
+    assert parse_package_name("QFP32_7x7mm")["pitch"] is None
+    assert parse_package_name("QFP32_7x7mm_P0.8mm")["pitch"] == 0.8
 
 
 class TestPackageInfo:
