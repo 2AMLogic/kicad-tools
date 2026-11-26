@@ -10,7 +10,13 @@ import pytest
 from kicad_tools.cli import mistakes_cmd
 from kicad_tools.explain.checks.decoupling_count import DecouplingCountCheck
 from kicad_tools.explain.mistake_waivers import annotate_mistakes
-from kicad_tools.explain.mistakes import MistakeCategory, MistakeDetector, get_default_checks
+from kicad_tools.explain.mistakes import (
+    CheckIncomplete,
+    Mistake,
+    MistakeCategory,
+    MistakeDetector,
+    get_default_checks,
+)
 from kicad_tools.schema.pcb import PCB
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -530,3 +536,85 @@ def test_stage_suffixed_board_without_schematic_keeps_geometric_fallback(tmp_pat
         ("U1", "1"): ["geometric"],
         ("U2", "1"): ["geometric"],
     }
+
+
+def test_json_report_parses_the_schematic_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #10241: findings and inventory share one schematic parse."""
+    import kicad_tools.placement.decoupling as decoupling
+
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    calls: list[Path] = []
+    real = decoupling.schematic_cap_associations
+
+    def counting(path, *args, **kwargs):
+        calls.append(Path(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(decoupling, "schematic_cap_associations", counting)
+    assert mistakes_cmd.main([str(board), "--category", "decoupling", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(calls) == 1
+    assert payload["decoupling_inventory"]
+
+
+def test_json_emits_inventory_from_a_configured_decoupling_subclass(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kicad_tools.explain import mistakes
+
+    class ProjectDecoupling(DecouplingCountCheck):
+        rule_id = "mistake.decoupling_count"
+
+    board = _two_ic_board(tmp_path, "U1.1", "U2.1", c1_offset=12.28)
+
+    def report(check: DecouplingCountCheck) -> dict:
+        monkeypatch.setattr(mistakes, "get_default_checks", lambda: [check])
+        assert mistakes_cmd.main([str(board), "--category", "decoupling", "--format", "json"]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    stock = report(DecouplingCountCheck(radius_mm=25))
+    registered = report(ProjectDecoupling(radius_mm=25))
+    assert registered["coverage_complete"]
+    assert registered["coverage"][0]["check_name"] == "ProjectDecoupling"
+    assert registered["findings"] == stock["findings"]
+    assert registered["decoupling_inventory"] == stock["decoupling_inventory"]
+    u1 = next(row for row in registered["decoupling_inventory"] if row["ic"] == "U1")
+    assert [(cap["ref"], cap["distance_mm"]) for cap in u1["caps"]] == [("C1", 12.28)]
+
+
+def test_detector_reports_inventory_from_registered_check(tmp_path: Path) -> None:
+    """The inventory comes from the registered instance, so its settings apply."""
+    board = _two_ic_board(tmp_path, "U1.1", "U1.1")
+    pcb = PCB.load(str(board))
+    check = DecouplingCountCheck(radius_mm=0.5)
+    reports: dict = {}
+    mistakes, _ = MistakeDetector([check]).detect_with_coverage(pcb, reports)
+    assert [r.to_dict() for r in reports["DecouplingCountCheck"]] == [
+        r.to_dict() for r in check.pin_inventory(pcb)
+    ]
+    assert mistakes
+    assert [m.title for m in mistakes] == [m.title for m in check.check(pcb)]
+    # Without a reports dict nothing is collected and nothing is kept.
+    plain, _ = MistakeDetector([check]).detect_with_coverage(pcb)
+    assert [m.title for m in plain] == [m.title for m in mistakes]
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_reports_preserve_registered_check_override(tmp_path: Path, incomplete: bool) -> None:
+    class CustomDecoupling(DecouplingCountCheck):
+        def check(self, pcb: PCB) -> list[Mistake]:
+            if incomplete:
+                raise CheckIncomplete("Designated schematic missing")
+            return super().check(pcb)[:1]
+
+    pcb = PCB.load(str(_two_ic_board(tmp_path, "U1.1", "U1.1")))
+    detector = MistakeDetector([CustomDecoupling()])
+    findings, coverage = detector.detect_with_coverage(pcb)
+    assert len(findings) == (0 if incomplete else 1)
+    assert coverage[0].status == ("incomplete" if incomplete else "ran")
+
+    reports: dict = {}
+    assert detector.detect_with_coverage(pcb, reports) == (findings, coverage)
+    assert reports == {}
