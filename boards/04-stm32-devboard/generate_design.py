@@ -3071,6 +3071,7 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
 
     process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
     process["validate_process"](routed_path)
+    process["validate_bypass_mask_escapes"](routed_path)
 
     print("\n" + "=" * 60)
     print("Generating manufacturing artifacts (reviewed paid drilling)...")

@@ -11,6 +11,7 @@ from that same fixture.
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import sys
 from pathlib import Path
 from unittest import mock
@@ -288,7 +289,8 @@ def test_catalog_search_ranks_basic_before_extended(catalog_db: Path):
     assert [p.lcsc_part for p in results] == ["C8734"]
 
 
-def test_catalog_search_library_type_ordering_multi(catalog_db: Path, tmp_path: Path):
+@pytest.mark.parametrize("source_db_v2", [True, False], ids=["source-db-v2", "legacy"])
+def test_catalog_search_library_type_ordering_multi(tmp_path: Path, source_db_v2: bool):
     """With multiple library_types matching one term, basic sorts first."""
     # Build a fixture where a shared description term spans basic/preferred/
     # extended so the ORDER BY is observable.
@@ -339,10 +341,26 @@ def test_catalog_search_library_type_ordering_multi(catalog_db: Path, tmp_path: 
         },
     ]
     db = _builder.build_fixture(tmp_path / "ranked.sqlite3", rows=rows)
+    if source_db_v2:
+        with sqlite3.connect(db) as conn:
+            conn.execute("ALTER TABLE jlc_components ADD COLUMN preferred INTEGER")
+            conn.execute(
+                "UPDATE jlc_components SET preferred = (library_type = 'preferred'), "
+                "library_type = CASE WHEN library_type = 'basic' THEN 'base' ELSE 'expand' END"
+            )
     catalog = JlcpartsCatalog(db)
     results = catalog.search("WIDGET")
-    # basic (stock DESC among basics) first, then preferred, then extended.
-    assert [p.lcsc_part for p in results] == ["C4", "C3", "C2", "C1"]
+    expected = ["C4", "C3", "C2", "C1"]
+    assert [p.lcsc_part for p in results] == expected
+    assert [p.lcsc_part for p in catalog.search("WIDGET", limit=2)] == expected[:2]
+
+    bulk = catalog.lookup_many(expected)
+    for part in results:
+        flags = (part.lcsc_part in ("C4", "C3"), part.lcsc_part == "C2")
+        single = catalog.lookup(part.lcsc_part)
+        assert single is not None
+        for found in (part, bulk[part.lcsc_part], single):
+            assert (found.is_basic, found.is_preferred) == flags
 
 
 def test_catalog_search_min_stock_filter(catalog_db: Path):

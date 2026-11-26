@@ -7,6 +7,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 SCRIPT = (
     Path(__file__).resolve().parent.parent
     / "scripts"
@@ -42,19 +44,32 @@ def _db(tmp_path: Path) -> Path:
     return path
 
 
-def test_classify_buckets_by_type_and_category(tmp_path):
+@pytest.mark.parametrize("source_db_v2", [True, False], ids=["source-db-v2", "legacy"])
+def test_classify_buckets_by_type_and_category(tmp_path, source_db_v2):
     mod = _load()
     footprints = {"0603": "R:0603", "SOT-23-6": "S:SOT-23-6"}
     with sqlite3.connect(_db(tmp_path)) as conn:
+        conn.execute("INSERT INTO jlc_components VALUES (5, 'SOT-23-6', 'Preferred', 'ICs', 40)")
+        if source_db_v2:
+            conn.execute("ALTER TABLE jlc_components ADD COLUMN preferred INTEGER")
+            conn.execute(
+                "UPDATE jlc_components SET preferred = (library_type = 'Preferred'), "
+                "library_type = CASE WHEN library_type = 'Basic' THEN 'base' ELSE 'expand' END"
+            )
         conn.row_factory = sqlite3.Row
         result = mod.classify(
             conn.execute("SELECT * FROM jlc_components"),
             footprints.get,
             lambda lib_id: lib_id == "R:0603",
         )
-    assert result["total"] == {"stock_body": 2, "needs_lcsc": 1, "no_footprint": 1}
-    assert result["buckets"]["type:basic"] == {"stock_body": 1}
-    assert result["buckets"]["category:ICs"] == {"needs_lcsc": 1, "no_footprint": 1}
+    assert result["total"] == {"stock_body": 2, "needs_lcsc": 2, "no_footprint": 1}
+    assert result["buckets"]["type:basic"] == {"stock_body": 1, "needs_lcsc": 1}
+    assert result["buckets"]["type:extended"] == {
+        "stock_body": 1,
+        "needs_lcsc": 1,
+        "no_footprint": 1,
+    }
+    assert result["buckets"]["category:ICs"] == {"needs_lcsc": 2, "no_footprint": 1}
     assert "not measured" in mod.render_text(result)
 
 
