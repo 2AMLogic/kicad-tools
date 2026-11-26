@@ -57,6 +57,7 @@ __all__ = [
     "Suggestions",
     "ComponentSuggestion",
     "BOMEntry",
+    "PurchasingEntry",
     "LeadProfile",
     "WireTermination",
     "Decision",
@@ -1093,6 +1094,97 @@ class BOMEntry(SpecModel):
         return self
 
 
+class PurchasingEntry(SpecModel):
+    """One supplementary procurement row: something to buy that is not placed (Issue #10431).
+
+    Accessories and off-board parts a complete assembly needs but that have no
+    KiCad placement of their own -- a fuse-holder cover, a cartridge bought
+    separately, chassis resistors wired to land footprints. They never enter the
+    fabricator BOM or CPL; the manufacturing export writes them beside those as a
+    per-board purchasing list, which the submission handoff scales by the board
+    quantity.
+    """
+
+    description: str = Field(..., description="What to buy")
+    quantity: int = Field(
+        ...,
+        description="Units per board; already covers every linked designator",
+    )
+    refs: list[str] | None = Field(
+        default=None,
+        description="Board designators the item belongs to (wire lands included); omit for none",
+    )
+    manufacturer: str | None = Field(default=None, description="Manufacturer of the selected part")
+    mpn: str | None = Field(
+        default=None,
+        description="Manufacturer Part Number of the selected part; quote it when it starts with a digit",
+    )
+    pending: str | None = Field(
+        default=None,
+        description="Set to what is still undecided instead of manufacturer/mpn: the part is not selected yet",
+    )
+
+    @field_validator("description")
+    @classmethod
+    def _description_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("purchasing rows need a non-blank description")
+        return value
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def _quantity_not_boolean(cls, value: Any) -> Any:
+        if type(value) is bool:
+            raise ValueError("quantity must be a positive whole number of units per board")
+        return value
+
+    @field_validator("quantity")
+    @classmethod
+    def _quantity_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("quantity must be a positive whole number of units per board")
+        return value
+
+    @field_validator("refs")
+    @classmethod
+    def _refs_not_blank(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        refs = []
+        for ref in value:
+            if not isinstance(ref, str) or not ref.strip():
+                raise ValueError("refs must list non-blank designators")
+            ref = ref.strip()
+            if ref in refs:
+                raise ValueError(f"refs must not repeat a designator: {ref}")
+            refs.append(ref)
+        return refs
+
+    @field_validator("manufacturer", "mpn", "pending")
+    @classmethod
+    def _optional_text_not_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{info.field_name} must be non-blank when set")
+        return value
+
+    @model_validator(mode="after")
+    def _selection_is_complete(self) -> PurchasingEntry:
+        if self.pending is not None:
+            if self.manufacturer is not None or self.mpn is not None:
+                raise ValueError("a pending row must not set manufacturer or mpn")
+            return self
+        if self.manufacturer is None or self.mpn is None:
+            raise ValueError(
+                "a selected row needs both manufacturer and mpn; "
+                "otherwise pending must say what is still to be selected"
+            )
+        return self
+
+
 class Suggestions(SpecModel):
     """Design suggestions and preferences (SHOULD, not MUST)."""
 
@@ -1182,6 +1274,10 @@ class ProjectSpec(SpecModel):
     bom_entries: list[BOMEntry] | None = Field(
         default=None,
         description="Per-reference BOM part mappings (MPN, LCSC)",
+    )
+    purchasing: list[PurchasingEntry] | None = Field(
+        default=None,
+        description="Supplementary per-board procurement rows for accessories and off-board parts",
     )
     decisions: list[Decision] | None = Field(default=None, description="Design decisions")
     wire_terminations: list[WireTermination] | None = Field(
