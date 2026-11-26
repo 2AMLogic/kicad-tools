@@ -852,6 +852,30 @@ def apply_router_coupled_pairs(
     return project_data
 
 
+def validate_router_netclass_containers(project: dict) -> None:
+    """Check containers used by both writers before removing their previous entries."""
+    if not isinstance(project, dict):
+        raise ValueError("project must be an object")
+    settings = project.get("net_settings", {})
+    if not isinstance(settings, dict):
+        raise ValueError("net_settings must be an object")
+    patterns = settings.get("netclass_patterns")
+    if patterns is not None and not isinstance(patterns, list):
+        raise ValueError("net_settings.netclass_patterns must be an array")
+    if not isinstance(settings.get("classes", []), list):
+        raise ValueError("net_settings.classes must be an array")
+    meta = project.get("meta", {})
+    if not isinstance(meta, dict):
+        raise ValueError("meta must be an object")
+    if not isinstance(meta.get("kct_netclass_patterns", {}), dict):
+        raise ValueError("meta.kct_netclass_patterns must be an object")
+    record = meta.get(ROUTER_NETCLASSES_META_KEY)
+    if isinstance(record, dict) and any(
+        not isinstance(record.get(key, []), list) for key in ("classes", "assignments")
+    ):
+        raise ValueError(f"meta.{ROUTER_NETCLASSES_META_KEY} requires arrays of classes and nets")
+
+
 def remove_router_patterns(project: dict, nets: Iterable[str]) -> None:
     """Remove only unchanged pattern rows emitted by kct for these nets."""
     meta = project.get("meta", {})
@@ -913,10 +937,6 @@ def _remove_router_netclasses(project_data: dict) -> None:
     settings = project_data.get("net_settings")
     if not isinstance(settings, dict):
         return
-    if classes and isinstance(settings.get("classes"), list):
-        settings["classes"] = [
-            c for c in settings["classes"] if not (isinstance(c, dict) and c.get("name") in classes)
-        ]
     assignments = settings.get("netclass_assignments")
     if nets and isinstance(assignments, dict):
         for net in nets:
@@ -932,6 +952,29 @@ def _remove_router_netclasses(project_data: dict) -> None:
                 if norm != [recorded_classes[net]]:
                     continue
             assignments.pop(net, None)
+
+    # A surviving pattern or assignment makes its class definition authored too.
+    if classes:
+        removable = set(classes)
+        for row in settings.get("netclass_patterns") or []:
+            if isinstance(row, dict) and isinstance(row.get("netclass"), str):
+                removable.discard(row["netclass"])
+        if isinstance(assignments, dict):
+            for target in assignments.values():
+                if isinstance(target, str):
+                    removable.discard(target)
+                elif isinstance(target, list):
+                    removable.difference_update(name for name in target if isinstance(name, str))
+        if "classes" in settings:
+            settings["classes"] = [
+                c
+                for c in settings["classes"]
+                if not (
+                    isinstance(c, dict)
+                    and isinstance(c.get("name"), str)
+                    and c["name"] in removable
+                )
+            ]
 
 
 def _authored_netclass_members(project_data: dict, net_names: list[str]) -> set[str]:
@@ -1004,6 +1047,13 @@ def apply_router_netclasses(
     Returns:
         The same ``project_data`` dict.
     """
+    try:
+        validate_router_netclass_containers(project_data)
+    except ValueError as exc:
+        _warn(
+            f"router net classes not declared: authored netclasses cannot be evaluated safely ({exc})"
+        )
+        return project_data
     _remove_router_netclasses(project_data)
     inventory = set(net_class_map) if net_names is None else set(net_names)
     names = inventory.intersection(net_class_map)

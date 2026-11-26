@@ -552,6 +552,29 @@ class TestIdempotency:
 
 
 class TestNonFatalDegradation:
+    @pytest.mark.parametrize(
+        ("path", "value"),
+        [
+            (("net_settings", "netclass_patterns"), "SDA*"),
+            (("net_settings",), []),
+            (("meta", "kct_netclass_patterns"), None),
+        ],
+    )
+    def test_malformed_reroute_warns_and_preserves_project(self, tmp_path, capsys, path, value):
+        pcb = _write_pcb(tmp_path, ["SDA"])
+        pro = _write_project(tmp_path, _minimal_project())
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": PROBE}, quiet=True)
+        project = _load(pro)
+        target = project if len(path) == 1 else project[path[0]]
+        target[path[-1]] = value
+        _write_project(tmp_path, project)
+        before = pro.read_bytes()
+
+        route_cmd._write_netclasses_to_project(pcb, {"SDA": PROBE})
+
+        assert "cannot be evaluated safely" in capsys.readouterr().out
+        assert pro.read_bytes() == before
+
     def test_missing_project_is_a_warning(self, tmp_path: Path, capsys):
         pcb = _write_pcb(tmp_path, ["GND"])
         # No .kicad_pro beside the board.
@@ -642,6 +665,34 @@ class TestKctStampInterop:
 
 
 class TestRunPostRouteDrcIntegration:
+    @pytest.mark.parametrize("schema_version", [3, 5])
+    def test_reroute_preserves_class_of_edited_pattern(self, tmp_path, schema_version):
+        pcb = _write_pcb(tmp_path, ["SDA", "SDA1"])
+        pro = _write_project(tmp_path, _minimal_project(schema_version=schema_version))
+
+        def reroute():
+            route_cmd.run_post_route_drc(
+                output_path=pcb,
+                manufacturer="jlcpcb",
+                layers=2,
+                net_class_map={"SDA": PROBE},
+                time_left=20.0,
+                drc_cost_estimate=40.0,
+            )
+
+        reroute()
+        edited = _load(pro)
+        _patterns(edited)[0]["pattern"] = "SDA*"
+        _write_project(tmp_path, edited)
+        reroute()
+
+        saved = _load(pro)
+        assert _patterns(saved) == [{"netclass": "Probe", "pattern": "SDA*"}]
+        resolved = resolve_project_clearances(saved, ["SDA", "SDA1"])
+        for net in ("SDA", "SDA1"):
+            assert resolved[net].source_class == "Probe"
+            assert resolved[net].clearance == pytest.approx(0.5)
+
     def test_project_netclasses_written_after_constraint_sidecars(self, tmp_path: Path, capsys):
         """The shared post-route DRC entry (all three route flows) declares
         the classes in the project, after -- and into the file produced by

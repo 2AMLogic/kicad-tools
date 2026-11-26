@@ -5665,7 +5665,18 @@ def _write_netclasses_to_project(
         remove_router_patterns,
         router_netclass_provenance,
         stamp_kct_project,
+        validate_router_netclass_containers,
     )
+
+    try:
+        validate_router_netclass_containers(project)
+    except ValueError as e:
+        if not quiet:
+            print(
+                f"  Warning: net classes not assigned in {project_path.name}: "
+                f"authored netclasses cannot be evaluated safely ({e})"
+            )
+        return
 
     # Re-stamp decision taken BEFORE mutating: only a project whose stamp
     # currently validates stays kct-owned across this write.  Stamping a
