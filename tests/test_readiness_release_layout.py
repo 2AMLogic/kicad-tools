@@ -88,6 +88,62 @@ def _submission_preview(bundle, pcb, schematic, destination):
     )
 
 
+@pytest.mark.parametrize("with_sibling", [True, False])
+def test_electrical_check_uses_the_exported_schematic(tmp_path, with_sibling):
+    from kicad_tools.cli.check_cmd import _resolve_check_schematic_with_source, portable_report_path
+
+    project = make_project(tmp_path)
+    if with_sibling:
+        (project / "kicad/board.kicad_sch").write_text("(kicad_sch other)")
+    selected = (project / "schematics/board.kicad_sch").rename(
+        project / "schematics/rev_b.kicad_sch"
+    )
+
+    class ElectricalEngines(HandoffEngines):
+        def kct_check(self, pcb, mfr, report_path, extra):
+            result = super().kct_check(pcb, mfr, report_path, extra)
+            explicit = extra[extra.index("--schematic") + 1] if "--schematic" in extra else None
+            self.checked, source = _resolve_check_schematic_with_source(explicit, pcb)
+            assert self.checked == pcb.parent.parent / "schematics/rev_b.kicad_sch"
+            assert self.checked != selected  # Gate 1 must check the staged copy.
+            report = json.loads(report_path.read_bytes())
+            report["meta_checks"]["schematic"] = {
+                "source": source,
+                "path": portable_report_path(self.checked),
+            }
+            report_path.write_text(json.dumps(report))
+            return result
+
+    engines = ElectricalEngines(project / "kicad")
+    assert run(project, "--generate", "--sch", str(selected), fake=engines)[0] == 0
+    assert engines.export_schematic == engines.checked
+    receipt = json.loads((project / "output/readiness.json").read_bytes())
+    report = json.loads((project / "output/readiness/kct-check.json").read_bytes())
+    assert report["meta_checks"]["schematic"] == {
+        "source": "--schematic",
+        "path": receipt["schematic_root"],
+    }
+
+
+@pytest.mark.parametrize("location", ["readiness.json", "readiness-verification/readiness.json"])
+def test_relocated_declared_release_requires_its_declaration(project, location, capsys):
+    pcb = project / "kicad/board.kicad_pcb"
+    output = project / "fabrication"
+    bundle = output / "manufacturing"
+    sign_off_bundle(bundle, pcb, "local test", readiness=output / location)
+    relocated = project.rename(project.with_name("signed-release"))
+    (relocated / ".kicad-tools.toml").unlink()
+    pcb = relocated / pcb.relative_to(project)
+    substitute = pcb.with_suffix(".kicad_sch")
+    substitute.write_text("(kicad_sch other)")
+    preview = relocated / "preview"
+    assert (
+        _submission_preview(relocated / bundle.relative_to(project), pcb, substitute, preview) == 2
+    )
+    assert "requires its project output declaration" in capsys.readouterr().err
+    assert not preview.exists()
+
+
 @pytest.mark.parametrize("location", ["readiness.json", "readiness-verification/readiness.json"])
 def test_release_signoff_and_dry_run_use_relocated_bundle(project, location, monkeypatch):
     pcb = project / "kicad/board.kicad_pcb"

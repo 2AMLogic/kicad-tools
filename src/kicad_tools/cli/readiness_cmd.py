@@ -1841,8 +1841,13 @@ def _gate_kct_check(
     right after the cleanup and still blocking here -- and points at
     ``--skip-cleanup``.  No new gate: only the blocker message changes.
     """
+    invocation_args = list(options.check_args)
+    if options.schematic is not None:
+        invocation_args.extend(
+            ["--schematic", options.schematic.relative_to(options.project_base).as_posix()]
+        )
     invocation = " ".join(
-        ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *options.check_args]
+        ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *invocation_args]
     )
     outcome, report = _gate_kct_check_run(options, engines)
     if outcome.status == FAILED and pre_cleanup is not None and post_cleanup is not None:
@@ -1898,7 +1903,7 @@ def _cleanup_introduced_errors(
     means the comparison could not run (a snapshot check failed or a report
     had unidentifiable errors); attribution is then skipped, never guessed.
     """
-    extra = list(options.check_args)
+    extra = _current_board_check_args(options)
     has_current_paths_flag = any(
         token == "--current-paths"
         or token.startswith("--current-paths=")
@@ -1937,10 +1942,19 @@ def _cleanup_introduced_errors(
     ]
 
 
+def _current_board_check_args(options: ReadinessOptions) -> list[str]:
+    extra = list(options.check_args)
+    if options.schematic is not None:
+        extra.extend(["--schematic", str(options.schematic)])
+    return extra
+
+
 def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
     report_path = options.evidence_dir / "kct-check.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    run = engines.kct_check(options.pcb, options.manufacturer, report_path, options.check_args)
+    run = engines.kct_check(
+        options.pcb, options.manufacturer, report_path, _current_board_check_args(options)
+    )
     evidence_rel = _rel(options, report_path)
     if not run.ok:
         return (
@@ -1953,6 +1967,21 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
             {},
         )
     report = _read_json(report_path)
+    from .check_cmd import portable_report_path
+
+    meta = report.get("meta_checks", {}) if isinstance(report.get("meta_checks"), dict) else {}
+    schematic = meta.get("schematic")
+    changed = False
+    # kct check can abbreviate the schematic to a basename. Preserve the explicit
+    # selection in the same portable coordinates the release uses for its sources.
+    if (
+        options.schematic is not None
+        and isinstance(schematic, dict)
+        and schematic.get("source") == "--schematic"
+        and schematic.get("path") == portable_report_path(options.schematic)
+    ):
+        schematic["path"] = options.schematic.relative_to(options.project_base).as_posix()
+        changed = True
     # Record the checked board board-relative: an absolute path would leak the
     # throw-away candidate directory into hash-bound evidence, so identical
     # inputs would never reproduce identical bytes (Issue #6076).
@@ -1975,10 +2004,11 @@ def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[Ch
             board_rel = None
         if board_rel is not None and board_rel != checked:
             report["file"] = board_rel
-            report_path.write_text(json.dumps(report, indent=2) + "\n")
+            changed = True
+    if changed:
+        report_path.write_text(json.dumps(report, indent=2) + "\n")
     summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
     errors = int(summary.get("errors", 0) or 0)
-    meta = report.get("meta_checks", {}) if isinstance(report.get("meta_checks"), dict) else {}
     counts = _warning_counts(report)
     table = _format_warning_table(counts)
 

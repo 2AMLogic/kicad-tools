@@ -302,11 +302,11 @@ def _readiness_record(
 
 def _load_readiness(
     readiness: Path, board: Path, board_sha: str, bundle_shas: dict[str, str], bundle_root: Path
-) -> str:
+) -> tuple[str, bool]:
     """Refuse unless a ``kct readiness`` receipt proves every gate passed for this board.
 
-    Returns the receipt's sha256. Use the generated or verification receipt for the selected
-    board, under its declared or board-local output root. It must have
+    Returns the receipt's sha256 and whether it requires a project declaration. Use the
+    generated or verification receipt under the selected board's output root. It must have
     ``schema_version`` 1, ``ready`` with no ``blockers``, every check ``passed``
     (including :data:`REQUIRED_GATE_CHECKS`). Every ``inputs`` / ``external_inputs``
     entry is re-hashed against disk (as ``read_readiness`` does), exempting only
@@ -383,7 +383,7 @@ def _load_readiness(
         uncovered = sorted(name for name, sha in bundle_shas.items() if sha not in covered)
     if uncovered:
         raise WorkflowError(f"Readiness receipt does not cover bundle files: {uncovered}")
-    return _sha(raw)
+    return _sha(raw), layout is not None
 
 
 def _check_declared_submission_sources(
@@ -619,7 +619,7 @@ def sign_off_bundle(
     else:
         if readiness is None:
             raise WorkflowError("The release sign-off needs --readiness <readiness.json>")
-        receipt_sha = _load_readiness(
+        receipt_sha, declared = _load_readiness(
             Path(readiness),
             board,
             board_sha,
@@ -631,6 +631,8 @@ def sign_off_bundle(
             "readiness_sha256": receipt_sha,
             "human_signoff": record,
         }
+        if declared:
+            tapeout["requires_project_declaration"] = True
         manifest["tapeout"] = tapeout
     (bundle_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8"
@@ -825,6 +827,8 @@ def run_submission(
 
     facts = preflight(bundle_root, board)  # offline; refuses before any network call
     layout = _selected_layout(board.resolve())
+    if layout is None and facts.manifest["tapeout"].get("requires_project_declaration"):
+        raise WorkflowError("This signed release requires its project output declaration")
     source_root = board.parent
     if layout is not None and not schematic.resolve().is_relative_to(source_root.resolve()):
         source_root = layout.input_base
