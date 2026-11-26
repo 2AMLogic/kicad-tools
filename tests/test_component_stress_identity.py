@@ -179,8 +179,12 @@ def test_incomplete_or_ambiguous_hierarchy_is_unresolved(tmp_path, filenames):
     assert all(r.check == "analysis" for r in rows)
 
 
-@pytest.mark.parametrize("global_labels", [False, True])
-def test_sibling_net_names_require_proven_global_binding(tmp_path, global_labels):
+@pytest.mark.parametrize(
+    "global_labels,lowercase_sibling", [(False, False), (True, False), (False, True)]
+)
+def test_sibling_net_names_require_proven_global_binding(
+    tmp_path, global_labels, lowercase_sibling
+):
     text = SCH.read_text()
     if global_labels:
         text = text.replace("(label ", "(global_label ")
@@ -188,12 +192,16 @@ def test_sibling_net_names_require_proven_global_binding(tmp_path, global_labels
     other = text
     for old, new in zip(range(1, 5), range(5, 9), strict=True):
         other = other.replace(f"Q{old}A", f"Q{new}A")
+    if lowercase_sibling:
+        for label in ("GATE_A", "BANK_POS", "SRC_POS"):
+            other = other.replace(f'(label "{label}"', f'(label "{label.lower()}"')
     (tmp_path / "other.kicad_sch").write_text(other)
     root = _root(tmp_path, ["child.kicad_sch", "other.kicad_sch"])
     rows = _analyze(root)
     if not global_labels:
         assert rows and all(r.status == "UNRESOLVED" and r.check == "analysis" for r in rows)
-        assert "sheet-local label" in rows[0].reason
+        expected = "ambiguous operating-state aliases" if lowercase_sibling else "sheet-local label"
+        assert expected in rows[0].reason
     else:
         assert len(rows) == 112
         for ref in ("Q1A", "Q5A"):

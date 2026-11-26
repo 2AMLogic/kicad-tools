@@ -418,11 +418,34 @@ class TestHierarchicalLabelNetMerging:
         doc.add(parse_string(f'(label "{sibling_label}" (at 100 46.19 0))'))
         (tmp_path / "child_b.kicad_sch").write_text(doc.to_string())
 
-        for names in self._hierarchy_pin_maps(parent):
-            assert names["R6.1"] == "/ChildWithLabels/SHARED"
-            assert names["R8.1"] == f"/ChildB/{sibling_label}"
-            assert names["R7.1"] == "/ChildB/SDA"
-            assert names["R1.1"] == names["R5.1"] == "/I2C_SDA"
+        for nets in self._hierarchy_net_maps(parent):
+            assert nets["/ChildWithLabels/SHARED"] == {"R6.1"}
+            assert nets[f"/ChildB/{sibling_label}"] == {"R8.1"}
+            assert nets["/ChildB/SDA"] == {"R7.1"}
+            assert nets["/I2C_SDA"] == {"R1.1", "R5.1"}
+            assert nets["Net-(R6-2)"] == {"R6.2"}
+
+    def test_literal_global_label_collides_with_qualified_local_name(self, tmp_path):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.add(parse_string('(global_label "/ChildWithLabels/SHARED" (at 80 53.81 0))'))
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string('(label "SHARED" (at 100 46.19 0))'))
+        child.write_text(doc.to_string())
+
+        for nets in self._hierarchy_net_maps(parent):
+            assert nets["/ChildWithLabels/SHARED"] == {"R1.2"}
+            assert nets["/ChildWithLabels/SHARED#2"] == {"R6.1"}
+
+    @staticmethod
+    def _hierarchy_net_maps(parent):
+        extracted = Schematic.load(parent).extract_netlist(hierarchical=True)
+        yield {name: {str(pin) for pin in pins} for name, pins in extracted.items()}
+        built = build_netlist_from_schematic(parent)
+        yield {net.name: {f"{n.reference}.{n.pin}" for n in net.nodes} for net in built.nets}
 
     def test_single_sheet_local_label_keeps_bare_name(self, tmp_path):
         """The qualification applies to multi-sheet designs; a flat sheet is unchanged."""
@@ -458,16 +481,9 @@ class TestHierarchicalLabelNetMerging:
     def test_hlabel_net_merged_with_parent_net(self):
         """Hierarchical label 'SDA' in child merges with parent's 'I2C_SDA' net."""
         _, net_dict = _collect_hierarchy_components(FIXTURES / "parent_with_pins.kicad_sch", "/")
-        # The parent has a label "I2C_SDA" connected via wire to the sheet pin "SDA".
-        # The child has a hierarchical_label "SDA" connected to R5 pin 1.
-        # After merging, the child's "SDA" net should be unified under "I2C_SDA".
-        #
-        # Check that "I2C_SDA" net exists and contains pins from the child
-        if "I2C_SDA" in net_dict:
-            # The "SDA" net from the child should have been merged into "I2C_SDA"
-            assert "SDA" not in net_dict, (
-                "Child's 'SDA' net should be merged into parent's 'I2C_SDA'"
-            )
+        assert {str(pin) for pin in net_dict["/I2C_SDA"]} == {"R1.1", "R5.1"}
+        assert "SDA" not in net_dict
+        assert "/ChildWithLabels/SDA" not in net_dict
 
     def test_component_count_matches_across_sheets(self):
         """Component count from hierarchy matches total placed symbols."""

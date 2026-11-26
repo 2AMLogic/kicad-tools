@@ -194,6 +194,14 @@ def _normalize_net_name(name: str | None) -> str:
     return str(name).strip().lstrip("/").upper()
 
 
+def _net_aliases(name: str) -> tuple[str, ...]:
+    """Manifest lookup keys, from the full net name to its bare label."""
+    full = _normalize_net_name(name)
+    if "/" in full:
+        return full, full.rsplit("/", 1)[1]
+    return (full,)
+
+
 def _parse_voltage(raw: object) -> float | None:
     """Parse a voltage-ish value to volts, or ``None``. Never raises.
 
@@ -298,20 +306,13 @@ class OperatingState:
     def potential(self, net_name: str | None) -> float | None:
         """Return the declared potential for *net_name*, or ``None``.
 
-        Matching is exact first, then tolerant of a leading ``/`` and of case,
-        so a manifest written as ``SRC_POS`` also matches a netlist's
-        ``/SRC_POS``. A sheet-qualified netlist name (``/Power/SRC_POS``) falls
-        back to its bare label when no manifest key names the full path; the
-        analyzer already rejects sheet-local labels repeated across sheets, so
-        the bare label identifies one net (#10334).
+        Match the full path first, ignoring case and leading slashes. If it
+        has no manifest entry, try the bare label. The analyzer checks that
+        each accepted alias belongs to a single net before evaluating states.
         """
         if not net_name:
             return None
-        wanted = _normalize_net_name(net_name)
-        candidates = [wanted]
-        if "/" in wanted:
-            candidates.append(wanted.rsplit("/", 1)[1])
-        for candidate in candidates:
+        for candidate in _net_aliases(net_name):
             matches = [
                 value
                 for key, value in self.potentials.items()
@@ -916,13 +917,13 @@ class ComponentStressAnalyzer:
                 raise ValueError("schematic hierarchy and netlist component identities disagree")
             net_names: dict[str, str] = {}
             for net in netlist.nets:
-                normalized = _normalize_net_name(net.name)
-                if normalized in net_names and net_names[normalized] != net.name:
-                    raise ValueError(
-                        f"distinct nets {net_names[normalized]!r} and {net.name!r} "
-                        "have ambiguous operating-state aliases"
-                    )
-                net_names[normalized] = net.name
+                for alias in _net_aliases(net.name):
+                    previous = net_names.setdefault(alias, net.name)
+                    if previous != net.name:
+                        raise ValueError(
+                            f"distinct nets {previous!r} and {net.name!r} "
+                            "have ambiguous operating-state aliases"
+                        )
         except Exception as exc:
             return load_error(exc)
 
