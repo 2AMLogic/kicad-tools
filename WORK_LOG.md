@@ -16,6 +16,66 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-25
 
+- **Issue #10244** (closed): kct sch re-annotate splits native multi-unit packages unless --pcb is passed
+- **PR #10246**: fix(schematic): keep native multi-unit packages together during reannotation
+- **Issue #10257** (closed): MCP placement parity test expects the old capacitor ordering diagnostic and blocks CI
+- **PR #10260**: test(mcp): cover designated capacitor ordering at equal distances
+- **Issue #10247** (closed): docs: cli.md prune narrative omits pour-redundant branch removal and the locked-via protection
+- **PR #10254**: docs(pcb): explain verified pour branch pruning
+- **Issue #10255** (closed): Board 06 USB2 save gate depends on the deprecated coupled_continuity_threshold
+- **Issue #10235** (closed): Repair the USB2 pad exits at U1.10 and U1.11 on Board 06
+- **PR #10237**: fix(boards): clear both USB2 transceiver pad exits on Board 06
+- **PR #10238**: fix: preserve reported track approaches when moving mask-adjacent vias
+- **Issue #10243** (closed): create-issue.sh is unusable on fleet hosts: config-resolver.sh passes a 137 KB config tier as one jq argv entry (E2BIG)
+- **Issue #10194** (closed): fix(board04): move C15/C16 decoupling caps beside U2 pin 1 and drop bypass_distance waivers
+- **PR #10214**: fix(board04): place C15/C16 beside U2 pin 1 and drop bypass_distance waivers
+- **Issue #10138** (closed): pcb prune: remove verified pour-redundant pad stubs and their terminal vias
+- **PR #10215**: feat(prune): remove verified pour-redundant pad branches and their vias
+- **Issue #10136** (closed): route: avoid power-plane stitches on SMD pads already bonded by filled copper
+- **PR #10167**: fix: skip power-plane stitches for SMD pads bonded to the plane by current fill
+- **Issue #10212** (closed): sch re-annotate: --pcb docstring and Phase 2b comment still claim the board is saved last
+- **Issue #10145** (closed): sch re-annotate: carry the renumbering mapping to the .kicad_pcb (--pcb)
+- **PR #10149**: feat: sync footprint references from sch re-annotate via --pcb
+- **Issue #10217** (closed): Pin the 0.25 mm disjoint pass-through slide bound and its chamfer arm with regression tests
+- **PR #10224**: test: guard the 0.25 mm pass-through slide clamp in mask-copper repair
+- **Issue #10108** (closed): Package a native KiCad project with a coherent basename and revision identity
+- **PR #10120**: fix(export): package the KiCad project under the root sheet's basename
+- **Issue #10134** (closed): check: report bypass capacitor count per power pin (redundant or missing decoupling)
+- **PR #10201**: feat(explain): inventory decoupling caps by schematic designation
+- **Issue #10143** (closed): schematic/blocks: take decoupling-cap counts from one place so blocks do not stack default caps on a shared rail
+- **PR #10157**: feat(schematic): report circuit block decoupling by supply net
+- **Issue #10131** (closed): placement: enforce schematic decoupling constraints in kct placement optimize
+- **Issue #10225** (closed): Enforce designated bypass-pad placement on both placement optimize save paths
+- **PR #10229**: fix: validate designated bypass pads before publishing optimized placements
+- **Issue #10219** (closed): optimize_placement MCP tool applies the schematic cap association but not the designated-cap side/radius gate
+- **PR #10227**: fix: validate designated capacitors on the MCP-selected placement
+- **Issue #10208** (closed): bypass_distance: restore the two regression guards PR #10186 dropped, and decide on association reach
+- **PR #10209**: test: pin board-03 unassociated bypass caps and guard Oscillator association
+- **Issue #10236** (closed): CI flake: CodeQL SARIF upload fails across three PRs during the GitHub service incident
+- **PR #10234**: fix(drc): flip a pad-edge elbow whose swapped corner stays beside the pad
+- **Issue #10097** (closed): Board 06: sharpen the PCIe taper authored-rule guard's keepout regression and its two fail-closed edges
+- **PR #10101**: test: harden board 06 PCIe taper guard's keepout regression and fail-closed edges
+- **Issue #10173** (closed): 0.1016 mm traces pass the jlcpcb profile; JLCDFM reports Danger at 0.1 mm
+- **PR #10178**: feat: warn on JLCPCB 4-layer outer tracks JLCDFM grades Danger
+- **Issue #10211** (closed): redundant_copper_pour_stub reports coverage 1 when only some candidate branches were evaluated
+- **PR #10213**: fix: disclose partially evaluated pour-stub candidates in the proof
+- **Issue #10228** (closed): Evolutionary placement fails while collecting wire-length metrics
+- **PR #10231**: fix: report wire length for the winning evolutionary placement
+- **Issue #10198** (closed): JLCPCB CPL: SOT-23-5 parts come out a quarter turn off (the "SOT-23*": 180 rotation entry is wrong for the 5-pin package)
+- **PR #10199**: fix(export): apply verified JLCPCB rotations by catalog part
+- **PR #10204**: fix(board06): center the U1 ground entry on its existing via
+- **PR #10206**: feat(router): split per-call route traces into native, fallback and other seconds
+- **PR #10216**: fix(board05): move unattended silkscreen references clear of routed drills
+- **Issue #10218** (closed): readiness: the 10106 retained-hold regression's "manufacturing" variant does not place the hold in the manufacturing directory
+- **PR #10223**: test: cover a retained hold inside the generated manufacturing and evidence directories
+- **Issue #10233** (closed): test flake: Board 06 permitted-width zone refill timed out on a pre-#10129 CI run
+- **Issue #10163** (closed): Readiness render exclusion is keyed on the literal name 'output', so a declared output_root with another name hashes renders as evidence
+- **PR #10222**: fix: exclude renders under any declared readiness output_root from hashed inputs
+- **Issue #10139** (closed): netclasses: check sidecar/project/track-width agreement and honour project class widths on re-route
+- **PR #10190**: feat(check): add netclass_agreement rule for sidecar/project/copper width agreement
+- **Issue #8962** (closed): Same-net slit population on fresh regens: repair-pass + route-side producers (stale fixture attribution from #8957)
+- **Issue #10125** (closed): test flake: Board 06 permitted-width rule-area refill reaches the 60-second bulk timeout
+- **PR #10129**: ci: run Board 06 rule-area tests in a serial lane with a 120 s budget
 - **Issue #10220** (closed): Board 03 mask repair aborted with "could not verify mask openings" on a second host — establish whether it is host-specific
 - **PR #10207**: fix(drc): slide a disjoint pass-through jog along its runs before recentring it
 - **Issue #10142** (closed): placement: use schematic cap-pin association as optimizer constraint
