@@ -206,6 +206,10 @@ def detect_diff_pairs(
             continue
         if pair.negative.net_id in paired_net_ids:
             continue
+        if pair.positive.notation == "pos_neg" and _is_power_terminal_pair(
+            pair, net_class_routing or {}, net_to_class or {}
+        ):
+            continue
         out.append(DetectedPair(pair=pair, source=DetectionSource.SUFFIX))
         paired_net_ids.add(pair.positive.net_id)
         paired_net_ids.add(pair.negative.net_id)
@@ -312,6 +316,36 @@ def coupled_pair_net_class(
 # =============================================================================
 # Internals
 # =============================================================================
+
+
+def _is_power_terminal_pair(
+    pair: DifferentialPair,
+    routing: dict[str, NetClassRouting],
+    net_to_class: dict[str, str],
+) -> bool:
+    """Both POS/NEG nets have the Power class and neither requests pair routing."""
+    from .rules import NET_CLASS_POWER
+
+    for signal in (pair.positive, pair.negative):
+        class_name = net_to_class.get(signal.net_name, "")
+        nc = routing.get(signal.net_name) or routing.get(class_name)
+        if getattr(nc, "name", class_name) != NET_CLASS_POWER.name:
+            return False
+        if getattr(nc, "coupled_routing", False) or any(
+            getattr(nc, field, None) is not None
+            for field in (
+                "intra_pair_clearance",
+                "target_diff_impedance",
+                "skew_tolerance_mm",
+                "coupled_continuity_threshold",
+                "pair_protocol",
+                "max_uncoupled_per_terminal_mm",
+                "max_uncoupled_total_mm",
+                "chain_skew_tolerance_mm",
+            )
+        ):
+            return False
+    return True
 
 
 def _name_to_id_map(net_names: dict[int, str]) -> dict[str, int]:

@@ -262,7 +262,7 @@ def _is_power_rail_base(base_name: str) -> bool:
 
     Used to refuse ``VCC_NEG``/``VBUS_POS``-style false positives.
     """
-    return bool(_POWER_RAIL_PREFIX_PATTERN.match(base_name))
+    return bool(_POWER_RAIL_PREFIX_PATTERN.match(base_name.rsplit("/", 1)[-1]))
 
 
 def is_single_ended_refused(net_name: str) -> bool:
