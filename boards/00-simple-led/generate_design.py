@@ -953,6 +953,38 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Step 8: Fill the zones so DRC sees plane copper rather than bare
     # outlines (issue #2516).  Must run after traces exist so the fill
     # respects trace clearances.
+    # Issue #10448: the reviewed LED_ANODE class must reach the editable
+    # routed project BEFORE the fill and the manufacturing ZIP read it.  On a
+    # clean directory no ``.kicad_pro`` exists yet, so emit the constraint
+    # sidecars first and then declare the router's classes in the project
+    # (the same writers ``kct route`` uses).
+    from kicad_tools.cli.route_cmd import (
+        _write_drc_constraint_sidecars,
+        _write_netclasses_to_project,
+    )
+
+    from kicad_tools.router.rules import NetClassRouting
+
+    class_map = dict(router.net_class_map)
+    # The reviewed class, not the router's Digital default (0.2 mm wide).
+    class_map["LED_ANODE"] = NetClassRouting(
+        name=LED_ANODE_CLASS,
+        priority=LED_ANODE_CLASS_PRIORITY,
+        trace_width=LED_ANODE_TRACE_WIDTH_MM,
+        clearance=LED_ANODE_CLASS_CLEARANCE_MM,
+    )
+    _write_drc_constraint_sidecars(
+        output_path,
+        "jlcpcb",
+        2,
+        quiet=True,
+        source_pcb_path=input_path,
+        net_class_map=class_map,
+    )
+    _write_netclasses_to_project(
+        output_path, class_map, quiet=True, via_drill=router.rules.via_drill
+    )
+
     print("\n8. Filling copper zones...")
     _fill_zones_after_route(output_path)
 

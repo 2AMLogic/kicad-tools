@@ -338,6 +338,35 @@ class TestBoard00SimpleLed:
         sidecar = routed_pcb.parent / "net_class_map.json"
         assert json.loads(sidecar.read_text()) == json.loads(SIDECAR.read_text())
 
+    def test_led_anode_class_reaches_the_fresh_routed_and_packaged_projects(
+        self, routed_pcb: Path
+    ) -> None:
+        """Issue #10448: a clean build resolves LED_ANODE to Digital, 0.127 mm / 0.150 mm.
+
+        The sidecar and copper alone are not enough: both the freshly
+        generated routed ``.kicad_pro`` and the copy packed into the
+        manufacturing ZIP must resolve the net to the reviewed class.
+        """
+        import zipfile
+
+        from kicad_tools.core.project_clearance import (
+            authored_netclass_widths,
+            resolve_project_clearances,
+        )
+
+        out_dir = routed_pcb.parent
+        sidecar_entry = json.loads((out_dir / "net_class_map.json").read_text())[LED_ANODE_NET_NAME]
+        assert sidecar_entry["target_ampacity"] == 0.01
+        with zipfile.ZipFile(out_dir / "manufacturing" / "kicad_project.zip") as bundle:
+            packaged = json.loads(bundle.read("simple_led.kicad_pro"))
+        fresh = json.loads((out_dir / "simple_led_routed.kicad_pro").read_text())
+        for label, project in (("routed", fresh), ("packaged", packaged)):
+            widths = authored_netclass_widths(project, [LED_ANODE_NET_NAME])
+            clearance = resolve_project_clearances(project, [LED_ANODE_NET_NAME])
+            assert widths[LED_ANODE_NET_NAME].source_class == "Digital", label
+            assert widths[LED_ANODE_NET_NAME].width == 0.127, label
+            assert clearance[LED_ANODE_NET_NAME].clearance == 0.15, label
+
     def test_fiducials_hold_the_pour_off_their_mask_openings(self, routed_pcb: Path) -> None:
         """Issue #10448: the stock fiducial clearance is widened before the pours fill."""
         fiducials = _fiducial_pads(routed_pcb)
