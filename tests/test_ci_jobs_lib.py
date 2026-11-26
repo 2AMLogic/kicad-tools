@@ -116,6 +116,48 @@ def _run_lib(
     )
 
 
+@pytest.mark.parametrize(
+    "missing",
+    [
+        None,
+        "routed.kicad_pcb",
+        "routed.kicad_pro",
+        "routed.kicad_dru",
+        "net_class_map.json",
+        "routed.net_class_map.json",
+    ],
+)
+def test_fresh_drc_requires_the_recipe_bundle(sandbox: Path, tmp_path: Path, missing) -> None:
+    fresh = tmp_path / "recipe output"
+    fresh.mkdir()
+    pcb = fresh / "routed.kicad_pcb"
+    override = fresh / "routed.net_class_map.json"
+    for path in (
+        pcb,
+        pcb.with_suffix(".kicad_pro"),
+        pcb.with_suffix(".kicad_dru"),
+        fresh / "net_class_map.json",
+        override,
+    ):
+        if path.name != missing:
+            path.write_bytes(FRESH_PCB)
+
+    result = _run_lib(
+        sandbox,
+        tmp_path,
+        f"check_fresh_routed_drc '{pcb}' '{override}'",
+        CI_JOBS_DRC_STUB_EXIT="2",
+    )
+    log = tmp_path / "drc-stub.log"
+    if missing is None:
+        assert result.returncode == 2, result.stderr
+        assert log.read_text().splitlines() == [f"{_sha(FRESH_PCB)} routed.kicad_pcb"]
+    else:
+        assert result.returncode == 1, result.stderr
+        assert str(fresh / missing) in result.stderr
+        assert not log.exists()
+
+
 def _assert_committed_tree_restored(sandbox: Path, before: dict[str, bytes]) -> None:
     """The committed output tree must be byte-identical to the snapshot."""
     committed = sandbox / "boards" / "probe" / "output"
