@@ -144,6 +144,22 @@ _SQUARE_FILL = [(100.0, 100.0), (110.0, 100.0), (110.0, 110.0), (100.0, 110.0)]
 
 
 class TestTrackDangling:
+    @pytest.mark.parametrize("pitch", [0.25, 0.125])
+    def test_subdivided_pad_to_pad_run_needs_no_trunk_walk(self, pitch):
+        from unittest.mock import patch
+
+        from kicad_tools.validate.rules import dangling_copper
+
+        points = [(6 + i * pitch, 9.0) for i in range(41)]
+        tracks = [_FakeSegment(a, b) for a, b in zip(points, points[1:], strict=False)]
+        pads = [_FakePad(position=p, size=(0.2, 0.2)) for p in (points[0], points[-1])]
+        with patch.object(
+            dangling_copper, "_trunk_span", wraps=dangling_copper._trunk_span
+        ) as walk:
+            results = _run(segments=tracks, footprints=[_FakeFootprint(pads)])
+        assert not results.violations
+        assert walk.call_count == 0
+
     def test_spur_beside_its_parent_needs_a_second_contact(self):
         junction = (12.0, 9.0)
         pads = [_FakePad(position=(6.0, 9.0)), _FakePad(position=(19.0, 9.0))]

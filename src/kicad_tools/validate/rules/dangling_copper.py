@@ -683,6 +683,7 @@ class DanglingCopperRule(DRCRule):
             py + reach,
         )
         point = Point(px, py)
+        off_center = []
         for item in index.candidates(probe):
             if item.key in span_keys:
                 continue
@@ -691,22 +692,29 @@ class DanglingCopperRule(DRCRule):
             if item.geom.distance(point) > reach:
                 continue
             parent = item.segment
-            if parent is not None and other_end != point_xy:
-                # The side of the same parent can graze both ends of a spur.
-                # Keep true T landings, end-cap joins and independent contacts.
-                start, end = _trunk_span(index, item, span_keys)
-                half_width = parent.width / 2.0
-                if (
-                    point_segment_distance(other_end, start, end) <= half_width + _TOUCH_TOL_MM
-                    and point_segment_distance(point_xy, start, end) > _TOUCH_TOL_MM
-                    # A cap at the spur root already accounts for that end.
-                    and not any(
-                        math.dist(point_xy, cap) <= half_width + reach
-                        and math.dist(other_end, cap) > _TOUCH_TOL_MM
-                        for cap in (start, end)
-                    )
-                ):
-                    continue
+            if parent is None or other_end == point_xy:
+                return True
+            if point_segment_distance(point_xy, parent.start, parent.end) <= _TOUCH_TOL_MM:
+                return True
+            off_center.append((item, parent))
+
+        # Only walk collinear runs if no local contact already terminates the tip.
+        for item, parent in off_center:
+            # The side of the same parent can graze both ends of a spur.
+            # Keep true T landings, end-cap joins and independent contacts.
+            start, end = _trunk_span(index, item, span_keys)
+            half_width = parent.width / 2.0
+            if (
+                point_segment_distance(other_end, start, end) <= half_width + _TOUCH_TOL_MM
+                and point_segment_distance(point_xy, start, end) > _TOUCH_TOL_MM
+                # A cap at the spur root already accounts for that end.
+                and not any(
+                    math.dist(point_xy, cap) <= half_width + reach
+                    and math.dist(other_end, cap) > _TOUCH_TOL_MM
+                    for cap in (start, end)
+                )
+            ):
+                continue
             return True
         return False
 
