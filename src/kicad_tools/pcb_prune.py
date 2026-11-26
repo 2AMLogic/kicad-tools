@@ -3105,7 +3105,7 @@ def audit_loops_left(
         if spec.net_name in seen:
             continue
         res = resolve_current_path(pcb, spec)
-        if res.status != STATUS_AMBIGUOUS or not res.witness:
+        if res.status != STATUS_AMBIGUOUS or res.witness.get("kind") not in {"segment", "via"}:
             continue
         seen.add(spec.net_name)
         w = res.witness

@@ -501,6 +501,43 @@ class TestPadExtentEndpointBinding:
     """
 
     @staticmethod
+    def _round_terminal_pcb(end_x: float):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=160, height=85, center=False)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+        terminal = pcb.get_footprint("J2")
+        assert terminal is not None
+        pad = terminal.pads[0]
+        pad.size = (3.0, 3.0)
+        pad.drill = 2.2
+        pcb.add_trace((20, 50), (end_x, 50), width=5.5, layer="F.Cu", net="NET1")
+        return pcb, pad
+
+    @pytest.mark.parametrize(
+        ("end_x", "resolved"), [(118.45, True), (118.0, False), (115.0, False)]
+    )
+    def test_round_pth_under_track_end_cap(self, end_x: float, resolved: bool) -> None:
+        # At 118.45 copper reaches the full circumference of the drill. At
+        # 118.0 it contacts only part of the barrel, and 115.0 misses the land.
+        pcb, _ = self._round_terminal_pcb(end_x)
+        assert resolve_current_path(pcb, _trunk_spec()).ok is resolved
+
+    @pytest.mark.parametrize("geometry", ["slot", "offset", "nonplated", "second_track"])
+    def test_end_cap_requires_one_track_at_a_round_plated_drill(self, geometry: str) -> None:
+        pcb, pad = self._round_terminal_pcb(118.45)
+        if geometry == "slot":
+            pad.drill_size = (2.2, 2.6)
+        elif geometry == "offset":
+            pad.drill_offset = (0.5, 0.0)
+        elif geometry == "nonplated":
+            pad.type = "np_thru_hole"
+        else:
+            pcb.add_trace((121.55, 50), (130, 50), width=5.5, layer="B.Cu", net="NET1")
+        assert not resolve_current_path(pcb, _trunk_spec()).ok
+
+    @staticmethod
     def _wide_pad_pcb(*, offsets: tuple[float, ...], pad_size=(2.29, 2.03)):
         """J1 -> J2, where the J1 end fans into ``offsets`` stubs on its pad."""
         from kicad_tools.schema.pcb import PCB
