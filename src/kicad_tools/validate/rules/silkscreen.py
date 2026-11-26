@@ -2049,17 +2049,21 @@ def _painted_chords(
         reach = math.sqrt(max(0, (radius - width / 2) ** 2 - lateral**2))
         for start, end, index in intervals:
             # Overdraw is ambiguous, even when one line is a full chord.
-            if any((a, b) != (start, end) and max(a, start) < min(b, end) for a, b, _ in intervals):
-                continue
+            overdrawn = any(
+                (a, b) != (start, end) and max(a, start) < min(b, end) for a, b, _ in intervals
+            )
             if start > -reach or end < reach:
                 if start > -reach and end < reach:
                     continue
                 cut_start = start > -reach
                 tip = start if cut_start else end
                 if not any(abs(tip - (a if cut_start else b)) <= 3e-6 for a, b, _ in neighbours):
+                    if overdrawn:
+                        continue
                     for pad_index, (along, across, pad_radius) in enumerate(round_pads):
                         toward_cut = tip - along if cut_start else along - tip
                         distance = math.hypot(toward_cut, lateral - across)
+                        # Larger repair clearances fall outside this two-stroke window.
                         if toward_cut > 0 and pad_radius <= distance <= pad_radius + 2 * width:
                             round_tips[pad_index].append((distance, offset, index))
                     continue
@@ -2069,7 +2073,10 @@ def _painted_chords(
                     for along, across, extent in pads
                 ):
                     continue
-            members.setdefault(offset, []).append(index)
+            # A qualifying offset still establishes hatch pitch when its ink is ambiguous.
+            chord = members.setdefault(offset, [])
+            if not overdrawn:
+                chord.append(index)
 
     for tips in round_tips.values():
         tips.sort()

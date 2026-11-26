@@ -106,7 +106,11 @@ def test_independent_stroke_is_identified(tmp_path, rules, extra):
     findings = check_silk_overlap(board(tmp_path, graphics=graphics, other=other), rules).violations
     identified = [v for v in findings if any(item_id in item for item in v.items)]
     assert identified
-    if extra != "overdraw":  # both partially overdrawn segments are ambiguous
+    if extra == "overdraw":
+        # Only the two ambiguous segments should generate overlap warnings.
+        assert len(findings) == 13
+        assert len(identified) == 7
+    else:
         assert identified == findings
     if extra == "duplicate":
         assert len(findings) == 1
@@ -151,13 +155,15 @@ def test_sector_crosses_exposed_pad_and_mask_graphic(tmp_path, rules):
 @pytest.mark.parametrize("case", ["aligned", "stray", "opposite_pad", "no_pad"])
 def test_round_pad_cutout_hatch(tmp_path, rules, face, case):
     graphics = []
+    stray_id = str(uuid.uuid4())
     for i, x in enumerate(OFFSETS):
         outer = math.sqrt(4 - x**2)
         tip = math.sqrt(0.55**2 - (x - 0.4) ** 2)
         graphics.append(line((x, -outer), (x, -tip)))
-        if case == "stray" and i == 2:
+        is_stray = case == "stray" and i == 2
+        if is_stray:
             tip += 0.09
-        graphics.append(line((x, tip), (x, outer)))
+        graphics.append(line((x, tip), (x, outer), stray_id if is_stray else None))
     if case != "no_pad":
         side = "B" if case == "opposite_pad" else "F"
         graphics.append(
@@ -171,3 +177,5 @@ def test_round_pad_cutout_hatch(tmp_path, rules, face, case):
         )
     findings = check_silk_overlap(PCB.load(path), rules).violations
     assert bool(findings) == (case != "aligned")
+    if case == "stray":
+        assert all(any(stray_id in item for item in v.items) for v in findings)
