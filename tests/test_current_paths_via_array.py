@@ -9,6 +9,7 @@ from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     PathEndpoint,
     audit_current_paths,
+    describe_witness,
     reinforcement_eligible_segment_ids,
     resolve_current_path,
 )
@@ -111,6 +112,25 @@ def test_unproved_fanout_remains_nonresolved(mutation):
         pcb.add_trace((115, 55), (120, 50), width=0.2, layer="B.Cu", net="NET1")
     assert not resolve_current_path(pcb, spec()).ok
     assert not reinforcement_eligible_segment_ids(pcb, [spec()])
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_unproved_fanout_identifies_its_pad_in_either_direction(reverse):
+    from kicad_tools.pcb_prune import audit_loops_left
+
+    pcb = fixture()
+    pcb._vias.pop(1)
+    declaration = spec()
+    if reverse:
+        declaration = replace(declaration, source=declaration.sink, sink=declaration.source)
+    result = resolve_current_path(pcb, declaration)
+    assert result.status == "ambiguous"
+    assert "fanout at J1.1" in result.reason
+    assert result.witness == {"kind": "pad", "position": [20, 50]}
+    assert describe_witness(result.witness, (61.5, 24.5)) == (
+        " [witness: pad centre at (81.500, 74.500)]"
+    )
+    assert not audit_loops_left(pcb, [declaration])
 
 
 @pytest.mark.parametrize("damage", ["two_missing_vias", "long_missing_trunk", "two_wrong_net_vias"])
