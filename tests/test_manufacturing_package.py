@@ -2599,3 +2599,229 @@ class TestPreflightLCSCReconciliation:
         assert result.preflight_results == []
         manifest = json.loads((out_dir / "manifest.json").read_text())
         assert "preflight" not in manifest
+
+
+class TestSimulationEvidence:
+    """Issue #10468: revision-bound simulation limits and fault-case evidence."""
+
+    DECK = b"* fault: gate open, command on\nV1 in 0 SIN(0 325 50)\n.end\n"
+
+    @staticmethod
+    def _digest(data: bytes) -> str:
+        import hashlib
+
+        return hashlib.sha256(data).hexdigest()
+
+    def _project(self, tmp_path, monkeypatch, cases=None):
+        project = tmp_path / "project"
+        (project / "sim").mkdir(parents=True)
+        pcb = project / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project / "board.kicad_pro").write_text("{}")
+        for name, value in (("installed", 85.6), ("proposed", 121.5)):
+            (project / "sim" / f"{name}.cir").write_bytes(self.DECK + name.encode())
+            self._write_result(project, name, value)
+        declared = cases or [self._case("installed"), self._case("proposed")]
+        (project / "board.simulations.json").write_text(json.dumps({"cases": declared}))
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom = od / "bom_jlcpcb.csv"
+            bom.write_text("Comment,Designator,Footprint,LCSC Part #\n")
+            return assembly.AssemblyPackageResult(output_dir=od, bom_path=bom)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+        return project, pcb
+
+    @staticmethod
+    def _case(name, **extra):
+        case = {
+            "name": name,
+            "deck": f"sim/{name}.cir",
+            "result": f"sim/{name}.result.json",
+            "quantity": "optotriac_irms",
+            "unit": "mA",
+            "upper": 100,
+        }
+        case.update(extra)
+        return case
+
+    def _write_result(self, project, name, measured, **override):
+        record = {
+            "case": name,
+            "quantity": "optotriac_irms",
+            "unit": "mA",
+            "value": measured,
+            "deck_sha256": self._digest((project / "sim" / f"{name}.cir").read_bytes()),
+        }
+        record.update(override)
+        (project / "sim" / f"{name}.result.json").write_text(json.dumps(record))
+
+    @staticmethod
+    def _export(pcb, tmp_path, name="bundle"):
+        config = ManufacturingConfig(
+            include_report=False, bom_source="pcb", preflight=PreflightConfig(skip_all=True)
+        )
+        result = ManufacturingPackage(pcb_path=pcb, config=config).export(tmp_path / name)
+        assert result.success, result.errors
+        return result
+
+    @staticmethod
+    def _cases(result):
+        return {c["name"]: c for c in result.simulation["cases"]}
+
+    def test_pass_and_out_of_range_reported_in_readme_and_manifest(self, tmp_path, monkeypatch):
+        _, pcb = self._project(tmp_path, monkeypatch)
+        result = self._export(pcb, tmp_path)
+        cases = self._cases(result)
+        assert cases["installed"]["status"] == "pass"
+        assert cases["installed"]["measured"] == 85.6
+        assert cases["proposed"]["status"] == "out_of_range"
+        assert (cases["proposed"]["measured"], cases["proposed"]["upper"]) == (121.5, 100.0)
+        assert cases["proposed"]["unit"] == "mA"
+
+        manifest = json.loads(result.manifest_path.read_text())
+        assert {c["name"]: c["status"] for c in manifest["simulation"]["cases"]} == {
+            "installed": "pass",
+            "proposed": "out_of_range",
+        }
+        assert "simulation" not in {pr["name"] for pr in manifest.get("preflight", [])}
+        readme = result.readme_path.read_text()
+        assert "[PASS] installed: optotriac_irms = 85.6 mA (limit <= 100 mA)" in readme
+        assert "[OUT OF RANGE] proposed: optotriac_irms = 121.5 mA (limit <= 100 mA)" in readme
+        assert "Native DRC:" in readme
+        assert any("proposed" in w for w in result.warnings)
+
+    def test_bundle_verifies_after_move_and_detects_modified_evidence(self, tmp_path, monkeypatch):
+        project, pcb = self._project(tmp_path, monkeypatch)
+        result = self._export(pcb, tmp_path)
+        manifest = json.loads(result.manifest_path.read_text())
+        case = next(c for c in manifest["simulation"]["cases"] if c["name"] == "installed")
+        assert case["tested_sha256"] == case["current_sha256"]
+        for rel in case["evidence"]:
+            assert rel in manifest["files"]
+
+        moved = tmp_path / "recipient"
+        shutil.copytree(result.output_dir, moved)
+        shutil.rmtree(project)
+        shutil.rmtree(result.output_dir)
+        assert verify_manifest(moved / "manifest.json") == []
+        packaged = moved / "simulation" / "proposed" / "sim" / "proposed.result.json"
+        packaged.write_text(packaged.read_text().replace("121.5", "90"))
+        assert any("sha256 mismatch" in e for e in verify_manifest(moved / "manifest.json"))
+
+    def test_edited_deck_with_retained_result_is_stale(self, tmp_path, monkeypatch):
+        project, pcb = self._project(tmp_path, monkeypatch)
+        (project / "sim" / "installed.cir").write_bytes(self.DECK + b"changed")
+        cases = self._cases(self._export(pcb, tmp_path))
+        assert cases["installed"]["status"] == "stale"
+        assert cases["installed"]["tested_sha256"] != cases["installed"]["current_sha256"]
+        assert cases["proposed"]["status"] == "out_of_range"
+
+    def test_removed_result_is_missing(self, tmp_path, monkeypatch):
+        project, pcb = self._project(tmp_path, monkeypatch)
+        (project / "sim" / "installed.result.json").unlink()
+        cases = self._cases(self._export(pcb, tmp_path))
+        assert cases["installed"]["status"] == "missing"
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"case": "other"},
+            {"unit": "A"},
+            {"quantity": "heat"},
+            {"value": "85.6"},
+            {"value": True},
+            {"value": None},
+            {"deck_sha256": "nothex"},
+        ],
+    )
+    def test_mismatched_or_malformed_record_cannot_pass(self, tmp_path, monkeypatch, override):
+        project, pcb = self._project(tmp_path, monkeypatch)
+        self._write_result(project, "installed", 85.6, **override)
+        case = self._cases(self._export(pcb, tmp_path))["installed"]
+        assert case["status"] == "invalid"
+        assert case["diagnostic"]
+
+    @pytest.mark.parametrize("raw", ["NaN", "Infinity", "{not json", "[1]"])
+    def test_non_finite_or_unparseable_result_is_invalid(self, tmp_path, monkeypatch, raw):
+        project, pcb = self._project(tmp_path, monkeypatch)
+        (project / "sim" / "installed.result.json").write_text(
+            raw
+            if raw.startswith(("{", "["))
+            else '{"case": "installed", "quantity": "optotriac_irms", "unit": "mA", "value": '
+            + raw
+            + "}"
+        )
+        assert self._cases(self._export(pcb, tmp_path))["installed"]["status"] == "invalid"
+
+    def test_bounds_are_inclusive_and_lower_bound_applies(self, tmp_path, monkeypatch):
+        cases = [
+            self._case("installed"),
+            self._case("proposed", upper=None, lower=130),
+        ]
+        for case in cases:
+            case.pop("upper") if case["upper"] is None else None
+        project, pcb = self._project(tmp_path, monkeypatch, cases)
+        self._write_result(project, "installed", 100.0)
+        got = self._cases(self._export(pcb, tmp_path))
+        assert got["installed"]["status"] == "pass"
+        assert got["proposed"]["status"] == "out_of_range"  # 121.5 < lower 130
+
+    @pytest.mark.parametrize("ref", ["../outside.cir", "/etc/hostname", "sim/../../x"])
+    def test_reference_outside_project_root_is_invalid(self, tmp_path, monkeypatch, ref):
+        cases = [self._case("installed", deck=ref)]
+        _, pcb = self._project(tmp_path, monkeypatch, cases)
+        case = self._cases(self._export(pcb, tmp_path))["installed"]
+        assert case["status"] == "invalid"
+        assert "outside the project root" in case["diagnostic"]
+
+    def test_symlink_escaping_project_root_is_invalid(self, tmp_path, monkeypatch):
+        outside = tmp_path / "secret.cir"
+        outside.write_text("secret")
+        project, pcb = self._project(tmp_path, monkeypatch)
+        (project / "sim" / "installed.cir").unlink()
+        (project / "sim" / "installed.cir").symlink_to(outside)
+        case = self._cases(self._export(pcb, tmp_path))["installed"]
+        assert case["status"] == "invalid"
+        assert not list((tmp_path / "bundle").rglob("secret*"))
+
+    def test_extra_declared_input_binds_the_result(self, tmp_path, monkeypatch):
+        cases = [self._case("installed", inputs=["sim/model.lib"])]
+        project, pcb = self._project(tmp_path, monkeypatch, cases)
+        lib = project / "sim" / "model.lib"
+        lib.write_text("v1")
+        self._write_result(
+            project, "installed", 85.6, inputs={"sim/model.lib": self._digest(b"v1")}
+        )
+        assert self._cases(self._export(pcb, tmp_path))["installed"]["status"] == "pass"
+        lib.write_text("v2")
+        assert self._cases(self._export(pcb, tmp_path, "b2"))["installed"]["status"] == "stale"
+
+    def test_malformed_declaration_is_diagnosed_not_fatal(self, tmp_path, monkeypatch):
+        project, pcb = self._project(tmp_path, monkeypatch)
+        (project / "board.simulations.json").write_text("{nope")
+        result = self._export(pcb, tmp_path)
+        assert result.simulation["cases"] == []
+        assert "diagnostic" in result.simulation
+        assert any("Simulation evidence" in w for w in result.warnings)
+
+    def test_no_declaration_keeps_existing_output(self, tmp_path, monkeypatch):
+        project, pcb = self._project(tmp_path, monkeypatch)
+        (project / "board.simulations.json").unlink()
+        result = self._export(pcb, tmp_path)
+        assert result.simulation is None
+        assert "simulation" not in json.loads(result.manifest_path.read_text())
+        assert "Simulation evidence" not in result.readme_path.read_text()
+        assert not (result.output_dir / "simulation").exists()
+
+    def test_reexport_without_declaration_removes_old_evidence(self, tmp_path, monkeypatch):
+        project, pcb = self._project(tmp_path, monkeypatch)
+        result = self._export(pcb, tmp_path)
+        assert (result.output_dir / "simulation").is_dir()
+        (project / "board.simulations.json").unlink()
+        result = self._export(pcb, tmp_path)
+        assert not (result.output_dir / "simulation").exists()
