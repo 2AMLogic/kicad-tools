@@ -1198,6 +1198,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             "so readiness can use its rules."
         )
 
+    schematic: Path | None
     if args.schematic:
         schematic = Path(args.schematic).resolve()
     else:
