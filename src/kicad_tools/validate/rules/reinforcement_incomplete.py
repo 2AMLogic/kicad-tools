@@ -227,6 +227,8 @@ class WiredLeg:
     width: float
     gauge: int
     anchor_arc: tuple[float, float] | None = None
+    # The actual holes accepted by the per-leg check, in polyline order.
+    anchors: tuple[_Anchor, ...] = field(default=(), compare=False)
 
 
 class ReinforcementIncompleteRule(DRCRule):
@@ -279,10 +281,10 @@ class ReinforcementIncompleteRule(DRCRule):
 
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         results = DRCResults()
-        self._run(pcb, design_rules, results, collector=None)
+        self._run(pcb, results, collector=None)
         return results
 
-    def fully_wired_legs(self, pcb: PCB, design_rules: DesignRules) -> list[WiredLeg]:
+    def fully_wired_legs(self, pcb: PCB, design_rules: DesignRules | None = None) -> list[WiredLeg]:
         """Legs on this board this rule judges fully wired (Issue #9648).
 
         Runs the same per-leg completeness check as :meth:`check` (its
@@ -295,13 +297,12 @@ class ReinforcementIncompleteRule(DRCRule):
         of re-deriving one, so this can never disagree with :meth:`check`.
         """
         collector: list[WiredLeg] = []
-        self._run(pcb, design_rules, DRCResults(), collector=collector)
+        self._run(pcb, DRCResults(), collector=collector)
         return collector
 
     def _run(
         self,
         pcb: PCB,
-        design_rules: DesignRules,
         results: DRCResults,
         collector: list[WiredLeg] | None,
     ) -> None:
@@ -819,7 +820,8 @@ class ReinforcementIncompleteRule(DRCRule):
                             points=tuple(leg.points),
                             width=leg.width,
                             gauge=leg.gauge,
-                            anchor_arc=outcome,
+                            anchor_arc=(outcome[0].arc, outcome[1].arc),
+                            anchors=outcome,
                         )
                     )
 
@@ -893,18 +895,10 @@ class ReinforcementIncompleteRule(DRCRule):
         claimed: set[int],
         results: DRCResults,
         via_is_tented: Any,
-    ) -> tuple[float, float] | None:
-        """Check one leg's (a)-(c); ``None`` when it is not a wire leg.
+    ) -> tuple[_Anchor, _Anchor] | None:
+        """Return the two holes in leg order when present on a wire leg.
 
-        Returns ``None`` for a leg no wire layout applies to (degenerate
-        geometry, a pad covering the whole leg, or an inner layer with no
-        solder mask), else the ``(first, last)`` cumulative-arc range of the
-        leg's anchors -- the stretch the wire is soldered over, which
-        consumers use to keep the unwired hole-to-pad stubs at bare copper
-        (Issue #9654). A leg with fewer than two anchors always carries an
-        (a) finding, so its whole-leg placeholder span is never credited.
-        Callers judging completeness (Issue #9648) additionally require that
-        no finding was emitted into ``results``.
+        Callers judging completeness also require that no finding was emitted.
         """
         pts, cum, total = leg.points, leg.cum, leg.total
         if len(pts) < 2 or total <= 1e-9:
@@ -1071,7 +1065,7 @@ class ReinforcementIncompleteRule(DRCRule):
                     + " and ".join("front" if s == "F" else "back" for s in tented)
                     + " side; both sides must be mask-open",
                 )
-        return (anchors[0].arc, anchors[-1].arc) if len(anchors) >= 2 else (0.0, total)
+        return (anchors[0], anchors[1]) if len(anchors) == 2 else None
 
     # ------------------------------------------------------------ geometry
 
