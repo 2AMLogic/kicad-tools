@@ -3205,6 +3205,51 @@ def test_disjoint_via_approach_turns_outside_pad_and_undoes(tmp_path):
     assert {uid: _end(board, uid) for uid in original} == original
 
 
+def _tangent_via_entry(tmp_path):
+    # The tap just meets the round cap of the diagonal entry. Moving the
+    # opposite end farther along its line leaves that cap in the same place.
+    via, corner, inside = (100.375, 99.0), (100.375, 99.375), (100.0, 99.75)
+    return _board(
+        tmp_path,
+        "\n".join(
+            [
+                _via("fixed", via),
+                _seg("lead", via, corner),
+                _seg("entry", corner, inside),
+                _seg("tap", (99.775, 99.75), (99.5, 99.75), width=0.25),
+            ]
+        ),
+    )
+
+
+def test_via_entry_extension_preserves_tangent_at_its_fixed_end(tmp_path):
+    board = _tangent_via_entry(tmp_path)
+    old_lead_ends = _end(board, "lead")
+    old_entry, old_ends = _saved_copper(board, "entry")
+    tap_copper, tap_ends = _saved_copper(board, "tap")
+    assert old_entry.intersects(tap_copper)
+    assert old_entry.intersection(tap_copper).geom_type == "Point"
+    before = board.read_bytes()
+    repairer = MaskCopperRepairer(board)
+    finding = _pt_finding("lead", measured=0.025)
+    assert repairer.repair([finding], dry_run=True, **_ELBOW_OPTS).repaired == 1
+    assert board.read_bytes() == before
+
+    result = repairer.repair([finding], **_ELBOW_OPTS)
+    (action,) = result.actions
+    repairer.save(board)
+    entry, ends = _saved_copper(board, "entry")
+    assert ends[1] == old_ends[1]
+    assert entry.covers(old_entry) and entry.intersects(tap_copper)
+    assert tuple(_end(board, "tap")) == tap_ends
+    assert _pad_poly(board, "R1/1").distance(_saved_copper(board, "lead")[0]) >= 0.11
+    assert not repairer.off_angle_tracks()
+    assert repairer.undo_action(action)
+    repairer.save(board)
+    assert tuple(_end(board, "entry")) == old_ends
+    assert _end(board, "lead") == old_lead_ends
+
+
 def test_locked_via_entry_corner_leaves_all_copper_untouched(tmp_path):
     repairer = MaskCopperRepairer(_via_pad_entry(tmp_path, locked=True))
     before = repairer.doc.to_string()
@@ -3213,8 +3258,9 @@ def test_locked_via_entry_corner_leaves_all_copper_untouched(tmp_path):
     assert repairer.doc.to_string() == before
 
 
-def test_via_entry_recheck_veto_preserves_board_bytes(tmp_path, monkeypatch, capsys):
-    board = _via_pad_entry(tmp_path)
+@pytest.mark.parametrize("make_board", [_via_pad_entry, _tangent_via_entry])
+def test_via_entry_recheck_veto_preserves_board_bytes(tmp_path, monkeypatch, capsys, make_board):
+    board = make_board(tmp_path)
     before = board.read_bytes()
     reported = _pt_finding("lead", measured=0.025)
     neighbour = _finding("entry")

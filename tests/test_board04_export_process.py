@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import json
+import runpy
 import shutil
 import subprocess
 import zipfile
@@ -80,7 +81,37 @@ def board(tmp_path):
     return tmp_path / "stm32_devboard_routed.kicad_pcb"
 
 
-def test_export_preserves_reviewed_floors_in_project_zip(monkeypatch, board):
+def move_user_led_corner(board, new_corner):
+    """Move both ends of the joint, keeping the alternative route connected."""
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_file, serialize_sexp
+
+    doc = parse_file(board)
+    pcb = PCB(doc)
+    ox, oy = pcb.board_origin
+    tracks = {s.uuid for s in pcb.segments if s.net_name == "USER_LED" and s.layer == "F.Cu"}
+    moved = 0
+    for node in doc.find_children("segment"):
+        if node.find_child("uuid").get_string(0) not in tracks:
+            continue
+        for field in ("start", "end"):
+            at = node.find_child(field)
+            point = round(at.get_float(0) - ox, 6), round(at.get_float(1) - oy, 6)
+            if point == (36.25, 24.75):
+                at.set_atom(0, round(ox + new_corner[0], 6))
+                at.set_atom(1, round(oy + new_corner[1], 6))
+                moved += 1
+    assert moved == 2
+    board.write_text(serialize_sexp(doc))
+    before = board.read_bytes()
+    runpy.run_path(str(BOARD / "manufacturing_process.py"))["repair_bypass_mask_escapes"](board)
+    assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("alternate", [False, True], ids=["reviewed", "safe-alternative"])
+def test_export_preserves_reviewed_floors_in_project_zip(monkeypatch, board, alternate):
+    if alternate:
+        move_user_led_corner(board, (36.23, 24.75))
     recipe = load_recipe()
     schematic = board.parent / "stm32_devboard.kicad_sch"
     shutil.copy2(BOARD / "output/stm32_devboard.kicad_sch", schematic)
@@ -122,6 +153,50 @@ def test_export_rejects_unselected_paid_option(monkeypatch, board):
     monkeypatch.setattr(ManufacturingPackage, "export", unexpected_export)
     with pytest.raises(ValueError, match="Select the reviewed paid"):
         load_recipe().generate_manufacturing(board, board.parent)
+
+
+def test_export_blocks_alternate_trace_under_the_u2_mask(monkeypatch, board):
+    move_user_led_corner(board, (35.1625, 25.451))
+    archive = board.parent / "manufacturing.zip"
+    archive.write_bytes(b"previous manufacturing package")
+    before = board.read_bytes()
+
+    def unexpected_export(*args, **kwargs):
+        pytest.fail("The shifted USER_LED trace reached package export")
+
+    monkeypatch.setattr(ManufacturingPackage, "export", unexpected_export)
+    with pytest.raises(ValueError, match=r"U2/25.*USER_LED.*0\.090 mm"):
+        load_recipe().generate_manufacturing(board, board.parent)
+    assert board.read_bytes() == before
+    assert archive.read_bytes() == b"previous manufacturing package"
+    assert not (board.parent / "manufacturing").exists()
+
+
+def test_export_requires_the_reviewed_oscillator_pad_to_have_an_opening(board):
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
+
+    doc = parse_file(board)
+    pad = next(p for p in PCB(doc).get_footprint("U2").pads if p.number == "5")
+    node = next(n for n in doc.find_all("pad") if n.find_child("uuid").get_string(0) == pad.uuid)
+    node.append(parse_string("(solder_mask_margin -0.2)"))  # Closes the 0.30 mm pad opening.
+    board.write_text(serialize_sexp(doc))
+    with pytest.raises(ValueError, match="missing front mask opening: U2/5"):
+        load_recipe().generate_manufacturing(board, board.parent)
+    assert not (board.parent / "manufacturing").exists()
+
+
+def test_export_requires_complete_mask_measurements(monkeypatch, board):
+    from kicad_tools.validate import mask_copper_geometry
+
+    monkeypatch.setattr(
+        mask_copper_geometry,
+        "_resolve_native_python_command",
+        lambda *_: (None, "no native object reader"),
+    )
+    with pytest.raises(ValueError, match="front mask check incomplete: .*no native object reader"):
+        load_recipe().generate_manufacturing(board, board.parent)
+    assert not (board.parent / "manufacturing").exists()
 
 
 def test_paid_gate_reports_failure_from_json_when_stderr_empty(monkeypatch, tmp_path):
