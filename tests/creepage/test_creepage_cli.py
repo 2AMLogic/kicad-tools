@@ -29,6 +29,8 @@ from .fixtures import (
     board_scoped_exception_unaudited_source,
     board_source,
     board_two_sharing_footprints_source,
+    scoped_bore_source,
+    scoped_dual_face_source,
 )
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
@@ -1134,3 +1136,64 @@ def test_exception_on_unaudited_net_pair_warns(tmp_path, capsys):
     assert payload["exceptions_unused"] == ["X1 pads 1-2 (creepage)"]
     assert "Warning" in captured.err
     assert "X1 pads 1-2" in captured.err
+
+
+def test_scoped_exception_keeps_cross_face_bore(tmp_path, capsys):
+    rc, payload, _ = _scoped_run(
+        tmp_path, capsys, scoped_bore_source(), [_exc_entry()], "--min", "4", std=False
+    )
+    assert rc == 1
+    bore = next(r for r in payload["pairs"] if r.get("via_bore") == "MH1.1")
+    assert bore["relationship"] == "board"
+    assert bore["creepage_mm"] == pytest.approx(3.75, abs=0.01)
+    assert bore["pass"] is False
+
+
+def test_scoped_exception_separates_floating_conductor(tmp_path, capsys):
+    source = board_scoped_exception_source(r1_gap_mm=2.6, r2_gap_mm=4.0)
+    source = (
+        source.rstrip()[:-1]
+        + ' (segment (start 110 110.7) (end 110 112.5) (width 0.2) (layer "F.Cu") (net 0)))'
+    )
+    rc, _, rows = _scoped_run(tmp_path, capsys, source, [_exc_entry()], "--min", "1.5", std=False)
+    assert rc == 1
+    board = next(r for r in rows if r.get("via_floating") == "segment")
+    assert board["relationship"] == "board"
+    assert board["creepage_mm"] == pytest.approx(0.6)
+    package = next(r for r in rows if r.get("footprint") == "R1")
+    assert package["creepage_mm"] == pytest.approx(2.6)
+    assert "via_floating" not in package
+
+
+@pytest.mark.parametrize("repeated_pads", [True, False])
+def test_scoped_exception_retains_limiting_clearance(tmp_path, capsys, repeated_pads):
+    rc, _, rows = _scoped_run(
+        tmp_path,
+        capsys,
+        scoped_dual_face_source(repeated_pads=repeated_pads),
+        [_exc_entry()],
+        "--pair",
+        "L_MAINS",
+        "DIV_MID",
+    )
+    assert rc == 1
+    row = next(r for r in rows if r["layer"] == "B.Cu" and r["clearance_pass"] is False)
+    assert row["relationship"] == ("same_footprint" if repeated_pads else "board")
+    assert row["clearance_mm"] == pytest.approx(1.2)
+    assert row["creepage_mm"] > 2
+    assert row["witness"]["item_a"] == ("R1.1" if repeated_pads else "segment")
+
+
+def test_scoped_exception_witness_preserves_net_order(tmp_path, capsys):
+    source = (
+        board_scoped_exception_source()
+        .replace('(pad "1"', '(pad "swap"')
+        .replace('(pad "2"', '(pad "1"')
+        .replace('(pad "swap"', '(pad "2"')
+    )
+    _, _, rows = _scoped_run(tmp_path, capsys, source, [_exc_entry()])
+    row = next(r for r in rows if r.get("footprint") == "R1")
+    assert row["pads"] == ["1", "2"]
+    assert row["net_a"] == "L_MAINS"
+    assert row["witness"]["item_a"] == "R1.2"
+    assert row["witness"]["item_b"] == "R1.1"

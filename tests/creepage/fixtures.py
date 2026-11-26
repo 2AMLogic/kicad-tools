@@ -747,3 +747,33 @@ def board_scoped_exception_unaudited_source() -> str:
         ")\n",
     ]
     return "".join(parts)
+
+
+def scoped_bore_source() -> str:
+    source = (
+        board_cross_face_bore_source()
+        .replace("100 100", "90 90")
+        .replace("140 100", "150 90")
+        .replace("140 120", "150 130")
+        .replace("100 120", "90 130")
+    )
+    package = _footprint2("R1", 130, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 2, "GND", 0, 1.6)])
+    return source.rstrip()[:-1] + package + ")\n"
+
+
+def scoped_dual_face_source(*, repeated_pads: bool) -> str:
+    """F.Cu has the shorter surface path, B.Cu the shorter air gap across a slot."""
+    source = board_scoped_exception_source(track_gap_mm=2.6)
+    slot = _SLOT.replace("119.0", "119.5").replace("121.0", "120.5")
+    if repeated_pads:
+        lands = (
+            '    (pad "1" smd rect (at 9.1 0) (size 0.6 0.6) (layers "B.Cu") (net 1 "L_MAINS"))\n'
+            '    (pad "2" smd rect (at 10.9 0) (size 0.6 0.6) (layers "B.Cu") (net 4 "DIV_MID"))\n'
+        )
+        source = source.replace('    (pad "1"', lands + '    (pad "1"', 1)
+    else:
+        source = source.rstrip()[:-1] + (
+            '  (segment (start 118 110) (end 119.3 110) (width 0.2) (layer "B.Cu") (net 1))\n'
+            '  (segment (start 120.7 110) (end 122 110) (width 0.2) (layer "B.Cu") (net 4))\n)\n'
+        )
+    return source.rstrip()[:-1] + slot + ")\n"

@@ -1795,7 +1795,16 @@ class _FootprintPadIndex:
         return out
 
 
-def _board_residual_after_same_footprint(
+class _BoardApproach(NamedTuple):
+    clearance: float
+    creepage: float
+    layer: str
+    geoms: tuple[Any, Any]
+    witness: dict[str, Any] | None
+    via_floating: str | None
+
+
+def _board_approaches_after_same_footprint(
     layer_unions: dict[str, dict[int, Any]],
     fp_index: _FootprintPadIndex,
     net_a: int,
@@ -1803,35 +1812,13 @@ def _board_residual_after_same_footprint(
     obstacles: list[Any],
     layer_items: dict[str, Labelled] | None = None,
     layer_islands: dict[str, list[tuple[Any, str]]] | None = None,
-) -> tuple[float, float, str, tuple[Any, Any], dict[str, Any] | None] | None:
-    """Smallest board-level ``(clearance, creepage, layer, (geom_a, geom_b), witness)`` for a ``same_footprint`` pair (#8232).
+) -> Iterable[_BoardApproach]:
+    """Yield board approaches with intra-package pad gaps excluded (#8232).
 
-    The pair's global minimum is a component-internal gap, which hides any
-    larger board-level approach on the same net pair.  To expose it, the pads
-    of the sharing footprint(s) are masked out of one net at a time (net A's
-    sharing pads vs. all of net B, then all of net A vs. net B's sharing
-    pads) and the pair is re-measured on every layer; the minimum creepage over
-    both variants and all layers is returned.  This drops the intra-footprint
-    pad pair but keeps e.g. a resistor pad -> neighbouring diode pad approach.
-    Cross-footprint approaches between two sharing footprints (A_i vs B_j,
-    i != j) are measured explicitly, and a layer where no footprint shares the
-    pair contributes its plain measurement.
-    A trace stub leaving a masked pad can still register a near-gap, which errs
-    conservative (more FAIL, never a false pass).  ``None`` when no residual
-    copper exists.  The witness (#8301) is the closest-point pair of the
-    winning masked variant -- never the waived intra-footprint minimum.
-
-    What the minimum measures (#8332): with pad B masked, the nearest remaining
-    net-B copper is the trace where it leaves the (masked) pad B -- not the
-    pad-to-trace straight gap and not a cross-footprint variant.  Because that
-    exit point moves when a trace is re-routed (e.g. a jog straightened onto the
-    pad centreline), the row can move while the router's pairwise kernel, whose
-    witness lies in the #4506 attach zone, is unchanged.  The returned geometry
-    pair is the binding variant, so the caller can apply the same attach-zone
-    classification (:func:`_witness_in_attach_zone`) a primary ``board`` minimum
-    gets and the census and router agree.
+    Mask the sharing pads on each net in turn, preserving approaches to
+    traces leaving the pads. Measure cross-footprint pairs explicitly since
+    neither masked variant includes both pads of such a pair.
     """
-    best: tuple[float, float, str, tuple[Any, Any], dict[str, Any] | None] | None = None
     for layer_name, unions in layer_unions.items():
         geom_a = unions.get(net_a)
         geom_b = unions.get(net_b)
@@ -1880,12 +1867,12 @@ def _board_residual_after_same_footprint(
             clearance, creepage = surface_path_length(ga, gb, obstacles, _bridged=True)
             # Floating-island hop (#8548): a net-0 conductor on the board path
             # must not let a same_footprint waiver hide a shorter bridged path.
-            clearance, creepage, _via = _island_hop(
+            clearance, creepage, via = _island_hop(
                 ga, gb, (layer_islands or {}).get(layer_name, ()), obstacles, clearance, creepage
             )
-            if best is None or creepage < best[1]:
-                best = (clearance, creepage, layer_name, (ga, gb), _witness(ga, gb, ia, ib))
-    return best
+            yield _BoardApproach(
+                clearance, creepage, layer_name, (ga, gb), _witness(ga, gb, ia, ib), via
+            )
 
 
 def _attach_zone_residual(
@@ -2705,10 +2692,10 @@ def compute_creepage_census(
     :func:`creepage_exceptions_from_dict`) is supplied, every net pair whose
     two nets carry at least one exception is **decomposed** instead of
     collapsed to its binding minimum: each pad pair of every footprint sharing
-    both nets becomes its own ``same_footprint`` row (carrying the reviewed
+    both nets gets a ``same_footprint`` measurement (carrying the reviewed
     footprint / pad-pair identity and the metric-scoped waiver), and the
-    board-level geometry is measured separately through the #8232 residual
-    machinery.  The waiver applies per metric (a creepage exception leaves a
+    board-level geometry is measured separately. Distinct limiting paths for
+    air clearance and surface creepage retain their own rows and witnesses.  The waiver applies per metric (a creepage exception leaves a
     failing air-clearance check on the same pads active), and a second package
     on the same nets, a different pad pair on the same footprint and a board
     track each keep failing independently.  Selectors that do not resolve
@@ -3026,6 +3013,7 @@ def compute_creepage_census(
     #
     # key -> (creepage, rim label, face of net A, face of net B, geom A, geom B)
     cross_best: dict[tuple[int, int], tuple[float, str, str, str, Any, Any]] = {}
+    scoped_cross: dict[tuple[int, int], list[tuple[float, str, str, str, Any, Any]]] = {}
     thickness_mm, thickness_source, declarations = _board_thickness_mm(pcb, order_thickness_mm)
     order_lookup = project_board if order_thickness_mm is None else None
     _copper = pcb.copper_layers
@@ -3068,7 +3056,11 @@ def compute_creepage_census(
                         thickness_errors[key] = project_error
                         continue
                     prev = best.get(key)
-                    if prev is not None:
+                    scoped = frozenset(key) in affected_pairs
+                    if scoped:
+                        # A waived package gap cannot bound a board path in either direction.
+                        bound = math.inf
+                    elif prev is not None:
                         # Existing (same-face) row: a cross-face path binds
                         # only by being strictly shorter.
                         bound = prev[1] - _PASS_TOLERANCE
@@ -3093,7 +3085,7 @@ def compute_creepage_census(
                     # candidate for this pair: only a strictly shorter path
                     # replaces it, so the orderings minimise.
                     earlier = cross_best.get(key)
-                    if earlier is not None:
+                    if earlier is not None and not scoped:
                         bound = min(bound, earlier[0])
                     best_cand = math.inf
                     best_label: str | None = None
@@ -3130,7 +3122,11 @@ def compute_creepage_census(
                         if cand < best_cand:
                             best_cand, best_label = cand, label
                     if best_label is not None and best_cand < bound:
-                        cross_best[key] = (best_cand, best_label, fa, fb, ga, gb)
+                        candidate = (best_cand, best_label, fa, fb, ga, gb)
+                        if scoped:
+                            scoped_cross.setdefault(key, []).append(candidate)
+                        if earlier is None or best_cand < earlier[0]:
+                            cross_best[key] = candidate
     for (a, b), detail in thickness_errors.items():
         best.pop((a, b), None)
         cross_best.pop((a, b), None)
@@ -3193,149 +3189,96 @@ def compute_creepage_census(
         The normal census collapses a net pair to its binding minimum, which
         erases *which* package -- and which pad pair of it -- produced the
         measurement: a waiver scoped to one reviewed pad pair could then never
-        leave a second package on the same nets failing.  For a pair carrying
-        scoped exceptions the collapse is undone:
+        leave a second package on the same nets failing.
 
-        * every pad pair inside every footprint sharing the two nets becomes
-          its own ``same_footprint`` row, keyed by the footprint reference and
-          the (unordered, sorted) pad numbers the operator's exception names,
-          measured directly between the two pad polygons (island-hop aware,
-          binding layer = smallest creepage, exactly how ``best`` binds);
-        * the board-level geometry on the pair is measured separately through
-          the #8232 residual (sharing-footprint pads masked out), so package
-          waivers can never mask a trace, a cross-footprint approach or a
-          cross-face bore path.
+        Keep both metric minima within each waiver scope. When different
+        measurements bind, emit both rows so their witnesses stay attributable.
         """
-        # --- per (footprint, pad pair) candidates, binding layer ----------
-        pair_best: dict[
-            tuple[str, tuple[str, str]], tuple[float, float, str, Any, Any, str | None]
-        ] = {}
-        for layer_name in layer_unions:
-            for ref in fp_index.shared_footprint_refs(layer_name, hv_num, other_num):
-                a_pads = fp_index.footprint_pad_polys(layer_name, ref, hv_num)
-                b_pads = fp_index.footprint_pad_polys(layer_name, ref, other_num)
-                for num_a, poly_a in a_pads:
-                    for num_b, poly_b in b_pads:
-                        pad_pair = (num_a, num_b) if num_a <= num_b else (num_b, num_a)
-                        pad_key = (ref, pad_pair)
-                        clr = poly_a.distance(poly_b)
-                        crp = surface_path_length(poly_a, poly_b, obstacles, _bridged=True)[1]
-                        clr, crp, via_label = _island_hop(
-                            poly_a,
-                            poly_b,
-                            layer_islands.get(layer_name, ()),
-                            obstacles,
-                            clr,
-                            crp,
-                        )
-                        prev = pair_best.get(pad_key)
-                        if prev is None or crp < prev[1]:
-                            pair_best[pad_key] = (clr, crp, layer_name, poly_a, poly_b, via_label)
+        groups: dict[tuple[str, str | None, tuple[str, str] | None], list[CreepagePair]] = {}
 
-        def _emit(
-            *,
-            layer: str,
-            clearance: float,
-            creepage: float,
-            relationship: str,
-            residual: dict[str, Any],
-            witness: dict[str, Any] | None,
-            via_bore: str | None = None,
-            via_floating: str | None = None,
-            footprint_ref: str | None = None,
-            pad_numbers: tuple[str, str] | None = None,
-            exception_waivers: dict[str, str] | None = None,
-        ) -> None:
-            kw: dict[str, Any] = {
-                "net_a": net_a_name,
-                "net_b": net_b_name,
-                "kind": "conductor",
-                "layer": layer,
-                "clearance_mm": clearance,
-                "creepage_mm": creepage,
-                "relationship": relationship,
-                "witness": witness,
-            }
-            if via_bore is not None:
-                kw["via_bore"] = via_bore
-            if via_floating is not None:
-                kw["via_floating"] = via_floating
-            if footprint_ref is not None:
-                kw["footprint_ref"] = footprint_ref
-                kw["pad_numbers"] = pad_numbers
-            if exception_waivers:
-                kw["exception_waivers"] = dict(exception_waivers)
-            kw.update(residual)
+        def collect(**fields: Any) -> None:
             if map_mode:
                 req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
-                report.pairs.append(
-                    _make_pair(req_creep=req_creep, req_clear=req_clear, prov=prov, **kw)
-                )
-            else:
-                report.pairs.append(_make_pair(**kw))
+                fields.update(req_creep=req_creep, req_clear=req_clear, prov=prov)
+            row = _make_pair(net_a=net_a_name, net_b=net_b_name, kind="conductor", **fields)
+            key = (row.relationship, row.footprint_ref, row.pad_numbers)
+            groups.setdefault(key, []).append(row)
 
-        for pad_key, (clr, crp, layer_name, poly_a, poly_b, via_label) in sorted(pair_best.items()):
-            ref, pads = pad_key
-            applied_keys.add(pad_key)
-            witness = _witness(
-                poly_a, poly_b, [(poly_a, f"{ref}.{pads[0]}")], [(poly_b, f"{ref}.{pads[1]}")]
-            )
-            _emit(
-                layer=layer_name,
-                clearance=clr,
-                creepage=crp,
-                relationship="same_footprint",
-                residual={},
-                witness=witness,
-                via_floating=via_label,
-                footprint_ref=ref,
-                pad_numbers=pads,
-                exception_waivers=exception_waivers.get(pad_key),
-            )
+        for layer in layer_unions:
+            islands = layer_islands.get(layer, ())
+            for ref in fp_index.shared_footprint_refs(layer, hv_num, other_num):
+                for num_a, ga in fp_index.footprint_pad_polys(layer, ref, hv_num):
+                    for num_b, gb in fp_index.footprint_pad_polys(layer, ref, other_num):
+                        pads = (num_a, num_b) if num_a <= num_b else (num_b, num_a)
+                        key = (ref, pads)
+                        applied_keys.add(key)
+                        witness = _witness(
+                            ga, gb, [(ga, f"{ref}.{num_a}")], [(gb, f"{ref}.{num_b}")]
+                        )
+                        clr, crp = surface_path_length(ga, gb, obstacles, _bridged=True)
+                        collect(
+                            layer=layer,
+                            clearance_mm=clr,
+                            creepage_mm=crp,
+                            relationship="same_footprint",
+                            witness=witness,
+                            footprint_ref=ref,
+                            pad_numbers=pads,
+                            exception_waivers=exception_waivers.get(key, {}),
+                        )
+                        if islands:
+                            # Even a hop longer than the waived direct path can fail.
+                            clr, crp, via = _island_hop(
+                                ga, gb, islands, obstacles, math.inf, math.inf
+                            )
+                            if via is not None:
+                                collect(
+                                    layer=layer,
+                                    clearance_mm=clr,
+                                    creepage_mm=crp,
+                                    relationship="board",
+                                    witness=witness,
+                                    via_floating=via,
+                                )
 
-        # --- board-level row (always, for an affected pair) ----------------
-        board_row = _board_residual_after_same_footprint(
+        for approach in _board_approaches_after_same_footprint(
             layer_unions, fp_index, hv_num, other_num, obstacles, layer_items, layer_islands
-        )
-        if board_row is not None:
-            b_clr, b_creep, b_layer, b_geoms, b_witness = board_row
-            via_bore_label: str | None = None
-            cross = cross_best.get((hv_num, other_num))
-            if cross is not None and cross[0] < b_creep - _PASS_TOLERANCE:
-                b_creep = cross[0]
-                via_bore_label = cross[1]
-                b_clr = min(b_clr, _opposite_face_clearance(cross[4], cross[5]))
-            row_rel, row_res = "board", {}
-            az = _attach_zone_row(
-                b_layer, b_geoms[0], b_geoms[1], hv_num, other_num, net_a_name, net_b_name
+        ):
+            az = (
+                None
+                if approach.via_floating
+                else _attach_zone_row(
+                    approach.layer, *approach.geoms, hv_num, other_num, net_a_name, net_b_name
+                )
             )
-            if az is not None:
-                row_rel, row_res = "attach_zone", az
-            _emit(
-                layer=b_layer,
-                clearance=b_clr,
-                creepage=b_creep,
-                relationship=row_rel,
-                residual=row_res,
-                witness=b_witness,
-                via_bore=via_bore_label,
+            collect(
+                layer=approach.layer,
+                clearance_mm=approach.clearance,
+                creepage_mm=approach.creepage,
+                relationship="attach_zone" if az else "board",
+                witness=approach.witness,
+                via_floating=approach.via_floating,
+                **(az or {}),
             )
-        else:
-            cross = cross_best.get((hv_num, other_num))
-            if cross is not None:
-                creep, label, fa, fb, ga, gb = cross
-                witness = _witness(
+
+        for creep, label, fa, fb, ga, gb in scoped_cross.get((hv_num, other_num), []):
+            collect(
+                layer=f"{fa}/{fb}",
+                clearance_mm=_opposite_face_clearance(ga, gb),
+                creepage_mm=creep,
+                relationship="board",
+                via_bore=label,
+                witness=_witness(
                     ga, gb, layer_items[fa].get(hv_num, []), layer_items[fb].get(other_num, [])
-                )
-                _emit(
-                    layer=f"{fa}/{fb}",
-                    clearance=_opposite_face_clearance(ga, gb),
-                    creepage=creep,
-                    relationship="board",
-                    residual={},
-                    witness=witness,
-                    via_bore=label,
-                )
+                ),
+            )
+
+        for candidates in groups.values():
+            surface = min(candidates, key=lambda r: (r.creepage_mm, r.clearance_mm))
+            air = min(candidates, key=lambda r: (r.clearance_mm, r.creepage_mm))
+            report.pairs.append(surface)
+            if air is not surface:
+                report.pairs.append(air)
 
     for (hv_num, other_num), (clearance, creepage, layer_name) in best.items():
         net_a_name = hv_nets[hv_num]
@@ -3383,8 +3326,12 @@ def compute_creepage_census(
             # #8232: the minimum is component-internal; surface the smallest
             # board-level approach on the same pair as its own row so a waiver
             # of the same_footprint row cannot hide it.
-            board_row = _board_residual_after_same_footprint(
-                layer_unions, fp_index, hv_num, other_num, obstacles, layer_items, layer_islands
+            board_row = min(
+                _board_approaches_after_same_footprint(
+                    layer_unions, fp_index, hv_num, other_num, obstacles, layer_items, layer_islands
+                ),
+                key=lambda row: row.creepage,
+                default=None,
             )
             if board_row is not None:
                 # #8332: classify the residual row like a primary board minimum.
