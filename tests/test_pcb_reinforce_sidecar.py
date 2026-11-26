@@ -251,6 +251,250 @@ def test_parallel_short_leg_is_recorded_and_cleared(tmp_path):
     assert load_wires(sidecar_path(p)) == []
 
 
+# ----------------------------- an entry that is not an object (Issue #10401)
+
+
+def _reinforced(tmp_path: Path, *nets: str) -> tuple[Path, list[dict]]:
+    """The two-net board after reinforcing each of ``nets``: ``(board, its records)``."""
+    p = _board(tmp_path)
+    for net in nets:
+        assert run_pcb_command(_args(p, net)) == 0
+    return p, load_wires(sidecar_path(p))
+
+
+def _rewrite_sidecar(board: Path, entries: list) -> Path:
+    """Put a version-1 sidecar of raw ``entries`` beside ``board``; its path."""
+    sc = sidecar_path(board)
+    sc.write_text(json.dumps({"version": 1, "wires": entries}, indent=2) + "\n", encoding="utf-8")
+    return sc
+
+
+def _snapshot(*paths: Path) -> dict[Path, bytes]:
+    return {p: p.read_bytes() for p in paths}
+
+
+def _assert_refused(err: str, sidecar: Path, index: int) -> None:
+    """The diagnostic names the sidecar, the first offending entry and what it should be."""
+    assert str(sidecar) in err
+    assert f"wires[{index}]" in err
+    assert "JSON object" in err
+
+
+_NON_OBJECTS = [
+    pytest.param(None, id="null"),
+    pytest.param(1.5, id="number"),
+    pytest.param("oops", id="string"),
+    pytest.param([{"net": "NET_B"}], id="array"),
+    pytest.param(False, id="boolean"),
+]
+
+
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_reinforce_refuses_a_non_object_entry_after_another_nets_record(tmp_path, capsys, bad):
+    """Add reads the sidecar again to merge its record; the merge used to raise."""
+    p, (_net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_b, bad])
+    before = _snapshot(p, sidecar)
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, "NET_A")) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, sidecar, 1)
+    assert captured.out == ""
+    assert _snapshot(p, sidecar) == before
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_clear_refuses_a_non_object_entry_instead_of_falling_back_to_the_size_rule(
+    tmp_path, capsys, bad, dry_run
+):
+    """The list names the anchors to remove, so it is never skipped over as unreadable
+    -- under --dry-run too, which reads it just the same."""
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_b, net_a, bad])
+    before = _snapshot(p, sidecar)
+    for net in ("NET_A", "NET_B"):
+        capsys.readouterr()
+        assert run_pcb_command(_args(p, net, clear=True, dry_run=dry_run)) == 1
+        captured = capsys.readouterr()
+        _assert_refused(captured.err, sidecar, 2)
+        assert captured.out == ""
+    assert _snapshot(p, sidecar) == before
+
+
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_replace_refuses_a_non_object_entry(tmp_path, capsys, bad):
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_b, bad, net_a])
+    before = _snapshot(p, sidecar)
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, "NET_B", replace=True)) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, sidecar, 1)
+    assert captured.out == ""
+    assert _snapshot(p, sidecar) == before
+
+
+@pytest.mark.parametrize("fmt", ["text", "json"])
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_adopt_refuses_a_non_object_entry_even_after_a_recorded_match(tmp_path, capsys, bad, fmt):
+    """An entry before the matching record used to raise; one after it went unread (exit 0)."""
+    p, (record,) = _reinforced(tmp_path, "NET_A")
+    for entries, index in (([bad, record], 0), ([record, bad], 1)):
+        sidecar = _rewrite_sidecar(p, entries)
+        before = _snapshot(p, sidecar)
+        capsys.readouterr()
+        assert run_pcb_command(_args(p, net=None, adopt=True, format=fmt)) == 1
+        captured = capsys.readouterr()
+        _assert_refused(captured.err, sidecar, index)
+        assert captured.out == ""
+        assert _snapshot(p, sidecar) == before
+
+
+@pytest.mark.parametrize("net", [None, "NET_A", "NET_B"])
+@pytest.mark.parametrize("bad", _NON_OBJECTS)
+def test_list_wires_text_refuses_a_non_object_entry(tmp_path, capsys, bad, net):
+    """With or without --net, the text listing has to read every entry to print it."""
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_a, bad, net_b])
+    before = sidecar.read_bytes()
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net, list_wires=True)) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, sidecar, 1)
+    assert captured.out == ""
+    assert sidecar.read_bytes() == before
+
+
+def test_list_wires_json_refuses_a_net_filter_but_dumps_the_file_unfiltered(tmp_path, capsys):
+    """The list from the issue: the dump prints every entry in file order; filtering
+    needs records, so --net refuses and names the first offender."""
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    entries = [None, 1.5, net_a, "oops", [net_b], False, net_b]
+    sidecar = _rewrite_sidecar(p, entries)
+    before = sidecar.read_bytes()
+    for net in ("NET_A", "NET_B"):
+        capsys.readouterr()
+        assert run_pcb_command(_args(p, net, list_wires=True, format="json")) == 1
+        captured = capsys.readouterr()
+        _assert_refused(captured.err, sidecar, 0)
+        assert captured.out == ""
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net=None, list_wires=True, format="json")) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"sidecar": str(sidecar), "wires": entries}
+    assert captured.err == ""
+    assert sidecar.read_bytes() == before
+
+
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize("fmt", ["text", "json"])
+def test_clear_to_an_output_with_a_bad_destination_sidecar_writes_nothing(
+    tmp_path, capsys, fmt, existing_output
+):
+    """The output board used to be saved before ``drop_wires`` reached the sidecar
+    beside it, which is not the valid one beside the input."""
+    p, (net_a,) = _reinforced(tmp_path, "NET_A")
+    out = tmp_path / "out.kicad_pcb"
+    if existing_output:
+        out.write_bytes(p.read_bytes())
+    bad = _rewrite_sidecar(out, [net_a, None])
+    watched = [p, sidecar_path(p), bad] + ([out] if existing_output else [])
+    before = _snapshot(*watched)
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, "NET_A", clear=True, output=str(out), format=fmt)) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, bad, 1)
+    assert captured.out == ""
+    assert out.exists() is existing_output
+    assert _snapshot(*watched) == before
+
+
+@pytest.mark.parametrize(
+    ("reinforced", "mode"),
+    [("NET_B", {}), ("NET_B", {"replace": True}), ("NET_A", {"replace": True})],
+    ids=["add", "replace", "replace-after-clear"],
+)
+def test_reinforce_to_an_output_with_a_bad_destination_sidecar_writes_nothing(
+    tmp_path, capsys, reinforced, mode
+):
+    """The sidecar beside a ``-o`` board is merged into, or dropped from and then
+    merged into; either way it refuses the command before the board is saved."""
+    p, (net,) = _reinforced(tmp_path, reinforced)
+    out = tmp_path / "out.kicad_pcb"
+    bad = _rewrite_sidecar(out, [net, "oops"])
+    before = _snapshot(p, sidecar_path(p), bad)
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, "NET_A", output=str(out), **mode)) == 1
+    captured = capsys.readouterr()
+    _assert_refused(captured.err, bad, 1)
+    assert captured.out == ""
+    assert not out.exists()
+    assert _snapshot(p, sidecar_path(p), bad) == before
+
+
+def test_writers_refuse_a_non_object_entry_and_leave_the_file_alone(tmp_path):
+    """``write_sidecar`` and ``drop_wires`` rewrite the file from what they read, so
+    they refuse the list instead of raising mid-merge or writing around the entry."""
+    from kicad_tools.pcb.reinforcement_sidecar import (
+        check_wire_records,
+        drop_wires,
+        load_wire_records,
+        write_sidecar,
+    )
+
+    p, (net_a, net_b) = _reinforced(tmp_path, "NET_A", "NET_B")
+    sidecar = _rewrite_sidecar(p, [net_b, None])
+    before = sidecar.read_bytes()
+    with pytest.raises(ValueError, match=r"wires\[1\] is null, not a JSON object"):
+        load_wire_records(sidecar)
+    with pytest.raises(ValueError, match=r"wires\[1\]"):
+        write_sidecar(p, [net_a])
+    with pytest.raises(ValueError, match=r"wires\[1\]"):
+        drop_wires(sidecar, "NET_B", [(a["x"], a["y"]) for a in net_b["anchors"]])
+    assert sidecar.read_bytes() == before
+    assert check_wire_records(sidecar, [net_b, net_a]) is None
+    assert check_wire_records(sidecar, []) is None
+
+
+def test_empty_list_and_legacy_object_records_keep_their_behaviour(tmp_path, capsys):
+    """Both are valid: every consumer reads them as before."""
+    legacy = {
+        "net": "NET_B",
+        "layer": "F.Cu",
+        "leg_start": {"x": 20.0, "y": 70.0},
+        "leg_end": {"x": 120.0, "y": 70.0},
+        "anchors": [{"x": 20.0, "y": 70.0}, {"x": 120.0, "y": 70.0}],
+        "length_mm": 100.0,
+        "wire_gauge_awg": 16,
+        "status": "full",
+    }
+    p = _board(tmp_path)
+    sidecar = _rewrite_sidecar(p, [])
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net=None, list_wires=True)) == 0
+    assert "No wires recorded." in capsys.readouterr().out
+    for net in (None, "NET_A"):
+        assert run_pcb_command(_args(p, net=net, list_wires=True, format="json")) == 0
+        assert json.loads(capsys.readouterr().out)["wires"] == []
+    assert run_pcb_command(_args(p, net=None, adopt=True)) == 0
+    assert run_pcb_command(_args(p, "NET_A", clear=True)) == 0
+    assert load_wires(sidecar) == []
+
+    _rewrite_sidecar(p, [legacy])
+    assert run_pcb_command(_args(p, net=None, list_wires=True)) == 0
+    out = capsys.readouterr().out
+    assert "1 wire(s):" in out and "NET_B F.Cu 100.0 mm 16 AWG [full]" in out
+    assert run_pcb_command(_args(p, net="NET_B", list_wires=True, format="json")) == 0
+    assert json.loads(capsys.readouterr().out)["wires"] == [legacy]
+    assert run_pcb_command(_args(p, net=None, adopt=True)) == 0
+    assert run_pcb_command(_args(p)) == 0
+    assert [w["net"] for w in load_wires(sidecar)] == ["NET_A", "NET_B"]
+    assert next(w for w in load_wires(sidecar) if w["net"] == "NET_B") == legacy
+    assert run_pcb_command(_args(p, "NET_A", clear=True)) == 0
+    assert load_wires(sidecar) == [legacy]
+
+
 # ------------------------------------------------------- --adopt (Issue #9419)
 
 
@@ -405,6 +649,22 @@ def test_clear_refuses_before_writing_on_unreadable_destination(
     assert str(bad) in captured.err and reason in captured.err
     assert _tree_bytes(tmp_path) == before
     assert captured.out == ""
+
+
+def test_clear_refuses_a_directory_at_the_destination_sidecar(tmp_path, capsys):
+    board = _reinforced_source(tmp_path)
+    output = _output_arg(tmp_path, "existing")
+    destination = sidecar_path(Path(output))
+    destination.mkdir()
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, clear=True, output=output)) == 1
+
+    captured = capsys.readouterr()
+    assert str(destination) in captured.err
+    assert captured.out == ""
+    assert _tree_bytes(tmp_path) == before
 
 
 def test_clear_refusal_leaves_the_output_directory_as_it_was(tmp_path, capsys):
