@@ -14,14 +14,37 @@ from kicad_tools.parts.models import Part, PartPrice
 ROWS = [
     # lcsc, mfr, package, library_type, description, stock, price
     (100, "EXT-100N", "0603", "extended", "100nF 50V X7R 0603", 500, "1-:0.0100"),
-    (101, "BASIC-100N", "0603", "basic", "100nF 25V X7R 0603", 9000, "1-:0.0050"),
+    (101, "BASIC-100N", "0603", "basic", "100nF 50V X7R 0603", 9000, "1-:0.0050"),
     (102, "PREF-100N", "0603", "preferred", "100nF 50V X7R 0603", 800, "1-:0.0040"),
     (103, "EXT2-100N", "0603", "extended", "100nF 16V X7R 0603", 100, "1-:0.0030"),
     (104, "OOS-BASIC-100N", "0603", "basic", "100nF 10V X7R 0603", 0, "1-:0.0010"),
     (105, "OTHERPKG-100N", "0402", "basic", "100nF 10V X7R 0402", 900, "1-:0.0010"),
+    (106, "PREFIX", "0603", "basic", "1100nF 50V X7R 0603", 900, "1-:0.0010"),
     (200, "BASIC-10K", "0603", "basic", "10kΩ 1% 0603", 100, "1-:0.0020"),
     (201, "BASIC-10K-CHEAP", "0603", "basic", "10kΩ 5% 0603", 100, "1-:0.0010"),
 ]
+
+
+CAP_FAMILY = "Multilayer Ceramic Capacitors MLCC - SMD/SMT"
+RES_FAMILY = "Chip Resistor - Surface Mount"
+
+
+def _attributes(description):
+    if "nF" in description:
+        nominal, voltage, dielectric, _ = description.split()
+        return CAP_FAMILY, {
+            "Capacitance": nominal,
+            "Voltage Rating": voltage,
+            "Temperature Coefficient": dielectric,
+            "Tolerance": "±10%",
+        }
+    resistance, tolerance, _ = description.split()
+    return RES_FAMILY, {
+        "Resistance": resistance,
+        "Tolerance": tolerance,
+        "Power(Watts)": "1W",
+        "Type": "Thick Film Resistor",
+    }
 
 
 @pytest.fixture
@@ -31,11 +54,17 @@ def catalog_db(tmp_path, monkeypatch):
         conn.execute(
             "CREATE TABLE jlc_components (lcsc INTEGER PRIMARY KEY, mfr TEXT, package TEXT,"
             " manufacturer TEXT, library_type TEXT, description TEXT, datasheet TEXT,"
-            " stock INTEGER, price TEXT)"
+            " stock INTEGER, price TEXT, attributes TEXT)"
         )
+        records = []
+        for code, mpn, package, tier, desc, stock, price in ROWS:
+            family, attrs = _attributes(desc)
+            records.append(
+                (code, mpn, package, tier, f"{desc} {family}", stock, price, json.dumps(attrs))
+            )
         conn.executemany(
-            "INSERT INTO jlc_components VALUES (?,?,?,'M',?,?,'',?,?)",
-            [(r[0], r[1], r[2], r[3], r[4], r[5], r[6]) for r in ROWS],
+            "INSERT INTO jlc_components VALUES (?,?,?,'M',?,?,'',?,?,?)",
+            records,
         )
     monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog.get_catalog_path", lambda: path)
     return path
@@ -81,7 +110,7 @@ def test_cli_json(catalog_db, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["source"]["lcsc"] == "C100"
     ids = [a["lcsc"] for a in data["alternatives"]]
-    assert ids == ["C101", "C102", "C103"]
+    assert ids == ["C101", "C102"]
     assert set(data["alternatives"][0]) == {
         "lcsc",
         "mfr_part",
@@ -89,7 +118,12 @@ def test_cli_json(catalog_db, capsys):
         "library_type",
         "stock",
         "unit_price",
+        "inventory",
     }
+    for row in [data["source"], *data["alternatives"]]:
+        assert row["inventory"]["source"] == "offline_catalog"
+        assert row["inventory"]["stock_verified"] is False
+        assert row["inventory"]["observed_at"] is None
     assert data["alternatives"][0]["library_type"] == "basic"
 
 
@@ -97,13 +131,14 @@ def test_cli_text_and_limit(catalog_db, capsys):
     assert parts_cmd.main(["alternatives", "C100", "--limit", "1"]) == 0
     out = capsys.readouterr().out
     assert "C101" in out and "C102" not in out
+    assert "Catalog stock" in out
 
 
-def test_cli_basic_source_no_better(catalog_db, capsys):
-    # C200 is Basic; C201 is cheaper Basic with matching value token "10kΩ".
+def test_looser_tolerance_is_excluded(catalog_db, capsys):
+    # C201 is cheaper but widens tolerance from 1% to 5%.
     assert parts_cmd.main(["alternatives", "C200", "--format", "json"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert [a["lcsc"] for a in data["alternatives"]] == ["C201"]
+    assert [a["lcsc"] for a in data["alternatives"]] == []
     assert parts_cmd.main(["alternatives", "C201"]) == 0
     assert "No better" in capsys.readouterr().out
 
@@ -121,3 +156,62 @@ def test_cli_missing_catalog(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "sync-catalog" in err
     assert "Traceback" not in err
+
+
+def test_incomplete_source_and_adjustable_buck(catalog_db, capsys):
+    with sqlite3.connect(catalog_db) as db:
+        db.executemany(
+            "INSERT INTO jlc_components VALUES (?,?,?,?,?,?,'',50,'1-:0.01',?)",
+            [
+                (346540, "RHC2512FT4K70", "2512", "", "extended", f"2512 {RES_FAMILY}", "{}"),
+                (25483, "30ROHM", "2512", "M", "basic", f"30Ω 2512 {RES_FAMILY}", "{}"),
+                (780769, "AP63203WU-7", "TSOT-23-6", "Diodes", "extended", "-40℃~+85℃ Fixed", "{}"),
+                (
+                    2070724,
+                    "TPS562200DDCT",
+                    "TSOT-23-6",
+                    "TI",
+                    "basic",
+                    "-40℃~+85℃ Adjustable",
+                    "{}",
+                ),
+                (212, "AP63203WU-7B", "TSOT-23-6", "Diodes", "basic", "Fixed", "{}"),
+                (213, "AP63203WU-7", "TSOT-23-6", "Other", "basic", "Fixed", "{}"),
+                (214, "AP63203WU-7", "TSOT-23-6", "Diodes", "basic", "Fixed", "{}"),
+                (215, "AP63203WU-7", "SOT563", "Diodes", "basic", "Fixed", "{}"),
+            ],
+        )
+    for code, expected in [("C346540", []), ("C780769", ["C214"])]:
+        assert parts_cmd.main(["alternatives", code, "--format", "json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert [p["lcsc"] for p in data["alternatives"]] == expected
+
+
+@pytest.mark.parametrize("attributes", [None, "{", "[]", '{"Resistance": ""}', '{"Resistance":42}'])
+def test_unusable_attributes_require_exact_device(catalog_db, capsys, attributes):
+    with sqlite3.connect(catalog_db) as db:
+        db.execute("UPDATE jlc_components SET attributes=? WHERE lcsc=100", (attributes,))
+    assert parts_cmd.main(["alternatives", "C100", "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["alternatives"] == []
+
+
+def test_1206_resistor_with_lower_power_is_excluded(catalog_db, capsys):
+    family, attrs = _attributes("10kΩ 1% 1206")
+    with sqlite3.connect(catalog_db) as db:
+        for code, nominal, power, tier in [
+            (301, "10kΩ", "2W", "extended"),
+            (302, "10kΩ", "1W", "basic"),
+            (303, "10kΩ", "2W", "basic"),
+        ]:
+            db.execute(
+                "INSERT INTO jlc_components VALUES (?,?,'1206','M',?,?,'',50,'1-:0.01',?)",
+                (
+                    code,
+                    str(code),
+                    tier,
+                    f"1206 {nominal} {power} {family}",
+                    json.dumps({**attrs, "Resistance": nominal, "Power(Watts)": power}),
+                ),
+            )
+    assert parts_cmd.main(["alternatives", "C301", "--format", "json"]) == 0
+    assert [row["lcsc"] for row in json.loads(capsys.readouterr().out)["alternatives"]] == ["C303"]

@@ -13,8 +13,6 @@ source, or the same tier at a lower unit price, are suggested.
 
 from __future__ import annotations
 
-import re
-
 from .jlcparts_catalog import JlcpartsCatalog
 from .models import Part
 
@@ -68,28 +66,50 @@ def rank_alternatives(source: Part, candidates: list[Part], limit: int = 5) -> l
     return kept[: max(limit, 0)]
 
 
-def _value_term(source: Part) -> str:
-    """Pick the search term identifying the part's value/family.
+# jlcparts uses these description and attribute names for individual chip
+# resistors and multilayer ceramic capacitors. Arrays and active parts need
+# pinout/application evidence that the catalog cannot provide.
+_PASSIVE_FAMILIES = (
+    ("Chip Resistor - Surface Mount", ("Resistance", "Type", "Tolerance", "Power(Watts)")),
+    (
+        "Multilayer Ceramic Capacitors MLCC - SMD/SMT",
+        ("Capacitance", "Temperature Coefficient", "Tolerance", "Voltage Rating"),
+    ),
+)
 
-    The jlcparts schema has no value column, so use ``Part.value`` when set,
-    else the first description token containing a digit (e.g. ``100nF``,
-    ``10kΩ``), else the first description token.
-    """
-    if source.value:
-        return source.value
-    tokens = source.description.split()
-    for token in tokens:
-        if re.search(r"\d", token):
-            return token
-    return tokens[0] if tokens else source.mfr_part
+
+def _nominal(part: Part) -> str | None:
+    for family, required in _PASSIVE_FAMILIES:
+        if family in part.description and all(part.specs.get(key) for key in required):
+            return part.specs[required[0]]
+    return None
+
+
+def _same_device(source: Part, candidate: Part) -> bool:
+    return bool(
+        source.manufacturer
+        and source.mfr_part
+        and candidate.manufacturer.casefold() == source.manufacturer.casefold()
+        and candidate.mfr_part == source.mfr_part
+    )
 
 
 def suggest_alternatives(catalog: JlcpartsCatalog, source: Part, limit: int = 5) -> list[Part]:
-    """Query *catalog* for in-stock substitutes for *source* and rank them."""
-    term = _value_term(source)
-    if not term:
+    """Rank only candidates with matching identity or comparable passive specifications."""
+    nominal = _nominal(source)
+    if not source.package or not (nominal or (source.manufacturer and source.mfr_part)):
         return []
     candidates = catalog.search(
-        term, package=source.package or None, min_stock=1, limit=_POOL_LIMIT
+        nominal or source.mfr_part, package=source.package, min_stock=1, limit=_POOL_LIMIT
     )
-    return rank_alternatives(source, candidates, limit)
+    verified = [
+        candidate
+        for candidate in candidates
+        if _same_device(source, candidate)
+        or (
+            nominal
+            and _nominal(candidate) == nominal
+            and source.specs.items() <= candidate.specs.items()
+        )
+    ]
+    return rank_alternatives(source, verified, limit)

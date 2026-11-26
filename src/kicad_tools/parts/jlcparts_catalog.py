@@ -409,6 +409,20 @@ def _normalize_lcsc_id(lcsc_part: str) -> int | None:
     return int(digits)
 
 
+def _catalog_specs(raw: str) -> dict[str, str]:
+    """Read flat electrical attributes from catalog versions that include them."""
+    try:
+        attrs = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    if not isinstance(attrs, dict) or not all(
+        isinstance(v, str) and v.strip().casefold() not in {"", "-", "n/a", "unknown"}
+        for v in attrs.values()
+    ):
+        return {}
+    return attrs
+
+
 def _row_to_part(row: sqlite3.Row) -> Part:
     """Translate a ``jlc_components`` row into a :class:`Part`.
 
@@ -452,6 +466,7 @@ def _row_to_part(row: sqlite3.Row) -> Part:
         manufacturer=col_str("manufacturer"),
         description=description,
         category=_categorize_part(description, package),
+        specs=_catalog_specs(col_str("attributes")),
         package=package,
         package_type=_guess_package_type(package),
         stock=col_int("stock", 0),
