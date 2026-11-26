@@ -544,3 +544,151 @@ def test_distinct_output_symlink_seeds_from_the_edited_inputs_inventory(tmp_path
     nets = {w["net"] for w in load_wires(sidecar_path(out))}
     assert nets == {"NET_A", "NET_B"}
     assert len(load_wires(sidecar_path(out))) == 2
+
+
+def _list_wires_json(board: Path, capsys) -> list[dict]:
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, net=None, list_wires=True, format="json")) == 0
+    return json.loads(capsys.readouterr().out)["wires"]
+
+
+@pytest.mark.parametrize("op", ["add", "replace", "clear", "spaced"])
+def test_save_failure_through_output_symlink_preserves_pair_and_control_succeeds(
+    tmp_path, monkeypatch, capsys, op
+):
+    """PR #10253 hold: a failed PCB save must preserve the symlink, PCB, and wire inventory."""
+    src = tmp_path / "src.kicad_pcb"
+    _two_net_pcb().save(src)
+    assert run_pcb_command(_args(src, "NET_B")) == 0
+    if op in ("replace", "clear"):
+        assert run_pcb_command(_args(src, "NET_A")) == 0
+    other = tmp_path / "other.kicad_pcb"
+    _two_net_pcb().save(other)
+    assert run_pcb_command(_args(other, "NET_A")) == 0
+    out = tmp_path / "out.kicad_pcb"
+    out.symlink_to(other)
+
+    other_pcb_before = other.read_bytes()
+    other_record_before = sidecar_path(other).read_bytes()
+    out_target_before = out.readlink()
+    out_wires_before = _list_wires_json(out, capsys)
+    other_wires_before = _list_wires_json(other, capsys)
+    assert out_wires_before == other_wires_before
+    assert {w["net"] for w in out_wires_before} == {"NET_A"}
+
+    kw = {
+        "add": {},
+        "replace": {"replace": True},
+        "clear": {"clear": True},
+        "spaced": {"anchor_mode": "spaced"},
+    }[op]
+
+    def fail_save(self, path=None):
+        raise OSError("forced save failure")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(PCB, "save", fail_save)
+        capsys.readouterr()
+        assert run_pcb_command(_args(src, "NET_A", output=str(out), **kw)) == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Error saving PCB" in captured.err
+
+    assert out.is_symlink()
+    assert out.readlink() == out_target_before
+    assert not out.with_name(out.name + ".reinforcement.json").exists()
+    assert other.read_bytes() == other_pcb_before
+    assert sidecar_path(other).read_bytes() == other_record_before
+    assert _list_wires_json(out, capsys) == out_wires_before
+    assert _list_wires_json(other, capsys) == other_wires_before
+
+    # Control: without the save failure, the export detaches cleanly and leaves target intact.
+    assert run_pcb_command(_args(src, "NET_A", output=str(out), **kw)) == 0
+    assert not out.is_symlink()
+    assert other.read_bytes() == other_pcb_before
+    assert sidecar_path(other).read_bytes() == other_record_before
+    assert _list_wires_json(other, capsys) == other_wires_before
+    expected_out_nets = {"NET_A", "NET_B"} if op in ("add", "replace") else {"NET_B"}
+    assert {w["net"] for w in _list_wires_json(out, capsys)} == expected_out_nets
+
+
+@pytest.mark.parametrize("op", ["add", "replace", "clear", "spaced"])
+def test_save_failure_on_centered_alias_preserves_symlink_pair(tmp_path, monkeypatch, capsys, op):
+    """A failed PCB save through a centered alias must not detach its sidecar symlink."""
+    board, alias = _centered_alias_pair(tmp_path)
+    alias_record = alias.with_name(alias.name + ".reinforcement.json")
+    assert alias.is_symlink()
+    assert alias_record.is_symlink()
+    board_pcb_before = board.read_bytes()
+    board_record_before = sidecar_path(board).read_bytes()
+    alias_wires_before = _list_wires_json(alias, capsys)
+    board_wires_before = _list_wires_json(board, capsys)
+    assert alias_wires_before == board_wires_before
+
+    net = "NET_B" if op in ("add", "spaced") else "NET_A"
+    kw = {
+        "add": {},
+        "replace": {"replace": True},
+        "clear": {"clear": True},
+        "spaced": {"anchor_mode": "spaced"},
+    }[op]
+
+    def fail_save(self, path=None):
+        raise OSError("forced save failure")
+
+    monkeypatch.setattr(PCB, "save", fail_save)
+    capsys.readouterr()
+    assert run_pcb_command(_args(alias, net, **kw)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Error saving PCB" in captured.err
+    assert alias.is_symlink()
+    assert alias_record.is_symlink()
+    assert board.read_bytes() == board_pcb_before
+    assert sidecar_path(board).read_bytes() == board_record_before
+    assert _list_wires_json(alias, capsys) == alias_wires_before
+    assert _list_wires_json(board, capsys) == board_wires_before
+
+
+def test_sidecar_commit_failure_rolls_back_pcb_and_symlink(tmp_path, monkeypatch, capsys):
+    """If publishing the sidecar fails after PCB.save, the output symlink is restored."""
+    import os
+
+    from kicad_tools.pcb import reinforcement_sidecar as sidecar_mod
+
+    src = tmp_path / "src.kicad_pcb"
+    _two_net_pcb().save(src)
+    assert run_pcb_command(_args(src, "NET_B")) == 0
+    other = tmp_path / "other.kicad_pcb"
+    _two_net_pcb().save(other)
+    assert run_pcb_command(_args(other, "NET_A")) == 0
+    out = tmp_path / "out.kicad_pcb"
+    out.symlink_to(other)
+
+    other_pcb_before = other.read_bytes()
+    other_record_before = sidecar_path(other).read_bytes()
+    out_target_before = out.readlink()
+    out_wires_before = _list_wires_json(out, capsys)
+    other_wires_before = _list_wires_json(other, capsys)
+    expected_sidecar = out.with_name(out.name + ".reinforcement.json")
+
+    real_replace = os.replace
+
+    def fail_sidecar_replace(src_path, dst_path):
+        if Path(dst_path) == expected_sidecar:
+            raise OSError("forced sidecar replace failure")
+        return real_replace(src_path, dst_path)
+
+    monkeypatch.setattr(sidecar_mod.os, "replace", fail_sidecar_replace)
+    capsys.readouterr()
+    assert run_pcb_command(_args(src, "NET_A", output=str(out))) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Error updating reinforcement sidecar" in captured.err
+    assert out.is_symlink()
+    assert out.readlink() == out_target_before
+    assert not expected_sidecar.exists()
+    assert other.read_bytes() == other_pcb_before
+    assert sidecar_path(other).read_bytes() == other_record_before
+    assert _list_wires_json(out, capsys) == out_wires_before
+    assert _list_wires_json(other, capsys) == other_wires_before

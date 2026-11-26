@@ -15,7 +15,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from kicad_tools.pcb.reinforce import LEG_COPY, STRATEGY_PARALLEL, STRATEGY_WIRE
@@ -146,6 +151,196 @@ def carry_record(seed: Path, dest: Path, detach: bool = False) -> None:
     mode = seed.stat().st_mode & 0o7777
     dest.write_bytes(seed.read_bytes())
     _restrict_to_creation_mode(dest, mode)
+
+
+@dataclass(frozen=True)
+class PreparedRecordUpdate:
+    """In-memory reinforcement sidecar update ready to stage and publish."""
+
+    dest: Path
+    content: bytes | None
+    seed_mode: int | None = None
+    replace_symlink: bool = False
+    dropped: int = 0
+
+
+def _parse_wires(raw: bytes, path: Path) -> list[dict[str, Any]]:
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict) or data.get("version") != SIDECAR_VERSION:
+        raise ValueError(f"{path}: not a version {SIDECAR_VERSION} reinforcement sidecar")
+    wires = data.get("wires")
+    if not isinstance(wires, list):
+        raise ValueError(f"{path}: missing 'wires' list")
+    return wires
+
+
+def prepare_record_update(
+    seed: Path,
+    dest: Path,
+    *,
+    carry: bool = False,
+    detach: bool = False,
+    drop: tuple[str, list[tuple[float, float]], list[tuple[Any, ...]]] | None = None,
+    new_wires: list[dict[str, Any]] | None = None,
+) -> PreparedRecordUpdate:
+    """Compute the final sidecar bytes in memory without touching disk.
+
+    Combines carrying/detaching ``seed`` into ``dest``, dropping cleared wire
+    records, and merging ``new_wires`` so validation errors fail before any
+    PCB or sidecar file changes.
+    """
+    source_path: Path | None = None
+    source_bytes: bytes | None = None
+    seed_mode: int | None = None
+    replace_symlink = False
+    dirty = False
+
+    if carry:
+        if dest == seed:
+            if detach and dest.is_symlink():
+                replace_symlink = True
+                if dest.is_file():
+                    source_path = dest
+                    source_bytes = dest.read_bytes()
+                    seed_mode = dest.stat().st_mode & 0o7777
+                    dirty = True
+            elif dest.is_file():
+                source_path = dest
+        elif seed.is_file():
+            if dest.is_symlink():
+                source_path = seed
+                source_bytes = seed.read_bytes()
+                seed_mode = seed.stat().st_mode & 0o7777
+                replace_symlink = True
+                dirty = True
+            elif dest.exists():
+                if dest.is_file():
+                    source_path = dest
+            else:
+                source_path = seed
+                source_bytes = seed.read_bytes()
+                seed_mode = seed.stat().st_mode & 0o7777
+                dirty = True
+        elif detach and dest.is_symlink():
+            replace_symlink = True
+        elif dest.is_file():
+            source_path = dest
+    elif dest.is_file():
+        source_path = dest
+
+    current_wires: list[dict[str, Any]] | None = None
+    content: bytes | None = None
+    dropped = 0
+
+    if drop is not None:
+        net, removed, removed_copies = drop
+        if (removed or removed_copies) and source_path is not None:
+            raw = source_bytes if source_bytes is not None else source_path.read_bytes()
+            wires = _parse_wires(raw, source_path)
+            gone = wires_with_anchors(wires, net, removed)
+            keys = set(removed_copies)
+            gone += [w for w in wires_for_net(wires, net) if is_parallel(w) and wire_key(w) in keys]
+            dropped = len(gone)
+            if dropped:
+                gone_ids = {id(w) for w in gone}
+                current_wires = sort_wires([w for w in wires if id(w) not in gone_ids])
+                content = render_sidecar(current_wires).encode("utf-8")
+                dirty = True
+            else:
+                current_wires = wires
+
+    if new_wires:
+        if current_wires is None:
+            if source_path is not None:
+                raw = source_bytes if source_bytes is not None else source_path.read_bytes()
+                current_wires = _parse_wires(raw, source_path)
+            else:
+                current_wires = []
+        merged = merge_wires(current_wires, new_wires)
+        content = render_sidecar(merged).encode("utf-8")
+        dirty = True
+
+    if dirty and content is None:
+        content = source_bytes
+
+    return PreparedRecordUpdate(
+        dest=dest,
+        content=content,
+        seed_mode=seed_mode,
+        replace_symlink=replace_symlink,
+        dropped=dropped,
+    )
+
+
+@contextmanager
+def stage_record_update(
+    plan: PreparedRecordUpdate,
+    *,
+    pcb_output: Path | None = None,
+) -> Iterator[Callable[[], None]]:
+    """Stage ``plan`` into a sibling file and publish it atomically on commit.
+
+    No target sidecar is created, modified, or unlinked before the returned
+    ``commit`` callback runs, so a failed PCB save leaves the prior PCB,
+    symlink, and wire inventory intact. If ``commit`` itself fails after a
+    PCB save to ``pcb_output``, ``pcb_output`` is restored to its pre-save
+    entry (regular file, symlink, or absent).
+    """
+    if plan.content is None:
+        yield lambda: None
+        return
+
+    write_target = (
+        plan.dest if (plan.replace_symlink or not plan.dest.is_symlink()) else plan.dest.resolve()
+    )
+    if write_target.is_dir() and not plan.replace_symlink:
+        raise IsADirectoryError(f"{write_target} is a directory")
+    replacing_regular = (
+        not plan.replace_symlink and write_target.exists() and not write_target.is_symlink()
+    )
+    if replacing_regular:
+        with write_target.open("ab"):
+            pass
+
+    with ExitStack() as stack:
+        tmpdir = Path(
+            stack.enter_context(TemporaryDirectory(prefix=".reinforce-", dir=write_target.parent))
+        )
+        candidate = tmpdir / "record"
+        with candidate.open("wb") as stream:
+            stream.write(plan.content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if replacing_regular:
+            shutil.copymode(write_target, candidate)
+        elif plan.seed_mode is not None:
+            _restrict_to_creation_mode(candidate, plan.seed_mode)
+
+        pcb_backup: Path | None = None
+        if pcb_output is not None and os.path.lexists(pcb_output):
+            if pcb_output.parent.resolve() == write_target.parent.resolve():
+                backup_dir = tmpdir
+            else:
+                backup_dir = Path(
+                    stack.enter_context(
+                        TemporaryDirectory(prefix=".reinforce-pcb-", dir=pcb_output.parent)
+                    )
+                )
+            pcb_backup = backup_dir / "original_pcb"
+            shutil.copy2(pcb_output, pcb_backup, follow_symlinks=False)
+
+        def commit() -> None:
+            try:
+                os.replace(candidate, write_target)
+            except BaseException:
+                if pcb_output is not None:
+                    if pcb_backup is not None and os.path.lexists(pcb_backup):
+                        os.replace(pcb_backup, pcb_output)
+                    else:
+                        pcb_output.unlink(missing_ok=True)
+                raise
+
+        yield commit
 
 
 def _pt(x: float, y: float) -> dict[str, float]:

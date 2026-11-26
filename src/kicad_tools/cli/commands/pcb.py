@@ -1437,19 +1437,83 @@ def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
     ]
 
 
+def _publish_reinforce_outputs(
+    pcb, pcb_path: Path, output_path: Path, plan, *, will_save: bool
+) -> bool:
+    """Publish staged reinforcement sidecar and PCB together; preserve both on failure."""
+    from kicad_tools.pcb.reinforcement_sidecar import stage_record_update
+
+    try:
+        with stage_record_update(plan, pcb_output=output_path if will_save else None) as commit:
+            if will_save:
+                try:
+                    pcb.save(output_path)
+                except Exception as e:
+                    print(f"Error saving PCB: {e}", file=sys.stderr)
+                    return False
+            try:
+                commit()
+            except OSError as e:
+                print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+                return False
+            if will_save:
+                try:
+                    _carry_sidecars(pcb_path, output_path)
+                except Exception as e:
+                    print(f"Error saving PCB: {e}", file=sys.stderr)
+                    return False
+    except OSError as e:
+        print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+        return False
+    return True
+
+
 def _finish_reinforce_clear(
     args, pcb, pcb_path: Path, output_path: Path, clear_outcome, dry_run: bool, output_format: str
 ) -> int:
     """Report and (unless ``--dry-run``) save a ``pcb reinforce --clear`` pass (#8747)."""
     origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    saved = not dry_run and _cleared_anything(clear_outcome)
+    dropped = 0
+    if saved:
+        from kicad_tools.pcb.reinforcement_sidecar import (
+            alias_export_conflict,
+            edit_seed_record,
+            prepare_record_update,
+            saved_record_path,
+        )
+
+        # The inventory of the PCB being edited, not of whatever the output name resolves to.
+        conflict = alias_export_conflict(pcb_path, output_path, True, False)
+        if conflict:
+            print(f"Error: {conflict}", file=sys.stderr)
+            return 1
+        seed_record = edit_seed_record(pcb_path, output_path)
+        was_alias = output_path.is_symlink()
+        record = saved_record_path(output_path, True)
+        removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
+        copies = [c.key for c in getattr(clear_outcome, "copies_removed", [])]
+        try:
+            plan = prepare_record_update(
+                seed_record,
+                record,
+                carry=True,
+                detach=was_alias,
+                drop=(clear_outcome.net_name, removed, copies),
+            )
+        except (OSError, ValueError) as e:
+            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+        if not _publish_reinforce_outputs(pcb, pcb_path, output_path, plan, will_save=True):
+            return 1
+        dropped = plan.dropped
+
     if output_format == "json":
         print(
             json.dumps(
                 {
                     "input": str(pcb_path),
-                    "output": str(output_path)
-                    if not dry_run and _cleared_anything(clear_outcome)
-                    else None,
+                    "output": str(output_path) if saved else None,
                     "dry_run": dry_run,
                     "clear": True,
                     "net": clear_outcome.net_name,
@@ -1488,43 +1552,13 @@ def _finish_reinforce_clear(
             print("  Nothing to clear: no anchor-sized same-net vias found.")
         else:
             _print_clear_lines(clear_outcome, origin_x, origin_y, dry_run)
-        if not dry_run and _cleared_anything(clear_outcome):
+        if saved:
             print()
             print("  NOTE: refill zone pours afterward (e.g. `kicad-cli pcb drc --refill-zones`).")
-
-    if not dry_run and _cleared_anything(clear_outcome):
-        from kicad_tools.pcb.reinforcement_sidecar import (
-            alias_export_conflict,
-            carry_record,
-            edit_seed_record,
-            sidecar_path,
-        )
-
-        # The inventory of the PCB being edited, not of whatever the output name resolves to.
-        conflict = alias_export_conflict(pcb_path, output_path, True, False)
-        if conflict:
-            print(f"Error: {conflict}", file=sys.stderr)
-            return 1
-        seed_record = edit_seed_record(pcb_path, output_path)
-        was_alias = output_path.is_symlink()
-        try:
-            pcb.save(output_path)
-            _carry_sidecars(pcb_path, output_path)
-            if output_format == "text":
-                print()
-                print(f"  Saved to: {output_path}")
-        except Exception as e:
-            print(f"Error saving PCB: {e}", file=sys.stderr)
-            return 1
-        try:
-            # A save through a board symlink detaches it: pair the record with the saved file.
-            carry_record(seed_record, sidecar_path(output_path), detach=was_alias)
-            dropped = _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
-        except (OSError, ValueError) as e:
-            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
-            return 1
-        if dropped and output_format == "text":
-            print(f"  Sidecar:  dropped {dropped} wire record(s)")
+            print()
+            print(f"  Saved to: {output_path}")
+            if dropped:
+                print(f"  Sidecar:  dropped {dropped} wire record(s)")
     return 0
 
 
@@ -2012,8 +2046,10 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     # The save below replaces a board symlink with its own file, so the record
     # is chosen as the pair of the PCB that will exist, not of the alias target.
     from kicad_tools.pcb.reinforcement_sidecar import (
-        carry_record,
+        alias_export_conflict,
+        build_wire_records,
         edit_seed_record,
+        prepare_record_update,
         saved_record_path,
     )
 
@@ -2022,25 +2058,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         or outcome.copies
         or (clear_outcome is not None and _cleared_anything(clear_outcome))
     )
-    from kicad_tools.pcb.reinforcement_sidecar import alias_export_conflict, build_wire_records
-
     wire_records = build_wire_records(outcome, origin_x, origin_y)
-    if not dry_run:
-        conflict = alias_export_conflict(pcb_path, output_path, will_save, bool(wire_records))
-        if conflict:
-            print(f"Error: {conflict}", file=sys.stderr)
-            return 1
-    seed_record = edit_seed_record(pcb_path, output_path)
-    was_alias = output_path.is_symlink()
-    record = saved_record_path(output_path, will_save)
-    if will_save and not dry_run:
-        # Detach the inventory whenever the save detaches the PCB, even when this
-        # pass writes no wire records (e.g. spaced mode).
-        try:
-            carry_record(seed_record, record, detach=was_alias)
-        except (OSError, ValueError) as e:
-            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
-            return 1
     if clear_outcome is not None:
         result["replace"] = True
         result["anchors_cleared"] = clear_outcome.removed_count
@@ -2053,29 +2071,49 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             clear_outcome.openings_removed, origin_x, origin_y
         )
         result["copies_cleared"] = _cleared_copy_entries(clear_outcome)
-        if not dry_run:
-            try:
-                _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y, record)
-            except (OSError, ValueError) as e:
-                print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
-                return 1
 
     # Issue #8744: wire list sidecar (ends mode only; never on a dry run).
-    from kicad_tools.pcb.reinforcement_sidecar import write_sidecar
-
     result["wires"] = wire_records
     result["wire_sidecar"] = None
-    if not dry_run and wire_records:
-        try:
-            result["wire_sidecar"] = str(write_sidecar(output_path, wire_records, record))
-        except (OSError, ValueError) as e:
-            print(f"Error writing reinforcement sidecar: {e}", file=sys.stderr)
+    if not dry_run:
+        conflict = alias_export_conflict(pcb_path, output_path, will_save, bool(wire_records))
+        if conflict:
+            print(f"Error: {conflict}", file=sys.stderr)
             return 1
-    elif not dry_run and outcome.anchor_mode == "spaced":
-        print(
-            "Note: spaced mode has no per-wire legs; no reinforcement sidecar written",
-            file=sys.stderr,
-        )
+        seed_record = edit_seed_record(pcb_path, output_path)
+        was_alias = output_path.is_symlink()
+        record = saved_record_path(output_path, will_save)
+        drop = None
+        if clear_outcome is not None:
+            removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
+            copies = [c.key for c in getattr(clear_outcome, "copies_removed", [])]
+            if removed or copies:
+                drop = (clear_outcome.net_name, removed, copies)
+        # Detach the inventory whenever the save detaches the PCB, even when this
+        # pass writes no wire records (e.g. spaced mode). Stage the sidecar and
+        # publish it only after the PCB save succeeds so a failed save leaves the
+        # prior PCB, symlink, and wire inventory intact.
+        try:
+            plan = prepare_record_update(
+                seed_record,
+                record,
+                carry=will_save,
+                detach=was_alias,
+                drop=drop,
+                new_wires=wire_records,
+            )
+        except (OSError, ValueError) as e:
+            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+        if not _publish_reinforce_outputs(pcb, pcb_path, output_path, plan, will_save=will_save):
+            return 1
+        if wire_records:
+            result["wire_sidecar"] = str(record)
+        elif outcome.anchor_mode == "spaced":
+            print(
+                "Note: spaced mode has no per-wire legs; no reinforcement sidecar written",
+                file=sys.stderr,
+            )
 
     for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
         print(
@@ -2207,21 +2245,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             else:
                 print("  NOTE: mask openings are off; anchors inherit the board's via tenting.")
 
-    # Save unless dry-run and at least one anchor or copy was placed (or cleared).
-    if not dry_run and (
-        outcome.placed_count
-        or outcome.copies
-        or (clear_outcome is not None and _cleared_anything(clear_outcome))
-    ):
-        try:
-            pcb.save(output_path)
-            _carry_sidecars(pcb_path, output_path)
-            if output_format == "text":
-                print()
-                print(f"  Saved to: {output_path}")
-        except Exception as e:
-            print(f"Error saving PCB: {e}", file=sys.stderr)
-            return 1
+    if not dry_run and will_save and output_format == "text":
+        print()
+        print(f"  Saved to: {output_path}")
 
     return 0
 
