@@ -2624,6 +2624,19 @@ def check_silk_ref_obscured(
         if ref_text.hidden:
             if is_fiducial_footprint(footprint):
                 continue  # hiding fiducial references is the convention (#8540)
+            if (
+                footprint.exclude_from_bom
+                and footprint.exclude_from_pos_files
+                and footprint.pads
+                and all(
+                    pad.type == "np_thru_hole"
+                    and not pad.number
+                    and not pad.net_number
+                    and not pad.net_name
+                    for pad in footprint.pads
+                )
+            ):
+                continue  # Bare tooling holes have no part to identify (#10350).
             if _has_replacement_silk_text(pcb, footprint, ref_text.layer, Polygon):
                 continue  # hidden on purpose, replaced by a function label (#9435)
             results.add(
