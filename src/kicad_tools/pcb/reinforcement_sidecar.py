@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,12 @@ SIDECAR_SUFFIX = ".reinforcement.json"
 
 
 def sidecar_path(board: Path) -> Path:
-    """Sidecar location for a board: ``<board>.reinforcement.json``."""
+    """Find the board's wire record, including boards reached through a symlink."""
+    if board.is_symlink():
+        named = board.with_name(board.name + SIDECAR_SUFFIX)
+        if os.path.lexists(named):
+            return named  # Keep a record explicitly paired with the alias.
+        board = board.resolve()
     return board.with_name(board.name + SIDECAR_SUFFIX)
 
 
