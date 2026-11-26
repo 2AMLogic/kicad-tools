@@ -742,6 +742,7 @@ def center_on_sheet(
     legacy record beside it, both board names are bound to one inventory.
     """
     from kicad_tools.pcb.reinforcement_sidecar import (
+        check_wire_records,
         load_wires,
         render_sidecar,
         translate_sidecar_wires,
@@ -833,6 +834,7 @@ def center_on_sheet(
         if os.path.lexists(src_sidecar):
             wires = load_wires(src_sidecar)
             if report.dx_mm or report.dy_mm:
+                check_wire_records(src_sidecar, wires)
                 record = render_sidecar(
                     translate_sidecar_wires(wires, report.dx_mm, report.dy_mm)
                 ).encode()

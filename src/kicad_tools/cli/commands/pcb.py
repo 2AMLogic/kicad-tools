@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -1354,48 +1355,6 @@ def _load_sidecar_wires(pcb_path: Path) -> list | None:
     return wires
 
 
-def _check_destination_sidecar(board: Path) -> None:
-    """Raise ``ValueError`` when ``board``'s sidecar holds a non-object entry (Issue #10401).
-
-    ``pcb reinforce --clear`` saves the ``-o`` board before ``drop_wires``
-    rewrites the sidecar beside it, so that sidecar is checked first. An
-    absent sidecar and an unreadable envelope are left to the steps that
-    follow, which keep their #8747 handling.
-    """
-    from kicad_tools.pcb.reinforcement_sidecar import check_wire_records, load_wires, sidecar_path
-
-    path = sidecar_path(board)
-    if not path.is_file():
-        return
-    try:
-        wires = load_wires(path)
-    except (OSError, ValueError):
-        return
-    check_wire_records(path, wires)
-
-
-def _drop_cleared_wires(
-    output_path: Path,
-    clear_outcome,
-    origin_x: float,
-    origin_y: float,
-    record: Path | None = None,
-) -> int:
-    """Remove the sidecar wire records whose anchors were cleared (#8747)."""
-    from kicad_tools.pcb.reinforcement_sidecar import drop_wires, sidecar_path
-
-    removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
-    copies = [c.key for c in getattr(clear_outcome, "copies_removed", [])]
-    if not removed and not copies:
-        return 0
-    return drop_wires(
-        record if record is not None else sidecar_path(output_path),
-        clear_outcome.net_name,
-        removed,
-        copies,
-    )
-
-
 def _cleared_anything(clear_outcome) -> bool:
     """True when a clear pass removed an anchor or a parallel copy (#8916)."""
     return bool(clear_outcome.removed_count or getattr(clear_outcome, "copies_removed", None))
@@ -1486,6 +1445,21 @@ def _publish_reinforce_outputs(
         print(f"Error {action}: {e}", file=sys.stderr)
         return False
     return True
+
+
+def _check_clear_destination(destination: Path) -> None:
+    """Read the wire records before a clear or replacement writes any files."""
+    from kicad_tools.pcb.reinforcement_sidecar import load_wire_records
+
+    try:
+        mode = destination.lstat().st_mode
+    except FileNotFoundError:
+        return  # No directory entry, so there are no records to drop.
+    if stat.S_ISLNK(mode):
+        mode = destination.stat().st_mode
+    if not stat.S_ISREG(mode):
+        raise ValueError("expected a regular reinforcement sidecar file")
+    load_wire_records(destination)
 
 
 def _finish_reinforce_clear(
@@ -1899,6 +1873,18 @@ def _reinforce(args, pcb_path: Path, verify_source: Callable[[], None]) -> int:
         except ReinforceError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
+        if not dry_run and _cleared_anything(clear_outcome):
+            from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+
+            destination = sidecar_path(output_path)
+            try:
+                _check_clear_destination(destination)
+            except (OSError, ValueError) as exc:
+                reason = str(exc).removeprefix(f"{destination}: ")
+                print(
+                    f"Error reading {destination}: {reason} -- nothing was written", file=sys.stderr
+                )
+                return 1
         if clear_only:
             return _finish_reinforce_clear(
                 args,

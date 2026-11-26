@@ -388,3 +388,143 @@ def test_review_page_contains_only_expected_files(plan, tmp_path):
     assert set(plan_core["outputs"]) == {
         name.removeprefix("uploads/") for name in found if name.startswith("uploads/")
     }
+
+
+# --- Issue #10431: the supplementary purchasing list ---
+
+
+def with_purchasing(plan_inputs, document=None):
+    """Freeze (or re-freeze) the fuse example's per-board purchasing list into the bundle."""
+    from tests.test_manufacturing_package import FUSE_PER_BOARD
+
+    target = plan_inputs["bundle_root"] / "purchasing.json"
+    target.write_bytes(sp._json(document if document is not None else FUSE_PER_BOARD))
+    listed = (*plan_inputs["bundle_files"], "purchasing.json")
+    plan_inputs["bundle_files"] = tuple(dict.fromkeys(listed))
+    refresh_manifest(plan_inputs)
+    return target
+
+
+def resolved_cartridge():
+    """The fuse example with its DC cartridge selected instead of pending."""
+    from copy import deepcopy
+
+    from tests.test_manufacturing_package import FUSE_PER_BOARD
+
+    document = deepcopy(FUSE_PER_BOARD)
+    document["items"][2] = {
+        "description": "5 x 20 mm cartridge, DC",
+        "per_board": 2,
+        "refs": ["F2", "F3"],
+        "status": "selected",
+        "manufacturer": "Example Fuse Co",
+        "mpn": "SYN-CART-DC",
+    }
+    return document
+
+
+def purchasing_section(page):
+    return (page.directory / "index.md").read_text().split("## Purchasing list", 1)[1]
+
+
+def test_review_page_scales_the_purchasing_list_and_names_outstanding_selections(
+    plan_inputs, tmp_path
+):
+    from tests.test_manufacturing_package import FUSE_PER_BOARD
+
+    with_purchasing(plan_inputs)
+    one = sr.render_review_page(
+        sp.prepare_submission(**(plan_inputs | {"destination": tmp_path / "handoff-one"})),
+        destination=tmp_path / "page-one",
+    )
+    two = sr.render_review_page(
+        sp.prepare_submission(
+            **(plan_inputs | {"destination": tmp_path / "handoff-two", "board_quantity": 2})
+        ),
+        destination=tmp_path / "page-two",
+    )
+
+    section = purchasing_section(two)
+    assert (
+        "| Snap-on cover for the 5 x 20 mm fuse holder | 3 | 6 | F1, F2, F3 | "
+        "Example Fuse Co SYN-COVER-1 |"
+    ) in section
+    assert "| 5 x 20 mm cartridge, AC | 1 | 2 | F1 | Example Fuse Co SYN-CART-AC |" in section
+    assert "| 5 x 20 mm cartridge, DC | 2 | 4 | F2, F3 | PENDING" in section
+    assert "| Mains cord set | 1 | 2 | (none) | Example Cable Co SYN-CORD-1 |" in section
+    # Each outstanding selection is identified by description and linked designators.
+    assert (
+        "- 5 x 20 mm cartridge, DC: 4 for this build (2 per board), linked F2, F3"
+        " -- DC rating and breaking capacity still to be chosen"
+    ) in section
+    assert "SYN-CART-DC" not in section
+    assert "| Snap-on cover for the 5 x 20 mm fuse holder | 3 | 3 |" in purchasing_section(one)
+
+    data = (two.directory / "purchasing.json").read_bytes()
+    assert json.loads(data) == {
+        "schema_version": 1,
+        "board_quantity": 2,
+        "items": [row | {"required": row["per_board"] * 2} for row in FUSE_PER_BOARD["items"]],
+    }
+    manifest = json.loads(two.manifest_bytes)
+    assert manifest["files"]["purchasing.json"] == {"sha256": digest(data), "size": len(data)}
+    found = {
+        str(p.relative_to(two.directory))
+        for p in two.directory.rglob("*")
+        if p.is_file() and p.name != "review-page-manifest.json"
+    }
+    assert found == set(manifest["files"])
+
+
+def test_review_page_without_purchasing_list_has_no_section(plan, tmp_path):
+    page = sr.render_review_page(plan, destination=tmp_path / "page")
+    index = (page.directory / "index.md").read_text()
+
+    assert "Purchasing list" not in index and "Outstanding selections" not in index
+    assert "purchasing.json" not in json.loads(page.manifest_bytes)["files"]
+    assert not (page.directory / "purchasing.json").exists()
+
+
+def test_resolving_the_pending_row_clears_the_outstanding_selections(plan_inputs, tmp_path):
+    with_purchasing(plan_inputs)
+    pending = sr.render_review_page(
+        sp.prepare_submission(**(plan_inputs | {"destination": tmp_path / "handoff-pending"})),
+        destination=tmp_path / "page-pending",
+    )
+    with_purchasing(plan_inputs, resolved_cartridge())
+    resolved = sr.render_review_page(
+        sp.prepare_submission(**(plan_inputs | {"destination": tmp_path / "handoff-resolved"})),
+        destination=tmp_path / "page-resolved",
+    )
+
+    assert "Outstanding selections (1)" in purchasing_section(pending)
+    section = purchasing_section(resolved)
+    assert "Outstanding selections: none" in section and "PENDING" not in section
+    assert "| 5 x 20 mm cartridge, DC | 2 | 2 | F2, F3 | Example Fuse Co SYN-CART-DC |" in section
+
+
+def test_changed_purchasing_list_invalidates_the_bound_review(plan_inputs, tmp_path):
+    with_purchasing(plan_inputs)
+    record = submit(
+        sp.prepare_submission(**(plan_inputs | {"destination": tmp_path / "handoff"})), tmp_path
+    )
+    with_purchasing(plan_inputs, resolved_cartridge())
+    revised = sp.prepare_submission(**(plan_inputs | {"destination": tmp_path / "handoff-2"}))
+
+    with pytest.raises(sr.ReviewError, match="different plan"):
+        sr.verify_review(record, revised)
+    with pytest.raises(sr.ReviewError, match="different plan"):
+        sr.render_review_page(revised, destination=tmp_path / "page", record=record)
+    assert not (tmp_path / "page").exists()
+
+
+def test_hand_edited_purchasing_rows_refuse_to_render(plan_inputs, tmp_path):
+    with_purchasing(plan_inputs)
+    plan = sp.prepare_submission(**plan_inputs)
+    core = json.loads(plan.plan_bytes)
+    core["purchasing"]["items"][2]["required"] = 3
+    forged = sp.SubmissionPlan(plan.directory, sp._json(core))
+
+    with pytest.raises(sr.ReviewError, match="purchasing"):
+        sr.render_review_page(forged, destination=tmp_path / "page")
+    assert not (tmp_path / "page").exists()

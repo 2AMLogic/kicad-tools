@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli import main
 from kicad_tools.cli.commands.pcb import run_pcb_command
 from kicad_tools.pcb.reinforcement_sidecar import (
     is_parallel,
@@ -955,6 +956,260 @@ def test_sidecar_commit_failure_rolls_back_pcb_and_symlink(tmp_path, monkeypatch
     assert sidecar_path(other).read_bytes() == other_record_before
     assert _list_wires_json(out, capsys) == out_wires_before
     assert _list_wires_json(other, capsys) == other_wires_before
+
+
+# --------------------------------------------------------------------------
+# Issue #10419: --clear refuses before any write when the destination
+# reinforcement sidecar cannot be read
+# --------------------------------------------------------------------------
+
+_BAD_VERSION = '{"version": 2, "wires": []}\n'
+_MODES = ["inplace", "fresh", "existing"]
+
+
+def _unreadable_sidecars() -> list:
+    """``(file text, reason)`` for three sidecars no version-1 reader accepts."""
+    with pytest.raises(ValueError) as info:
+        json.loads("{not json\n")
+    return [
+        pytest.param(_BAD_VERSION, "not a version 1 reinforcement sidecar", id="wrong_version"),
+        pytest.param("{not json\n", str(info.value), id="malformed_json"),
+        pytest.param('{"version": 1}\n', "missing 'wires' list", id="no_wire_list"),
+    ]
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    """Every file under ``root`` by relative path, so an absent file shows up too."""
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+def _reinforced_source(tmp_path: Path, **reinforce) -> Path:
+    """The two-net board reinforced on NET_A (2 anchors, 1 mask opening), in ``tmp_path/src``.
+
+    A ``.kicad_pro`` sits beside it, so a project-sidecar copy to a refused
+    ``-o`` output would be noticed.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    board = _board(src)
+    assert run_pcb_command(_args(board, **reinforce)) == 0
+    (src / "board.kicad_pro").write_text('{"board": {}}\n')
+    return board
+
+
+def _output_arg(tmp_path: Path, mode: str) -> str | None:
+    """The ``-o`` of a clear: in place, a fresh output, or an output holding another board."""
+    if mode == "inplace":
+        return None
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out = out_dir / "out.kicad_pcb"
+    if mode == "existing":
+        _two_net_pcb(length=80.0).save(out)
+    return str(out)
+
+
+def _destination(board: Path, output: str | None) -> Path:
+    return Path(output) if output else board
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("text, reason", _unreadable_sidecars())
+def test_clear_refuses_before_writing_on_unreadable_destination(
+    tmp_path, capsys, mode, text, reason
+):
+    board, output = _reinforced_source(tmp_path), _output_arg(tmp_path, mode)
+    bad = sidecar_path(_destination(board, output))
+    bad.write_text(text)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(board, clear=True, output=output))
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert str(bad) in captured.err and reason in captured.err
+    assert _tree_bytes(tmp_path) == before
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("kind", ["dangling", "directory"])
+@pytest.mark.parametrize(
+    "flags", [["--clear"], ["--replace"], ["--replace", "--anchor-mode", "spaced"]]
+)
+def test_refuses_unreadable_destination_entry(tmp_path, capsys, mode, kind, flags):
+    board = _reinforced_source(tmp_path)
+    output = _output_arg(tmp_path, mode)
+    destination = sidecar_path(_destination(board, output))
+    destination.unlink(missing_ok=True)
+    target = tmp_path / "missing.json"
+    if kind == "dangling":
+        destination.symlink_to(target)
+    else:
+        destination.mkdir()
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    argv = ["pcb", "reinforce", str(board), "--net", "NET_A", *flags]
+    if output:
+        argv.extend(["-o", output])
+    assert main(argv) == 1
+
+    captured = capsys.readouterr()
+    assert str(destination) in captured.err and captured.out == ""
+    assert _tree_bytes(tmp_path) == before
+    if kind == "dangling":
+        assert destination.readlink() == target and not target.exists()
+    else:
+        assert destination.is_dir()
+
+
+@pytest.mark.parametrize("flag", ["--clear", "--replace"])
+def test_readable_destination_symlink_is_preserved(tmp_path, flag):
+    board = _reinforced_source(tmp_path)
+    destination = sidecar_path(board)
+    target = destination.rename(tmp_path / "records.json")
+    destination.symlink_to(target)
+
+    assert main(["pcb", "reinforce", str(board), "--net", "NET_A", flag]) == 0
+    assert destination.readlink() == target
+    assert len(load_wires(target)) == (0 if flag == "--clear" else 1)
+
+
+def test_clear_refusal_leaves_the_output_directory_as_it_was(tmp_path, capsys):
+    """A refused ``-o`` clear copies no project sidecar either."""
+    board = _reinforced_source(tmp_path)
+    output = _output_arg(tmp_path, "fresh")
+    sidecar_path(Path(output)).write_text(_BAD_VERSION)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, clear=True, output=output)) == 1
+
+    assert [p.name for p in (tmp_path / "out").iterdir()] == ["out.kicad_pcb.reinforcement.json"]
+
+
+def test_clear_refusal_prints_no_json_document(tmp_path, capsys):
+    board = _reinforced_source(tmp_path)
+    bad = sidecar_path(board)
+    bad.write_text(_BAD_VERSION)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, clear=True, format="json")) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == "" and str(bad) in captured.err
+
+
+def test_clear_of_a_parallel_copy_refuses_on_unreadable_destination(tmp_path, capsys):
+    """The source records identify the copy; the destination still has to be readable."""
+    src = tmp_path / "src"
+    src.mkdir()
+    board = src / "short.kicad_pcb"
+    _two_net_pcb(length=12.0).save(board)
+    assert run_pcb_command(_args(board, strategy="parallel")) == 0
+    output = _output_arg(tmp_path, "fresh")
+    bad = sidecar_path(Path(output))
+    bad.write_text(_BAD_VERSION)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, clear=True, output=output)) == 1
+
+    captured = capsys.readouterr()
+    assert str(bad) in captured.err and captured.out == ""
+    assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_replace_with_unreadable_destination_writes_nothing(tmp_path, capsys, mode):
+    """Regression control: ``--replace`` drops the cleared wires before its board save."""
+    board, output = _reinforced_source(tmp_path), _output_arg(tmp_path, mode)
+    bad = sidecar_path(_destination(board, output))
+    bad.write_text(_BAD_VERSION)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, replace=True, output=output)) == 1
+
+    captured = capsys.readouterr()
+    assert str(bad) in captured.err and captured.out == ""
+    assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("text, reason", _unreadable_sidecars())
+@pytest.mark.parametrize("clear", [True, False], ids=["clear", "replace"])
+def test_unreadable_source_falls_back_to_size_toward_a_fresh_destination(
+    tmp_path, capsys, text, reason, clear
+):
+    board = _reinforced_source(tmp_path)
+    sidecar_path(board).write_text(text)
+    output = _output_arg(tmp_path, "fresh")
+    source_before = _tree_bytes(tmp_path / "src")
+
+    capsys.readouterr()
+    rc = run_pcb_command(_args(board, clear=clear, replace=not clear, output=output, format="json"))
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert f"Warning: ignoring unreadable {sidecar_path(board)}" in captured.err
+    assert json.loads(captured.out)["identified_by"] == "size"
+    assert len(PCB.load(Path(output)).vias) == (0 if clear else 2)
+    written = sidecar_path(Path(output))
+    if clear:
+        assert not written.exists()
+    else:
+        assert len(load_wires(written)) == 1
+    assert _tree_bytes(tmp_path / "src") == source_before
+
+
+@pytest.mark.parametrize("clear", [True, False], ids=["clear", "replace"])
+@pytest.mark.parametrize("mode", _MODES)
+def test_dry_run_reports_an_unreadable_destination_without_failing(tmp_path, capsys, mode, clear):
+    board, output = _reinforced_source(tmp_path), _output_arg(tmp_path, mode)
+    sidecar_path(_destination(board, output)).write_text(_BAD_VERSION)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    rc = run_pcb_command(
+        _args(board, clear=clear, replace=not clear, output=output, dry_run=True, format="json")
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    doc = json.loads(captured.out)
+    assert doc["dry_run"] is True and doc["anchors_cleared"] == 2
+    assert doc["identified_by"] == ("size" if mode == "inplace" else "sidecar")
+    assert "Error" not in captured.err
+    assert _tree_bytes(tmp_path) == before
+
+
+def test_clear_without_a_sidecar_still_saves(tmp_path):
+    board = _reinforced_source(tmp_path)
+    sidecar_path(board).unlink()
+
+    assert run_pcb_command(_args(board, clear=True)) == 0
+
+    assert PCB.load(board).vias == []
+    assert not sidecar_path(board).exists()
+
+
+def test_clear_with_nothing_to_remove_ignores_an_unreadable_sidecar(tmp_path, capsys):
+    board = _board(tmp_path)
+    sidecar_path(board).write_text(_BAD_VERSION)
+    before = _tree_bytes(tmp_path)
+
+    capsys.readouterr()
+    assert run_pcb_command(_args(board, clear=True)) == 0
+
+    captured = capsys.readouterr()
+    assert "Nothing to clear" in captured.out
+    assert "Error" not in captured.err
+    assert _tree_bytes(tmp_path) == before
 
 
 # ------------------------------------------- read-only loader (Issue #10398)

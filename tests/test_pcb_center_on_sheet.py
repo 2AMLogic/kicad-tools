@@ -489,6 +489,26 @@ def _via_xy(pcb_text: str) -> tuple[float, float]:
 
 
 class TestReinforcementSidecar:
+    @pytest.mark.parametrize(
+        ("bad", "kind"),
+        [(None, "null"), ("wire", "a string"), (7, "a number"), ([["net", "GND"]], "an array")],
+    )
+    def test_refuses_non_object_before_translating(self, tmp_path: Path, bad, kind):
+        pcb = _write_reinforced(tmp_path)
+        record = sidecar_path(pcb)
+        data = json.loads(record.read_bytes())
+        data["wires"][1] = bad
+        record.write_text(json.dumps(data))
+        original_pcb = pcb.read_bytes()
+        original_record = record.read_bytes()
+
+        with pytest.raises(ValueError) as error:
+            center_on_sheet(pcb)
+
+        assert str(error.value) == f"{record}: wires[1] is {kind}, not a JSON object"
+        assert pcb.read_bytes() == original_pcb
+        assert record.read_bytes() == original_record
+
     def test_anchor_matches_moved_via(self, tmp_path: Path):
         pcb = _write_reinforced(tmp_path)
         report = center_on_sheet(pcb)
