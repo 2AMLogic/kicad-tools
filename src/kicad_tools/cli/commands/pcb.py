@@ -1346,6 +1346,23 @@ def _load_sidecar_wires(pcb_path: Path) -> list | None:
         return None
 
 
+def _unreadable_sidecar(board: Path) -> str | None:
+    """``<board>.reinforcement.json`` unreadable as a wire list: the reason, else None (#10419).
+
+    A missing sidecar is not a problem: there are no records to rewrite then.
+    """
+    from kicad_tools.pcb.reinforcement_sidecar import load_wires, sidecar_path
+
+    path = sidecar_path(board)
+    if not path.is_file():
+        return None
+    try:
+        load_wires(path)
+    except (OSError, ValueError) as e:
+        return f"{path}: {e}"
+    return None
+
+
 def _drop_cleared_wires(output_path: Path, clear_outcome, origin_x: float, origin_y: float) -> int:
     """Remove the sidecar wire records whose anchors were cleared (#8747)."""
     from kicad_tools.pcb.reinforcement_sidecar import drop_wires, sidecar_path
@@ -1429,8 +1446,18 @@ def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
 def _finish_reinforce_clear(
     args, pcb, pcb_path: Path, output_path: Path, clear_outcome, dry_run: bool, output_format: str
 ) -> int:
-    """Report and (unless ``--dry-run``) save a ``pcb reinforce --clear`` pass (#8747)."""
+    """Report and (unless ``--dry-run``) save a ``pcb reinforce --clear`` pass (#8747).
+
+    A clear that would save refuses first when the destination's wire-list
+    sidecar cannot be read: its records are dropped after the board is saved,
+    so an unreadable one must not leave a half-applied clear behind (#10419).
+    """
     origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    if not dry_run and _cleared_anything(clear_outcome):
+        unreadable = _unreadable_sidecar(output_path)
+        if unreadable is not None:
+            print(f"Error reading {unreadable} -- nothing was written", file=sys.stderr)
+            return 1
     if output_format == "json":
         print(
             json.dumps(
