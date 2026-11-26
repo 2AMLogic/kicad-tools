@@ -322,7 +322,6 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("mask_to_copper", "USB2_D-"): 8858,
     ("mask_to_copper", "USB3_RX1+"): 8858,
     ("mask_to_copper", "USB3_RX1-"): 8858,
-    ("mask_to_copper", "USB3_TX1-"): 8858,
     ("mask_to_copper", "USB3_TX2+"): 8858,
 }
 
