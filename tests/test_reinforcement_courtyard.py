@@ -156,6 +156,9 @@ def test_same_net_component_drill_is_clear_of_the_fitted_wire():
     assert len(matches) == 1
     assert round(matches[0].actual_value, 3) == 0.350
     assert matches[0].required_value == 0.6455
+    fp.position = (70, 50)
+    crossing = [v for v in _run(pcb) if "component drill" in v.message and "R6.1" in v.message]
+    assert len(crossing) == 1 and "at least 0.6455 mm" in crossing[0].message
     fp.position = (70, 52.50)
     assert not [v for v in _run(pcb) if "R6.1" in v.message]
     # The end terminal is connected to an unwired copper tail beyond the anchor.

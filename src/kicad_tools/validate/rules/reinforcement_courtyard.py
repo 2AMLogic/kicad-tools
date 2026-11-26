@@ -291,13 +291,14 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                     ):
                         continue
                     point = nearest_points(fitted, bore)[0]
+                    qualifier = "at least " if gap == 0 else ""
                     results.add(
                         DRCViolation(
                             rule_id=self.rule_id,
                             severity="error",
                             message=(
                                 f"Wire run overlaps component drill [run] on {leg.layer}: "
-                                f"{fp.reference}.{pad.number} on {leg.net!r} has {radius - gap:.4f} mm "
+                                f"{fp.reference}.{pad.number} on {leg.net!r} has {qualifier}{radius - gap:.4f} mm "
                                 f"interference (centreline to bore {gap:.4f} mm, wire radius {radius:.4f} mm)"
                             ),
                             location=(point.x, point.y),
