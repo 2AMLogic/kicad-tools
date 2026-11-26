@@ -555,7 +555,7 @@ class _Face:
 
 def _positive_exposure(opening: Any, geometry: Any) -> bool:
     certain = opening.buffer(-_UNCERTAINTY_MM).intersection(geometry.buffer(-_UNCERTAINTY_MM))
-    return certain.area > _AREA_EPSILON_MM2
+    return bool(certain.area > _AREA_EPSILON_MM2)
 
 
 def _measure(
