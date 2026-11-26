@@ -500,6 +500,44 @@ class TestEndToEndParsedBoard:
         findings = _by_rule(checker.check_dangling_copper(), "track_dangling")
         assert [v.location for v in findings] == ([tip] if contact == "open" else [])
 
+    @pytest.mark.parametrize("contact", ["open", "pad", "cap"])
+    @pytest.mark.parametrize("extra_vertex", [False, True])
+    def test_subdividing_straight_trunk_keeps_spur_tip_warning(
+        self, tmp_path, extra_vertex, contact
+    ):
+        """An added vertex on the trunk near the root is not a contact."""
+        from kicad_tools.schema.pcb import PCB
+
+        left, root, right, tip = (6, 9), (12, 9), (19, 9), (11.8, 9.15)
+        segments = [(left, (11.9, 9)), ((11.9, 9), root)] if extra_vertex else [(left, root)]
+        segments += [(root, right), (tip, root)]
+        pads = [left, right]
+        if contact == "pad":
+            pads.append(tip)
+        elif contact == "cap":
+            far_end = (tip[0], 12)
+            segments.append(((tip[0], tip[1] + 0.18), far_end))
+            pads.append(far_end)
+
+        parts = [
+            '(kicad_pcb (version 20240108) (generator "test")',
+            '(layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 1 "SIG")',
+        ]
+        for (x1, y1), (x2, y2) in segments:
+            parts.append(
+                f'(segment (start {x1} {y1}) (end {x2} {y2}) (width 0.2) (layer "F.Cu") (net 1))'
+            )
+        for x, y in pads:
+            parts.append(
+                f'(footprint "Test:Pad" (layer "F.Cu") (at {x} {y}) '
+                '(pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "SIG")))'
+            )
+        board = tmp_path / "trunk.kicad_pcb"
+        board.write_text("\n".join([*parts, ")"]))
+        checker = DRCChecker(PCB.load(str(board)), manufacturer="jlcpcb", layers=2)
+        findings = _by_rule(checker.check_dangling_copper(), "track_dangling")
+        assert [v.location for v in findings] == ([tip] if contact == "open" else [])
+
     def test_arc_terminates_track_ends_and_stubs_flagged(self, tmp_path):
         """On a parsed board: a segment-arc-segment chain closed through
         two vias is clean (the arc terminates both adjacent segment

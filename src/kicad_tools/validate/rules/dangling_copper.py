@@ -512,6 +512,36 @@ def build_copper_layer_indexes(
     return {layer: _LayerIndex(items) for layer, items in items_by_layer.items()}
 
 
+def _is_trunk_join(
+    index: _LayerIndex,
+    parent_item: _CopperItem,
+    cap: tuple[float, float],
+    other_end: tuple[float, float],
+    span_keys: set[int],
+) -> bool:
+    """True when ``cap`` joins ``parent_item`` to a sibling segment under ``other_end``.
+
+    Subdividing a straight trunk adds vertices without changing the copper, so
+    such a vertex must not count as a second connection for a spur.
+    """
+    from shapely import box
+
+    reach = _TOUCH_TOL_MM
+    probe = box(cap[0] - reach, cap[1] - reach, cap[0] + reach, cap[1] + reach)
+    for other in index.candidates(probe):
+        sibling = other.segment
+        if sibling is None or other.key == parent_item.key or other.key in span_keys:
+            continue
+        if min(math.dist(cap, sibling.start), math.dist(cap, sibling.end)) > _TOUCH_TOL_MM:
+            continue
+        if (
+            point_segment_distance(other_end, sibling.start, sibling.end)
+            <= sibling.width / 2.0 + _TOUCH_TOL_MM
+        ):
+            return True
+    return False
+
+
 class DanglingCopperRule(DRCRule):
     """Flag dangling track ends and under-bonded vias.
 
@@ -639,6 +669,9 @@ class DanglingCopperRule(DRCRule):
                     and not any(
                         math.dist(point_xy, cap) <= half_width + reach
                         and math.dist(other_end, cap) > _TOUCH_TOL_MM
+                        # A vertex that only joins two pieces of the trunk
+                        # carrying the spur root is not an independent contact.
+                        and not _is_trunk_join(index, item, cap, other_end, span_keys)
                         for cap in (start, end)
                     )
                 ):
