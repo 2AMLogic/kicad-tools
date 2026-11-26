@@ -366,6 +366,31 @@ def _near_nominal_bore(core_mm=1.525):
     )
 
 
+@pytest.mark.parametrize(("order", "fails"), [(0.8, True), (1.6, False)])
+def test_route_link_census_uses_order_thickness(tmp_path, order, fails):
+    from kicad_tools.cli.parser import create_parser
+    from kicad_tools.cli.route_link_cmd import _census_failures
+
+    board = tmp_path / "variant.kicad_pcb"
+    board.write_text(_near_nominal_bore())
+    net_map = tmp_path / "net-class-map.json"
+    net_map.write_text(json.dumps({"L_MAINS": {"name": "HV"}}))
+    args = create_parser().parse_args(
+        [
+            "route-link",
+            str(board),
+            "--min",
+            "3.30",
+            "--net-class-map",
+            str(net_map),
+            "--order-thickness-mm",
+            str(order),
+        ]
+    )
+    pairs = _census_failures(board, args)
+    assert (("L_MAINS", "GND", "conductor", "board") in pairs) == fails
+
+
 @pytest.mark.parametrize(("order", "code", "distance"), [(0.8, 1, 2.95), (1.6, 0, 3.75)])
 def test_project_purchase_applies_to_creepage_and_audit(tmp_path, capsys, order, code, distance):
     from kicad_tools.audit.auditor import check_isolation
