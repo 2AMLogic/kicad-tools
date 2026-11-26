@@ -2100,6 +2100,32 @@ class TestRelocateInPadVias:
         assert not result.moved
         assert pcb.vias[0].position == (100.0, 100.0)
 
+    def test_even_if_supported_dry_run_matches_saved_board(self, tmp_path, capsys):
+        import json
+
+        from kicad_tools.cli import main as kct_main
+
+        board = _write(tmp_path, _PCB_SIGNAL_IN_PAD)
+        original = board.read_bytes()
+        argv = [
+            "fix-vias",
+            str(board),
+            "--mfr",
+            "jlcpcb-tier1",
+            "--relocate-in-pad",
+            "--even-if-supported",
+            "--format",
+            "json",
+        ]
+        assert kct_main(argv + ["--dry-run"]) == 0
+        planned = json.loads(capsys.readouterr().out)
+        assert not planned["via_in_pad_supported_noop"]
+        assert len(planned["moved"]) == 1
+        assert board.read_bytes() == original
+        assert kct_main(argv) == 0
+        assert json.loads(capsys.readouterr().out)["moved"] == planned["moved"]
+        assert _via_in_pad_count(PCB.load(board)) == 0
+
     def test_plane_stitch_via_reported_unresolvable(self, tmp_path: Path):
         """An in-pad via with no escape track is surfaced, never left silently."""
         p = _write(tmp_path, _PCB_PLANE_STITCH_IN_PAD)
