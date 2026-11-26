@@ -1156,3 +1156,25 @@ class TestClipToPads:
         repairer.repair_pad_clearance(0.15)
         repairer.save()
         assert not _silk_pad_findings(path)
+
+
+@pytest.mark.parametrize("profile", ["jlcpcb-tier1", "jlcpcb_tier1"])
+def test_all_resolves_order_profile_and_alias(pcb_undersized_both: Path, profile: str):
+    before = pcb_undersized_both.read_bytes()
+    assert (
+        main(
+            [
+                str(pcb_undersized_both),
+                "--mfr",
+                profile,
+                "--layers",
+                "4",
+                "--copper",
+                "2",
+                "--all",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert pcb_undersized_both.read_bytes() == before
