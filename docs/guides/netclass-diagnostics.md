@@ -70,18 +70,34 @@ one or more `X`, and a group only sequences its contents. Supply names such as
 an invalid leading quantifier, so only the wildcard interpretation applies --
 while `Net-(U5-CAPP)` matches both that spelling (wildcard) and KiCad's
 unparenthesized spelling `Net-U5-CAPP` (regex), and `A.B`/`C+P` also match
-`AXB`/`CCP`. The resolver also recognizes the anchored literal expressions emitted for router-assigned net names. Those encode ASCII punctuation as hex escapes, leave Unicode letters intact, and end with a strict end-of-string anchor. Each generated pattern is checked against the board inventory to avoid a second match under KiCad’s wildcard interpretation. Other syntax is explicitly `unsupported_pattern`, including
-backslashes/escaping, brackets, braces, alternation, regex anchors, quantified
-or nested groups, and Unicode **in patterns**. It is not silently
-interpreted as a glob. The supported subset evaluates both interpretations;
-invalid leading regex quantifiers still allow the wildcard interpretation.
+`AXB`/`CCP`.
+
+**Router-generated literal patterns** are a corpus-verified exception to the
+general exclusions for escapes, regex anchors and Unicode in patterns. The
+writer starts the expression with `^`, hex-escapes ASCII characters such as
+`.` and `+` as `\xHH`, preserves Unicode, and ends with `\z$`. The strict
+end anchor applies to the decoded net name. In the KiCad 10.0.6 corpus,
+`^A\x2EB\z$` matches `A.B` and rejects both `AXB` and `A.B` followed by a
+line feed. Likewise, `^\x2B5V\z$` and `^é\z$` select `+5V` and `é`
+respectively and reject their trailing-line-feed variants.
+
+The wildcard interpretation can also match the verbatim pattern text. For
+`^USB\z$`, the corpus lists `USB`, the text `^USB\z$` itself, and that
+text followed by a line feed as matches. It rejects `USB` followed by a
+line feed. The writer checks the board inventory for both verbatim aliases
+and prepends extra `^` anchors until neither alias names a board net. Each
+extra anchor changes the wildcard spelling while preserving the decoded match.
+
+Outside that router-generated form, escapes, regex anchors (such as `^USB$`)
+and Unicode in patterns produce `unsupported_pattern`. Brackets, braces,
+alternation, and quantified or nested groups are also unsupported.
 The independent implementation uses position sets, avoiding regex backtracking.
 
 Net names may contain punctuation, hierarchical slashes and Unicode. Native
 verification includes non-BMP Unicode and newlines: wildcard characters can
-consume newlines, and the anchored end also accepts the position before a final
-newline. KiCad does not assign the unnamed (empty-name) net; it therefore never
-appears among matches, even for `*`. Empty patterns are valid, with the same
+consume newlines, and the ordinary `$` end anchor also accepts the position
+before a final newline. KiCad leaves the unnamed (empty-name) net unassigned,
+so it never appears among matches, even for `*`. Empty patterns are valid, with the same
 anchor behavior. The oracle tests include these unusual cases to make the
 contract explicit rather than assuming Python regex defaults.
 

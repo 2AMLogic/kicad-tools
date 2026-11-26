@@ -141,12 +141,10 @@ BOARD06_GAP_NETS: tuple[str, ...] = ()
 # The seed-42 fixture originally measured 22 mask error nets (#8858).
 # The sideband, PCIe and MIPI clock repairs retired nine of those net
 # identities; the data repair (#10113) retired the MIPI_D0 pair as well, and
-# the U1.32 ground repair (#9891) retired the GND identity.
-BOARD06_MASK_NETS = (
-    "USB2_D+",
-    "USB2_D-",
-    "USB3_TX2+",
-)
+# the U1.32 ground repair (#9891) retired the GND identity. The J1 connector
+# repair (#10258) retired both USB2_D mask identities. The power repairs (#10267)
+# retired +1V2 and +3V3.
+BOARD06_MASK_NETS = ("USB3_TX2+",)
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
@@ -499,6 +497,8 @@ def test_board06_measured_mask_population_passes_and_drains():
         "PCIE_TX-",
         "PCIE_RX+",
         "PCIE_RX-",
+        "USB2_D+",
+        "USB2_D-",
         "USB3_RX1+",
         "USB3_RX1-",
     ):

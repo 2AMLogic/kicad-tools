@@ -7,7 +7,9 @@ This command repairs multiple types of DRC violations:
 - hole_to_hole_clearance (formerly dimension_drill_clearance, #4353): de-duplicate
   or slide vias via DrillClearanceRepairer
 - physical_copper_gap same-net slits (#9332): move a via clear of its own pad
-  or onto its own track via CopperGapRepairer
+  or onto its own track via CopperGapRepairer; rewrite a same-net trace shelf
+  at a routed branch (#10367) with a shortcut that keeps the trunk node, the
+  far end and the widths
 
 Success is never self-reported (Issues #6431 / #6434): after the last pass
 ``fix-drc`` re-checks the output with ``kct check``'s own rule set (the
@@ -352,7 +354,8 @@ Examples:
             "detected with kct check's rules, not kicad-cli, and is also part "
             "of the default set when the report carries such findings. "
             "'copper-gap' moves a via that sits too close to its own pad or "
-            "track (same-net physical_copper_gap slits), also detected with "
+            "track and rewrites a short same-net trace shelf at a routed "
+            "branch (same-net physical_copper_gap slits), also detected with "
             "kct check's rules and part of the default set."
         ),
     )
@@ -828,7 +831,7 @@ def _execute_repair(
         if not args.quiet and args.format == "text" and pass_num == 1:
             # Engine-label the detection total so it cannot be read as a
             # contradiction next to the pure-Python --verify counts.
-            print(f"Found {total_targeted} repairable violation(s) ({args.engine} engine):")
+            print(f"Found {total_targeted} targeted violation(s) ({args.engine} engine):")
             if clearance_violations:
                 print(f"  Clearance: {len(clearance_violations)}")
             if drill_violations:
@@ -874,6 +877,8 @@ def _execute_repair(
             pass_number=pass_num,
             local_reroute=args.local_reroute,
             design_rules=drill_design_rules,
+            manufacturer=args.mfr,
+            layers=args.layers,
         )
 
         mask_result = MaskRepairResult()
@@ -1202,6 +1207,8 @@ def _run_single_pass(
     pass_number: int = 1,
     local_reroute: bool = False,
     design_rules: DesignRules | None = None,
+    manufacturer: str = "jlcpcb",
+    layers: int | None = None,
     copper_violations: list | None = None,
 ) -> tuple[RepairResult, DrillRepairResult, CopperGapResult]:
     """Execute a single repair pass (clearance + drill + copper gap).
@@ -1269,7 +1276,12 @@ def _run_single_pass(
             ):
                 load_path = output_path
 
-            copper_repairer = CopperGapRepairer(load_path)
+            from kicad_tools.schema.pcb import PCB
+
+            _, policy = _board_gap_policy(PCB.load(load_path), manufacturer, layers)
+            copper_repairer = CopperGapRepairer(
+                load_path, project_pcb_path=pcb_path, fab_gap_policy=policy
+            )
             copper_result = copper_repairer.repair_gaps(
                 copper_violations,
                 max_displacement=max_displacement,
@@ -1619,9 +1631,11 @@ def _run_mask_pass(
                 isinstance(action, MaskNudgeAction) or action.action == "pull_in"
                 for action in result.actions
             )
-            has_bends = any(action.bends for action in result.actions)
+            bend_nets = {action.net_name for action in result.actions if action.bends}
+            # Refill can split existing copper even when a move added no segment.
+            contact_nets = edited_nets | before.pour_nets() if has_zones else bend_nets
             before_native = (
-                _mask_native_state(candidate) if has_zones or check_copper or has_bends else None
+                _mask_native_state(candidate) if has_zones or check_copper or bend_nets else None
             )
             # On a partially connected board one new contact can hide a split,
             # even on the same net. Keep KiCad's actual pad groups for that case.
@@ -1639,10 +1653,14 @@ def _run_mask_pass(
                 if not refill.success:
                     raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
 
-            # The barrel's old antipad belongs to the old drill position. Grade
-            # a pad bridge against the copper that will actually be published.
-            refilled = has_zones and any(a.action == "bridge_via" for a in result.actions)
-            if refilled:
+            def lost_contacts() -> set[str]:
+                if not contact_nets:
+                    return set()
+                return MaskCopperRepairer(candidate).disconnected_copper_nets(before, contact_nets)
+
+            # Refill zone pours before grading so moved tracks and via antipads
+            # are checked against the copper that will actually be published (#9939).
+            if has_zones:
                 refill_candidate()
             _verify_mask_actions(
                 result,
@@ -1651,16 +1669,16 @@ def _run_mask_pass(
                 pcb_path,
                 candidate,
                 pad_islands,
-                lost_contacts=repairer.disconnected_bends(before, result.actions),
+                lost_contacts=lost_contacts(),
             )
-            if has_bends and result.repaired < proposed:
-                lost = MaskCopperRepairer(candidate).disconnected_bends(before, result.actions)
+            if result.actions and result.repaired < proposed:
+                if has_zones:
+                    refill_candidate()
+                lost = lost_contacts()
                 if lost:
                     raise _MaskPadConnectionLost(
                         f"saved repair disconnected copper on {', '.join(sorted(lost))}"
                     )
-            if result.actions and has_zones and (not refilled or result.repaired < proposed):
-                refill_candidate()
             if result.actions and before_native is not None:
                 saved_native = _mask_native_state(candidate)
                 new_errors = (saved_native.errors - before_native.errors).total()
@@ -1845,6 +1863,13 @@ def _verify_mask_actions(
 
     disconnected = _split_mask_nets(pad_islands, candidate) if pad_islands else set()
     disconnected.update(lost_contacts or ())
+    # A refill can split another net's pour. No action on that net can be
+    # individually undone, so discard the private candidate as a whole.
+    unattributed = disconnected - {act.net_name for act in result.actions}
+    if unattributed:
+        raise _MaskPadConnectionLost(
+            f"repair disconnected copper on {', '.join(sorted(unattributed))}"
+        )
     keep = []
     revert = []
     for act in result.actions:
@@ -2178,6 +2203,20 @@ def _get_drc_report(
     return _run_python_drc(pcb_path, manufacturer=manufacturer, layers=layers)
 
 
+def _board_gap_policy(pcb, manufacturer, layers):
+    from kicad_tools.cli.check_cmd import _resolve_fab_gap_policy, stackup_copper_oz
+
+    outer, inner = stackup_copper_oz(pcb)
+    return outer, _resolve_fab_gap_policy(
+        manufacturer,
+        layers,
+        outer,
+        inner,
+        outer if outer is not None else 1.0,
+        len(pcb.copper_layers),
+    )
+
+
 def _run_python_drc(
     pcb_path: Path,
     manufacturer: str = "jlcpcb",
@@ -2246,24 +2285,10 @@ def _run_python_drc(
                     )
             rule_set.checker.mask_copper_request = request
         if copper_gap:
-            from kicad_tools.cli.check_cmd import _resolve_fab_gap_policy, stackup_copper_oz
-
-            outer, inner = stackup_copper_oz(pcb)
-            # The same tier-1/2 resolution ``kct check`` applies: an undeclared
-            # stackup follows the 1 oz entry (fix-drc has no --copper flag).
-            preset_oz = outer if outer is not None else 1.0
-            # And the same fab-view flags its DRCChecker(...) call passes:
-            # without ``fab_view`` the gap pass returns before scanning.
+            outer, policy = _board_gap_policy(pcb, rule_set.manufacturer, layers)
             rule_set.checker.fab_view = rule_set.manufacturer == "jlcpcb"
             rule_set.checker.fab_view_copper_oz = outer
-            rule_set.checker.fab_view_gap_policy = _resolve_fab_gap_policy(
-                rule_set.manufacturer,
-                layers,
-                outer,
-                inner,
-                preset_oz,
-                len(pcb.copper_layers),
-            )
+            rule_set.checker.fab_view_gap_policy = policy
         results = run_check_rule_set(rule_set)
         if elbow_gaps and elbow_gaps.required:
             # Use the physical observations before waiver and severity filtering.
@@ -2518,6 +2543,7 @@ def _print_json(
             "snapped_to_pad": copper_result.snapped_to_pad,
             "snapped_to_track": copper_result.snapped_to_track,
             "opened": copper_result.opened,
+            "rewritten_shelves": copper_result.rewritten_shelves,
             "actions": [
                 {
                     "action": a.action,
@@ -2528,6 +2554,7 @@ def _print_json(
                     "displacement_mm": round(a.displacement_mm, 4),
                     "detail": a.detail,
                     "reverted": (bool(rolled_back) or (a.uuid in reverted_uuids)),
+                    **({"shelf": a.shelf.to_dict()} if a.shelf is not None else {}),
                 }
                 for a in copper_result.actions
             ],
@@ -2953,6 +2980,12 @@ def _print_text(
     remaining = first_violations - total_repaired_all
     if dry_run:
         print("Dry run: predictions only -- the board was not modified or re-checked.")
+        print(f"Targeted findings without a proposed repair: {remaining}")
+        if non_targeted:
+            print(f"Findings outside the repair targets: {non_targeted}")
+        if clearance_result.skipped_exceeds_max + drill_result.skipped_exceeds_max > 0:
+            print(f"    Try increasing --max-displacement (currently {max_displacement}mm)")
+        return
 
     if remaining <= 0 and non_targeted == 0:
         print("All violations repaired!")

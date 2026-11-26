@@ -818,6 +818,28 @@ class TestSymbolInstance:
             f"Wires: {[((w.x1, w.y1), (w.x2, w.y2)) for w in parsed.wires]}"
         )
 
+    @pytest.mark.parametrize("override", [None, "~", "", 'https://new.example/a"b'])
+    @pytest.mark.parametrize("derived", [False, True])
+    def test_datasheet_inherits_and_round_trips_once(self, override, derived):
+        from kicad_tools.sexp import parse_string
+
+        url = "https://parts.example/data.pdf"
+        parent = f'(symbol "Base" (property "Datasheet" "{url}"))'
+        raw = parent + '\n(symbol "Child" (extends "Base"))' if derived else parent
+        name = "Child" if derived else "Base"
+        definition = SymbolDef(f"Parts:{name}", name, raw)
+        inst = SymbolInstance(definition, 0, 0, 0, "U1", name)
+        if override is not None:
+            inst.properties["Datasheet"] = override
+        expected = url if override is None else override
+        for node in (inst.to_sexp_node("test", "/"), parse_string(inst.to_sexp("test", "/"))):
+            fields = [
+                p.get_string(1) for p in node.find_all("property") if p.get_string(0) == "Datasheet"
+            ]
+            assert fields == [expected]
+            loaded = SymbolInstance.from_sexp(node, {definition.lib_id: definition})
+            assert loaded.properties["Datasheet"] == expected
+
     def test_symbol_instance_to_sexp_node(self, mock_symbol_def):
         """SymbolInstance generates valid S-expression node."""
         inst = SymbolInstance(

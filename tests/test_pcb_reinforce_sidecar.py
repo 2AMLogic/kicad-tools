@@ -7,11 +7,16 @@ import json
 import math
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli.commands.pcb import run_pcb_command
 from kicad_tools.pcb.reinforcement_sidecar import (
+    is_parallel,
     load_wires,
+    load_wires_if_present,
     merge_wires,
     sidecar_path,
+    wire_key,
 )
 from kicad_tools.physics.wire_gauge import bare_copper_diameter_mm
 from kicad_tools.schema.pcb import PCB
@@ -321,3 +326,123 @@ def test_adopt_reports_a_strip_without_anchor_holes(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Adopted 0 wire(s)" in out and "Not adopted" in out
     assert not sidecar_path(p).exists()
+
+
+# ------------------------------------------- read-only loader (Issue #10398)
+
+
+def _wire_record(net: str, x: float, **extra) -> dict:
+    return {
+        "net": net,
+        "layer": "F.Cu",
+        "kind": "run",
+        "path": None,
+        "paths": [],
+        "leg_start": {"x": x, "y": 0.0},
+        "leg_end": {"x": x + 10.0, "y": 0.0},
+        "anchors": [{"x": x, "y": 0.0}, {"x": x + 10.0, "y": 0.0}],
+        "length_mm": 10.0,
+        "straight_line_mm": 10.0,
+        "wire_gauge_awg": 16,
+        "max_end_shift_mm": None,
+        "bare_diameter_mm": round(bare_copper_diameter_mm(16), 4),
+        "mask_opening": None,
+        "status": "full",
+        "reason": "reinforced",
+        **extra,
+    }
+
+
+def _parallel_record(net: str, x: float) -> dict:
+    return _wire_record(
+        net,
+        x,
+        strategy="parallel",
+        copy_status="placed",
+        copy_layer="B.Cu",
+        polyline=[{"x": x, "y": 0.0}, {"x": x + 10.0, "y": 0.0}],
+        copy_segments=[
+            {"start": {"x": x, "y": 0.0}, "end": {"x": x + 10.0, "y": 0.0}, "width_mm": 2.0}
+        ],
+        stitch_vias=[{"x": x + 5.0, "y": 0.0}],
+        stitch_via_size_mm=0.8,
+        stitch_via_drill_mm=0.4,
+    )
+
+
+def _sidecar_with(tmp_path: Path, entries: list) -> tuple[Path, Path]:
+    board = tmp_path / "board.kicad_pcb"
+    board.touch()
+    sidecar = sidecar_path(board)
+    sidecar.write_text(
+        json.dumps({"version": 1, "wires": entries}, indent=2) + "\n", encoding="utf-8"
+    )
+    return board, sidecar
+
+
+def test_read_only_loader_returns_the_objects_in_file_order(tmp_path):
+    """Objects survive whole and in order around entries that are not objects,
+    and reading leaves the file's bytes alone."""
+    legacy = _wire_record("NET_A", 0.0)
+    parallel = _parallel_record("NET_B", 20.0)
+    board, sidecar = _sidecar_with(
+        tmp_path, [None, legacy, "not a record", 7, [legacy], parallel, False]
+    )
+    before = sidecar.read_bytes()
+    assert load_wires_if_present(board) == [legacy, parallel]
+    assert sidecar.read_bytes() == before
+
+
+def test_read_only_loader_keeps_legacy_wire_and_parallel_copy_meaning(tmp_path):
+    legacy = _wire_record("NET_A", 0.0)
+    parallel = _parallel_record("NET_B", 20.0)
+    board, _ = _sidecar_with(tmp_path, [parallel, None, legacy])
+    loaded = load_wires_if_present(board)
+    assert loaded == [parallel, legacy]
+    assert [is_parallel(w) for w in loaded] == [True, False]
+    assert [wire_key(w) for w in loaded] == [wire_key(parallel), wire_key(legacy)]
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [[], [None], ["not a record"], [1, 2.5, True, [1, {"net": "NET_A"}], None]],
+)
+def test_read_only_loader_with_no_object_is_empty(tmp_path, entries):
+    board, sidecar = _sidecar_with(tmp_path, entries)
+    before = sidecar.read_bytes()
+    assert load_wires_if_present(board) == []
+    assert sidecar.read_bytes() == before
+
+
+def test_read_only_loader_absent_sidecar_is_empty(tmp_path):
+    board = tmp_path / "board.kicad_pcb"
+    board.touch()
+    assert load_wires_if_present(board) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not json",
+        json.dumps([_wire_record("NET_A", 0.0)]),
+        json.dumps({"version": 2, "wires": [_wire_record("NET_A", 0.0)]}),
+        json.dumps({"version": 1, "wires": {"NET_A": _wire_record("NET_A", 0.0)}}),
+        json.dumps({"version": 1}),
+    ],
+)
+def test_read_only_loader_unreadable_envelope_is_empty(tmp_path, text):
+    board = tmp_path / "board.kicad_pcb"
+    board.touch()
+    sidecar = sidecar_path(board)
+    sidecar.write_text(text, encoding="utf-8")
+    before = sidecar.read_bytes()
+    assert load_wires_if_present(board) == []
+    assert sidecar.read_bytes() == before
+
+
+def test_low_level_loader_still_reads_every_entry(tmp_path):
+    """``load_wires`` feeds ``write_sidecar`` and ``drop_wires``: dropping an
+    entry there would silently delete it from the owner's file."""
+    legacy = _wire_record("NET_A", 0.0)
+    board, sidecar = _sidecar_with(tmp_path, [None, legacy, "not a record"])
+    assert load_wires(sidecar) == [None, legacy, "not a record"]
