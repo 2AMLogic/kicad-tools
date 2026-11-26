@@ -99,9 +99,19 @@ def test_project_rewrite_reported_when_dru_write_fails(tmp_path: Path) -> None:
     assert any(f"Export modified {pro.name}" in w for w in result.warnings)
 
 
-@pytest.mark.parametrize("project", ["authored", "write_only", "editor_replaces", "editor_creates"])
-def test_unloadable_dru_refusal_leaves_project_intact(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch, project: str
+@pytest.mark.parametrize(
+    ("project", "valid_dru"),
+    [
+        ("authored", False),
+        ("write_only", False),
+        ("editor_replaces", False),
+        ("editor_creates", False),
+        ("editor_replaces", True),
+        ("editor_creates", True),
+    ],
+)
+def test_rules_export_refusal_leaves_sidecars_intact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch, project: str, valid_dru: bool
 ) -> None:
     from kicad_tools.cli import main
     from kicad_tools.manufacturers import dru_generator
@@ -111,7 +121,8 @@ def test_unloadable_dru_refusal_leaves_project_intact(
     pro, dru = pcb.with_suffix(".kicad_pro"), pcb.with_suffix(".kicad_dru")
     expected = b'{"text_variables": {"authored": "keep me"}}'
     pro.write_bytes(expected)
-    dru.write_text(dru.read_text() + "; authored comment\n")
+    if not valid_dru:
+        dru.write_text(dru.read_text() + "; authored comment\n")
     dru_before = dru.read_bytes()
 
     if project.startswith("editor_"):
@@ -151,7 +162,10 @@ def test_unloadable_dru_refusal_leaves_project_intact(
             pro.chmod(0o644)
     captured = capsys.readouterr()
     assert rc == 1
-    assert dru.name in captured.err and "';' comment" in captured.err
+    if valid_dru:
+        assert f"{pro.name} changed while rendering DRC constraints" in captured.err
+    else:
+        assert dru.name in captured.err and "';' comment" in captured.err
     assert "Export modified" not in captured.out + captured.err
     assert pro.read_bytes() == expected
     assert dru.read_bytes() == dru_before

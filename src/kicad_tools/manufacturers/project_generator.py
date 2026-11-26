@@ -42,6 +42,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -1885,7 +1886,12 @@ def write_drc_constraints(
     pro_path = pcb_path.with_suffix(".kicad_pro")
     written: list[Path] = []
 
-    if pro_path.exists():
+    try:
+        original_project = pro_path.stat()
+    except FileNotFoundError:
+        original_project = None
+
+    if original_project is not None:
         try:
             project_data = json.loads(pro_path.read_text(encoding="utf-8"))
             merge_project_rules(project_data, rules, preserve_board_rules=preserve_board_rules)
@@ -2019,7 +2025,34 @@ def write_drc_constraints(
             merged_dru, rules, project_data, board, zone_targets
         )
 
-    pro_path.write_text(json.dumps(project_data, indent=2), encoding="utf-8")
+    content = json.dumps(project_data, indent=2)
+    conflict = f"{pro_path.name} changed while rendering DRC constraints"
+    # Create exclusively or open without truncating. Verify the descriptor we
+    # will write through, so a later rename cannot redirect us to an editor's save.
+    flags = os.O_WRONLY
+    if original_project is None:
+        flags |= os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(pro_path, flags, 0o666)
+    except (FileNotFoundError, FileExistsError) as exc:
+        raise ValueError(conflict) from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as project:
+        current = os.fstat(fd)
+        if original_project is not None and (
+            not os.path.samestat(original_project, current)
+            or original_project.st_ctime_ns != current.st_ctime_ns
+            or original_project.st_mtime_ns != current.st_mtime_ns
+            or original_project.st_size != current.st_size
+        ):
+            raise ValueError(conflict)
+        project.write(content)
+        project.truncate()
+        try:
+            published = pro_path.stat()
+        except FileNotFoundError as exc:
+            raise ValueError(conflict) from exc
+        if not os.path.samestat(current, published):
+            raise ValueError(conflict)
     written.append(pro_path)
     if write_dru:
         dru_path.write_text(merged_dru, encoding="utf-8")
