@@ -149,8 +149,6 @@ BOARD06_MASK_NETS = (
     "USB2_D-",
     "USB3_RX1+",
     "USB3_RX1-",
-    "USB3_RX2+",
-    "USB3_RX2-",
     "USB3_TX2+",
 )
 
