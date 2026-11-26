@@ -260,3 +260,65 @@ def test_missing_map_with_nothing_to_repair(tmp_path, monkeypatch, capsys):
     assert data["creepage"]["findings"] == [
         {"map": "missing", "stage": "input", "reason": "unverifiable"}
     ]
+
+
+def test_cross_face_move_uses_project_order(tmp_path, monkeypatch, capsys, native_ok):
+    from tests.creepage.test_creepage_cross_face import _write_purchase_spec
+
+    pcb = _board(
+        tmp_path,
+        PASS
+        + """
+    (footprint "TP" (layer "B.Cu") (at 97 101.24)
+      (property "Reference" "TP2" (at 0 0) (layer "B.SilkS"))
+      (pad "1" smd rect (at 0 0) (size 0.2 0.2)
+        (layers "B.Cu" "B.Mask") (net 2 "N2")))
+    (footprint "Hole" (layer "F.Cu") (at 97 101.94)
+      (pad "" np_thru_hole circle (at 0 0) (size 1 1) (drill 1) (layers "*.Cu" "*.Mask")))
+    (gr_rect (start 80 80) (end 120 120) (stroke (width 0.05) (type default))
+      (fill none) (layer "Edge.Cuts"))
+    """,
+    )
+    _write_purchase_spec(tmp_path, 0.8, artifact=pcb.name)
+    original = pcb.read_bytes()
+    rc = _run(
+        monkeypatch,
+        pcb,
+        [_report(_pt_finding("trk-p")), _report()],
+        ["--format", "json", *_maps(tmp_path)],
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 1 and pcb.read_bytes() == original
+    (row,) = data["creepage"]["findings"]
+    assert row["map"] == "peak" and row["stage"] == "pass 1"
+    assert row["creepage_mm_before"] == pytest.approx(1.62)
+    assert row["creepage_mm_after"] == pytest.approx(1.53)
+
+
+def test_only_unwaived_board_measurement_is_reported(tmp_path):
+    from argparse import Namespace
+
+    from tests.creepage.fixtures import board_same_footprint_hides_board_source
+
+    voltage_map = tmp_path / "peak.json"
+    voltage_map.write_text(json.dumps({"L_MAINS": 150, "DIV_MID": 0}))
+    audit = fix_drc_cmd.MaskCreepageAudit(
+        Namespace(
+            pcb=str(tmp_path / "board.kicad_pcb"),
+            only="mask-copper",
+            voltage_map=[str(voltage_map)],
+            creepage_standard="iec60664",
+            pollution_degree=2,
+            material_group="IIIa",
+            hv_threshold=30,
+        )
+    )
+    nets = audit.compare(
+        board_same_footprint_hides_board_source(board_gap_mm=1.7),
+        board_same_footprint_hides_board_source(board_gap_mm=1.5),
+        "final",
+    )
+    assert nets == {"L_MAINS", "DIV_MID"}
+    (row,) = audit.report()["findings"]
+    assert row["creepage_mm_before"] == pytest.approx(1.7)
+    assert row["creepage_mm_after"] == pytest.approx(1.5)

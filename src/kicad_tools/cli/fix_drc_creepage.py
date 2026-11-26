@@ -67,6 +67,7 @@ class MaskCreepageAudit:
                 raise ValueError(f"duplicate voltage map name: {name!r}")
             self.audits[name] = CreepageAudit(
                 voltage_map=path,
+                project_board=Path(args.pcb),
                 standard=args.creepage_standard,
                 pollution_degree=args.pollution_degree,
                 material_group=args.material_group,
@@ -75,24 +76,24 @@ class MaskCreepageAudit:
 
     def compare(self, before: str, after: str, stage: str) -> set[str]:
         """Record every regressed pair and return its board net names."""
-        from kicad_tools.creepage.output_audit import pair_key, worse_pairs
+        from kicad_tools.creepage.output_audit import pair_key, shortfall_units
 
         nets: set[str] = set()
         unavailable = []
         for name, audit in self.audits.items():
-            worse = worse_pairs(audit, before, after)
-            if not worse:
-                continue
-            if "unverifiable" in worse:
+            baseline = audit.census(before)
+            candidate = audit.census(after)
+            if baseline is None or candidate is None:
                 unavailable.append(name)
                 self.findings.append({"map": name, "stage": stage, "reason": "unverifiable"})
                 continue
-            old = {pair_key(row): row for row in audit.census(before) or []}
-            for row in audit.census(after) or []:
-                key = pair_key(row)
-                if key not in worse:
+            # A same-footprint minimum and its independent board-level gap can
+            # share both nets and the layer. Compare each relationship separately.
+            old = {(pair_key(row), row["relationship"]): row for row in baseline}
+            for row in candidate:
+                previous = old.get((pair_key(row), row["relationship"]), {})
+                if shortfall_units(row) <= shortfall_units(previous):
                     continue
-                previous = old.get(key, {})
                 nets.update((row["net_a"], row["net_b"]))
                 self.findings.append(
                     {
