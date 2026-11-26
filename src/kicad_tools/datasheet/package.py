@@ -209,7 +209,8 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
     )
 
     for match in labeled_pattern.finditer(text):
-        label = match.group(1).upper()
+        # JEDEC uses uppercase E for body length and lowercase e for pitch.
+        label = "PITCH" if match.group(1) == "e" else match.group(1).upper()
         value = float(match.group(2))
         unit = match.group(3)
 
@@ -232,13 +233,14 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
     # Pattern for pitch (e.g., "pitch: 0.5mm", "e = 0.5")
     pitch_match = re.search(
         r"(?<![A-Za-z0-9])(?:(?i:pitch|p)\s*[=:]?|e\s*[=:])\s*"
-        r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))?\b"
-        r"|(\d+(?:\.\d+)?)\s*((?i:mm|mils?))\s+(?i:pitch)\b",
+        r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))?\b",
         text,
     )
+    if not pitch_match:
+        pitch_match = re.search(r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))\s+(?i:pitch)\b", text)
     if pitch_match:
-        value = float(pitch_match.group(1) or pitch_match.group(3))
-        unit = (pitch_match.group(2) or pitch_match.group(4) or "").lower()
+        value = float(pitch_match.group(1))
+        unit = (pitch_match.group(2) or "").lower()
         dimensions["PITCH"] = value * 0.0254 if unit in ("mil", "mils") else value
 
     return dimensions

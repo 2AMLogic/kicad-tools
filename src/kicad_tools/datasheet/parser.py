@@ -705,60 +705,47 @@ class DatasheetParser:
                     start = text.rfind("\n", 0, match.start()) + 1
                     context = text[start:].split("\n", 1)[0]
 
-                # Look for dimensions
-                body_width, body_length = 0.0, 0.0
-
-                # Check parsed body size from name
-                if parsed.get("body_size"):
-                    body_width, body_length = parsed["body_size"]
-
-                # Try to find dimensions in context
+                dims = extract_dimension_from_text(context)
                 dim_match = dimension_pattern.search(context)
-                if dim_match and body_width == 0:
-                    body_width = float(dim_match.group(1))
-                    body_length = float(dim_match.group(2))
+                if dim_match:
+                    dims["D"] = float(dim_match[1])
+                    dims["E"] = float(dim_match[2])
 
-                # Extract additional dimensions from text
-                extracted_dims = extract_dimension_from_text(context)
-                if "D" in extracted_dims and body_width == 0:
-                    body_width = extracted_dims["D"]
-                if "E" in extracted_dims and body_length == 0:
-                    body_length = extracted_dims["E"]
-                pitch = extracted_dims.get("PITCH", 0.0)
-                pitch_inferred = pitch == 0
-
-                # Use defaults if dimensions not found
-                if body_width == 0 or body_length == 0:
-                    body_width, body_length = get_default_body_size(pkg_type, pin_count)
-
-                if pitch == 0:
-                    pitch = parsed.get("pitch") or get_default_pitch(pkg_type, pin_count)
-
-                # Calculate confidence based on what was extracted vs defaulted
-                confidence = 0.3  # Base confidence
-                if parsed.get("body_size") or dim_match:
-                    confidence += 0.3
-                if not pitch_inferred:
-                    confidence += 0.2
-                if pkg_pins:
-                    confidence += 0.2
-
-                package = PackageInfo(
-                    name=pkg_name,
-                    type=pkg_type,
-                    pin_count=pin_count,
-                    body_width=body_width,
-                    body_length=body_length,
-                    pitch=pitch,
-                    height=None,
-                    exposed_pad=None,
-                    source_page=table.page,
-                    confidence=min(confidence, 1.0),
-                    pitch_inferred=pitch_inferred,
-                )
-                previous = by_name.get(pkg_name)
-                if previous is None or package.confidence > previous.confidence:
+                package = by_name.get(pkg_name)
+                if package is None:
+                    package = PackageInfo(
+                        name=pkg_name,
+                        type=pkg_type,
+                        pin_count=pin_count,
+                        body_width=0.0,
+                        body_length=0.0,
+                        pitch=0.0,
+                        source_page=table.page,
+                    )
                     by_name[pkg_name] = package
+
+                # Accumulate measurements before filling gaps with family defaults.
+                if not package.pitch and "PITCH" in dims:
+                    package.pitch = dims["PITCH"]
+                    package.source_page = table.page
+                elif not package.pitch and not package.body_width and "D" in dims:
+                    package.source_page = table.page
+                package.body_width = package.body_width or dims.get("D", 0.0)
+                package.body_length = package.body_length or dims.get("E", 0.0)
+
+        for package in by_name.values():
+            body_measured = bool(package.body_width and package.body_length)
+            if not body_measured:
+                width, length = get_default_body_size(package.type, package.pin_count)
+                package.body_width = package.body_width or width
+                package.body_length = package.body_length or length
+            package.pitch_inferred = not package.pitch
+            if package.pitch_inferred:
+                package.pitch = parse_package_name(package.name)["pitch"] or get_default_pitch(
+                    package.type, package.pin_count
+                )
+            # All retained packages have a pin count.
+            package.confidence = 0.5 + 0.3 * body_measured + 0.2 * (not package.pitch_inferred)
 
         # Sort by confidence, then by name
         return sorted(by_name.values(), key=lambda p: (-p.confidence, p.name))
