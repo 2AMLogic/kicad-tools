@@ -2,7 +2,7 @@ Manufacturing package for voltage_divider_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-11-26T09:16:55.077920+00:00
+Generated        : 2026-11-26T15:50:05Z
 
 Assembly package: BOM and CPL are included.
 CPL rotations combine the KiCad angle with a catalog-part or footprint table offset.
@@ -45,16 +45,14 @@ Warning review (per rule)
 
 Copper cleanup
 --------------
-  copper_cleanup: applied; exact-duplicate copper removed: 0 segment(s), 0 via(s)
-  step dedupe: applied (segments=0, vias=0)
-  step prune: applied (segments_removed=0, ends_snapped=0)
-  step optimize_traces: applied (segments_before=9, segments_after=9, corners_before=4, corners_after=4, layers=2, copper_oz=1.0)
+  copper_cleanup: skipped (--skip-cleanup)
 
 LCSC stock order
 ----------------
   order size: 5 board(s)
   no parts declared as held in operator inventory
-  stock check WARN: Stock not verified: 2 assigned LCSC number(s) found in neither the parts cache nor the offline catalog
+  parts data sources: parts cache searched, match found; offline catalog searched, match found
+  stock check OK: 2 LCSC part(s) have recorded stock for 5 board(s)
 
 Assembly prep
 -------------
