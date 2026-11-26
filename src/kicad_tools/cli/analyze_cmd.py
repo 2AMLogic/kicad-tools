@@ -56,6 +56,10 @@ def main(argv: list[str] | None = None) -> int:
 
     subparsers = parser.add_subparsers(dest="subcommand", help="Analysis type")
 
+    from .reference_coverage import add_parser as add_reference_coverage_parser
+
+    add_reference_coverage_parser(subparsers)
+
     # Congestion subcommand
     congestion_parser = subparsers.add_parser(
         "congestion",
@@ -459,6 +463,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.subcommand:
         parser.print_help()
         return 1
+
+    if args.subcommand == "reference-coverage":
+        from .reference_coverage import run
+
+        return run(args)
 
     if args.subcommand == "congestion":
         return _run_congestion_analysis(args)
