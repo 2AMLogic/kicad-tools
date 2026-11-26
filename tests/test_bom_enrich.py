@@ -1047,6 +1047,29 @@ class TestEnrichmentReport:
 
 class TestExplicitSourcingMixedGroups:
     @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_distinct_schematic_mpns_do_not_share_lcsc(self, MockSuggester):
+        mock = MockSuggester.return_value
+        _make_suggester_mock(mock)
+        mock.suggest_for_component.return_value = _mock_no_match()
+        footprint = "Resistor_SMD:R_1206_3216Metric"
+
+        for reverse in (False, True):
+            items = [
+                _make_item("R1", "10k", footprint, lcsc="C12345", mpn="MPN-A"),
+                _make_item("R2", "10k", footprint, mpn="MPN-B"),
+            ]
+            if reverse:
+                items.reverse()
+
+            report = enrich_bom_lcsc(items)
+
+            assert {item.reference: item.lcsc for item in items} == {"R1": "C12345", "R2": ""}
+            assert {tuple(e.references): e.source for e in report.entries} == {
+                ("R1",): "schematic",
+                ("R2",): "unmatched",
+            }
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
     def test_peer_lcsc_never_reaches_explicit_mpn(self, MockSuggester):
         for reverse in (False, True):
             mock = MockSuggester.return_value
