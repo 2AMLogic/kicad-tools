@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +35,25 @@ def sidecar_path(board: Path) -> Path:
     return board.with_name(board.name + SIDECAR_SUFFIX)
 
 
+def edit_seed_record(input_board: Path, output_board: Path) -> Path:
+    """The inventory the PCB being saved to ``output_board`` starts from.
+
+    Through a board symlink the unsaved name resolves to the alias target's
+    record. That is the saved PCB's inventory only when the alias is the board
+    being edited; a distinct input leaves the output name's own pairing.
+    """
+    if output_board.is_symlink() and not _same_board(input_board, output_board):
+        return output_board.with_name(output_board.name + SIDECAR_SUFFIX)
+    return sidecar_path(output_board)
+
+
+def _same_board(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
 def saved_record_path(board: Path, will_save: bool) -> Path:
     """The record that pairs with ``board`` once a save has replaced it.
 
@@ -47,6 +65,15 @@ def saved_record_path(board: Path, will_save: bool) -> Path:
     return sidecar_path(board)
 
 
+def _restrict_to_creation_mode(path: Path, wanted: int) -> None:
+    """Give a just-created ``path`` the permissions of ``wanted`` it may keep.
+
+    ``path`` was created under the process umask; never widen that, so a
+    private umask still yields a private record.
+    """
+    path.chmod(wanted & (path.stat().st_mode & 0o7777))
+
+
 def carry_record(seed: Path, dest: Path, detach: bool = False) -> None:
     """Give ``dest`` the inventory ``seed`` held.
 
@@ -54,6 +81,8 @@ def carry_record(seed: Path, dest: Path, detach: bool = False) -> None:
     board was a symlink that a save has replaced) and ``dest`` is itself a
     symlink into the original board's inventory: it is then replaced by an
     independent copy so edits cannot reach the original board's wire list.
+    A new file keeps the seed's permissions only as far as the creation mask
+    allows.
     """
     if dest == seed:
         if detach and dest.is_symlink() and dest.is_file():
@@ -61,7 +90,7 @@ def carry_record(seed: Path, dest: Path, detach: bool = False) -> None:
             mode = dest.stat().st_mode & 0o7777
             dest.unlink()
             dest.write_bytes(data)
-            dest.chmod(mode)
+            _restrict_to_creation_mode(dest, mode)
         return
     if not seed.is_file():
         return
@@ -69,8 +98,9 @@ def carry_record(seed: Path, dest: Path, detach: bool = False) -> None:
         dest.unlink()
     elif dest.exists():
         return  # an inventory already paired with the saved board wins
+    mode = seed.stat().st_mode & 0o7777
     dest.write_bytes(seed.read_bytes())
-    shutil.copymode(seed, dest)
+    _restrict_to_creation_mode(dest, mode)
 
 
 def _pt(x: float, y: float) -> dict[str, float]:

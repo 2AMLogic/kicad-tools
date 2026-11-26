@@ -429,3 +429,53 @@ def test_edit_through_centered_alias_detaches_its_inventory(tmp_path, op):
     assert board.read_bytes() == before_pcb
     assert board_record.read_bytes() == before_record
     assert {w["net"] for w in load_wires(sidecar_path(alias))} >= {"NET_B"}
+
+
+@pytest.mark.parametrize("op", ["add", "replace", "clear"])
+def test_distinct_output_symlink_does_not_inherit_the_targets_inventory(tmp_path, op):
+    src = tmp_path / "src.kicad_pcb"
+    _two_net_pcb().save(src)
+    if op != "add":
+        assert run_pcb_command(_args(src, "NET_A")) == 0
+    other = tmp_path / "other.kicad_pcb"
+    _two_net_pcb().save(other)
+    assert run_pcb_command(_args(other, "NET_B")) == 0
+    other_record = sidecar_path(other).read_bytes()
+    out = tmp_path / "out.kicad_pcb"
+    out.symlink_to(other)
+    kw = {"replace": {"replace": True}, "clear": {"clear": True}}.get(op, {})
+    assert run_pcb_command(_args(src, "NET_A", output=str(out), **kw)) == 0
+    assert not out.is_symlink()
+    assert sidecar_path(other).read_bytes() == other_record
+    nets = (
+        {w["net"] for w in load_wires(sidecar_path(out))} if sidecar_path(out).is_file() else set()
+    )
+    assert "NET_B" not in nets
+    assert nets == (set() if op == "clear" else {"NET_A"})
+
+
+def test_spaced_edit_through_centered_alias_still_detaches_inventory(tmp_path):
+    board, alias = _centered_alias_pair(tmp_path)
+    board_record = sidecar_path(board)
+    before = board_record.read_bytes()
+    assert run_pcb_command(_args(alias, "NET_B", anchor_mode="spaced")) == 0
+    assert not alias.is_symlink()
+    assert not sidecar_path(alias).is_symlink()
+    assert board_record.read_bytes() == before
+    assert sidecar_path(alias).read_bytes() == before
+
+
+def test_new_detached_record_never_widens_the_creation_mask(tmp_path):
+    import os
+
+    board = _board(tmp_path)
+    assert run_pcb_command(_args(board, "NET_A")) == 0
+    sidecar_path(board).chmod(0o644)
+    alias = tmp_path / "review.kicad_pcb"
+    alias.symlink_to(board)
+    old = os.umask(0o077)
+    try:
+        assert run_pcb_command(_args(alias, "NET_B")) == 0
+    finally:
+        os.umask(old)
+    assert sidecar_path(alias).stat().st_mode & 0o777 == 0o600

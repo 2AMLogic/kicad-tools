@@ -907,3 +907,31 @@ def test_in_place_alias_migration_keeps_private_record_mode(tmp_path):
         os.umask(old)
     assert sidecar_path(board).stat().st_mode & 0o777 == 0o600
     assert alias.with_name(alias.name + ".reinforcement.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_distinct_output_alias_migration_keeps_private_destination_record_mode(tmp_path):
+    import os
+
+    from kicad_tools.cli import main
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+    from tests.test_pcb_reinforce_sidecar import _args, _two_net_pcb
+
+    src = tmp_path / "src.kicad_pcb"
+    other = tmp_path / "other.kicad_pcb"
+    for path in (src, other):
+        _two_net_pcb().save(path)
+        assert run_pcb_command(_args(path, "NET_A")) == 0
+    out = tmp_path / "review.kicad_pcb"
+    out.symlink_to(other)
+    legacy = out.with_name(out.name + ".reinforcement.json")
+    canonical = sidecar_path(other)
+    legacy.write_bytes(canonical.read_bytes())
+    canonical.unlink()  # only the alias-side legacy record remains
+    legacy.chmod(0o600)
+    old = os.umask(0o022)
+    try:
+        assert main(["pcb", "center-on-sheet", str(src), "--paper", "A3", "-o", str(out)]) == 0
+    finally:
+        os.umask(old)
+    assert sidecar_path(out).stat().st_mode & 0o777 == 0o600

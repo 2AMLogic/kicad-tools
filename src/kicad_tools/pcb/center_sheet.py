@@ -828,10 +828,19 @@ def center_on_sheet(
         if record is not None:
             # Migrating the input's own inventory to a new name keeps its mode
             # (a private 0600 record stays private); a new export does not.
-            migrating = not copying and os.path.lexists(src_sidecar)
-            record_tmp = _stage_centered_file(
-                files, record_target, record, src_sidecar if migrating else None
-            )
+            # A distinct output whose own regular legacy record moves to the
+            # canonical name keeps that record's mode too.
+            mode_from: Path | None = None
+            if not copying and os.path.lexists(src_sidecar):
+                mode_from = src_sidecar
+            elif (
+                copying
+                and record_link is not None
+                and dest_sidecar.is_file()
+                and not dest_sidecar.is_symlink()
+            ):
+                mode_from = dest_sidecar
+            record_tmp = _stage_centered_file(files, record_target, record, mode_from)
             replacements = [(record_tmp, record_target)]
             if record_link is not None:
                 link_tmp = _stage_record_link(files, record_link, record_target)
