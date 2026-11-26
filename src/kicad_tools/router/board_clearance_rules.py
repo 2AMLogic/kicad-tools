@@ -245,6 +245,11 @@ class ItemProps:
             board-level copper or a footprint with no library
             association; ``None`` when unknown (the condition evaluates
             to unknown).
+        areas: For a track, what ``A.intersectsArea('NAME')`` answers per named
+            rule area: ``(name, True | False | None)`` pairs, ``None`` where
+            the area's layers do not include the track's (undecided).  ``None``
+            (the default) means the geometry is unknown, so every area
+            condition evaluates to unknown (#10121).
     """
 
     type: str | None
@@ -254,6 +259,7 @@ class ItemProps:
     layer: str | None = None
     footprint_ref: str | None = None
     footprint_lib_id: str | None = None
+    areas: tuple[tuple[str, bool | None], ...] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -738,7 +744,7 @@ class _PairContext:
                 # KiCad-release dependent (#6196); see :class:`_PadLayer`.
                 layers = (item.layer,) if item.layer is not None else _COPPER_LAYER_NAMES
                 return _PadLayer(layers)
-            if item.type == "Track" and item.layer is not None:
+            if item.type in ("Track", "Zone") and item.layer is not None:
                 return _LayerName(item.layer)
             return _UNKNOWN
         return _UNKNOWN
@@ -746,6 +752,15 @@ class _PairContext:
     def call(self, text: str, args: list[Any]) -> Any:
         item, name = self._split(text)
         if item is None:
+            return _UNKNOWN
+        if name == "intersectsarea" and len(args) == 1 and isinstance(args[0], str):
+            # Decided only where the caller measured the item's geometry
+            # against every named rule area (#10121); anything else is unknown.
+            if item.type != "Track" or item.areas is None:
+                return _UNKNOWN
+            for area_name, hit in item.areas:
+                if area_name == args[0]:
+                    return _UNKNOWN if hit is None else hit
             return _UNKNOWN
         if name == "isplated" and not args:
             return _UNKNOWN if item.plated is None else item.plated

@@ -422,3 +422,57 @@ def test_higher_priority_zone_governs_overlapping_lower_zone(tmp_path: Path) -> 
     # The same pair next to (outside) the high zone is governed by the low zone.
     narrow = _priority_zone("GND", 3, 8, 0.4)
     assert _pair_gaps(_control_p(tmp_path, (narrow, low))) == low_only
+
+
+_RULE_AREA = """(zone
+	(net 0)
+	(net_name "")
+	(layers "F.Cu")
+	(uuid "00000000-0000-0000-0000-0000000000a1")
+	(name "WideSpacing")
+	(hatch edge 0.5)
+	(keepout (tracks allowed) (vias allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+	(polygon (pts (xy {x0} 10) (xy {x1} 10) (xy {x1} 25) (xy {x0} 25)))
+)
+"""
+
+
+def _rules_board(tmp_path: Path, condition: str, *, gap: float, area_x=(32, 42)):
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+    area = _RULE_AREA.format(x0=area_x[0], x1=area_x[1])
+    pcb = _control_p(tmp_path, (ZONE, area), gap=gap)
+    board = tmp_path / "control_p.kicad_pcb"
+    board.with_suffix(".kicad_dru").write_text(
+        f'(version 1)\n(rule "Wide clearance"\n  (condition "{condition}")\n'
+        "  (constraint clearance (min 0.3mm)))\n"
+    )
+    return pcb, BoardClearanceRules.from_board(board)
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "A.Type == 'Track' && A.intersectsArea('WideSpacing')",
+        "A.Type == 'Zone' && A.Layer == 'B.Cu'",
+    ],
+)
+def test_unrelated_rule_does_not_change_pour_slot_decision(tmp_path, condition):
+    """A rule scoped away from these tracks neither hides nor invents a slot."""
+    for gap, expected in ((0.55, 1), (0.705, 0)):
+        pcb, rules = _rules_board(tmp_path, condition, gap=gap)
+        assert len(list(iter_pour_slot_pairs(pcb, rules))) == expected, (condition, gap)
+
+
+def test_rule_area_on_the_tracks_applies_its_clearance(tmp_path):
+    cond = "A.Type == 'Track' && A.intersectsArea('WideSpacing')"
+    # 0.3 mm applies: 0.55 is packed (2 x 0.3 = 0.6); 0.705 lies in (0.6, 0.9).
+    for gap, expected in ((0.55, 0), (0.705, 1)):
+        pcb, rules = _rules_board(tmp_path, cond, gap=gap, area_x=(5, 25))
+        assert len(list(iter_pour_slot_pairs(pcb, rules))) == expected, gap
+
+
+def test_unresolvable_rule_keeps_genuine_slot(tmp_path):
+    """A predicate the evaluator cannot decide must not erase the 0.55 mm slot."""
+    pcb, rules = _rules_board(tmp_path, "A.insideArea('WideSpacing')", gap=0.55)
+    assert len(list(iter_pour_slot_pairs(pcb, rules))) == 1

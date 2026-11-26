@@ -56,7 +56,11 @@ from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 from shapely.ops import unary_union  # type: ignore[import-untyped]
 
 from kicad_tools.core.project_clearance import DEFAULT_NETCLASS_CLEARANCE_MM
-from kicad_tools.router.board_clearance_rules import BoardClearanceRules, ItemProps
+from kicad_tools.router.board_clearance_rules import (
+    CLEARANCE,
+    BoardClearanceRules,
+    ItemProps,
+)
 from kicad_tools.schema.pcb import _segment_dedup_key
 
 from ..violations import DRCResults, DRCViolation
@@ -93,6 +97,7 @@ class _Pour:
     clearance: float
     min_thickness: float
     priority: int = 0
+    single_layer: bool = False  #: the zone's ``Layer`` property is unambiguous
 
 
 def _effective_pours(pours: list[_Pour]) -> list[_Pour]:
@@ -158,18 +163,64 @@ class PourSlotRule(DRCRule):
 
     def __init__(self, netclass_clearances: PourSlotClearances | None = None) -> None:
         self.clearances = netclass_clearances or {}
+        self._rule_areas: list[tuple[str, frozenset[str], BaseGeometry]] = []
+        self._areas_cache: dict[int, tuple[tuple[str, bool | None], ...]] = {}
 
     def _track_clearance(self, track: str, zone_net: str, layer: str) -> float:
         if isinstance(self.clearances, BoardClearanceRules):
             track_props = ItemProps(
                 "Track", track, layer=layer, footprint_ref="", footprint_lib_id=""
             )
-            zone_props = ItemProps(
-                "Zone", zone_net, layer=layer, footprint_ref="", footprint_lib_id=""
-            )
+            zone_props = ItemProps("Zone", zone_net, footprint_ref="", footprint_lib_id="")
             return self.clearances.clearance(track_props, zone_props, layer)
         default = self.clearances.get("", DEFAULT_NETCLASS_CLEARANCE_MM)
         return max(self.clearances.get(track, default), self.clearances.get(zone_net, default))
+
+    def _segment_clearance(
+        self, seg: Any, zone: _Pour, layer: str, areas: tuple[tuple[str, bool | None], ...]
+    ) -> tuple[float, float]:
+        """``(upper, lower)`` track-to-zone clearance for one segment (Issue #10121).
+
+        Rule conditions are evaluated at the segment's own geometry (the named
+        rule areas it touches) and the zone's own layer.  A condition that
+        still cannot be decided keeps both readings -- the largest and the
+        smallest requirement it allows -- so the caller never lets an
+        unresolved rule decide a warning in either direction.
+        """
+        if not isinstance(self.clearances, BoardClearanceRules):
+            value = self._track_clearance(seg.net_name, zone.net_name, layer)
+            return value, value
+        track = ItemProps(
+            "Track",
+            seg.net_name,
+            layer=layer,
+            footprint_ref="",
+            footprint_lib_id="",
+            areas=areas,
+        )
+        pour = ItemProps(
+            "Zone",
+            zone.net_name,
+            layer=layer if zone.single_layer else None,
+            footprint_ref="",
+            footprint_lib_id="",
+        )
+        res = self.clearances.explain_required(CLEARANCE, track, pour, layer)
+        return res.requirement, res.lower_bound
+
+    def _segment_areas(self, seg: Any, layer: str) -> tuple[tuple[str, bool | None], ...]:
+        """Per named rule area: does ``seg``'s copper touch it (``None``: other layer)."""
+        key = id(seg)
+        cached = self._areas_cache.get(key)
+        if cached is not None:
+            return cached
+        shape = LineString([seg.start, seg.end]).buffer(seg.width / 2)
+        result = tuple(
+            (name, None if layers and layer not in layers else bool(shape.intersects(outline)))
+            for name, layers, outline in self._rule_areas
+        )
+        self._areas_cache[key] = result
+        return result
 
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         results = DRCResults()
@@ -182,8 +233,20 @@ class PourSlotRule(DRCRule):
     def iter_pairs(self, pcb: PCB) -> Iterator[PourSlotPair]:
         """Yield each flagged pair (the single detection path, Issue #8440)."""
         zones: dict[str, list[_Pour]] = defaultdict(list)
+        self._rule_areas = []
+        self._areas_cache = {}
         for zone in pcb.zones:
             if zone.keepout is not None:
+                contours = getattr(zone, "rule_area_contours", None) or [zone.polygon]
+                if getattr(zone, "name", "") and all(len(ring) >= 3 for ring in contours):
+                    area = Polygon(contours[0], holes=contours[1:])
+                    self._rule_areas.append(
+                        (
+                            zone.name,
+                            frozenset({zone.layer, *getattr(zone, "layers", [])} - {""}),
+                            area if area.is_valid else area.buffer(0),
+                        )
+                    )
                 continue
             contours = zone.rule_area_contours or [zone.polygon]
             if any(len(ring) < 3 for ring in contours):
@@ -195,6 +258,7 @@ class PourSlotRule(DRCRule):
                 zone.clearance,
                 zone.min_thickness,
                 getattr(zone, "priority", 0) or 0,
+                len({zone.layer, *getattr(zone, "layers", [])} - {""}) == 1,
             )
             for layer in {zone.layer, *getattr(zone, "layers", [])}:
                 if layer:
@@ -289,6 +353,30 @@ class PourSlotRule(DRCRule):
                     if pair is not None:
                         yield pair
 
+    def _candidates(
+        self,
+        a: Any,
+        b: Any,
+        zlist: list[_Pour],
+        layer: str,
+        areas_a: tuple[tuple[str, bool | None], ...],
+        areas_b: tuple[tuple[str, bool | None], ...],
+    ) -> Iterator[tuple[_Pour, float, float]]:
+        """Each zone with the clearance readings its undecided rules allow.
+
+        One reading when every rule resolved; two (all-largest, all-smallest)
+        when one could not, so a genuine slot survives an unrelated or
+        unresolvable rule (Issue #10121).
+        """
+        for zone in zlist:
+            up_a, lo_a = self._segment_clearance(a, zone, layer, areas_a)
+            up_b, lo_b = self._segment_clearance(b, zone, layer, areas_b)
+            readings = [(up_a, up_b)]
+            if (lo_a, lo_b) != (up_a, up_b):
+                readings.append((lo_a, lo_b))
+            for ca, cb in readings:
+                yield zone, max(zone.clearance, ca), max(zone.clearance, cb)
+
     def _check_pair(
         self,
         layer: str,
@@ -325,9 +413,11 @@ class PourSlotRule(DRCRule):
         def separation(t: float) -> float:
             return db0 + slope * (t - tb0)
 
-        for zone in zlist:
-            clearance_a = max(zone.clearance, clearances[a.net_name, zone.net_name])
-            clearance_b = max(zone.clearance, clearances[b.net_name, zone.net_name])
+        areas_a = self._segment_areas(a, layer)
+        areas_b = self._segment_areas(b, layer)
+        for zone, clearance_a, clearance_b in self._candidates(
+            a, b, zlist, layer, areas_a, areas_b
+        ):
             packed_gap = clearance_a + clearance_b
             threshold = packed_gap + zone.min_thickness
             # Split the shared projection where either facing gap crosses a
