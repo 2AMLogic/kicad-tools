@@ -200,3 +200,30 @@ def test_two_zones_on_one_layer_report_each_pair_once():
     assert len(res.violations) == 1
     # The widest requirement of the layer's pours applies.
     assert abs(res.violations[0].required_value - 0.85) < 1e-6
+
+
+def test_angled_gap_uses_only_the_shared_run_in_the_zone():
+    zone = _Zone(clearance=0.2, min_thickness=0.3)
+    zone.polygon = ((5, 5), (25, 5), (25, 35), (5, 35))
+    a = _Seg((11, 15), (19, 15), width=0.4)
+    for end_x in (19, 40):
+        end_y = 15.995 - (end_x - 11) * 0.395 / 29
+        b = _Seg((11, 15.995), (end_x, end_y), width=0.4, net_number=2, net_name="B")
+        for tracks in ([a, b], [b, a]):
+            (warning,) = _run(tracks, [zone]).violations
+            assert abs(warning.actual_value - (0.595 - 4 * 0.395 / 29)) < 1e-6
+
+    # Both tracks continue, but only the first 14 mm are in the zone.
+    a.end = (40, 15)
+    (warning,) = _run([a, b], [zone]).violations
+    assert abs(warning.actual_value - (0.595 - 7 * 0.395 / 29)) < 1e-6
+
+
+def test_angled_pair_reports_only_the_part_in_the_slot_band():
+    a = _Seg((0, 0), (30, 0), width=0.4)
+    b = _Seg((0, 0.7), (30, 1.3), width=0.4, net_number=2, net_name="B")
+    zone = _Zone(clearance=0.2, min_thickness=0.3)
+    (pair,) = PourSlotRule().iter_pairs(_PCB([a, b], [zone]))
+    # Edge gap increases from 0.3 to 0.9 mm, crossing both cutoffs.
+    assert abs(pair.gap - 0.5505) < 1e-5
+    assert abs(pair.overlap - 14.95) < 0.001

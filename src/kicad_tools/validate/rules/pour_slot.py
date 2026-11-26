@@ -241,6 +241,9 @@ class PourSlotRule(DRCRule):
         second: tuple[Any, tuple[float, float, float]],
         zlist: list[_Pour],
     ) -> PourSlotPair | None:
+        # Use the same projection axis for either serialization of the pair.
+        if first[0].net_number > second[0].net_number:
+            first, second = second, first
         a, (ux, uy, la) = first
         b, (vx, vy, _lb) = second
         if a.net_number == b.net_number:
@@ -260,8 +263,12 @@ class PourSlotRule(DRCRule):
         overlap = end_t - start_t
         if overlap < MIN_OVERLAP_MM:
             return None
-        centre_dist = abs((db0 + db1) / 2)
-        gap = centre_dist - (a.width + b.width) / 2
+        half_widths = (a.width + b.width) / 2
+        slope = (db1 - db0) / (tb1 - tb0)
+
+        def separation(t: float) -> float:
+            return db0 + slope * (t - tb0)
+
         net_clearance_a = self.netclass_clearances.get(a.net_name, 0.0)
         net_clearance_b = self.netclass_clearances.get(b.net_name, 0.0)
         for zone in zlist:
@@ -269,21 +276,38 @@ class PourSlotRule(DRCRule):
             clearance_b = max(zone.clearance, net_clearance_b)
             packed_gap = clearance_a + clearance_b
             threshold = packed_gap + zone.min_thickness
-            if gap <= packed_gap + PACKED_GAP_TOL_MM or gap >= threshold - 1e-6:
-                continue
-            # Clip the centerline of the remaining strip to the local outline.
-            # Unequal clearances shift that line away from the tighter track.
+            # Split the shared projection where either facing gap crosses a
+            # slot boundary. Within each interval the signed distance is linear.
+            low = half_widths + packed_gap + PACKED_GAP_TOL_MM
+            high = half_widths + threshold - 1e-6
+            cuts = [start_t, end_t]
+            if slope:
+                for boundary in (-high, -low, low, high):
+                    t = tb0 + (boundary - db0) / slope
+                    if start_t < t < end_t:
+                        cuts.append(t)
+                cuts.sort()
+
             midpoint_shift = (a.width - b.width) / 4 + (clearance_a - clearance_b) / 2
-            ends = []
-            for t in (start_t, end_t):
-                d = db0 + (db1 - db0) * (t - tb0) / (tb1 - tb0)
-                offset = d / 2 + math.copysign(1, d) * midpoint_shift
-                ends.append((a.start[0] + ux * t - uy * offset, a.start[1] + uy * t + ux * offset))
-            covered = zone.outline.intersection(LineString(ends))
-            run = max(get_parts(covered), key=lambda part: part.length, default=None)
+            runs = []
+            for left, right in zip(cuts, cuts[1:], strict=False):
+                distance = separation((left + right) / 2)
+                if not low < abs(distance) < high:
+                    continue
+                shift = math.copysign(1, distance) * midpoint_shift
+                ends = []
+                for t in (left, right):
+                    offset = separation(t) / 2 + shift
+                    ends.append(
+                        (a.start[0] + ux * t - uy * offset, a.start[1] + uy * t + ux * offset)
+                    )
+                covered = zone.outline.intersection(LineString(ends))
+                runs.extend(get_parts(covered))
+            run = max(runs, key=lambda part: part.length, default=None)
             if run is None or run.length < MIN_OVERLAP_MM:
                 continue
             point = run.interpolate(0.5, normalized=True)
+            gap = abs(separation(frame((point.x, point.y))[0])) - half_widths
             return PourSlotPair(
                 layer=layer,
                 first=a,
