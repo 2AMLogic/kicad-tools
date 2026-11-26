@@ -343,6 +343,8 @@ def test_route_reuses_verified_fill_without_a_bond_check_refill(
     assert ground_copper(PCB.load(output)) == (2, 2)
 
 
+# The complete public route and independent native refill share one test budget.
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("island", [False, True], ids=["bonded", "island"])
 def test_public_route_command_and_native_refill(tmp_path, native_cli, island):
     board = make_board(tmp_path, right_edge=115 if island else 135)
