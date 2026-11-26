@@ -75,3 +75,18 @@ class BoardItemLocks:
     def is_generator_owned(self, item: SExp) -> bool:
         """A generator owns every track in its groups, even when it is unlocked."""
         return bool(self._generated_members) and _item_id(item) in self._generated_members
+
+
+def locked_copper_nets(board: SExp, net_names: dict[int, str]) -> set[str]:
+    """Nets with a directly or group-locked routed track, arc, or via."""
+    locks = BoardItemLocks(board)
+    protected = set()
+    for item in board.children:
+        if item.name in {"segment", "arc", "via"} and locks.is_locked(item):
+            net = item.find_child("net")
+            if net is not None:
+                value = net.get_first_atom()
+                name = net_names.get(value, net.get_string(1)) if isinstance(value, int) else value
+                if isinstance(name, str) and name:
+                    protected.add(name)
+    return protected

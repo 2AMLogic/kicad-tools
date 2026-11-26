@@ -16,6 +16,23 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-26
 
+- **Issue #10285** (closed): Clear the USB3 receive-pair mask openings at BGA pads U2/F5 and F6 on Board 06
+- **PR #10288**: fix(board06): clear both USB3 receiver BGA mask openings
+- **Issue #10281** (closed): fix-silkscreen --all cannot resolve the advertised jlcpcb-tier1 order profile
+- **PR #10282**: Resolve silk fixes against the registered order profile
+- **Issue #10295** (closed): Reinforcement checker crashes on an eligible trunk with two T junctions
+- **PR #10296**: Handle unsupported reinforcement trees in manufacturing checks
+- **PR #10251**: feat(router): trace how each Python fallback relates to earlier ones
+- **Issue #10276** (closed): Board 06 clear both J1 USB3 receive mask findings at A10 and A11
+- **PR #10279**: fix(board06): clear the J1 USB3 receive mask openings
+- **Issue #10308** (closed): Grade the final Board 06 manufacturing bundle in the full recipe
+- **PR #10313**: fix(board06): grade the delivered manufacturing bundle in the full recipe
+- **Issue #10314** (closed): Chain skew sums forked gate networks and accepts two links on one conductor
+- **PR #10315**: fix: validate series topology before reporting chain skew
+- **Issue #10300** (closed): Preserve plated-pad ampacity when a straight entry is split at a collinear vertex
+- **PR #10312**: fix: keep plated-terminal ampacity when a straight entry is split
+- **Issue #10270** (closed): Clear a pad-to-pad mask finding by distributing the straight part of an existing bend
+- **PR #10274**: fix: preserve trace length when clearing pad-to-pad mask bends
 - **Issue #10241** (closed): detect-mistakes --format json builds a second DecouplingCountCheck, parsing the schematic twice
 - **PR #10245**: perf(detect-mistakes): share one decoupling check run between findings and inventory
 - **Issue #10291** (closed): path_ampacity judges one layer of a doubled copper link when its first bend sits inside the plated terminal

@@ -147,7 +147,6 @@ BOARD06_MASK_NETS = (
     "USB2_D-",
     "USB3_RX1+",
     "USB3_RX1-",
-    "USB3_TX1-",
     "USB3_TX2+",
 )
 
@@ -532,6 +531,18 @@ def test_board06_unmodified_clock_exits_are_rejected():
     assert gate.unexpected_baseline_errors(
         BOARD06_KEY, rule_counts(unmodified), identities_of(unmodified)
     ) == {"mask_to_copper": 2}  # the two newly unallowed net identities
+
+
+def test_board06_tx1_mask_findings_fail_the_fixture_gate():
+    gate = load("check_diffpair_coverage")
+    assert ("mask_to_copper", "USB3_TX1-") not in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+    others = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    assert gate.unallowed_blocking(BOARD06_KEY, others) == []
+    both_exits = [mask_violation("USB3_TX1-")] * 4
+    assert (
+        gate.unallowed_blocking(BOARD06_KEY, others + both_exits)
+        == [("mask_to_copper", "USB3_TX1-")] * 4
+    )
 
 
 def test_board06_unmodified_ground_entry_is_rejected():
