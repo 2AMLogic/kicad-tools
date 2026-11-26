@@ -6964,6 +6964,10 @@ def _add_analyze_parser(subparsers) -> None:
         dest="analyze_command", help="Analysis commands"
     )
 
+    from .reference_coverage import add_parser as add_reference_coverage_parser
+
+    add_reference_coverage_parser(analyze_subparsers)
+
     # analyze congestion
     congestion_parser = analyze_subparsers.add_parser(
         "congestion",
