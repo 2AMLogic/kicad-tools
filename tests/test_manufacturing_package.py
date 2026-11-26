@@ -3013,6 +3013,21 @@ class TestPurchasingList:
         assert not (out / "purchasing.json").exists()
         assert "purchasing.json" not in self._manifest(removed)
 
+    def test_reformatted_generated_list_survives_manifest_removal(
+        self, tmp_path, monkeypatch, local_symbol_project
+    ):
+        self._write_spec(local_symbol_project, FUSE_PURCHASING)
+        out = tmp_path / "bundle"
+        _, first = self._export(monkeypatch, local_symbol_project, out)
+        assert first.success, first.errors
+        first.manifest_path.unlink()
+        edited = json.dumps(json.loads(first.purchasing_path.read_bytes())).encode()
+        first.purchasing_path.write_bytes(edited)
+        self._write_spec(local_symbol_project)
+        _, result = self._export(monkeypatch, local_symbol_project, out)
+        assert not result.success and "differs" in str(result.errors)
+        assert first.purchasing_path.read_bytes() == edited
+
     def test_unmarked_list_without_ownership_evidence_is_preserved(
         self, tmp_path, monkeypatch, local_symbol_project
     ):

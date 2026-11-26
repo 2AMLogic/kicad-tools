@@ -1039,7 +1039,7 @@ def _previous_purchasing_digest(out_dir: Path, manifest_name: str) -> str | None
                 ):
                     raise ValueError(f"{path} differs from the previous export manifest")
     try:
-        parse_purchasing_list(data)
+        rows = parse_purchasing_list(data)
     except SubmissionError as exc:
         if marked:
             raise ValueError(
@@ -1047,6 +1047,17 @@ def _previous_purchasing_digest(out_dir: Path, manifest_name: str) -> str | None
             ) from exc
         # An older export could use this filename for a BOM or another artifact.
         return None
+    if marked:
+        # The marker binds the rows. Also preserve byte-level buyer edits,
+        # including reformatting, when there is no matching manifest.
+        original = {
+            "schema_version": 1,
+            "items": rows,
+            "kct_export_sha256": document["kct_export_sha256"],
+        }
+        encoded = (json.dumps(original, indent=2, ensure_ascii=False) + "\n").encode()
+        if data not in (encoded, encoded.replace(b"\n", b"\r\n")):
+            raise ValueError(f"{path} differs from the previously exported purchasing list")
     if not marked and not isinstance(entry, dict):
         raise ValueError(f"Cannot establish ownership of {path}. Move it aside before exporting.")
     return digest
