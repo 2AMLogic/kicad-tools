@@ -100,6 +100,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.primitives import Pad, Route
     from kicad_tools.router.reporting import RouteAttemptResult
     from kicad_tools.router.routing_plan import OverflowReport, RoutingPlan
+    from kicad_tools.schema.pcb import PCB
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
 # ``kicad_tools.router.auto_pour.auto_skip_pour_nets`` so in-process router
@@ -1182,10 +1183,10 @@ def _reject_lost_route_only_bindings(args, nets_to_route: int) -> int | None:
     if not requested or nets_to_route != 0:
         return None
     under_two = getattr(args, "_route_only_nets_under_two", None) or set()
-    requested_set = set(requested)
+    requested_set = set(requested) - set(getattr(args, "_route_only_locked_nets", ()))
     if requested_set <= under_two:
-        # Preflight already warned every requested net has <2 pads -- a
-        # zero routable count is expected here, not a loader bug.
+        # Preflight already reported the requested nets with locked copper
+        # or fewer than two pads. A zero routable count is expected.
         return None
 
     # Requested nets preflight confirmed were routable (2+ pads) -- these
@@ -1343,10 +1344,12 @@ def _emit_single_pad_net_warning(
     )
 
 
-_ROUTE_BLOCK_HEAD = re.compile(r"(?:\s|[#;][^\n]*\n)*(segment|via)(?=[\s()]|\Z)")
+_ROUTE_BLOCK_HEAD = re.compile(r"(?:\s|[#;][^\n]*\n)*(segment|via|arc)(?=[\s()]|\Z)")
 
 
-def _route_block_spans(pcb_content: str) -> "Iterator[tuple[str, int, int]]":
+def _route_block_spans(
+    pcb_content: str, *, include_arcs: bool = False
+) -> "Iterator[tuple[str, int, int]]":
     """Yield the kind and verbatim source span of each top-level routing form."""
     depth = 0
     kind = ""
@@ -1355,7 +1358,7 @@ def _route_block_spans(pcb_content: str) -> "Iterator[tuple[str, int, int]]":
         if paren == "(":
             if depth == 1:
                 head = _ROUTE_BLOCK_HEAD.match(pcb_content, pos + 1)
-                if head:
+                if head and (include_arcs or head[1] != "arc"):
                     kind, start = head[1], pos
             depth += 1
         else:
@@ -1368,8 +1371,13 @@ def _route_block_spans(pcb_content: str) -> "Iterator[tuple[str, int, int]]":
         yield kind, start, len(pcb_content)
 
 
-def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> tuple[str, int, int]:
-    """Strip top-level ``(segment ...)`` and ``(via ...)`` blocks from PCB content.
+def _strip_route_blocks(
+    pcb_content: str,
+    collect: list[str] | None = None,
+    *,
+    replaced_arc_nets: frozenset[str] = frozenset(),
+) -> tuple[str, int, int]:
+    """Strip top-level segments, vias, and arcs on nets explicitly being replaced.
 
     Issue #2976: When ``_stage_input_for_auto_pour`` aliases ``pcb_path`` to
     ``output_path`` (so the user's input file isn't mutated by ``auto_pour``),
@@ -1386,9 +1394,8 @@ def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> t
     The fix is to remove any top-level routed-element blocks before
     inserting fresh ones: the in-memory router state is the source of
     truth, and the new ``route_sexp`` already contains every segment and
-    via that should appear in the output.  Footprints, pads, zones, and
-    other PCB structure are preserved because we only strip blocks whose
-    first token is ``segment`` or ``via``.
+    via that should appear in the output. Authored arcs stay in their source
+    form unless the run replaces their net's existing copper.
 
     Args:
         pcb_content: Original PCB file content.
@@ -1396,6 +1403,8 @@ def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> t
             excised block is appended to it (issue #9599 row 2: the
             existing-copper replacement notice lists the affected nets from
             these blocks).
+
+        replaced_arc_nets: Also remove source track arcs on these rerouted nets.
 
     Returns:
         Tuple of ``(stripped_content, segments_removed, vias_removed)``.
@@ -1405,12 +1414,21 @@ def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> t
     pieces: list[str] = []
     cursor = 0
     segments_removed = vias_removed = 0
-    for kind, start, end in _route_block_spans(pcb_content):
+    if replaced_arc_nets:
+        from kicad_tools.router.optimizer.pcb import parse_net_names, resolve_block_net
+
+        net_names = parse_net_names(pcb_content)
+        name_to_id = {name: number for number, name in net_names.items()}
+    for kind, start, end in _route_block_spans(pcb_content, include_arcs=bool(replaced_arc_nets)):
+        if kind == "arc":
+            identity = resolve_block_net(pcb_content[start:end], net_names, name_to_id)
+            if identity is None or identity[1] not in replaced_arc_nets:
+                continue
         # Remove the indentation and one newline belonging to the old form.
         pieces.append(pcb_content[cursor:start].rstrip(" \t").removesuffix("\n"))
         if collect is not None:
             collect.append(pcb_content[start:end])
-        if kind == "segment":
+        if kind != "via":
             segments_removed += 1
         else:
             vias_removed += 1
@@ -1514,7 +1532,9 @@ def _board_uses_name_only_dialect(pcb_path: "Path | str") -> bool:
     return bool(_NAME_ONLY_NET_RE.search(content))
 
 
-def _insert_sexp_before_closing(pcb_content: str, sexp_fragments: str) -> str:
+def _insert_sexp_before_closing(
+    pcb_content: str, sexp_fragments: str, *, replaced_arc_nets: frozenset[str] = frozenset()
+) -> str:
     """Insert S-expression fragments before the final closing parenthesis of a PCB file.
 
     This correctly removes only the last closing parenthesis from the PCB content
@@ -1536,7 +1556,9 @@ def _insert_sexp_before_closing(pcb_content: str, sexp_fragments: str) -> str:
     Returns:
         Modified PCB content with fragments inserted before the final ``)``.
     """
-    pcb_content, _stripped_segs, _stripped_vias = _strip_route_blocks(pcb_content)
+    pcb_content, _stripped_segs, _stripped_vias = _strip_route_blocks(
+        pcb_content, replaced_arc_nets=replaced_arc_nets
+    )
     content = pcb_content.rstrip()
     if content.endswith(")"):
         content = content[:-1].rstrip()
@@ -1791,6 +1813,7 @@ def _write_routed_pcb(
     layer_count: int = 2,
     is_checkpoint: bool = False,
     guard_copper_loss: bool = False,
+    replaced_arc_nets: frozenset[str] = frozenset(),
 ) -> Path:
     """Atomically write a routed PCB file.
 
@@ -1855,7 +1878,9 @@ def _write_routed_pcb(
         original_content = update_pcb_layer_stackup(original_content, layer_count)
 
     if route_sexp:
-        output_content = _insert_sexp_before_closing(original_content, route_sexp)
+        output_content = _insert_sexp_before_closing(
+            original_content, route_sexp, replaced_arc_nets=replaced_arc_nets
+        )
     else:
         output_content = original_content
 
@@ -3436,6 +3461,7 @@ def _make_checkpoint_callback(
     preserved_routes: "list[Route] | None" = None,
     router_provider: "Callable[[], Autorouter] | None" = None,
     source_pcb_path: Path | None = None,
+    replaced_arc_nets: frozenset[str] = frozenset(),
     best_checkpoint: "BestCheckpointWriter | None" = None,
     dry_run: bool = False,
 ):
@@ -3551,7 +3577,12 @@ def _make_checkpoint_callback(
                 route_sexp = f"{route_sexp}\n\t{kept}" if route_sexp else kept
             _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, dest)
             _write_routed_pcb(
-                pcb_path, dest, route_sexp, is_checkpoint=True, layer_count=layer_count
+                pcb_path,
+                dest,
+                route_sexp,
+                is_checkpoint=True,
+                layer_count=layer_count,
+                replaced_arc_nets=replaced_arc_nets,
             )
 
         with restore_stage():
@@ -3654,6 +3685,7 @@ def _make_checkpoint_callback(
                 route_sexp,
                 is_checkpoint=True,
                 layer_count=layer_count,
+                replaced_arc_nets=replaced_arc_nets,
             )
             record_stage("serialization", checkpoint_saved=True, checkpoint=str(output_path))
 
@@ -3711,7 +3743,14 @@ def _make_checkpoint_callback(
             os.close(fd)
             completed = Path(name)
             _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, completed)
-            _write_routed_pcb(pcb_path, completed, sexp, layer_count=layers, is_checkpoint=True)
+            _write_routed_pcb(
+                pcb_path,
+                completed,
+                sexp,
+                layer_count=layers,
+                is_checkpoint=True,
+                replaced_arc_nets=replaced_arc_nets,
+            )
             history.append(str(completed))
             record_stage("serialization", checkpoint_history=list(history))
 
@@ -3779,14 +3818,30 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
 def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route"], str]:
     """Capture fixed source copper once, before checkpoint writes can replace it."""
     preserve = bool(getattr(args, "preserve_existing", False))
+    replaced = frozenset(getattr(args, "_replace_existing_nets", None) or ())
     routes = _capture_preserved_routes(pcb_path) if preserve else []
+    if replaced:
+        routes = [route for route in routes if route.net_name not in replaced]
     disposition = getattr(args, "_placement_disposition", None)
     names = disposition.preserve_copper_nets if disposition is not None else frozenset()
     if preserve and _keep_input_copper_on_routed_nets(args):
         # The geometry model supplies routing obstacles. Keep the source forms
         # for output as well, including locks and per-via fabrication settings.
+        text = pcb_path.read_text()
         input_blocks: list[str] = []
-        _strip_route_blocks(pcb_path.read_text(), collect=input_blocks)
+        _strip_route_blocks(text, collect=input_blocks)
+        if replaced:
+            from kicad_tools.router.optimizer.pcb import parse_net_names, resolve_block_net
+
+            net_names = parse_net_names(text)
+            by_name = {name: number for number, name in net_names.items()}
+            input_blocks = [
+                block
+                for block in input_blocks
+                if (identity := resolve_block_net(block, net_names, by_name)) is None
+                or identity[1] in names
+                or identity[1] not in replaced
+            ]
         return routes, "\n\t".join(input_blocks)
     name_only = _board_uses_name_only_dialect(pcb_path)
     ordinary = _serialize_preserved_routes(
@@ -4556,6 +4611,7 @@ def _reset_partial_save_state() -> None:
     _interrupt_state["placement_text"] = None
     _interrupt_state["partial_save_info"] = None
     _interrupt_state["source_copper"] = None
+    _interrupt_state["replaced_arc_nets"] = frozenset()
     _interrupt_state["source_routes"] = None
 
 
@@ -4976,7 +5032,11 @@ def _save_partial_results() -> bool:
             check_kicad_lock(cast(Path, save_path))
 
             # Insert routes before final closing parenthesis
-            output_content = _insert_sexp_before_closing(original_content, route_sexp)
+            output_content = _insert_sexp_before_closing(
+                original_content,
+                route_sexp,
+                replaced_arc_nets=_interrupt_state.get("replaced_arc_nets", frozenset()),
+            )
 
             # Issue #4898: this SIGINT-triggered save previously used a plain
             # ``write_text`` -- no tmp file, no fsync, no ``os.replace`` --
@@ -9917,6 +9977,22 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
                 f"sidecar entries{pour_note}"
             )
 
+    floor = getattr(args, "_mfr_min_trace_floor", None)
+    if floor and getattr(args, "_explicit_trace_width", None) is None:
+        # Sidecar overrides have already received their own floor diagnostic.
+        project_classes = {
+            net: router.net_class_map[net]
+            for net in getattr(router, "authored_net_widths", {})
+            if net in router.net_class_map and not (loaded and net in resolution.resolved)
+        }
+        for name, width in _sub_floor_net_class_widths(project_classes, floor):
+            print(
+                f"WARNING: Project net class {name} uses {width:.4g}mm traces, below the "
+                f"{args.manufacturer} minimum trace width {floor:.4g}mm. "
+                f"`kct check --mfr {args.manufacturer}` will report dimension_trace_width.",
+                file=sys.stderr,
+            )
+
     # Issue #4605: stash the ``spatial_keepouts`` rule-area filter block on
     # the router for the lattice keepout projection.  Runs AFTER the merge
     # above so class-name validation sees the sidecar-defined classes too;
@@ -11212,7 +11288,13 @@ def _publish_preserved_departure(pcb_path, output_path, route_sexp, args, router
     with tempfile.TemporaryDirectory(prefix=".kct-departure-", dir=output_path.parent) as directory:
         staged = Path(directory) / output_path.name
         _copy_checkpoint_constraint_sidecars(output_path, staged)
-        _write_routed_pcb(pcb_path, staged, route_sexp, guard_copper_loss=True)
+        _write_routed_pcb(
+            pcb_path,
+            staged,
+            route_sexp,
+            guard_copper_loss=True,
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
+        )
         trial = copy(args)
         trial._preserved_departure_trial = True
         _run_post_save_stitching(trial, staged, quiet=quiet)
@@ -12136,6 +12218,18 @@ DEFAULT_TRACE_WIDTH_MM = 0.2
 _TRACE_WIDTH_EPS = 1e-9
 
 
+def _extra_load_width_kwargs(args, tier_width: float | None = None) -> dict:
+    """Optional #10189 kwargs for ``load_pcb_for_routing`` (omitted when unset)."""
+    extra: dict = {}
+    explicit = getattr(args, "_explicit_trace_width", None)
+    if explicit is not None:
+        extra["explicit_trace_width"] = float(tier_width if tier_width is not None else explicit)
+    replaced = getattr(args, "_replace_existing_nets", None)
+    if replaced:
+        extra["ignore_existing_nets"] = replaced
+    return extra
+
+
 def _effective_trace_width(args) -> float:
     """Return ``args.trace_width``, falling back to the CLI default.
 
@@ -12379,6 +12473,8 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     )
 
     explicit_width = getattr(args, "trace_width", None)
+    with contextlib.suppress(AttributeError):
+        args._explicit_trace_width = float(explicit_width) if explicit_width is not None else None
     if explicit_width is None:
         resolved = DEFAULT_TRACE_WIDTH_MM if floor is None else max(DEFAULT_TRACE_WIDTH_MM, floor)
         args.trace_width = resolved
@@ -14182,6 +14278,7 @@ def route_with_layer_escalation(
     _interrupt_state["output_path"] = output_path
     _interrupt_state["pcb_path"] = pcb_path
     _reset_partial_save_state()
+    _interrupt_state["replaced_arc_nets"] = getattr(args, "_replace_existing_nets", frozenset())
     _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
@@ -14304,6 +14401,7 @@ def route_with_layer_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
@@ -14472,6 +14570,7 @@ def route_with_layer_escalation(
                     # copper is loaded as grid obstacles + populated into
                     # router.existing_routes so it survives the route pass.
                     load_existing_routes=getattr(args, "preserve_existing", False),
+                    **_extra_load_width_kwargs(args),
                     # Issue #4148: region-bounded routing.  When set, cells
                     # outside the board-relative box are marked as obstacles.
                     region=getattr(args, "_region_box", None),
@@ -15146,6 +15245,7 @@ def route_with_layer_escalation(
             # dropped preserved set aborts loudly instead of overwriting the
             # board with only the freshly-routed net.
             guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         )
 
     if not quiet:
@@ -15635,6 +15735,7 @@ def route_with_rule_relaxation(
     _reset_partial_save_state()
     # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
     # so the partial save takes the preserved input copper from here.
+    _interrupt_state["replaced_arc_nets"] = getattr(args, "_replace_existing_nets", frozenset())
     _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
@@ -15654,6 +15755,7 @@ def route_with_rule_relaxation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
@@ -15767,6 +15869,7 @@ def route_with_rule_relaxation(
                     strict_drc=False,
                     # Issue #3155: incremental routing (see route_with_layer_escalation).
                     load_existing_routes=getattr(args, "preserve_existing", False),
+                    **_extra_load_width_kwargs(args, tier.trace_width),
                     # Issue #4148: region-bounded routing (see main()).
                     region=getattr(args, "_region_box", None),
                     # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -16199,6 +16302,7 @@ def route_with_rule_relaxation(
             # dropped preserved set aborts loudly instead of overwriting the
             # board with only the freshly-routed net.
             guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         )
 
     if not quiet:
@@ -18163,6 +18267,7 @@ def route_with_combined_escalation(
     _reset_partial_save_state()
     # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
     # so the partial save takes the preserved input copper from here.
+    _interrupt_state["replaced_arc_nets"] = getattr(args, "_replace_existing_nets", frozenset())
     _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
@@ -18182,6 +18287,7 @@ def route_with_combined_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         preserved_routes=_preserved_routes,
         router_provider=lambda: router,
         source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
@@ -18339,6 +18445,7 @@ def route_with_combined_escalation(
                         strict_drc=False,
                         # Issue #3155: incremental routing (see route_with_layer_escalation).
                         load_existing_routes=getattr(args, "preserve_existing", False),
+                        **_extra_load_width_kwargs(args, tier.trace_width),
                         # Issue #4148: region-bounded routing (see main()).
                         region=getattr(args, "_region_box", None),
                         # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -18810,6 +18917,7 @@ def route_with_combined_escalation(
             # dropped preserved set aborts loudly instead of overwriting the
             # board with only the freshly-routed net.
             guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
         )
 
     if not quiet:
@@ -20854,6 +20962,7 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
     Returns 0 on success (or when ``--nets`` is absent) and a non-zero exit
     code (with a printed error) otherwise.
     """
+    args._replace_existing_nets = frozenset()
     requested_raw = getattr(args, "nets", None)
     if not requested_raw:
         return 0
@@ -20923,7 +21032,26 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
 
     # Invert into the skip machinery: skip every board net NOT requested.
     requested_set = set(requested_unique)
-    effective_skip = sorted(board_nets - requested_set)
+    locked_arc_nets: set[str] = set()
+    arc_nets = {arc.net_name for arc in pcb.arcs} & (requested_set - set(under_two))
+    if arc_nets and not getattr(args, "region", None) and not getattr(args, "complete", False):
+        # A whole-net reroute replaces source curves along with its old straight
+        # tracks. Bounded and incremental routes may still depend on the curves.
+        from kicad_tools.core.pcb_item_locks import locked_copper_nets
+
+        net_names = {number: net.name for number, net in pcb.nets.items()}
+        locked_arc_nets = arc_nets & locked_copper_nets(pcb._sexp, net_names)
+        disposition = getattr(args, "_placement_disposition", None)
+        if disposition is not None:
+            arc_nets -= disposition.preserve_copper_nets
+        args._replace_existing_nets = frozenset(arc_nets - locked_arc_nets)
+        if locked_arc_nets:
+            print(
+                "Warning: --nets retained locked copper on " + ", ".join(sorted(locked_arc_nets)),
+                file=sys.stderr,
+            )
+    args._route_only_locked_nets = locked_arc_nets
+    effective_skip = sorted((board_nets - requested_set) | locked_arc_nets)
     args.skip_nets = ",".join(effective_skip)
     # Marker: route-only mode.  The (large) inverted skip set must NOT be
     # forwarded as force_pour_nets (that would try to pour ~every net).
@@ -20954,6 +21082,85 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def _stale_width_connected_nets(args, pcb_path: Path, pcb: "PCB", connected: list[str]) -> set[str]:
+    """Connected nets whose existing copper disagrees with authored width (#10189).
+
+    Under an auto-selected ``preserve_existing`` re-run (no explicit
+    ``--preserve-existing`` or ``--resume``), compare copper against widths from
+    project netclasses or ``--net-class-map``. An explicit ``--trace-width``
+    overrides the project width for nets with an authored declaration.
+    """
+    import json
+    from itertools import chain
+
+    from kicad_tools.core.pcb_item_locks import locked_copper_nets
+    from kicad_tools.core.project_clearance import ProjectClearanceError, authored_netclass_widths
+    from kicad_tools.router.net_names import resolve_net_class_map_keys
+    from kicad_tools.schema.pcb import Arc
+
+    explicit_width = getattr(args, "trace_width", None)
+    target: dict[str, float] = {}
+    project_path = Path(getattr(args, "pcb", pcb_path)).with_suffix(".kicad_pro")
+    if project_path.is_file():
+        try:
+            project = json.loads(project_path.read_text(encoding="utf-8"))
+            for net_name, nw in authored_netclass_widths(project, connected).items():
+                if nw.width > 0:
+                    target[net_name] = (
+                        explicit_width if explicit_width and explicit_width > 0 else nw.width
+                    )
+        except (OSError, ValueError, ProjectClearanceError):
+            # Surface canonical project errors at load_pcb_for_routing time.
+            pass
+
+    net_names = {number: net.name for number, net in pcb.nets.items()}
+    loaded = getattr(args, "_loaded_net_class_map", None)
+    if loaded:
+        # An open net on another sheet can share a connected net's suffix.
+        # Only an unambiguous board-wide match may release preserved copper.
+        resolution = resolve_net_class_map_keys(loaded, net_names.values())
+        for net_name, key in resolution.resolved.items():
+            routing = loaded[key]
+            if routing.route_via == "manual":
+                target.pop(net_name, None)
+            elif routing.trace_width > 0:
+                target[net_name] = routing.trace_width
+
+    if not target:
+        return set()
+
+    disposition = getattr(args, "_placement_disposition", None)
+    preserved_placement = (
+        disposition.preserve_copper_nets if disposition is not None else frozenset()
+    )
+    # Estimate the trunk from the copper area at each width (centerline
+    # length times width). This is independent of the number of segments:
+    # a short wide join or a narrow pad escape need not set the net's width.
+    candidates = (target.keys() & set(connected)) - preserved_placement
+    areas: dict[str, dict[float, float]] = {}
+    for track in chain(pcb.segments, pcb.arcs):
+        if track.net_name in candidates:
+            length = track.length if isinstance(track, Arc) else math.dist(track.start, track.end)
+            by_width = areas.setdefault(track.net_name, {})
+            by_width[track.width] = by_width.get(track.width, 0.0) + length * track.width
+
+    stale = set()
+    for name, by_width in areas.items():
+        trunk_width = max(by_width, key=lambda width: (by_width[width], width))
+        if abs(trunk_width - target[name]) > 1e-4:
+            stale.add(name)
+    if pcb.arcs:
+        from kicad_tools.router.preserve_existing import detached_off_width_arc_nets
+
+        # An older writer could leave an off-width arc behind an already
+        # corrected trunk. Preserve connected neck-downs on the same net.
+        stale.update(detached_off_width_arc_nets(pcb, {n: target[n] for n in candidates - stale}))
+    if stale:
+        # Re-routing replaces the whole net, including vias and group members.
+        stale.difference_update(locked_copper_nets(pcb._sexp, net_names))
+    return stale
 
 
 def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
@@ -21008,9 +21215,11 @@ def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
         return 0
 
     from kicad_tools.router.preserve_existing import fully_connected_nets
+    from kicad_tools.schema.pcb import PCB
 
     try:
-        connected = fully_connected_nets(pcb_path)
+        pcb = PCB.load(pcb_path)
+        connected = fully_connected_nets(pcb=pcb)
     except Exception as e:  # pragma: no cover - a detector that cannot run
         # must never widen the preserved set (and must never fail the route).
         if not getattr(args, "quiet", False):
@@ -21023,6 +21232,14 @@ def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
 
     if not connected:
         return 0
+
+    if getattr(args, "_auto_preserve_existing", False):
+        stale = _stale_width_connected_nets(args, pcb_path, pcb, connected)
+        if stale:
+            args._replace_existing_nets = frozenset(stale)
+            connected = [n for n in connected if n not in stale]
+            if not connected:
+                return 0
 
     args._preserved_connected_nets = list(connected)
     if not getattr(args, "quiet", False):
@@ -21159,6 +21376,11 @@ def _extend_skip_for_preserved_nets(args, skip_nets: list[str]) -> list[str]:
     preserved = list(getattr(args, "_preserved_connected_nets", None) or [])
     added = [n for n in preserved if n not in skip_nets]
     skip_nets.extend(added)
+    # Only a net the pathfinder will route can replace its input copper.
+    # This list includes both explicit exclusions and automatically skipped pours.
+    replaced = getattr(args, "_replace_existing_nets", None)
+    if replaced:
+        args._replace_existing_nets = replaced.difference(skip_nets)
     return added
 
 
@@ -25868,12 +26090,14 @@ def _run_main_impl(args, parser, argv) -> int:
     if args.preserve_existing is None:
         try:
             args.preserve_existing = (
-                next(_route_block_spans(pcb_path.read_text()), None) is not None
+                next(_route_block_spans(pcb_path.read_text(), include_arcs=True), None) is not None
             )
         except (OSError, UnicodeError) as exc:
             print(f"Error reading input routing copper from {pcb_path}: {exc}", file=sys.stderr)
             return 1
+        args._auto_preserve_existing = bool(args.preserve_existing)
     else:
+        args._auto_preserve_existing = False
         _warn_existing_copper_replacement(pcb_path, args)
 
     # Issue #5788: a bare --preserve-existing must honour its own --help ("only
@@ -26684,6 +26908,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 strict_drc=False,  # Only fail on hard constraint (grid > clearance)
                 # Issue #3155: incremental routing (see route_with_layer_escalation).
                 load_existing_routes=getattr(args, "preserve_existing", False),
+                **_extra_load_width_kwargs(args),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
                 # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -26777,6 +27002,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 validate_drc=not args.force,
                 strict_drc=False,
                 load_existing_routes=getattr(args, "preserve_existing", False),
+                **_extra_load_width_kwargs(args),
                 # Issue #4148: region-bounded routing (see main()).
                 region=getattr(args, "_region_box", None),
                 # Issue #4472 (epic #4465, Phase 2): --complete localizes the
@@ -26845,6 +27071,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # Issue #6553: checkpoints overwrite ``pcb_path`` with routed-only copper,
     # so the partial save takes the preserved input copper (captured above,
     # before routing) from here.
+    _interrupt_state["replaced_arc_nets"] = getattr(args, "_replace_existing_nets", frozenset())
     _interrupt_state["source_copper"] = _preserved_sexp
     _interrupt_state["source_routes"] = _preserved_routes
     _interrupt_state["quiet"] = quiet
@@ -27456,6 +27683,7 @@ def _run_main_impl(args, parser, argv) -> int:
             float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
             quiet=quiet,
             preserved_sexp=_preserved_sexp,
+            replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
             preserved_routes=_preserved_routes,
             router_provider=lambda: router,
             source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
@@ -28238,6 +28466,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     output_path,
                     combined_sexp,
                     guard_copper_loss=bool(getattr(args, "preserve_existing", False)),
+                    replaced_arc_nets=getattr(args, "_replace_existing_nets", frozenset()),
                 )
             elif not _publish_preserved_departure(
                 pcb_path, output_path, combined_sexp, args, router, quiet
