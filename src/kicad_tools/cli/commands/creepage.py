@@ -256,7 +256,7 @@ def run_creepage_command(args) -> int:
             net_class=net_class,
             board=str(pcb_path),
             order_thickness_mm=getattr(args, "order_thickness_mm", None),
-            project_board=pcb_path,
+            project_board=getattr(args, "project_board", None) or pcb_path,
             # In map mode the requirement varies per pair, so the report-level
             # scalar requirement / working voltage are null (per-pair).
             required_creepage_mm=required_creepage_mm,

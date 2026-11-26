@@ -32,9 +32,9 @@ from .diffpair import (
     DifferentialPairRules,
     DifferentialSignal,
     _detect_pair_type,
-)
-from .diffpair import (
-    detect_differential_pairs as _suffix_detect_pairs,
+    _is_power_rail_base,
+    detect_differential_signals,
+    group_differential_pairs,
 )
 
 if TYPE_CHECKING:
@@ -201,10 +201,15 @@ def detect_diff_pairs(
     remaining_names: dict[int, str] = {
         nid: nm for nid, nm in net_names.items() if nid not in paired_net_ids
     }
-    for pair in _suffix_detect_pairs(remaining_names):
+    signals = detect_differential_signals(remaining_names, include_power_rails=True)
+    for pair in group_differential_pairs(signals):
         if pair.positive.net_id in paired_net_ids:
             continue
         if pair.negative.net_id in paired_net_ids:
+            continue
+        if pair.positive.notation == "pos_neg" and _is_power_terminal_pair(
+            pair, net_class_routing or {}, net_to_class or {}
+        ):
             continue
         out.append(DetectedPair(pair=pair, source=DetectionSource.SUFFIX))
         paired_net_ids.add(pair.positive.net_id)
@@ -312,6 +317,38 @@ def coupled_pair_net_class(
 # =============================================================================
 # Internals
 # =============================================================================
+
+
+def _is_power_terminal_pair(
+    pair: DifferentialPair,
+    routing: dict[str, NetClassRouting],
+    net_to_class: dict[str, str],
+) -> bool:
+    """Exclude supply names or two Power-class terminals unless either has pair constraints."""
+    from .rules import NET_CLASS_POWER
+
+    both_power = True
+    for signal in (pair.positive, pair.negative):
+        class_name = net_to_class.get(signal.net_name, "")
+        nc = routing.get(signal.net_name) or routing.get(class_name)
+        if getattr(nc, "name", class_name) != NET_CLASS_POWER.name:
+            both_power = False
+        if getattr(nc, "coupled_routing", False) or any(
+            getattr(nc, field, None) is not None
+            for field in (
+                "intra_pair_clearance",
+                "target_diff_impedance",
+                "skew_tolerance_mm",
+                "coupled_continuity_threshold",
+                "pair_protocol",
+                "data_rate_gbps",
+                "max_uncoupled_per_terminal_mm",
+                "max_uncoupled_total_mm",
+                "chain_skew_tolerance_mm",
+            )
+        ):
+            return False
+    return both_power or _is_power_rail_base(pair.name)
 
 
 def _name_to_id_map(net_names: dict[int, str]) -> dict[str, int]:
