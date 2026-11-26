@@ -53,6 +53,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.schema.pcb import PCB
 
 
+# Banner attached to every selected-pair diagnostic (#10342), in both formats.
+SELECTED_PAIR_NOTICE = (
+    "LIMITED DIAGNOSTIC: only the explicitly requested net pairs were measured. "
+    "This is NOT a complete creepage census and is not release evidence; run "
+    "`kct creepage` without --pair (or kct audit / kct readiness) for the full board."
+)
+
 # Sentinel used as the "net B" name for HV-vs-board-edge pairs.
 BOARD_EDGE_LABEL = "<board edge>"
 
@@ -643,6 +650,9 @@ class CreepagePair:
     # ``via_floating``, ``witness`` still marks the closest approach, not the
     # through-bore path.
     via_bore: str | None = None
+    # Governing voltage difference (V) of a selected-pair diagnostic row (#10342).
+    # ``None`` on every full-census row, so the census schema is unchanged.
+    governing_voltage_v: float | None = None
 
     @property
     def residual_passed(self) -> bool:
@@ -742,6 +752,8 @@ class CreepagePair:
             base["via_floating"] = self.via_floating
         if self.via_bore is not None:
             base["via_bore"] = self.via_bore
+        if self.governing_voltage_v is not None:
+            base["governing_voltage_v"] = round(self.governing_voltage_v, 4)
         if self.witness is not None:
             base["witness"] = {
                 "point_a_mm": [round(v, 4) for v in self.witness["point_a_mm"]],
@@ -826,6 +838,18 @@ class CreepageReport:
     board_thickness_mm: float | None = None
     board_thickness_source: str | None = None
     board_thickness_declarations_mm: dict[str, float] | None = None
+    # Selected-pair diagnostic (#10342).  ``None`` for a full census; otherwise
+    # the de-duplicated requested ``(net_a, net_b)`` names, in request order.
+    # Such a report measures ONLY these pairs and is never release evidence.
+    selected_pairs: list[tuple[str, str]] | None = None
+    # Requested pairs that could not be measured: ``{"nets": [a, b], "reason":
+    # <token>, "detail": <text>}``.  Any entry fails the verdicts below.
+    unresolved_pairs: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def is_selected_diagnostic(self) -> bool:
+        """``True`` for a limited selected-pair diagnostic (#10342)."""
+        return self.selected_pairs is not None
 
     @property
     def passed(self) -> bool:
@@ -838,7 +862,7 @@ class CreepageReport:
         (#4403 safety guard).  Only :attr:`gate_passed` honors waivers, and only
         the standalone ``kct creepage`` CLI opts into it.
         """
-        return all(p.passed for p in self.pairs)
+        return not self.unresolved_pairs and all(p.passed for p in self.pairs)
 
     @property
     def gate_passed(self) -> bool:
@@ -850,7 +874,7 @@ class CreepageReport:
         actionable board-level defects are no longer buried under
         component-rating residuals.
         """
-        return all(p.passed for p in self.pairs if not p.waived)
+        return not self.unresolved_pairs and all(p.passed for p in self.pairs if not p.waived)
 
     @property
     def has_hv_nets(self) -> bool:
@@ -866,6 +890,19 @@ class CreepageReport:
         return self.voltage_map is not None
 
     def to_dict(self) -> dict[str, Any]:
+        d = self._census_dict()
+        if self.selected_pairs is not None:
+            d["diagnostic"] = {
+                "mode": "selected_pairs",
+                "limited": True,
+                "complete_census": False,
+                "notice": SELECTED_PAIR_NOTICE,
+                "requested_pairs": [list(p) for p in self.selected_pairs],
+            }
+            d["unresolved_pairs"] = list(self.unresolved_pairs)
+        return d
+
+    def _census_dict(self) -> dict[str, Any]:
         # Verdict semantics (#4687): ``passed`` is the RAW, waiver-blind result
         # (what ``kct audit`` keys off); ``gate_passed`` is the waiver-aware
         # verdict the standalone CLI exit code follows.  Both are always
@@ -2294,8 +2331,22 @@ def compute_creepage_census(
     insulation: str = DEFAULT_INSULATION,
     attach_zones: Sequence[Any] | None = None,
     pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
+    selected_pairs: Sequence[tuple[str, str]] | None = None,
 ) -> CreepageReport:
     """Build the full HV creepage/clearance census for a board.
+
+    Selected-pair diagnostic (#10342)
+    ---------------------------------
+    When ``selected_pairs`` (``[(net_a, net_b), ...]`` board net names) is
+    supplied the census is replaced by a *limited diagnostic*: ``hv_nets`` is
+    ignored, only the requested unordered pairs are measured (neither endpoint
+    needs to be HV; a reversed duplicate is measured once), board-edge rows are
+    skipped, and a passing cross-face-only path is reported.  The geometry, the
+    distance / voltage-interval / pair-bound / rule / witness calculations are
+    the census's own.  A pair that cannot be measured (unknown net, net with no
+    copper, no path, or -- with a ``voltage_map`` -- an endpoint absent from the
+    map) is listed in :attr:`CreepageReport.unresolved_pairs`, which fails both
+    verdicts.  In this mode an unmapped selected net is NEVER defaulted to 0 V.
 
     ``order_thickness_mm`` is the nominal finished thickness selected for purchase.
     Without an explicit value, ``project_board`` identifies the original PCB whose
@@ -2500,8 +2551,34 @@ def compute_creepage_census(
             prov["clearance"] = clprov
         return req_creep, req_clear, prov
 
+    selected_mode = selected_pairs is not None
+    sel_partners: dict[int, list[int]] = {}
+    sel_keys: list[tuple[int, int]] = []
+    if selected_pairs is not None:
+        hv_nets, sel_partners, sel_keys = _resolve_selected_pairs(
+            pcb, selected_pairs, set(norm_vmap) if map_mode else None, report
+        )
+        report.hv_nets = []
+
     if not hv_nets:
         return report
+
+    def _partners(hv_num: int, unions: dict[int, Any]) -> list[tuple[int, Any]]:
+        """Conductors to pair ``hv_num`` against within one layer/face's ``unions``."""
+        if selected_mode:
+            return [(o, unions[o]) for o in sel_partners.get(hv_num, ()) if o in unions]
+        out: list[tuple[int, Any]] = []
+        for other_num, geom in unions.items():
+            if other_num == 0 or other_num == hv_num:
+                continue
+            if other_num in hv_nets:
+                if not map_mode:
+                    continue
+                # Canonical dedup: evaluate each HV-HV pair once.
+                if other_num < hv_num:
+                    continue
+            out.append((other_num, geom))
+        return out
 
     number_to_name = {net.number: net.name for net in pcb.nets.values()}
     # Bridge sub-dimension-X cutouts once per census (#7058).
@@ -2570,15 +2647,7 @@ def compute_creepage_census(
             hv_geom = unions.get(hv_num)
             if hv_geom is None:
                 continue
-            for other_num, other_geom in unions.items():
-                if other_num == 0 or other_num == hv_num:
-                    continue
-                if other_num in hv_nets:
-                    if not map_mode:
-                        continue
-                    # Canonical dedup: evaluate each HV-HV pair once.
-                    if other_num < hv_num:
-                        continue
+            for other_num, other_geom in _partners(hv_num, unions):
                 clearance, creepage = surface_path_length(
                     hv_geom, other_geom, obstacles, _bridged=True
                 )
@@ -2636,12 +2705,7 @@ def compute_creepage_census(
                 ga = unions_by_face[fa].get(hv_num)
                 if ga is None:
                     continue
-                for other_num, gb in unions_by_face[fb].items():
-                    if other_num == 0 or other_num == hv_num:
-                        continue
-                    if other_num in hv_nets:
-                        if not map_mode or other_num < hv_num:
-                            continue
+                for other_num, gb in _partners(hv_num, unions_by_face[fb]):
                     # Read the project once, on the first actual opposing-face pair.
                     if order_lookup is not None:
                         order_thickness_mm = _project_order_thickness(order_lookup)
@@ -2654,8 +2718,9 @@ def compute_creepage_census(
                         # Existing (same-face) row: a cross-face path binds
                         # only by being strictly shorter.
                         bound = prev[1] - _PASS_TOLERANCE
-                    elif order_thickness_mm is not None:
-                        # An explicit order also reports the shortest passing cross-face path.
+                    elif order_thickness_mm is not None or selected_mode:
+                        # An explicit order -- or an explicitly requested pair
+                        # (#10342) -- also reports the shortest passing cross-face path.
                         bound = math.inf
                     else:
                         # The pair shares no copper layer.  It enters the
@@ -2887,8 +2952,26 @@ def compute_creepage_census(
             )
         )
 
+    if selected_mode:
+        copper_nets = {n for unions in layer_unions.values() for n in unions}
+        for a_num, b_num in sel_keys:
+            if (a_num, b_num) in best or (a_num, b_num) in cross_best:
+                continue
+            na, nb = hv_nets[a_num], number_to_name.get(b_num, f"net{b_num}")
+            bare = [n for n, num in ((na, a_num), (nb, b_num)) if num not in copper_nets]
+            if bare:
+                reason = "no_copper"
+                detail = f"net(s) {', '.join(bare)} declared but carry no copper on this board"
+            else:
+                reason = "no_measurable_path"
+                detail = (
+                    "no copper layer carries both nets and no cross-face "
+                    "(bore / slot / outline) path joins them"
+                )
+            report.unresolved_pairs.append({"nets": [na, nb], "reason": reason, "detail": detail})
+
     # --- HV-vs-board-edge pairs (copper union across all layers) ---
-    edge_geom = board_edge_geometry(pcb)
+    edge_geom = None if selected_mode else board_edge_geometry(pcb)
     if edge_geom is not None and not edge_geom.is_empty:
         from shapely.ops import unary_union
 
@@ -2929,9 +3012,104 @@ def compute_creepage_census(
                     )
                 )
 
+    if selected_mode:
+        for row in report.pairs:
+            row.governing_voltage_v = (
+                row.provenance.get("voltage", {}).get("delta_v_v") if map_mode else working_voltage
+            )
+
     # Deterministic ordering: by net A, then edge last, then net B.
     report.pairs.sort(key=lambda p: (p.net_a, p.kind == "edge", p.net_b))
     return report
+
+
+def _resolve_selected_pairs(
+    pcb: PCB,
+    selected_pairs: Sequence[tuple[str, str]],
+    mapped_keys: set[str] | None,
+    report: CreepageReport,
+) -> tuple[dict[int, str], dict[int, list[int]], list[tuple[int, int]]]:
+    """Resolve requested net-name pairs to board net numbers (#10342).
+
+    Records the de-duplicated request on ``report.selected_pairs`` and every pair
+    that cannot be measured on ``report.unresolved_pairs`` (``unknown_net``,
+    ``identical_nets``, ``no_potential``).  ``mapped_keys`` is the normalised
+    voltage-map key set, or ``None`` when no per-net potentials are in play.
+    Returns ``(first_endpoint_nets, partners, ordered (a, b) number pairs)``;
+    each unordered pair appears once, oriented as first requested.
+    """
+    by_name: dict[str, int] = {}
+    by_key: dict[str, set[int]] = {}
+    for net in pcb.nets.values():
+        if net.number == 0 or not net.name:
+            continue
+        by_name[net.name] = net.number
+        by_key.setdefault(_norm_net_key(net.name), set()).add(net.number)
+    number_to_name = {num: name for name, num in by_name.items()}
+
+    def lookup(name: str) -> int | None:
+        if name in by_name:
+            return by_name[name]
+        nums = by_key.get(_norm_net_key(name), set())
+        return next(iter(nums)) if len(nums) == 1 else None
+
+    first_nets: dict[int, str] = {}
+    partners: dict[int, list[int]] = {}
+    ordered: list[tuple[int, int]] = []
+    seen: set[frozenset[Any]] = set()
+    report.selected_pairs = []
+    for raw_a, raw_b in selected_pairs:
+        a_num, b_num = lookup(raw_a), lookup(raw_b)
+        ident = frozenset(
+            (a_num if a_num is not None else ("?", _norm_net_key(raw_a)),)
+            + (b_num if b_num is not None else ("?", _norm_net_key(raw_b)),)
+        )
+        if ident in seen:
+            continue  # reversed or repeated request: measured once
+        seen.add(ident)
+        report.selected_pairs.append((raw_a, raw_b))
+        unknown = [raw for raw, num in ((raw_a, a_num), (raw_b, b_num)) if num is None]
+        if unknown:
+            report.unresolved_pairs.append(
+                {
+                    "nets": [raw_a, raw_b],
+                    "reason": "unknown_net",
+                    "detail": f"net(s) {', '.join(unknown)} not found on the board",
+                }
+            )
+            continue
+        assert a_num is not None and b_num is not None
+        if a_num == b_num:
+            report.unresolved_pairs.append(
+                {
+                    "nets": [raw_a, raw_b],
+                    "reason": "identical_nets",
+                    "detail": "both names resolve to the same net",
+                }
+            )
+            continue
+        if mapped_keys is not None:
+            absent = [
+                number_to_name[n]
+                for n in (a_num, b_num)
+                if _norm_net_key(number_to_name[n]) not in mapped_keys
+            ]
+            if absent:
+                report.unresolved_pairs.append(
+                    {
+                        "nets": [number_to_name[a_num], number_to_name[b_num]],
+                        "reason": "no_potential",
+                        "detail": (
+                            f"net(s) {', '.join(absent)} absent from the voltage map; "
+                            "an unmapped selected net is not assumed to be 0 V"
+                        ),
+                    }
+                )
+                continue
+        first_nets[a_num] = number_to_name[a_num]
+        partners.setdefault(a_num, []).append(b_num)
+        ordered.append((a_num, b_num))
+    return first_nets, partners, ordered
 
 
 def apply_census_waivers(report: CreepageReport, *, waive_same_footprint: bool = False) -> None:
