@@ -1416,7 +1416,7 @@ class MaskCopperRepairer(CopperGapRepairer):
         on the pad and the mask rule's own verdict on the track a clean entry.
         Nothing else moves: the old end lies on the extended copper, so every
         track or via that met it still touches.  Returns ``None`` on success,
-        else ``declined`` -- the reason the recentre already gave.
+        else the junction veto or the original refusal reason.
         """
         from kicad_tools.router.quantize import is_45_aligned
         from kicad_tools.schema.pcb import PCB
@@ -1455,6 +1455,9 @@ class MaskCopperRepairer(CopperGapRepairer):
         # that is already there cannot clear the finding.
         if poly.buffer(-_MASK_UNCERTAINTY_MM).contains(Point(inside)):
             return declined
+        _, blocked = self._junction(layer, inside, seg_uuid, net_name)
+        if blocked:
+            return "junction_at_moved_end"
         run = math.dist(inside, outside)
         if run < 1e-9:
             return declined
@@ -1468,14 +1471,17 @@ class MaskCopperRepairer(CopperGapRepairer):
         # An end that merely stops on the edge needs at most about one track
         # width (0.7 of it at 45 degrees) to put its whole cap on the pad; a
         # longer slide is a different repair (a chamfer, a lead) not this one.
-        steps = int(min(max_displacement, width) / _EXTEND_STEP_MM + 1e-9)
+        limit = min(max_displacement, width)
+        steps = int(limit / _EXTEND_STEP_MM + 1e-9)
         for index in range(1, steps + 1):
             step = index * _EXTEND_STEP_MM
             candidate = (
                 round(inside[0] + unit[0] * step, 4),
                 round(inside[1] + unit[1] * step, 4),
             )
-            if not poly.buffer(_INSIDE_EPS_MM).contains(Point(candidate)):
+            if math.dist(inside, candidate) > limit:
+                break
+            if not grown.contains(Point(candidate)):
                 break
             copper = LineString([outside, candidate]).buffer(width / 2, quad_segs=16)
             if not poly.covers(Point(candidate).buffer(width / 2, quad_segs=16)):

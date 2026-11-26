@@ -3437,22 +3437,46 @@ def test_edge_escape_is_not_carried_past_the_displacement_limit(tmp_path):
     assert not repairer.modified and repairer.doc.to_string() == before
 
 
+@pytest.mark.parametrize(("limit", "moves"), [(0.135, False), (0.1351, True)])
+def test_edge_escape_limit_applies_to_saved_coordinates(tmp_path, limit, moves):
+    board = _edge_escape_fixture(tmp_path, width=0.19)
+    original = _end(board, "diag")
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_edge_finding()], max_displacement=limit, clearance_mm=0.127)
+    assert result.repaired == int(moves)
+    repairer.save(board)
+    saved = _end(board, "diag")
+    assert saved[1] == original[1]
+    assert math.dist(original[0], saved[0]) <= limit
+    assert saved[0] == ((100.1955, 100.4045) if moves else original[0])
+
+
+@pytest.mark.parametrize("limit", [0.5, 2.0])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        _via("v-edge", (100.1, 100.5)),
+        _seg("foreign", (100.1, 100.5), (99.6, 100.0), net=2),
+        _seg("locked", (100.1, 100.5), (99.6, 100.0)).replace("(segment ", "(segment locked "),
+    ],
+    ids=["via-at-end", "foreign-end", "locked-same-net-end"],
+)
+def test_edge_escape_extension_respects_fixed_junction(tmp_path, extra, limit):
+    board = _edge_escape_fixture(tmp_path, extra=extra)
+    repairer = MaskCopperRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair([_edge_finding()], max_displacement=limit, clearance_mm=0.127)
+    assert result.repaired == 0
+    assert [(u.uuid, u.reason) for u in result.unrepaired] == [("diag", "junction_at_moved_end")]
+    assert not repairer.modified and repairer.doc.to_string() == before
+
+
 @pytest.mark.parametrize(
     ("name", "width", "extra", "lock", "reason"),
     [
         # As wide as the pad's corner radius: its end can never lie wholly on
         # the pad along this line.
         ("wide-track", 0.3, "", "", "would_violate_clearance"),
-        # A via sits on the edge end.
-        ("via-at-end", 0.2, _via("v-edge", (100.1, 100.5)), "", "junction_at_moved_end"),
-        # Another net's track ends on the edge end.
-        (
-            "foreign-end",
-            0.2,
-            _seg("foreign", (100.1, 100.5), (99.6, 100.0), net=2),
-            "",
-            "junction_at_moved_end",
-        ),
         ("locked", 0.2, "", "locked", "locked_segment"),
     ],
 )
