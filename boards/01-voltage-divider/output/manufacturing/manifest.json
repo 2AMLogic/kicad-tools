@@ -23,8 +23,8 @@
       },
       "optimize_traces": {
         "copper_oz": 1.0,
-        "corners_after": 5,
-        "corners_before": 5,
+        "corners_after": 4,
+        "corners_before": 4,
         "layers": 2,
         "segments_after": 9,
         "segments_before": 9,
@@ -43,15 +43,15 @@
   },
   "files": {
     "README.txt": {
-      "sha256": "019a88a73aed18db88fe1bd59f7e2bd86cde95a6b44fcc74f3b2bf1b4f9d565e",
-      "size": 1825
+      "sha256": "278f5fb619b2eaedddbe5aa5df23bdba3f1491cf8666d5a220229dd76d54ca23",
+      "size": 2215
     },
     "assembly-back.pdf": {
-      "sha256": "1f7fb6bac361e583d6b506b03f43c637f8dac57073787215502e2dcfd15ff1a4",
+      "sha256": "18041ac4584bdfdf1b97f877e1d6cb89700380fd784cf2b078aa46d13d7672bf",
       "size": 8733
     },
     "assembly-front.pdf": {
-      "sha256": "7966311dff1b95058decc6f8ff20585a66a9a74d23174810b9f2fe37513dfc71",
+      "sha256": "55c1f069755668c1b296e7a08fd245dc4b7ea9f7431259fe824c6570aa4ad02a",
       "size": 19589
     },
     "bom_jlcpcb.csv": {
@@ -59,16 +59,16 @@
       "size": 175
     },
     "check-report.json": {
-      "sha256": "9cef8ab9841765215b33512cfff4eb5876ec8f4fae736c13bd203717a3919c8c",
-      "size": 126109
+      "sha256": "7bd6bf5c618eff8c40ec62c304c2814fc3e413e27d1b2930ebe1a1988c20f0a9",
+      "size": 130783
     },
     "cpl_jlcpcb.csv": {
       "sha256": "847457252c291c9086804931f5016de06f78dc1aa1020d4a0068bc98ddd89c36",
       "size": 377
     },
     "gerbers/gerbers.zip": {
-      "sha256": "11c012e6e39df361c3dcb002251b3d97e599b3f8564eec6538cc7014c16a4b0b",
-      "size": 15708
+      "sha256": "e1c32c65fa6cef7936224883ca08fde4cb289b80d8de0f9caa620c5aa08e3beb",
+      "size": 15657
     },
     "images/assembly.png": {
       "sha256": "40855c76d00618e1505662e335316ebc3cccc140beb05c5b6584dcd0f64e3daf",
@@ -95,12 +95,12 @@
       "size": 200093
     },
     "images/schematic_voltage_divider.png": {
-      "sha256": "02421af6d6d8fcfc31b5d5d4ddbb02bba24ae16635caccd9e9c90b4acb05e10b",
-      "size": 118121
+      "sha256": "27f0d0565c634d8f676c0d0b5e2edc214da86fdaa29c5f495a58dde423e213bf",
+      "size": 118129
     },
     "kicad_project.zip": {
-      "sha256": "d3e695b7b62b620755176457c58ab78611183dcdcb67a385f54cf71d9773b98b",
-      "size": 15740
+      "sha256": "7218769f570c40640017a2966421419f948f6a2d6dd9b7b967333818a4d4dc68",
+      "size": 16076
     },
     "native-drc.json": {
       "sha256": "10bbc584c93b3b2abed0729a49842f4010816c7c2635a2ca2f139e32adee4ad4",
@@ -111,19 +111,19 @@
       "size": 13488
     },
     "report.md": {
-      "sha256": "91bc6fb64d9aee5449bbe9ff791340891327b0d5cfa0b6cdb4b6dbbebad40116",
+      "sha256": "ef85489504ab8ef97900b23ee09c6fa3ce40a6b3210f55e0ab89881a68c86e49",
       "size": 2464
     },
     "report.pdf": {
-      "sha256": "c5d9e538b5ebbf5b1c0d5f80d26ba9a99926f7dd5311d3f046efb2986e7d6958",
-      "size": 905287
+      "sha256": "1e815b5973be1352fc9a2979fee8ef3bebcb3299e68a0dd85e816a084c4e964f",
+      "size": 914686
     },
     "schematic.pdf": {
-      "sha256": "31ae8587c31b52577ef563637c2df00405b1f45777e8ffbaa97e5c9712eb7e89",
+      "sha256": "9cc1629eaa68bdca7cf952e3df5e079c7879f7b5092ef7f34daa5c739881483c",
       "size": 47876
     }
   },
-  "generated_at": "2026-11-24T17:18:27Z",
+  "generated_at": "2026-11-26T09:16:55.077920+00:00",
   "kicad_tools_version": "0.29.0",
   "manufacturer": "jlcpcb",
   "mode": "assembly",
@@ -213,46 +213,26 @@
       "status": "OK"
     },
     {
-      "message": "4 of 4 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches",
+      "details": "unverified: J1 -> C7501260, R1 -> C17414, R2 -> C17414, J2 -> C7501260",
+      "message": "0 of 4 assigned item(s) verified (no source); 4 unverifiable (not in parts cache or offline catalog)",
       "name": "bom_lcsc_values",
-      "status": "OK"
+      "status": "WARN"
     },
     {
       "data": {
         "inventory_covered": [],
         "order_boards": 5,
-        "parts": [
-          {
-            "age_days": 1,
-            "lcsc": "C17414",
-            "per_board": 2,
-            "refs": [
-              "R1",
-              "R2"
-            ],
-            "source": "live",
-            "stock": 44589073,
-            "verified": false
-          },
-          {
-            "age_days": null,
-            "lcsc": "C7501260",
-            "per_board": 2,
-            "refs": [
-              "J1",
-              "J2"
-            ],
-            "source": "offline_catalog",
-            "stock": 27339,
-            "verified": false
-          }
-        ],
+        "parts": [],
         "strict": false,
-        "unresolved": []
+        "unresolved": [
+          "C17414",
+          "C7501260"
+        ]
       },
-      "message": "2 LCSC part(s) have recorded stock for 5 board(s)",
+      "details": "C17414, C7501260",
+      "message": "Stock not verified: 2 assigned LCSC number(s) found in neither the parts cache nor the offline catalog",
       "name": "bom_lcsc_stock",
-      "status": "OK"
+      "status": "WARN"
     },
     {
       "message": "BOM and PCB references match (4 components)",
@@ -280,6 +260,7 @@
   "producer": "kct readiness",
   "version": "1.0",
   "warning_counts_by_rule": {
-    "mask_to_copper": 8
+    "mask_to_copper": 8,
+    "netclass_sidecar_mismatch": 3
   }
 }

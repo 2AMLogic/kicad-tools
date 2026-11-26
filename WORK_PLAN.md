@@ -11,7 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-_None._
+- **#10253**: fix: translate reinforcement sidecar with pcb center-on-sheet
 
 ## Very Important
 
@@ -30,36 +30,36 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#10268**: kct check misses dangling copper when a dead-end branch is duplicated in reverse
-- **#10269**: Dangling branch tip is masked by the side of its own parent track
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#8486**: Reduce repeated full-budget reroutes of six narrow nets on the 97-net board
 - **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
 - **#9939**: Repair Board 03’s 16 remaining mask-to-copper findings while preserving legal trace angles
-- **#10107**: Use the declared layout for receipt validation, render output and fabrication handoff
 - **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film
-- **#10189**: router/optimize-traces: honour project netclass track widths on re-route
-- **#10240**: schematic: get_net_for_pin and extract_netlist disagree with KiCad (and each other) when a rail carries two names
 - **#10250**: pcb center-on-sheet moves wire anchors but leaves reinforcement coordinates at their old positions
-- **#10258**: Board 06: clear eight USB2 mask findings at the J1 connector on the seed-42 fixture
 - **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts
 - **#10265**: Board 03 tier-1 USB_D+ route exceeds its 16 mm branch length limit
-- **#10267**: Board 06 clear the six remaining power-net mask findings at U2 and U3
-- **#10270**: Clear a pad-to-pad mask finding by distributing the straight part of an existing bend
-- **#10276**: Board 06 clear both J1 USB3 receive mask findings at A10 and A11
-- **#10277**: Router-generated netclasses disappear from a fresh KiCad schematic netlist
-- **#10285**: Clear the USB3 receive-pair mask openings at BGA pads U2/F5 and F6 on Board 06
-- **#10290**: Clear the USB3 transmitter mask errors at J1/A3 and U2/B3 on Board 06
 - **#10294**: Board 06: clear the J1/B2 USB3_TX2+ mask overlap at its connector exit
-- **#10297**: Board 06: clear three USB3_RX1 mask errors at J1/B10 and U2/B5
 - **#10299**: Assembly preflight should compare through-hole lead dimensions with the finished plated hole
-- **#10300**: Preserve plated-pad ampacity when a straight entry is split at a collinear vertex
-- **#10308**: Grade the final Board 06 manufacturing bundle in the full recipe
+- **#10317**: creepage: support reviewed per-pad-pair exceptions alongside the global same-footprint waiver
+- **#10334**: Hierarchical net names are qualified only on collision, so an unrelated sheet's label renames a net
+- **#10336**: Request an explicit routing corridor on an inner layer with a partial plane
+- **#10345**: Verify copper repairs against each selected operating-state voltage map
+- **#10357**: Report plated via overlaps with same-face assembly lands in PCBA exports
+- **#10362**: Datasheet pitch extraction truncates a measurement when a letter follows the number or unit
+- **#10364**: Identify verified reinforcement wire-end holes when reviewing native KiCad dangling-via warnings
+- **#10368**: Summarize nominal Gerber mask exposure separately from near-pad fabrication findings
+- **#10384**: Untented via mask apertures ignore the board's declared pad_to_mask_clearance
+- **#10386**: Readiness evidence silently downgrades parts/stock verification when the producing host has no offline catalog
+- **#10387**: Recognize Kelvin sense taps that exit a through via on an inner layer
+- **#10396**: Document the current-paths sidecar's `cases` key in docs/reference/cli.md
+- **#10398**: Reinforcement courtyard rule reads sidecar records without the isinstance guard its siblings use
+- **#10401**: kct pcb reinforce raises a raw traceback on a sidecar entry that is not an object
+- **#10408**: Readiness fails on a symlinked TMPDIR when staging the selected schematic
 
 ## PRs Awaiting Review
 
@@ -67,37 +67,33 @@ PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
 - **#10128**: fix(validate): stop pour_slot reporting packed parallel track pairs
-- **#10193**: fix: honour project netclass widths in route and optimize-traces
-- **#10232**: fix: follow the declared readiness layout through fabrication handoff
-- **#10252**: fix: resolve one net identity across schematic netlist APIs
+- **#10248**: fix(fix-drc): guard mask-copper repairs against new warnings
 - **#10262**: fix(route): stitch power planes after the routed copper is refilled
-- **#10263**: fix: route Board 06 USB2 through clear connector escapes
 - **#10272**: fix(router): shorten aligned differential-pair pad hops
-- **#10273**: fix: clear Board 06 power-net mask errors at U2 and U3
-- **#10274**: fix: preserve trace length when clearing pad-to-pad mask bends
-- **#10278**: Preserve router netclasses in KiCad schematic exports
-- **#10279**: fix(board06): clear the J1 USB3 receive mask openings
-- **#10283**: Recognize the painted polarity sector of KiCad radial capacitors
 - **#10286**: Report project DRC settings changed by manufacturing export
-- **#10288**: fix(board06): clear both USB3 receiver BGA mask openings
-- **#10289**: fix(drc): add orthogonal elbow fallback and refill-safe bend checks
-- **#10296**: Handle unsupported reinforcement trees in manufacturing checks
 - **#10298**: fix(board06): clear the USB3_TX2+ connector exit at J1/B2
-- **#10302**: Expose the datasheet package commands in kct
-- **#10304**: Keep pin count and pitch separate in datasheet footprint suggestions
-- **#10307**: Use circular mask apertures for round pads in silkscreen checks
-- **#10309**: feat: compare through-hole lead dimensions with the finished hole in preflight
-- **#10311**: fix(sync): reconcile schematic purchasing fields on board footprints
-- **#10312**: fix: keep plated-terminal ampacity when a straight entry is split
-- **#10313**: fix(board06): grade the delivered manufacturing bundle in the full recipe
-- **#10315**: fix: validate series topology before reporting chain skew
+- **#10322**: fix: check fitted wire spans on mixed copper and wire paths
+- **#10339**: Fix false current-path opens at offset via landings
+- **#10344**: fix: respect project copper spacing in route-link search
+- **#10373**: fix: qualify sheet-local net names independently of sibling sheets
+- **#10378**: feat: identify verified wire ends in native dangling-via reports
+- **#10392**: fix: expand untented via mask openings by pad_to_mask_clearance
+- **#10400**: fix: recognise Kelvin sense taps leaving a through via on an inner layer
+- **#10402**: fix: drop non-object entries from the read-only reinforcement sidecar loader
+- **#10403**: feat: add opt-in via land overlap measurement to kct export
+- **#10406**: fix: measure bypass distance across repeated pin lands
+- **#10407**: fix: report unplanned findings in DRC repair previews
+- **#10410**: fix: recognize round pad cutouts in radial polarity artwork
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#10293**: fix(board06): clear the USB3 transmitter mask errors at both ends
-- **#10305**: fix(board06): clear the USB3 RX1 connector and BGA mask openings
+- **#10253**: fix: translate reinforcement sidecar with pcb center-on-sheet
+- **#10309**: feat: compare through-hole lead dimensions with the finished hole in preflight
+- **#10363**: feat: verify mask repairs against named voltage maps
+- **#10377**: fix: treat datasheet pitch tokens with an attached letter as ambiguous
+- **#10381**: feat: report nominal mask exposure per plotted opening
 
 ## Proposed
 
@@ -127,34 +123,30 @@ Issues carrying `loom:curated`.
 - **#9921**: Repair Board 05’s reviewed revision-B copper and regenerate its manufacturing package *(curated)*
 - **#9939**: Repair Board 03’s 16 remaining mask-to-copper findings while preserving legal trace angles *(curated)*
 - **#10105**: Support a repository layout with editable KiCad sources and a sibling generated-output directory *(curated)*
-- **#10107**: Use the declared layout for receipt validation, render output and fabrication handoff *(curated)*
 - **#10121**: Verify the nine Board 05 pour-slot warnings against the native copper film *(curated)*
-- **#10189**: router/optimize-traces: honour project netclass track widths on re-route *(curated)*
-- **#10240**: schematic: get_net_for_pin and extract_netlist disagree with KiCad (and each other) when a rail carries two names *(curated)*
 - **#10250**: pcb center-on-sheet moves wire anchors but leaves reinforcement coordinates at their old positions *(curated)*
-- **#10258**: Board 06: clear eight USB2 mask findings at the J1 connector on the seed-42 fixture *(curated)*
 - **#10261**: Fill the routed board before optional power-plane stitching on mixed-signal layouts *(curated)*
 - **#10265**: Board 03 tier-1 USB_D+ route exceeds its 16 mm branch length limit *(curated)*
-- **#10267**: Board 06 clear the six remaining power-net mask findings at U2 and U3 *(curated)*
-- **#10268**: kct check misses dangling copper when a dead-end branch is duplicated in reverse *(curated)*
-- **#10269**: Dangling branch tip is masked by the side of its own parent track *(curated)*
-- **#10270**: Clear a pad-to-pad mask finding by distributing the straight part of an existing bend *(curated)*
-- **#10276**: Board 06 clear both J1 USB3 receive mask findings at A10 and A11 *(curated)*
-- **#10280**: silk_overlap reports 1,105 collisions inside one radial capacitor polarity marking *(curated)*
-- **#10281**: fix-silkscreen --all cannot resolve the advertised jlcpcb-tier1 order profile *(curated)*
 - **#10284**: Report project DRC settings rewritten by manufacturing export *(curated)*
-- **#10285**: Clear the USB3 receive-pair mask openings at BGA pads U2/F5 and F6 on Board 06 *(curated)*
-- **#10290**: Clear the USB3 transmitter mask errors at J1/A3 and U2/B3 on Board 06 *(curated)*
 - **#10294**: Board 06: clear the J1/B2 USB3_TX2+ mask overlap at its connector exit *(curated)*
-- **#10295**: Reinforcement checker crashes on an eligible trunk with two T junctions *(curated)*
-- **#10297**: Board 06: clear three USB3_RX1 mask errors at J1/B10 and U2/B5 *(curated)*
 - **#10299**: Assembly preflight should compare through-hole lead dimensions with the finished plated hole *(curated)*
-- **#10300**: Preserve plated-pad ampacity when a straight entry is split at a collinear vertex *(curated)*
-- **#10301**: Public kct datasheet CLI rejects extract-package and suggest-footprint *(curated)*
-- **#10303**: Datasheet package extraction interprets the P48 in LQFP48 as a 48 mm lead pitch *(curated)*
-- **#10308**: Grade the final Board 06 manufacturing bundle in the full recipe *(curated)*
-- **#10310**: kct sync loses or leaves stale purchasing fields when adding, swapping or changing a part *(curated)*
-- **#10314**: Chain skew sums forked gate networks and accepts two links on one conductor *(curated)*
+- **#10317**: creepage: support reviewed per-pad-pair exceptions alongside the global same-footprint waiver *(curated)*
+- **#10321**: Wire courtyard DRC treats copper-only legs of a partially wire-reinforced current path as fitted wire *(curated)*
+- **#10334**: Hierarchical net names are qualified only on collision, so an unrelated sheet's label renames a net *(curated)*
+- **#10336**: Request an explicit routing corridor on an inner layer with a partial plane *(curated)*
+- **#10345**: Verify copper repairs against each selected operating-state voltage map *(curated)*
+- **#10362**: Datasheet pitch extraction truncates a measurement when a letter follows the number or unit *(curated)*
+- **#10364**: Identify verified reinforcement wire-end holes when reviewing native KiCad dangling-via warnings *(curated)*
+- **#10368**: Summarize nominal Gerber mask exposure separately from near-pad fabrication findings *(curated)*
+- **#10384**: Untented via mask apertures ignore the board's declared pad_to_mask_clearance *(curated)*
+- **#10386**: Readiness evidence silently downgrades parts/stock verification when the producing host has no offline catalog *(curated)*
+- **#10387**: Recognize Kelvin sense taps that exit a through via on an inner layer *(curated)*
+- **#10398**: Reinforcement courtyard rule reads sidecar records without the isinstance guard its siblings use *(curated)*
+- **#10401**: kct pcb reinforce raises a raw traceback on a sidecar entry that is not an object *(curated)*
+- **#10404**: fix-drc dry run describes unsupported and skipped candidates as repairable *(curated)*
+- **#10405**: Bypass distance depends on footprint pad order for regulators with a repeated pin number *(curated)*
+- **#10408**: Readiness fails on a symlinked TMPDIR when staging the selected schematic *(curated)*
+- **#10409**: Radial-capacitor hatch warnings return after clipping strokes to a round pad clearance *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -171,14 +163,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 0 |
+| Operator merge-risk holds | 1 |
 | Very important | 1 |
 | Important | 2 |
-| Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 23 |
-| PRs awaiting review | 26 |
-| Approved PRs awaiting merge | 2 |
-| Curated | 52 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 24 |
+| PRs awaiting review | 19 |
+| Approved PRs awaiting merge | 5 |
+| Curated | 48 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->

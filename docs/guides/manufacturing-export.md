@@ -120,6 +120,60 @@ pip install kicad-tools
 
 You'll also need KiCad 8+ installed for Gerber generation via `kicad-cli`.
 
+## Separate editable KiCad files from generated output
+
+Keep the PCB, schematic, project, rules and local libraries under version control.
+For example, place them in `kicad/`, alongside a project-root `.kicad-tools.toml`
+that declares a sibling output directory. Both the output path and receipt
+input names are relative to the directory containing the TOML file. You can
+pass an enclosing checkout to `--project-root` and move the declared project
+on its own. A narrower `--project-root` must contain the board, its dependencies
+and the output directory.
+
+```toml
+[readiness]
+output_root = "output"
+```
+
+From the project root, generate the package and its readiness receipt. Rendering
+the selected board puts the views and their provenance in `output/renders/`.
+The verification command writes a second receipt in `output/readiness-verification/`.
+
+```bash
+kct readiness kicad/controller.kicad_pcb --sch kicad/controller.kicad_sch --mfr jlcpcb --generate
+kct render kicad/controller.kicad_pcb
+kct readiness kicad/controller.kicad_pcb --sch kicad/controller.kicad_sch --mfr jlcpcb --verify
+```
+
+After reviewing the package, use your reviewer name to sign it. The generated
+receipt at `output/readiness.json` and the verification receipt shown here
+both bind the release to the selected PCB and bundle. Keep the receipt used
+at sign-off with the package. Submission checks the PCB and schematic paths
+and hashes against that receipt, including a schematic in a sibling source
+directory. A dry run prepares a local order preview and checks stock. Give it
+a new directory outside the source and manufacturing directories.
+
+```bash
+kct tapeout-sign-off output/manufacturing --board kicad/controller.kicad_pcb \
+  --readiness output/readiness-verification/readiness.json --reviewer "Your name"
+kct submit-jlcpcb output/manufacturing --board kicad/controller.kicad_pcb \
+  --schematic kicad/controller.kicad_sch --quantity 5 --dry-run -o ../controller-submission-preview
+```
+
+These root-anchored `.gitignore` entries cover disposable output and local
+editor state.
+
+```gitignore
+/output/
+/kicad/*.kicad_prl
+/kicad/~*.lck
+```
+
+Keep historical source revisions in `history/`. Copy the exact released
+package, signed manifest, readiness receipt and human fabrication review
+records you intend to retain into a versioned directory such as
+`releases/rev-d/`. These paths stay trackable alongside the editable design.
+
 ## Are We Ship-Ready? (`kct fleet status`)
 
 Before generating manufacturing artefacts, ask the repo whether every board
@@ -551,6 +605,59 @@ if __name__ == "__main__":
         sys.exit(1)
     export_for_jlcpcb(sys.argv[1], sys.argv[2], sys.argv[3])
 ```
+
+## Via Drills Against the Mask, Stencil and Land (`--via-land-overlap`)
+
+Under an ordinary via process every routed via should stay tented and off the
+stencil. `--via-land-overlap` measures the archive the export has just written,
+so it reports what the assembler receives rather than what the source board
+says (Issue #10357):
+
+```bash
+kct export board.kicad_pcb --mfr jlcpcb --via-land-overlap --format json
+```
+
+The opt-in appends a `via_land_overlap` entry to the preflight list of the JSON
+output and of `manifest.json`. A drill counts when the exported drill disk of a
+via matched to a plated Excellon hit shares area with the solder-mask opening,
+the stencil opening and one SMD land on the same face. A drill whose center
+lies outside the opening still counts when its edge reaches it.
+
+```json
+{
+  "name": "via_land_overlap",
+  "status": "WARN",
+  "data": {
+    "expected_vias": 499, "matched_vias": 499, "distinct_holes": 22,
+    "dispositions": {"undeclared": 22, "filled_capped": 0, "exposed_thermal": 0},
+    "coverage": {"status": "complete", "reasons": []},
+    "observations": [
+      {"face": "F", "reference": "U1", "pad": "3", "drill_file": "board-PTH.drl",
+       "drill_center_mm": [12.7, -3.4], "drill_diameter_mm": 0.3,
+       "overlap_area_mm2": 0.0075, "edge_overlap": true,
+       "process_disposition": "undeclared", "declarations": []}
+    ]
+  }
+}
+```
+
+- `drill_center_mm` is the coordinate as printed in `drill_file`, in millimetres.
+  A physical hole is counted once in `distinct_holes` however many faces
+  observe it.
+- `process_disposition` names the declaration that applies to an intersection:
+  `filled_capped` under the bundle's declared via-in-pad process (the
+  manifest's `fabrication_process`), `exposed_thermal` on a pad carrying
+  KiCad's `pad_prop_heatsink` property, or `undeclared`. A manufacturer's
+  via-in-pad capability or a pad name alone is not a declaration.
+- `coverage.status` is `complete` only when every routed via matched a drill
+  hit and the mask and paste plots of every reached face were read and line up
+  with the board. Otherwise `reasons` names what is missing, unsupported,
+  unregistered or ambiguous, the findings of the measured faces are kept, and
+  a zero is not a complete one.
+
+The result is `OK` when coverage is complete and every intersection is
+declared, and `WARN` otherwise; it never blocks the export. A standard export
+does not run the measurement.
 
 ## Other Manufacturers
 

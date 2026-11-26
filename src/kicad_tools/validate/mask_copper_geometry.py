@@ -446,23 +446,13 @@ def inspect_attributed_mask_geometry(
                 margin_source = "native-default (no explicit object/footprint/board margin)"
             # Source identity for triage messages (issue #9038): the owning
             # footprint's Reference and the pad number, so a finding can say
-            # `pad:R1/1` instead of an opaque UUID. Additive to the internal
-            # object dict; the report schema does not carry it.
-            pad_ref = None
-            if feature["kind"].startswith("pad:"):
-                number = feature["node"].get_string(0)
-                reference = None
-                if parent_node is not None:
-                    reference = next(
-                        (
-                            child.get_string(1)
-                            for child in parent_node.iter_children()
-                            if child.name == "property" and child.get_string(0) == "Reference"
-                        ),
-                        None,
-                    )
-                if reference and number:
-                    pad_ref = f"{reference}/{number}"
+            # `pad:R1/1` instead of an opaque UUID. Unnumbered openings
+            # retain their footprint reference for the aperture inventory.
+            reference = _footprint_reference(parent_node) if parent_node is not None else None
+            is_pad = feature["kind"].startswith("pad:")
+            number = feature["node"].get_string(0) if is_pad else None
+            pad_ref = f"{reference}/{number}" if reference and number else None
+            pad_property = feature["node"].find_child("property") if is_pad else None
             # Authored via drill (issue #8858). The native via copper is a solid
             # disk, so the hole is not in its geometry; the within-own-pad
             # classification needs it to keep a via-in-pad (drill inside the
@@ -493,6 +483,10 @@ def inspect_attributed_mask_geometry(
                 "margin_mm": item["margin_mm"],
                 "margin_source": margin_source,
                 "pad_ref": pad_ref,
+                "footprint_ref": reference,
+                "footprint_name": parent_node.get_string(0) if parent_node is not None else None,
+                "pad_type": feature["node"].get_string(1) if is_pad else None,
+                "pad_property": pad_property.get_string(0) if pad_property is not None else None,
                 "drill_mm": drill_mm,
                 "width_mm": width_mm,
                 "endpoints_mm": endpoints_mm,

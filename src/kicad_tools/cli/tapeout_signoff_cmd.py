@@ -51,8 +51,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--readiness",
         help=(
             "Required for --stage release. Passing `kct readiness` receipt covering --board and the bundle: "
-            "<board>/output/readiness.json or the `--verify` receipt at "
-            "<board>/output/readiness-verification/readiness.json"
+            "readiness.json or readiness-verification/readiness.json under the project's "
+            "declared output root (the legacy default is <board>/output/)."
         ),
     )
     parser.add_argument(

@@ -27,15 +27,18 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from .bom_spec_overlay import AssemblySpecErrors
 from .pnp import _ref_sort_key, is_through_hole_footprint
 
 if TYPE_CHECKING:
     from ..drc.violation import DRCViolation
     from ..manufacturers.base import AssemblyCapabilities, ManufacturerProfile
-    from ..schema.pcb import PCB
+    from ..schema.pcb import PCB, Pad
+    from ..spec.schema import BOMEntry, LeadProfile, ProjectSpec
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,8 @@ class PreflightResult:
     message: str
     details: str = ""
     # Optional machine-readable record (Issue #8807): ``bom_lcsc_stock`` stores
-    # its per-part observations so a later ``--verify`` can re-evaluate them.
+    # its per-part observations so a later ``--verify`` can re-evaluate them,
+    # and (Issue #10386) where on this host its lookups reached.
     data: dict | None = None
 
     def to_dict(self) -> dict:
@@ -193,6 +197,191 @@ def resolve_ordered_copper(pcb: PCB, manufacturer: str) -> dict:
             return info
     info["status"] = "mismatch"
     return info
+
+
+# ---------------------------------------------------------------------------
+# Through-hole lead fit (Issue #10299)
+# ---------------------------------------------------------------------------
+
+# Reported margins are rounded to 3 decimals for display; pass/fail verdicts
+# use the unrounded values so a -0.0004 mm interference still fails.
+_LEAD_MARGIN_DECIMALS = 3
+
+
+def _lead_record(profile: LeadProfile) -> dict:
+    """Serialized form of a declared lead profile (dimensions + source)."""
+    rec: dict = {"shape": profile.shape, "source": profile.source}
+    if profile.shape == "round":
+        rec["diameter_mm"] = profile.diameter_mm
+    else:
+        rec["width_mm"] = profile.width_mm
+        rec["thickness_mm"] = profile.thickness_mm
+    return rec
+
+
+def _lead_fit_finding(
+    reference: str,
+    pad: Pad,
+    entry: BOMEntry | None,
+    profile: LeadProfile | None,
+    tolerance_mm: float | None,
+    tolerance_source: str | None,
+    tolerance_reason: str,
+    profile_error: str | None,
+) -> dict:
+    """Build one per-pad lead-fit record (Issue #10299).
+
+    The drill geometry is read independently of the copper pad outline:
+    ``pad.drill`` is the round finished-hole diameter and
+    ``pad.drill_size`` holds both slot axes.  A negative nominal margin
+    fails nominal fit; a negative margin at minimum finish fails fit at
+    tolerance even when the nominal margin is positive.  Margins are
+    computed at full precision (required diameter subtracted from the
+    opening diameter) and rounded for reporting; the verdicts use the
+    unrounded values.
+    """
+    mpn = entry.part if entry is not None else None
+
+    # A slot hole: identify it with both axes and stop -- a slot's long
+    # axis must not be mistaken for a round hole diameter.
+    if pad.drill_size is not None:
+        slot_w, slot_h = pad.drill_size
+        return {
+            "reference": reference,
+            "pad": pad.number,
+            "mpn": mpn,
+            "hole": {"shape": "slot", "size_mm": [slot_w, slot_h]},
+            "lead": _lead_record(profile) if profile is not None else None,
+            "status": "unassessed",
+            "reason": (
+                f"slot hole {slot_w:.{_LEAD_MARGIN_DECIMALS}f} x "
+                f"{slot_h:.{_LEAD_MARGIN_DECIMALS}f} mm; only round holes are assessed"
+            ),
+        }
+
+    hole_mm = float(pad.drill)
+    hole: dict = {"shape": "round", "diameter_mm": hole_mm}
+    if hole_mm <= 0:
+        return {
+            "reference": reference,
+            "pad": pad.number,
+            "mpn": mpn,
+            "hole": hole,
+            "lead": _lead_record(profile) if profile is not None else None,
+            "status": "unassessed",
+            "reason": "through-hole pad has no drill diameter",
+        }
+
+    if profile is None:
+        if profile_error:
+            reason = profile_error
+        elif entry is None:
+            reason = (
+                f"no verified lead dimensions: reference {reference} has no "
+                "bom_entries assignment in the project spec"
+            )
+        else:
+            reason = f"no verified lead dimensions declared for pad {pad.number} of {mpn}"
+        return {
+            "reference": reference,
+            "pad": pad.number,
+            "mpn": mpn,
+            "hole": hole,
+            "lead": None,
+            "status": "unassessed",
+            "reason": reason,
+        }
+
+    # Preserve decimal fabrication dimensions through the tolerance addition.
+    diameter = Decimal(str(hole_mm))
+    required_mm = profile.required_diameter_decimal_mm()
+    nominal_margin = diameter - required_mm
+    finding: dict = {
+        "reference": reference,
+        "pad": pad.number,
+        "mpn": mpn,
+        "hole": hole,
+        "lead": _lead_record(profile),
+        "required_diameter_mm": round(float(required_mm), _LEAD_MARGIN_DECIMALS),
+        "nominal_margin_mm": round(float(nominal_margin), _LEAD_MARGIN_DECIMALS),
+        "nominal_status": "fail" if nominal_margin < 0 else "pass",
+    }
+
+    if tolerance_mm is None:
+        # Valid lead data, unknown hole tolerance: report the nominal fit
+        # and mark the tolerance result unassessed.
+        finding["tolerance"] = {
+            "status": "unassessed",
+            "reason": tolerance_reason,
+        }
+        finding["status"] = "fail" if nominal_margin < 0 else "pass"
+        return finding
+
+    minimum_hole_mm = diameter + Decimal(str(tolerance_mm))
+    minimum_margin = minimum_hole_mm - required_mm
+    finding["tolerance"] = {
+        "status": "fail" if minimum_margin < 0 else "pass",
+        "tolerance_mm": tolerance_mm,
+        "source": tolerance_source,
+        "minimum_hole_mm": round(float(minimum_hole_mm), _LEAD_MARGIN_DECIMALS),
+        "minimum_margin_mm": round(float(minimum_margin), _LEAD_MARGIN_DECIMALS),
+    }
+    finding["status"] = "fail" if (nominal_margin < 0 or minimum_margin < 0) else "pass"
+    return finding
+
+
+def _format_lead_finding(f: dict) -> str:
+    """One ``details`` line per pad, carrying the full per-pad evidence."""
+    mpn = f.get("mpn")
+    tag = f"{f['reference']} pad {f['pad']}" + (f" [{mpn}]" if mpn else "")
+
+    if f["status"] == "unassessed":
+        return f"{tag}: unassessed: {f['reason']}"
+
+    hole = f["hole"]
+    hole_desc = (
+        f"hole {hole['diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm round"
+        if hole["shape"] == "round"
+        else (
+            f"slot {hole['size_mm'][0]:.{_LEAD_MARGIN_DECIMALS}f} x "
+            f"{hole['size_mm'][1]:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        )
+    )
+    lead = f["lead"] or {}
+    if lead.get("shape") == "round":
+        lead_desc = f"round lead dia {lead['diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
+    else:
+        lead_desc = (
+            f"rectangular lead {lead['width_mm']:.{_LEAD_MARGIN_DECIMALS}f} x "
+            f"{lead['thickness_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm"
+        )
+    src = f" per '{lead.get('source', '')}'" if lead.get("source") else ""
+    head = (
+        f"{tag}: {hole_desc} vs {lead_desc} "
+        f"(needs {f['required_diameter_mm']:.{_LEAD_MARGIN_DECIMALS}f} mm dia){src}"
+    )
+
+    margin_fmt = f".{_LEAD_MARGIN_DECIMALS}f"
+    seg = f"nominal margin {f['nominal_margin_mm']:+{margin_fmt}} mm ({f['nominal_status']})"
+    tol = f["tolerance"]
+    if tol["status"] == "unassessed":
+        seg += f"; tolerance unassessed: {tol['reason']}"
+    else:
+        seg += (
+            f"; tolerance {tol['tolerance_mm']:+{margin_fmt}} mm"
+            + (f" per '{tol['source']}'" if tol.get("source") else "")
+            + f" -> min hole {tol['minimum_hole_mm']:{margin_fmt}} mm, "
+            f"min margin {tol['minimum_margin_mm']:+{margin_fmt}} mm ({tol['status']})"
+        )
+    return f"{head}; {seg}"
+
+
+def _lead_finding_sort_key(f: dict) -> tuple[int, tuple, tuple[int, int, str]]:
+    """Failures first, then unassessed, then passes; ref/pad order within."""
+    order = {"fail": 0, "unassessed": 1, "pass": 2}
+    pad_no = str(f["pad"])
+    pad_key: tuple[int, int, str] = (0, int(pad_no), "") if pad_no.isdigit() else (1, 0, pad_no)
+    return (order.get(f["status"], 3), _ref_sort_key(f["reference"]), pad_key)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +578,59 @@ def _describe_stock_record(rec: dict, boards: int) -> str:
     return f"needs {needed}, stock {rec['stock']} ({when})"
 
 
+# Where the ``bom_lcsc_stock`` lookups reached on the generating host
+# (issue #10386).  Every assigned LCSC number is searched in the parts cache
+# and then, when the cache does not settle it, in the offline catalog;
+# ``data["sources"]`` folds those per-number outcomes into one state per
+# source.  That lets a reader of recorded evidence tell a host that could
+# not check -- no catalog file, or one it could not read -- from a catalog
+# that was searched and does not list the part.
+LOOKUP_SOURCE_CACHE = "parts_cache"
+LOOKUP_SOURCE_CATALOG = "offline_catalog"
+
+# Fold order: the first state a run contains wins, so a query that failed is
+# never summarised as a search that found nothing.
+_LOOKUP_STATE_ORDER: dict[str, tuple[str, ...]] = {
+    LOOKUP_SOURCE_CACHE: ("unreadable", "hit", "miss", "not_consulted"),
+    LOOKUP_SOURCE_CATALOG: ("unreadable", "hit", "missing", "miss", "not_consulted"),
+}
+
+_LOOKUP_SOURCE_LABEL = {
+    LOOKUP_SOURCE_CACHE: "parts cache",
+    LOOKUP_SOURCE_CATALOG: "offline catalog",
+}
+
+_LOOKUP_STATE_TEXT = {
+    "hit": "searched, match found",
+    "miss": "searched, no matching row",
+    "missing": "not available on the generating host (no catalog file)",
+    "unreadable": "could not be read on the generating host",
+    "not_consulted": "not consulted",
+}
+
+
+def summarize_lookup_states(source: str, states: Iterable[str]) -> str:
+    """Fold the per-number lookup states of one source into the run's state."""
+    seen = set(states)
+    return next((s for s in _LOOKUP_STATE_ORDER[source] if s in seen), "not_consulted")
+
+
+def describe_lookup_sources(sources: object) -> str:
+    """Render a recorded ``sources`` block; empty when nothing was recorded.
+
+    ``data["sources"]`` is absent from bundles recorded before issue #10386
+    and from runs that assigned no LCSC number; those make no claim here.
+    """
+    if not isinstance(sources, dict):
+        return ""
+    described = []
+    for key, label in _LOOKUP_SOURCE_LABEL.items():
+        if key in sources:
+            state = str(sources[key])
+            described.append(f"{label} {_LOOKUP_STATE_TEXT.get(state, state)}")
+    return "; ".join(described)
+
+
 def evaluate_lcsc_stock(
     data: dict, boards: int, covered: frozenset[str], strict: bool
 ) -> PreflightResult:
@@ -399,7 +641,9 @@ def evaluate_lcsc_stock(
     on the manifest's recorded ``data``), so a shortfall reads identically in
     both.  ``data`` holds ``parts`` (resolved LCSC ids with ``refs``,
     ``per_board``, ``stock``, ``verified``, ``source``, ``age_days``) and
-    ``unresolved`` (ids in neither the cache nor the catalog).
+    ``unresolved`` (ids in neither the cache nor the catalog).  When it also
+    holds ``sources`` (issue #10386), "Stock not verified" says what became
+    of the lookups the producer made; without it the message is unchanged.
     """
     name = "bom_lcsc_stock"
     boards = max(1, int(boards))
@@ -474,10 +718,12 @@ def evaluate_lcsc_stock(
     checked = len(parts)
     uncovered_unresolved = [u for u in unresolved if u not in covered]
     if checked == 0 and uncovered_unresolved:
+        looked = describe_lookup_sources(data.get("sources"))
         return _result(
             "FAIL" if strict else "WARN",
             f"Stock not verified: {len(uncovered_unresolved)} assigned LCSC number(s) found in "
             f"neither the parts cache nor the offline catalog"
+            + (f"; {looked}" if looked else "")
             + (" (strict preflight)" if strict else ""),
             ", ".join(uncovered_unresolved[:10]),
         )
@@ -548,7 +794,11 @@ class PreflightChecker:
         parts_catalog=None,
         merge_lcsc: bool = True,
         merge_lcsc_from: str | Path | None = None,
+        spec_path: Path | None = None,
+        no_spec: bool = False,
     ):
+        self.spec_path = spec_path
+        self.no_spec = no_spec
         self.pcb_path = Path(pcb_path)
         # LCSC merge source, mirroring AssemblyConfig (issue #8260).
         self._merge_lcsc = merge_lcsc
@@ -621,6 +871,11 @@ class PreflightChecker:
             results.append(self._check_footprints_present())
             results.append(self._check_board_dimensions())
             results.append(self._check_drill_holes())
+            # Through-hole lead fit against the finished plated hole
+            # (Issue #10299).  Runs whenever the board loads: pads without
+            # verified lead dimensions report *unassessed* rather than
+            # passing silently.
+            results.append(self._check_assembly_lead_fit())
             results.append(self._check_stackup_copper())
 
         # THT-in-CPL warning
@@ -1068,6 +1323,182 @@ class PreflightChecker:
             name="drill_holes",
             status="OK",
             message=f"Drill holes present ({via_count} vias, {th_pad_count} TH pads)",
+        )
+
+    # ------------------------------------------------------------------
+    # Through-hole lead fit (Issue #10299)
+    # ------------------------------------------------------------------
+
+    def _load_project_spec(self) -> tuple[ProjectSpec | None, AssemblySpecErrors]:
+        """Use the BOM export's spec selection and retain per-profile errors."""
+        from .bom_spec_overlay import find_spec_file, load_assembly_spec
+
+        if self.no_spec:
+            return None, AssemblySpecErrors()
+        try:
+            path = self.spec_path or find_spec_file(self.pcb_path.parent)
+            if path is not None:
+                return load_assembly_spec(path)
+        except (ImportError, OSError, ValueError) as exc:
+            logger.warning("Project spec load failed: %s", exc)
+        return None, AssemblySpecErrors()
+
+    def _check_assembly_lead_fit(self) -> PreflightResult:
+        """Compare declared maximum lead dimensions with the finished hole.
+
+        Issue #10299: a designer declares *verified* maximum lead
+        dimensions for a part assignment (``bom_entries`` ``lead``, or a
+        ``pad_leads`` override per pad number) plus the fabricator's lower
+        finished-hole tolerance
+        (``requirements.manufacturing.finished_hole_tolerance_mm``), and
+        this check compares them with the placed footprint's plated
+        component holes.  For circular holes it reports the centred
+        geometric fit -- nominal margin (finished diameter minus required
+        diameter) and, when the tolerance is declared, the margin at
+        minimum finish.  A negative margin is a confirmed interference
+        and fails preflight.  Missing lead data, slot holes and an
+        unknown tolerance are reported as unassessed, never as a fit;
+        one pad's missing data never hides another pad's failure.
+
+        Vias (not pads), SMD pads and non-plated holes are excluded.  The
+        result describes a centred geometric fit only -- one input to
+        reviewing placement and lead-pitch tolerances.
+        """
+        name = "assembly_lead_fit"
+        if self._pcb is None:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No PCB loaded; through-hole lead fit not assessed",
+                data={"pads": [], "summary": {"pads": 0}},
+            )
+
+        spec, spec_errors = self._load_project_spec()
+        tolerance_reason = (
+            spec_errors.tolerance
+            or "no finished-hole tolerance declared in requirements.manufacturing"
+        )
+        tolerance_mm: float | None = None
+        tolerance_source: str | None = None
+        entries: dict[str, tuple[int, BOMEntry]] = {}
+        if spec is not None:
+            mfg = spec.requirements.manufacturing if spec.requirements else None
+            if mfg is not None:
+                from ..manufacturers import get_fab_family
+
+                if mfg.target_fab and get_fab_family(mfg.target_fab) != self._fab_family:
+                    tolerance_reason = f"no applicable tolerance for {self.manufacturer} (spec targets {mfg.target_fab})"
+                else:
+                    tolerance_mm = mfg.finished_hole_tolerance_mm
+                    tolerance_source = mfg.finished_hole_tolerance_source
+            from .bom_spec_overlay import expand_ref_range
+
+            for row, assignment in enumerate(spec.bom_entries or []):
+                for ref in expand_ref_range(assignment.ref):
+                    entries[ref] = (row, assignment)
+
+        findings: list[dict] = []
+        for fp in self._pcb.footprints:
+            if fp.dnp:
+                continue
+            for pad in fp.pads:
+                # Excludes vias (not pads), SMD pads and np_thru_hole
+                # (non-plated) pads by type.
+                if pad.type not in ("thru_hole", "through_hole"):
+                    continue
+                entry = None
+                profile_error = None
+                profile: LeadProfile | None = None
+                if fp.reference in entries:
+                    row, entry = entries[fp.reference]
+                    profile_error = spec_errors.pad_containers.get(row) or spec_errors.profiles.get(
+                        (row, pad.number)
+                    )
+                    if profile_error is None:
+                        profile = (entry.pad_leads or {}).get(pad.number) or entry.lead
+                        if profile is None:
+                            profile_error = spec_errors.profiles.get((row, None))
+                findings.append(
+                    _lead_fit_finding(
+                        fp.reference,
+                        pad,
+                        entry,
+                        profile,
+                        tolerance_mm,
+                        tolerance_source,
+                        tolerance_reason,
+                        profile_error,
+                    )
+                )
+
+        failed = [f for f in findings if f["status"] == "fail"]
+        unassessed = [f for f in findings if f["status"] == "unassessed"]
+        tolerance_unassessed = [
+            f
+            for f in findings
+            if f["status"] != "unassessed" and f["tolerance"]["status"] == "unassessed"
+        ]
+        data: dict = {
+            "pads": findings,
+            "summary": {
+                "pads": len(findings),
+                "failed": len(failed),
+                "unassessed": len(unassessed),
+                "tolerance_unassessed": len(tolerance_unassessed),
+                "finished_hole_tolerance_mm": tolerance_mm,
+                "finished_hole_tolerance_source": tolerance_source,
+            },
+        }
+
+        if not findings:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No plated through-hole component pads; lead fit not applicable",
+                data=data,
+            )
+
+        def _refs(fs: list[dict], limit: int = 5) -> str:
+            shown = ", ".join(f"{f['reference']} pad {f['pad']}" for f in fs[:limit])
+            if len(fs) > limit:
+                shown += f" (and {len(fs) - limit} more)"
+            return shown
+
+        if failed:
+            message = f"Through-hole lead fit fails on {len(failed)} pad(s): {_refs(failed)}"
+            status: Literal["OK", "WARN", "FAIL"] = "FAIL"
+        elif unassessed or tolerance_unassessed:
+            bits = []
+            if unassessed:
+                bits.append(
+                    f"{len(unassessed)} pad(s) unassessed "
+                    "(no verified lead dimensions or unsupported geometry)"
+                )
+            if tolerance_unassessed:
+                bits.append(
+                    f"{len(tolerance_unassessed)} pad(s) assessed without a finished-hole tolerance"
+                )
+            message = "Through-hole lead fit unverified: " + "; ".join(bits) + "; no failures"
+            status = "WARN"
+        else:
+            message = (
+                f"Through-hole lead fit verified: all {len(findings)} plated "
+                "through-hole pad(s) fit"
+            )
+            status = "OK"
+
+        lines = [_format_lead_finding(f) for f in sorted(findings, key=_lead_finding_sort_key)]
+        if len(lines) > 40:  # pragma: no cover - large boards
+            lines = lines[:40] + [f"(and {len(lines) - 40} more pads in data.pads)"]
+        lines.append(
+            "Assessment covers centred geometric fit only (not lead pitch or placement tolerances)."
+        )
+        return PreflightResult(
+            name=name,
+            status=status,
+            message=message,
+            details="\n".join(lines),
+            data=data,
         )
 
     def _check_stackup_copper(self) -> PreflightResult:
@@ -1748,6 +2179,10 @@ class PreflightChecker:
         unknown source) it is a WARN -- a legacy cache row with no stock info
         also reads ``stock=0`` -- escalated to FAIL under
         ``strict_report_source`` (``--strict-preflight``).
+
+        The recorded ``data`` also says where the lookups reached on this
+        host (``sources``, issue #10386), so a later reader can tell an
+        unverified part from a host that had no source to check it against.
         """
         name = "bom_lcsc_stock"
         boards = max(1, int(self.config.order_boards))
@@ -1806,8 +2241,12 @@ class PreflightChecker:
 
         records: list[dict] = []
         unresolved: list[str] = []
+        cache_states: set[str] = set()
+        catalog_states: set[str] = set()
         for lcsc, refs in sorted(refs_by_lcsc.items()):
             verdict = verify_lcsc_assignment(cache, catalog, lcsc, "", refs[0])
+            cache_states.add(verdict.lookups.cache)
+            catalog_states.add(verdict.lookups.catalog)
             if verdict.part is None:
                 unresolved.append(lcsc)  # not in any source: also reported by bom_lcsc_values
                 continue
@@ -1833,6 +2272,12 @@ class PreflightChecker:
             "strict": bool(self.config.strict_report_source),
             "parts": records,
             "unresolved": unresolved,
+            "sources": {
+                LOOKUP_SOURCE_CACHE: summarize_lookup_states(LOOKUP_SOURCE_CACHE, cache_states),
+                LOOKUP_SOURCE_CATALOG: summarize_lookup_states(
+                    LOOKUP_SOURCE_CATALOG, catalog_states
+                ),
+            },
         }
         return evaluate_lcsc_stock(
             data,
@@ -2367,16 +2812,10 @@ class PreflightChecker:
         original (warn-on-missing) behaviour.
         """
         try:
-            from .bom_spec_overlay import expand_ref_range, find_spec_file
+            from .bom_spec_overlay import expand_ref_range
 
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is None:
-                return set()
-
-            from ..spec.parser import load_spec
-
-            spec = load_spec(spec_file)
-            if not spec.bom_entries:
+            spec, _ = self._load_project_spec()
+            if spec is None or not spec.bom_entries:
                 return set()
 
             refs: set[str] = set()
@@ -2396,14 +2835,11 @@ class PreflightChecker:
         Best-effort like the overlay: no/invalid spec means no exemptions.
         """
         try:
-            from .bom_spec_overlay import declared_exemptions, find_spec_file
+            from .bom_spec_overlay import declared_exemptions
 
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is None:
+            spec, _ = self._load_project_spec()
+            if spec is None:
                 return {}
-            from ..spec.parser import load_spec
-
-            spec = load_spec(spec_file)
             return declared_exemptions(spec.bom_entries) if spec.bom_entries else {}
         except Exception as e:
             logger.debug("Spec exemption lookup failed (ignoring): %s", e)
@@ -2454,18 +2890,13 @@ class PreflightChecker:
             from .bom_spec_overlay import (
                 apply_spec_overlay,
                 declared_exemptions,
-                find_spec_file,
                 resolved_refs,
             )
 
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is not None:
-                from ..spec.parser import load_spec
-
-                spec = load_spec(spec_file)
-                if spec.bom_entries:
-                    spec_refs = resolved_refs(apply_spec_overlay(items, spec.bom_entries))
-                    exempt_refs = set(declared_exemptions(spec.bom_entries))
+            spec, _ = self._load_project_spec()
+            if spec and spec.bom_entries:
+                spec_refs = resolved_refs(apply_spec_overlay(items, spec.bom_entries))
+                exempt_refs = set(declared_exemptions(spec.bom_entries))
         except Exception as e:
             logger.warning("Spec overlay failed in preflight (continuing without): %s", e)
 
