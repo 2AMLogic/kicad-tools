@@ -825,7 +825,7 @@ def test_arc_only_width_edit_obeys_dry_run_and_output_verifier(tmp_path, capsys)
     assert pcb.read_text() == board
 
 
-@pytest.mark.parametrize("command", ["route", "optimize-traces"])
+@pytest.mark.parametrize("command", ["route", "selected-route", "optimize-traces"])
 @pytest.mark.parametrize("lock", ["direct", "group"])
 def test_width_edit_preserves_net_with_only_a_locked_arc(tmp_path, capsys, command, lock):
     from kicad_tools.schema.pcb import PCB
@@ -850,6 +850,9 @@ def test_width_edit_preserves_net_with_only_a_locked_arc(tmp_path, capsys, comma
     before = _arc_geometry(PCB.load(pcb).arcs[0])
     if command == "route":
         _route_board(pcb, ["--skip-drc"])
+    elif command == "selected-route":
+        _route_board(pcb, ["--nets", "NET_B", "--skip-drc"])
+        assert "retained locked copper on NET_B" in capsys.readouterr().err
     else:
         assert optimize_cmd.main([str(pcb), "--net", "NET_B", "--format", "json"]) == 0
         assert json.loads(capsys.readouterr().out)["locked_nets_skipped"] == ["NET_B"]
@@ -883,3 +886,49 @@ def test_reroute_recovers_old_detached_arc_but_keeps_connected_neckdown(tmp_path
     result = PCB.load(pcb)
     assert {s.width for s in result.segments if s.net_name == "NET_A"} == {0.37}
     assert [_arc_geometry(arc) for arc in result.arcs] == ([] if detached else [original])
+
+
+def test_short_wide_segment_does_not_mask_a_stale_trunk(tmp_path: Path):
+    pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+    text = pcb.read_text().replace(
+        "(segment (start 4 6) (end 12 6)",
+        '(segment (start 11.85 6) (end 12 6) (width 0.40) (layer "F.Cu") (net 1))\n'
+        "  (segment (start 4 6) (end 11.85 6)",
+    )
+    pcb.write_text(text)
+    other = _geometry_signature(pcb, "NET_B")
+    settings = json.loads(project.read_text())
+    next(c for c in settings["net_settings"]["classes"] if c["name"] == "ClassA")["track_width"] = (
+        0.40
+    )
+    project.write_text(json.dumps(settings))
+
+    _route_board(pcb)
+
+    assert _widths_by_net(pcb)["NET_A"] == {0.40}
+    assert _geometry_signature(pcb, "NET_B") == other
+
+
+@pytest.mark.parametrize("width", [0.25, 0.37])
+def test_selected_net_replaces_its_arc_and_preserves_unselected_copper(
+    tmp_path: Path, width: float
+):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb, project = _write_routed_two_class_board_for_optimize(tmp_path)
+    text = _arc_fixture_ids(pcb.read_text())
+    text = text.replace("(segment (start 4 6)", "(arc (start 4 6) (mid 8 6.2)")
+    text = text.replace("(segment (start 4 18)", "(arc (start 4 18) (mid 12 18.2)")
+    pcb.write_text(text)
+    kept = next(a for a in PCB.load(pcb).arcs if a.net_name == "NET_B")
+    settings = json.loads(project.read_text())
+    next(c for c in settings["net_settings"]["classes"] if c["name"] == "ClassA")["track_width"] = (
+        width
+    )
+    project.write_text(json.dumps(settings))
+
+    _route_board(pcb, ["--nets", "NET_A"])
+
+    result = PCB.load(pcb)
+    assert [_arc_geometry(a) for a in result.arcs] == [_arc_geometry(kept)]
+    assert _widths_by_net(pcb)["NET_A"] == {width}
