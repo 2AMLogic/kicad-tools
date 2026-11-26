@@ -24,6 +24,33 @@ from pathlib import Path
 from kicad_tools.cli.format_options import add_format_flag, emit_json
 
 
+def add_stock_parser(subparsers) -> None:
+    """Register authorized-distributor stock options on either parts parser."""
+    stock_parser = subparsers.add_parser(
+        "stock",
+        help="Distributor stock/price/lead time (Mouser, DigiKey; BYO API keys)",
+        description=(
+            "Look up manufacturer part numbers at authorised distributors via their "
+            "official APIs. Credentials come from the environment only: "
+            "MOUSER_API_KEY; DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET. Sources "
+            "without credentials are skipped. Several MPNs give a comparison sorted "
+            "by availability, then unit price."
+        ),
+    )
+    stock_parser.add_argument("mpns", nargs="+", help="Manufacturer part number(s)")
+    stock_parser.add_argument(
+        "-q", "--quantity", type=int, default=1, help="Quantity to price (default: 1)"
+    )
+    stock_parser.add_argument("--no-cache", action="store_true", help="Bypass the local cache")
+    stock_parser.add_argument(
+        "--cache-ttl-minutes",
+        type=float,
+        default=60.0,
+        help="Reuse cached offers younger than this (default: 60)",
+    )
+    add_format_flag(stock_parser, choices=("text", "table", "json"))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parts command entry point."""
     parser = argparse.ArgumentParser(
@@ -184,30 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     alt_parser.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
     add_format_flag(alt_parser)
 
-    # stock subcommand
-    stock_parser = subparsers.add_parser(
-        "stock",
-        help="Distributor stock/price/lead time (Mouser, DigiKey; BYO API keys)",
-        description=(
-            "Look up manufacturer part numbers at authorised distributors via their "
-            "official APIs. Credentials come from the environment only: "
-            "MOUSER_API_KEY; DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET. Sources "
-            "without credentials are skipped. Several MPNs give a comparison sorted "
-            "by availability, then unit price."
-        ),
-    )
-    stock_parser.add_argument("mpns", nargs="+", help="Manufacturer part number(s)")
-    stock_parser.add_argument(
-        "-q", "--quantity", type=int, default=1, help="Quantity to price (default: 1)"
-    )
-    stock_parser.add_argument("--no-cache", action="store_true", help="Bypass the local cache")
-    stock_parser.add_argument(
-        "--cache-ttl-minutes",
-        type=float,
-        default=60.0,
-        help="Reuse cached offers younger than this (default: 60)",
-    )
-    add_format_flag(stock_parser, choices=("text", "table", "json"))
+    add_stock_parser(subparsers)
 
     # cache subcommand
     cache_parser = subparsers.add_parser("cache", help="Cache management")
@@ -248,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.action == "suggest":
         return _suggest(args)
     elif args.action == "stock":
-        return _stock(args)
+        return run_stock(args)
     elif args.action == "alternatives":
         return _alternatives(args)
     elif args.action == "cache":
@@ -269,7 +273,7 @@ def _format_age(seconds: float | None) -> str:
     return f"{seconds / 3600:.1f}h ago"
 
 
-def _stock(args) -> int:
+def run_stock(args) -> int:
     """Handle the stock command (Mouser/DigiKey official APIs)."""
     from ..parts.distributors import query_stock
 

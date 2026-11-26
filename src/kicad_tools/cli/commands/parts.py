@@ -14,11 +14,16 @@ def run_parts_command(args) -> int:
     if not args.parts_command:
         print("Usage: kicad-tools parts <command> [options]")
         print(
-            "Commands: lookup, search, availability, import, cache, suggest, sync-catalog, alternatives"
+            "Commands: lookup, search, availability, import, cache, suggest, sync-catalog, alternatives, stock"
         )
         return 1
 
     from ..parts_cmd import main as parts_main
+
+    if args.parts_command == "stock":
+        from ..parts_cmd import run_stock
+
+        return run_stock(args)
 
     if args.parts_command == "lookup":
         sub_argv = ["lookup", args.part]

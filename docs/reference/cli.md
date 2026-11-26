@@ -1518,6 +1518,7 @@ kct parts <subcommand> [options]
 kct parts search "STM32F103"
 kct parts lookup C8734
 kct parts alternatives C123456 --limit 3
+kct parts stock AP63203WU-7 -q 5 --format json
 kct parts availability project.kicad_sch --quantity 100
 kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
 ```
