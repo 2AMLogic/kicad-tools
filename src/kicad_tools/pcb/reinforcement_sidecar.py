@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -196,10 +197,14 @@ def drop_wires(
     ``removed_copies`` are the :func:`wire_key` s of parallel-copy records whose
     copper was removed (Issue #8916); those records go too. A no-op when the
     sidecar is absent. The file is rewritten deterministically.
+
+    Raises:
+        ValueError: The sidecar holds an entry that is not a JSON object
+            (:func:`load_wire_records`). Nothing is written then.
     """
     if not path.is_file():
         return 0
-    wires = load_wires(path)
+    wires = load_wire_records(path)
     gone = wires_with_anchors(wires, net, removed)
     keys = set(removed_copies or ())
     gone += [w for w in wires_for_net(wires, net) if is_parallel(w) and wire_key(w) in keys]
@@ -215,7 +220,13 @@ def drop_wires(
 
 
 def load_wires(path: Path) -> list[dict[str, Any]]:
-    """Read a sidecar's wires. Raises ``OSError``/``ValueError`` if unreadable."""
+    """Read a sidecar's wires, every entry as written. Raises ``OSError``/``ValueError``.
+
+    An entry that is not a JSON object comes back too: the writers
+    (:func:`write_sidecar`, :func:`drop_wires`) read through this and must not
+    drop anything from the owner's file. Read-only consumers go through
+    :func:`load_wires_if_present`.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("version") != SIDECAR_VERSION:
         raise ValueError(f"{path}: not a version {SIDECAR_VERSION} reinforcement sidecar")
@@ -226,24 +237,78 @@ def load_wires(path: Path) -> list[dict[str, Any]]:
 
 
 def load_wires_if_present(board: Path) -> list[dict[str, Any]]:
-    """Wires of the board's sidecar; empty when absent or unreadable (#8746)."""
+    """Wires of the board's sidecar; empty when absent or unreadable (#8746).
+
+    Only the object entries of ``wires`` are returned, in file order and with
+    their fields untouched; an entry that is not a JSON object (``null``, a
+    string, a number, an array) is left out, so a reader can treat every
+    element as a record (Issue #10398). Fields inside a record are not
+    validated, and the file is never rewritten.
+    """
     path = sidecar_path(board)
     if not path.is_file():
         return []
     try:
-        return load_wires(path)
+        return [w for w in load_wires(path) if isinstance(w, dict)]
     except (OSError, ValueError):
         return []
 
 
 def write_sidecar(board: Path, new_wires: list[dict[str, Any]]) -> Path:
-    """Merge ``new_wires`` into the board's sidecar and write it deterministically."""
+    """Merge ``new_wires`` into the board's sidecar and write it deterministically.
+
+    An existing sidecar is read with :func:`load_wire_records`: one that holds
+    an entry which is not a JSON object raises ``ValueError`` and is left as
+    it is (Issue #10401), rather than being rewritten without the entry.
+    """
     path = sidecar_path(board)
-    existing = load_wires(path) if path.is_file() else []
+    existing = load_wire_records(path) if path.is_file() else []
     wires = merge_wires(existing, new_wires)
     text = json.dumps({"version": SIDECAR_VERSION, "wires": wires}, indent=2, sort_keys=True)
     path.write_text(text + "\n", encoding="utf-8")
     return path
+
+
+def _json_type(value: Any) -> str:
+    """A loaded entry's JSON type, as a phrase that reads after ``is``."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "an array"
+    return type(value).__name__
+
+
+def check_wire_records(path: Path, wires: Sequence[Any]) -> None:
+    """Raise ``ValueError`` when an entry of ``wires`` is not a JSON object (Issue #10401).
+
+    A hand-edited sidecar can carry ``null``, a number, a string, an array or
+    a boolean among its records. :func:`load_wires` returns those as they are,
+    so a writer never drops them from the owner's file; a caller that reads
+    the list as records calls this first and refuses the whole list, before
+    it filters by net, looks for a match or saves anything. The message names
+    the sidecar, the zero-based index of the first offending entry and what
+    every entry must be. Fields inside an object are not checked.
+    """
+    for index, wire in enumerate(wires):
+        if not isinstance(wire, dict):
+            raise ValueError(f"{path}: wires[{index}] is {_json_type(wire)}, not a JSON object")
+
+
+def load_wire_records(path: Path) -> list[dict[str, Any]]:
+    """:func:`load_wires` for a consumer that reads the list as records (Issue #10401).
+
+    Raises ``OSError`` / ``ValueError`` when the file, its envelope or one of
+    its entries is unreadable; nothing is written either way.
+    """
+    wires = load_wires(path)
+    check_wire_records(path, wires)
+    return wires
 
 
 # ---------------------------------------------------------------- adopt (#9419)

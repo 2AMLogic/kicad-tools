@@ -1215,6 +1215,7 @@ _EXPORT_PASS_THROUGH_CASES = {
         ["F.Cu", "B.Cu"],
     ),
     "include_tht": (["--include-tht"], True),
+    "via_land_overlap": (["--via-land-overlap"], True),
     "output_format": (["--format", "json"], "json"),
 }
 
