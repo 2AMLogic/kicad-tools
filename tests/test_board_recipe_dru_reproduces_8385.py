@@ -3,7 +3,10 @@
 The follow-up to #8357 (board 05, ``test_board05_recipe_dru_reproduces_8357.py``):
 under the same operator ruling (commit what the recipe emits, consistent with
 #8029), a board's committed routed ``.kicad_dru`` must be the file its recipe
-leaves on disk, including the #8048 attach-zone block.
+leaves on disk. Boards 02, 04 and 07 emit the #8048 attach-zone block. Board
+01 authors its ``Power`` net class (#10421), and board 06 authors ``LVTTL``,
+``LVDS`` and ``Power`` (#10450). Neither project has a router-class floor
+to relax. Both remain in the byte-for-byte recipe comparison.
 
 Each recipe's *last* DRU write is replayed on the committed routed board in a
 scratch directory, starting -- as a fresh recipe run does -- from no
@@ -35,11 +38,7 @@ so the writer's ampacity rules match the committed file (board 02, #8759).
 Boards not covered, and why (traced in #8385): board 00's recipe routes
 in-process and its routed ``.kicad_pro`` declares no router class, so it never
 emits the block; board 03 is suppressed by its own designer clearance rule;
-board 05 has its own test.  Since #10450 the attach-zone assertion also skips
-board 06: ``assembled-demo/generate.py`` authors ``LVTTL``, ``LVDS`` and
-``Power`` in the source project, so its routed ``.kicad_pro`` declares no
-router class and the recipe emits no block --
-``test_board06_authored_classes_emit_no_attach_zone_block`` pins that.
+board 05 has its own test.
 """
 
 from __future__ import annotations
@@ -68,13 +67,11 @@ def _export_writer(routed: Path) -> None:
 
 
 def _board06_pair_rules_then_export(routed: Path) -> None:
-    """The floors and attach-zone block, then ``build.py``'s LVDS pair block last.
+    """Write the manufacturer floors, followed by ``build.py``'s LVDS pair block.
 
     Board 06 routes only IN/OUT, so the LVDS pairs need ``build.py``
-    (Issue #8404).  The recipe's final DRU carries the pair block after the
-    attach-zone block (Issue #8801: the replay used to re-run the exporter
-    after the pair rules, which put the pair block first and no longer
-    matches a fresh recipe run).
+    (Issue #8404). Replaying the exporter before the pair rules preserves
+    the production recipe's rule order (#8801).
     """
     _export_writer(routed)
     rules = runpy.run_path(str(BOARDS / "06-diffpair-test" / "assembled-demo" / "build.py"))
@@ -112,6 +109,8 @@ PARAMS = [
     pytest.param("07-matchgroup-test", id="board07"),
 ]
 
+ATTACH_ZONE_PARAMS = [param for param in PARAMS if param.id not in {"board01", "board06"}]
+
 
 def _committed_dru(board: str) -> str:
     stem = CASES[board][0]
@@ -132,12 +131,14 @@ def _recipe_dru(board: str, tmp_path: Path) -> str:
     return routed.with_suffix(".kicad_dru").read_text(encoding="utf-8")
 
 
-ATTACH_ZONE_PARAMS = [p for p in PARAMS if p.id != "board06"]
-
-
 @pytest.mark.parametrize("board", ATTACH_ZONE_PARAMS)
 def test_committed_dru_carries_the_attach_zone_block(board):
     assert has_attach_zone_block(_committed_dru(board))
+
+
+def test_board01_authored_power_class_leaves_no_attach_zone_block():
+    """A designer-authored class is never relaxed, so board 01 emits no block."""
+    assert not has_attach_zone_block(_committed_dru("01-voltage-divider"))
 
 
 def test_board06_authored_classes_emit_no_attach_zone_block():
