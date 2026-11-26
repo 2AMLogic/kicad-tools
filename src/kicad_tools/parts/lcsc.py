@@ -858,12 +858,18 @@ class LCSCClient:
 
         parts = []
         parse_failures = 0
+        excluded = 0
         for comp in components:
             try:
                 part = self._parse_component(comp)
                 if not part.lcsc_part:
                     raise ValueError("Missing catalog identity")
-                parts.append(part)
+                if in_stock and (type(comp.get("stockCount")) is not int or part.stock < 0):
+                    raise ValueError("Missing or invalid stock count")
+                if in_stock and not part.in_stock:
+                    excluded += 1
+                else:
+                    parts.append(part)
                 # Cache search results
                 if self.cache:
                     self.cache.put(part)
@@ -872,17 +878,27 @@ class LCSCClient:
                 logger.debug("Failed to parse component: %s", type(e).__name__)
                 continue
 
+        diagnostics = []
+        if parse_failures:
+            diagnostics.append(f"{parse_failures} unparseable results; coverage incomplete")
+        if excluded:
+            if page == 1 and len(components) == total:
+                total -= excluded
+            else:
+                diagnostics.append(
+                    f"Excluded {excluded} zero-stock result(s) on this page; "
+                    "the supplier total includes unfiltered rows"
+                )
+
         return SearchResult(
             query=query,
             parts=parts,
             total_count=total,
             page=page,
-            page_size=page_size,
+            page_size=min(page_size, 100),
             source="anonymous",
-            coverage="incomplete" if parse_failures else "live",
-            diagnostics=[f"{parse_failures} unparseable results; coverage incomplete"]
-            if parse_failures
-            else [],
+            coverage="incomplete" if diagnostics else "live",
+            diagnostics=diagnostics,
         )
 
     def _catalog_search(

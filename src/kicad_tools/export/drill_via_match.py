@@ -51,6 +51,7 @@ class ViaMatch:
     center_mm: Point
     diameter_mm: float
     faces: tuple[str, ...]
+    tolerance_mm: Point = (0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -376,7 +377,13 @@ def match_drill_vias(
                     ambiguous.add(i)
                 else:
                     candidates[i] = ViaMatch(
-                        i, vias[i].uuid, file.filename, hit.center_mm, hit.diameter_mm, faces
+                        i,
+                        vias[i].uuid,
+                        file.filename,
+                        hit.center_mm,
+                        hit.diameter_mm,
+                        faces,
+                        hit.tolerance_mm,
                     )
     if ambiguous:
         reasons.add("ambiguous_hit")

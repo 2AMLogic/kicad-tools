@@ -4798,7 +4798,9 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     )
     diagnostics = _diagnostics_dir(options, original, diagnostic_name)
     with tempfile.TemporaryDirectory(prefix="kct-readiness-candidate-") as temporary:
-        candidate_root = Path(temporary) / "board"
+        # Use the same physical path as project_base when TMPDIR names a symlink.
+        temporary_root = Path(temporary).resolve()
+        candidate_root = temporary_root / "board"
         candidate = candidate_root / original.relative_to(project_base)
         candidate_source_root = candidate_root / source_root.relative_to(project_base)
         shutil.copytree(
@@ -4843,7 +4845,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             spec_target = (
                 candidate_source_root / spec.relative_to(source_root)
                 if spec.is_relative_to(source_root)
-                else Path(temporary) / spec.name
+                else temporary_root / spec.name
             )
             spec_target.parent.mkdir(parents=True, exist_ok=True)
             if not spec_target.exists():

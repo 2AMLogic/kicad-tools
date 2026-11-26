@@ -80,12 +80,14 @@ class CreepageAudit:
         self,
         *,
         voltage_map: str | Path,
+        project_board: Path | None = None,
         standard: str = "iec60664",
         pollution_degree: int = 2,
         material_group: str = "IIIa",
         hv_threshold: float = 30.0,
     ) -> None:
         self.voltage_map = str(voltage_map)
+        self.project_board = project_board
         self.standard = standard
         self.pollution_degree = pollution_degree
         self.material_group = material_group
@@ -150,6 +152,7 @@ class CreepageAudit:
                 board.write_text(board_text)
                 ns = SimpleNamespace(
                     pcb=str(board),
+                    project_board=self.project_board,
                     format="json",
                     min=None,
                     standard=self.standard,
@@ -180,14 +183,20 @@ class CreepageAudit:
         return failing_units(pairs)
 
 
+def shortfall_units(row: Mapping[str, Any]) -> int:
+    """Unwaived shortfall in verifier units, or zero for a passing or waived row."""
+    if row.get("pass", True) or row.get("waived"):
+        return 0
+    shortfall = max(0.0, -float(row.get("margin_mm", 0.0)))
+    return max(1, round(shortfall / SHORTFALL_STEP_MM))
+
+
 def failing_units(pairs: list[dict[str, Any]]) -> dict[str, int]:
     """``{pair key: shortfall units}`` for the un-waived failing rows of a census."""
     out: dict[str, int] = {}
     for p in pairs:
-        if p.get("pass", True) or p.get("waived"):
-            continue
-        shortfall = max(0.0, -float(p.get("margin_mm", 0.0)))
-        out[pair_key(p)] = max(1, round(shortfall / SHORTFALL_STEP_MM))
+        if units := shortfall_units(p):
+            out[pair_key(p)] = units
     return out
 
 

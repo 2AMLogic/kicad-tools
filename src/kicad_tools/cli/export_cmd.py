@@ -317,6 +317,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
     )
     parser.add_argument(
+        "--via-land-overlap",
+        action="store_true",
+        help=(
+            "Measure the shipped PCBA archive for plated via drills that overlap the "
+            "solder-mask opening, stencil opening and an SMD land on the same face; adds "
+            "the via_land_overlap preflight result to the JSON output and manifest "
+            "(Issue #10357)"
+        ),
+    )
+    parser.add_argument(
         "--format",
         dest="output_format",
         default="text",
@@ -365,6 +375,7 @@ def build_manufacturing_config(
     keep_versions: bool = False,
     keep_build_artifacts: bool = False,
     silk_fix: bool = True,
+    via_land_overlap: bool = False,
 ) -> ManufacturingConfig:
     """Build the ``PreflightConfig`` + ``ManufacturingConfig`` ``kct export`` uses.
 
@@ -428,6 +439,7 @@ def build_manufacturing_config(
         latest_report_only=not keep_versions,
         keep_build_artifacts=keep_build_artifacts,
         silk_fix=silk_fix,
+        via_land_overlap=via_land_overlap,
     )
 
 
@@ -513,6 +525,7 @@ def run_export(args: argparse.Namespace) -> int:
         keep_versions=getattr(args, "keep_versions", False),
         keep_build_artifacts=getattr(args, "keep_build_artifacts", False),
         silk_fix=not getattr(args, "no_silk_fix", False),
+        via_land_overlap=getattr(args, "via_land_overlap", False),
     )
 
     pkg = ManufacturingPackage(

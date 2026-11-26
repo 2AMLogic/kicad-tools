@@ -1007,6 +1007,34 @@ class TestLCSCClientExtended:
             assert payload["currentPage"] == 2
             assert payload["pageSize"] == 50
 
+    @pytest.mark.parametrize(
+        ("inventory", "in_stock", "total", "expected", "coverage"),
+        [
+            ([0], True, 1, [], "live"),
+            ([0, 4], True, 2, ["C2"], "live"),
+            ([0, 4], False, 2, ["C1", "C2"], "live"),
+            ([0, 4], True, 8, ["C2"], "incomplete"),
+            ([None, 4], True, 2, ["C2"], "incomplete"),
+        ],
+    )
+    def test_live_search_enforces_stock_filter(
+        self, inventory, in_stock, total, expected, coverage
+    ):
+        from kicad_tools.parts import LCSCClient
+
+        rows = [
+            {"componentCode": f"C{i}", "stockCount": count}
+            for i, count in enumerate(inventory, start=1)
+        ]
+        client = LCSCClient(use_cache=False, use_local_catalog=False)
+        response = {"code": 200, "data": {"componentPageInfo": {"list": rows, "total": total}}}
+        with patch.object(client, "_make_request", return_value=response):
+            result = client.search("indicator", in_stock=in_stock, page_size=2)
+        assert [part.lcsc_part for part in result.parts] == expected
+        assert result.coverage == coverage
+        assert result.total_count == (len(expected) if coverage == "live" else total)
+        assert result.has_more == (total > 2)
+
     def test_search_null_list_returns_empty(self, tmp_path):
         """A no-match query where the API returns ``"list": null`` must not raise.
 
