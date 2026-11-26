@@ -697,6 +697,40 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
     return True, excess, None
 
 
+def clean_own_pad_entry(
+    opening,
+    copper,
+    owner_copper,
+    owner_kind: str,
+    width_mm: float,
+    endpoints,
+    *,
+    clearance_mm: float,
+    uncertainty_mm: float,
+    margin_mm: float = 0.0,
+) -> bool:
+    """Whether a straight track is one clean entry into its own pad.
+
+    The within-own-pad class asked about copper that is not on a board yet
+    (issue #9939): a repairer judging a leg it may draw.  ``opening`` is the
+    pad's modelled mask opening, ``owner_copper`` the pad's copper and
+    ``owner_kind`` its kind (``pad:roundrect`` ...); ``endpoints`` are the
+    track's authored ends.  The caller supplies the policy clearance, the pad's
+    mask margin and the uncertainty it modelled the opening to.
+    """
+    item = {"kind": "segment", "width_mm": width_mm, "endpoints_mm": tuple(endpoints)}
+    return _within_own_pad(
+        opening,
+        copper,
+        owner_copper,
+        {"kind": owner_kind},
+        item,
+        margin_mm,
+        clearance_mm,
+        uncertainty_mm,
+    )[0]
+
+
 def _separate_mask_land(owner, side, opening, candidates, conductors):
     """Resolve a technical mask pad to the single numbered land beneath it."""
     parent = owner.get("parent_uuid")
