@@ -256,7 +256,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
     ) -> None:
         """Keep the fitted span clear of same-net lead holes on the other side."""
         from shapely.geometry import LineString
-        from shapely.ops import nearest_points, substring
+        from shapely.ops import nearest_points, substring  # type: ignore[import-untyped]
 
         from kicad_tools.physics.wire_gauge import anchor_drill_for_awg, bare_copper_diameter_mm
 
