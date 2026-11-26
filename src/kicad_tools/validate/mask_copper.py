@@ -688,11 +688,16 @@ def _separate_mask_land(owner, side, opening, candidates, conductors):
     """Resolve a technical mask pad to the single numbered land beneath it."""
     parent = owner.get("parent_uuid")
     layers = owner["layers_geometry"]
+    # The worker only emits outer-layer copper polygons. Inner copper and
+    # wildcard copper memberships are recorded in the authored layer list.
+    authored_layers = owner.get("layers")
     if (
         not parent
         or not owner["kind"].startswith("pad:")
         or owner.get("net")
         or owner.get("pad_ref")
+        or not authored_layers
+        or any(layer.endswith(".Cu") for layer in authored_layers)
         or any(layer.endswith(".Cu") for layer in layers)
         or opening.is_empty
     ):
@@ -1595,6 +1600,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 if excluded is not None
                 else None
             )
+            owner_items = [land] if land is not None else source_items
             for position in candidates:
                 identity, item, copper = conductors[position]
                 if identity == excluded:
@@ -1618,9 +1624,6 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 # copper is exposed, and whether the exposure is the pad's
                 # own escape or an unrelated crossing. Never gates the
                 # measurement itself -- the comparison set stays all objects.
-                owner_items = source_items
-                if land is not None and (item is land or not item["kind"].startswith("pad:")):
-                    owner_items = [land]
                 owner_nets = sorted({o["net"] for o in owner_items if o["net"]})
                 conductor_net = item["net"] or None
                 same_net = (
@@ -1650,6 +1653,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 if (
                     disposition in ("violation", "uncertain")
                     and same_net
+                    and (land is None or item is land or not item["kind"].startswith("pad:"))
                     and owner_copper is not None
                     and not owner_copper.is_empty
                 ):

@@ -179,6 +179,7 @@ def _separate_aperture(**kwargs):
     geometry = _geometry(owner_net="", **kwargs)
     aperture = geometry.objects[OWNER]
     del aperture["layers_geometry"]["F.Cu"]
+    aperture["layers"] = ["F.Mask", "F.Paste"]
     aperture["pad_ref"] = None
     return geometry
 
@@ -213,6 +214,36 @@ def test_technical_pad_with_opposite_side_copper_stays_unattributed():
     geometry = _separate_aperture()
     geometry.objects[OWNER]["layers_geometry"]["B.Cu"] = CIRCLE
     assert _measure(geometry)[1] == "error"
+
+
+def test_authored_inner_copper_prevents_assignment_even_without_native_polygon():
+    geometry = _separate_aperture()
+    geometry.objects[OWNER]["layers"] = ["F.Mask", "In1.Cu"]
+    m, severity = _measure(geometry)
+    assert (m.owner_ref, m.owner_net, m.same_net) == (None, None, None)
+    assert severity == "error"
+
+
+def test_foreign_pad_clearance_names_both_nets_and_keeps_error():
+    geometry = _separate_aperture()
+    geometry.objects["foreign-pad"] = dict(
+        geometry.objects[OTHER],
+        net="SENSE",
+        pad_ref="U2/1",
+        parent_uuid="fp-2",
+        layers_geometry={"F.Cu": box(2.07, 1, 2.5, 2)},
+    )
+    result = assess_attributed_geometry(geometry, POLICY, ())
+    m = next(m for m in result.measurements if m.conductor_uuid == "foreign-pad")
+    assert (m.opening_uuids, m.owner_ref, m.owner_net, m.same_net) == (
+        (OWNER,),
+        "U1/1",
+        "GND",
+        False,
+    )
+    assert (m.relation, m.disposition) == ("disjoint", "violation")
+    finding = next(v for v in assessment_results(result).violations if "foreign-pad" in v.items)
+    assert (finding.nets, finding.severity) == (("GND", "SENSE"), "error")
 
 
 def test_second_land_under_only_part_of_aperture_prevents_assignment():
