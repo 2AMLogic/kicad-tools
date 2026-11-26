@@ -758,10 +758,15 @@ class _PairContext:
             # against every named rule area (#10121); anything else is unknown.
             if item.type != "Track" or item.areas is None:
                 return _UNKNOWN
-            for area_name, hit in item.areas:
-                if area_name == args[0]:
-                    return _UNKNOWN if hit is None else hit
-            return _UNKNOWN
+            # Same-named areas are all evaluated, so serialization order
+            # cannot change the result: any hit decides True; otherwise an
+            # undecided area keeps it unknown.
+            hits = [hit for area_name, hit in item.areas if area_name == args[0]]
+            if not hits:
+                return _UNKNOWN
+            if any(hit is True for hit in hits):
+                return True
+            return _UNKNOWN if any(hit is None for hit in hits) else False
         if name == "isplated" and not args:
             return _UNKNOWN if item.plated is None else item.plated
         if name == "hasnetclass" and len(args) == 1 and isinstance(args[0], str):

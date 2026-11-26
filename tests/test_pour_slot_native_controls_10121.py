@@ -476,3 +476,29 @@ def test_unresolvable_rule_keeps_genuine_slot(tmp_path):
     """A predicate the evaluator cannot decide must not erase the 0.55 mm slot."""
     pcb, rules = _rules_board(tmp_path, "A.insideArea('WideSpacing')", gap=0.55)
     assert len(list(iter_pour_slot_pairs(pcb, rules))) == 1
+
+
+def test_undecided_rule_needs_a_confirmed_slot(tmp_path):
+    """0.705 mm is a slot only if the rule applies; undecided means no pair to move."""
+    pcb, rules = _rules_board(
+        tmp_path, "A.Type == 'Track' && A.enclosedByArea('WideSpacing')", gap=0.705
+    )
+    assert list(iter_pour_slot_pairs(pcb, rules)) == []
+
+
+@pytest.mark.parametrize("local_first", [True, False])
+def test_same_named_rule_areas_ignore_serialization_order(tmp_path, local_first):
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+    local = _RULE_AREA.format(x0=5, x1=25)
+    distant = _RULE_AREA.format(x0=32, x1=42).replace("0000000000a1", "0000000000a2")
+    areas = (local, distant) if local_first else (distant, local)
+    pcb = _control_p(tmp_path, (ZONE, *areas), gap=0.705)
+    board = tmp_path / "control_p.kicad_pcb"
+    board.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "Wide clearance"\n'
+        "  (condition \"A.Type == 'Track' && A.intersectsArea('WideSpacing')\")\n"
+        "  (constraint clearance (min 0.3mm)))\n"
+    )
+    rules = BoardClearanceRules.from_board(board)
+    assert len(list(iter_pour_slot_pairs(pcb, rules))) == 1

@@ -365,8 +365,9 @@ class PourSlotRule(DRCRule):
         """Each zone with the clearance readings its undecided rules allow.
 
         One reading when every rule resolved; two (all-largest, all-smallest)
-        when one could not, so a genuine slot survives an unrelated or
-        unresolvable rule (Issue #10121).
+        when one could not. The caller confirms a slot on the last (smallest)
+        reading only, so an unresolvable rule neither hides a genuine slot nor
+        invents one that exists only if the rule applied (Issue #10121).
         """
         for zone in zlist:
             up_a, lo_a = self._segment_clearance(a, zone, layer, areas_a)
@@ -415,9 +416,13 @@ class PourSlotRule(DRCRule):
 
         areas_a = self._segment_areas(a, layer)
         areas_b = self._segment_areas(b, layer)
+        zone_readings: dict[int, list[tuple[_Pour, float, float]]] = {}
         for zone, clearance_a, clearance_b in self._candidates(
             a, b, zlist, layer, areas_a, areas_b
         ):
+            zone_readings.setdefault(id(zone), []).append((zone, clearance_a, clearance_b))
+
+        def slot(zone: _Pour, clearance_a: float, clearance_b: float) -> PourSlotPair | None:
             packed_gap = clearance_a + clearance_b
             threshold = packed_gap + zone.min_thickness
             # Split the shared projection where either facing gap crosses a
@@ -449,7 +454,7 @@ class PourSlotRule(DRCRule):
                 runs.extend(get_parts(covered))
             run = max(runs, key=lambda part: part.length, default=None)
             if run is None or run.length < MIN_OVERLAP_MM:
-                continue
+                return None
             point = run.interpolate(0.5, normalized=True)
             gap = abs(separation(frame((point.x, point.y))[0])) - half_widths
             return PourSlotPair(
@@ -464,4 +469,12 @@ class PourSlotRule(DRCRule):
                 overlap=run.length,
                 location=(point.x, point.y),
             )
+
+        for readings in zone_readings.values():
+            # The last reading is the one where no undecided rule applies. A
+            # slot that exists only if such a rule applies is unconfirmed and
+            # is neither reported nor handed to cleanup to move.
+            pair = slot(*readings[-1])
+            if pair is not None:
+                return pair
         return None
