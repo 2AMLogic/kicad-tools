@@ -108,6 +108,47 @@ def test_malformed_project_exits_nonzero(tmp_path, capsys, with_clearance_rule):
     assert rc == 1
 
 
+@pytest.mark.parametrize("field", ["classes", "netclass_patterns"])
+@pytest.mark.parametrize("with_clearance_rule", [False, True])
+def test_malformed_net_settings_array_preserves_json_error(
+    tmp_path, capsys, field, with_clearance_rule
+):
+    from kicad_tools.cli import main
+
+    p = _write(tmp_path, BODY)
+    _project(p, 0.4)
+    pro_path = p.with_suffix(".kicad_pro")
+    data = json.loads(pro_path.read_text())
+    data["net_settings"][field] = 1
+    pro_path.write_text(json.dumps(data))
+    if with_clearance_rule:
+        p.with_suffix(".kicad_dru").write_text(
+            '(version 1)\n(rule "front pair" (layer "F.Cu") '
+            "(condition \"A.NetName == 'HV' && B.NetName == 'SIG'\") "
+            "(constraint clearance (min 2mm)))\n"
+        )
+    rc = main(
+        [
+            "route-link",
+            "--format",
+            "json",
+            "--probe",
+            str(p),
+            "--link",
+            "SIG R1.1 R2.1",
+            "--link-layers",
+            "F.Cu",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert f"net_settings.{field}" in payload["error"]
+    assert "array" in payload["error"].lower()
+
+
 def test_gate_stages_project_files_next_to_output(tmp_path):
     src = tmp_path / "in" / "b.kicad_pcb"
     out = tmp_path / "out" / "o.kicad_pcb"
@@ -190,6 +231,48 @@ def test_invalid_dru_refuses_before_routing(tmp_path):
     args = _parse(str(p), "--link", "SIG R1.1 R2.1")
     with pytest.raises(LinkSpecError):
         _rules_from_args(args, PCB.load(str(p)))
+
+
+def test_unreadable_dru_refuses_before_routing(tmp_path, capsys, monkeypatch):
+    from kicad_tools.cli import main
+
+    p = _write(tmp_path, BODY)
+    _project(p, 0.2)
+    dru = p.with_suffix(".kicad_dru")
+    dru.write_text(
+        '(version 1)\n(rule "front pair" (layer "F.Cu") '
+        "(condition \"A.NetName == 'HV' && B.NetName == 'SIG'\") "
+        "(constraint clearance (min 2mm)))\n"
+    )
+    orig_read_text = Path.read_text
+
+    def fail_on_dru(self, *args, **kwargs):
+        if self == dru:
+            raise PermissionError(13, "Permission denied", str(self))
+        return orig_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_on_dru)
+    rc = main(
+        [
+            "route-link",
+            "--format",
+            "json",
+            "--probe",
+            str(p),
+            "--link",
+            "SIG R1.1 R2.1",
+            "--link-layers",
+            "F.Cu",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert "links" not in payload
+    assert dru.name in payload["error"]
+    assert "cannot be read" in payload["error"]
 
 
 def _pair_rules(tmp_path, dru, clearance=0.2):

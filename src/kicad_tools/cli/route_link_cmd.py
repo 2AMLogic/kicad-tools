@@ -363,7 +363,7 @@ def _rules_from_args(args: argparse.Namespace, pcb: Any) -> Any:
         via_drill=args.via_drill,
     )
     names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
-    if Path(args.pcb).with_suffix(".kicad_dru").is_file():
+    if Path(args.pcb).with_suffix(".kicad_dru").exists():
         from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 
         project = BoardClearanceRules.from_board(args.pcb)
