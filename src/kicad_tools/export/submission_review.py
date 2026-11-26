@@ -37,6 +37,14 @@ absolute machine paths, no secrets, and no files beyond the reviewed
 bundle's own hashed inputs/outputs plus the caller's explicitly hash-bound
 assets.
 
+When the plan carries the project's supplementary purchasing list (Issue
+#10431: accessories and off-board parts, which the factory neither places
+nor supplies), the page adds a ``purchasing.json`` with each row's per-board
+and build quantity and a "Purchasing list" section in ``index.md`` whose
+"Outstanding selections" part names every row whose part is not chosen yet,
+by description and linked designators. The list is the buyer's; it is kept
+apart from the assembly demand and never counted as a stock observation.
+
 States use the same terse vocabulary as ``submission_plan.py``'s own
 ``states`` block: ``preparation``, ``inventory``, ``human_approval``,
 ``factory_matching``, ``upload`` and ``order``. This module only ever
@@ -58,6 +66,8 @@ from pathlib import Path
 from typing import Any
 
 from .submission_plan import (
+    PURCHASING_FILENAME,
+    SubmissionError,
     SubmissionPlan,
     _digest,
     _inventory,
@@ -70,6 +80,7 @@ from .submission_plan import (
     _record,
     _root,
     _write_bytes,
+    scaled_purchasing,
 )
 
 _ASSET_KINDS = frozenset({"manufacturing", "synthetic-test-evidence"})
@@ -372,6 +383,70 @@ def _fab_dfm_section(fab_dfm: Mapping[str, Any] | None) -> list[str]:
     return lines + [""]
 
 
+def _plan_purchasing(core: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the plan's purchasing rows, checked against its board quantity.
+
+    A plan without a supplementary list (Issue #10431) yields ``None``.  The
+    rows are re-validated rather than trusted, so a hand-edited plan cannot
+    put an unscaled quantity or an invented part number on the page.
+    """
+    purchasing = core.get("purchasing")
+    if purchasing is None:
+        return None
+    try:
+        items = scaled_purchasing(purchasing["items"], core["board_quantity"])
+    except (KeyError, TypeError, SubmissionError) as exc:
+        raise ReviewError("Malformed plan purchasing list") from exc
+    return {"items": items, "board_quantity": core["board_quantity"]}
+
+
+def _cell(text: str) -> str:
+    """Keep free text inside its own markdown table cell and on one row."""
+    return " ".join(text.split()).replace("|", "\\|")
+
+
+def _purchasing_section(purchasing: Mapping[str, Any] | None) -> list[str]:
+    """Render the buyer's list; ``None`` renders nothing."""
+    if purchasing is None:
+        return []
+    items = purchasing["items"]
+    boards = purchasing["board_quantity"]
+    lines = [
+        "## Purchasing list (supplementary; not part of the fabricator BOM/CPL)",
+        "Accessories and off-board parts the project declares for a complete assembly.",
+        "The factory neither places nor supplies them, and nothing here is a stock",
+        f"observation. Quantities are per board and for all {boards} board(s) of this build.",
+        "Machine-readable copy: purchasing.json.",
+        "",
+        "| Description | Per board | For this build | Linked designators | Selection |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for item in items:
+        if item["status"] == "pending":
+            selection = f"PENDING: {item['pending']}"
+        else:
+            selection = f"{item['manufacturer']} {item['mpn']}"
+        lines.append(
+            f"| {_cell(item['description'])} | {item['per_board']} | {item['required']} | "
+            f"{_cell(', '.join(item['refs']) or '(none)')} | {_cell(selection)} |"
+        )
+    outstanding = [item for item in items if item["status"] == "pending"]
+    lines.append("")
+    lines.append(
+        f"Outstanding selections ({len(outstanding)}):"
+        if outstanding
+        else "Outstanding selections: none"
+    )
+    for item in outstanding:
+        linked = ", ".join(item["refs"]) or "no board designator"
+        lines.append(
+            f"- {_cell(item['description'])}: {item['required']} for this build "
+            f"({item['per_board']} per board), linked {_cell(linked)}"
+            f" -- {_cell(item['pending'])}"
+        )
+    return lines + [""]
+
+
 def render_review_page(
     plan: SubmissionPlan,
     *,
@@ -419,12 +494,15 @@ def render_review_page(
     The published directory contains exactly: the page itself
     (``index.md``), a human-readable ``inventory-report.txt``, byte-exact
     copies of the plan's own declared upload/download file set under
-    ``uploads/``, the caller's hash-verified assets, and a self-describing
-    ``review-page-manifest.json``. No ambient absolute machine path or
-    secret is embedded in any of it, and nothing beyond those exact,
-    already-hashed inputs is ever written.
+    ``uploads/``, the caller's hash-verified assets, a self-describing
+    ``review-page-manifest.json`` and -- only when the plan carries the
+    project's supplementary purchasing list (Issue #10431) -- that list as
+    ``purchasing.json``. No ambient absolute machine path or secret is
+    embedded in any of it, and nothing beyond those exact, already-hashed
+    inputs is ever written.
     """
     core = _plan_core(plan)
+    purchasing = _plan_purchasing(core)
     record_core: dict[str, Any] | None = None
     if record is not None:
         record_core = verify_review(record, plan)
@@ -561,6 +639,7 @@ def render_review_page(
         [f"- {path}" for path in sorted(test_assets)] if test_assets else ["(none supplied)"]
     )
     index_lines += ["", "## Inventory report", "See inventory-report.txt", ""]
+    index_lines += _purchasing_section(purchasing)
     index_bytes = "\n".join(index_lines).encode("utf-8")
 
     files: dict[str, bytes] = {
@@ -570,6 +649,8 @@ def render_review_page(
         **manufacturing_assets,
         **test_assets,
     }
+    if purchasing is not None:
+        files[PURCHASING_FILENAME] = _json({"schema_version": 1, **purchasing})
     for name in files:
         _path(name)
     if len({name.casefold() for name in files}) != len(files):

@@ -13,9 +13,9 @@ between variants is measuring the wrong thing.  It then asks the parser whether
 a via accepts a local ``solder_mask_margin`` node at all.
 
 Part B -- DRC.  One untented via or round SMD pad per silk line, each line at a
-controlled distance from its feature, through ``kicad-cli pcb drc`` and kct's
-``check_silk_over_copper`` on the same board.  Thick lines are judged by both;
-thin lines locate where the native check's reach ends.
+controlled distance from its feature, through ``kicad-cli pcb drc`` and
+``kct check --mfr jlcpcb`` on the same board. Thin lines locate the copper
+edge and thick lines test the ring inside an expanded mask opening.
 
 Run from a checkout::
 
@@ -42,9 +42,6 @@ from kicad_tools.cli.kicad_toolchain import (
     docker_fallback_enabled,
     evidence_toolchain,
 )
-from kicad_tools.manufacturers import get_profile
-from kicad_tools.schema.pcb import PCB
-from kicad_tools.validate.rules.silkscreen import check_silk_over_copper
 
 #: ``(label, setup text)`` -- the board-level ``pad_to_mask_clearance`` variants.
 CLEARANCES: tuple[tuple[str, str], ...] = (
@@ -98,11 +95,8 @@ FEATURE_RADII = {"via": 0.3, "via1.6": 0.8, "pad": 0.5}
 _SWEEP_X0 = 10.0
 _SWEEP_PITCH = 5.0
 
-#: Silk line ``(length, stroke width)`` both tools can judge: it clears kct's
-#: per-pair overlap gate whenever it lies inside an opening.
+#: Silk line ``(length, stroke width)`` for the ring and edge controls.
 THICK_LINE = (0.4, 0.2)
-#: Thinner line that locates the native threshold.  kct is not run on these: so
-#: thin a stroke cannot reach its per-pair overlap gate against these features.
 THIN_LINE = (0.2, 0.05)
 
 #: ``(feature, distance of the line's centre from the feature centre, direction
@@ -487,7 +481,26 @@ def native_silk_over_copper(board: Path, out: Path) -> dict[str, int]:
 
 def kct_silk_over_copper(board: Path) -> dict[str, int]:
     """``probe name -> kct ``silk_over_copper`` findings on its feature``."""
-    rules = get_profile("jlcpcb").get_design_rules(layers=2)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "check",
+            str(board),
+            "--mfr",
+            "jlcpcb",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    # The probe deliberately violates other manufacturing rules.
+    if proc.returncode not in (0, 2):
+        raise RuntimeError(proc.stderr)
+    report = json.loads(proc.stdout)
     labels = {
         f"{_reference(i)} pad 1"
         if p.feature == "pad"
@@ -495,48 +508,37 @@ def kct_silk_over_copper(board: Path) -> dict[str, int]:
         for i, p in enumerate(SILK_PROBES)
     }
     counts = {p.name: 0 for p in SILK_PROBES}
-    for violation in check_silk_over_copper(PCB.load(board), rules).violations:
-        name = labels.get(violation.items[1])
-        assert name is not None, f"unexpected aperture label {violation.items[1]!r}"
+    for violation in report["violations"]:
+        if violation["rule_id"] != "silk_over_copper":
+            continue
+        name = labels[violation["items"][1]]
         counts[name] += 1
     return counts
 
 
-def measure_drc(root: Path) -> dict[str, dict[str, tuple[int, int | None]]]:
-    """``clearance label -> {probe: (native count, kct count or None)}``."""
-    results: dict[str, dict[str, tuple[int, int | None]]] = {}
+def measure_drc(root: Path) -> dict[str, dict[str, tuple[int, int]]]:
+    """``clearance label -> {probe: (native count, kct count)}``."""
+    results: dict[str, dict[str, tuple[int, int]]] = {}
     for clabel, clearance in CLEARANCES:
         board = root / f"drc_{_slug(clabel)}.kicad_pcb"
         board.write_text(drc_board_text(clearance))
         native = native_silk_over_copper(board, root / board.stem)
         kct = kct_silk_over_copper(board)
-        results[clabel] = {
-            p.name: (native[p.name], None if p.thin else kct[p.name]) for p in SILK_PROBES
-        }
+        results[clabel] = {p.name: (native[p.name], kct[p.name]) for p in SILK_PROBES}
     return results
 
 
-def report_drc(drc: dict[str, dict[str, tuple[int, int | None]]]) -> None:
+def report_drc(drc: dict[str, dict[str, tuple[int, int]]]) -> None:
     print("\n== B: silk_over_copper findings by pad_to_mask_clearance ==")
-    sections = (
-        (False, f"thick lines {THICK_LINE[0]:g} x {THICK_LINE[1]:g} mm -- native / kct"),
-        (
-            True,
-            f"thin lines {THIN_LINE[0]:g} x {THIN_LINE[1]:g} mm -- native only; the stroke "
-            f"cannot clear kct's per-pair overlap gate",
-        ),
-    )
-    for thin, heading in sections:
-        print(f"\n  {heading}")
+    for thin, (length, width) in ((False, THICK_LINE), (True, THIN_LINE)):
+        print(f"\n  {length:g} x {width:g} mm lines -- native / kct")
         for probe in SILK_PROBES:
             if probe.thin is not thin:
                 continue
             cells = []
             for clabel, _clearance in CLEARANCES:
                 native, kct = drc[clabel][probe.name]
-                cells.append(
-                    f"{clabel:>8}: {native}" if kct is None else f"{clabel:>8}: {native}/{kct}"
-                )
+                cells.append(f"{clabel:>8}: {native}/{kct}")
             print(f"  {probe.name:<34} " + "   ".join(cells))
 
 

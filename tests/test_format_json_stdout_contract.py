@@ -319,6 +319,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "validate": ["--sync", "{pro}"],
     "analyze congestion": ["{pcb}"],
     "analyze trace-lengths": ["{pcb}"],
+    "analyze reference-coverage": ["{pcb}", "--pair", "VIN", "NET1"],
     "analyze signal-integrity": ["{pcb}"],
     "analyze thermal": ["{pcb}"],
     "analyze complexity": ["{pcb}"],
