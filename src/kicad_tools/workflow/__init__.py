@@ -422,12 +422,12 @@ class PCBFromSchematic:
                 columns = max_cols
                 fitted = self._shrink_spacing_to_fit(n, usable_width, usable_height, columns)
                 if fitted is not None:
-                    spacing = fitted
                     result.warnings.append(
                         f"{n} components do not fit within "
                         f"{board_w:.1f}x{board_h:.1f} mm at {spacing:.1f} mm "
                         f"spacing; auto-shrank spacing to {fitted:.2f} mm to fit."
                     )
+                    spacing = fitted
                 else:
                     result.warnings.append(
                         f"{n} components cannot fit within "

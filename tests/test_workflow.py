@@ -740,8 +740,10 @@ class TestPlaceAllComponentsBoardAware:
             result = workflow.place_all_components(spacing=15.0)
 
         # 63 parts at 15mm cannot fit in 65x56 -> spacing auto-shrunk + warned.
-        assert result.warnings, "expected a placement warning for overcrowded board"
-        assert any("spacing" in w for w in result.warnings)
+        assert result.warnings == [
+            "63 components do not fit within 65.0x56.0 mm at 15.0 mm spacing; "
+            "auto-shrank spacing to 2.38 mm to fit."
+        ]
 
     def test_explicit_columns_not_height_bounded(self, tmp_path: Path):
         """Explicit columns preserves prior (unbounded) behavior for callers."""
