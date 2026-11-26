@@ -1439,6 +1439,7 @@ class PathResolution:
     #: proves the cycle, as ``{"kind": "segment"|"via", "layer", "start",
     #: "end"}`` / ``{"kind": "via", "position"}``, board-relative, plus
     #: ``"blocking_branches"`` when a doubled group failed to qualify.
+    #: An unproved endpoint fanout reports its pad centre (kind "pad").
     #: Rendered by :func:`describe_witness`. Empty otherwise.
     witness: dict[str, object] = field(default_factory=dict)
     #: Doubled-copper groups the resolution relied on to clear a cycle
@@ -3788,6 +3789,8 @@ def witness_text(witness: dict[str, object], origin: tuple[float, float] = (0.0,
     """
     if not witness:
         return ""
+    if witness.get("kind") == "pad":
+        return f"pad centre at {_witness_point(witness['position'], origin)}"
     if witness.get("kind") == "segment":
         start = _witness_point(witness["start"], origin)
         end = _witness_point(witness["end"], origin)
@@ -4124,7 +4127,7 @@ def resolve_current_path(
     path_segments, route_edges = route
     arrays: list[_ViaArray] = []
     sense_taps: list[Segment] = []
-    for endpoint in (spec.source, spec.sink):
+    for endpoint, terminal in ((spec.source, source), (spec.sink, sink)):
         array = _endpoint_via_array(adjacency, pcb, endpoint, spec.net_name)
         if array is not None and not any(array.nodes & previous.nodes for previous in arrays):
             arrays.append(array)
@@ -4182,7 +4185,11 @@ def resolve_current_path(
                     status=STATUS_AMBIGUOUS,
                     source=source,
                     sink=sink,
-                    reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
+                    reason=(
+                        f"endpoint via fanout at {endpoint.label()} is outside the proved "
+                        "local pad-to-trunk motif"
+                    ),
+                    witness={"kind": "pad", "position": list(terminal.position)},
                 )
     source_pin, sink_pin = (source.ref, source.pad), (sink.ref, sink.pad)
 
