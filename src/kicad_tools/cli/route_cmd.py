@@ -92,7 +92,7 @@ if TYPE_CHECKING:
     from kicad_tools.router import Autorouter, LayerStack
     from kicad_tools.router.checkpoint import BestCheckpointWriter
     from kicad_tools.router.clearance_resolver import DeclaredClearanceRules
-    from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.current_paths import CurrentPathSpec, OperatingCase
     from kicad_tools.router.io import ClearanceViolation
     from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
@@ -6228,6 +6228,7 @@ def _write_current_paths_sidecar(
     current_path_specs: "Sequence[CurrentPathSpec] | None",
     quiet: bool = False,
     input_path: Path | None = None,
+    current_path_cases: "Sequence[OperatingCase]" = (),
 ) -> None:
     """Persist the declared current-path intent next to the routed PCB (#4980).
 
@@ -6273,7 +6274,7 @@ def _write_current_paths_sidecar(
         dump_current_path_specs,
     )
 
-    if not current_path_specs:
+    if not current_path_specs and not current_path_cases:
         return
 
     sidecar_path = output_path.parent / CURRENT_PATHS_SIDECAR_BASENAME
@@ -6284,7 +6285,7 @@ def _write_current_paths_sidecar(
         diverted = True
 
     try:
-        payload = dump_current_path_specs(list(current_path_specs))
+        payload = dump_current_path_specs(current_path_specs or (), current_path_cases)
         sidecar_path.write_text(json.dumps(payload, indent=2))
     except (OSError, TypeError, ValueError) as e:
         if not quiet:
@@ -6332,10 +6333,11 @@ def _preload_current_paths(args, pcb_path: Path) -> int:
     """
     from kicad_tools.router.current_paths import (
         discover_current_paths_sidecar,
-        load_current_path_specs,
+        load_current_path_sidecar,
     )
 
     args._loaded_current_paths = []
+    args._loaded_current_path_cases = []
     # The file the specs actually came from (explicit OR auto-discovered).
     # Threaded to the sidecar writer so the derived ``current_paths.json``
     # never rewrites the source file in place -- an auto-discovered sidecar
@@ -6384,7 +6386,9 @@ def _preload_current_paths(args, pcb_path: Path) -> int:
         return 1
 
     try:
-        args._loaded_current_paths = load_current_path_specs(cp_path)
+        sidecar = load_current_path_sidecar(cp_path)
+        args._loaded_current_paths = sidecar.specs
+        args._loaded_current_path_cases = sidecar.cases
     except (OSError, ValueError) as e:
         if explicit is not None:
             print(f"Error: parsing current-paths JSON: {e}", file=sys.stderr)
@@ -6912,6 +6916,7 @@ def run_post_route_drc(
     time_left: float | None = None,
     drc_cost_estimate: float = 0.0,
     edge_clearance: float | None = None,
+    current_path_cases: "Sequence[OperatingCase]" = (),
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -7040,6 +7045,7 @@ def run_post_route_drc(
         current_path_specs,
         quiet=quiet,
         input_path=current_paths_input_path,
+        current_path_cases=current_path_cases,
     )
 
     # Issue #5519 (Epic #5510, Phase 1): persist the report-only
@@ -7148,6 +7154,7 @@ def run_post_route_drc(
             # Empty/None leaves ``check_path_ampacity`` a no-op, so the
             # flag-off route stays byte-identical to the pre-#4980 verdict.
             current_path_specs=current_path_specs,
+            current_path_cases=current_path_cases,
         )
         results = checker.check_all()
         # Recorded even with no declared paths (an empty set): the entry is
@@ -15351,6 +15358,7 @@ def route_with_layer_escalation(
             # current, and the specs are re-emitted next to the routed board
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_path_cases=getattr(args, "_loaded_current_path_cases", ()),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
             # Issue #5519 (Epic #5510, Phase 1): thread the report-only
             # RoutingPlan so it is serialized to
@@ -16406,6 +16414,7 @@ def route_with_rule_relaxation(
             # current, and the specs are re-emitted next to the routed board
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_path_cases=getattr(args, "_loaded_current_path_cases", ()),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
             # Issue #5519 (Epic #5510, Phase 1): thread the report-only
             # RoutingPlan so it is serialized to
@@ -19022,6 +19031,7 @@ def route_with_combined_escalation(
             # current, and the specs are re-emitted next to the routed board
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_path_cases=getattr(args, "_loaded_current_path_cases", ()),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
             # Issue #5519 (Epic #5510, Phase 1): thread the report-only
             # RoutingPlan so it is serialized to
@@ -28587,6 +28597,7 @@ def _run_main_impl(args, parser, argv) -> int:
             # current, and the specs are re-emitted next to the routed board
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_path_cases=getattr(args, "_loaded_current_path_cases", ()),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
             # Issue #5519 (Epic #5510, Phase 1): thread the report-only
             # RoutingPlan so it is serialized to
