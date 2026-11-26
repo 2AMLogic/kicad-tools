@@ -3493,3 +3493,66 @@ class TestPurchasingList:
         }
         assert control.purchasing_path is None
         assert not (tmp_path / "control" / "purchasing.json").exists()
+
+    @pytest.mark.skipif(find_kicad_cli() is None, reason="Native KiCad CLI is not installed")
+    def test_real_pipeline_sees_no_terminal_map(self, tmp_path):
+        """The real BOM/CPL pipeline sees no terminal map; the real board still checks it (Issue #10514)."""
+        design = tmp_path / "board" / "output"
+        shutil.copytree(Path(__file__).parent / "fixtures" / "project_archive_10108", design)
+        spec = design.parent / "project.kct"
+        row = (
+            "purchasing:\n"
+            "  - description: Chassis network wired to R1's landings\n"
+            "    quantity: 1\n"
+            "    refs: [R1]\n"
+            "    manufacturer: Example\n"
+            "    mpn: SYN-NETWORK-1\n"
+        )
+
+        def export(label, purchasing):
+            spec.write_text("kct_version: '1.0'\nproject:\n  name: t\n" + purchasing)
+            config = ManufacturingConfig(
+                output_dir=tmp_path / label,
+                include_gerbers=False,
+                include_report=False,
+                silk_fix=False,
+                emit_drc_constraints=False,
+                auto_lcsc=False,
+                preflight=PreflightConfig(skip_all=True),
+            )
+            return ManufacturingPackage(
+                design / "board_v07.kicad_pcb", design / "board.kicad_sch", config=config
+            ).export()
+
+        control = export("control", row)
+        mapped = export(
+            "mapped",
+            row + "    terminals:\n"
+            "      - {terminal: B, ref: R1, pad: 1, net: VCC}\n"
+            "      - {terminal: A, ref: R1, pad: 2, net: GND}\n"
+            "      - {terminal: C, unused: true}\n",
+        )
+        assert control.success and mapped.success, (control.errors, mapped.errors)
+
+        for name in ("bom_jlcpcb.csv", "cpl_jlcpcb.csv"):
+            assert (tmp_path / "mapped" / name).read_bytes() == (
+                tmp_path / "control" / name
+            ).read_bytes()
+        placement = list(
+            csv.reader(io.StringIO(mapped.assembly_result.pnp_path.read_text("utf-8-sig")))
+        )
+        assert [cells[0] for cells in placement[1:]] == ["R1", "R2"]
+        assert self._read_exported_list(mapped.purchasing_path)["items"][0]["terminals"] == [
+            {"terminal": "B", "ref": "R1", "pad": "1", "net": "VCC"},
+            {"terminal": "A", "ref": "R1", "pad": "2", "net": "GND"},
+            {"terminal": "C", "unused": True},
+        ]
+        assert verify_manifest(mapped.manifest_path) == []
+
+        refused = export(
+            "refused", row + "    terminals:\n      - {terminal: B, ref: R1, pad: 1, net: GND}\n"
+        )
+
+        assert not refused.success
+        assert "R1 pad 1 carries VCC on the board, not GND" in str(refused.errors)
+        assert not (tmp_path / "refused").exists()
