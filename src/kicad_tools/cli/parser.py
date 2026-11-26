@@ -5725,9 +5725,12 @@ def _add_repair_creepage_parser(subparsers) -> None:
 
 def _add_fix_drc_parser(subparsers) -> None:
     """Add fix-drc subcommand parser."""
+    from .fix_drc_creepage import add_mask_creepage_args
+
     fix_drc_parser = subparsers.add_parser(
         "fix-drc", help="Automated DRC violation repair (clearance + drill)"
     )
+    add_mask_creepage_args(fix_drc_parser)
     fix_drc_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_drc_parser.add_argument(
         "--drc-report",

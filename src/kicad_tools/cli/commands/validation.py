@@ -239,6 +239,21 @@ def run_fix_drc_command(args) -> int:
         sub_argv.append("--no-connectivity-check")
     if getattr(args, "verify", False):
         sub_argv.append("--verify")
+    if getattr(args, "voltage_map", None):
+        for voltage_map in args.voltage_map:
+            sub_argv.extend(["--voltage-map", voltage_map])
+        sub_argv.extend(
+            [
+                "--creepage-standard",
+                args.creepage_standard,
+                "--pollution-degree",
+                str(args.pollution_degree),
+                "--material-group",
+                args.material_group,
+                "--hv-threshold",
+                str(args.hv_threshold),
+            ]
+        )
     if getattr(args, "transactional", False):
         sub_argv.append("--transactional")
     if args.format != "text":
