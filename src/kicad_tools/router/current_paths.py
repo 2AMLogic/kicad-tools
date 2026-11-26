@@ -3620,7 +3620,8 @@ def _sense_tap_segments(
     A tap is acyclic copper, strictly narrower than the widest arm at the
     hub, that ends only at pad terminals of other footprints (never a
     declared endpoint pad, never back at the hub). Anything else -- a rejoin,
-    a dangling end, an equally wide leg -- is not proved to be a tap.
+    a dangling end, an equally wide leg -- is not proved to be a tap. An
+    unused end of a via barrel that transfers current elsewhere is not dangling.
     """
     terminals = {node for key, node in graph.pads.items() if key[:2] not in declared}
     declared_nodes = {node for key, node in graph.pads.items() if key[:2] in declared}
@@ -3638,7 +3639,7 @@ def _sense_tap_segments(
                 return None
             segments[id(previous.segment)] = previous.segment
         onward = [(n, e) for n, e in graph.adjacency[node] if e is not previous]
-        if not onward and node not in terminals:
+        if not onward and node not in terminals and not previous.barrel_has_transfer:
             return None
         pending.extend(onward)
     return list(segments.values())
