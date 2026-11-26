@@ -4392,8 +4392,9 @@ def test_split_leg_mask_warning_matches_its_original_conductor():
 
 @pytest.mark.parametrize("guard", [False, True])
 @pytest.mark.parametrize("after_refill", [False, True])
-def test_persisting_mask_error_on_split_leg_restores_board(
-    tmp_path, monkeypatch, capsys, guard, after_refill
+@pytest.mark.parametrize("same_opening", [False, True])
+def test_mask_error_on_split_leg_restores_board(
+    tmp_path, monkeypatch, capsys, guard, after_refill, same_opening
 ):
     from kicad_tools.cli import runner
 
@@ -4417,7 +4418,10 @@ def test_persisting_mask_error_on_split_leg_restores_board(
         if after_refill and not refilled:
             return _report()
         split_errors.append(leg)
-        return _report(_finding(leg))
+        finding = _finding(leg)
+        if not same_opening:
+            finding.items[0] = "another-opening"
+        return _report(finding)
 
     monkeypatch.setattr(runner, "run_refill_zones", refill)
     monkeypatch.setattr(
@@ -4441,7 +4445,10 @@ def test_persisting_mask_error_on_split_leg_restores_board(
     )
     assert split_errors
     assert code == 1
-    assert json.loads(capsys.readouterr().out)["total_repaired"] == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["total_repaired"] == 0
+    reason = "finding_not_cleared" if same_opening else "new_mask_finding"
+    assert result["mask_copper"]["unrepaired"][-1]["reason"] == reason
     assert board.read_bytes() == original
 
 

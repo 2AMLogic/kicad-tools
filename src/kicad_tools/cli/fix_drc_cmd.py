@@ -1920,19 +1920,16 @@ def _run_mask_pass(
                     guard_warnings=guard_baseline is not None,
                     split_parents=parents,
                 )
-                if guard_baseline is not None and new_keys:
+                touched = {uid for key in new_keys for uid in key}
+                if new_keys and (
+                    guard_baseline is not None
+                    or any(_mask_action_touches(a, touched) for a in result.actions)
+                ):
                     raise _MaskBatchRejected(
                         "new_mask_finding", "final saved mask repair introduced new mask findings"
                     )
-                touched = {uid for key in new_keys for uid in key}
                 persisting = _persisting_mask_conductors(final.violations, parents)
-                if (
-                    any(
-                        a.uuid in persisting or _mask_action_touches(a, touched)
-                        for a in result.actions
-                    )
-                    or final_gaps.missed
-                ):
+                if any(a.uuid in persisting for a in result.actions) or final_gaps.missed:
                     raise _MaskBatchRejected(
                         "finding_not_cleared",
                         "mask openings failed verification on the final saved board",
@@ -2100,10 +2097,10 @@ def _verify_mask_actions(
             revert.append((act, "recheck_unavailable"))
         elif act.net_name in disconnected:
             revert.append((act, "pad_connection_lost"))
-        elif act.uuid in persisting:
-            revert.append((act, "finding_not_cleared"))
         elif unattributed_mask_finding or _mask_action_touches(act, touched):
             revert.append((act, "new_mask_finding"))
+        elif act.uuid in persisting:
+            revert.append((act, "finding_not_cleared"))
         elif act.uuid in gaps.missed:
             revert.append((act, "mask_margin_not_met"))
         elif act.uuid in regressed:
