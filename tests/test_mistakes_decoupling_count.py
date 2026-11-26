@@ -559,6 +559,31 @@ def test_json_report_parses_the_schematic_once(
     assert payload["decoupling_inventory"]
 
 
+def test_json_emits_inventory_from_a_configured_decoupling_subclass(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kicad_tools.explain import mistakes
+
+    class ProjectDecoupling(DecouplingCountCheck):
+        rule_id = "mistake.decoupling_count"
+
+    board = _two_ic_board(tmp_path, "U1.1", "U2.1", c1_offset=12.28)
+
+    def report(check: DecouplingCountCheck) -> dict:
+        monkeypatch.setattr(mistakes, "get_default_checks", lambda: [check])
+        assert mistakes_cmd.main([str(board), "--category", "decoupling", "--format", "json"]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    stock = report(DecouplingCountCheck(radius_mm=25))
+    registered = report(ProjectDecoupling(radius_mm=25))
+    assert registered["coverage_complete"]
+    assert registered["coverage"][0]["check_name"] == "ProjectDecoupling"
+    assert registered["findings"] == stock["findings"]
+    assert registered["decoupling_inventory"] == stock["decoupling_inventory"]
+    u1 = next(row for row in registered["decoupling_inventory"] if row["ic"] == "U1")
+    assert [(cap["ref"], cap["distance_mm"]) for cap in u1["caps"]] == [("C1", 12.28)]
+
+
 def test_detector_reports_inventory_from_registered_check(tmp_path: Path) -> None:
     """The inventory comes from the registered instance, so its settings apply."""
     board = _two_ic_board(tmp_path, "U1.1", "U1.1")

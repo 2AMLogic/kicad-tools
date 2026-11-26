@@ -38,6 +38,9 @@ if TYPE_CHECKING:
     from ..schema.pcb import PCB, Footprint
 
 
+DECOUPLING_INVENTORY_REPORT_KEY = "DecouplingCountCheck"
+
+
 class MistakeCategory(Enum):
     """Categories of PCB design mistakes."""
 
@@ -378,10 +381,10 @@ class MistakeDetector:
     ) -> tuple[list[Mistake], list[CheckCoverage]]:
         """Run *checks* against *pcb*, catching :class:`CheckIncomplete` per-check.
 
-        When *reports* is given, collect the built-in decoupling check's
-        inventory alongside its findings in one pass (Issue #10241). A
-        registered check with a custom ``check`` method always runs through
-        that method, including when the caller requests reports.
+        When *reports* is given, the built-in decoupling check and subclasses
+        that inherit its ``check`` method produce findings and inventory in one
+        pass (Issue #10241). Their inventory uses :data:`DECOUPLING_INVENTORY_REPORT_KEY`.
+        Registered checks with a custom ``check`` method always run through it.
 
         A check that raises ``CheckIncomplete`` contributes a ``"incomplete"``
         :class:`CheckCoverage` entry (and no mistakes); every other check
@@ -401,7 +404,8 @@ class MistakeDetector:
                     and isinstance(check, DecouplingCountCheck)
                     and getattr(check.check, "__func__", None) is DecouplingCountCheck.check
                 ):
-                    found, reports[check_name] = check.check_with_inventory(pcb)
+                    found, inventory = check.check_with_inventory(pcb)
+                    reports[DECOUPLING_INVENTORY_REPORT_KEY] = inventory
                 else:
                     found = check.check(pcb)
             except CheckIncomplete as exc:

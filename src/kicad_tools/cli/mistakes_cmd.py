@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kicad_tools.explain.mistakes import MistakeCategory
+from kicad_tools.explain.mistakes import DECOUPLING_INVENTORY_REPORT_KEY, MistakeCategory
 from kicad_tools.findings import findings_payload, from_violation_dict
 
 if TYPE_CHECKING:
@@ -515,7 +515,7 @@ def _decoupling_inventory(reports: dict[str, Any] | None) -> list[dict] | None:
     shares the findings' settings and schematic parse.  None when the check
     did not produce one (another ``--category``, or the check was incomplete).
     """
-    rows = (reports or {}).get("DecouplingCountCheck")
+    rows = (reports or {}).get(DECOUPLING_INVENTORY_REPORT_KEY)
     return None if rows is None else [row.to_dict() for row in rows]
 
 
