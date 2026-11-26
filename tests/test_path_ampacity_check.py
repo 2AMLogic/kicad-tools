@@ -343,6 +343,37 @@ def _layer_change_pcb(*, drill: float = 0.3) -> PCB:
     return pcb
 
 
+@pytest.mark.parametrize("fault", ["none", "feed", "via"])
+def test_recorded_back_wire_preserves_shared_front_feed_checks(fault):
+    from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+    from kicad_tools.validate.checker import DRCChecker
+
+    pcb = _t_network_pcb(trunk_width=5.5, sense_width=5.5)
+    pcb.segments[1].layer = "B.Cu"
+    pcb.add_via(60, 50, size=3, drill=2, net="NET1")
+    specs = [_trunk_spec(3), _sense_spec(3)]
+    plan = reinforce_net(
+        pcb, "NET1", layer="B.Cu", current_paths=specs, end_offset_mm=8, max_end_shift_mm=12
+    )
+    records = build_wire_records(plan, *pcb.board_origin)
+    assert any(r["layer"] == "B.Cu" and r["status"] == "full" for r in records)
+    if fault == "feed":
+        pcb.segments[0].width = 0.15
+    elif fault == "via":
+        pcb.vias[0].drill = 0.15
+
+    checker = DRCChecker(pcb, current_path_specs=specs, reinforcement_wires=records)
+    findings = [v.message for v in checker.check_path_ampacity()]
+    if fault == "none":
+        assert not findings
+    elif fault == "feed":
+        for path in ("TRUNK", "SENSE"):
+            assert any(path in m and "F.Cu too narrow" in m for m in findings)
+    else:
+        assert any("TRUNK" in m and "changes layer" in m for m in findings)
+        assert not any("SENSE" in m for m in findings)
+
+
 class TestLayerChangeVia:
     def test_undersized_via_is_error_for_force_path(self):
         res = PathAmpacityRule(specs=[_trunk_spec(), _sense_spec()]).check(

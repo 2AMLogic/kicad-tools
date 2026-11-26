@@ -227,6 +227,7 @@ class WiredLeg:
     width: float
     gauge: int
     anchor_arc: tuple[float, float] | None = None
+    anchor_centers: tuple[_Point, _Point] | None = None  # physical, board-relative
 
 
 class ReinforcementIncompleteRule(DRCRule):
@@ -819,7 +820,8 @@ class ReinforcementIncompleteRule(DRCRule):
                             points=tuple(leg.points),
                             width=leg.width,
                             gauge=leg.gauge,
-                            anchor_arc=outcome,
+                            anchor_arc=(outcome[0].arc, outcome[1].arc),
+                            anchor_centers=(outcome[0].pos, outcome[1].pos),
                         )
                     )
 
@@ -893,18 +895,10 @@ class ReinforcementIncompleteRule(DRCRule):
         claimed: set[int],
         results: DRCResults,
         via_is_tented: Any,
-    ) -> tuple[float, float] | None:
-        """Check one leg's (a)-(c); ``None`` when it is not a wire leg.
+    ) -> tuple[_Anchor, _Anchor] | None:
+        """Check one leg and return its two end holes when both are present.
 
-        Returns ``None`` for a leg no wire layout applies to (degenerate
-        geometry, a pad covering the whole leg, or an inner layer with no
-        solder mask), else the ``(first, last)`` cumulative-arc range of the
-        leg's anchors -- the stretch the wire is soldered over, which
-        consumers use to keep the unwired hole-to-pad stubs at bare copper
-        (Issue #9654). A leg with fewer than two anchors always carries an
-        (a) finding, so its whole-leg placeholder span is never credited.
-        Callers judging completeness (Issue #9648) additionally require that
-        no finding was emitted into ``results``.
+        Consumers credit this pair only when the check emitted no findings.
         """
         pts, cum, total = leg.points, leg.cum, leg.total
         if len(pts) < 2 or total <= 1e-9:
@@ -1071,7 +1065,7 @@ class ReinforcementIncompleteRule(DRCRule):
                     + " and ".join("front" if s == "F" else "back" for s in tented)
                     + " side; both sides must be mask-open",
                 )
-        return (anchors[0].arc, anchors[-1].arc) if len(anchors) >= 2 else (0.0, total)
+        return (anchors[0], anchors[-1]) if len(anchors) == 2 else None
 
     # ------------------------------------------------------------ geometry
 
