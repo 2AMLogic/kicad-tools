@@ -363,6 +363,31 @@ class TestHierarchicalLabelNetMerging:
             assert names["R1.1"] == "Z_BUS"
             assert names["R1.2"] == names["R5.1"] == ("Z_BUS" if connected else "A_LOCAL")
 
+    @pytest.mark.parametrize(
+        "parent_kind,child_kind,name,parent_net,child_net",
+        [
+            ("global_label", "label", "Z_BUS", "Z_BUS", "/ChildWithLabels/Z_BUS"),
+            ("label", "label", "A_BUS", "/A_BUS", "/ChildWithLabels/A_BUS"),
+            ("global_label", "global_label", "Z_BUS", "Z_BUS", "Z_BUS"),
+        ],
+    )
+    def test_independent_child_label_scope(
+        self, tmp_path, parent_kind, child_kind, name, parent_net, child_net
+    ):
+        parent = tmp_path / "parent_with_pins.kicad_sch"
+        doc = parse_file(FIXTURES / parent.name)
+        doc.add(parse_string(f'({parent_kind} "{name}" (at 130 40 0))'))
+        parent.write_text(doc.to_string())
+
+        child = tmp_path / "child_with_hlabels.kicad_sch"
+        doc = parse_file(FIXTURES / child.name)
+        doc.add(parse_string(f'({child_kind} "{name}" (at 100 46.19 0))'))
+        child.write_text(doc.to_string())
+
+        for names in self._hierarchy_pin_maps(parent):
+            assert names["R1.1"] == names["R5.1"] == parent_net
+            assert names["R6.1"] == child_net
+
     @staticmethod
     def _hierarchy_pin_maps(parent):
         extracted = Schematic.load(parent).extract_netlist(hierarchical=True)

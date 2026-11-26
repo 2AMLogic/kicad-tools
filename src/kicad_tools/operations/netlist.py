@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -607,13 +607,36 @@ def _collect_hierarchy_components(
         sheet_path,
         visited,
         include_symbol_pins=include_symbol_pins,
+        net_scope=sheet_path,
         parent_nets_by_port={},
         aliases=aliases,
     )
-    merged: dict[str, list] = {}
+    by_identity: dict[_NetIdentity, list] = defaultdict(list)
     for identity, pins in nets.items():
-        merged.setdefault(aliases.resolve(identity).name, []).extend(pins)
-    return components, merged
+        by_identity[aliases.resolve(identity)].extend(pins)
+
+    # Preserve short names when unique. For a collision, qualify each local
+    # label with its sheet instance path and keep the global name bare.
+    counts = Counter(identity.name for identity in by_identity)
+    names = {
+        identity: identity.name
+        for identity in by_identity
+        if not identity.scope or counts[identity.name] == 1
+    }
+    used = set(names.values())
+    for identity in by_identity:
+        if identity in names:
+            continue
+        qualified = f"{identity.scope}{identity.name}"
+        name = qualified
+        # A label can itself contain the generated path.
+        suffix = 2
+        while name in used:
+            name = f"{qualified}#{suffix}"
+            suffix += 1
+        names[identity] = name
+        used.add(name)
+    return components, {names[identity]: pins for identity, pins in by_identity.items()}
 
 
 def _collect_sheet_nets(
@@ -622,6 +645,7 @@ def _collect_sheet_nets(
     visited: set[Path] | None,
     *,
     include_symbol_pins: bool,
+    net_scope: str,
     parent_nets_by_port: dict[str, _NetIdentity],
     aliases: _ParentNetAliases,
 ) -> tuple[list[NetlistComponent], dict[_NetIdentity, list]]:
@@ -644,6 +668,7 @@ def _collect_sheet_nets(
             the function creates the set internally.
         include_symbol_pins: Retain library pin definitions and include the
             pins of placed power symbols in the connectivity.
+        net_scope: Path of sheet instance names used to qualify local nets.
         parent_nets_by_port: Parent net names at this sheet instance's ports.
         aliases: Parent nets joined by ports anywhere in this traversal.
 
@@ -707,7 +732,7 @@ def _collect_sheet_nets(
     identities = {}
     for candidates in ranked_names.values():
         priority, winner = candidates[0]
-        identity = _NetIdentity(priority, winner, "" if priority <= 1 else sheet_path)
+        identity = _NetIdentity(priority, winner, "" if priority <= 1 else net_scope)
         identities[winner] = identity
         # Every global or power name is a connection across sheets, even if
         # another label won the flat component's display name.
@@ -740,7 +765,7 @@ def _collect_sheet_nets(
     try:
         for name, pins in sch.extract_netlist(include_power_symbols=include_symbol_pins).items():
             identity = (
-                parent_names.get(name) or identities.get(name) or _NetIdentity(4, name, sheet_path)
+                parent_names.get(name) or identities.get(name) or _NetIdentity(4, name, net_scope)
             )
             net_dict.setdefault(identity, []).extend(pins)
     except Exception:
@@ -757,6 +782,7 @@ def _collect_sheet_nets(
             f"{sheet_path}{entry.filename}/",
             visited,
             include_symbol_pins=include_symbol_pins,
+            net_scope=f"{net_scope}{entry.sheetname or Path(entry.filename).stem}/",
             parent_nets_by_port=child_bindings,
             aliases=aliases,
         )
