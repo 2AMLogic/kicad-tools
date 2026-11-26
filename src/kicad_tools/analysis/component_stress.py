@@ -194,11 +194,11 @@ def _normalize_net_name(name: str | None) -> str:
     return str(name).strip().lstrip("/").upper()
 
 
-def _net_aliases(name: str) -> tuple[str, ...]:
+def _net_aliases(name: str, label: str | None) -> tuple[str, ...]:
     """Manifest lookup keys, from the full net name to its bare label."""
     full = _normalize_net_name(name)
-    if "/" in full:
-        return full, full.rsplit("/", 1)[1]
+    if label is not None:
+        return full, _normalize_net_name(label)
     return (full,)
 
 
@@ -303,16 +303,16 @@ class OperatingState:
     assumptions: str | None = None
     source: str | None = None
 
-    def potential(self, net_name: str | None) -> float | None:
+    def potential(self, net_name: str | None, label: str | None = None) -> float | None:
         """Return the declared potential for *net_name*, or ``None``.
 
         Match the full path first, ignoring case and leading slashes. If it
-        has no manifest entry, try the bare label. The analyzer checks that
+        has no manifest entry, try the supplied winning label. The analyzer checks that
         each accepted alias belongs to a single net before evaluating states.
         """
         if not net_name:
             return None
-        for candidate in _net_aliases(net_name):
+        for candidate in _net_aliases(net_name, label):
             matches = [
                 value
                 for key, value in self.potentials.items()
@@ -917,7 +917,7 @@ class ComponentStressAnalyzer:
                 raise ValueError("schematic hierarchy and netlist component identities disagree")
             net_names: dict[str, str] = {}
             for net in netlist.nets:
-                for alias in _net_aliases(net.name):
+                for alias in _net_aliases(net.name, netlist.qualified_labels.get(net.name)):
                     previous = net_names.setdefault(alias, net.name)
                     if previous != net.name:
                         raise ValueError(
@@ -1009,6 +1009,7 @@ class ComponentStressAnalyzer:
                         rating_source=rating_source,
                         roles=roles,
                         pin_nets=pin_nets,
+                        qualified_labels=netlist.qualified_labels,
                         state_name=state_name,
                         state=state,
                         check=check,
@@ -1027,6 +1028,7 @@ class ComponentStressAnalyzer:
         rating_source: str | None,
         roles: PinRoleMap | None,
         pin_nets: dict[str, str],
+        qualified_labels: dict[str, str],
         state_name: str,
         state: OperatingState | None,
         check: str,
@@ -1087,8 +1089,10 @@ class ComponentStressAnalyzer:
         low_pin = roles.pin(low_role)
         high_net = pin_nets.get(str(high_pin))
         low_net = pin_nets.get(str(low_pin))
-        unbound = [role for role, net in ((high_role, high_net), (low_role, low_net)) if not net]
-        if unbound:
+        if not high_net or not low_net:
+            unbound = [
+                role for role, net in ((high_role, high_net), (low_role, low_net)) if not net
+            ]
             return row(
                 STATUS_UNRESOLVED,
                 f"terminal {'/'.join(unbound)} is not bound to a net",
@@ -1097,8 +1101,8 @@ class ComponentStressAnalyzer:
             )
 
         # 4. Declared potentials for BOTH terminals, in THIS state.
-        high_v = state.potential(high_net)
-        low_v = state.potential(low_net)
+        high_v = state.potential(high_net, qualified_labels.get(high_net))
+        low_v = state.potential(low_net, qualified_labels.get(low_net))
         missing = [net for net, volts in ((high_net, high_v), (low_net, low_v)) if volts is None]
         if missing:
             return row(

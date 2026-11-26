@@ -162,6 +162,52 @@ def test_child_sheet_mosfets_have_same_stress_as_flat_schematic(tmp_path):
     assert q1.stress_v == pytest.approx(259.3)
 
 
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "child"])
+@pytest.mark.parametrize("tag", ["label", "global_label"])
+@pytest.mark.parametrize("manifest_key", ["SRC_POS", "AUX/SRC_POS"])
+def test_slash_in_label_is_literal(tmp_path, nested, tag, manifest_key):
+    path = tmp_path / "child.kicad_sch"
+    path.write_text(SCH.read_text().replace('(label "SRC_POS"', f'({tag} "AUX/SRC_POS"'))
+    schematic = _root(tmp_path, [path.name]) if nested else path
+    manifest = OperatingStateManifest.load(FIXTURES / "states.yaml")
+    potentials = manifest.get("startup").potentials
+    potentials[manifest_key] = potentials.pop("SRC_POS")
+
+    rows = ComponentStressAnalyzer(manifest).analyze(schematic)
+    row = next(r for r in rows if (r.reference, r.state, r.check) == ("Q1A", "startup", "vds"))
+    expected = "/Child0/AUX/SRC_POS" if nested and tag == "label" else "AUX/SRC_POS"
+    assert row.low_net == expected
+    if manifest_key == "SRC_POS":
+        assert row.status == "UNRESOLVED"
+    else:
+        assert row.status == "PASS"
+        assert row.stress_v == 0
+
+
+def test_distinct_literal_labels_can_share_a_suffix(tmp_path):
+    path = tmp_path / "child.kicad_sch"
+    path.write_text(SCH.read_text().replace('"BANK_POS"', '"AUX/SRC_POS"'))
+    manifest = OperatingStateManifest.load(FIXTURES / "states.yaml")
+    manifest.get("startup").potentials["AUX/SRC_POS"] = 20
+
+    rows = ComponentStressAnalyzer(manifest).analyze(_root(tmp_path, [path.name]))
+    row = next(r for r in rows if (r.reference, r.state, r.check) == ("Q1A", "startup", "vds"))
+    assert row.status == "PASS"
+    assert row.stress_v == 20
+
+
+def test_qualified_potential_precedes_literal_label_alias(tmp_path):
+    path = tmp_path / "child.kicad_sch"
+    path.write_text(SCH.read_text().replace('"SRC_POS"', '"AUX/SRC_POS"'))
+    manifest = OperatingStateManifest.load(FIXTURES / "states.yaml")
+    manifest.get("startup").potentials.update({"AUX/SRC_POS": 0, "/Child0/AUX/SRC_POS": -200})
+
+    rows = ComponentStressAnalyzer(manifest).analyze(_root(tmp_path, [path.name]))
+    row = next(r for r in rows if (r.reference, r.state, r.check) == ("Q1A", "startup", "vds"))
+    assert row.status == "FAIL"
+    assert row.stress_v == 200
+
+
 @pytest.mark.parametrize(
     "filenames",
     [

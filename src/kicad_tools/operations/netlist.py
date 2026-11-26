@@ -180,6 +180,8 @@ class Netlist:
     sheets: list[SheetInfo] = field(default_factory=list)
     components: list[NetlistComponent] = field(default_factory=list)
     nets: list[NetlistNet] = field(default_factory=list)
+    # Qualified output name -> literal winning local/hierarchical label.
+    qualified_labels: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Netlist:
@@ -599,6 +601,7 @@ def _collect_hierarchy_components(
     visited: set[Path] | None = None,
     *,
     include_symbol_pins: bool = False,
+    qualified_labels: dict[str, str] | None = None,
 ) -> tuple[list[NetlistComponent], dict[str, list]]:
     """Resolve names after collecting bindings from every sheet in the hierarchy."""
     aliases = _ParentNetAliases()
@@ -643,6 +646,8 @@ def _collect_hierarchy_components(
             suffix += 1
         names[identity] = name
         used.add(name)
+        if qualified_labels is not None and identity.priority in (2, 3):
+            qualified_labels[name] = identity.name
     return components, {names[identity]: pins for identity, pins in by_identity.items()}
 
 
@@ -832,8 +837,9 @@ def build_netlist_from_schematic(
         raise FileNotFoundError(f"Schematic not found: {sch_path}")
 
     # Recursively collect components and nets from all sheets
+    qualified_labels: dict[str, str] = {}
     components, net_dict = _collect_hierarchy_components(
-        sch_path, "/", include_symbol_pins=include_symbol_pins
+        sch_path, "/", include_symbol_pins=include_symbol_pins, qualified_labels=qualified_labels
     )
 
     # Build nets from merged connectivity data
@@ -853,6 +859,7 @@ def build_netlist_from_schematic(
         tool="kicad-tools (Python fallback)",
         components=components,
         nets=nets,
+        qualified_labels=qualified_labels,
     )
 
 
