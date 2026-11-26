@@ -742,6 +742,112 @@ class TestBOMEntryLeadDeclarations:
         assert spec.requirements.manufacturing.finished_hole_tolerance_mm == pytest.approx(-0.08)
 
 
+class TestWireTerminationDeclarations:
+    """Soldered wire or ferrule landings declared without a component MPN (Issue #10473)."""
+
+    def test_wire_terminations_parse_without_bom_entry(self, tmp_path):
+        from kicad_tools.spec.parser import collect_unknown_keys, load_spec
+
+        spec_file = tmp_path / "project.kct"
+        spec_file.write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: T\n"
+            "wire_terminations:\n"
+            "  - ref: J1\n"
+            "    pad: 2\n"
+            "    diameter_mm: 3.10\n"
+            "    source: ferrule datasheet maximum barrel outside diameter\n"
+        )
+        spec = load_spec(spec_file)
+        assert spec.bom_entries is None
+        assert spec.wire_terminations is not None
+        (wire,) = spec.wire_terminations
+        assert wire.ref == "J1"
+        assert wire.pad == "2"
+        assert wire.diameter_mm == pytest.approx(3.10)
+        assert wire.source == "ferrule datasheet maximum barrel outside diameter"
+        assert collect_unknown_keys(spec) == []
+
+    def test_declaration_without_diameter_stays_unverified(self):
+        """A landing may be declared before its prepared end is measured."""
+        from kicad_tools.spec.schema import WireTermination
+
+        wire = WireTermination(ref="J1", pad="3")
+        assert wire.diameter_mm is None
+        assert wire.source is None
+
+    def test_pad_accepts_integer_or_string(self):
+        from kicad_tools.spec.schema import WireTermination
+
+        wire = WireTermination(ref=" J1 ", pad=2)
+        assert wire.ref == "J1"
+        assert wire.pad == "2"
+        assert WireTermination(ref="J1", pad="A1").pad == "A1"
+
+    @pytest.mark.parametrize("pad", [None, True, 2.5, "", "  "])
+    def test_invalid_pad_rejected(self, pad):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import WireTermination
+
+        with pytest.raises(ValidationError, match="pad number"):
+            WireTermination(ref="J1", pad=pad)
+
+    @pytest.mark.parametrize("ref", ["", "  "])
+    def test_blank_reference_rejected(self, ref):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import WireTermination
+
+        with pytest.raises(ValidationError, match="reference designator"):
+            WireTermination(ref=ref, pad="1")
+
+    def test_diameter_requires_a_source(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import WireTermination
+
+        with pytest.raises(ValidationError, match="source"):
+            WireTermination(ref="J1", pad="1", diameter_mm=2.4)
+
+    def test_blank_source_rejected_with_diameter(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import WireTermination
+
+        with pytest.raises(ValidationError, match="source"):
+            WireTermination(ref="J1", pad="1", diameter_mm=2.4, source="   ")
+
+    @pytest.mark.parametrize("diameter", [0, -0.1, "2.4", True, float("nan"), float("inf")])
+    def test_diameter_must_be_a_positive_finite_number(self, diameter):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import WireTermination
+
+        with pytest.raises(ValidationError, match="diameter_mm"):
+            WireTermination(ref="J1", pad="1", diameter_mm=diameter, source="drawing")
+
+    def test_wire_terminations_round_trip(self, tmp_path):
+        """save_spec -> load_spec preserves the declarations; no BOM entry appears."""
+        from kicad_tools.spec.parser import load_spec, save_spec
+        from kicad_tools.spec.schema import ProjectMetadata, ProjectSpec, WireTermination
+
+        spec = ProjectSpec(
+            project=ProjectMetadata(name="T"),
+            wire_terminations=[
+                WireTermination(ref="J1", pad=1, diameter_mm=2.4, source="calipers 2026-11-26"),
+                WireTermination(ref="J1", pad="2"),
+            ],
+        )
+        path = tmp_path / "project.kct"
+        save_spec(spec, path)
+        loaded = load_spec(path)
+        assert loaded.bom_entries is None
+        assert loaded.wire_terminations == spec.wire_terminations
+        assert "bom_entries" not in path.read_text()
+
+
 class TestMountingHoleGroupSpec:
     """Tests for the MountingHoleGroupSpec schema (Issue #3352, P_AS1)."""
 

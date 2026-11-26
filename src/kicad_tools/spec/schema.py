@@ -58,6 +58,7 @@ __all__ = [
     "ComponentSuggestion",
     "BOMEntry",
     "LeadProfile",
+    "WireTermination",
     "Decision",
     "Progress",
     "PhaseProgress",
@@ -947,6 +948,77 @@ class LeadProfile(SpecModel):
         return (float(self.width_mm or 0.0), float(self.thickness_mm or 0.0))
 
 
+class WireTermination(SpecModel):
+    """A soldered wire or ferrule landing on one plated through-hole pad (Issue #10473).
+
+    A wire land has no placed part, so there is no ``bom_entries`` MPN whose
+    lead could stand in for what enters the hole.  The designer names the pad
+    by its exact KiCad reference and pad number and declares the maximum
+    outside diameter of the prepared end that enters the hole: the widest
+    part of the tinned conductor, or the ferrule barrel when one is fitted.
+    Assembly preflight compares it with the finished hole like a round lead.
+    The conductor's cross-sectional area, the insulation (jacket) diameter
+    and a footprint's nominal wire description are not that dimension.
+
+    A landing may be declared before its end is measured: without
+    ``diameter_mm`` the pad stays unassessed.
+    """
+
+    ref: str = Field(
+        ...,
+        description=(
+            "Exact KiCad reference designator of the landing footprint (e.g. 'J1'); not a range"
+        ),
+    )
+    pad: str = Field(..., description="Exact KiCad pad number (e.g. '1' or 'A1')")
+    diameter_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Maximum outside diameter of the prepared end that enters the "
+            "hole, in millimetres: the tinned conductor at its widest, or the "
+            "ferrule barrel when one is fitted.  Unset until verified."
+        ),
+    )
+    source: str | None = Field(
+        default=None,
+        validate_default=True,
+        description=(
+            "Where the diameter was verified: a drawing/page reference or "
+            "measurement record.  Required when ``diameter_mm`` is set."
+        ),
+    )
+
+    @field_validator("ref")
+    @classmethod
+    def validate_reference(cls, ref: str) -> str:
+        if not ref.strip():
+            raise ValueError("a wire termination requires a reference designator")
+        return ref.strip()
+
+    @field_validator("pad", mode="before")
+    @classmethod
+    def normalize_pad(cls, value: Any) -> Any:
+        """Accept the pad number as a string or integer, like ``BOMEntry.pad_leads`` keys."""
+        if type(value) is int:
+            value = str(value)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("a wire termination requires a pad number (string or integer)")
+        return value.strip()
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, source: str | None, info: ValidationInfo) -> str | None:
+        if info.data.get("diameter_mm") is not None and not (source or "").strip():
+            raise ValueError(
+                "a declared prepared diameter requires a non-empty source "
+                "(drawing/page reference or measurement record)"
+            )
+        return source
+
+
 class BOMEntry(SpecModel):
     """Per-reference BOM mapping for explicit part assignment.
 
@@ -1112,6 +1184,13 @@ class ProjectSpec(SpecModel):
         description="Per-reference BOM part mappings (MPN, LCSC)",
     )
     decisions: list[Decision] | None = Field(default=None, description="Design decisions")
+    wire_terminations: list[WireTermination] | None = Field(
+        default=None,
+        description=(
+            "Issue #10473: wire or ferrule landings that assembly preflight "
+            "assesses without a bom_entries part assignment, one per pad."
+        ),
+    )
     progress: Progress | None = Field(default=None, description="Progress tracking")
     validation: Validation | None = Field(default=None, description="Validation results")
 
