@@ -2,6 +2,12 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-26
+
+- **PR #5735**: test(conformance): hard-gate the route-halo refinement against kicad-cli
+- **PR #5734**: fix: give the optimizer's grid collision checker an exact narrow phase
+- **Issue #5625** (closed): router/optimizer: GridCollisionChecker and VectorCollisionChecker disagree on near-threshold copper
+
 ### 2026-09-25
 
 - **PR #5728**: cleanup(router/mesh): retire merge_overlapping and segment_intersects_* helpers
