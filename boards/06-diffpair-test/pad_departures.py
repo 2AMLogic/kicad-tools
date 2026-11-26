@@ -1217,7 +1217,12 @@ def _authored_rules_ok(
     pcb: PCB, path: Path, tracks: list[Segment], vias: list[Via], label: str
 ) -> bool:
     """Have KiCad evaluate authored rules on the replacement copper before publishing it."""
-    if not path.with_suffix(".kicad_dru").exists() and not all_rule_area_zones(pcb):
+    # A project can impose drill spacing on a moved barrel without a custom rules file.
+    if not (
+        path.with_suffix(".kicad_dru").exists()
+        or (vias and path.with_suffix(".kicad_pro").is_file())
+        or all_rule_area_zones(pcb)
+    ):
         return True
     changed = {item.uuid for item in (*tracks, *vias)}
     if not all(changed):

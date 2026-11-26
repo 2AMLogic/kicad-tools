@@ -76,3 +76,32 @@ def test_tx1_declines_both_exits_if_either_is_unsafe(tx1, original, replacement)
     before = board.read_bytes()
     assert repair(board) == 0
     assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("at", [(11.61, 9.29), (53.10, 18.605)], ids=["J1-A3", "U2-B3"])
+@pytest.mark.parametrize(("minimum", "edits"), [(0.5, 0), (0.4, 2)], ids=["blocked", "clear"])
+def test_tx1_honors_project_only_hole_spacing(tx1, at, minimum, edits):
+    board, repair = tx1
+    project = board.with_suffix(".kicad_pro")
+    settings = json.loads(project.read_text())
+    design = settings["board"]["design_settings"]
+    # Both moved barrels would leave 0.450 mm between the drill edges.
+    design["rules"]["min_hole_to_hole"] = minimum
+    design["rule_severities"]["hole_to_hole"] = "error"
+    project.write_text(json.dumps(settings))
+    assert not board.with_suffix(".kicad_dru").exists()
+
+    source = board.read_text().rstrip().removesuffix(")")
+    board.write_text(
+        f"""{source}
+  (gr_rect (start -2 4) (end 57 27) (stroke (width 0.05) (type default))
+    (fill none) (layer "Edge.Cuts"))
+  (via (at {at[0]} {at[1]}) (size 0.45) (drill 0.25) (layers "F.Cu" "B.Cu")
+    (tenting (front yes) (back yes)) (net 3) (uuid "a917ed24-a93e-45bc-9024-2c6fa0b30288"))
+)
+"""
+    )
+    before = board.read_bytes()
+    assert repair(board) == edits
+    if edits == 0:
+        assert board.read_bytes() == before
