@@ -35,11 +35,16 @@ so the writer's ampacity rules match the committed file (board 02, #8759).
 Boards not covered, and why (traced in #8385): board 00's recipe routes
 in-process and its routed ``.kicad_pro`` declares no router class, so it never
 emits the block; board 03 is suppressed by its own designer clearance rule;
-board 05 has its own test.
+board 05 has its own test.  Since #10450 the attach-zone assertion also skips
+board 06: ``assembled-demo/generate.py`` authors ``LVTTL``, ``LVDS`` and
+``Power`` in the source project, so its routed ``.kicad_pro`` declares no
+router class and the recipe emits no block --
+``test_board06_authored_classes_emit_no_attach_zone_block`` pins that.
 """
 
 from __future__ import annotations
 
+import json
 import runpy
 import shutil
 from collections.abc import Callable
@@ -49,6 +54,7 @@ import pytest
 
 from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
 from kicad_tools.manufacturers.attach_zone_dru import has_attach_zone_block
+from kicad_tools.manufacturers.project_generator import router_netclass_provenance
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARDS = REPO_ROOT / "boards"
@@ -126,9 +132,22 @@ def _recipe_dru(board: str, tmp_path: Path) -> str:
     return routed.with_suffix(".kicad_dru").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("board", PARAMS)
+ATTACH_ZONE_PARAMS = [p for p in PARAMS if p.id != "board06"]
+
+
+@pytest.mark.parametrize("board", ATTACH_ZONE_PARAMS)
 def test_committed_dru_carries_the_attach_zone_block(board):
     assert has_attach_zone_block(_committed_dru(board))
+
+
+def test_board06_authored_classes_emit_no_attach_zone_block():
+    """Board 06's project authors its classes, so no router-class floor is left to relax."""
+    assert not has_attach_zone_block(_committed_dru("06-diffpair-test"))
+    stem = CASES["06-diffpair-test"][0]
+    project = json.loads(
+        (BOARDS / "06-diffpair-test" / "output" / f"{stem}.kicad_pro").read_text(encoding="utf-8")
+    )
+    assert router_netclass_provenance(project) == ([], [])
 
 
 @pytest.mark.parametrize("board", PARAMS)
