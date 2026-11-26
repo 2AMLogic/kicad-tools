@@ -4151,12 +4151,12 @@ def run_selected_checks(
 
                 project = load_project(pcb_path)
                 if project is not None:
-                    names = [n.name for n in checker.pcb.nets.values() if n.name]
+                    names = ["", *(n.name for n in checker.pcb.nets.values() if n.name)]
                     clearances = {
                         n: v.clearance
                         for n, v in resolve_project_clearances(project, names).items()
                     }
-            except Exception:  # advisory: fall back to the zone clearance alone
+            except Exception:  # advisory: use the built-in Default netclass
                 clearances = {}
         return checker.check_pour_slot(clearances)
 

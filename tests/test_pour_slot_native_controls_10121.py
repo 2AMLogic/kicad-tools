@@ -169,6 +169,40 @@ def test_public_check_at_netclass_clearance(
     assert _public_pour_slot_count(board, capsys) == warnings
 
 
+@pytest.mark.parametrize("project", ["absent", "empty", "default", "lower"])
+@pytest.mark.parametrize("min_thickness", [0.3, 0.1])
+def test_implicit_default_in_check_and_cleanup(
+    tmp_path, capsys, monkeypatch, project, min_thickness
+):
+    from kicad_tools.cli import main
+
+    zone = ZONE.replace("clearance 0.2", "clearance 0").replace(
+        "min_thickness 0.3", f"min_thickness {min_thickness}"
+    )
+    _control_p(tmp_path, zones=(zone,))
+    board = tmp_path / "control_p.kicad_pcb"
+    if project != "absent":
+        settings = {}
+        if project != "empty":
+            clearance = 0.1 if project == "lower" else 0.2
+            settings = {"net_settings": {"classes": [{"name": "Default", "clearance": clearance}]}}
+        board.with_suffix(".kicad_pro").write_text(json.dumps(settings))
+
+    expected = int(min_thickness == 0.3 and project != "lower")
+    assert _public_pour_slot_count(board, capsys) == expected
+
+    # Exercise the public cleanup and its real pair detector. The native
+    # refill and DRC subprocesses are independent of candidate selection.
+    monkeypatch.setattr(
+        "kicad_tools.cli.optimize_cmd._refill_written_board", lambda _: (True, None)
+    )
+    monkeypatch.setattr("kicad_tools.cli.optimize_cmd._kicad_cli_drc_counts", lambda *a, **kw: {})
+    assert main(["optimize-traces", str(board), "--pour-slots", "--format", "json"]) == 0
+    result = json.loads(capsys.readouterr().out)["pour_slots"]
+    assert result["pairs_before"] == expected
+    assert result["spread"] == expected
+
+
 def test_missing_zone_clearance_uses_default(tmp_path):
     zone = ZONE.replace("(clearance 0.2)", "")
     pcb = _control_p(tmp_path, zones=(zone,))

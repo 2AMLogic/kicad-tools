@@ -366,11 +366,11 @@ def _run_pour_slot_pass(written: Path, rules_from: Path | None, pack: bool = Fal
 
         project = load_project(written)
         if project is not None:
-            names = [n.name for n in pcb.nets.values() if n.name]
+            names = ["", *(n.name for n in pcb.nets.values() if n.name)]
             clearances = {
                 n: v.clearance for n, v in resolve_project_clearances(project, names).items()
             }
-    except Exception:  # advisory-grade input: fall back to the zone clearance
+    except Exception:  # advisory-grade input: use the built-in Default netclass
         clearances = {}
 
     def referee(candidate):

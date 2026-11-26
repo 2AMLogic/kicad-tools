@@ -52,6 +52,7 @@ from shapely import get_parts  # type: ignore[import-untyped]
 from shapely.geometry import LineString, Polygon  # type: ignore[import-untyped]
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
+from kicad_tools.core.project_clearance import DEFAULT_NETCLASS_CLEARANCE_MM
 from kicad_tools.schema.pcb import _segment_dedup_key
 
 from ..violations import DRCResults, DRCViolation
@@ -129,6 +130,8 @@ class PourSlotRule(DRCRule):
     def __init__(self, netclass_clearances: Mapping[str, float] | None = None) -> None:
         #: Net name -> authored netclass clearance (mm); optional.
         self.netclass_clearances = dict(netclass_clearances or {})
+        # The resolver maps the unnamed net to the project's Default class.
+        self.default_clearance = self.netclass_clearances.get("", DEFAULT_NETCLASS_CLEARANCE_MM)
 
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         results = DRCResults()
@@ -151,7 +154,10 @@ class PourSlotRule(DRCRule):
             pour = _Pour(
                 outline if outline.is_valid else outline.buffer(0),
                 max(
-                    zone.clearance, self.netclass_clearances.get(getattr(zone, "net_name", ""), 0.0)
+                    zone.clearance,
+                    self.netclass_clearances.get(
+                        getattr(zone, "net_name", ""), self.default_clearance
+                    ),
                 ),
                 zone.min_thickness,
             )
@@ -211,7 +217,11 @@ class PourSlotRule(DRCRule):
         items: list[tuple[Any, tuple[float, float, float]]],
         zlist: list[_Pour],
     ) -> Iterator[PourSlotPair]:
-        max_clear = max([z.clearance for z in zlist] + list(self.netclass_clearances.values()))
+        max_clear = max(
+            [self.default_clearance]
+            + [z.clearance for z in zlist]
+            + list(self.netclass_clearances.values())
+        )
         max_thick = max(z.min_thickness for z in zlist)
         max_w = max(s.width for s, _u in items)
         reach = 2 * max_clear + max_thick + max_w  # centre-to-centre search radius
@@ -272,8 +282,8 @@ class PourSlotRule(DRCRule):
         def separation(t: float) -> float:
             return db0 + slope * (t - tb0)
 
-        net_clearance_a = self.netclass_clearances.get(a.net_name, 0.0)
-        net_clearance_b = self.netclass_clearances.get(b.net_name, 0.0)
+        net_clearance_a = self.netclass_clearances.get(a.net_name, self.default_clearance)
+        net_clearance_b = self.netclass_clearances.get(b.net_name, self.default_clearance)
         for zone in zlist:
             clearance_a = max(zone.clearance, net_clearance_a)
             clearance_b = max(zone.clearance, net_clearance_b)
