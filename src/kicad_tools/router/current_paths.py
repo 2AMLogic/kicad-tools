@@ -1983,9 +1983,9 @@ def _build_graph(
     for i, seg in enumerate(segments):
         for end in (seg.start, seg.end):
             at_node.setdefault(_copper_node(end, seg.layer), []).append(i)
-    for members in at_node.values():
-        for i in members:
-            for j in members:
+    for segment_indices in at_node.values():
+        for i in segment_indices:
+            for j in segment_indices:
                 if i < j and segments[i].width == segments[j].width:
                     overlap = collinear_overlap_length(
                         segments[i].start,
@@ -2011,10 +2011,10 @@ def _build_graph(
                 continue
             for end in (seg.start, seg.end):
                 if _via_covered_by_end(via, seg, end):
-                    key = (math.dist(end, via.position), _copper_node(end, seg.layer))
+                    candidate = (math.dist(end, via.position), _copper_node(end, seg.layer))
                     root_i = run_root(i)
-                    if root_i not in best or key > best[root_i]:
-                        best[root_i] = key
+                    if root_i not in best or candidate > best[root_i]:
+                        best[root_i] = candidate
         for _, node in best.values():
             offset_ports.add((node, _copper_node(via.position, node[2])))
 
