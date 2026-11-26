@@ -486,9 +486,9 @@ class AssemblyPackage:
                     # Auto-detect from schematic/PCB directory
                     spec_file = find_spec_file(self.pcb_path.parent)
                 if spec_file is not None:
-                    from ..spec.parser import load_spec
+                    from .bom_spec_overlay import load_assembly_spec
 
-                    spec = load_spec(spec_file)
+                    spec, _ = load_assembly_spec(spec_file)
                     if spec.bom_entries:
                         overlay_report = apply_spec_overlay(items, spec.bom_entries)
                         if result is not None:
@@ -916,6 +916,19 @@ def profile_rotation_corrections(manufacturer: str) -> dict[str, float] | None:
     except (ValueError, ImportError):
         pass
     return None
+
+
+def plot_use_aux_origin(fab_family: str, config: AssemblyConfig) -> bool:
+    """The ``GerberConfig.use_aux_origin`` an assembly package plots its Gerbers with.
+
+    The resolution :meth:`AssemblyPackage._generate_gerbers` applies: a
+    manufacturer preset owns the Gerber options, anything else plots with the
+    caller's ``gerber_config`` or the defaults. A measurement of the shipped
+    archive must register the drill files in this frame (Issue #10357).
+    """
+    if fab_family in MANUFACTURER_PRESETS:
+        return MANUFACTURER_PRESETS[fab_family].config.use_aux_origin
+    return (config.gerber_config or GerberConfig()).use_aux_origin
 
 
 def resolve_pnp_config(
