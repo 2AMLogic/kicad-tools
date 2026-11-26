@@ -283,9 +283,18 @@ def test_mixed_signal_route_keeps_the_bonded_ground_copper(
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.parametrize("prefilled", [False, True], ids=["unfilled", "prefilled"])
+@pytest.mark.parametrize(
+    ("prefilled", "oracle_options", "report_only"),
+    [
+        (False, [], False),
+        (True, [], False),
+        (True, ["--oracle-rounds", "0"], False),
+        (True, [], True),
+    ],
+    ids=["unfilled", "prefilled", "disabled-oracle", "first-fill-report-only"],
+)
 def test_route_reuses_verified_fill_without_a_bond_check_refill(
-    tmp_path, native_cli, monkeypatch, prefilled
+    tmp_path, native_cli, monkeypatch, prefilled, oracle_options, report_only
 ):
     """A refused stitcher bond-check refill must not cost the bonded ground copper (#10261)."""
     from kicad_tools.cli import route_cmd, runner
@@ -313,13 +322,25 @@ def test_route_reuses_verified_fill_without_a_bond_check_refill(
         return native_refill(path, *args, **kwargs)
 
     monkeypatch.setattr(runner, "run_refill_zones", refuse_bond_check)
-    result = route_cmd.main(route_args(board, "--native-zone-clearance"))
+    if report_only:
+        native_fill = runner.run_fill_zones
+
+        def first_fill_without_save(path, **kwargs):
+            monkeypatch.setattr(runner, "run_fill_zones", native_fill)
+            return runner.KiCadCLIResult(success=True, refill_saved=False)
+
+        monkeypatch.setattr(runner, "run_fill_zones", first_fill_without_save)
+    result = route_cmd.main(route_args(board, "--native-zone-clearance", *oracle_options))
     assert result == 0
     assert not bond_check_calls
     assert board.read_bytes() == original
-    routed = PCB.load(board.with_name("routed.kicad_pcb"))
+    output = board.with_name("routed.kicad_pcb")
+    routed = PCB.load(output)
     assert sum(segment.net_name == "SIG" for segment in routed.segments) == 1
     assert ground_copper(routed) == (2, 2)
+    assert "C1.1" in bonded_pads(stitch(output, fill_verified=True))
+    assert refill(output, native_cli)["unconnected_items"] == []
+    assert ground_copper(PCB.load(output)) == (2, 2)
 
 
 @pytest.mark.parametrize("island", [False, True], ids=["bonded", "island"])

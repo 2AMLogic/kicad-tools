@@ -8508,7 +8508,7 @@ def _fill_zones_after_route(
     Args:
         output_path: Path to the routed PCB file (modified in place).
         quiet: Suppress informational output.
-        require_saved: A DRC report without a confirmed native save cannot verify the fill.
+        require_saved: Also verify selective placement fills against a full native refill.
     """
     record_stage("native-zone-fill")
     if args is not None:
@@ -8696,7 +8696,7 @@ def _fill_zones_after_route(
     # Validate net format after zone fill -- kicad-cli may corrupt nets.
     report = validate_net_format(output_path)
     if args is not None:
-        args._zone_fill_verified = report.valid and (not require_saved or result.refill_saved)
+        args._zone_fill_verified = report.valid and result.refill_saved
     if not report.valid:
         logger.warning(
             "Net format corruption detected after zone fill: "
@@ -11388,6 +11388,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
 
     args._stranded_pour_links = 0
     args._pour_connectivity_verified = False
+    args._oracle_changed_copper = False
     args._exhausted_mixed_plane_pads = frozenset()
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
@@ -11457,6 +11458,8 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
+        # If the closer raises mid-edit, its incoming fill is no longer proven.
+        args._oracle_changed_copper = True
         result = run_oracle_completion(
             output_path,
             oracle=_make_pour_oracle(args),
@@ -11475,6 +11478,7 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             # regression merely for being below the project's via floors.
             declared_via=(closer.via_size, closer.via_drill),
         )
+        args._oracle_changed_copper = any(round_.kept for round_ in result.rounds)
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
         return 0
@@ -19666,16 +19670,22 @@ def _run_post_save_stitching(
 
     # Keep the published board and project together while the new via or
     # trace still crosses the previous fill. Only promote the refilled copy.
-    # The staged copy is byte-identical to the board whose fill and pour
-    # connectivity were just verified, so the stitcher may reuse that fill.
-    fill_verified = bool(
-        getattr(args, "_zone_fill_verified", False)
-        and getattr(args, "_pour_connectivity_verified", False)
-    )
     with tempfile.TemporaryDirectory(prefix=".kct-stitch-", dir=output_path.parent) as directory:
         staged = Path(directory) / output_path.name
         shutil.copy2(output_path, staged)
         copy_project_sidecars(output_path, staged)
+        refresh_fill = not getattr(args, "_zone_fill_verified", False) or getattr(
+            args, "_oracle_changed_copper", False
+        )
+        if refresh_fill:
+            _fill_zones_after_route(
+                staged, quiet=quiet, router=router, args=args, require_saved=True
+            )
+            if not args._zone_fill_verified:
+                relocate({staged: None})
+                raise _PostStitchRefillError(
+                    "Could not verify a saved zone refill before stitching."
+                )
         stitch_result = run_stitch(
             pcb_path=staged,
             net_names=net_names,
@@ -19683,9 +19693,10 @@ def _run_post_save_stitching(
             drill=args.via_drill,
             clearance=args.clearance,
             dry_run=False,
-            fill_verified=fill_verified,
+            fill_verified=True,
         )
-        if stitch_result.vias_added or stitch_result.traces_added:
+        added_copper = bool(stitch_result.vias_added or stitch_result.traces_added)
+        if added_copper:
             _fill_zones_after_route(
                 staged, quiet=quiet, router=router, args=args, require_saved=True
             )
@@ -19694,6 +19705,7 @@ def _run_post_save_stitching(
                 raise _PostStitchRefillError(
                     "Post-stitch zone refill could not be verified. Discarded the proposed stitch."
                 )
+        if refresh_fill or added_copper:
             moves: list[tuple[Path, Path | None]] = [
                 (output_path.with_suffix(ext), staged.with_suffix(ext))
                 for ext in PROJECT_SIDECAR_SUFFIXES
