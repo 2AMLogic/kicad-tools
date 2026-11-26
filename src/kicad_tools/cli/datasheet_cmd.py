@@ -23,6 +23,7 @@ import json
 import sys
 from pathlib import Path
 
+from kicad_tools.cli.commands.datasheet import add_package_parsers
 from kicad_tools.cli.format_options import add_format_flag, emit_json
 from kicad_tools.utils import ensure_parent_dir
 
@@ -246,47 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     info_parser.add_argument("pdf", help="Path to PDF file")
     info_parser.add_argument("--format", choices=["text", "json"], default="text")
 
-    # extract-package subcommand
-    pkg_parser = subparsers.add_parser(
-        "extract-package", help="Extract package information from PDF"
-    )
-    pkg_parser.add_argument("pdf", help="Path to PDF file")
-    pkg_parser.add_argument(
-        "-o",
-        "--output",
-        help="Output file path (default: stdout)",
-    )
-    pkg_parser.add_argument(
-        "--pages",
-        help="Page range to search (e.g., '1-10' or '1,2,5')",
-    )
-    pkg_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format (default: text)",
-    )
-
-    # suggest-footprint subcommand
-    footprint_parser = subparsers.add_parser(
-        "suggest-footprint", help="Suggest matching footprints for packages in PDF"
-    )
-    footprint_parser.add_argument("pdf", help="Path to PDF file")
-    footprint_parser.add_argument(
-        "-o",
-        "--output",
-        help="Output file path (default: stdout)",
-    )
-    footprint_parser.add_argument(
-        "--pages",
-        help="Page range to search (e.g., '1-10' or '1,2,5')",
-    )
-    footprint_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format (default: text)",
-    )
+    add_package_parsers(subparsers)
 
     args = parser.parse_args(argv)
 
