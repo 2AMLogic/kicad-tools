@@ -6709,6 +6709,32 @@ class PCB:
 
         return False
 
+    def set_footprint_property(self, reference: str, name: str, value: str) -> bool:
+        """Set a custom footprint field, retaining its existing display settings."""
+        fp = self.get_footprint(reference)
+        if fp is None or fp._sexp_node is None:
+            return False
+        for prop in fp._sexp_node.find_children("property"):
+            if prop.get_string(0) == name:
+                prop.children[1] = SExp.quoted_atom(value)
+                break
+        else:
+            prop = SExp.list(
+                "property",
+                SExp.quoted_atom(name),
+                SExp.quoted_atom(value),
+                SExp.list("at", 0, 0),
+                SExp.list("layer", fp.layer.replace(".Cu", ".Fab")),
+                SExp.list("hide", "yes"),
+                SExp.list("uuid", self.mint_uuid("property", fp.uuid, name)),
+                SExp.list("effects", SExp.list("font", SExp.list("size", 1, 1))),
+            )
+            if fp.layer == "B.Cu":
+                _mirror_text_effects(prop)
+            fp._sexp_node.append(prop)
+        fp.properties[name] = value
+        return True
+
     # Silkscreen management methods
 
     def set_reference_visibility(
