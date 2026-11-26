@@ -487,10 +487,9 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
     audit``).
     """
     total = len(report.pairs)
-    waived = [p for p in report.pairs if p.waived or p.exception_waivers]
     gate_failures = [p for p in report.pairs if not p.gate_row_passed]
     same_fp = [p for p in report.pairs if p.relationship == "same_footprint"]
-    scoped = [p for p in report.pairs if p.exception_waivers]
+    scoped = any(p.exception_waivers for p in report.pairs)
 
     # Issue #8277: an ``attach-zn`` row is waived only when the copper OUTSIDE
     # the zone still clears; say why one that is not waived still gates.
@@ -510,7 +509,8 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
     # auditable from the table alone.
     _print_reviewed_exceptions(report)
 
-    if waived:
+    if scoped or any(p.waived for p in report.pairs):
+        waived_count = report.gate_waived_count
         waived_note = (
             "(same-footprint / attach-zone -- qualify at the component, not the layout)"
             if not scoped
@@ -519,12 +519,12 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
         if gate_failures:
             print(
                 f"FAIL (gate): {len(gate_failures)}/{total} board pair(s) fail "
-                f"{unit_desc}; {len(waived)} pair(s) WAIVED {waived_note}."
+                f"{unit_desc}; {waived_count} pair(s) WAIVED {waived_note}."
             )
         else:
             print(
-                f"PASS (gate): {total - len(waived)}/{total} pair(s) clear "
-                f"{unit_desc}; {len(waived)} pair(s) WAIVED {waived_note}."
+                f"PASS (gate): {total - waived_count}/{total} pair(s) clear "
+                f"{unit_desc}; {waived_count} pair(s) WAIVED {waived_note}."
             )
         return
 
@@ -612,7 +612,7 @@ def _render_table_selected(report: CreepageReport, *, show_witness: bool = False
 
     _print_reviewed_exceptions(report)
     passed = sum(p.passed for p in report.pairs)
-    waived = sum(p.gate_row_passed and not p.passed for p in report.pairs)
+    waived = report.gate_waived_count
     failures = len(report.pairs) - passed - waived
     verdict = "PASS" if report.gate_passed else "FAIL"
     print(
