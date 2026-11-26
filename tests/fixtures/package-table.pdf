@@ -1,0 +1,41 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 210 >>
+stream
+0.5 w
+40 200 m 240 200 l 240 260 l 40 260 l h S
+40 230 m 240 230 l S
+140 200 m 140 260 l S
+BT /F1 10 Tf 50 240 Td (Package) Tj 100 0 Td (Pitch) Tj ET
+BT /F1 10 Tf 50 210 Td (SOIC-8) Tj 100 0 Td (1.27 mm) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << >> >>
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000317 00000 n 
+0000000577 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+665
+%%EOF
