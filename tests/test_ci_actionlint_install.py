@@ -106,7 +106,8 @@ def _install(tmp_path: Path, statuses: list[int], served: bytes, pinned: str):
     thread.start()
     binary = tmp_path / "bin" / "actionlint"
     script = step["run"].replace(RELEASE_ORIGIN, f"http://127.0.0.1:{server.server_port}")
-    script = script.replace(INSTALL_PATH, str(binary))
+    # Relative to cwd=tmp_path, so a space in tmp_path cannot split the shell word.
+    script = script.replace(INSTALL_PATH, "./bin/actionlint")
     try:
         result = subprocess.run(
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
