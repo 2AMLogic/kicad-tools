@@ -1036,6 +1036,7 @@ class ReadinessOptions:
     bom_spec_error: str | None = None
     # In-project declaration that selected the implicit schematic, staged with its inputs.
     schematic_spec: Path | None = None
+    schematic_implicit: bool = False
     # The ORIGINAL board directory the spec lookup started from (#8764); the
     # staged candidate's ``board_dir`` is a temp dir deleted when the run ends.
     bom_spec_searched: Path | None = None
@@ -1354,6 +1355,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             pcb=pcb,
             schematic=schematic,
             schematic_spec=schematic_spec,
+            schematic_implicit=not args.schematic,
             project=project,
             manufacturer=manufacturer,
             mode="pcb_only" if args.pcb_only else "assembly",
@@ -4553,6 +4555,7 @@ def build_report(
         report["project_root"] = Path(os.path.relpath(root, options.board_dir.resolve())).as_posix()
         report["output_root"] = options.output_root.resolve().relative_to(root).as_posix()
         if options.schematic is not None and options.schematic.is_file():
+            report["schematic_selection"] = "implicit" if options.schematic_implicit else "explicit"
             report["schematic_root"] = options.schematic.resolve().relative_to(root).as_posix()
     else:
         external = _external_dependencies(options)

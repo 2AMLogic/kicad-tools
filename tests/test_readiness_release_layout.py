@@ -549,3 +549,75 @@ def test_implicit_declaration_must_fit_explicit_source_boundary(tmp_path, capsys
     assert "schematic declaration" in capsys.readouterr().err
     assert not (pcb.parent / "fabrication").exists()
     assert readiness_cmd.main([*args, "--sch", str(sch)], engines=engines.bundle()) == 0
+
+
+@pytest.mark.parametrize("change", ["amend", "first", "nearer", "explicit"])
+def test_new_schematic_priority_after_verification(tmp_path, change, monkeypatch):
+    project = make_project(tmp_path)
+    pcb = project / "kicad/board.kicad_pcb"
+    pcb.write_text(PCB)
+    original = pcb.with_suffix(".kicad_sch")
+    original.write_text("(kicad_sch original)")
+    parent = project / "project.kct"
+    prefix = 'kct_version: "1.0"\nproject:\n  name: board\n  artifacts:\n'
+    pcb_line = "    pcb: kicad/board.kicad_pcb\n"
+    if change == "amend":
+        parent.write_text(prefix + pcb_line)
+    if change == "nearer":
+        parent.write_text(prefix + pcb_line + "    schematic: kicad/board.kicad_sch\n")
+    engines = HandoffEngines(
+        pcb.parent, part_numbers={"R1": "C17630"}, tht_refs=(), cpl_refs=("R1",)
+    )
+    args = [str(pcb), "--mfr", "jlcpcb"]
+    if change == "explicit":
+        args.extend(["--sch", str(original)])
+    for mode in ("--generate", "--verify"):
+        assert readiness_cmd.main([*args, mode], engines=engines.bundle()) == 0
+    assert read_readiness(pcb)["status"] == "ready"
+
+    output = project / "output"
+    bundle = output / "manufacturing"
+    sign_off_bundle(bundle, pcb, "local test", readiness=output / "readiness.json")
+    _no_browser(monkeypatch)
+    _stock(monkeypatch, {"C17630": 100})
+    if change == "nearer":
+        (pcb.parent / "project.kct").write_text(
+            prefix + "    pcb: board.kicad_pcb\n    schematic: ../schematics/board.kicad_sch\n"
+        )
+    else:
+        parent.write_text(prefix + pcb_line + "    schematic: schematics/board.kicad_sch\n")
+    preview = tmp_path / "preview"
+    assert _submission_preview(bundle, pcb, original, preview) == (0 if change == "explicit" else 2)
+    assert preview.exists() == (change == "explicit")
+    manifest = bundle / "manifest.json"
+    before = manifest.read_bytes()
+    for receipt in (output / "readiness.json", output / "readiness-verification/readiness.json"):
+        if change == "explicit":
+            assert read_readiness(pcb)["status"] == "ready"
+            sign_off_bundle(bundle, pcb, "local test", readiness=receipt)
+        else:
+            assert read_readiness(pcb)["status"] == "unverified"
+            with pytest.raises(WorkflowError, match="Implicit schematic selection changed"):
+                sign_off_bundle(bundle, pcb, "local test", readiness=receipt)
+            assert manifest.read_bytes() == before
+
+
+def test_legacy_report_identifies_routed_board(project):
+    import hashlib
+
+    output = project / "fabrication"
+    bundle = output / "manufacturing"
+    receipt = output / "readiness.json"
+    data = json.loads(receipt.read_bytes())
+    routed = project / data.pop("source_pcb")
+    unrouted = routed.with_name("unrouted.kicad_pcb")
+    unrouted.write_text("(kicad_pcb unrouted)")
+    data["inputs"][unrouted.relative_to(project).as_posix()] = hashlib.sha256(
+        unrouted.read_bytes()
+    ).hexdigest()
+    receipt.write_text(json.dumps(data))
+    sign_off_bundle(bundle, routed, "local test", readiness=receipt)
+    before = (bundle / "manifest.json").read_bytes()
+    with pytest.raises(WorkflowError, match="not produced for this --board"):
+        sign_off_bundle(bundle, unrouted, "local test", readiness=receipt)
+    assert (bundle / "manifest.json").read_bytes() == before

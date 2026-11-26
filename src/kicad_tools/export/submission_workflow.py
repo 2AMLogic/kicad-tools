@@ -352,7 +352,7 @@ def _load_readiness(
     input_base = layout.input_base if layout is not None else board_dir
     try:
         validate_source_pcb(data, board, input_base, generated.parent)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         raise WorkflowError(str(exc)) from exc
     exempt = (bundle_root / "manifest.json").resolve()
     _rehash_receipt_inputs(input_base, inputs, exempt, "inputs", relative_to="board-relative")

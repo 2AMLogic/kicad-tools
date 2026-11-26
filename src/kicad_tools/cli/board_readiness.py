@@ -84,6 +84,18 @@ class ReadinessLayout:
                 roots.append(root)
         if len(roots) != 1:
             raise ValueError("The readiness receipt does not identify one complete schematic root")
+        if data.get("schematic_selection") == "implicit":
+            from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+            source = data.get("source_pcb")
+            if not isinstance(source, str) or source not in inputs:
+                raise ValueError("Implicit schematic selection requires the recorded source PCB")
+            pcb = (base / source).resolve()
+            if not pcb.is_relative_to(base):
+                raise ValueError("Recorded source PCB leaves the project")
+            current = resolve_schematic_for_pcb(pcb)
+            if current is None or current.resolve() != roots[0]:
+                raise ValueError("Implicit schematic selection changed; re-verify readiness")
         return roots[0]
 
 
@@ -95,7 +107,7 @@ def validate_source_pcb(data: dict, pcb: Path, base: Path, output: Path) -> None
         source = data["source_pcb"]
     else:
         # Older receipts list the two diagnostic copies alongside the design.
-        # Only infer the source when one PCB remains outside the snapshot trees.
+        # Native DRC provenance can distinguish remaining routed and unrouted inputs.
         snapshots = [
             output / evidence / kind
             for evidence in ("readiness", "readiness-verification")
@@ -107,9 +119,39 @@ def validate_source_pcb(data: dict, pcb: Path, base: Path, output: Path) -> None
             if name.endswith(".kicad_pcb")
             and not any((base / name).is_relative_to(tree) for tree in snapshots)
         ]
+        if len(candidates) > 1:
+            candidates = _legacy_report_candidates(data, base, output, candidates)
         source = candidates[0] if len(candidates) == 1 else None
     if source != selected or selected not in inputs:
         raise ValueError("Readiness receipt was not produced for this --board")
+
+
+def _legacy_report_candidates(
+    data: dict, base: Path, output: Path, candidates: list[str]
+) -> list[str]:
+    """Use the receipt's hash-bound native DRC reports to identify the checked board."""
+    inputs = data["inputs"]
+    sources = data.get("report_sources")
+    if not isinstance(sources, dict):
+        return []
+    matches = set(candidates)
+    for name, digest in sources.items():
+        path = (base / name).resolve()
+        if path.name not in {"native-drc.json", "native-drc-raw.json", "drc_report.json"}:
+            continue
+        if name not in inputs or not path.is_relative_to(output):
+            continue
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != inputs[name]:
+            return []
+        report = json.loads(raw)
+        if not isinstance(report, dict):
+            return []
+        bound = [candidate for candidate in candidates if inputs[candidate] == digest]
+        if report.get("source"):
+            bound = [candidate for candidate in bound if Path(candidate).name == report["source"]]
+        matches.intersection_update(bound)
+    return sorted(matches)
 
 
 def board_directory_for_pcb(pcb: Path) -> Path:
