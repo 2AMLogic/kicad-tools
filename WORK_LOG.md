@@ -16,6 +16,19 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-26
 
+- **Issue #10358** (closed): kct creepage --exceptions: docs say an unmatched selector is an error (it warns), and the gate summary double-counts a partially waived row
+- **PR #10462**: fix: count creepage exception rows by their final verdict
+- **Issue #10477** (closed): Reinforcement clearance: a second mask opening on an anchor makes a registered anchor read unverified_registration
+- **PR #10493**: fix: register reinforcement anchors beside a second mask opening
+- **Issue #10484** (closed): Analog review: compare routed divider-arm loading and identify gaps in the adjacent reference plane
+- **PR #10489**: feat: measure routed net coverage over adjacent zone fills
+- **Issue #10450** (closed): Reconcile Board 06 LVDS and LVTTL project widths and re-pin the assembled demo
+- **PR #10463**: fix(board06): declare LVTTL, LVDS and Power widths in source project
+- **Issue #10480** (closed): kct export: expose the declared project root for boards in a kicad subdirectory
+- **PR #10481**: Expose the project root for standalone manufacturing exports
+- **Issue #10431** (closed): Export a supplementary procurement list for accessories and off-board assembly parts
+- **PR #10444**: feat: export a supplementary purchasing list for off-board parts
+
 - **Issue #10419** (closed): kct pcb reinforce --clear writes the board before drop_wires fails on an unreadable sidecar envelope
 - **PR #10432**: fix: refuse reinforce --clear on an unreadable destination sidecar
 - **Issue #10409** (closed): Radial-capacitor hatch warnings return after clipping strokes to a round pad clearance
