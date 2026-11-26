@@ -138,3 +138,72 @@ def test_thin_non_text_silk_graphic_flagged(tmp_path):
     pcb = _load(tmp_path, _pad_fp(_vline(3.0, width=0.10)))
     found = check_silkscreen_line_width(pcb, _rules()).violations
     assert [v.rule_id for v in found] == ["silkscreen_line_width"]
+
+
+def _margin_board(setup_margin: str | None, fp_margin: float | None) -> str:
+    """Two concentric pad/ring pairs: an inheriting pad and a +0.05 mm control.
+
+    A 0.15 mm ink ring of radius 1.76 mm around a 2.80 mm round pad leaves
+    ``0.285 - margin`` mm between the ink and the mask aperture, so the
+    printed gap follows the effective mask margin directly (Issue #10326).
+    """
+    setup = "(setup (tenting front back))"
+    if setup_margin is not None:
+        setup = f"(setup (pad_to_mask_clearance {setup_margin}) (tenting front back))"
+    fp_margin_node = f"(solder_mask_margin {fp_margin})" if fp_margin is not None else ""
+    body = f"""  (footprint "X:C" (layer "F.Cu") (at 10 10)
+    (property "Reference" "J1" (at 0 -3) (layer "F.Fab")
+      (effects (font (size 1 1) (thickness 0.15))))
+    {fp_margin_node}
+    (fp_circle (center 0 0) (end 1.76 0) (stroke (width 0.15) (type solid))
+      (layer "F.SilkS"))
+    (fp_circle (center 5 0) (end 6.76 0) (stroke (width 0.15) (type solid))
+      (layer "F.SilkS"))
+    (pad "1" thru_hole circle (at 0 0) (size 2.8 2.8) (drill 1.7)
+      (layers "*.Cu" "*.Mask"))
+    (pad "2" thru_hole circle (at 5 0) (size 2.8 2.8) (drill 1.7)
+      (layers "*.Cu" "*.Mask") (solder_mask_margin 0.05)))
+"""
+    return _HEAD + setup + "\n" + body + ")\n"
+
+
+def _mfr_check_json(tmp_path: Path, capsys, board_text: str) -> dict:
+    """Run the reported public JLCPCB check and return its JSON report."""
+    import json
+
+    from kicad_tools.cli.check_cmd import main
+
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(board_text)
+    main([str(path), "--drc-only", "--format", "json", "--mfr", "jlcpcb"])
+    out = capsys.readouterr().out
+    return json.loads(out[out.index("{") :])
+
+
+@pytest.mark.parametrize(
+    ("setup_margin", "fp_margin", "expected_gap"),
+    [("0", 0.22, 0.065), ("0.22", None, 0.065), ("0.40", 0.05, None)],
+)
+def test_inherited_mask_margin_reaches_silk_clearance(
+    tmp_path, capsys, setup_margin, fp_margin, expected_gap
+):
+    """Issue #10326: the aperture margin resolves pad, then footprint, then board.
+
+    A 0.065 mm gap must trip the 0.12 mm error band whether the +0.22 mm
+    margin is the footprint's (no local override, board at zero) or the
+    board's (footprint unset). The +0.05 mm footprint override of a
+    +0.40 mm board margin yields a 0.235 mm gap and must clear the rule,
+    and the explicit +0.05 mm control pad stays clear in every row.
+    """
+    data = _mfr_check_json(tmp_path, capsys, _margin_board(setup_margin, fp_margin))
+    findings = [v for v in data["violations"] if v["rule_id"] == "silk_pad_clearance"]
+    inherited = [v for v in findings if "J1-1" in v["items"]]
+    assert not [v for v in findings if "J1-2" in v["items"]]
+    if expected_gap is None:
+        assert not inherited
+    else:
+        assert len(inherited) == 1
+        assert inherited[0]["severity"] == "error"
+        assert inherited[0]["actual_value"] > 0
+        assert inherited[0]["actual_value"] == pytest.approx(expected_gap, abs=0.001)
+        assert inherited[0]["required_value"] == pytest.approx(0.12)
