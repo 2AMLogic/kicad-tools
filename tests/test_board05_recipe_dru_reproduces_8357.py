@@ -322,6 +322,9 @@ def _extend_phase_a_leg(board: Path, leg) -> None:
 
 def test_recipe_declares_reviewed_classes_widths_and_necks(staged):
     build = _load_build()
+    assert (staged.parent / "net_class_map.json").read_bytes() == (
+        REDESIGN / "net_class_map.json"
+    ).read_bytes()
     sidecar = _sidecar(staged)
     pcb = PCB.load(str(staged))
     assert set(sidecar) == {net.name for net in pcb.nets.values() if net.name}
