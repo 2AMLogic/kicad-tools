@@ -456,14 +456,20 @@ def prepare_routed_board(output):
     return routed, fingerprint
 
 
-def build(output):
+def generate_routed_board(output):
+    """Generate the hardware and prepare its reviewed copper and sidecars for refill."""
     output = Path(output).resolve()
     generate(output)
     # A local copy lets procurement/export discover exact identities in scratch.
     (output / "project.kct").write_text((ROOT / "project.kct").read_text().replace("output/", ""))
     # Published beside the PCB so `kct check` auto-loads the declared ampacity targets.
     shutil.copy2(ROOT / "net_class_map.json", output / "net_class_map.json")
-    routed, fingerprint = prepare_routed_board(output)
+    return prepare_routed_board(output)
+
+
+def build(output):
+    output = Path(output).resolve()
+    routed, fingerprint = generate_routed_board(output)
     evidence = output / "readiness"
     # The shared stage proves every plane net on actual refilled copper.
     # A failed or dangling stitch never replaces the staged input, and its

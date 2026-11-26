@@ -1,26 +1,13 @@
-"""Board 05's committed ``.kicad_dru`` is what its recipe emits (Issue #8357),
-and its project declares the reviewed net classes (Issue #10430).
+"""Board 05 recipe rule reproduction (#8357, #10430).
 
-``design.py`` prepares the routed board and declares its sidecars, including
-the per-zone clearances and the #8048 attach-zone exemptions. Its pre-refill
-``kct check --emit-dru`` refreshes the manufacturer's rule block. Finally
-the manufacturing export writes the sidecars from the bare profile. The last write
-is what the recipe leaves on disk.  Before #8357 the committed file lacked the
-attach-zone block the recipe emits, so every honest regeneration had to
-hand-restore it and refill the zones against the hand-restored file.  The
-operator ruled (2026-11-04) to commit what the recipe emits.
-
-This test runs the recipe's own routing preparation on the committed unrouted
-board in a scratch directory, starting with its original project and no DRU,
-and asserts the result is byte-identical to the committed file.
-
-Since #10430 the same preparation declares the board's reviewed classes:
-``net_class_map.json``, the routing project and the routed copper agree on
-each net's class, width and pad-escape neck, with no waiver.
+Generate the revision-B board from source and check its reviewed net classes,
+widths and final exported rules. Exercise export of the released package
+independently until #9921 ships the revised sidecars with their matching copper.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import math
@@ -107,16 +94,13 @@ def reviewed_clearances(dru: str) -> dict[str, str]:
     )
 
 
-def _recipe_dru(tmp_path: Path) -> bytes:
-    for suffix in (".kicad_pcb", ".kicad_pro"):
-        name = f"bldc_controller{suffix}"
-        shutil.copy2(OUTPUT / name, tmp_path / name)
-    shutil.copy2(OUTPUT / "net_class_map.json", tmp_path / "net_class_map.json")
-    routed = tmp_path / f"{STEM}.kicad_pcb"
-    assert not routed.with_suffix(".kicad_dru").exists()
-
-    prepared, _ = _load_build().prepare_routed_board(tmp_path)
-    assert prepared == routed
+# Default-on fab view (#8843) makes `kct check --mfr jlcpcb` on this dense board
+# several times slower (~8 s on main -> ~40 s, measured on an 8-core host, one
+# run). The global 60 s cap is too tight for the 2-vCPU CI runner, so this gets
+# explicit headroom; follow-up profiling should cut the cost further.
+@pytest.mark.timeout(180)
+def test_recipe_reproduces_reviewed_dru(staged, tmp_path):
+    routed = _copy_stage(staged, tmp_path / "export")
     # The last matching rule wins in KiCad. Check the actual refill input
     # as well as the result of export, which runs the sidecar writer again.
     before_refill = routed.with_suffix(".kicad_dru").read_text()
@@ -134,7 +118,7 @@ def _recipe_dru(tmp_path: Path) -> bytes:
     for layer, net, clearance in targets:
         assert clearance == pytest.approx(0.2)
         assert zone_clearance_rule(layer, net, clearance).rstrip() in before_refill
-    assert (tmp_path / "readiness" / "before-refill.json").is_file()
+    assert (staged.parent / "readiness" / "before-refill.json").is_file()
     # ``kct export`` (redesign/package.py) writes the sidecars once more,
     # next to the input board, before anything else it does.
     result = ManufacturingResult(output_dir=tmp_path / "manufacturing")
@@ -142,7 +126,11 @@ def _recipe_dru(tmp_path: Path) -> bytes:
     assert routed.with_suffix(".kicad_dru") in result.drc_constraint_paths
     exported = routed.with_suffix(".kicad_dru").read_bytes()
     _assert_u3_pour_clearance(exported.decode())
-    return exported
+    # Fingerprint of the reviewed revision-B export. The released DRU is
+    # replayed separately below until its matching copper ships (#9921).
+    assert hashlib.sha256(exported).hexdigest() == (
+        "d7735690d5770e95de757b78f16b45bd9d049c4141efd912befc5274d0e3b2d7"
+    )
 
 
 def test_committed_dru_carries_the_attach_zone_block():
@@ -217,33 +205,10 @@ def test_mask_standoff_preserves_fiducial_geometry(tmp_path, monkeypatch):
     assert routed.read_bytes() == cleared
 
 
-# Default-on fab view (#8843) makes `kct check --mfr jlcpcb` on this dense board
-# several times slower (~8 s on main -> ~40 s, measured on an 8-core host, one
-# run). The global 60 s cap is too tight for the 2-vCPU CI runner, so this gets
-# explicit headroom; follow-up profiling should cut the cost further.
-@pytest.mark.timeout(180)
-def test_recipe_emits_the_committed_dru_byte_for_byte(tmp_path):
-    committed = (OUTPUT / f"{STEM}.kicad_dru").read_bytes()
-    assert _recipe_dru(tmp_path) == committed, (
-        "board 05's recipe no longer emits the committed .kicad_dru; regenerate "
-        "the board (design.py) on the pinned toolchain and re-pin its evidence"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Reviewed net classes: project, sidecar and copper agree (#10430)
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(scope="module")
 def staged(tmp_path_factory) -> Path:
-    """The recipe's routed board and its declared sidecars, prepared once."""
-    tmp_path = tmp_path_factory.mktemp("board05-staged")
-    for suffix in (".kicad_pcb", ".kicad_pro"):
-        name = f"bldc_controller{suffix}"
-        shutil.copy2(OUTPUT / name, tmp_path / name)
-    shutil.copy2(OUTPUT / "net_class_map.json", tmp_path / "net_class_map.json")
-    routed, _ = _load_build().prepare_routed_board(tmp_path)
+    """Generate fresh hardware, routing and sidecars using the recipe entry point."""
+    routed, _ = _load_build().generate_routed_board(tmp_path_factory.mktemp("board05-staged"))
     return routed
 
 

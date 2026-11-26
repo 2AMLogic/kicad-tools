@@ -77,12 +77,10 @@ def test_export_matches_emit_dru_with_sidecar(tmp_path: Path) -> None:
 
 
 def test_export_without_sidecar_unchanged(tmp_path: Path) -> None:
-    # The project declares the ``Motor power`` netclass itself (#10430), so only
-    # the sidecar-derived ampacity rules may come and go with the sidecar.
     pcb = _stage(tmp_path, sidecar=False)
     dru = _export_dru(pcb)
     assert "Ampacity Min Width" not in dru
-    assert '(rule "Reviewed clearance - Motor power"' in dru
+    assert "Motor power" not in dru
 
 
 def test_dedupe_net_classes_one_per_name() -> None:

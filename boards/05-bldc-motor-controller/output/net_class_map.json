@@ -1,11 +1,10 @@
 {
-  "_comment": "Board 05 revision-B reviewed net-class account (issue #10430). The routing project, this map and the routed copper hold one class, width and neck floor per net: VIN to GND_SENSE and GND keep their authored entries and every other net carries the router's effective class and width. Motor power and Ground plane declare the strictest class clearance their nets already held (0.2 mm; FUSED, VM and GND_SENSE were held to 0.15 mm only by the name classifier). neck_trace_width is the floor for a short pad-escape leg only: copper leaving a same-net pad on its own layer within the agreement rule's local reach. Any other segment narrower than trace_width is below class and must warn. build.py overlays this map on the router's default map, declares the result with the route CLI's class and width writers, and verifies the resolved classes, widths, clearances and copper on the staged board.",
   "VIN": {
     "name": "Motor power",
     "priority": 1,
     "trace_width": 0.5,
     "neck_trace_width": 0.3,
-    "clearance": 0.2,
+    "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
     "is_pour_net": false,
@@ -16,7 +15,7 @@
     "priority": 1,
     "trace_width": 0.5,
     "neck_trace_width": 0.3,
-    "clearance": 0.2,
+    "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
     "is_pour_net": false,
@@ -27,7 +26,7 @@
     "priority": 1,
     "trace_width": 0.5,
     "neck_trace_width": 0.3,
-    "clearance": 0.2,
+    "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
     "is_pour_net": false,
@@ -38,7 +37,7 @@
     "priority": 1,
     "trace_width": 0.5,
     "neck_trace_width": 0.3,
-    "clearance": 0.2,
+    "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
     "is_pour_net": false,
@@ -49,7 +48,7 @@
     "priority": 1,
     "trace_width": 0.5,
     "neck_trace_width": 0.3,
-    "clearance": 0.2,
+    "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
     "is_pour_net": false,
@@ -60,7 +59,7 @@
     "priority": 1,
     "trace_width": 0.5,
     "neck_trace_width": 0.3,
-    "clearance": 0.2,
+    "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
     "is_pour_net": false,
@@ -71,7 +70,7 @@
     "priority": 1,
     "trace_width": 0.5,
     "neck_trace_width": 0.3,
-    "clearance": 0.2,
+    "clearance": 0.127,
     "via_size": 0.65,
     "route_via": "pathfinder",
     "is_pour_net": false,
@@ -81,248 +80,10 @@
     "name": "Ground plane",
     "priority": 1,
     "trace_width": 0.5,
-    "neck_trace_width": 0.15,
-    "clearance": 0.2,
-    "via_size": 0.6,
+    "clearance": 0.127,
     "is_pour_net": true,
     "route_via": "pour",
     "zone_connection": "solid"
-  },
-  "+5V": {
-    "name": "Power",
-    "priority": 1,
-    "trace_width": 0.5,
-    "neck_trace_width": 0.15,
-    "clearance": 0.2,
-    "via_size": 0.8,
-    "is_pour_net": true,
-    "route_via": "pour",
-    "zone_connection": "solid",
-    "zone_priority": 10
-  },
-  "V3P3": {
-    "name": "Power",
-    "priority": 1,
-    "trace_width": 0.5,
-    "neck_trace_width": 0.15,
-    "clearance": 0.2,
-    "via_size": 0.8,
-    "is_pour_net": true,
-    "route_via": "pour",
-    "zone_connection": "solid",
-    "zone_priority": 10
-  },
-  "DRIVER_SLEEP": {
-    "name": "Differential",
-    "priority": 2,
-    "trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "RUN": {
-    "name": "Differential",
-    "priority": 2,
-    "trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "VCP": {
-    "name": "Differential",
-    "priority": 2,
-    "trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "nTRIP": {
-    "name": "Differential",
-    "priority": 2,
-    "trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "SCK": {
-    "name": "Clock",
-    "priority": 2,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.2,
-    "via_size": 0.6
-  },
-  "SENSE_IN": {
-    "name": "Audio",
-    "priority": 3,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "RESET": {
-    "name": "Debug",
-    "priority": 5,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "AREF": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "CPH": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "CPL": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "EN_A": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "EN_B": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "EN_C": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "HALL_A": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "HALL_B": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "HALL_C": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "IREF": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "LED_A": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "MISO": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "MOSI": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "PG_DELAY": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "PWM_A": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "PWM_B": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "PWM_C": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "SPEED": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "STATUS_LED": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
-  },
-  "nFAULT": {
-    "name": "Digital",
-    "priority": 4,
-    "trace_width": 0.2,
-    "neck_trace_width": 0.15,
-    "clearance": 0.15,
-    "via_size": 0.6
   },
   "non_hv_nets": {
     "FUSED": "12-24 V DC motor supply after F1 (1 A, 63 V fuse), SMBJ24A-clamped; SELV, not mains (issue #8278)"

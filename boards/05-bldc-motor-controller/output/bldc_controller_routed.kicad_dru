@@ -71,12 +71,8 @@
   (condition "(A.NetClass == 'Clock' || B.NetClass == 'Clock') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.2mm)))
 
-(rule "Reviewed clearance - Ground plane"
-  (condition "(A.NetClass == 'Ground plane' || B.NetClass == 'Ground plane') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
-  (constraint clearance (min 0.2mm)))
-
-(rule "Reviewed clearance - Motor power"
-  (condition "(A.NetClass == 'Motor power' || B.NetClass == 'Motor power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+(rule "Reviewed clearance - HighCurrentSignal"
+  (condition "(A.NetClass == 'HighCurrentSignal' || B.NetClass == 'HighCurrentSignal') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.2mm)))
 
 (rule "Reviewed clearance - Power"
