@@ -227,7 +227,24 @@ def _native_plane_link(capsys, board, *args):
     )
 
 
-def test_plane_commit_reports_gap_to_saved_project_refill(plane_board, capsys):
+def test_native_plane_refill_requires_a_bounded_save(plane_board, monkeypatch):
+    from math import isfinite
+
+    from kicad_tools.cli import runner
+    from kicad_tools.cli.route_link_cmd import _native_refill
+
+    def timed_out(path, output, cli, *, timeout):
+        assert isfinite(timeout) and timeout > 0
+        return runner.KiCadCLIResult(success=False, stderr="refill timed out")
+
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("kicad-cli"))
+    monkeypatch.setattr(runner, "_run_fill_zones_via_drc", timed_out)
+    with pytest.raises(RuntimeError, match="refill timed out"):
+        _native_refill(plane_board)
+
+
+@pytest.fixture
+def project_plane_board(plane_board):
     plane_board.with_suffix(".kicad_pro").write_text(
         json.dumps(
             {
@@ -239,20 +256,27 @@ def test_plane_commit_reports_gap_to_saved_project_refill(plane_board, capsys):
             }
         )
     )
-    original = plane_board.read_bytes()
-    out = plane_board.with_name("routed.kicad_pcb")
-    rc, doc = _native_plane_link(capsys, plane_board, "-o", str(out))
+    return plane_board
+
+
+def test_plane_commit_reports_gap_to_saved_project_refill(project_plane_board, capsys):
+    original = project_plane_board.read_bytes()
+    out = project_plane_board.with_name("routed.kicad_pcb")
+    rc, doc = _native_plane_link(capsys, project_plane_board, "-o", str(out))
     assert rc == 0, doc
     gap = doc["links"][0]["min_plane_gap_mm"]
     assert 0.8 <= gap < 0.81  # project floor exceeds zone (0.5) and CLI (0.2)
-    assert plane_board.read_bytes() == original
+    assert project_plane_board.read_bytes() == original
     pcb = PCB.load(out)
     assert [s.layer for s in pcb.segments if pcb.nets[s.net_number].name == "SIG"] == ["In1.Cu"]
     assert pcb.zones[0].filled_polygons
-    # An explicit floor larger than the native setback must veto the same route.
-    rc, doc = _native_plane_link(capsys, plane_board, "--net-clearance", "FOE=1.5")
+
+
+def test_plane_commit_vetoes_clearance_above_native_setback(project_plane_board, capsys):
+    original = project_plane_board.read_bytes()
+    rc, doc = _native_plane_link(capsys, project_plane_board, "--net-clearance", "FOE=1.5")
     assert rc == 1 and "requires 1.5 mm" in doc["links"][0]["reason"]
-    assert plane_board.read_bytes() == original
+    assert project_plane_board.read_bytes() == original
 
 
 @pytest.mark.parametrize("second_pad", [True, False])

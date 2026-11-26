@@ -926,7 +926,7 @@ def _native_refill(path: Path) -> PCB:
     cli = find_kicad_cli()
     if cli is None:
         raise RuntimeError("kicad-cli is required to verify the plane refill")
-    result = _run_fill_zones_via_drc(path, None, cli)
+    result = _run_fill_zones_via_drc(path, None, cli, timeout=120)
     if not result.success or not result.refill_saved:
         raise RuntimeError(f"plane refill was not saved: {result.stderr}")
     return PCB.load(path)
