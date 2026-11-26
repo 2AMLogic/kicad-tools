@@ -10738,6 +10738,12 @@ def _add_export_parser(subparsers) -> None:
         help="Disable BOM enrichment from .kct project spec",
     )
     export_parser.add_argument(
+        "--project-root",
+        dest="export_project_root",
+        metavar="DIR",
+        help="Root for project-relative export inputs (defaults to the PCB directory)",
+    )
+    export_parser.add_argument(
         "--spec",
         dest="export_spec",
         metavar="PATH",
