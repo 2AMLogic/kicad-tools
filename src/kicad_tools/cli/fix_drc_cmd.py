@@ -831,7 +831,7 @@ def _execute_repair(
         if not args.quiet and args.format == "text" and pass_num == 1:
             # Engine-label the detection total so it cannot be read as a
             # contradiction next to the pure-Python --verify counts.
-            print(f"Found {total_targeted} repairable violation(s) ({args.engine} engine):")
+            print(f"Found {total_targeted} targeted violation(s) ({args.engine} engine):")
             if clearance_violations:
                 print(f"  Clearance: {len(clearance_violations)}")
             if drill_violations:
@@ -1631,9 +1631,11 @@ def _run_mask_pass(
                 isinstance(action, MaskNudgeAction) or action.action == "pull_in"
                 for action in result.actions
             )
-            has_bends = any(action.bends for action in result.actions)
+            bend_nets = {action.net_name for action in result.actions if action.bends}
+            # Refill can split existing copper even when a move added no segment.
+            contact_nets = edited_nets | before.pour_nets() if has_zones else bend_nets
             before_native = (
-                _mask_native_state(candidate) if has_zones or check_copper or has_bends else None
+                _mask_native_state(candidate) if has_zones or check_copper or bend_nets else None
             )
             # On a partially connected board one new contact can hide a split,
             # even on the same net. Keep KiCad's actual pad groups for that case.
@@ -1651,10 +1653,14 @@ def _run_mask_pass(
                 if not refill.success:
                     raise RuntimeError(f"could not persist repaired zone fills: {refill.stderr}")
 
-            # The barrel's old antipad belongs to the old drill position. Grade
-            # a pad bridge against the copper that will actually be published.
-            refilled = has_zones and any(a.action == "bridge_via" for a in result.actions)
-            if refilled:
+            def lost_contacts() -> set[str]:
+                if not contact_nets:
+                    return set()
+                return MaskCopperRepairer(candidate).disconnected_copper_nets(before, contact_nets)
+
+            # Refill zone pours before grading so moved tracks and via antipads
+            # are checked against the copper that will actually be published (#9939).
+            if has_zones:
                 refill_candidate()
             _verify_mask_actions(
                 result,
@@ -1663,16 +1669,16 @@ def _run_mask_pass(
                 pcb_path,
                 candidate,
                 pad_islands,
-                lost_contacts=repairer.disconnected_bends(before, result.actions),
+                lost_contacts=lost_contacts(),
             )
-            if has_bends and result.repaired < proposed:
-                lost = MaskCopperRepairer(candidate).disconnected_bends(before, result.actions)
+            if result.actions and result.repaired < proposed:
+                if has_zones:
+                    refill_candidate()
+                lost = lost_contacts()
                 if lost:
                     raise _MaskPadConnectionLost(
                         f"saved repair disconnected copper on {', '.join(sorted(lost))}"
                     )
-            if result.actions and has_zones and (not refilled or result.repaired < proposed):
-                refill_candidate()
             if result.actions and before_native is not None:
                 saved_native = _mask_native_state(candidate)
                 new_errors = (saved_native.errors - before_native.errors).total()
@@ -1857,6 +1863,13 @@ def _verify_mask_actions(
 
     disconnected = _split_mask_nets(pad_islands, candidate) if pad_islands else set()
     disconnected.update(lost_contacts or ())
+    # A refill can split another net's pour. No action on that net can be
+    # individually undone, so discard the private candidate as a whole.
+    unattributed = disconnected - {act.net_name for act in result.actions}
+    if unattributed:
+        raise _MaskPadConnectionLost(
+            f"repair disconnected copper on {', '.join(sorted(unattributed))}"
+        )
     keep = []
     revert = []
     for act in result.actions:
@@ -2967,6 +2980,12 @@ def _print_text(
     remaining = first_violations - total_repaired_all
     if dry_run:
         print("Dry run: predictions only -- the board was not modified or re-checked.")
+        print(f"Targeted findings without a proposed repair: {remaining}")
+        if non_targeted:
+            print(f"Findings outside the repair targets: {non_targeted}")
+        if clearance_result.skipped_exceeds_max + drill_result.skipped_exceeds_max > 0:
+            print(f"    Try increasing --max-displacement (currently {max_displacement}mm)")
+        return
 
     if remaining <= 0 and non_targeted == 0:
         print("All violations repaired!")

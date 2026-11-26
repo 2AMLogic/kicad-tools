@@ -3455,6 +3455,8 @@ def _write_readme(
                     f"  step {name}: {step.get('status')}" + (f" ({detail})" if detail else "")
                 )
     if options.assembly:
+        from kicad_tools.export.preflight import describe_lookup_sources
+
         _, stock_record, _ = _stock_evaluation(options, _recorded_stock_check(options))
         if stock_record is not None:
             lines.extend(["", "LCSC stock order", "----------------"])
@@ -3466,6 +3468,9 @@ def _write_readme(
                 )
             else:
                 lines.append("  no parts declared as held in operator inventory")
+            recorded = describe_lookup_sources(stock_record.get("sources"))
+            if recorded:
+                lines.append(f"  parts data sources: {recorded}")
             lines.append(f"  stock check {stock_record['status']}: {stock_record['message']}")
     prep = options.assembly_prep_record
     if prep is not None:
@@ -3781,6 +3786,11 @@ def _stock_evaluation(
         "message": result.message,
         "details": result.details,
     }
+    sources = data.get("sources")
+    if isinstance(sources, dict):
+        # Where the producer's lookups reached (issue #10386).  Verification
+        # carries the record forward; it never re-derives it from this host.
+        record["sources"] = dict(sources)
     return result, record, None
 
 
@@ -4788,7 +4798,9 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     )
     diagnostics = _diagnostics_dir(options, original, diagnostic_name)
     with tempfile.TemporaryDirectory(prefix="kct-readiness-candidate-") as temporary:
-        candidate_root = Path(temporary) / "board"
+        # Use the same physical path as project_base when TMPDIR names a symlink.
+        temporary_root = Path(temporary).resolve()
+        candidate_root = temporary_root / "board"
         candidate = candidate_root / original.relative_to(project_base)
         candidate_source_root = candidate_root / source_root.relative_to(project_base)
         shutil.copytree(
@@ -4833,7 +4845,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             spec_target = (
                 candidate_source_root / spec.relative_to(source_root)
                 if spec.is_relative_to(source_root)
-                else Path(temporary) / spec.name
+                else temporary_root / spec.name
             )
             spec_target.parent.mkdir(parents=True, exist_ok=True)
             if not spec_target.exists():

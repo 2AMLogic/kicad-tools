@@ -539,6 +539,209 @@ class TestCopperWeight:
         assert mfg.copper_weight is None
 
 
+class TestLeadProfile:
+    """Verified maximum lead dimensions on a BOM entry (Issue #10299)."""
+
+    def test_round_lead_required_diameter(self):
+        """A round lead needs its maximum diameter."""
+        from kicad_tools.spec.schema import LeadProfile
+
+        lead = LeadProfile(shape="round", diameter_mm=1.0, source="calipers 2026-11-20")
+        assert lead.required_diameter_mm() == pytest.approx(1.0)
+        assert lead.max_dimensions_mm() == (1.0,)
+
+    def test_rectangular_lead_required_diameter_is_diagonal(self):
+        """A rectangular lead needs the diagonal of its maximum width/thickness."""
+        from kicad_tools.spec.schema import LeadProfile
+
+        lead = LeadProfile(
+            shape="rectangular", width_mm=1.4, thickness_mm=0.8, source="datasheet p. 9"
+        )
+        # sqrt(1.4^2 + 0.8^2) = 1.6124515...
+        assert lead.required_diameter_mm() == pytest.approx(1.61245155, rel=1e-6)
+        assert lead.max_dimensions_mm() == (1.4, 0.8)
+
+    def test_round_requires_diameter(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError, match="requires diameter_mm"):
+            LeadProfile(shape="round", source="datasheet")
+
+    def test_rectangular_requires_width_and_thickness(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError, match="width_mm and thickness_mm"):
+            LeadProfile(shape="rectangular", width_mm=1.4, source="datasheet")
+        with pytest.raises(ValidationError, match="width_mm and thickness_mm"):
+            LeadProfile(shape="rectangular", thickness_mm=0.8, source="datasheet")
+
+    def test_shape_dimension_mismatch_rejected(self):
+        """Round takes diameter only; rectangular takes width/thickness only."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError, match="diameter_mm only"):
+            LeadProfile(shape="round", diameter_mm=1.0, width_mm=1.4, source="datasheet")
+        with pytest.raises(ValidationError, match="width_mm and thickness_mm; "):
+            LeadProfile(
+                shape="rectangular", width_mm=1.4, thickness_mm=0.8, diameter_mm=1.0, source="s"
+            )
+
+    def test_blank_source_rejected(self):
+        """Dimensions without provenance cannot be traced, so they are refused."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError, match="require a source"):
+            LeadProfile(shape="round", diameter_mm=1.0, source="   ")
+
+    def test_dimensions_must_be_positive(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import LeadProfile
+
+        with pytest.raises(ValidationError):
+            LeadProfile(shape="round", diameter_mm=0, source="datasheet")
+        with pytest.raises(ValidationError):
+            LeadProfile(shape="rectangular", width_mm=-1.4, thickness_mm=0.8, source="datasheet")
+
+
+class TestFinishedHoleTolerance:
+    """Fabricator lower finished-hole tolerance (Issue #10299)."""
+
+    def test_declared_with_source(self):
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_mm=-0.08,
+            finished_hole_tolerance_source="JLCPCB capabilities, through-hole tolerances",
+        )
+        assert mfg.finished_hole_tolerance_mm == -0.08
+        assert mfg.finished_hole_tolerance_source == "JLCPCB capabilities, through-hole tolerances"
+
+    def test_zero_is_allowed(self):
+        """Zero (hole never smaller than nominal) is a valid lower tolerance."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(
+            finished_hole_tolerance_mm=0.0, finished_hole_tolerance_source="fab quote"
+        )
+        assert mfg.finished_hole_tolerance_mm == 0.0
+
+    def test_requires_source(self):
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError, match="finished_hole_tolerance_source"):
+            ManufacturingRequirements(finished_hole_tolerance_mm=-0.08)
+
+    def test_positive_rejected(self):
+        """The sign convention is lower/negative; a positive value misunderstands it."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError):
+            ManufacturingRequirements(
+                finished_hole_tolerance_mm=0.08, finished_hole_tolerance_source="misread"
+            )
+
+    def test_unset_by_default(self):
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        assert ManufacturingRequirements().finished_hole_tolerance_mm is None
+        assert ManufacturingRequirements().finished_hole_tolerance_source is None
+
+
+class TestBOMEntryLeadDeclarations:
+    """Lead declarations on bom_entries load from a .kct file (Issue #10299)."""
+
+    def test_lead_and_pad_leads_parse(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec
+
+        spec_file = tmp_path / "project.kct"
+        spec_file.write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: T\n"
+            "bom_entries:\n"
+            "  - ref: Q1-Q8\n"
+            "    part: STW70N60DM2\n"
+            "    lead:\n"
+            "      shape: rectangular\n"
+            "      width_mm: 1.4\n"
+            "      thickness_mm: 0.8\n"
+            "      source: STW70N60DM2 datasheet package drawing, pp. 9-10\n"
+            "    pad_leads:\n"
+            "      '2':\n"
+            "        shape: round\n"
+            "        diameter_mm: 1.0\n"
+            "        source: measured with calipers 2026-11-20\n"
+        )
+        spec = load_spec(spec_file)
+        assert spec.bom_entries is not None
+        entry = spec.bom_entries[0]
+        assert entry.lead is not None
+        assert entry.lead.shape == "rectangular"
+        assert entry.lead.width_mm == pytest.approx(1.4)
+        assert entry.lead.thickness_mm == pytest.approx(0.8)
+        assert entry.lead.source == "STW70N60DM2 datasheet package drawing, pp. 9-10"
+        assert entry.pad_leads is not None
+        assert entry.pad_leads["2"].shape == "round"
+        assert entry.pad_leads["2"].diameter_mm == pytest.approx(1.0)
+
+    def test_lead_declarations_round_trip(self, tmp_path):
+        """save_spec -> load_spec preserves the lead declarations verbatim."""
+        from kicad_tools.spec.parser import load_spec, save_spec
+        from kicad_tools.spec.schema import BOMEntry, LeadProfile, ProjectMetadata, ProjectSpec
+
+        spec = ProjectSpec(
+            project=ProjectMetadata(name="T"),
+            bom_entries=[
+                BOMEntry(
+                    ref="Q1",
+                    part="STW70N60DM2",
+                    lead=LeadProfile(
+                        shape="rectangular", width_mm=1.4, thickness_mm=0.8, source="p. 9"
+                    ),
+                    pad_leads={"3": LeadProfile(shape="round", diameter_mm=1.0, source="calipers")},
+                )
+            ],
+        )
+        path = tmp_path / "project.kct"
+        save_spec(spec, path)
+        loaded = load_spec(path)
+        assert loaded.bom_entries is not None
+        entry = loaded.bom_entries[0]
+        assert entry.lead == spec.bom_entries[0].lead
+        assert entry.pad_leads == spec.bom_entries[0].pad_leads
+
+    def test_tolerance_parses_from_spec(self, tmp_path):
+        from kicad_tools.spec.parser import load_spec
+
+        spec_file = tmp_path / "project.kct"
+        spec_file.write_text(
+            "kct_version: '1.0'\n"
+            "project:\n"
+            "  name: T\n"
+            "requirements:\n"
+            "  manufacturing:\n"
+            "    finished_hole_tolerance_mm: -0.08\n"
+            "    finished_hole_tolerance_source: JLCPCB capabilities\n"
+        )
+        spec = load_spec(spec_file)
+        assert spec.requirements is not None
+        assert spec.requirements.manufacturing is not None
+        assert spec.requirements.manufacturing.finished_hole_tolerance_mm == pytest.approx(-0.08)
+
+
 class TestMountingHoleGroupSpec:
     """Tests for the MountingHoleGroupSpec schema (Issue #3352, P_AS1)."""
 

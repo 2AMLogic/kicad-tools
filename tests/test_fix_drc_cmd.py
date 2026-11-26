@@ -883,7 +883,7 @@ class TestFixDRCCLI:
         out = captured.out
 
         # The detection total is engine-labeled.
-        assert "Found" in out and "repairable violation(s) (kicad-cli engine)" in out
+        assert "Found" in out and "targeted violation(s) (kicad-cli engine)" in out
         # The --verify snapshot total names its (different) engine.
         assert "via pure-Python DRC" in out
 
@@ -1074,6 +1074,29 @@ class TestFixDRCCLI:
         data = json.loads(captured.out)
         # The violation should be repaired (via found despite having no net)
         assert data["clearance"]["repaired"] >= 1
+
+    @pytest.mark.parametrize(("limit", "unplanned"), [("0", 1), ("0.5", 0)])
+    def test_text_dry_run_reports_predicted_outcome(
+        self, pcb_clearance: Path, report_clearance: Path, capsys, limit: str, unplanned: int
+    ):
+        original = pcb_clearance.read_bytes()
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-displacement",
+                limit,
+                "--dry-run",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert "Found 1 targeted violation" in out
+        assert f"Would repair {1 - unplanned}/1" in out
+        assert f"Targeted findings without a proposed repair: {unplanned}" in out
+        assert "All violations repaired!" not in out
+        assert "Repairable (not yet fixed)" not in out
+        assert pcb_clearance.read_bytes() == original
 
     def test_max_displacement_zero_skips_nudges(
         self, pcb_clearance: Path, report_clearance: Path, capsys
@@ -4291,3 +4314,137 @@ def test_bonded_via_is_graded_on_refilled_copper(tmp_path, monkeypatch, capsys):
     )
     assert json.loads(capsys.readouterr().out)["mask_copper"]["repaired"] == 1
     assert filled == [_saved_copper(board, "via-bond")[1]] and filled[0] != start
+
+
+def test_mask_track_repair_refills_zones_before_grading_on_zoned_board(
+    tmp_path, monkeypatch, capsys
+):
+    """A moved track on a zoned board is graded against refilled pours (#9939)."""
+    from types import SimpleNamespace
+
+    from kicad_tools.cli import fix_drc_cmd, runner
+    from tests.test_repair_mask_copper import (
+        _board,
+        _end,
+        _overlap_pass_through,
+        _report,
+        _run,
+        _seg,
+    )
+
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(
+        tmp_path,
+        "\n".join(
+            [
+                _seg("hug", (98.5, 99.5), (98.9, 99.5)),
+                _seg("turn", (98.9, 99.5), (99.3, 99.9)),
+                zone,
+            ]
+        ),
+    )
+    filled: list[tuple[float, float]] = []
+    grade = fix_drc_cmd._verify_mask_actions
+
+    def refill(candidate, *, require_save):
+        assert require_save
+        filled.append(_end(candidate, "hug")[1])
+        return SimpleNamespace(success=True)
+
+    def grade_saved(result, report, args, pcb_path, candidate, *rest, **kwargs):
+        assert filled == [_end(candidate, "hug")[1]]
+        return grade(result, report, args, pcb_path, candidate, *rest, **kwargs)
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(fix_drc_cmd, "_verify_mask_actions", grade_saved)
+    monkeypatch.setattr(
+        "kicad_tools.drc.geometric.run_geometric_drc",
+        lambda *a, **kw: SimpleNamespace(ran=True, error_violations=[], unconnected_count=0),
+    )
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda path: [frozenset({"pad"})])
+    _run(
+        monkeypatch,
+        board,
+        [_report(_overlap_pass_through("hug")), _report(), _report()],
+        extra=("--mfr", "jlcpcb-tier1", "--format", "json"),
+        connectivity=True,
+    )
+    assert json.loads(capsys.readouterr().out)["mask_copper"]["repaired"] == 1
+    assert filled == [(98.5, 99.9)]
+
+
+@pytest.mark.parametrize("pour_net", [1, 2], ids=["edited_net", "unedited_net"])
+@pytest.mark.parametrize("repair", ["bend", "orthogonal_elbow"])
+@pytest.mark.parametrize("split_on_refill", [1, 2])
+def test_mask_repair_rolls_back_when_refill_trades_one_contact_for_another(
+    tmp_path, monkeypatch, capsys, split_on_refill, repair, pour_net
+):
+    from types import SimpleNamespace
+
+    from kicad_tools.cli import runner
+    from kicad_tools.sexp import parse_file
+    from tests.test_repair_mask_copper import (
+        ENTRY,
+        _board2,
+        _end,
+        _finding,
+        _overlap_pass_through,
+        _own_finding,
+        _report,
+        _run,
+        _seg,
+    )
+
+    tracks = [_seg(f"tap-{x}", (x, 110), (x, 111), net=pour_net) for x in (95, 100, 105)]
+    zone = f"""(zone (net {pour_net}) (net_name "N{pour_net}") (layer "F.Cu")
+        (polygon (pts (xy 94 109) (xy 106 109) (xy 106 112) (xy 94 112)))
+        (filled_polygon (layer "F.Cu")
+          (pts (xy 94 109) (xy 101 109) (xy 101 112) (xy 94 112))))"""
+    second = _seg("trk-2", (115, 100.3), (120.7, 100.3))
+    if repair == "orthogonal_elbow":
+        entry = _seg("hug", (98.5, 99.5), (98.9, 99.5)) + _seg("turn", (98.9, 99.5), (99.3, 99.9))
+        finding = _overlap_pass_through("hug")
+    else:
+        entry = ENTRY
+        finding = _finding("trk-a")
+    board = _board2(tmp_path, "\n".join([entry, second, *tracks, zone]), "120 100")
+    other = _own_finding("trk-2", "pad-r2-1", "R2/1")
+    findings = [finding]
+    if split_on_refill == 2:
+        findings.append(other)  # Its persisting finding forces a partial rollback.
+    refill_count = 0
+    original = board.read_bytes()
+
+    def refill(candidate, *, require_save):
+        nonlocal refill_count
+        assert require_save
+        refill_count += 1
+        if repair == "orthogonal_elbow":
+            assert _end(candidate, "hug")[1] == (98.5, 99.9)
+        if refill_count < split_on_refill:
+            return SimpleNamespace(success=True)
+        doc = parse_file(candidate)
+        points = doc.find("zone").find("filled_polygon").find("pts")
+        for xy in points.find_all("xy"):
+            xy.set_atom(0, xy.get_float(0) + 5)
+        candidate.write_text(doc.to_string())
+        return SimpleNamespace(success=True)
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(
+        "kicad_tools.drc.geometric.run_geometric_drc",
+        lambda *a, **kw: SimpleNamespace(
+            ran=True, error_violations=[], unconnected_count=2 if refill_count else 3
+        ),
+    )
+    _run(
+        monkeypatch,
+        board,
+        [_report(*findings), _report(other) if split_on_refill == 2 else _report()],
+        extra=("--format", "json", "--max-passes", "1"),
+    )
+    assert refill_count == split_on_refill
+    outcome = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert outcome["repaired"] == 0
+    assert outcome["unrepaired"][-1]["reason"] == "pad_connection_lost"
+    assert board.read_bytes() == original

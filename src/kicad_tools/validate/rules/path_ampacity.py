@@ -104,8 +104,10 @@ if TYPE_CHECKING:
 
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.router.current_paths import (
+        CurrentPathAudit,
         CurrentPathSpec,
         LayerChange,
+        OperatingCase,
         ParallelGroup,
         PathResolution,
         ThermalDesignCurrent,
@@ -210,6 +212,7 @@ class PathAmpacityRule(DRCRule):
         self,
         specs: Sequence[CurrentPathSpec] | None = None,
         wired_legs: Sequence[WiredLeg] | None = None,
+        cases: Sequence[OperatingCase] | None = None,
     ) -> None:
         """Initialize the rule.
 
@@ -227,7 +230,13 @@ class PathAmpacityRule(DRCRule):
                 hole-to-pad stubs outside the anchors stay at bare copper
                 width (Issue #9654). ``None``/empty keeps every judgement
                 at bare copper width (the pre-#9648 behaviour).
+            cases: Named operating cases (Issue #10361): sets of declared
+                paths that are active **together**, with signed currents.
+                Each case is judged on the combined current of the copper
+                its paths share. ``None``/empty keeps every path judged
+                independently, exactly as before.
         """
+        self.cases: list[OperatingCase] = list(cases) if cases else []
         self.specs: list[CurrentPathSpec] = list(specs) if specs else []
         self.wired_legs: list[WiredLeg] = list(wired_legs) if wired_legs else []
 
@@ -269,7 +278,7 @@ class PathAmpacityRule(DRCRule):
             object found on a declared net. Empty when no path is declared.
         """
         results = DRCResults(rules_checked=1)
-        if not self.specs:
+        if not self.specs and not self.cases:
             return results
 
         from kicad_tools.router.current_paths import (
@@ -401,6 +410,9 @@ class PathAmpacityRule(DRCRule):
                     if fusing is not None:
                         results.add(fusing)
 
+        if self.cases:
+            self._check_cases(pcb, design_rules, audit, wire_areas, results)
+
         for net_name, segments in audit.uncovered.items():
             for segment in segments:
                 results.add(self._uncovered_violation(net_name, segment))
@@ -410,6 +422,342 @@ class PathAmpacityRule(DRCRule):
                 results.add(self._unmodeled_copper_violation(net_name, item))
 
         return results
+
+    # ------------------------------------------------------------------
+    # Operating cases (Issue #10361)
+    # ------------------------------------------------------------------
+
+    def _case_issue(self, case: OperatingCase, message: str, *items: str) -> DRCViolation:
+        """A declaration problem in a case: always visible, never a clean pass."""
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity="error",
+            message=f"Operating case {case.name!r} cannot be evaluated: {message}",
+            location=None,
+            layer="",
+            actual_value=None,
+            required_value=None,
+            items=(case.name, *items),
+        )
+
+    def _check_cases(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+        audit: CurrentPathAudit,
+        wire_areas: Sequence[tuple[WiredLeg, float]],
+        results: DRCResults,
+    ) -> None:
+        """Judge each operating case on the combined current of shared copper.
+
+        A case is evaluated only when every reference in it is sound (known,
+        unambiguous, listed once, non-zero and resolved): a partial total is
+        never offered as a verdict. Copper whose combined current does not
+        exceed what the independent per-path checks already judged it at is
+        not re-reported.
+        """
+        from .path_operating_cases import Cover, Member, build_covers, evaluate_case
+
+        by_name: dict[str, list[PathResolution]] = {}
+        for resolution in audit.resolutions:
+            by_name.setdefault(resolution.spec.name, []).append(resolution)
+
+        authored_ids = frozenset(id(seg) for seg in pcb.segments)
+        covers_by_path: dict[str, list[Cover]] = {}
+        independent: dict[tuple, list[tuple[float, float, float]]] = {}
+        for resolution in audit.resolutions:
+            covers = build_covers(resolution, authored_ids)
+            covers_by_path.setdefault(resolution.spec.name, covers)
+            current = resolution.spec.thermal_design_current().current_a
+            for cover in covers:
+                independent.setdefault(cover.key, []).append((cover.lo, cover.hi, current))
+
+        for case in self.cases:
+            members: list[Member] = []
+            sound = True
+            seen: set[str] = set()
+            if not case.contributions:
+                results.add(self._case_issue(case, "it lists no active path"))
+                continue
+            for contribution in case.contributions:
+                name = contribution.path
+                if name in seen:
+                    results.add(
+                        self._case_issue(case, f"path {name!r} is listed more than once", name)
+                    )
+                    sound = False
+                    continue
+                seen.add(name)
+                matches = by_name.get(name, [])
+                if not matches:
+                    results.add(self._case_issue(case, f"unknown path {name!r}", name))
+                    sound = False
+                elif len(matches) > 1:
+                    results.add(
+                        self._case_issue(
+                            case,
+                            f"path name {name!r} is ambiguous ({len(matches)} declarations share it)",
+                            name,
+                        )
+                    )
+                    sound = False
+                elif not math.isfinite(contribution.current_a) or contribution.current_a == 0:
+                    results.add(
+                        self._case_issue(
+                            case,
+                            f"path {name!r} has a zero or non-finite current; omit a path that is inactive",
+                            name,
+                        )
+                    )
+                    sound = False
+                elif not matches[0].ok:
+                    results.add(
+                        self._case_issue(
+                            case,
+                            f"path {name!r} is {matches[0].status}, so the combined current "
+                            "on the copper it shares is not established",
+                            name,
+                        )
+                    )
+                    sound = False
+                else:
+                    members.append(Member(matches[0].spec, contribution.current_a))
+            if not sound:
+                continue
+
+            currents = {m.spec.name: m.current_a for m in members}
+            reported_pulses: set[tuple] = set()
+            for element in evaluate_case(members, covers_by_path, independent, case.pulse_overlap):
+                self._judge_case_element(
+                    case, element, currents, design_rules, wire_areas, results, reported_pulses
+                )
+
+    @staticmethod
+    def _contributors(element, currents: dict[str, float]) -> str:
+        return ", ".join(f"{name} {currents[name]:+.4g}A" for name in element.paths)
+
+    def _element_location(self, element) -> tuple[tuple[float, float] | None, str]:
+        ref = element.cover.ref
+        kind = element.cover.kind
+        if kind == "track":
+            return self._span_midpoint(ref, element.x0, element.x1), ref.layer
+        if kind == "joint":
+            return ref.pinch, ref.span.layer
+        if kind == "transfer":
+            return ref.position, ref.from_layer
+        first = ref.branches[0][0]
+        return self._segment_midpoint(first), first.layer
+
+    def _judge_case_element(
+        self,
+        case: OperatingCase,
+        element,
+        currents: dict[str, float],
+        design_rules: DesignRules,
+        wire_areas: Sequence[tuple[WiredLeg, float]],
+        results: DRCResults,
+        reported_pulses: set[tuple],
+    ) -> None:
+        spec = element.covers[0].spec
+        if element.hi.undetermined:
+            token = (element.paths, element.hi.undetermined, element.hi.missing)
+            if token not in reported_pulses:
+                reported_pulses.add(token)
+                location, layer = self._element_location(element)
+                quantities = " and ".join(element.hi.undetermined)
+                results.add(
+                    DRCViolation(
+                        rule_id=self.rule_id,
+                        severity="warning",
+                        message=(
+                            f"Operating case {case.name!r}: combined {quantities} current on "
+                            f"copper shared by {', '.join(element.paths)} is NOT determined by "
+                            f"the supplied data; missing {element.hi.missing}. Only the steady "
+                            f"sum of {element.hi.current_a:.4g}A was checked there"
+                        ),
+                        location=location,
+                        layer=layer,
+                        actual_value=None,
+                        required_value=None,
+                        items=(case.name, *element.paths, spec.net_name),
+                    )
+                )
+
+        eps = 1e-9
+        hi_a, lo_a = element.hi.current_a, element.lo.current_a
+        if hi_a <= element.independent_a + eps:
+            return
+        fail_hi = self._case_failures(element, hi_a, design_rules, wire_areas)
+        if not fail_hi:
+            return
+        fail_keys: set[tuple] = set()
+        if not element.direction_known:
+            fail_lo = (
+                self._case_failures(element, lo_a, design_rules, wire_areas)
+                if lo_a > element.independent_a + eps
+                else []
+            )
+            fail_keys = {f["key"] for f in fail_lo}
+        for failure in fail_hi:
+            sure = element.direction_known or failure["key"] in fail_keys
+            results.add(
+                self._case_violation(
+                    case, element, failure, currents, sure=sure, lo_a=lo_a, hi_a=hi_a
+                )
+            )
+
+    def _case_failures(
+        self,
+        element,
+        current_a: float,
+        design_rules: DesignRules,
+        wire_areas: Sequence[tuple[WiredLeg, float]],
+    ) -> list[dict]:
+        """Where ``element`` cannot carry ``current_a``, as plain records."""
+        ref = element.cover.ref
+        kind = element.cover.kind
+        spec = element.covers[0].spec
+        failures: list[dict] = []
+        if kind == "transfer":
+            capacity = ref.current_capacity_a()
+            if capacity < current_a:
+                failures.append(
+                    {
+                        "key": ("transfer",),
+                        "kind": kind,
+                        "capacity_a": capacity,
+                        "location": ref.position,
+                    }
+                )
+            return failures
+        if kind == "group":
+            capacity = 0.0
+            for layer, width in ref.layer_widths().items():
+                external = self._is_external_layer(layer)
+                required = self._required_width_mm(current_a, design_rules, external=external)
+                capacity += width / required if required > 0 else float("inf")
+            if capacity < 1.0:
+                failures.append(
+                    {
+                        "key": ("group",),
+                        "kind": kind,
+                        "share": capacity,
+                        "location": self._segment_midpoint(ref.branches[0][0]),
+                    }
+                )
+            return failures
+
+        segment = ref if kind == "track" else ref.span
+        pinch = ref.pinch if kind == "joint" else None
+        layer = getattr(segment, "layer", "F.Cu")
+        external = self._is_external_layer(layer)
+        required = self._required_width_mm(current_a, design_rules, external=external)
+        for span in self._segment_credit_spans(
+            spec,
+            segment,
+            layer,
+            external=external,
+            design_rules=design_rules,
+            wire_areas=wire_areas,
+            pinch=pinch,
+        ):
+            if kind == "track":
+                t0, t1 = max(span.t0, element.x0), min(span.t1, element.x1)
+                if t1 - t0 <= 1e-6:
+                    continue
+            else:
+                t0, t1 = span.t0, span.t1
+            effective = getattr(segment, "width", 0.0) + span.credit_mm
+            if effective < required:
+                failures.append(
+                    {
+                        "key": ("width", round(t0, 4), round(t1, 4)),
+                        "kind": kind,
+                        "width": getattr(segment, "width", 0.0),
+                        "effective": effective,
+                        "required": required,
+                        "leg": span.leg,
+                        "layer": layer,
+                        "external": external,
+                        "oz": self._copper_weight_oz(design_rules, external=external),
+                        "location": self._span_midpoint(segment, t0, t1),
+                    }
+                )
+        return failures
+
+    def _case_violation(
+        self,
+        case: OperatingCase,
+        element,
+        failure: dict,
+        currents: dict[str, float],
+        *,
+        sure: bool,
+        lo_a: float,
+        hi_a: float,
+    ) -> DRCViolation:
+        spec = element.covers[0].spec
+        contributors = self._contributors(element, currents)
+        items = (case.name, *element.paths, spec.net_name)
+        if element.direction_known:
+            current_clause = f"combined {hi_a:.4g}A"
+        elif sure:
+            current_clause = f"combined at least {lo_a:.4g}A"
+        else:
+            current_clause = (
+                f"combined {lo_a:.4g}A to {hi_a:.4g}A (traversal direction not established)"
+            )
+        head = f"Operating case {case.name!r} ({contributors})"
+        kind = failure["kind"]
+        if kind == "transfer":
+            ref = element.cover.ref
+            message = (
+                f"{head}: layer change {ref.from_layer} -> {ref.to_layer} through "
+                f"{ref.count} via(s) has capacity {failure['capacity_a']:.2f}A, below "
+                f"{current_clause}"
+            )
+            layer = ref.from_layer
+            actual: float | None = failure["capacity_a"]
+            required_value: float | None = hi_a
+            severity = (
+                "error" if any(c.spec.reinforcement_eligible for c in element.covers) else "warning"
+            )
+        elif kind == "group":
+            ref = element.cover.ref
+            message = (
+                f"{head}: {ref.describe()} too narrow for {current_clause}: {ref.shape} width "
+                f"{ref.width_mm:.3f}mm provides {failure['share']:.0%} of the IPC-2221 requirement"
+            )
+            layer = ref.branches[0][0].layer
+            actual, required_value = failure["share"], 1.0
+            severity = "error"
+        else:
+            layer = failure["layer"]
+            layer_class = "external" if failure["external"] else "internal"
+            width_clause = f"width {failure['width']:.3f}mm"
+            if failure["leg"] is not None:
+                width_clause = (
+                    f"width {failure['width']:.3f}mm + {failure['leg'].gauge} AWG wire "
+                    f"= {failure['effective']:.3f}mm effective"
+                )
+            message = (
+                f"{head}: trace on {layer} too narrow for {current_clause}: {width_clause}, "
+                f"requires {failure['required']:.3f}mm (IPC-2221, {failure['oz']}oz {layer_class})"
+            )
+            actual, required_value = failure["effective"], failure["required"]
+            severity = "error"
+        if not sure and severity == "error":
+            severity = "warning"
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity=severity,
+            message=message,
+            location=failure["location"],
+            layer=layer,
+            actual_value=actual,
+            required_value=required_value,
+            items=items,
+        )
 
     def _parallel_group_violation(
         self,

@@ -1006,6 +1006,20 @@ VerdictStatus = Literal["match", "mismatch", "unverified"]
 
 
 @dataclass(frozen=True)
+class LookupProvenance:
+    """What each local source did for one assignment (issue #10386).
+
+    ``hit`` / ``miss``: the source was searched.  ``missing`` / ``unreadable``:
+    the offline catalog file was absent or could not be queried, so nothing
+    follows about the part.  ``not_consulted``: it was not needed (a cache
+    record stating a package) or no reader was given.
+    """
+
+    cache: str = "not_consulted"  # hit | miss | unreadable | not_consulted
+    catalog: str = "not_consulted"  # hit | miss | missing | unreadable | not_consulted
+
+
+@dataclass(frozen=True)
 class LcscVerdict:
     """Outcome of validating one LCSC assignment.
 
@@ -1026,6 +1040,9 @@ class LcscVerdict:
     #: The resolved record the verdict was computed from, so callers (the
     #: ``bom_lcsc_stock`` check, issue #8121) need no second lookup.
     part: Part | None = None
+    #: Where the lookups reached, so ``unverified`` can be attributed to the
+    #: sources instead of read as a fact about the part.
+    lookups: LookupProvenance = LookupProvenance()
 
 
 @dataclass(frozen=True)
@@ -1219,30 +1236,40 @@ def verify_lcsc_assignment(
     no ``package``.  Never writes to the cache and never touches the
     network.  Besides the value and chip-package checks of
     :func:`check_lcsc_against_cache`, runs :func:`find_ic_package_mismatch`.
+    ``lookups`` records what each source did, so a part no source resolved
+    can be attributed to the sources (issue #10386).
     """
     if not lcsc_part:
         return LcscVerdict("unverified", reason=UNVERIFIED_NOT_FOUND)
 
     candidates: list[tuple[Part, str]] = []
+    cache_state = "not_consulted"
     if cache is not None:
+        cache_state = "miss"
         try:
             cached = cache.get(lcsc_part, ignore_expiry=True)
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Parts cache lookup failed for %s: %s", lcsc_part, e)
             cached = None
+            cache_state = "unreadable"
         if cached is not None:
             candidates.append((cached, "parts cache"))
+            cache_state = "hit"
+    catalog_state = "not_consulted"
     if catalog is not None and (not candidates or not candidates[0][0].package):
+        listed: Part | None = None
         try:
-            listed = catalog.lookup(lcsc_part) if catalog.available else None
+            found = catalog.lookup_with_status(lcsc_part)
+            listed, catalog_state = found.part, found.status
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Offline catalog lookup failed for %s: %s", lcsc_part, e)
-            listed = None
+            catalog_state = "unreadable"
         if listed is not None:
             candidates.append((listed, "offline catalog"))
+    lookups = LookupProvenance(cache_state, catalog_state)
 
     if not candidates:
-        return LcscVerdict("unverified", reason=UNVERIFIED_NOT_FOUND)
+        return LcscVerdict("unverified", reason=UNVERIFIED_NOT_FOUND, lookups=lookups)
 
     # Stock comes from the most trustworthy record: a live-verified one, else
     # the first that states a provenance, else the first (issue #8121).
@@ -1255,7 +1282,7 @@ def verify_lcsc_assignment(
             part, requested_value, reference, footprint, pad_numbers, check_ic=True
         )
         if mismatch is not None:
-            return LcscVerdict("mismatch", source, mismatch, part=stock_part)
+            return LcscVerdict("mismatch", source, mismatch, part=stock_part, lookups=lookups)
     # A header/socket footprint whose part states no readable pin count was
     # never pin-checked: report it, never a bare ``match`` (issue #7446).
     problems = [
@@ -1263,5 +1290,11 @@ def verify_lcsc_assignment(
         for part, _ in candidates
     ]
     if all(problems):
-        return LcscVerdict("unverified", candidates[-1][1], reason=problems[-1], part=stock_part)
-    return LcscVerdict("match", candidates[-1][1], part=stock_part)
+        return LcscVerdict(
+            "unverified",
+            candidates[-1][1],
+            reason=problems[-1],
+            part=stock_part,
+            lookups=lookups,
+        )
+    return LcscVerdict("match", candidates[-1][1], part=stock_part, lookups=lookups)
