@@ -279,25 +279,21 @@ class DRCReport:
             return parse_text_report(content, str(path))
 
 
-def _bracketed_tokens(text: str) -> list[str]:
-    """Return top-level ``[...]`` tokens, keeping balanced inner brackets.
+_NET_TOKEN_RE = re.compile(r"\[(.+?)\](?=[\s,;:)]|$)")
+_LEGACY_TOKEN_RE = re.compile(r"\[([^\]]+)\]")
 
-    Net names may contain brackets (``BUS[0]``), which KiCad prints verbatim as
-    ``Via [BUS[0]] on F.Cu``; a ``[^\\]]+`` pattern would truncate to ``BUS[0``.
+
+def _bracketed_tokens(text: str) -> list[str]:
+    """Return the ``[...]`` net tokens of a KiCad item description.
+
+    KiCad prints net names verbatim, so a name may hold brackets: balanced
+    (``Via [BUS[0]] on F.Cu``) or literally unmatched (``[BUS[0]``, ``[BUS]0]``).
+    A token therefore ends at the first ``]`` that is followed by whitespace,
+    punctuation or the end of the text. Text with no such closing bracket falls
+    back to the plain ``[^]]+`` match.
     """
-    tokens: list[str] = []
-    depth = 0
-    start = 0
-    for i, ch in enumerate(text):
-        if ch == "[":
-            if depth == 0:
-                start = i + 1
-            depth += 1
-        elif ch == "]" and depth:
-            depth -= 1
-            if depth == 0 and i > start:
-                tokens.append(text[start:i])
-    return tokens
+    tokens = _NET_TOKEN_RE.findall(text)
+    return tokens if tokens else _LEGACY_TOKEN_RE.findall(text)
 
 
 def _is_json(content: str) -> bool:

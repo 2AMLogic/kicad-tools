@@ -221,3 +221,66 @@ def test_bracketed_net_name_survives_report_parsing():
     assert _bracketed_tokens("Via [BUS[0]] on F.Cu - B.Cu") == ["BUS[0]"]
     assert _bracketed_tokens("Track [Net-(C11-2)] on F.Cu") == ["Net-(C11-2)"]
     assert _bracketed_tokens("Via [<no net>] on F.Cu") == ["<no net>"]
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Via [BUS[0] on F.Cu - B.Cu", ["BUS[0"]),
+        ("Via [BUS]0] on F.Cu - B.Cu", ["BUS]0"]),
+        ("Via [BUS[0]] on F.Cu - B.Cu", ["BUS[0]"]),
+    ],
+)
+def test_literal_unmatched_brackets_survive_parsing(text, expected):
+    from kicad_tools.drc.report import _bracketed_tokens
+
+    assert _bracketed_tokens(text) == expected
+
+
+def test_isolated_stub_does_not_explain_wire_ends(native_review):
+    from kicad_tools.drc.reinforcement import _has_wire_side_copper
+    from kicad_tools.router.current_paths import load_current_path_specs
+    from kicad_tools.validate.rules.reinforcement_incomplete import ReinforcementIncompleteRule
+
+    board, _, _ = native_review
+    pcb = PCB.load(board)
+    specs = list(load_current_path_specs(board.parent / "current_paths.json"))
+    legs = ReinforcementIncompleteRule(specs=specs).fully_wired_legs(pcb)
+    leg = next(leg for leg in legs if leg.net == "PGND")
+    assert _has_wire_side_copper(pcb, leg)
+    # Narrow the run and park an unconnected same-net stub under the start anchor.
+    for seg in pcb.segments:
+        if seg.net_number == pcb.get_net_by_name("PGND").number:
+            seg.width = 0.2
+    anchor = leg.anchors[0]
+    anchor.pos = (anchor.pos[0], anchor.pos[1] + 1.5)
+    assert not _has_wire_side_copper(pcb, leg)
+    x, y = anchor.pos
+    pcb.add_trace((x - 1, y), (x + 1, y), width=0.2, layer="B.Cu", net="PGND")
+    assert not _has_wire_side_copper(pcb, leg)
+
+
+def test_reversed_adopted_mask_strip_keeps_explanations(native_review, capsys):
+    board, _, _ = native_review
+    path = sidecar_path(board)
+    data = json.loads(path.read_text())
+    (data["wires"][0],) = adopt_wire_records(PCB.load(board), "FUSED_LINE").records
+    path.write_text(json.dumps(data))
+    text = board.read_text()
+    from kicad_tools.sexp import parse_file
+
+    tree = parse_file(board)
+    for line in tree.find_all("gr_line"):
+        if str(line.find("layer").get_value(0)) == "B.Mask":
+            s, e = line.find("start"), line.find("end")
+            sv = [s.get_value(0), s.get_value(1)]
+            ev = [e.get_value(0), e.get_value(1)]
+            s.set_value(0, ev[0])
+            s.set_value(1, ev[1])
+            e.set_value(0, sv[0])
+            e.set_value(1, sv[1])
+    board.write_text(tree.to_string())
+    assert text != board.read_text()
+    assert drc_cmd.main([str(board), "--format", "json", "--allow-incomplete"]) == 0
+    findings = json.loads(capsys.readouterr().out)["violations"]
+    assert sum("wire_end" in v for v in findings) == 4

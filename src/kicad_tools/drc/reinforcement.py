@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from kicad_tools.core.geometry import point_to_segment_distance
+from kicad_tools.core.geometry import point_to_segment_distance, segment_to_segment_distance
 from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.pcb.reinforcement_sidecar import adopt_wire_records, load_wires_if_present
 from kicad_tools.router.current_paths import (
@@ -17,6 +17,7 @@ from kicad_tools.router.current_paths import (
 )
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.reinforcement_incomplete import (
+    END_WINDOW_SLACK_MM,
     ReinforcementIncompleteRule,
     WiredLeg,
 )
@@ -32,18 +33,47 @@ def _is_through_hole(via: Any) -> bool:
 
 def _has_wire_side_copper(pcb: PCB, leg: WiredLeg) -> bool:
     # Completeness uses the widest segment to locate candidate holes. Check
-    # actual copper contact using the local track width at each accepted hole.
+    # actual copper contact using the local track width at each accepted hole,
+    # and that the touched copper is one connected run reaching both leg ends:
+    # an isolated stub under an anchor is not the wire's copper.
     net = pcb.get_net_by_name(leg.net)
-    return net is not None and all(
-        (a.via is None or _is_through_hole(a.via))
-        and any(
-            s.net_number == net.number
-            and s.layer == leg.layer
-            and point_to_segment_distance(*a.pos, *s.start, *s.end) <= a.radius + s.width / 2
-            for s in pcb.segments
-        )
-        for a in leg.anchors
+    if net is None or not all(a.via is None or _is_through_hole(a.via) for a in leg.anchors):
+        return False
+    segs = [s for s in pcb.segments if s.net_number == net.number and s.layer == leg.layer]
+    parent = list(range(len(segs)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, s in enumerate(segs):
+        for j in range(i):
+            t = segs[j]
+            reach = (s.width + t.width) / 2 + 1e-6
+            if segment_to_segment_distance(*s.start, *s.end, *t.start, *t.end) <= reach:
+                parent[find(i)] = find(j)
+
+    def touching(pos: tuple[float, float], slack: float) -> set[int]:
+        return {
+            find(i)
+            for i, s in enumerate(segs)
+            if point_to_segment_distance(*pos, *s.start, *s.end) <= slack + s.width / 2
+        }
+
+    def contact(a: Any) -> set[int]:
+        return {
+            find(i)
+            for i, s in enumerate(segs)
+            if point_to_segment_distance(*a.pos, *s.start, *s.end) <= a.radius + s.width / 2
+        }
+
+    # Components covering both leg ends (hole-to-pad stubs get the end slack).
+    runs = touching(leg.points[0], END_WINDOW_SLACK_MM) & touching(
+        leg.points[-1], END_WINDOW_SLACK_MM
     )
+    return bool(leg.anchors) and all(contact(a) & runs for a in leg.anchors)
 
 
 def _wire_candidates(
@@ -87,13 +117,20 @@ def _wire_candidates(
             continue
         leg_ends = [wire.get("leg_start"), wire.get("leg_end")]
         if wire.get("status") == "adopted":
-            # Adopted leg ends describe the mask strip, not the track ends.
+            # Adopted leg ends describe the mask strip, not the track ends. The
+            # strip's drawing direction is arbitrary, so match either order of
+            # the paired anchors and strip endpoints.
             if adopted is None:
                 adopted = adopt_wire_records(pcb, leg.net).records
             if not any(
                 w["layer"] == leg.layer
-                and w["anchors"] == wire["anchors"]
-                and [w["leg_start"], w["leg_end"]] == leg_ends
+                and (
+                    (w["anchors"] == wire["anchors"] and [w["leg_start"], w["leg_end"]] == leg_ends)
+                    or (
+                        w["anchors"] == wire["anchors"][::-1]
+                        and [w["leg_end"], w["leg_start"]] == leg_ends
+                    )
+                )
                 for w in adopted
             ):
                 continue
