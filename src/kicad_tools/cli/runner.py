@@ -1263,13 +1263,19 @@ def _fill_and_remediate_zones(
         def _carve(path: Path) -> None:
             carve_on_disk[0] = bool(_apply_foreign_pad_clearance(path))
 
+        saved_fill_stale = [False]
         settled_report = _remediate_starved_thermal(
             result.output_path,
             kicad_cli,
             settle=None if native_clearance else _carve,
             skip_first_refill=already_freshly_refilled,
+            saved_fill_stale=saved_fill_stale,
             **remediation_kwargs,
         )
+        if saved_fill_stale[0]:
+            # Issue #10261: remediation edited a pad and its refill did not
+            # complete, so the copper on disk predates the board's settings.
+            result.refill_saved = False
         if carve_on_disk[0]:
             verify_affordable = True
             if time_left is not None:
@@ -1330,6 +1336,7 @@ def _remediate_starved_thermal(
     time_left: Callable[[], float | None] | None = None,
     refill_cost_estimate: float = 0.0,
     revisit_solid: bool = False,
+    saved_fill_stale: list[bool] | None = None,
 ) -> dict | None:
     """Remediate the pads KiCad's DRC flags (Issue #3729).
 
@@ -1380,6 +1387,13 @@ def _remediate_starved_thermal(
             left as the last completed step wrote it.
         refill_cost_estimate: Seconds of one KiCad refill of this board
             (the caller's measured fill).  Measured passes replace it.
+        saved_fill_stale: Issue #10261.  One-element out-parameter.  Set to
+            ``True`` whenever a pad setting was written to ``pcb_path`` and
+            cleared only by a later refill that KiCad completed for those
+            settings.  A ``True`` on return means the saved copper predates
+            the board's current pad settings (the next refill failed, was
+            unaffordable, or the pass budget ended first), so the caller must
+            not report the fill as freshly saved.
 
     Returns:
         Issue #8053: the read-only DRC report of the settled geometry when
@@ -1408,6 +1422,10 @@ def _remediate_starved_thermal(
 
     pass_costs: list[float] = []
 
+    def _set_stale(value: bool) -> None:
+        if saved_fill_stale:
+            saved_fill_stale[0] = value
+
     def _affordable(kicad_runs: int) -> bool:
         if time_left is None:
             return True
@@ -1423,6 +1441,7 @@ def _remediate_starved_thermal(
             revisit_doc = parse_file(pcb_path)
             if revisit_solid_pad_overrides(revisit_doc):
                 save_pcb(revisit_doc, pcb_path)
+                _set_stale(True)
             skip_first_refill = False  # overrides changed: pass 0 must refill
         for pass_num in range(max_passes):
             if not _affordable(2):
@@ -1436,6 +1455,7 @@ def _remediate_starved_thermal(
             if not (skip_first_refill and pass_num == 0):
                 if _run_drc(refill=True) is None:
                     return None
+                _set_stale(False)
             _settle()
             report = _run_drc(refill=False)
             if report is None:
@@ -1452,11 +1472,13 @@ def _remediate_starved_thermal(
                 # is already on disk and we cannot improve it; stop here.
                 return report
             save_pcb(doc, pcb_path)
+            _set_stale(True)  # Issue #10261: the saved fill predates this edit
             pass_costs.append(_monotonic() - pass_started)
             # Next pass refills (reverting the carve), re-applies it, re-checks.
         # Pass budget exhausted with overrides still pending: do a final
         # refill + carve so the shipped copper reflects both.
         if _affordable(1) and _run_drc(refill=True) is not None:
+            _set_stale(False)
             _settle()
         return None
     except ModuleNotFoundError:

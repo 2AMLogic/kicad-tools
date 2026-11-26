@@ -535,3 +535,51 @@ def test_isolated_surface_island_is_not_its_own_plane_regardless_of_zone_order(
     for ordering in (zones, zones[::-1]):
         board.write_text(head + "".join(marker + z for z in ordering) + tail)
         assert "C1.1" not in bonded_pads(stitch(board))
+
+
+def _starved_board(tmp_path: Path) -> Path:
+    """C1.1 forms one thermal spoke where the pour's left edge sits at x=110.2."""
+    board = make_board(tmp_path, connect="connect_pads")
+    text = board.read_text()
+    text = text.replace("(xy 105 105)", "(xy 110.2 105)").replace("(xy 105 115)", "(xy 110.2 115)")
+    board.write_text(text)
+    return board
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("refuse_refill", [False, True], ids=["recovered", "refused"])
+def test_fill_after_thermal_edit_is_saved_only_if_its_refill_succeeded(
+    tmp_path, native_cli, monkeypatch, refuse_refill
+):
+    """A refill refused right after remediation edits a pad leaves stale copper (#10261)."""
+    from kicad_tools.cli import runner
+    from kicad_tools.zones.fill_clearance import starved_thermal_pad_uuids
+
+    board = _starved_board(tmp_path)
+    native_report = runner._kicad_drc_report
+    calls = []  # (refill, edit_pending, refused)
+    state = {"edit_pending": False}
+
+    def drc(path, cli, *, refill):
+        refused = refill and state["edit_pending"] and refuse_refill
+        report = None if refused else native_report(path, cli, refill=refill)
+        calls.append((refill, state["edit_pending"], refused))
+        if refill:
+            state["edit_pending"] = state["edit_pending"] and refused
+        elif report is not None and starved_thermal_pad_uuids(report):
+            state["edit_pending"] = True  # remediation writes the pad setting next
+        return report
+
+    monkeypatch.setattr(runner, "_kicad_drc_report", drc)
+    result = runner.run_fill_zones(board, kicad_cli=Path(native_cli))
+    assert result.success
+    assert any(pending for _, pending, _ in calls), "the pad edit never happened"
+    assert any(refused for *_, refused in calls) == refuse_refill
+    assert result.refill_saved is not refuse_refill
+    if not refuse_refill:
+        saved = {z.layer: z.filled_polygons for z in PCB.load(board).zones}
+        probe = board.with_name("probe.kicad_pcb")
+        shutil.copy2(board, probe)
+        copy_project_sidecars(board, probe)
+        refill(probe, native_cli)
+        assert saved == {z.layer: z.filled_polygons for z in PCB.load(probe).zones}
