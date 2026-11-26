@@ -36,13 +36,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from kicad_tools.schema.physical_identity import physical_pad_position
+
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.placement.decoupling import SchematicCapAssociation
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.pcb import PCB, Footprint
 
 BYPASS_DISTANCE_RULE_ID = "bypass_distance"
 BYPASS_UNASSOCIATED_RULE_ID = "bypass_distance_unassociated"
@@ -93,6 +95,14 @@ class BypassPairing:
         return pin.pad if pin else None
 
 
+def _copper_land_centers(footprint: Footprint, number: str) -> list[tuple[float, float]]:
+    return [
+        physical_pad_position(footprint, pad)
+        for pad in footprint.pads
+        if pad.number == number and any(layer.endswith(".Cu") for layer in pad.layers)
+    ]
+
+
 def resolve_pairings(
     pcb: PCB, associations: Sequence[SchematicCapAssociation]
 ) -> list[BypassPairing]:
@@ -100,6 +110,7 @@ def resolve_pairings(
 
     Distances are between pad centres, in the board frame, from the cap's
     supply pad (``association.cap.supply_pad``) to the associated pin's pad.
+    For a repeated pad number, use the nearest pair of physical copper lands.
     """
     rows: list[BypassPairing] = []
     for assoc in associations:
@@ -113,21 +124,24 @@ def resolve_pairings(
             missing = cap_ref if cap_fp is None else assoc.pin.reference
             rows.append(BypassPairing(assoc, "unplaced", detail=f"{missing} is not on the PCB"))
             continue
-        cap_pos = pcb.get_pad_position(cap_ref, assoc.cap.supply_pad)
-        pin_pos = pcb.get_pad_position(assoc.pin.reference, assoc.pin.pad)
-        if cap_pos is None or pin_pos is None:
+        cap_lands = _copper_land_centers(cap_fp, assoc.cap.supply_pad)
+        pin_lands = _copper_land_centers(pin_fp, assoc.pin.pad)
+        if not cap_lands or not pin_lands:
             missing_pad = (
                 f"{cap_ref} pad {assoc.cap.supply_pad}"
-                if cap_pos is None
+                if not cap_lands
                 else f"{assoc.pin.reference} pad {assoc.pin.pad}"
             )
             rows.append(BypassPairing(assoc, "unplaced", detail=f"{missing_pad} is not on the PCB"))
             continue
+        distance, cap_pos = min(
+            (math.dist(cap, pin), cap) for cap in cap_lands for pin in pin_lands
+        )
         rows.append(
             BypassPairing(
                 assoc,
                 "measured",
-                distance_mm=math.dist(cap_pos, pin_pos),
+                distance_mm=distance,
                 cap_position=cap_pos,
                 opposite_side=cap_fp.layer != pin_fp.layer,
             )
