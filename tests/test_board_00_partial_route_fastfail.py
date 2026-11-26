@@ -206,6 +206,7 @@ class TestBoard00RoutePcbNetCount:
         monkeypatch.setattr(optimizer_mod, "TraceOptimizer", _NoopOptimizer)
         # Downstream file-mutating helpers are irrelevant to the count logic.
         monkeypatch.setattr(module, "_rewrite_led_anode_route", lambda *a, **k: None)
+        monkeypatch.setattr(module, "_set_fiducial_pour_clearance", lambda *a, **k: None)
         # Issue #8759: route_pcb imports these inside the function; the fake
         # router writes no footprints for them to place against.
         monkeypatch.setattr(

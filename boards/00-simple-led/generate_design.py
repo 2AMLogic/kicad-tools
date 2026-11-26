@@ -557,6 +557,19 @@ def create_led_pcb(output_dir: Path) -> Path:
     return pcb_path
 
 
+# Board 00's reviewed LED_ANODE net class (Issue #10448).  The router's name
+# classifier files ``LED_ANODE`` under ``Digital`` and the routed project
+# declares ``Digital`` at the jlcpcb track floor.  The sidecar, the copper and
+# the routed ``.kicad_pro`` must all name the same class at the same width, or
+# ``kct check`` reports ``netclass_sidecar_mismatch``.  The clearance is the
+# router class's own: a sidecar entry that omits it re-declares the class at
+# the ``NetClassRouting`` default.
+LED_ANODE_CLASS = "Digital"
+LED_ANODE_CLASS_PRIORITY = 4
+LED_ANODE_CLASS_CLEARANCE_MM = 0.15
+LED_ANODE_TRACE_WIDTH_MM = 0.127
+
+
 def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
     """Replace LED_ANODE's routed segments with a short-free route (issue #3737).
 
@@ -571,7 +584,8 @@ def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
         D1's GND pin (which sits west of the anode).
 
     Every existing ``(segment ... (net N))`` for the LED_ANODE net is dropped
-    and replaced by this chain (0.2 mm wide, ``F.Cu``).  Rewritten in place.
+    and replaced by this chain (``LED_ANODE_TRACE_WIDTH_MM`` wide, ``F.Cu``).
+    Rewritten in place.
     """
     import math
 
@@ -660,7 +674,7 @@ def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
     # ever did not (e.g. a future footprint change), fall back to a due-north
     # descent (a 90-degree leg directly above the anode), which is also on
     # the legal angle set -- never re-introduce an off-45 nudge.
-    GND_CLEARANCE_MM = 0.5  # 0.1 mm trace half-width + ample pad margin
+    GND_CLEARANCE_MM = 0.5  # trace half-width + ample pad margin
     if _clearance_to_gnd(knee, d1_anode) < GND_CLEARANCE_MM:
         knee = (d1_anode[0], r1_anode[1])
 
@@ -684,7 +698,7 @@ def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
                 "segment",
                 SExp.list("start", round(sx, 3), round(sy, 3)),
                 SExp.list("end", round(ex, 3), round(ey, 3)),
-                SExp.list("width", 0.2),
+                SExp.list("width", LED_ANODE_TRACE_WIDTH_MM),
                 SExp.list("layer", "F.Cu"),
                 SExp.list("uuid", segment_uuids()),
                 SExp.list("net", net_num),
@@ -693,6 +707,56 @@ def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
 
     pcb_path.write_text(doc.to_string() + "\n")
     print(f"   LED_ANODE: deterministic route, {len(points) - 1} segment(s)")
+
+
+def _set_fiducial_pour_clearance(pcb_path: Path) -> None:
+    """Hold the pour off each fiducial's mask opening (Issue #10448).
+
+    ``kct pcb add-fiducials`` inserts the stock ``Fiducial_1mm_Mask2mm`` pad:
+    1 mm copper, a 0.5 mm solder-mask margin and a 0.6 mm local clearance, so
+    a pour around it stops 0.1 mm from the mask opening -- inside the JLCPCB
+    mask-to-copper warning band ``kct check`` applies.  Each fiducial pad's
+    local clearance is set so the pour void reaches the copper-free radius
+    ``kct pcb add-fiducials`` itself keeps around a fiducial
+    (``DEFAULT_KEEPOUT_MM``).  Rewritten in place; a pad already at that
+    clearance is left alone.  Raises when the board carries no fiducial.
+    """
+    from kicad_tools.cli.pcb_add_fiducials import DEFAULT_KEEPOUT_MM
+    from kicad_tools.sexp import SExp, parse_file
+
+    text = pcb_path.read_text()
+    doc = parse_file(pcb_path)
+    clearances: set[float] = set()
+    changed = False
+    for fp in doc.find_all("footprint"):
+        if not (fp.get_string(0) or "").rsplit(":", 1)[-1].startswith("Fiducial"):
+            continue
+        for pad in fp.find_all("pad"):
+            size = pad.find("size")
+            if size is None:
+                continue
+            radius = max(size.get_float(0) or 0.0, size.get_float(1) or 0.0) / 2
+            clearance = round(max(DEFAULT_KEEPOUT_MM - radius, 0.0), 3)
+            clearances.add(clearance)
+            node = SExp.list("clearance", clearance)
+            current = pad.find("clearance")
+            if current is not None:
+                if (current.get_float(0) or 0.0) != clearance:
+                    pad.children[pad.children.index(current)] = node
+                    changed = True
+            else:
+                uuid = pad.find("uuid")
+                at = pad.children.index(uuid) if uuid is not None else len(pad.children)
+                pad.children.insert(at, node)
+                changed = True
+    if not clearances:
+        raise ValueError("no fiducial footprint found to set the pour clearance on")
+    if changed:
+        pcb_path.write_text(doc.to_string() + ("\n" if text.endswith("\n") else ""))
+    print(
+        f"   Fiducial pour clearance: {len(clearances)} distinct value(s), "
+        f"void radius {DEFAULT_KEEPOUT_MM:g} mm"
+    )
 
 
 # Declared supply currents from project.kct (A), mapped onto nets (Issue #7206).
@@ -706,6 +770,10 @@ def declare_ampacity_targets(output_dir: Path) -> None:
     project.kct declares these currents; kct never infers which net carries
     them, so the net-class-map sidecar must map them or ``kct check`` reports
     ``ampacity: unknown``.
+
+    Each declared net's entry carries the reviewed class and width above
+    (Issue #10448).  ``kct check`` reads the sidecar as the router's view of
+    the net, so an entry an earlier run left behind is replaced, never kept.
     """
     import json
 
@@ -717,8 +785,13 @@ def declare_ampacity_targets(output_dir: Path) -> None:
     sidecar = output_dir / "net_class_map.json"
     data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
     for net, amps in AMPACITY_TARGETS_A.items():
-        entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
-        entry["target_ampacity"] = amps
+        data[net] = {
+            "name": LED_ANODE_CLASS,
+            "priority": LED_ANODE_CLASS_PRIORITY,
+            "trace_width": LED_ANODE_TRACE_WIDTH_MM,
+            "clearance": LED_ANODE_CLASS_CLEARANCE_MM,
+            "target_ampacity": amps,
+        }
     sidecar.write_text(json.dumps(data, indent=2))
     print(f"   Declared target_ampacity on {', '.join(AMPACITY_TARGETS_A)}: {sidecar}")
 
@@ -839,6 +912,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     if run_add_fiducials(output_path, sides="populated") != 0:
         raise RuntimeError("pcb add-fiducials failed")
+    _set_fiducial_pour_clearance(output_path)
     if run_add_board_info(output_path, auto=True) != 0:
         raise RuntimeError("pcb add-board-info failed")
 

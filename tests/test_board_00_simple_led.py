@@ -36,10 +36,13 @@ picks this up; PR-time CI excludes it.
 
 from __future__ import annotations
 
+import json
 import re
 import runpy
+import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -329,6 +332,18 @@ class TestBoard00SimpleLed:
             f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
         )
 
+    def test_led_anode_copper_and_sidecar_follow_the_reviewed_class(self, routed_pcb: Path) -> None:
+        """Issue #10448: the recipe's copper and sidecar both say Digital at 0.127 mm."""
+        assert _led_anode_segments(routed_pcb) == [(0.127, "F.Cu")] * 2
+        sidecar = routed_pcb.parent / "net_class_map.json"
+        assert json.loads(sidecar.read_text()) == json.loads(SIDECAR.read_text())
+
+    def test_fiducials_hold_the_pour_off_their_mask_openings(self, routed_pcb: Path) -> None:
+        """Issue #10448: the stock fiducial clearance is widened before the pours fill."""
+        fiducials = _fiducial_pads(routed_pcb)
+        assert len(fiducials) == 3
+        assert {fid["clearance"] - fid["margin"] for fid in fiducials} == {1.0}
+
 
 class TestBoard00OfflineBomDeterminism:
     """Issue #7741 -- the LCSC column must not depend on network or host.
@@ -427,3 +442,397 @@ class TestBoard00OfflineBomDeterminism:
     def test_generator_passes_spec_to_export(self) -> None:
         text = GENERATOR.read_text()
         assert '"--spec"' in text and '"project.kct"' in text
+
+
+# ---------------------------------------------------------------------------
+# Issue #10448: LED_ANODE class/width agreement and the fiducial pour clearance
+# ---------------------------------------------------------------------------
+
+OUTPUT_DIR = BOARD_DIR / "output"
+ROUTED_PCB = OUTPUT_DIR / "simple_led_routed.kicad_pcb"
+ROUTED_PROJECT = OUTPUT_DIR / "simple_led_routed.kicad_pro"
+SIDECAR = OUTPUT_DIR / "net_class_map.json"
+#: The sidecar entry committed before #10448 (Issue #7206): a class and a
+#: width that matched neither the routed project nor the copper.
+STALE_SIDECAR_ENTRY = {
+    "name": "Power",
+    "priority": 1,
+    "trace_width": 0.25,
+    "target_ampacity": 0.01,
+}
+#: Files beside the routed PCB that ``kct check`` reads.
+ROUTED_SIDECARS = (
+    "simple_led_routed.kicad_pro",
+    "simple_led_routed.kicad_dru",
+    "simple_led.kicad_sch",
+    "simple_led.kicad_pro",
+    "net_class_map.json",
+    "lvs.json",
+)
+
+
+def _generator() -> dict:
+    """The recipe's module globals, without running its ``main``."""
+    return runpy.run_path(str(GENERATOR))
+
+
+def _led_anode_segments(pcb_path: Path) -> list[tuple[float, str]]:
+    """``(width, layer)`` of every LED_ANODE segment on ``pcb_path``."""
+    from kicad_tools.schema.pcb import PCB
+
+    return [
+        (segment.width, segment.layer)
+        for segment in PCB.load(str(pcb_path)).segments
+        if segment.net_number == LED_ANODE_NET_NUM
+    ]
+
+
+def _fiducial_pads(pcb_path: Path) -> list[dict]:
+    """Each fiducial pad's centre, radius, mask margin and clearance on ``pcb_path``."""
+    from kicad_tools.sexp import parse_file
+
+    pads: list[dict] = []
+    for fp in parse_file(pcb_path).find_all("footprint"):
+        if not (fp.get_string(0) or "").rsplit(":", 1)[-1].startswith("Fiducial"):
+            continue
+        at = fp.find("at")
+        for pad in fp.find_all("pad"):
+            size = pad.find("size")
+            pads.append(
+                {
+                    "centre": (at.get_float(0), at.get_float(1)),
+                    "radius": max(size.get_float(0), size.get_float(1)) / 2,
+                    "margin": pad.find("solder_mask_margin").get_float(0),
+                    "clearance": pad.find("clearance").get_float(0),
+                }
+            )
+    return pads
+
+
+def _stage_routed(board: Path) -> Path:
+    """Copy the committed routed board, its sidecars and its bundle into ``board``."""
+    board.mkdir(parents=True)
+    for name in (ROUTED_PCB.name, *ROUTED_SIDECARS):
+        shutil.copy(OUTPUT_DIR / name, board / name)
+    shutil.copytree(OUTPUT_DIR / "manufacturing", board / "manufacturing")
+    return board
+
+
+def _agreement_results(board: Path):
+    """``check_netclass_agreement`` over the routed board staged in ``board``."""
+    from kicad_tools.router.rules import net_class_map_from_dict
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.netclass_agreement import check_netclass_agreement
+
+    pcb_path = board / ROUTED_PCB.name
+    sidecar = json.loads((board / SIDECAR.name).read_text())
+    return check_netclass_agreement(
+        pcb_path, PCB.load(str(pcb_path)), net_class_map_from_dict(sidecar)
+    )
+
+
+def _pinned_check(board: Path) -> dict:
+    """``kct check --mfr jlcpcb --format json`` over the routed board staged in ``board``."""
+    report = board / "check.json"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "check",
+            str(board / ROUTED_PCB.name),
+            "--mfr",
+            "jlcpcb",
+            "--format",
+            "json",
+            "--output",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    assert report.is_file(), proc.stderr[-2000:]
+    return json.loads(report.read_text())
+
+
+def _mask_findings(report: dict) -> list[dict]:
+    """The ``mask_to_copper`` findings of warning severity or worse."""
+    return [
+        v
+        for v in report["violations"]
+        if v["rule_id"] == "mask_to_copper" and v["severity"] in ("warning", "error")
+    ]
+
+
+class TestBoard00LedAnodeNetclass:
+    """Issue #10448: sidecar, routed project and copper agree on LED_ANODE.
+
+    The recipe declared LED_ANODE ``Power`` at 0.25 mm in the sidecar while the
+    routed project resolved it to ``Digital`` at 0.127 mm and the copper was
+    0.200 mm wide, which ``kct check`` reports as ``netclass_sidecar_mismatch``.
+    """
+
+    def test_reviewed_class_is_the_router_class(self) -> None:
+        """The recipe's constants describe the class the router files LED_ANODE under."""
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        routing = classify_and_apply_rules({LED_ANODE_NET_NUM: LED_ANODE_NET_NAME})[
+            LED_ANODE_NET_NAME
+        ]
+        gen = _generator()
+        assert routing.name == gen["LED_ANODE_CLASS"]
+        assert routing.priority == gen["LED_ANODE_CLASS_PRIORITY"]
+        assert routing.clearance == gen["LED_ANODE_CLASS_CLEARANCE_MM"]
+
+    def test_ampacity_target_is_the_spec_current(self) -> None:
+        """The sidecar keeps declaring the 10 mA ``project.kct`` asks for."""
+        gen = _generator()
+        assert gen["AMPACITY_TARGETS_A"] == {LED_ANODE_NET_NAME: 0.01}
+        assert "led_current: 10mA" in (BOARD_DIR / "project.kct").read_text()
+
+    def test_sidecar_identical_from_a_clean_and_a_stale_directory(self, tmp_path: Path) -> None:
+        """A stale entry is replaced: clean generation and regeneration agree byte for byte."""
+        gen = _generator()
+        clean, stale = tmp_path / "clean", tmp_path / "stale"
+        clean.mkdir()
+        stale.mkdir()
+        (stale / SIDECAR.name).write_text(
+            json.dumps({LED_ANODE_NET_NAME: STALE_SIDECAR_ENTRY}, indent=2)
+        )
+        gen["declare_ampacity_targets"](clean)
+        gen["declare_ampacity_targets"](stale)
+        assert (clean / SIDECAR.name).read_bytes() == SIDECAR.read_bytes()
+        assert (stale / SIDECAR.name).read_bytes() == SIDECAR.read_bytes()
+
+    def test_committed_sidecar_project_and_copper_agree(self) -> None:
+        """The committed sidecar, routed project and LED_ANODE copper say the same thing."""
+        from kicad_tools.core.project_clearance import authored_netclass_widths
+        from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+        entry = json.loads(SIDECAR.read_text())[LED_ANODE_NET_NAME]
+        assert entry == {
+            "name": "Digital",
+            "priority": 4,
+            "trace_width": 0.127,
+            "clearance": 0.15,
+            "target_ampacity": 0.01,
+        }
+        settings = json.loads(ROUTED_PROJECT.read_text())["net_settings"]
+        assert settings["netclass_assignments"][LED_ANODE_NET_NAME] == "Digital"
+        digital = next(cls for cls in settings["classes"] if cls["name"] == "Digital")
+        assert digital["track_width"] == entry["trace_width"]
+        assert digital["clearance"] == entry["clearance"]
+        resolved = authored_netclass_widths(
+            load_project(ROUTED_PCB.resolve()), [LED_ANODE_NET_NAME]
+        )
+        assert (resolved[LED_ANODE_NET_NAME].source_class, resolved[LED_ANODE_NET_NAME].width) == (
+            "Digital",
+            0.127,
+        )
+        assert _led_anode_segments(ROUTED_PCB) == [(0.127, "F.Cu")] * 2
+
+    def test_agreement_rule_is_silent_on_the_committed_board(self, tmp_path: Path) -> None:
+        """``check_netclass_agreement`` reports nothing for the committed files."""
+        assert _agreement_results(_stage_routed(tmp_path / "committed")).violations == []
+
+    def test_agreement_rule_reports_a_conflicting_declaration(self, tmp_path: Path) -> None:
+        """A sidecar that disagrees with the project is reported for LED_ANODE only."""
+        from kicad_tools.validate.rules.netclass_agreement import RULE_SIDECAR_MISMATCH
+
+        board = _stage_routed(tmp_path / "conflict")
+        (board / SIDECAR.name).write_text(
+            json.dumps({LED_ANODE_NET_NAME: STALE_SIDECAR_ENTRY}, indent=2)
+        )
+        violations = _agreement_results(board).violations
+        assert [v.rule_id for v in violations] == [RULE_SIDECAR_MISMATCH]
+        assert violations[0].nets == (LED_ANODE_NET_NAME,)
+        assert "sidecar class 'Power' but project resolves 'Digital'" in violations[0].message
+
+
+class TestBoard00FiducialPourClearance:
+    """Issue #10448: the pour keeps off each fiducial's mask opening.
+
+    The stock ``Fiducial_1mm_Mask2mm`` pad carries a 0.5 mm solder-mask margin
+    and a 0.6 mm local clearance, so a pour around it stopped 0.1005 mm from the
+    mask opening: a ``mask_to_copper`` warning on pinned KiCad 10.0.6.
+    """
+
+    def test_committed_web_clears_the_jlcpcb_warning_band(self) -> None:
+        """Each pad clearance leaves more than the 0.15 mm band beyond its opening."""
+        from kicad_tools.validate.mask_copper import _JLCPCB_MASK_COPPER_POLICY
+
+        fiducials = _fiducial_pads(ROUTED_PCB)
+        assert len(fiducials) == 3
+        band = _JLCPCB_MASK_COPPER_POLICY.warning_clearance_mm
+        assert all(fid["clearance"] - fid["margin"] > band for fid in fiducials)
+
+    def test_saved_pour_holds_that_distance(self) -> None:
+        """The saved VCC fill is as far from each opening as the pad clearance says."""
+        from shapely.geometry import Point, Polygon
+
+        from kicad_tools.sexp import parse_file
+
+        pours: list[Polygon] = []
+        for zone in parse_file(ROUTED_PCB).find_all("zone"):
+            if zone.find("net").get_string(0) != "VCC":
+                continue
+            for filled in zone.find_all("filled_polygon"):
+                pours.append(
+                    Polygon(
+                        [
+                            (xy.get_float(0), xy.get_float(1))
+                            for xy in filled.find("pts").find_all("xy")
+                        ]
+                    )
+                )
+        assert pours
+        for fid in _fiducial_pads(ROUTED_PCB):
+            opening = Point(fid["centre"]).buffer(fid["radius"] + fid["margin"], 256)
+            distance = min(pour.distance(opening) for pour in pours)
+            assert distance == pytest.approx(fid["clearance"] - fid["margin"], abs=0.01)
+
+    def test_recipe_sets_the_clearance_and_is_idempotent(self, tmp_path: Path) -> None:
+        """The committed pads already carry the recipe's clearance; a changed pad is restored."""
+        gen = _generator()
+        staged = tmp_path / ROUTED_PCB.name
+        staged.write_bytes(ROUTED_PCB.read_bytes())
+        gen["_set_fiducial_pour_clearance"](staged)
+        assert staged.read_bytes() == ROUTED_PCB.read_bytes()
+
+        text = ROUTED_PCB.read_text()
+        narrowed = text.replace("(clearance 1.5)", "(clearance 0.6)", 1)
+        assert narrowed != text
+        staged.write_text(narrowed)
+        gen["_set_fiducial_pour_clearance"](staged)
+        assert staged.read_bytes() == ROUTED_PCB.read_bytes()
+
+    def test_recipe_refuses_a_board_without_a_fiducial(self, tmp_path: Path) -> None:
+        """No fiducial to widen is an error, never a silent pass."""
+        gen = _generator()
+        staged = tmp_path / ROUTED_PCB.name
+        staged.write_text(
+            ROUTED_PCB.read_text().replace("Fiducial:Fiducial_1mm_Mask2mm", "Test:Pad")
+        )
+        with pytest.raises(ValueError, match="no fiducial footprint"):
+            gen["_set_fiducial_pour_clearance"](staged)
+
+
+@pytest.fixture(scope="module")
+def genuine_violation_stage(tmp_path_factory: pytest.TempPathFactory) -> Callable[[str], Path]:
+    """Stage disposable copies of the committed package once its pinned check is clean.
+
+    Skips where the pristine board's mask-to-copper assessment cannot run.
+    """
+    root = tmp_path_factory.mktemp("board00_genuine")
+    baseline = _pinned_check(_stage_routed(root / "pristine"))
+    if baseline["coverage"]["mask_to_copper"]["state"] != "checked":
+        pytest.skip("mask_to_copper assessment needs a native KiCad toolchain")
+    summary = baseline["summary"]
+    assert (summary["errors"], summary["warnings"]) == (0, 0)
+
+    def stage(name: str) -> Path:
+        return _stage_routed(root / name)
+
+    return stage
+
+
+@pytest.mark.slow
+class TestBoard00PinnedCheckStillFlagsGenuineViolations:
+    """Issue #10448: the corrected board's clean result does not hide genuine violations.
+
+    Each case stages a disposable copy of the committed package and runs the
+    pinned ``kct check --mfr jlcpcb``. The mask-to-copper assessment needs a
+    native KiCad toolchain, so the class skips where the pristine board's
+    assessment cannot run.
+    """
+
+    def test_conflicting_declaration_is_reported(
+        self, genuine_violation_stage: Callable[[str], Path]
+    ) -> None:
+        """The pre-#10448 sidecar entry is the ``netclass_sidecar_mismatch`` it used to be."""
+        board = genuine_violation_stage("conflict")
+        (board / SIDECAR.name).write_text(
+            json.dumps({LED_ANODE_NET_NAME: STALE_SIDECAR_ENTRY}, indent=2)
+        )
+        warnings = [v for v in _pinned_check(board)["violations"] if v["severity"] == "warning"]
+        assert [v["rule_id"] for v in warnings] == ["netclass_sidecar_mismatch"]
+        assert warnings[0]["message"] == (
+            "Net 'LED_ANODE': sidecar class 'Power' but project resolves 'Digital'; "
+            "sidecar trace_width 0.250mm but project class 'Digital' track_width 0.127mm"
+        )
+
+    def test_different_net_copper_beside_an_opening_is_reported(
+        self, genuine_violation_stage: Callable[[str], Path]
+    ) -> None:
+        """A GND track stopped 0.05 mm short of J1/1's (VCC) opening is a different-net violation."""
+        board = genuine_violation_stage("different_net")
+        pcb = board / ROUTED_PCB.name
+        # Anchored on J1/2 (GND): KiCad reassigns a floating stub to the pad it
+        # touches, which would make the probe same-net.
+        y_end = 87.08 + 0.05 + 0.127 / 2
+        segment = (
+            f"\t(segment\n\t\t(start 141.0 88.77) (end 141.0 {y_end:.6f}) (width 0.127) "
+            f'(layer "F.Cu")\n\t\t(uuid "00000000-0000-4000-8000-0000000000a4") (net 3)\n\t)\n'
+        )
+        text = pcb.read_text()
+        assert text.rstrip().endswith(")")
+        pcb.write_text(text.rstrip()[:-1] + segment + ")\n")
+        findings = _mask_findings(_pinned_check(board))
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "error"
+        assert "Mask-to-copper disjoint: violation" in findings[0]["message"]
+        assert (
+            "opening pad:J1/1; exposed copper segment (net GND); different-net"
+            in (findings[0]["message"])
+        )
+        assert findings[0]["actual_value"] == pytest.approx(0.05, abs=0.001)
+
+    def test_narrow_fiducial_web_is_reported(
+        self, genuine_violation_stage: Callable[[str], Path]
+    ) -> None:
+        """A fiducial whose pour web drops to 0.05 mm is the ``mask_to_copper`` finding again."""
+        from kicad_tools.cli.runner import find_kicad_cli
+        from kicad_tools.sexp import SExp, parse_file
+
+        board = genuine_violation_stage("narrow_web")
+        pcb = board / ROUTED_PCB.name
+        doc = parse_file(pcb)
+        narrowed = 0
+        for fp in doc.find_all("footprint"):
+            if not (fp.get_string(0) or "").rsplit(":", 1)[-1].startswith("Fiducial"):
+                continue
+            for pad in fp.find_all("pad"):
+                pad.children[pad.children.index(pad.find("clearance"))] = SExp.list(
+                    "clearance", 0.55
+                )
+                narrowed += 1
+        assert narrowed == 3
+        pcb.write_text(doc.to_string())
+        kicad_cli = find_kicad_cli()
+        assert kicad_cli is not None
+        refill = subprocess.run(
+            [
+                kicad_cli,
+                "pcb",
+                "drc",
+                str(pcb),
+                "--refill-zones",
+                "--save-board",
+                "--format",
+                "json",
+                "--output",
+                str(board / "refill.json"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        assert (board / "refill.json").is_file(), refill.stderr[-2000:]
+        findings = _mask_findings(_pinned_check(board))
+        assert len(findings) == 3
+        assert {finding["severity"] for finding in findings} == {"error"}
+        assert all("Mask-to-copper disjoint: violation" in f["message"] for f in findings)
+        assert all(f["actual_value"] == pytest.approx(0.0505, abs=0.001) for f in findings)
