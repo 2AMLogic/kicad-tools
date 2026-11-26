@@ -1234,3 +1234,86 @@ def test_fix_drc_json_reports_the_shelf_rewrite(tmp_path, monkeypatch, capsys):
     assert action["shelf"]["far_node"] == list(FAR_END)
     assert action["shelf"]["removed_segments"] == 3
     assert len(action["shelf"]["added_segments"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        (_seg("tap", (92, 107.5914), (92, 107.4), width=0.12), "protected_tap"),
+        (
+            '(via (at 92 107.5914) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu") (net 1) (uuid "v"))',
+            "protected_via",
+        ),
+        (
+            "\n".join(_seg(str(y), (91.6, y), (92.25, y), width=0.12) for y in (107.52, 107.68)),
+            "protected_tap",
+        ),
+        # Foreign tracks isolate the newly exposed slit from same-net contact protection.
+        (
+            "\n".join(
+                _seg(str(y), (91.6, y), (92.25, y), net=2, width=0.12) for y in (107.52, 107.68)
+            ),
+            "gap_not_cleared",
+        ),
+    ],
+)
+def test_extended_shelf_preserves_contacts_and_covered_gaps(tmp_path, extra, reason):
+    board = _board(
+        tmp_path, SHELF.replace("90.8086", "92.8086").replace("91.4 ", "93.4 ") + "\n" + extra
+    )
+    finding = _finding([SHELF_REF.replace("90.809", "92.809"), TRUNK_REF], required=0.127)
+    repairer = CopperGapRepairer(board)
+    before = repairer.doc.to_string()
+    result = repairer.repair_gaps([finding])
+    assert result.skipped(reason) == 1, result.unrepaired
+    assert repairer.doc.to_string() == before
+
+
+@pytest.mark.parametrize(
+    ("owner", "reason"), [("generated", "generator_owned"), ("group", "group_member")]
+)
+def test_shelf_rewrite_preserves_member_ids(tmp_path, owner, reason):
+    board = _board(
+        tmp_path, SHELF + f'\n({owner} "tuning" (uuid "g") (members "sh-b1" "sh-b2" "sh-b3"))'
+    )
+    repairer = CopperGapRepairer(board)
+    before = repairer.doc.to_string()
+    assert repairer.repair_gaps([_shelf_finding()]).skipped(reason) == 1
+    assert repairer.doc.to_string() == before
+
+
+def test_saved_legacy_shelf_undo(tmp_path):
+    board = _board(tmp_path, SHELF.replace("(uuid", "(tstamp"))
+    repairer = CopperGapRepairer(board)
+    original = [n.to_string() for n in repairer.doc.find_children("segment")]
+    (action,) = repairer.repair_gaps([_shelf_finding()]).actions
+    repairer.save(board)
+    fresh = CopperGapRepairer(board)
+    assert fresh.undo_move(action)
+    assert [n.to_string() for n in fresh.doc.find_children("segment")] == original
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("end", 94), ("start", 91.5), ("width", 0.2), ("layer", "B.Cu"), ("net", 2)],
+)
+def test_shelf_undo_preserves_later_edits(tmp_path, field, value):
+    board = _board(tmp_path, SHELF)
+    repairer = CopperGapRepairer(board)
+    (action,) = repairer.repair_gaps([_shelf_finding()]).actions
+    repairer.save(board)
+    fresh = CopperGapRepairer(board)
+    replacement = fresh._segment_by_uuid(action.shelf.added[-1][0])
+    replacement.find_child(field).set_value(0, value)
+    edited = fresh.doc.to_string()
+    assert not fresh.undo_move(action)
+    assert fresh.doc.to_string() == edited
+
+
+def test_unrelated_preexisting_slit_in_shelf_window_is_allowed(tmp_path):
+    extra = "\n".join(_seg(str(y), (91.15, y), (91.45, y), width=0.1) for y in (107.53, 107.69))
+    board = _board(tmp_path, SHELF + "\n" + extra)
+    before = _same_net_gap_errors(_real_report(board))
+    assert any(gap.actual_value_mm == pytest.approx(0.06) for gap in before)
+    result = CopperGapRepairer(board).repair_gaps([_shelf_finding()])
+    assert result.repaired == 1, result.unrepaired

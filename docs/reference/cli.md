@@ -927,8 +927,10 @@ segments; the chain is at most eight segments. A pad, via, tap, layer change
 or reinforcement endpoint on an interior node protects the chain
 (`protected_pad`, `protected_via`, `protected_tap`, `protected_layer_change`,
 `protected_reinforcement`), a locked segment is never rewritten
-(`locked_segment`), and the rewrite is kept only when the new copper clears all
-foreign copper (`would_violate_clearance`) and leaves no slit below the
+(`locked_segment`). Group members and generator-owned tracks retain their IDs
+(`group_member`, `generator_owned`). A shortcut must keep contact with same-net
+copper anywhere along the removed chain. The new copper must clear all
+foreign copper (`would_violate_clearance`) and the rewrite must introduce or expose no slit below the
 finding's required value (`gap_not_cleared`) under the physical-gap rule's own
 copper model; `--dry-run` lists the shelf and both end nodes. The shortcut
 changes the branch's routed length, so length-constrained nets need the same

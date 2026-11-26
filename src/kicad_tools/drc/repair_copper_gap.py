@@ -747,7 +747,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
         physical-gap rule's own copper model (``physical_gap._collect`` --
         pads, vias, tracks, arcs, filled zones): every neighbouring foreign
         source must keep the profile's clearance, and no slit below the
-        finding's ``required_value`` may involve the new copper (which also
+        finding's ``required_value`` may be introduced or exposed (which also
         proves the original slit is gone).  Continuity holds by
         construction: both end nodes keep their exact coordinates and every
         replacement leg shares a node with the next.  Returns
@@ -778,6 +778,10 @@ class CopperGapRepairer(DrillClearanceRepairer):
             return "no_simplification", first_uuid
         if any(self._locks.is_locked(t.node) for t in chain):
             return "locked_segment", first_uuid
+        if any(self._locks.is_generator_owned(t.node) for t in chain):
+            return "generator_owned", first_uuid
+        if any(self._locks.is_group_member(t.node) for t in chain):
+            return "group_member", first_uuid
         protected = self._protected_node_reason(pts, chain, layer, net, track_list)
         if protected is not None:
             return protected, first_uuid
@@ -1207,21 +1211,15 @@ class CopperGapRepairer(DrillClearanceRepairer):
     ) -> str | None:
         """Why this replacement must not be applied, else ``None``.
 
-        Judged on the physical-gap rule's own model against the layer's copper
-        minus the chain being replaced: ``would_violate_clearance`` when any
-        foreign-net copper (tracks, vias, pads, filled zones) is closer than the
-        profile's minimum clearance, ``gap_not_cleared`` when any slit below
-        ``required`` still involves the new copper (the original slit
-        included), ``gap_model_incomplete`` when the rule cannot model the
-        board.  A slit *reopened* between two remaining sources by removing
-        the chain is outside this local check, as in the staircase oracle.
+        Compare the layer's local slits before and after replacing the chain.
+        Check clearance and continued contact with neighbouring copper.
         """
         from shapely import union_all  # type: ignore[import-untyped]
         from shapely.geometry import LineString
 
         from kicad_tools.schema.pcb import Segment
         from kicad_tools.validate.copper_refs import segment_ref
-        from kicad_tools.validate.rules.physical_gap import CopperSource, _layer_slit_candidates
+        from kicad_tools.validate.rules.physical_gap import CopperSource, iter_source_gaps
 
         model = self._gap_model()
         if model is None:
@@ -1251,18 +1249,32 @@ class CopperGapRepairer(DrillClearanceRepairer):
         candidate_geom = union_all([c.geometry for c in candidate_sources])
         foreign_required = design_rules.min_clearance_mm if design_rules is not None else required
         reach = max(required, foreign_required) + _TOLERANCE_MM
-        minx, miny, maxx, maxy = candidate_geom.bounds
+        removed_sources = [s for s in sources if s.layer == layer and s.identity in removed]
+        if len(removed_sources) != len(chain):
+            return "gap_model_incomplete"
+        original_geom = union_all([s.geometry for s in removed_sources])
+        minx, miny, maxx, maxy = original_geom.union(candidate_geom).bounds
 
-        windowed: list[CopperSource] = []
+        neighbours: list[CopperSource] = []
         for source in sources:
             if source.layer != layer or source.geometry.is_empty or source.identity in removed:
                 continue
             sx0, sy0, sx1, sy1 = source.geometry.bounds
             if sx1 < minx - reach or sx0 > maxx + reach or sy1 < miny - reach or sy0 > maxy + reach:
                 continue
-            windowed.append(source)
+            neighbours.append(source)
 
-        for source in windowed:
+        for source in neighbours:
+            if (
+                source.net == net
+                and original_geom.intersects(source.geometry)
+                and not candidate_geom.intersects(source.geometry)
+            ):
+                if source.kind == "pad":
+                    return "protected_pad"
+                if source.identity.startswith("Via@"):
+                    return "protected_via"
+                return "protected_tap"
             # Same-net and unassigned copper are exempt, as in the pairwise
             # clearance rule (and ``_dragged_track_reason``).
             if not source.net or source.net == net:
@@ -1270,12 +1282,18 @@ class CopperGapRepairer(DrillClearanceRepairer):
             if candidate_geom.distance(source.geometry) < foreign_required - 1e-6:
                 return "would_violate_clearance"
 
-        first_candidate = len(windowed)
-        windowed.extend(candidate_sources)
-        candidate_indices = set(range(first_candidate, len(windowed)))
-        for _distance, owners, _a, _b in _layer_slit_candidates(windowed, required):
-            if any(k in candidate_indices for side in owners for k in side):
-                return "gap_not_cleared"
+        # A previously covered slit can have two surviving owners. Compare
+        # witnesses as well as owners so an old slit elsewhere cannot mask it.
+        def witnesses(local: list[CopperSource]) -> set[tuple]:
+            return {
+                (gap.ids, tuple(sorted((round(p.x, 9), round(p.y, 9)) for p in (gap.a, gap.b))))
+                for gap in iter_source_gaps(local, required)
+            }
+
+        after = witnesses(neighbours + candidate_sources)
+        if after and after - witnesses(neighbours + removed_sources):
+            return "gap_not_cleared"
+
         return None
 
     def _undo_shelf(self, action: CopperGapAction) -> bool:
@@ -1290,13 +1308,19 @@ class CopperGapRepairer(DrillClearanceRepairer):
             return False
         positions: list[int] = []
         for new_id, a, b, width in shelf.added:
-            node = (
-                self._segment_by_uuid(new_id)
-                if new_id
-                else self._segment_by_geometry(shelf.layer, a, b, width)
-            )
-            index = self._child_index(node) if node is not None else None
-            if index is None:
+            matches = [
+                seg
+                for seg in self.doc.find_children("segment")
+                if self._segment_uuid(seg) == new_id
+                and self._net_name(seg) == action.net_name
+                and self._segment_layer(seg) == shelf.layer
+                and abs(_num(seg.find("width")) - width) < 1e-9
+                and {_xy(seg.find("start")), _xy(seg.find("end"))} == {a, b}
+            ]
+            if len(matches) != 1:
+                return False
+            index = self._child_index(matches[0])
+            if index is None or index in positions:
                 return False
             positions.append(index)
         children = self.doc.children
@@ -1309,21 +1333,6 @@ class CopperGapRepairer(DrillClearanceRepairer):
         self._gap_model_cache = None
         self.modified = True
         return True
-
-    def _segment_by_geometry(self, layer: str, a: Point2, b: Point2, width: float) -> SExp | None:
-        for seg_node in self.doc.find_all("segment"):
-            if self._segment_layer(seg_node) != layer:
-                continue
-            if abs(_num(seg_node.find("width")) - width) > 1e-6:
-                continue
-            start, end = _xy(seg_node.find("start")), _xy(seg_node.find("end"))
-            if start is None or end is None:
-                continue
-            if (math.dist(start, a) < 1e-6 and math.dist(end, b) < 1e-6) or (
-                math.dist(start, b) < 1e-6 and math.dist(end, a) < 1e-6
-            ):
-                return seg_node
-        return None
 
     # ------------------------------------------------------------------
     # Apply / undo / save
@@ -1438,7 +1447,7 @@ class CopperGapRepairer(DrillClearanceRepairer):
 
     @staticmethod
     def _segment_uuid(seg_node: SExp) -> str:
-        uuid_node = seg_node.find("uuid")
+        uuid_node = seg_node.find_child("uuid") or seg_node.find_child("tstamp")
         atom = uuid_node.get_first_atom() if uuid_node else None
         return _bare(atom) if atom is not None else ""
 
