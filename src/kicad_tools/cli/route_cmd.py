@@ -5640,9 +5640,7 @@ def _write_netclasses_to_project(
     ``ClearanceResolver`` actually enforces) and ``via_diameter`` from the
     router's :class:`~kicad_tools.router.rules.NetClassRouting` -- and assigns
     each routed net by exact name in ``net_settings.netclass_assignments``
-    (never ``netclass_patterns``, where KiCad's regex/wildcard evaluation
-    causes ``.``, ``+``, ``(``, ``)``, ``*`` and ``?`` in net names to match
-    unrelated nets or fail pattern validation; see #10122).  GND and power
+    and in literal project patterns so the schematic sees those classes too.  GND and power
     rails land in their own dedicated classes because the classifier gives
     them non-``Default`` classes ("Ground", "Power", ...).
 
@@ -5721,11 +5719,24 @@ def _write_netclasses_to_project(
 
     from kicad_tools.manufacturers.project_generator import (
         _authored_netclass_members,
+        add_router_patterns,
         board_net_names,
         is_kct_owned_project,
+        remove_router_patterns,
         router_netclass_provenance,
         stamp_kct_project,
+        validate_router_netclass_containers,
     )
+
+    try:
+        validate_router_netclass_containers(project)
+    except ValueError as e:
+        if not quiet:
+            print(
+                f"  Warning: net classes not assigned in {project_path.name}: "
+                f"authored netclasses cannot be evaluated safely ({e})"
+            )
+        return
 
     # Re-stamp decision taken BEFORE mutating: only a project whose stamp
     # currently validates stays kct-owned across this write.  Stamping a
@@ -5754,6 +5765,8 @@ def _write_netclasses_to_project(
     raw_assignments = (
         settings_raw.get("netclass_assignments") if isinstance(settings_raw, dict) else None
     )
+    r_classes, r_nets = router_netclass_provenance(project)
+    remove_router_patterns(project, set(recorded).union(r_nets))
     assignments_mutated = False
     if isinstance(raw_assignments, dict):
         for net, recorded_cls in recorded.items():
@@ -5766,7 +5779,6 @@ def _write_netclasses_to_project(
         # kct's own #6390 assignments (_write_drc_constraint_sidecars) are not
         # authored intent either, provided they were not hand-edited to a
         # different class.
-        r_classes, r_nets = router_netclass_provenance(project)
         r_owned_classes = set(r_classes)
         for net in r_nets:
             if net in recorded or net not in raw_assignments:
@@ -5889,6 +5901,7 @@ def _write_netclasses_to_project(
         settings_raw["netclass_assignments"] = dict(sorted(raw_assignments.items()))
 
     if assigned:
+        add_router_patterns(project, assigned, board_nets if board_nets is not None else names)
         project.setdefault("meta", {})[KCT_NETCLASS_ASSIGNMENTS_META_KEY] = dict(
             sorted(assigned.items())
         )

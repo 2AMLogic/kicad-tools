@@ -818,6 +818,10 @@ def _layer_matches(clause: str | None, layer: str | None) -> bool | None:
 
 
 def _pattern_matches(pattern: str, net_name: str) -> bool:
+    from kicad_tools.core.netclass_diagnostics import matches_encoded_netclass
+
+    if matches_encoded_netclass(pattern, net_name):
+        return True
     if fnmatch.fnmatchcase(net_name, pattern):
         return True
     try:
