@@ -5,6 +5,8 @@ import uuid
 
 import pytest
 
+from kicad_tools.drc.repair_silkscreen import SilkscreenRepairer
+from kicad_tools.footprints.library_path import detect_kicad_library_path
 from kicad_tools.manufacturers import get_profile
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.silkscreen import (
@@ -106,7 +108,11 @@ def test_independent_stroke_is_identified(tmp_path, rules, extra):
     findings = check_silk_overlap(board(tmp_path, graphics=graphics, other=other), rules).violations
     identified = [v for v in findings if any(item_id in item for item in v.items)]
     assert identified
-    if extra != "overdraw":  # both partially overdrawn segments are ambiguous
+    if extra == "overdraw":
+        # Only the two ambiguous segments should generate overlap warnings.
+        assert len(findings) == 13
+        assert len(identified) == 7
+    else:
         assert identified == findings
     if extra == "duplicate":
         assert len(findings) == 1
@@ -145,6 +151,36 @@ def test_sector_crosses_exposed_pad_and_mask_graphic(tmp_path, rules):
     for check in (check_silk_over_copper, check_silk_over_mask_opening):
         findings = check(pcb, rules).violations
         assert any("C1 (fp_line)" in v.items for v in findings)
+
+
+@pytest.mark.parametrize("face", ["F", "B"])
+@pytest.mark.parametrize("case", ["aligned", "stray", "opposite_pad", "no_pad"])
+def test_round_pad_cutout_hatch(tmp_path, rules, face, case):
+    graphics = []
+    stray_id = str(uuid.uuid4())
+    for i, x in enumerate(OFFSETS):
+        outer = math.sqrt(4 - x**2)
+        tip = math.sqrt(0.55**2 - (x - 0.4) ** 2)
+        graphics.append(line((x, -outer), (x, -tip)))
+        is_stray = case == "stray" and i == 2
+        if is_stray:
+            tip += 0.09
+        graphics.append(line((x, tip), (x, outer), stray_id if is_stray else None))
+    if case != "no_pad":
+        side = "B" if case == "opposite_pad" else "F"
+        graphics.append(
+            f'(pad "2" smd circle (at 0.4 0) (size 0.8 0.8) (layers "{side}.Cu" "{side}.Mask"))'
+        )
+    board(tmp_path, offsets=(), graphics=" ".join(graphics))
+    path = tmp_path / "sector.kicad_pcb"
+    if face == "B":
+        path.write_text(
+            path.read_text().replace('"B.', '"TMP.').replace('"F.', '"B.').replace('"TMP.', '"F.')
+        )
+    findings = check_silk_overlap(PCB.load(path), rules).violations
+    assert bool(findings) == (case != "aligned")
+    if case == "stray":
+        assert all(any(stray_id in item for item in v.items) for v in findings)
 
 
 @pytest.mark.parametrize("face", ["F", "B"])
@@ -192,3 +228,47 @@ def test_radial_positive_lead_mark(tmp_path, rules, face, case):
         assert any(second in item for item in findings[0].items)
     else:
         assert len(findings) == (0 if case == "plus" else 1)
+
+
+def test_round_pad_cutout_with_repair_clearance_and_mask_margin(tmp_path, rules):
+    """Stock-width (0.12 mm) ink clipped 0.255 mm off a pad stays a recognised cutout."""
+    stroke = '(stroke (width 0.12) (type solid)) (layer "F.SilkS")'
+    pad_radius, tip_radius = 0.4, 0.4 + 0.045 + 0.15 + 0.06
+    graphics = []
+    for x in OFFSETS:
+        outer = math.sqrt(4 - x**2)
+        tip = math.sqrt(tip_radius**2 - (x - 0.4) ** 2)
+        for a, b in (((x, -outer), (x, -tip)), ((x, tip), (x, outer))):
+            graphics.append(
+                f"(fp_line (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) {stroke} (uuid {uuid.uuid4()}))"
+            )
+    path = tmp_path / "clipped.kicad_pcb"
+    path.write_text(f"""(kicad_pcb (version 20240108) (generator "test")
+        (setup (pad_to_mask_clearance 0.045))
+        (footprint "ProjectMark" (layer "F.Cu") (at 10 10 0)
+            (property "Reference" "C1" (at 0.4 0) (layer "F.Fab")
+              (effects (font (size 1 1) (thickness 0.15))))
+            (fp_circle (center 0 0) (end 2 0) {stroke} (fill no))
+            (pad "2" smd circle (at 0.4 0) (size {2 * pad_radius} {2 * pad_radius})
+              (layers "F.Cu" "F.Mask"))
+            {" ".join(graphics)}))""")
+    assert not check_silk_overlap(PCB.load(path), rules).violations
+
+
+@pytest.mark.parametrize("name", ["CP_Radial_D16.0mm_P7.50mm", "CP_Radial_D30.0mm_P10.00mm_SnapIn"])
+def test_stock_radial_overlap_after_pad_clearance_repair(tmp_path, rules, name):
+    footprint = detect_kicad_library_path().get_footprint_file("Capacitor_THT", name)
+    if footprint is None:
+        pytest.skip(f"KiCad stock footprint {name} is unavailable")
+    path = tmp_path / "radial.kicad_pcb"
+    path.write_text(f"""(kicad_pcb (version 20260206) (generator "test")
+        (setup (pad_to_mask_clearance 0.045))
+        {footprint.read_text()})""")
+    baseline = check_silk_overlap(PCB.load(path), rules).violations
+    assert baseline == []
+
+    repairer = SilkscreenRepairer(path)
+    result = repairer.repair_pad_clearance(0.15)
+    assert result.total_fixed > 0
+    repairer.save()
+    assert check_silk_overlap(PCB.load(path), rules).violations == baseline

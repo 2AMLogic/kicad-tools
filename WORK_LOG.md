@@ -16,6 +16,28 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-26
 
+- **Issue #10419** (closed): kct pcb reinforce --clear writes the board before drop_wires fails on an unreadable sidecar envelope
+- **PR #10432**: fix: refuse reinforce --clear on an unreadable destination sidecar
+- **Issue #10409** (closed): Radial-capacitor hatch warnings return after clipping strokes to a round pad clearance
+- **PR #10410**: fix: recognize round pad cutouts in radial polarity artwork
+- **Issue #10391** (closed): Align JLCPCB silkscreen-over-copper findings on pads and untented vias with the native copper edge
+- **PR #10475**: fix: check JLCPCB silkscreen strokes at the exposed copper edge
+- **Issue #9406** (closed): Converge boards 06/07 DRC re-check into the single-sourced job scripts (latent local-gate --full failure)
+- **PR #10465**: ci: restore strict release DRC on regenerated Boards 06 and 07
+- **Issue #10393** (closed): Route links around non-plated mounting holes when a straight trace would cross the drill
+- **PR #10467**: fix(route-link): keep tracks clear of non-plated mounting holes
+- **Issue #10470** (closed): create-pcb reports the fitted grid pitch as the requested pitch in its auto-shrink warning
+- **PR #10471**: fix: show the original pitch in automatic placement warnings
+
+- **Issue #10458** (closed): Intermittent empty staged-board path in the lint-gate SIGTERM test
+- **PR #10464**: test: publish lint-gate readiness atomically before signaling
+- **Issue #10457** (closed): Coupling test misses the inner-layer widths published in the current-paths cases section
+- **PR #10460**: docs(reference): cover inner-layer widths and unevaluated cases
+- **Issue #10478** (closed): Verify the X2 %TO.N premise on the pinned KiCad image: a track reported plotted under a stale net attribute on 10.0.8
+- **Issue #10421** (closed): Board 01 release regeneration narrows nine Power tracks below its declared minimum trace width
+- **PR #10446**: fix(board01): author the Power net class so release cleanup keeps the 0.5 mm tracks
+- **Issue #10422** (closed): Export preflight: measure reinforcement mask strips against covered and exposed foreign copper in Gerbers
+- **PR #10443**: feat: measure reinforcement runs against the shipped Gerbers in export preflight
 - **Issue #10364** (closed): Identify verified reinforcement wire-end holes when reviewing native KiCad dangling-via warnings
 - **PR #10378**: feat: identify verified wire ends in native dangling-via reports
 - **Issue #10479** (closed): Loom role scripts exit 126: config-resolver.sh passes the 208 KB private defaults as a single jq --argjson argument
