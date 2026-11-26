@@ -1090,13 +1090,13 @@ def _stroke_geometry(
 def _pad_aperture_geometry(
     pad: Pad,
     footprint: Footprint,
-    min_mask_clearance: float,
+    margin: float,
 ) -> _Geometry:
     """Build a shapely polygon for a pad's solder-mask aperture (exposed copper).
 
-    Aperture = pad copper expanded by the mask margin (``pad.solder_mask_margin``
-    if set, else the profile default). Circular pads and supported custom pads
-    use their copper outline. Other shapes use an oriented rectangle.
+    Expand the pad copper by its effective mask margin. Circular pads and
+    supported custom pads use their copper outline. Other shapes use an
+    oriented rectangle.
 
     The rectangle is **oriented by the pad's absolute angle** (``pad.rotation``
     already includes ``footprint.rotation`` per KiCad's file convention, see
@@ -1119,7 +1119,6 @@ def _pad_aperture_geometry(
         pad_copper_outline,
     )
 
-    margin = pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
     pad_pos = pad_board_center(pad, footprint.position, footprint.rotation)
     if pad.shape == "circle":
         outline = pad_copper_outline(pad, footprint.position, footprint.rotation)
@@ -1459,8 +1458,13 @@ def _iter_pad_apertures(
     default).  ``check_silk_over_copper`` chains both iterators into a single
     aperture index.
     """
+    from ..mask_geometry import board_mask_margin, pad_mask_margin
     from .clearance import _pad_has_no_copper, _pad_has_no_mask
 
+    board_margin, declared = board_mask_margin(pcb)
+    if board_margin is None or not declared:
+        board_margin = min_mask_clearance
+    version = pcb._file_version()
     for footprint in pcb.footprints:
         for pad in footprint.pads:
             if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
@@ -1475,7 +1479,12 @@ def _iter_pad_apertures(
             else:
                 # NPTH / connect / other: no exposed copper to smear silk onto.
                 continue
-            geom = _pad_aperture_geometry(pad, footprint, min_mask_clearance)
+            margin, _ = pad_mask_margin(
+                pad, footprint, board_margin, declared, board_version=version
+            )
+            if margin is None or not math.isfinite(margin):
+                margin = board_margin
+            geom = _pad_aperture_geometry(pad, footprint, margin)
             label = f"{footprint.reference} pad {pad.number}"
             for side in sides:
                 yield side, geom, label

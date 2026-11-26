@@ -1928,6 +1928,66 @@ class TestSilkCircleArcGeometry:
         pcb._footprints.append(_make_footprint(pads=[pad], graphics=[ring]))
         assert len(check_silk_over_copper(pcb, _rules())) == int(overlaps)
 
+    @pytest.mark.parametrize(
+        ("version", "board_margin", "fp_margin", "pad_margin", "overlaps"),
+        [
+            (20240108, 0, 0.40, None, True),
+            (20240108, 0.40, None, None, True),
+            (20240108, 0.40, 0.05, None, False),
+            (20240108, 0, 0.40, 0.05, False),
+            (20240108, 0, 0.05, 0.40, True),
+            (20240108, 0, 0.40, 0, True),
+            (20240108, 0.40, 0, None, True),
+            (20260206, 0, 0.40, 0, False),
+            (20260206, 0.40, 0, None, False),
+        ],
+    )
+    def test_round_pad_margin_in_public_check(
+        self, tmp_path, version, board_margin, fp_margin, pad_margin, overlaps
+    ):
+        from kicad_tools.cli.check_cmd import main
+
+        board = tmp_path / "ring.kicad_pcb"
+        report = tmp_path / "findings.json"
+        fp_setting = "" if fp_margin is None else f"(solder_mask_margin {fp_margin})"
+        pad_setting = "" if pad_margin is None else f"(solder_mask_margin {pad_margin})"
+        board.write_text(
+            f"""(kicad_pcb (version {version}) (generator "pcbnew")
+              (general (thickness 1.6)) (paper "A4")
+              (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user)
+                      (38 "B.Mask" user) (39 "F.Mask" user))
+              (setup (pad_to_mask_clearance {board_margin}))
+              (footprint "Test:Round" (layer "F.Cu") (at 10 10) {fp_setting}
+                (property "Reference" "J1" (at 0 -4) (layer "F.SilkS")
+                  (effects (font (size 1 1) (thickness 0.15))))
+                (fp_circle (center 0 0) (end 1.76 0) (stroke (width 0.15) (type solid))
+                  (fill none) (layer "F.SilkS"))
+                (pad "1" thru_hole circle (at 0 0) (size 2.8 2.8) (drill 1.7)
+                  (layers "*.Cu" "*.Mask") {pad_setting})))"""
+        )
+        rc = main(
+            [
+                str(board),
+                "--mfr",
+                "jlcpcb",
+                "--only",
+                "silkscreen",
+                "--format",
+                "json",
+                "-o",
+                str(report),
+            ]
+        )
+        findings = [
+            v
+            for v in json.loads(report.read_text())["violations"]
+            if v["rule_id"] == "silk_over_copper"
+        ]
+        assert len(findings) == int(overlaps)
+        if overlaps:
+            assert findings[0]["severity"] == "error"
+            assert rc == 2
+
     def test_unfilled_ring_enclosing_pad_does_not_flag(self):
         g = _silk_circle()
         g.fill = "no"
