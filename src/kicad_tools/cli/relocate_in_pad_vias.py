@@ -1546,14 +1546,16 @@ def relocate_in_pad_vias(
     dry_run: bool = False,
     min_hole_clearance_mm: float | None = None,
     search_alternatives: bool = False,
+    even_if_supported: bool = False,
 ) -> RelocationResult:
     """Slide signal in-pad vias off-pad, preserving connectivity (Phase 1).
 
     Args:
         pcb: The board to operate on (mutated in place unless ``dry_run``).
-        design_rules: Active manufacturer rules.  A no-op when
-            ``via_in_pad_supported`` is True.  ``min_clearance_mm`` and
+        design_rules: Active manufacturer rules. ``min_clearance_mm`` and
             ``min_hole_to_hole_mm`` gate the off-pad placement.
+        even_if_supported: Attempt relocation on a profile offering via-in-pad.
+            Such profiles otherwise return a capability no-op.
         search_alternatives: Opt in to a bounded 24-candidate cardinal/45-degree
             search when the preferred single escape is blocked. Alternatives
             preserve the full via land on every spanned layer and require full
@@ -1585,12 +1587,12 @@ def relocate_in_pad_vias(
             nets=nets,
             min_hole_clearance_mm=min_hole_clearance,
             search_alternatives=search_alternatives,
+            even_if_supported=even_if_supported,
         )
 
     result = RelocationResult()
 
-    # Capability gate: a no-op on profiles that support via-in-pad.
-    if getattr(design_rules, "via_in_pad_supported", False):
+    if getattr(design_rules, "via_in_pad_supported", False) and not even_if_supported:
         result.supported_noop = True
         return result
 
