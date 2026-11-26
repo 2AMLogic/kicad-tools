@@ -2260,6 +2260,47 @@ def _hub_continuation_segments(
     return _pad_continuation_chains(internal, centres, entries, branch_exits)
 
 
+def _parallel_pad_entries(
+    graph: _CopperGraph,
+    hub: _Node,
+    continuations: Sequence[Segment],
+    groups: Sequence[ParallelGroup],
+) -> list[ParallelGroup]:
+    """Credit matching terminal entries on both arms of a proved two-layer link."""
+    centres = graph.pad_centres.get(hub, set())
+    if len(centres) != 1:
+        return []
+    centre = next(iter(centres))
+    pairs = []
+    seen = set()
+    for seg in continuations:
+        ends = frozenset((_node_key(seg.start), _node_key(seg.end)))
+        if centre not in ends or len(ends) != 2 or ends in seen:
+            continue
+        seen.add(ends)
+        landing = next(point for point in ends if point != centre)
+        copies = [
+            item
+            for item in graph.internal[hub]
+            if frozenset((_node_key(item.start), _node_key(item.end))) == ends
+        ]
+        if len(copies) != 2 or {item.layer for item in copies} != {"F.Cu", "B.Cu"}:
+            continue
+        for group in groups:
+            if len(group.branches) != 2 or {arm[0].layer for arm in group.branches} != {
+                "F.Cu",
+                "B.Cu",
+            }:
+                continue
+            if all(
+                any(landing in (_node_key(item.start), _node_key(item.end)) for item in arm)
+                for arm in group.branches
+            ):
+                pairs.append(ParallelGroup(tuple((item,) for item in copies)))
+                break
+    return pairs
+
+
 def _bfs_path(
     graph: _CopperGraph, start: _Node, goal: _Node
 ) -> tuple[list[Segment], list[_GraphEdge]] | None:
@@ -4225,9 +4266,12 @@ def resolve_current_path(
             if edge.segment is not None and id(edge.segment) in group_ids
         }
         arm_hubs = {hub for edge in arm_edges for hub, _ in adjacency.attachments.get(edge, [])}
-        path_segments.extend(
-            seg for hub in arm_hubs for seg in _hub_continuation_segments(adjacency, hub, arm_edges)
-        )
+        entry_groups = []
+        for hub in arm_hubs:
+            entries = _hub_continuation_segments(adjacency, hub, arm_edges)
+            path_segments.extend(entries)
+            entry_groups.extend(_parallel_pad_entries(adjacency, hub, entries, parallel_groups))
+        parallel_groups.extend(entry_groups)
 
     on_path_groups = [
         group for group in via_groups if _path_changes_layer_through(path_segments, group)
