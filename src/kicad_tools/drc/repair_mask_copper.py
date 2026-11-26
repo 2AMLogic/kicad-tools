@@ -558,9 +558,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             return best
         raise MaskTraceAngleError(f"neither elbow preserves contact and clearance for track {uid}")
 
-    def disconnected_bends(
-        self, before: MaskCopperRepairer, actions: list[MaskRepairAction | MaskNudgeAction]
-    ) -> set[str]:
+    def disconnected_copper_nets(self, before: MaskCopperRepairer, names: set[str]) -> set[str]:
         """Check all physical copper groups, including taps without a pad on either side.
 
         Matches authored copper items (pads, vias, segments and arcs) by UUID
@@ -572,7 +570,6 @@ class MaskCopperRepairer(CopperGapRepairer):
         from kicad_tools.validate.connectivity import ConnectivityValidator
         from kicad_tools.validate.copper_contact import PAD, TRACK, VIA, CopperItem
 
-        names = {act.net_name for act in actions if act.bends}
         if not names:
             return set()
         old_board, new_board = PCB(before.doc), PCB(self.doc)

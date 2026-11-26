@@ -1650,16 +1650,14 @@ def _run_mask_pass(
                 pcb_path,
                 candidate,
                 pad_islands,
-                lost_contacts=(
-                    MaskCopperRepairer(candidate).disconnected_bends(before, result.actions)
-                    if has_bends
-                    else set()
+                lost_contacts=MaskCopperRepairer(candidate).disconnected_copper_nets(
+                    before, edited_nets
                 ),
             )
-            if result.actions and has_zones and result.repaired < proposed:
-                refill_candidate()
-            if any(action.bends for action in result.actions) and result.repaired < proposed:
-                lost = MaskCopperRepairer(candidate).disconnected_bends(before, result.actions)
+            if result.actions and result.repaired < proposed:
+                if has_zones:
+                    refill_candidate()
+                lost = MaskCopperRepairer(candidate).disconnected_copper_nets(before, edited_nets)
                 if lost:
                     raise _MaskPadConnectionLost(
                         f"saved repair disconnected copper on {', '.join(sorted(lost))}"

@@ -4350,9 +4350,10 @@ def test_mask_track_repair_refills_zones_before_grading_on_zoned_board(
     assert filled == [(98.5, 99.9)]
 
 
+@pytest.mark.parametrize("repair", ["bend", "orthogonal_elbow"])
 @pytest.mark.parametrize("split_on_refill", [1, 2])
-def test_mask_bend_rolls_back_when_refill_trades_one_contact_for_another(
-    tmp_path, monkeypatch, capsys, split_on_refill
+def test_mask_repair_rolls_back_when_refill_trades_one_contact_for_another(
+    tmp_path, monkeypatch, capsys, split_on_refill, repair
 ):
     from types import SimpleNamespace
 
@@ -4361,7 +4362,9 @@ def test_mask_bend_rolls_back_when_refill_trades_one_contact_for_another(
     from tests.test_repair_mask_copper import (
         ENTRY,
         _board2,
+        _end,
         _finding,
+        _overlap_pass_through,
         _own_finding,
         _report,
         _run,
@@ -4374,9 +4377,15 @@ def test_mask_bend_rolls_back_when_refill_trades_one_contact_for_another(
         (filled_polygon (layer "F.Cu")
           (pts (xy 94 109) (xy 101 109) (xy 101 112) (xy 94 112))))"""
     second = _seg("trk-2", (115, 100.3), (120.7, 100.3))
-    board = _board2(tmp_path, "\n".join([ENTRY, second, *tracks, zone]), "120 100")
+    if repair == "orthogonal_elbow":
+        entry = _seg("hug", (98.5, 99.5), (98.9, 99.5)) + _seg("turn", (98.9, 99.5), (99.3, 99.9))
+        finding = _overlap_pass_through("hug")
+    else:
+        entry = ENTRY
+        finding = _finding("trk-a")
+    board = _board2(tmp_path, "\n".join([entry, second, *tracks, zone]), "120 100")
     other = _own_finding("trk-2", "pad-r2-1", "R2/1")
-    findings = [_finding("trk-a")]
+    findings = [finding]
     if split_on_refill == 2:
         findings.append(other)  # Its persisting finding forces a partial rollback.
     refill_count = 0
@@ -4386,6 +4395,8 @@ def test_mask_bend_rolls_back_when_refill_trades_one_contact_for_another(
         nonlocal refill_count
         assert require_save
         refill_count += 1
+        if repair == "orthogonal_elbow":
+            assert _end(candidate, "hug")[1] == (98.5, 99.9)
         if refill_count < split_on_refill:
             return SimpleNamespace(success=True)
         doc = parse_file(candidate)

@@ -3915,10 +3915,10 @@ def test_orthogonal_elbow_flip_vetoed_by_clearance_lock_or_offset_restores_coppe
     assert not repairer.modified and repairer.doc.to_string() == before, case
 
 
-def test_disconnected_bends_survives_reordered_copper_after_refill_and_catches_splits(tmp_path):
+def test_disconnected_copper_nets_survives_reordered_copper_after_refill_and_catches_splits(
+    tmp_path,
+):
     """KiCad zone refill reorders segments/vias and regenerates fills (#9939)."""
-    from kicad_tools.drc.repair_mask_copper import MaskNudgeAction
-
     seg_a = _seg("seg-a", (100.0, 100.0), (102.0, 100.0))
     seg_b = _seg("seg-b", (102.0, 100.0), (103.0, 100.0))
     seg_other = _seg("seg-other", (105.0, 105.0), (106.0, 105.0), net=2)
@@ -3944,26 +3944,9 @@ def test_disconnected_bends_survives_reordered_copper_after_refill_and_catches_s
     # Reordered AND genuinely disconnected (seg-b moved off seg-a and outside the zone).
     seg_b_broken = _seg("seg-b", (108.0, 100.0), (109.0, 100.0))
     broken_path = _board(broken_dir, "\n".join([seg_other, seg_b_broken, seg_a, zone_one_fill]))
-    dummy_action = MaskNudgeAction(
-        action="nudge_clear",
-        uuid="seg-a",
-        kind="segment",
-        pad_uuid=PAD,
-        pad_ref="R1/1",
-        net_name="N1",
-        layer="F.Cu",
-        old_x=102.0,
-        old_y=100.0,
-        new_x=102.0,
-        new_y=100.0,
-        dx=0.0,
-        dy=0.0,
-        displacement_mm=0.0,
-        bends=[object()],  # type: ignore[list-item]
-    )
     before = MaskCopperRepairer(before_path)
-    assert MaskCopperRepairer(reordered_path).disconnected_bends(before, [dummy_action]) == set()
-    assert MaskCopperRepairer(broken_path).disconnected_bends(before, [dummy_action]) == {"N1"}
+    assert MaskCopperRepairer(reordered_path).disconnected_copper_nets(before, {"N1"}) == set()
+    assert MaskCopperRepairer(broken_path).disconnected_copper_nets(before, {"N1"}) == {"N1"}
 
 
 def test_orthogonal_elbow_flip_waits_for_anchor_via_to_relocate_first(tmp_path):
@@ -4026,9 +4009,7 @@ def test_orthogonal_elbow_flip_uses_pairwise_netclass_clearance(
     assert result.repaired == expected_repaired
 
 
-def test_disconnected_bends_matches_items_assigned_first_uuid_by_native_save(tmp_path):
-    from types import SimpleNamespace
-
+def test_disconnected_copper_nets_matches_items_assigned_first_uuid_by_native_save(tmp_path):
     from kicad_tools.cli.runner import run_refill_zones
     from kicad_tools.schema.pcb import PCB
 
@@ -4051,7 +4032,4 @@ def test_disconnected_bends_matches_items_assigned_first_uuid_by_native_save(tmp
     pcb = PCB(saved.doc)
     assert all(p.uuid for fp in pcb.footprints for p in fp.pads)
     assert all(item.uuid for item in [*pcb.segments, *pcb.arcs, *pcb.vias])
-    assert (
-        saved.disconnected_bends(before, [SimpleNamespace(net_name="Signal", bends=[True])])
-        == set()
-    )
+    assert saved.disconnected_copper_nets(before, {"Signal"}) == set()
