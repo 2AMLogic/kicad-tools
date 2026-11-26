@@ -35,6 +35,28 @@ def sidecar_path(board: Path) -> Path:
     return board.with_name(board.name + SIDECAR_SUFFIX)
 
 
+def saved_record_path(board: Path, will_save: bool) -> Path:
+    """The record that pairs with ``board`` once a save has replaced it.
+
+    A save through a board symlink replaces the alias with its own file, so
+    the wire list must sit beside that file, not beside the unchanged target.
+    """
+    if will_save and board.is_symlink():
+        return board.with_name(board.name + SIDECAR_SUFFIX)
+    return sidecar_path(board)
+
+
+def carry_record(seed: Path, dest: Path) -> None:
+    """Give ``dest`` the inventory ``seed`` held (no-op when they are the same file)."""
+    if dest == seed or not seed.is_file():
+        return
+    if dest.is_symlink():
+        dest.unlink()
+    elif dest.exists():
+        return  # an inventory already paired with the saved board wins
+    dest.write_bytes(seed.read_bytes())
+
+
 def _pt(x: float, y: float) -> dict[str, float]:
     return {"x": round(x, 4), "y": round(y, 4)}
 
@@ -287,9 +309,9 @@ def load_wires_if_present(board: Path) -> list[dict[str, Any]]:
         return []
 
 
-def write_sidecar(board: Path, new_wires: list[dict[str, Any]]) -> Path:
+def write_sidecar(board: Path, new_wires: list[dict[str, Any]], record: Path | None = None) -> Path:
     """Merge ``new_wires`` into the board's sidecar and write it deterministically."""
-    path = sidecar_path(board)
+    path = record if record is not None else sidecar_path(board)
     existing = load_wires(path) if path.is_file() else []
     wires = merge_wires(existing, new_wires)
     text = json.dumps({"version": SIDECAR_VERSION, "wires": wires}, indent=2, sort_keys=True)

@@ -366,3 +366,32 @@ def test_adopt_reports_a_strip_without_anchor_holes(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Adopted 0 wire(s)" in out and "Not adopted" in out
     assert not sidecar_path(p).exists()
+
+
+def test_reinforce_through_board_symlink_pairs_record_with_saved_pcb(tmp_path):
+    board = _board(tmp_path)
+    alias = tmp_path / "review.kicad_pcb"
+    alias.symlink_to(board)
+    assert run_pcb_command(_args(alias, "NET_A")) == 0
+    # The save detached the alias; its record sits beside it, main is untouched.
+    assert not alias.is_symlink()
+    assert not sidecar_path(board).exists()
+    assert len(load_wires(sidecar_path(alias))) == 1
+
+
+def test_replace_and_clear_through_symlink_keep_other_nets(tmp_path):
+    board = _board(tmp_path)
+    for net in ("NET_A", "NET_B"):
+        assert run_pcb_command(_args(board, net)) == 0
+    main_record = sidecar_path(board).read_bytes()
+    alias = tmp_path / "review.kicad_pcb"
+    alias.symlink_to(board)
+    assert run_pcb_command(_args(alias, "NET_A", replace=True)) == 0
+    assert sidecar_path(board).read_bytes() == main_record
+    assert {w["net"] for w in load_wires(sidecar_path(alias))} == {"NET_A", "NET_B"}
+
+    alias2 = tmp_path / "second.kicad_pcb"
+    alias2.symlink_to(board)
+    assert run_pcb_command(_args(alias2, "NET_A", clear=True)) == 0
+    assert sidecar_path(board).read_bytes() == main_record
+    assert {w["net"] for w in load_wires(sidecar_path(alias2))} == {"NET_B"}

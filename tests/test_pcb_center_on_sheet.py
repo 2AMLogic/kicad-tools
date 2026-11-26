@@ -868,3 +868,21 @@ class TestReinforcementSidecar:
         plain.write_text(make_pcb())
         assert run_center_on_sheet(plain, dry_run=True, output_format="json") == 0
         assert json.loads(capsys.readouterr().out)["sidecar"] is None
+
+
+def test_new_export_honors_private_umask(tmp_path):
+    import os
+
+    from kicad_tools.cli import main
+
+    src = _write_reinforced(tmp_path, "source.kicad_pcb")
+    src.chmod(0o644)
+    sidecar_path(src).chmod(0o644)
+    out = tmp_path / "out.kicad_pcb"
+    old = os.umask(0o077)
+    try:
+        assert main(["pcb", "center-on-sheet", str(src), "--paper", "keep", "-o", str(out)]) == 0
+    finally:
+        os.umask(old)
+    assert out.stat().st_mode & 0o777 == 0o600
+    assert sidecar_path(out).stat().st_mode & 0o777 == 0o600

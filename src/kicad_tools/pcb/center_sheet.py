@@ -671,19 +671,24 @@ def _staged_path(stack: ExitStack, dest: Path) -> Path:
     return Path(directory) / "new"
 
 
-def _stage_centered_file(stack: ExitStack, dest: Path, content: bytes, source: Path) -> Path:
-    """Prepare a sibling replacement with the existing destination's permissions."""
-    if dest.exists():
+def _stage_centered_file(stack: ExitStack, dest: Path, content: bytes) -> Path:
+    """Prepare a sibling replacement.
+
+    An existing destination keeps its permissions; a new one gets the creation
+    mask's mode, never the source's (a private umask must not be widened).
+    """
+    replacing = dest.exists()
+    if replacing:
         # A rename alone would bypass the access check of the original in-place writer.
         with dest.open("r+b"):
             pass
-        source = dest
     candidate = _staged_path(stack, dest)
     with candidate.open("wb") as stream:
         stream.write(content)
         stream.flush()
         os.fsync(stream.fileno())
-    shutil.copymode(source, candidate)
+    if replacing:
+        shutil.copymode(dest, candidate)
     return candidate
 
 
@@ -813,10 +818,9 @@ def center_on_sheet(
 
         pcb_tmp = None
         if report.changed or copying:
-            pcb_tmp = _stage_centered_file(files, board_target, new_text.encode(), pcb_path)
+            pcb_tmp = _stage_centered_file(files, board_target, new_text.encode())
         if record is not None:
-            mode_source = dest_sidecar if dest_sidecar.is_file() else src_sidecar
-            record_tmp = _stage_centered_file(files, record_target, record, mode_source)
+            record_tmp = _stage_centered_file(files, record_target, record)
             replacements = [(record_tmp, record_target)]
             if record_link is not None:
                 link_tmp = _stage_record_link(files, record_link, record_target)
