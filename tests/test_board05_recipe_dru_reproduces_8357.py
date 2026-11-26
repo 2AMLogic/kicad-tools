@@ -1,4 +1,5 @@
-"""Board 05's committed ``.kicad_dru`` is what its recipe emits (Issue #8357).
+"""Board 05's committed ``.kicad_dru`` is what its recipe emits (Issue #8357),
+and its project declares the reviewed net classes (Issue #10430).
 
 ``design.py`` prepares the routed board and declares its sidecars, including
 the per-zone clearances and the #8048 attach-zone exemptions. Its pre-refill
@@ -12,11 +13,18 @@ operator ruled (2026-11-04) to commit what the recipe emits.
 This test runs the recipe's own routing preparation on the committed unrouted
 board in a scratch directory, starting with its original project and no DRU,
 and asserts the result is byte-identical to the committed file.
+
+Since #10430 the same preparation declares the board's reviewed classes:
+``net_class_map.json``, the routing project and the routed copper agree on
+each net's class, width and pad-escape neck, with no waiver.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
+import math
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -29,6 +37,7 @@ from kicad_tools.manufacturers.attach_zone_dru import (
     has_attach_zone_block,
 )
 from kicad_tools.manufacturers.zone_clearance_dru import zone_clearance_rule, zone_clearance_targets
+from kicad_tools.schema.pcb import PCB
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD = REPO_ROOT / "boards" / "05-bldc-motor-controller"
@@ -55,7 +64,7 @@ def _assert_u3_pour_clearance(text: str) -> None:
     marker = '(rule "Zone clearance at U3 pads - GND (F.Cu)"'
     assert text.count(marker) == 1
     assert text.count('(rule "kct attach zone - ') == 42
-    assert text.count('(rule "Reviewed clearance - ') == 7
+    assert reviewed_clearances(text) == REVIEWED_CLEARANCES
     assert text.count('(rule "Zone clearance - ') == 4
     assert text.count('(rule "Ampacity Min Width') == 2
     assert text.rindex('(rule "kct attach zone - ') < text.index(marker)
@@ -68,6 +77,34 @@ def _assert_u3_pour_clearance(text: str) -> None:
             f"({zone}.Type == 'Zone' && {zone}.NetName == 'GND' && "
             f"{pad}.Type == 'Pad' && {pad}.Reference == 'U3' && ({numbers}))"
         ) in rule
+
+
+#: Each net class the staged project declares, and the clearance its
+#: ``Reviewed clearance`` DRU rule holds its nets to (#10430).  ``Motor power``
+#: keeps the strictest clearance the motor nets already held (VIN and the
+#: phases 0.2 mm); FUSED, VM and GND_SENSE were held to 0.15 mm only because the
+#: name classifier called them ``Digital`` or ``Audio``.
+REVIEWED_CLEARANCES = {
+    "Audio": "0.15",
+    "Clock": "0.2",
+    "Debug": "0.15",
+    "Differential": "0.15",
+    "Digital": "0.15",
+    "Ground plane": "0.2",
+    "Motor power": "0.2",
+    "Power": "0.2",
+}
+
+
+def reviewed_clearances(dru: str) -> dict[str, str]:
+    """``{class: min clearance}`` from a DRU's ``Reviewed clearance`` rules."""
+    return dict(
+        re.findall(
+            r'\(rule "Reviewed clearance - ([^"]+)"\n\s*\(condition[^\n]*\n'
+            r"\s*\(constraint clearance \(min ([\d.]+)mm\)\)",
+            dru,
+        )
+    )
 
 
 def _recipe_dru(tmp_path: Path) -> bytes:
@@ -191,3 +228,250 @@ def test_recipe_emits_the_committed_dru_byte_for_byte(tmp_path):
         "board 05's recipe no longer emits the committed .kicad_dru; regenerate "
         "the board (design.py) on the pinned toolchain and re-pin its evidence"
     )
+
+
+# ---------------------------------------------------------------------------
+# Reviewed net classes: project, sidecar and copper agree (#10430)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def staged(tmp_path_factory) -> Path:
+    """The recipe's routed board and its declared sidecars, prepared once."""
+    tmp_path = tmp_path_factory.mktemp("board05-staged")
+    for suffix in (".kicad_pcb", ".kicad_pro"):
+        name = f"bldc_controller{suffix}"
+        shutil.copy2(OUTPUT / name, tmp_path / name)
+    shutil.copy2(OUTPUT / "net_class_map.json", tmp_path / "net_class_map.json")
+    routed, _ = _load_build().prepare_routed_board(tmp_path)
+    return routed
+
+
+def _sidecar(routed: Path) -> dict:
+    """The staged ``net_class_map.json``, loaded the way ``kct check`` loads it."""
+    from kicad_tools.router.rules import net_class_map_from_path
+
+    return net_class_map_from_path(routed.parent / "net_class_map.json", pcb_path=routed)
+
+
+def _resolved(routed: Path) -> dict[str, tuple[str, float]]:
+    """``{net: (class, width)}`` the staged project resolves each routed net to."""
+    from kicad_tools.core.project_clearance import authored_netclass_widths
+
+    project = json.loads(routed.with_suffix(".kicad_pro").read_text())
+    names = sorted({net.name for net in PCB.load(str(routed)).nets.values() if net.name})
+    return {
+        net: (width.source_class, round(width.width, 4))
+        for net, width in authored_netclass_widths(project, names).items()
+    }
+
+
+def _at(point, segment) -> bool:
+    """True when ``point`` is one of ``segment``'s ends (coordinates are micrometre-rounded)."""
+    return math.dist(point, segment.start) < 1e-3 or math.dist(point, segment.end) < 1e-3
+
+
+def _copy_stage(staged: Path, root: Path) -> Path:
+    root.mkdir()
+    sources = (
+        staged,
+        staged.with_suffix(".kicad_pro"),
+        staged.with_suffix(".kicad_dru"),
+        staged.parent / "net_class_map.json",
+    )
+    for source in sources:
+        shutil.copy2(source, root / source.name)
+    return root / staged.name
+
+
+def _phase_a_leg(pcb: PCB) -> tuple:
+    """PHASE_A's pad-escape leg and the U2 pad it leaves, with the pad's centre."""
+    from kicad_tools.validate.rules.netclass_agreement import _pad_necks
+
+    phase = [s for s in pcb.segments if s.net_name == "PHASE_A"]
+    (neck,) = (phase[k] for k in _pad_necks(pcb, phase, 0.5, 0.2))
+    u2 = next(fp for fp in pcb.footprints if fp.reference == "U2")
+    pad = next(p for p in u2.pads if p.number == "5")
+    return neck, pad, (u2.position[0] + pad.position[0], u2.position[1] + pad.position[1])
+
+
+def _edit_copper(board: Path, edit) -> None:
+    """Rewrite ``board``'s segments through its S-expression tree, as the recipe does.
+
+    ``edit(node, net, layer, start, end, to_file)`` sees board-relative endpoints;
+    a coordinate written back must pass through ``to_file`` to reach the file frame.
+    """
+    from kicad_tools.sexp import parse_file, serialize_sexp
+
+    pcb = PCB.load(str(board))
+    ox, oy = pcb.board_origin
+    by_number = {num: net.name for num, net in pcb.nets.items()}
+    tree = parse_file(board)
+    for node in tree.find_all("segment"):
+        net = node.find("net").get_string(0)
+        start, end = node.find("start"), node.find("end")
+        edit(
+            node,
+            by_number.get(int(net), net) if net.isdigit() else net,
+            node.find("layer").get_string(0),
+            (start.get_float(0) - ox, start.get_float(1) - oy),
+            (end.get_float(0) - ox, end.get_float(1) - oy),
+            lambda point: (point[0] + ox, point[1] + oy),
+        )
+    board.write_text(serialize_sexp(tree))
+
+
+def _add_segment(board: Path, net: str, layer: str, start, end, width) -> None:
+    from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
+
+    pcb = PCB.load(str(board))
+    ox, oy = pcb.board_origin
+    number = next(num for num, item in pcb.nets.items() if item.name == net)
+    tree = parse_file(board)
+    tree.append(
+        parse_string(
+            f"(segment (start {start[0] + ox} {start[1] + oy}) (end {end[0] + ox} {end[1] + oy})"
+            f' (width {width}) (layer "{layer}") (net {number}))'
+        )
+    )
+    board.write_text(serialize_sexp(tree))
+
+
+def _reset_run_width(board: Path, width: float) -> None:
+    def edit(node, net, layer, start, end, to_file):
+        if net == "RESET" and layer == "In1.Cu" and math.dist(start, (44.6, 15.325)) < 1e-3:
+            node.find("width").set_value(0, width)
+
+    _edit_copper(board, edit)
+
+
+def _extend_phase_a_leg(board: Path, leg) -> None:
+    """Lengthen PHASE_A's retained pad-escape leg to 3.6 mm, still at its pad."""
+
+    def edit(node, net, layer, start, end, to_file):
+        if net == "PHASE_A" and layer == leg.layer and math.dist(start, leg.start) < 1e-3:
+            node.find("end").set_value(0, to_file((18.5, leg.start[1]))[0])
+
+    _edit_copper(board, edit)
+
+
+def test_recipe_declares_reviewed_classes_widths_and_necks(staged):
+    build = _load_build()
+    sidecar = _sidecar(staged)
+    pcb = PCB.load(str(staged))
+    assert set(sidecar) == {net.name for net in pcb.nets.values() if net.name}
+    assert tuple(sorted(REVIEWED_CLEARANCES)) == build.ROUTER_NETCLASSES
+
+    resolved = _resolved(staged)
+    motor = {
+        net: resolved[net]
+        for net in ("VIN", "FUSED", "VM", "PHASE_A", "PHASE_B", "PHASE_C", "GND_SENSE")
+    }
+    assert set(motor.values()) == {("Motor power", 0.5)}
+    assert resolved["GND"] == ("Ground plane", 0.5)
+    # Formerly below their 0.2 mm class: the 0.15 mm RESET, MOSI, PWM_B and PWM_C runs are now 0.2 mm.
+    assert resolved["MOSI"] == ("Digital", 0.2)
+    assert resolved["RESET"] == ("Debug", 0.2)
+    # Differential is the router's 0.15 mm class; the project used to say 0.2 mm.
+    assert resolved["RUN"] == ("Differential", 0.15)
+    for net, routing in sidecar.items():
+        assert resolved[net] == (routing.name, round(routing.trace_width, 4))
+
+    project = json.loads(staged.with_suffix(".kicad_pro").read_text())
+    classes = {c["name"]: c for c in project["net_settings"]["classes"]}
+    assert set(classes) == {"Default", *build.ROUTER_NETCLASSES}
+    for name, clearance in REVIEWED_CLEARANCES.items():
+        assert classes[name]["clearance"] == float(clearance)
+    assert classes["Differential"]["track_width"] == pytest.approx(0.15)
+    assert classes["Motor power"]["track_width"] == pytest.approx(0.5)
+    assert (
+        tuple(sorted(project["meta"]["kct_router_netclasses"]["classes"]))
+        == build.ROUTER_NETCLASSES
+    )
+
+    from kicad_tools.validate.rules.netclass_agreement import check_netclass_agreement
+
+    results = check_netclass_agreement(staged, pcb, sidecar)
+    assert results.violations == []
+
+    reset = [s for s in pcb.segments if s.net_name == "RESET"]
+    assert 0.15 not in {round(s.width, 3) for s in reset}
+    (run,) = [s for s in reset if s.layer == "In1.Cu" and math.dist(s.start, (44.6, 15.325)) < 1e-3]
+    assert run.width == pytest.approx(0.2)
+    assert math.dist(run.end, (44.6, 32.6375)) < 1e-3
+
+
+def test_retained_motor_neck_is_the_u2_pad_escape(staged):
+    pcb = PCB.load(str(staged))
+    leg, pad, centre = _phase_a_leg(pcb)
+    assert pad.net_name == "PHASE_A" and "F.Cu" in pad.layers
+    # A 0.5 mm trace cannot leave a 0.4 mm pad on 0.65 mm pitch: the leg leaves
+    # pad 5 at the pad's own width and lands on a via into 0.5 mm inner copper.
+    assert pad.size == pytest.approx((1.575, 0.4))
+    assert leg.layer == "F.Cu" and leg.width == pytest.approx(0.4)
+    assert leg.start == pytest.approx(centre, abs=1e-3)
+    assert math.dist(leg.start, leg.end) == pytest.approx(1.199, abs=1e-3)
+    landing = [
+        s for s in pcb.segments if s.net_name == "PHASE_A" and s is not leg and _at(leg.end, s)
+    ]
+    assert landing and all(s.layer == "In2.Cu" and s.width == pytest.approx(0.5) for s in landing)
+    assert any(
+        v.position == pytest.approx(leg.end, abs=1e-6) for v in pcb.vias if v.net_name == "PHASE_A"
+    )
+
+
+def test_narrow_copper_that_is_not_the_pad_escape_still_warns(staged, tmp_path):
+    from kicad_tools.validate.rules.netclass_agreement import (
+        RULE_TRACK_WIDTH_MISMATCH,
+        check_netclass_agreement,
+    )
+
+    pcb = PCB.load(str(staged))
+    leg, _pad, centre = _phase_a_leg(pcb)
+    cases = {
+        # 0.4 mm away from both PHASE_A pads is below class, not a neck.
+        "away_from_pads": ("In2.Cu", (50.0, 60.0), (52.0, 60.0), 0.4),
+        # At the pad and 0.4 mm wide, but inside pad 5 and under the 0.3 mm neck floor.
+        "under_neck_floor": ("F.Cu", centre, (centre[0] + 0.5, centre[1]), 0.2),
+    }
+    for name, (layer, start, end, width) in cases.items():
+        board = _copy_stage(staged, tmp_path / name)
+        _add_segment(board, "PHASE_A", layer, start, end, width)
+        findings = check_netclass_agreement(board, PCB.load(str(board)), _sidecar(board)).violations
+        assert [(v.rule_id, v.nets) for v in findings] == [
+            (RULE_TRACK_WIDTH_MISMATCH, ("PHASE_A",))
+        ]
+        assert f"narrowest {width:.3f}mm" in findings[0].message
+
+    # The retained leg itself stops being an escape once it outruns the reach.
+    board = _copy_stage(staged, tmp_path / "long_leg")
+    _extend_phase_a_leg(board, leg)
+    (long_leg,) = [
+        s
+        for s in PCB.load(str(board)).segments
+        if s.net_name == "PHASE_A" and s.width < 0.5 and math.dist(s.start, leg.start) < 1e-3
+    ]
+    assert math.dist(long_leg.start, long_leg.end) > 3.3
+    findings = check_netclass_agreement(board, PCB.load(str(board)), _sidecar(board)).violations
+    assert [(v.rule_id, v.nets) for v in findings] == [(RULE_TRACK_WIDTH_MISMATCH, ("PHASE_A",))]
+    assert "narrowest 0.400mm" in findings[0].message
+
+
+def test_recipe_refuses_copper_or_project_outside_the_reviewed_account(staged, tmp_path):
+    build = _load_build()
+
+    board = _copy_stage(staged, tmp_path / "copper")
+    _reset_run_width(board, 0.15)
+    with pytest.raises(RuntimeError, match=r"netclass_track_width_mismatch RESET: .*0\.150mm"):
+        build.declare_router_netclasses(board)
+
+    board = _copy_stage(staged, tmp_path / "project")
+    project_path = board.with_suffix(".kicad_pro")
+    project = json.loads(project_path.read_text())
+    project["net_settings"]["netclass_assignments"]["FUSED"] = ["Digital"]
+    for row in project["net_settings"]["netclass_patterns"]:
+        if row["pattern"] == "FUSED":
+            row["netclass"] = "Digital"
+    project_path.write_text(json.dumps(project, indent=2))
+    with pytest.raises(RuntimeError, match="Net 'FUSED' does not resolve to its reviewed class"):
+        build.verify_router_netclasses(board, build.reviewed_net_class_map(board))
