@@ -1968,34 +1968,55 @@ def _build_graph(
     # A wide round end cap can surround the entire drill without its
     # centreline touching the via. Bind only the landing on this layer.
     # The end must lie inside the via land and leave copper around the bore.
-    # A split inside a straight run is already part of that run. Contracting
-    # an internal vertex with a nearby via would shorten the proven bar.
-    continuations: dict[_Node, list[Segment]] = {}
-    for seg in segments:
+    # A straight run split at vertices is one bar: bind it to a via once, at
+    # the covered point farthest from the bore, so no measured span contracts.
+    # Collinear same-width neighbours sharing an end form one run.
+    run_of = list(range(len(segments)))
+
+    def run_root(i: int) -> int:
+        while run_of[i] != i:
+            run_of[i] = run_of[run_of[i]]
+            i = run_of[i]
+        return i
+
+    at_node: dict[_Node, list[int]] = {}
+    for i, seg in enumerate(segments):
         for end in (seg.start, seg.end):
-            continuations.setdefault(_copper_node(end, seg.layer), []).append(seg)
+            at_node.setdefault(_copper_node(end, seg.layer), []).append(i)
+    for members in at_node.values():
+        for i in members:
+            for j in members:
+                if i < j and segments[i].width == segments[j].width:
+                    overlap = collinear_overlap_length(
+                        segments[i].start,
+                        segments[i].end,
+                        segments[j].start,
+                        segments[j].end,
+                        _PAD_EPS,
+                    )
+                    if overlap is not None and overlap <= _PAD_EPS:
+                        run_of[run_root(i)] = run_root(j)
     offset_ports: set[tuple[_Node, _Node]] = set()
     for via in vias:
-        for seg in segments:
-            if not via_spans_layer(via.layers, seg.layer):
-                continue
-            if point_to_segment_distance(*via.position, *seg.start, *seg.end) <= _VIA_CENTRE_EPS:
+        best: dict[int, tuple[float, _Node]] = {}
+        # A run whose centreline already reaches the via centre is bound there.
+        on_centre = {
+            run_root(i)
+            for i, seg in enumerate(segments)
+            if via_spans_layer(via.layers, seg.layer)
+            and point_to_segment_distance(*via.position, *seg.start, *seg.end) <= _VIA_CENTRE_EPS
+        }
+        for i, seg in enumerate(segments):
+            if not via_spans_layer(via.layers, seg.layer) or run_root(i) in on_centre:
                 continue
             for end in (seg.start, seg.end):
-                if not _via_covered_by_end(via, seg, end):
-                    continue
-                node = _copper_node(end, seg.layer)
-                if any(
-                    other is not seg
-                    and other.width == seg.width
-                    and collinear_overlap_length(
-                        seg.start, seg.end, other.start, other.end, _PAD_EPS
-                    )
-                    == 0
-                    for other in continuations[node]
-                ):
-                    continue
-                offset_ports.add((node, _copper_node(via.position, seg.layer)))
+                if _via_covered_by_end(via, seg, end):
+                    key = (math.dist(end, via.position), _copper_node(end, seg.layer))
+                    root_i = run_root(i)
+                    if root_i not in best or key > best[root_i]:
+                        best[root_i] = key
+        for _, node in best.values():
+            offset_ports.add((node, _copper_node(via.position, node[2])))
 
     for station, _ in row_ports or ():
         contacts[station[2]].add(station[:2])

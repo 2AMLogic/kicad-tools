@@ -824,6 +824,37 @@ class TestPhysicalLayerGraph:
             pcb.add_trace((30, 50.632), (100, 50), width=1, layer="F.Cu", net=net)
             assert resolve_current_path(pcb, _trunk_spec()).status == "ambiguous"
 
+    def _offset_via_pcb(self, end=(60, 50.632), start=(20, 50.632)):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(layers=4)
+        _add_pad_footprint(pcb, ref="J1", x=start[0], y=start[1], net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=100, y=50, net="NET1")
+        pcb.add_trace(start, end, width=2.45, layer="In1.Cu", net="NET1")
+        pcb.add_trace((60, 50), (100, 50), width=1, layer="F.Cu", net="NET1")
+        pcb.add_via(60, 50, size=1.6, drill=0.8, net="NET1")
+        return pcb
+
+    def test_straight_stub_keeps_offset_via_contact(self):
+        pcb = self._offset_via_pcb()
+        pcb.add_trace((60, 50.632), (62, 50.632), width=2.45, layer="In1.Cu", net="NET1")
+        assert resolve_current_path(pcb, _trunk_spec()).status == "resolved"
+        pcb.add_via(30, 50.632, size=1.6, drill=0.8, net="NET1")
+        pcb.add_trace((30, 50.632), (100, 50), width=1, layer="F.Cu", net="NET1")
+        assert resolve_current_path(pcb, _trunk_spec()).status == "ambiguous"
+
+    def test_diagonal_split_keeps_length(self):
+        def length(split):
+            pcb = self._offset_via_pcb(start=(20, 10.632))
+            if split:
+                pcb.segments[0].end = (59.5, 50.132)
+                pcb.add_trace((59.5, 50.132), (60, 50.632), width=2.45, layer="In1.Cu", net="NET1")
+            result = resolve_current_path(pcb, _trunk_spec())
+            assert result.status == "resolved"
+            return result.length_mm
+
+        assert length(True) == pytest.approx(length(False))
+
     def test_interior_via_nearby_is_not_contact(self):
         pcb = self._interior_pcb()
         pcb.vias[0].position = (60, 50.01)
