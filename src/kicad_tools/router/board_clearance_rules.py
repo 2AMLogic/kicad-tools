@@ -340,14 +340,16 @@ def parse_dru(dru_path: str | Path) -> tuple[list[DruRule], str | None]:
     """The gate's rules of a ``.kicad_dru``, in file order, and why it was rejected.
 
     Returns ``(rules, None)`` for a file ``kicad-cli`` accepts, and
-    ``([], reason)`` for one it would discard whole -- a syntax error, or a
-    constraint keyword or severity it does not know (issue #6150).  A
-    missing file gives ``([], None)``.
+    ``([], reason)`` for one it would discard whole -- an unreadable file, a
+    syntax error, or a constraint keyword or severity it does not know
+    (issue #6150).  A missing file gives ``([], None)``.
     """
     try:
         text = Path(dru_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except FileNotFoundError:
         return [], None
+    except OSError as exc:
+        return [], f"it cannot be read ({type(exc).__name__}: {exc})"
     try:
         from kicad_tools.sexp import parse_string
 
@@ -914,13 +916,15 @@ class BoardClearanceRules:
         net_settings = data.get("net_settings")
         if not isinstance(net_settings, dict):
             return
-        for entry in net_settings.get("classes") or []:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            value = _parse_length_mm(entry.get("clearance"))
-            if isinstance(name, str) and name and value is not None and value >= 0:
-                self.class_clearance[name] = value
+        classes = net_settings.get("classes")
+        if isinstance(classes, list):
+            for entry in classes:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                value = _parse_length_mm(entry.get("clearance"))
+                if isinstance(name, str) and name and value is not None and value >= 0:
+                    self.class_clearance[name] = value
         assignments = net_settings.get("netclass_assignments")
         if isinstance(assignments, dict):
             for net, cls_name in assignments.items():
@@ -928,11 +932,13 @@ class BoardClearanceRules:
                     cls_name = cls_name[0] if len(cls_name) == 1 else None
                 if isinstance(net, str) and isinstance(cls_name, str):
                     self.netclass_assignments[net] = cls_name
-        for entry in net_settings.get("netclass_patterns") or []:
-            if isinstance(entry, dict):
-                cls_name, pattern = entry.get("netclass"), entry.get("pattern")
-                if isinstance(cls_name, str) and isinstance(pattern, str) and pattern:
-                    self.netclass_patterns.append((cls_name, pattern))
+        patterns = net_settings.get("netclass_patterns")
+        if isinstance(patterns, list):
+            for entry in patterns:
+                if isinstance(entry, dict):
+                    cls_name, pattern = entry.get("netclass"), entry.get("pattern")
+                    if isinstance(cls_name, str) and isinstance(pattern, str) and pattern:
+                        self.netclass_patterns.append((cls_name, pattern))
 
     # -- netclasses ---------------------------------------------------------
 
@@ -1167,6 +1173,7 @@ PAD_TYPE_NAMES = {
     "smd": "SMD",
     "thru_hole": "Through-hole",
     "np_thru_hole": "NPTH, mechanical",
+    "connect": "Edge connector",
 }
 
 

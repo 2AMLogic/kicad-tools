@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from kicad_tools.manufacturers import DesignRules
 from kicad_tools.pcb.reinforce import reinforce_net
+from kicad_tools.pcb.reinforcement_sidecar import (
+    build_wire_records,
+    load_wires_if_present,
+    write_sidecar,
+)
 from kicad_tools.router.current_paths import CurrentPathSpec, PathEndpoint
 from kicad_tools.schema.pcb import PCB, Footprint, FootprintGraphic, Pad
+from kicad_tools.validate.checker import DRCChecker
 from kicad_tools.validate.rules.reinforcement_courtyard import ReinforcementCourtyardRule
 from tests.test_pcb_reinforce import _add_th_pad_footprint, _straight_run_pcb
 
@@ -487,3 +495,174 @@ def test_reinforce_cli_dry_run_lists_courtyard_refusal(tmp_path, capsys, monkeyp
     assert run_pcb_command(_reinforce_args(path, dry_run=True)) == 0
     text = capsys.readouterr().out
     assert "refused at" in text and "courtyard of U9" in text and "in U9" in text
+
+
+def test_mixed_wire_assembly_checks_actual_wire_and_anchor_bodies():
+    """An eligible path continues from the wired front side on bare back copper."""
+    pcb = PCB.create(width=200, height=100, center=True)
+    assert pcb.board_origin != (0, 0)
+    for ref, (x, y) in (("J1", (20, 50)), ("J2", (120, 50)), ("J3", (99, 70))):
+        _add_th_pad_footprint(pcb, ref=ref, x=x, y=y, net=NET, drill=1, size=2)
+    pcb.add_trace((20, 50), (120, 50), width=2, layer="F.Cu", net=NET)
+    pcb.add_trace((120, 50), (99, 70), width=5.5, layer="B.Cu", net=NET)
+    spec = replace(_spec(), sink=PathEndpoint("J3", "1"))
+    plan = reinforce_net(pcb, NET, design_rules=_rules(), layer="F.Cu", current_paths=[spec])
+    # A drilled center may lie off the trace centerline, within its copper.
+    front_leg = next(leg for leg in plan.legs if leg.layer == "F.Cu")
+    for via, anchor in zip(pcb.vias, front_leg.anchors, strict=True):
+        via.position = (via.position[0], via.position[1] + 0.3)
+        anchor.y += 0.3
+    records = build_wire_records(plan, *pcb.board_origin)
+    assert sorted(r["status"] for r in records) == ["full", "unhandled"]
+    _body(pcb, "COPPER_ONLY", 109.5, 60, side="B", half=0.5)
+    _body(pcb, "OVER_WIRE", 70, 50)
+    _body(pcb, "OVER_TAIL", *pcb.vias[-1].position, side="B", half=0.5)
+    # The declared path returns to the fitted layer on a separate bare leg.
+    _add_th_pad_footprint(pcb, ref="J4", x=70, y=70, net=NET, drill=1, size=2)
+    pcb.add_trace((99, 70), (70, 70), width=5.5, layer="F.Cu", net=NET)
+    spec = replace(spec, sink=PathEndpoint("J4", "1"))
+    _body(pcb, "BARE_FRONT", 85, 70, half=0.5)
+
+    def messages(records):
+        checker = DRCChecker(pcb, current_path_specs=[spec], reinforcement_wires=records)
+        return _msgs(checker.check_wire_run_courtyard_overlap())
+
+    fitted = messages(records)
+    assert all("COPPER_ONLY" not in m and "BARE_FRONT" not in m for m in fitted)
+    assert any("[run]" in m and "F.Cu" in m and "OVER_WIRE" in m for m in fitted)
+    assert any("[end hole]" in m and "OVER_TAIL" in m and "opposite" in m for m in fitted)
+    assert not any("[run]" in m and "OVER_TAIL" in m for m in fitted)
+    assert any("COPPER_ONLY" in m for m in messages([]))
+    for record in records:
+        for point in record["anchors"]:
+            point["y"] -= 0.3
+    assert any("COPPER_ONLY" in m for m in messages(records))
+
+
+@pytest.mark.parametrize("wire", ["absent", "current", "stale", "unrecorded", "mask_gap"])
+def test_parallel_copper_checks_only_a_fitted_wire(wire):
+    pcb = _bare_board()
+    spec = _spec()
+    wires = []
+    if wire != "absent":
+        wire_plan = reinforce_net(pcb, NET, current_paths=[spec], strategy="wire")
+        wires = build_wire_records(wire_plan, *pcb.board_origin)
+        assert [w["status"] for w in wires] == ["full"]
+    plan = reinforce_net(pcb, NET, current_paths=[spec], strategy="parallel")
+    records = build_wire_records(plan, *pcb.board_origin)
+    assert any(r["copy_status"] == "placed" for r in records)
+    for side in ("F", "B"):
+        _body(pcb, f"OVER_{side}", 70, 50, side=side)
+    if wire != "absent":
+        anchor = wires[0]["anchors"][0]
+        _body(pcb, "FILLET", anchor["x"], anchor["y"], side="B", half=0.5)
+    if wire == "stale":
+        wires[0]["anchors"][0]["y"] += 0.5
+    elif wire == "unrecorded":
+        wires.clear()
+    elif wire == "mask_gap":
+        strip = next(g for g in pcb.graphic_lines if g.layer == "F.Mask")
+        strip.end = (strip.end[0] - 1, strip.end[1])
+    checker = DRCChecker(pcb, current_path_specs=[spec], reinforcement_wires=records + wires)
+    messages = _msgs(checker.check_wire_run_courtyard_overlap())
+    if wire != "absent":
+        assert any("[run]" in m and "OVER_F" in m for m in messages)
+        assert not any("OVER_B" in m for m in messages)
+        assert any("[end hole]" in m and "FILLET" in m and "opposite" in m for m in messages)
+    else:
+        assert messages == []
+    incomplete = _msgs(checker.check_reinforcement_incomplete())
+    if wire == "mask_gap":
+        assert any("[b]" in m for m in incomplete)
+    else:
+        assert incomplete == []
+
+
+@pytest.mark.parametrize(
+    ("has_record", "malformed"),
+    [(True, []), (True, [None, "invalid"]), (False, ["invalid"])],
+    ids=["recorded", "mixed-records", "malformed-only"],
+)
+def test_recorded_wire_leaves_bare_copper_between_hole_and_terminal(has_record, malformed):
+    pcb = _bare_board()
+    result = reinforce_net(pcb, NET, design_rules=_rules(), end_offset_mm=12)
+    assert result.placed_count == 2
+    ends = [{"x": a.x, "y": a.y} for a in result.legs[0].anchors]
+    assert min(p["x"] for p in ends) > 29
+    _body(pcb, "BARE_STUB", 24, 50, half=0.5)
+    _body(pcb, "OVER_WIRE", 60, 50)
+    wires = list(malformed)
+    if has_record:
+        wires.append({"net": NET, "layer": "F.Cu", "status": "full", "anchors": ends})
+    rule = ReinforcementCourtyardRule(specs=[_spec()], wires=wires, end_offset_mm=12)
+    messages = _msgs(rule.check(pcb, _rules()))
+    assert any("BARE_STUB" in m for m in messages) == (not has_record)
+    assert any("OVER_WIRE" in m for m in messages)
+
+
+def test_fitted_wire_follows_bend_and_clears_its_chord():
+    pcb = PCB.create(width=130, height=80, center=False)
+    for ref, x, y in [("J1", 20, 20), ("J2", 100, 60)]:
+        _add_th_pad_footprint(pcb, ref=ref, x=x, y=y, net=NET, drill=1, size=2)
+    pcb.add_trace((20, 20), (100, 20), width=2, layer="B.Cu", net=NET)
+    pcb.add_trace((100, 20), (100, 60), width=2, layer="B.Cu", net=NET)
+    plan = reinforce_net(pcb, NET, current_paths=[_spec()])
+    records = build_wire_records(plan, *pcb.board_origin)
+    assert len(records) == 1 and records[0]["status"] == "full"
+    _body(pcb, "BEND", 100, 20, side="B")
+    _body(pcb, "CHORD", 60, 40, side="B")
+    _add_th_pad_footprint(pcb, ref="PIN", x=100, y=40, net="OTHER", drill=1, size=2)
+    checker = DRCChecker(pcb, current_path_specs=[_spec()], reinforcement_wires=records)
+    messages = _msgs(checker.check_wire_run_courtyard_overlap())
+    assert any("[run]" in m and "BEND" in m for m in messages)
+    assert any("[run]" in m and "foreign-net pin 1 of PIN" in m for m in messages)
+    assert not any("CHORD" in m for m in messages)
+
+
+def test_adopted_wire_sidecar_checks_same_span_as_planned_wire(tmp_path):
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from tests.test_pcb_reinforce import _reinforce_args
+
+    pcb = _bare_board()
+    pcb.add_trace((120, 50), (120, 80), width=5.5, layer="B.Cu", net=NET)
+    path = tmp_path / "planned.kicad_pcb"
+    plan = reinforce_net(pcb, NET, layer="F.Cu")
+    pcb.save(path)
+    write_sidecar(path, build_wire_records(plan, *pcb.board_origin))
+    adopted = tmp_path / "adopted.kicad_pcb"
+    adopted.write_bytes(path.read_bytes())
+    assert run_pcb_command(_reinforce_args(adopted, adopt=True)) == 0
+    assert adopted.read_bytes() == path.read_bytes()
+
+    pcb = PCB.load(path)
+    # The test terminal footprints are in-memory fixtures.
+    for ref, x, y in [("J1", 20, 50), ("J2", 120, 50), ("J3", 120, 80)]:
+        _add_th_pad_footprint(pcb, ref=ref, x=x, y=y, net=NET, drill=1, size=2)
+    spec = replace(_spec(), sink=PathEndpoint("J3", "1"))
+    _body(pcb, "WIRE", 70, 50)
+    _body(pcb, "BARE", 120, 65, side="B")
+    for board, status in [(path, "full"), (adopted, "adopted")]:
+        records = load_wires_if_present(board)
+        assert any(r["status"] == status for r in records)
+        checker = DRCChecker(pcb, current_path_specs=[spec], reinforcement_wires=records)
+        messages = _msgs(checker.check_wire_run_courtyard_overlap())
+        assert any("[run]" in m and "WIRE" in m for m in messages)
+        assert not any("BARE" in m for m in messages)
+
+
+def test_recorded_anchor_also_serves_as_layer_change():
+    pcb = _bare_board()
+    plan = reinforce_net(pcb, NET, layer="F.Cu")
+    records = build_wire_records(plan, *pcb.board_origin)
+    x, y = pcb.vias[-1].position
+    _add_th_pad_footprint(pcb, ref="J3", x=x, y=80, net=NET, drill=1, size=2)
+    pcb.add_trace((x, y), (x, 80), width=5.5, layer="B.Cu", net=NET)
+    spec = replace(_spec(), sink=PathEndpoint("J3", "1"))
+    _body(pcb, "WIRE", 70, 50)
+    _body(pcb, "FILLET", x, y, side="B", half=0.5)
+    _body(pcb, "BARE", x, 65, side="B", half=0.5)
+    checker = DRCChecker(pcb, current_path_specs=[spec], reinforcement_wires=records)
+    messages = _msgs(checker.check_wire_run_courtyard_overlap())
+    assert any("[run]" in m and "F.Cu" in m and "WIRE" in m for m in messages)
+    assert any("[end hole]" in m and "opposite" in m and "FILLET" in m for m in messages)
+    assert not any("[run]" in m and "B.Cu" in m for m in messages)
