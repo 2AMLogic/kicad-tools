@@ -52,7 +52,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ManufacturingConfig(AssemblyConfig):
-    """Configuration for manufacturing package generation."""
+    """Configuration for manufacturing package generation.
+
+    ``via_land_overlap`` opts the export into the ``via_land_overlap`` preflight
+    measurement of the shipped archive (``kct export --via-land-overlap``, Issue
+    #10357); it is off by default.
+    """
 
     # Report settings
     include_report: bool = True
@@ -124,6 +129,8 @@ class ManufacturingConfig(AssemblyConfig):
     silk_fix: bool = True
     # Readiness resolves the source boundary before it stages the editable project.
     project_root: Path | None = None
+
+    via_land_overlap: bool = False
 
 
 @dataclass
@@ -1247,6 +1254,7 @@ class ManufacturingPackage:
         self.pcb_path = Path(pcb_path)
         # Live board path while ``pcb_path`` points at a staged copy (#10091).
         self._live_pcb_path: Path | None = None
+        self._pending_mutation_notices: list[tuple[int, str]] = []
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.config = config or ManufacturingConfig()
@@ -1317,6 +1325,7 @@ class ManufacturingPackage:
         # runs them on a scratch copy and publishes only on success, so a
         # refused repair leaves the board and its siblings untouched (#10091).
         staged: _StagedSource | None = None
+        self._pending_mutation_notices = []
         live_pcb = self.pcb_path
         if (
             self.config.emit_drc_constraints
@@ -1362,6 +1371,10 @@ class ManufacturingPackage:
                         live_pcb.with_name(Path(os.path.relpath(q, staged_dir)).name)
                         for q in result.drc_constraint_paths
                     ]
+                    # The staged changes are now the live files: report them.
+                    for level, message in self._pending_mutation_notices:
+                        logger.log(level, message)
+                        result.warnings.append(message)
             finally:
                 staged.close()
         if not proceed:
@@ -1495,6 +1508,9 @@ class ManufacturingPackage:
         # Step 1.6: measure the Gerber archive that will ship (Issue #10422),
         # before the report, README and manifest are written from it.
         self._measure_reinforcement_clearance(result)
+
+        if self.config.via_land_overlap:
+            self._measure_via_land_overlap(result)
 
         # Step 2: Report (optional)
         if self.config.include_report:
@@ -1941,6 +1957,53 @@ class ManufacturingPackage:
         result.reinforcement_clearance = report.to_dict()
         result.preflight_results.append(report.preflight_result())
 
+    def _measure_via_land_overlap(self, result: ManufacturingResult) -> None:
+        """Measure the shipped archive's plated via drills against same-face SMD lands.
+
+        Opt-in through ``ManufacturingConfig.via_land_overlap`` (Issue #10357).
+        Runs once the archive exists and before the report and the manifest
+        read ``preflight_results``. A missing or unreadable archive, or a
+        failure of the measurement itself, is recorded as partial coverage and
+        never blocks the export.
+        """
+        from ..manufacturers import get_fab_family
+        from ..schema.pcb import PCB
+        from .assembly import plot_use_aux_origin
+        from .via_land_overlap import measure_via_land_overlap, unmeasured_via_land_overlap
+
+        assembly = result.assembly_result
+        archive = Path(assembly.gerber_path) if assembly and assembly.gerber_path else None
+        name = result.bundle_relpath(archive) if archive is not None else None
+        use_aux_origin = plot_use_aux_origin(get_fab_family(self.manufacturer), self.config)
+        sha256: str | None = None
+
+        def unmeasured(reason: str) -> PreflightResult:
+            return unmeasured_via_land_overlap(
+                [reason], archive=name, archive_sha256=sha256, use_aux_origin=use_aux_origin
+            )
+
+        if archive is None or not archive.is_file():
+            result.preflight_results.append(unmeasured("archive_missing"))
+            return
+        try:
+            sha256 = _sha256_file(archive)
+            with zipfile.ZipFile(archive) as opened:
+                measurement = measure_via_land_overlap(
+                    PCB.load(str(self.pcb_path)),
+                    opened,
+                    use_aux_origin=use_aux_origin,
+                    fabrication_process=result.fabrication_process,
+                    archive_name=name,
+                    archive_sha256=sha256,
+                )
+        except (zipfile.BadZipFile, OSError) as exc:
+            logger.warning("Via land overlap: archive %s is unreadable: %s", archive, exc)
+            measurement = unmeasured("archive_unreadable")
+        except Exception as exc:
+            logger.exception("Via land overlap measurement failed")
+            measurement = unmeasured(f"measurement_failed:{type(exc).__name__}")
+        result.preflight_results.append(measurement)
+
     def _check_drc_safety_floor(self, result: ManufacturingResult) -> None:
         """Hard-abort export on net shorts / connectivity errors.
 
@@ -2199,11 +2262,32 @@ class ManufacturingPackage:
                 logger.info(fab_override_msg)
 
         rules = self._apply_stackup_copper(rules)
+
+        unreadable = object()
+
+        def existing_bytes(path: Path):
+            # Bytes, not text: read_text() normalizes line endings and would
+            # hide a rewrite that only changed them. A file that exists but
+            # cannot be read is not "absent": the writer regenerates it.
+            try:
+                return path.read_bytes()
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return unreadable if path.exists() else None
+
+        def stat_sig(path: Path):
+            try:
+                st = path.stat()
+            except OSError:
+                return None
+            return (st.st_mtime_ns, st.st_size)
+
         dru_path = Path(self.pcb_path).with_suffix(".kicad_dru")
-        try:
-            dru_text_before = dru_path.read_text(encoding="utf-8")
-        except OSError:
-            dru_text_before = None
+        pro_path = Path(self.pcb_path).with_suffix(".kicad_pro")
+        dru_bytes_before = existing_bytes(dru_path)
+        pro_bytes_before = existing_bytes(pro_path)
+        sig_before = {dru_path: stat_sig(dru_path), pro_path: stat_sig(pro_path)}
         dru_before = self._ampacity_block(dru_path)
 
         max_width_mm: float | None = None
@@ -2213,7 +2297,11 @@ class ManufacturingPackage:
         else:
             from ..manufacturers.attach_zone_dru import has_designer_clearance_rule
 
-            if has_designer_clearance_rule(dru_text_before):
+            if has_designer_clearance_rule(
+                dru_bytes_before.decode("utf-8", errors="replace")
+                if isinstance(dru_bytes_before, bytes)
+                else None
+            ):
                 result.warnings.append(
                     f"Skipped ampacity rules: {dru_path.name} carries the designer's own "
                     "clearance rules and was not extended with track_width floors."
@@ -2237,6 +2325,40 @@ class ManufacturingPackage:
             )
             return
 
+        # #8612: the designer owns these files; say so whenever export rewrote
+        # one. Runs on the write-error path too: the project is saved before
+        # the DRU, so a failed DRU write can still have changed the project.
+        # Notices from a scratch copy (named-stackup staging) are held back
+        # until the staged files are published to the live ones.
+        def note(text: str, level: int = logging.INFO) -> None:
+            if self._live_pcb_path is not None:
+                self._pending_mutation_notices.append((level, text))
+            else:
+                logger.log(level, text)
+                result.warnings.append(text)
+
+        def report_rewrites() -> None:
+            for path, before, reason in (
+                (dru_path, dru_bytes_before, "generated DRC rules"),
+                (pro_path, pro_bytes_before, "project DRC settings"),
+            ):
+                after = existing_bytes(path)
+                if before is unreadable and stat_sig(path) not in (None, sig_before[path]):
+                    msg = (
+                        f"Export replaced {path.name} ({reason}); its prior contents "
+                        "could not be read, so the changes could not be compared."
+                    )
+                elif isinstance(before, bytes) and isinstance(after, bytes) and before != after:
+                    msg = f"Export modified {path.name} ({reason})."
+                else:
+                    continue
+                if path == pro_path:
+                    msg += (
+                        f" Re-run `kicad-cli pcb drc` on {Path(self.pcb_path).name} "
+                        "with the packaged project settings."
+                    )
+                note(msg)
+
         try:
             written = write_drc_constraints(
                 self.pcb_path,
@@ -2250,6 +2372,7 @@ class ManufacturingPackage:
         except OSError as e:
             logger.warning("Could not write DRC-constraint files: %s", e)
             result.warnings.append(f"Could not write DRC constraints: {e}")
+            report_rewrites()
             return
 
         result.drc_constraint_paths = written
@@ -2263,22 +2386,9 @@ class ManufacturingPackage:
                 "sign-off DRC did not run against them. Re-run "
                 "`kicad-cli pcb drc` against the shipped .kicad_dru."
             )
-            logger.warning(msg)
-            result.warnings.append(msg)
+            note(msg, logging.WARNING)
 
-        # #8612: the designer owns this file; say so whenever export rewrote it.
-        try:
-            dru_text_after = dru_path.read_text(encoding="utf-8")
-        except OSError:
-            dru_text_after = None
-        if (
-            dru_text_before is not None
-            and dru_text_after is not None
-            and dru_text_after != dru_text_before
-        ):
-            note = f"Export modified {dru_path.name} (generated DRC rules)."
-            logger.info(note)
-            result.warnings.append(note)
+        report_rewrites()
 
     def _dry_run_write_drc_constraints(
         self,
