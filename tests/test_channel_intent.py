@@ -243,3 +243,37 @@ def test_swapped_placement_references_match_native_export(bank, capsys, tmp_path
     assert direct
     # Drop the source label: the same defects are reported against either input.
     assert [r[:2] + r[3:] for r in direct] == [r[:2] + r[3:] for r in exported]
+
+
+def _add_second_project_block(sch, *, last):
+    """Add a ``second_project`` annotation with R327/R427 exchanged on the shared path."""
+    text = sch.read_text()
+    path = "/00000000-0000-0000-0000-000000000001"
+    for own, other in (("R327", "R427"), ("R427", "R327")):
+        old = f'(instances (project "bank" (path "{path}" (reference "{own}") (unit 1))))'
+        extra = f'(project "second_project" (path "{path}" (reference "{other}") (unit 1)))'
+        assert old in text
+        new = (
+            f'(instances (project "bank" (path "{path}" (reference "{own}") (unit 1))) {extra})'
+            if last
+            else f'(instances {extra} (project "bank" (path "{path}" (reference "{own}") (unit 1))))'
+        )
+        text = text.replace(old, new)
+    sch.write_text(text)
+
+
+def test_conflicting_placement_annotations_last_one_wins(bank, capsys):
+    """With a shared path the last annotation is selected, as a native export does."""
+    sch = bank / "bank.kicad_sch"
+    original = sch.read_text()
+
+    # Original annotation last: a leading foreign block must not rename anything.
+    _add_second_project_block(sch, last=False)
+    assert check(bank, "kicad_sch", capsys, 0) == []
+
+    # Foreign annotation last: it is the selected placement, so the dividers read swapped.
+    sch.write_text(original)
+    _add_second_project_block(sch, last=True)
+    findings = check(bank, "kicad_sch", capsys, 1)
+    assert {row[1] for row in findings} == {"R327", "R427"}
+    assert len(findings) == 6

@@ -425,14 +425,20 @@ def _instance_reference_map(visit: _SheetVisit) -> dict[str, str]:
                 break
         if not prop_ref:
             continue
+        # Several annotations can share one path (e.g. another project's block).
+        # A native export honours the last one, so a later annotation equal to
+        # the displayed reference must cancel an earlier rename.
+        selected: str | None = None
         for project in instances.find_all("project"):
             for path_node in project.find_all("path"):
                 if path_node.get_string(0) != visit.uuid_path:
                     continue
                 ref_node = path_node.find("reference")
                 inst_ref = ref_node.get_string(0) if ref_node is not None else None
-                if inst_ref and inst_ref != prop_ref:
-                    renames[prop_ref] = inst_ref
+                if inst_ref:
+                    selected = inst_ref
+        if selected and selected != prop_ref:
+            renames[prop_ref] = selected
     return renames
 
 
