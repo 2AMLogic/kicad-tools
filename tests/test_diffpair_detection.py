@@ -30,6 +30,7 @@ from kicad_tools.router.diffpair import (
 )
 from kicad_tools.router.diffpair_detection import (
     DetectionSource,
+    coupled_engaged_pairs,
     detect_diff_pairs,
     parse_diff_pair_templates_from_pcb,
 )
@@ -139,6 +140,64 @@ class TestSingleEndedRefusal:
 
 
 class TestPowerRailFilter:
+    def test_hierarchical_power_rail_names(self):
+        assert not detect_diff_pairs({1: "/reg/VCC_POS", 2: "/reg/VCC_NEG"})
+        pairs = detect_diff_pairs({1: "/clock/CLK_POS", 2: "/clock/CLK_NEG", 3: "/other/CLK_NEG"})
+        assert [(p.pair.positive.net_name, p.pair.negative.net_name) for p in pairs] == [
+            ("/clock/CLK_POS", "/clock/CLK_NEG")
+        ]
+
+    @pytest.mark.parametrize("lookup", ["per_net", "by_class", "names_only"])
+    def test_declared_power_terminals(self, lookup):
+        names = {1: "/BANK_POS", 2: "/BANK_NEG"}
+        classes = dict.fromkeys(names.values(), "Power")
+        power = NetClassRouting(name="Power")
+        routing = {
+            "by_class": {"Power": power},
+            "per_net": dict.fromkeys(names.values(), power),
+            "names_only": {},
+        }[lookup]
+        assert not detect_diff_pairs(names, net_class_routing=routing, net_to_class=classes)
+        result = detect_diff_pairs(
+            names,
+            net_class_routing=routing,
+            net_to_class=classes,
+            kicad_groups=[("/BANK_POS", "/BANK_NEG")],
+        )
+        assert [p.source for p in result] == [DetectionSource.KICAD_GROUP]
+
+    @pytest.mark.parametrize(
+        "intent",
+        [{"coupled_routing": True}, {"target_diff_impedance": 90.0}, {"skew_tolerance_mm": 0.0}],
+    )
+    @pytest.mark.parametrize("base", ["/BANK", "/scope/VCC"])
+    def test_power_class_explicit_pair_settings(self, intent, base):
+        names = {1: f"{base}_POS", 2: f"{base}_NEG"}
+        routing = {
+            names[1]: NetClassRouting(name="Power", **intent),
+            names[2]: NetClassRouting(name="Power"),
+        }
+        pairs = detect_diff_pairs(names, net_class_routing=routing)
+        assert [p.source for p in pairs] == [DetectionSource.SUFFIX]
+
+    def test_hierarchical_supply_pair_engages_when_coupled(self):
+        names = ("/scope/VCC_POS", "/scope/VCC_NEG")
+        routing = dict.fromkeys(names, NetClassRouting(name="Power", coupled_routing=True))
+        assert coupled_engaged_pairs(list(names), routing) == [names]
+
+    def test_declared_power_partner_overrides_suffix_refusal(self):
+        nets = {1: "/BANK_POS", 2: "/BANK_NEG"}
+        routing = {"/BANK_POS": NetClassRouting(name="Power", diffpair_partner="/BANK_NEG")}
+        pairs = detect_diff_pairs(
+            nets, net_class_routing=routing, net_to_class=dict.fromkeys(nets.values(), "Power")
+        )
+        assert [p.source for p in pairs] == [DetectionSource.EXPLICIT]
+
+    def test_pn_signal_notation_keeps_existing_inference(self):
+        nets = {1: "/CLK_P", 2: "/CLK_N"}
+        pairs = detect_diff_pairs(nets, net_to_class=dict.fromkeys(nets.values(), "Power"))
+        assert [p.source for p in pairs] == [DetectionSource.SUFFIX]
+
     def test_vcc_neg_not_a_pair(self):
         # VCC_NEG matches the POS/NEG suffix structurally but is a
         # power-rail name -- must not be pairable.
