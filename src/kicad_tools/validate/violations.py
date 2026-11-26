@@ -81,7 +81,7 @@ class DRCViolation:
     # fix-drc repair guard can compare the same copper across a move (Issue
     # #9424).  Never part of :attr:`key` -- ``items`` alone feeds waiver and
     # ``--diff`` identity, and UUIDs there would break existing waivers.
-    witnesses: tuple[str, ...] = ()
+    witnesses: tuple[str, ...] = field(default=(), kw_only=True)
     # Issue #8938: True when every side of the finding sits on one net (a
     # same-net slit).  The fab cannot see nets and fails the board on such a
     # gap regardless, so the gap is still severity-graded -- this flag only

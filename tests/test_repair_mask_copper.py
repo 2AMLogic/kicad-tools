@@ -4233,3 +4233,98 @@ def test_copper_witnesses_do_not_change_public_finding_keys(tmp_path):
     assert first and [v.key for v in first] == [v.key for v in second]
     assert all("old-" not in v.key for v in first)
     assert [v.witnesses for v in first] != [v.witnesses for v in second]
+
+
+def _run_guard_with_rule(monkeypatch, board, target, check):
+    from kicad_tools.drc.compat import drc_results_to_report
+    from kicad_tools.schema.pcb import PCB
+
+    original = board.read_bytes()
+    seen = []
+
+    def assess(path, **kwargs):
+        report = drc_results_to_report(check(PCB.load(path)), path)
+        seen.append(report.violations.copy())
+        report.mask_copper_assessments = [MaskCopperAssessment(coverage="complete")]
+        if path.read_bytes() == original:
+            report.violations.append(target)
+        return report
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    fix_drc_cmd.main(
+        [
+            str(board),
+            "--only",
+            "mask-copper",
+            "--no-new-warnings",
+            "--max-displacement",
+            "1.1",
+            "--margin",
+            ".45",
+            "--mfr",
+            "jlcpcb",
+        ]
+    )
+    return seen
+
+
+def test_guard_reverts_gap_against_different_stationary_track(tmp_path, monkeypatch):
+    from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap
+
+    board = _board(
+        tmp_path,
+        "\n".join(
+            [
+                PASS,
+                _seg("old", (97, 100.855), (98, 100.855), width=0.1),
+                _seg("new", (97, 101.375), (98, 101.375), width=0.1),
+            ]
+        ),
+    )
+    original = board.read_bytes()
+    seen = _run_guard_with_rule(
+        monkeypatch, board, _pt_finding("trk-p"), lambda pcb: check_physical_copper_gap(pcb, 0.1)
+    )
+    assert any(v.witnesses == ["old", "trk-p"] for v in seen[0])
+    assert any(v.witnesses == ["new", "trk-p"] for findings in seen for v in findings)
+    assert board.read_bytes() == original
+
+
+def test_guard_keeps_split_with_existing_dangling_end(tmp_path, monkeypatch):
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.validate.rules.dangling_copper import DanglingCopperRule
+
+    board = _board(tmp_path, ENTRY)
+    rules = get_profile("jlcpcb").get_design_rules(2)
+    seen = _run_guard_with_rule(
+        monkeypatch, board, _finding("trk-a"), lambda pcb: DanglingCopperRule().check(pcb, rules)
+    )
+    (before,) = seen[0]
+    (after,) = seen[-1]
+    assert before.items != after.items
+    assert before.locations == after.locations
+    assert _end(board, "trk-a")[1] == (100, 100)
+
+
+def test_violation_positional_constructors_preserve_fields():
+    from kicad_tools.validate.violations import DRCViolation as ValidationViolation
+
+    validation = ValidationViolation(
+        "physical_copper_gap", "error", "", None, None, 0.15, 0.25, (), (), True
+    )
+    assert validation.same_net is True
+    assert validation.to_dict()["witnesses"] == []
+    report = DRCViolation(
+        ViolationType.PHYSICAL_COPPER_GAP,
+        "physical_copper_gap",
+        Severity.ERROR,
+        "",
+        "",
+        [],
+        [],
+        [],
+        [],
+        0.25,
+        0.15,
+    )
+    assert (report.required_value_mm, report.actual_value_mm) == (0.25, 0.15)

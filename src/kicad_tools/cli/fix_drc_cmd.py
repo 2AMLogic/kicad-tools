@@ -1355,11 +1355,12 @@ def _run_single_pass(
 _MASK_RULE_TYPES = (ViolationType.MASK_TO_COPPER, ViolationType.MASK_TO_COPPER_INCOMPLETE)
 
 
-def _error_class(v: DRCViolation) -> tuple:
+def _error_class(v: DRCViolation, split_parents: dict[str, str]) -> tuple:
     """Group topology findings by witness and clearance findings by net pair."""
     key = (v.type_str, tuple(sorted(v.nets)))
     if v.type_str.startswith("redundant_copper_") or v.type_str in {
         "pour_slot",
+        "physical_copper_gap",
         "track_dangling",
         "via_dangling",
         "isolated_copper",
@@ -1368,6 +1369,8 @@ def _error_class(v: DRCViolation) -> tuple:
         # Older and net-only reports have only the location to identify the witness.
         witness = v.witnesses or [item for item in v.items if not item.startswith("net:")]
         if witness:
+            if v.type_str in {"track_dangling", "physical_copper_gap"}:
+                witness = [split_parents.get(item, item) for item in witness]
             return (*key, tuple(sorted(witness)), tuple(loc.layer for loc in v.locations))
         return (*key, tuple((loc.layer, loc.x_mm, loc.y_mm) for loc in v.locations))
     # Clearance reports name tracks by geometry, which changes with the move.
@@ -1378,6 +1381,7 @@ def _new_errors(
     after: list[DRCViolation],
     baseline: list[DRCViolation],
     tolerance_mm: float,
+    split_parents: dict[str, str],
 ) -> list[DRCViolation]:
     """After-run errors with no baseline counterpart of the same class nearby.
 
@@ -1389,11 +1393,11 @@ def _new_errors(
     """
     remaining: dict[tuple, list[DRCViolation]] = {}
     for v in baseline:
-        remaining.setdefault(_error_class(v), []).append(v)
+        remaining.setdefault(_error_class(v, {}), []).append(v)
     new: list[DRCViolation] = []
     # Match errors first so a warning cannot consume the only baseline error.
     for v in sorted(after, key=lambda finding: not finding.is_error):
-        bucket = remaining.get(_error_class(v), [])
+        bucket = remaining.get(_error_class(v, split_parents), [])
         eligible = ((i, b) for i, b in enumerate(bucket) if not v.is_error or b.is_error)
         if not v.locations:
             # Unlocatable: only an equally unlocatable baseline error of the
@@ -1491,7 +1495,11 @@ def _moves_with_new_errors(
     # run or undo leaves ``baseline_errors`` empty, so every candidate reads
     # as new and the moves revert: fail closed.
     tolerance_mm = max(a.displacement_mm for a in actions) + 0.1
-    new_errors = _new_errors(candidates, baseline_errors, tolerance_mm)
+    split_parents: dict[str, str] = {}
+    for action in actions:
+        for bend in action.bends:
+            split_parents[bend.added_uuid] = split_parents.get(bend.uuid, bend.uuid)
+    new_errors = _new_errors(candidates, baseline_errors, tolerance_mm, split_parents)
     if not new_errors:
         return set()
 
