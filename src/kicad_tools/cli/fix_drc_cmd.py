@@ -1366,8 +1366,9 @@ def _error_class(v: DRCViolation) -> tuple:
     }:
         # Distinguish nearby traces even when both fit inside the move tolerance.
         # Older and net-only reports have only the location to identify the witness.
-        if any(not item.startswith("net:") for item in v.items):
-            return (*key, tuple(sorted(v.items)), tuple(loc.layer for loc in v.locations))
+        witness = v.witnesses or [item for item in v.items if not item.startswith("net:")]
+        if witness:
+            return (*key, tuple(sorted(witness)), tuple(loc.layer for loc in v.locations))
         return (*key, tuple((loc.layer, loc.x_mm, loc.y_mm) for loc in v.locations))
     # Clearance reports name tracks by geometry, which changes with the move.
     return key

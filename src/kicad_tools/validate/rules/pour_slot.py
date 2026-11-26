@@ -162,7 +162,7 @@ class PourSlotRule(DRCRule):
             layer=pair.layer,
             actual_value=pair.gap,
             required_value=pair.threshold,
-            items=(segment_witness(a, origin), segment_witness(b, origin)),
+            witnesses=(segment_witness(a, origin), segment_witness(b, origin)),
             nets=(na, nb),
         )
 

@@ -637,7 +637,7 @@ def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_co
         results = RedundantCopperRule().check(pcb, get_profile("jlcpcb").get_design_rules(2))
         report = drc_results_to_report(results, path)
         covered.append(
-            [v.items for v in report.violations if v.type_str == "redundant_copper_covered"]
+            [v.witnesses for v in report.violations if v.type_str == "redundant_copper_covered"]
         )
         report.mask_copper_assessments = [MaskCopperAssessment(coverage="complete")]
         if _end(path, "trk-a")[1] == (100.7, 100.3):
@@ -4211,3 +4211,25 @@ def test_direct_pad_via_veto_preserves_the_copper(tmp_path, obstacle):
     result = repairer.repair([_bonded_via_finding()], **opts)
     assert not result.actions and not repairer.modified
     assert result.unrepaired and board.read_bytes() == before
+
+
+def test_copper_witnesses_do_not_change_public_finding_keys(tmp_path):
+    """Regenerated UUIDs keep the same finding key (waivers keep matching)."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+    def covered(uuid: str):
+        copper = "\n".join(
+            [_seg("big", (95.0, 100.3), (100.7, 100.3)), _seg(uuid, (99.74, 100.3), (99.84, 100.3))]
+        )
+        board = _board(tmp_path / uuid, copper)
+        results = RedundantCopperRule().check(
+            PCB.load(board), get_profile("jlcpcb").get_design_rules(2)
+        )
+        return [v for v in results.violations if v.rule_id == "redundant_copper_covered"]
+
+    first, second = covered("old-a"), covered("old-b")
+    assert first and [v.key for v in first] == [v.key for v in second]
+    assert all("old-" not in v.key for v in first)
+    assert [v.witnesses for v in first] != [v.witnesses for v in second]

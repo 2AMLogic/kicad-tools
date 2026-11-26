@@ -733,10 +733,8 @@ class DanglingCopperRule(DRCRule):
                     layer=top,
                     actual_value=float(bonded_layers),
                     required_value=float(_VIA_MIN_BONDED_LAYERS),
-                    items=(
-                        getattr(via, "uuid", "") or via_ref(via, board_origin(pcb)),
-                        f"net:{net_label}",
-                    ),
+                    items=(f"net:{net_label}",),
+                    witnesses=(getattr(via, "uuid", "") or via_ref(via, board_origin(pcb)),),
                     nets=(net_label,),
                 )
             )

@@ -530,6 +530,7 @@ def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
             locations=locations,
             items=items,
             nets=[str(n) for n in item.get("nets", [])],
+            witnesses=[str(w) for w in item.get("witnesses", [])],
             required_value_mm=item.get("required_value"),
             actual_value_mm=item.get("actual_value"),
         )

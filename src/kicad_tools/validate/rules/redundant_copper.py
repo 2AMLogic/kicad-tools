@@ -328,7 +328,7 @@ class RedundantCopperRule(DRCRule):
                     ),
                     location=seg.start,
                     layer=seg.layer,
-                    items=(segment_witness(seg, self._origin),),
+                    witnesses=(segment_witness(seg, self._origin),),
                     nets=(label,),
                 )
             )
@@ -360,7 +360,7 @@ class RedundantCopperRule(DRCRule):
                             ),
                             location=seg.start,
                             layer=seg.layer,
-                            items=(segment_witness(seg, self._origin),),
+                            witnesses=(segment_witness(seg, self._origin),),
                             nets=(label,),
                         )
                     )
@@ -511,7 +511,7 @@ class RedundantCopperRule(DRCRule):
                         layer=layer,
                         actual_value=float(len(run)),
                         required_value=float(FRAGMENT_RUN_MIN - 1),
-                        items=tuple(segment_witness(s, self._origin) for s in run),
+                        witnesses=tuple(segment_witness(s, self._origin) for s in run),
                         nets=(label,),
                     )
                 )
@@ -536,7 +536,7 @@ class RedundantCopperRule(DRCRule):
                         layer=layer,
                         actual_value=ratio,
                         required_value=DETOUR_RATIO,
-                        items=tuple(segment_witness(s, self._origin) for s, _, _ in chain),
+                        witnesses=tuple(segment_witness(s, self._origin) for s, _, _ in chain),
                         nets=(label,),
                     )
                 )
@@ -889,7 +889,7 @@ class RedundantCopperRule(DRCRule):
                     layer=layer,
                     actual_value=float(bends),
                     required_value=float(new_bends),
-                    items=tuple(segment_witness(s, self._origin) for s in chain_segments),
+                    witnesses=tuple(segment_witness(s, self._origin) for s in chain_segments),
                     nets=(label,),
                 )
             )
@@ -954,7 +954,7 @@ class RedundantCopperRule(DRCRule):
                             location=end,
                             layer=seg.layer,
                             actual_value=d,
-                            items=(
+                            witnesses=(
                                 segment_witness(seg, self._origin),
                                 getattr(via, "uuid", "") or via_ref(via, self._origin),
                             ),
