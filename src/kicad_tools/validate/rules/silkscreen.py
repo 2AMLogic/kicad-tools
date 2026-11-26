@@ -32,6 +32,7 @@ import fnmatch
 import math
 import re
 import sys
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -1250,6 +1251,7 @@ def _iter_silk_geometries(
 
 def _iter_silk_elements(
     pcb: PCB,
+    radial_marks: dict[int, set[object]] | None = None,
 ) -> Iterator[tuple[str, _Geometry, str, tuple[float, float], str, str, str]]:
     """Yield ``(side, geom, label, location, layer, uuid, item)`` for every silk element.
 
@@ -1291,7 +1293,8 @@ def _iter_silk_elements(
             label = f"{footprint.reference} ({fp_text.text_type})"
             yield side, geom, label, center, fp_text.layer, fp_text.uuid, label
 
-        for graphic in footprint.graphics:
+        marks = _radial_polarity_strokes(footprint) if radial_marks is not None else {}
+        for index, graphic in enumerate(footprint.graphics):
             side = _silk_side(graphic.layer)
             if side is None:
                 continue
@@ -1299,6 +1302,8 @@ def _iter_silk_elements(
             if geom is None:
                 continue
             label = f"{footprint.reference} (fp_{graphic.graphic_type})"
+            if radial_marks is not None and index in marks:
+                radial_marks[id(geom)] = marks[index]
             item = f"{footprint.reference} ({_graphic_descriptor('fp', graphic)})"
             yield side, geom, label, footprint.position, graphic.layer, graphic.uuid, item
 
@@ -1971,43 +1976,95 @@ def check_silk_over_mask_opening(
     return results
 
 
-def _radial_polarity_strokes(
-    footprint: Footprint,
-) -> dict[tuple[str, bytes], tuple[str, str, tuple[float, float], float]]:
-    """Identify the stroke-painted sector of KiCad's CP_Radial footprints."""
-    if not footprint.name.startswith("Capacitor_THT:CP_Radial_"):
-        return {}
+def _hatch_runs(offsets: Sequence[int], width: float) -> Iterator[list[int]]:
+    """Find runs on a regular pitch in projected nanometres."""
+    pitches = Counter(b - a for a, b in pairwise(offsets) if b - a < width)
+    remaining = set(offsets)
+    for pitch, count in pitches.most_common():
+        if count < 2:
+            break
+        # An independent tick between two hatches is on a different lattice.
+        phases: dict[int, list[int]] = defaultdict(list)
+        for offset in offsets:
+            if offset in remaining:
+                phases[offset % pitch].append(offset)
+        for phase in phases.values():
+            # A pad cutout can remove a whole chord. Bridge one missing
+            # offset only if its neighbours still overlap.
+            cuts = [
+                i
+                for i, (a, b) in enumerate(pairwise(phase), 1)
+                if b - a >= width or b - a > 2 * pitch
+            ]
+            for start, end in pairwise([0, *cuts, len(phase)]):
+                run = phase[start:end]
+                if any(b - a == 3 * pitch for a, b in zip(run, run[3:], strict=False)):
+                    yield run
+                    remaining.difference_update(run)
 
-    transform = _fp_transform(footprint)
-    strokes = {}
-    for circle in footprint.graphics:
-        if circle.graphic_type != "circle" or _silk_side(circle.layer) is None:
+
+def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
+    """Map authored graphic indices to the painted runs they belong to."""
+    from kicad_tools.core.arcs import arc_sweep
+
+    marks: dict[int, set[object]] = defaultdict(set)
+    for outline_index, outline in enumerate(footprint.graphics):
+        if _silk_side(outline.layer) is None or outline.is_filled or outline.stroke_width <= 0:
             continue
-        center = circle.center
-        if center is None or circle.is_filled:
-            continue
-        radius = math.dist(center, circle.end)
-        lines = []
-        for line in footprint.graphics:
-            if line.graphic_type != "line" or line.layer != circle.layer:
+        arc = None
+        if outline.graphic_type == "circle" and outline.center is not None:
+            center = outline.center
+            radius = math.dist(center, outline.end)
+        elif outline.graphic_type == "arc" and outline.mid is not None:
+            arc = arc_sweep(outline.start, outline.mid, outline.end)
+            if arc is None:
                 continue
-            x, y = line.start
-            if x != line.end[0] or x < center[0] or line.stroke_width != circle.stroke_width:
-                continue
-            # A hatch ends on the perimeter. A pad cutout may split its chord in two.
-            outer = max(math.dist(center, (x, y)), math.dist(center, line.end))
-            if abs(radius - outer) <= line.stroke_width / 2:
-                lines.append(line)
-        xs = sorted({line.start[0] for line in lines})
-        # A solid marking needs a run of distinct, overlapping parallel strokes.
-        if len(xs) < 4 or any(b - a >= circle.stroke_width for a, b in pairwise(xs)):
+            center, radius = arc.center, arc.radius
+        else:
             continue
-        for graphic in [circle, *lines]:
-            geom = _stroke_geometry(graphic, transform)
-            if geom is not None:
-                key = (f"{footprint.reference} (fp_{graphic.graphic_type})", geom.wkb)
-                strokes[key] = (footprint.reference, circle.layer, center, radius)
-    return strokes
+
+        directions: dict[float, dict[int, list[tuple[float, float, int]]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        for index, line in enumerate(footprint.graphics):
+            if (
+                line.graphic_type != "line"
+                or line.layer != outline.layer
+                or line.stroke_width != outline.stroke_width
+                or line.start == line.end
+            ):
+                continue
+            ends = sorted((line.start, line.end))
+            if max(math.dist(center, p) for p in ends) > radius + line.stroke_width / 2:
+                continue
+            if not any(
+                abs(math.dist(center, (x, y)) - radius) <= line.stroke_width / 2
+                and (arc is None or arc.reaches(math.atan2(y - center[1], x - center[0])))
+                for x, y in ends
+            ):
+                continue
+            (x, y), (ex, ey) = ends
+            angle = math.atan2(ey - y, ex - x)
+            ux, uy = math.cos(angle), math.sin(angle)
+            offset = round(((x - center[0]) * -uy + (y - center[1]) * ux) * 1e6)
+            directions[round(angle, 6)][offset].append((x * ux + y * uy, ex * ux + ey * uy, index))
+
+        for offsets in directions.values():
+            for run in _hatch_runs(sorted(offsets), outline.stroke_width * 1e6):
+                mark = object()
+                marks[outline_index].add(mark)
+                for offset in run:
+                    intervals = offsets[offset]
+                    for start, end, index in intervals:
+                        # Disjoint pieces of a pad-clipped chord are integral.
+                        # Ambiguous partial overdraw remains reportable.
+                        if any(
+                            (a, b) != (start, end) and max(a, start) < min(b, end)
+                            for a, b, _ in intervals
+                        ):
+                            continue
+                        marks[index].add(mark)
+    return marks
 
 
 def check_silk_overlap(
@@ -2070,7 +2127,8 @@ def check_silk_overlap(
         "F": [],
         "B": [],
     }
-    for side, geom, label, location, layer, uuid in _iter_silk_geometries(pcb):
+    radial_marks: dict[int, set[object]] = {}
+    for side, geom, label, location, layer, uuid, _ in _iter_silk_elements(pcb, radial_marks):
         by_side[side].append((geom, label, location, layer, uuid))
 
     # A library outline is often several joined line primitives. Their round
@@ -2093,9 +2151,7 @@ def check_silk_overlap(
     # another arc of the same footprint is one drawn outline, so overlap
     # confined to the shared joint is not a finding.
     arc_endpoints = {}
-    radial_marks = {}
     for footprint in pcb.footprints:
-        radial_marks.update(_radial_polarity_strokes(footprint))
         transform = _fp_transform(footprint)
         for graphic in footprint.graphics:
             if (
@@ -2144,11 +2200,11 @@ def check_silk_overlap(
                 other_geom, label_b, _, _, uuid_b = entries[j]
                 if not geom.intersects(other_geom):
                     continue
-                if radial_marks and label_a.split(" (")[0] == label_b.split(" (")[0]:
-                    mark = radial_marks.get((label_a, geom.wkb))
-                    if mark is not None and mark == radial_marks.get((label_b, other_geom.wkb)):
-                        if not geom.equals(other_geom):  # exact duplicate ink is still a finding
-                            continue
+                if id(geom) in radial_marks and id(other_geom) in radial_marks:
+                    if radial_marks[id(geom)] & radial_marks[id(other_geom)] and not geom.equals(
+                        other_geom
+                    ):
+                        continue
                 overlap = geom.intersection(other_geom)
                 if overlap.area < _MIN_SILK_OVERLAP_AREA_MM2:
                     continue
