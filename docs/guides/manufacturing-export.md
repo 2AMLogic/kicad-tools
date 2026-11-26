@@ -120,6 +120,60 @@ pip install kicad-tools
 
 You'll also need KiCad 8+ installed for Gerber generation via `kicad-cli`.
 
+## Separate editable KiCad files from generated output
+
+Keep the PCB, schematic, project, rules and local libraries under version control.
+For example, place them in `kicad/`, alongside a project-root `.kicad-tools.toml`
+that declares a sibling output directory. Both the output path and receipt
+input names are relative to the directory containing the TOML file. You can
+pass an enclosing checkout to `--project-root` and move the declared project
+on its own. A narrower `--project-root` must contain the board, its dependencies
+and the output directory.
+
+```toml
+[readiness]
+output_root = "output"
+```
+
+From the project root, generate the package and its readiness receipt. Rendering
+the selected board puts the views and their provenance in `output/renders/`.
+The verification command writes a second receipt in `output/readiness-verification/`.
+
+```bash
+kct readiness kicad/controller.kicad_pcb --sch kicad/controller.kicad_sch --mfr jlcpcb --generate
+kct render kicad/controller.kicad_pcb
+kct readiness kicad/controller.kicad_pcb --sch kicad/controller.kicad_sch --mfr jlcpcb --verify
+```
+
+After reviewing the package, use your reviewer name to sign it. The generated
+receipt at `output/readiness.json` and the verification receipt shown here
+both bind the release to the selected PCB and bundle. Keep the receipt used
+at sign-off with the package. Submission checks the PCB and schematic paths
+and hashes against that receipt, including a schematic in a sibling source
+directory. A dry run prepares a local order preview and checks stock. Give it
+a new directory outside the source and manufacturing directories.
+
+```bash
+kct tapeout-sign-off output/manufacturing --board kicad/controller.kicad_pcb \
+  --readiness output/readiness-verification/readiness.json --reviewer "Your name"
+kct submit-jlcpcb output/manufacturing --board kicad/controller.kicad_pcb \
+  --schematic kicad/controller.kicad_sch --quantity 5 --dry-run -o ../controller-submission-preview
+```
+
+These root-anchored `.gitignore` entries cover disposable output and local
+editor state.
+
+```gitignore
+/output/
+/kicad/*.kicad_prl
+/kicad/~*.lck
+```
+
+Keep historical source revisions in `history/`. Copy the exact released
+package, signed manifest, readiness receipt and human fabrication review
+records you intend to retain into a versioned directory such as
+`releases/rev-d/`. These paths stay trackable alongside the editable design.
+
 ## Are We Ship-Ready? (`kct fleet status`)
 
 Before generating manufacturing artefacts, ask the repo whether every board
