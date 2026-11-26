@@ -416,18 +416,26 @@ class TestSeriesVersusParallelVias:
         out = PathAmpacityRule(specs=[_trunk_spec(3.0)]).check(pcb, _design_rules_2oz())
         assert len([e for e in out.errors if "changes layer" in e.message]) == 2
 
+    @pytest.mark.parametrize("row_direction", [(1, 0), (0, 1), (-1, 0), (0, -1)])
+    @pytest.mark.parametrize("feed_offset", [(-10, -4), (0, -10)], ids=["bent", "right-angle"])
     @pytest.mark.parametrize("reverse", [False, True])
-    def test_packed_row_entered_at_a_bent_track_vertex(self, reverse):
+    def test_packed_row_entered_at_a_bent_track_vertex(self, row_direction, feed_offset, reverse):
         from kicad_tools.router.current_paths import resolve_current_path
 
+        def position(along, across=0):
+            dx, dy = row_direction
+            return (40 + dx * along - dy * across, 50 + dy * along + dx * across)
+
         pcb = PCB.create(layers=4)
-        _add_pad_footprint(pcb, ref="J1", x=30, y=46, net="NET1")
-        _add_pad_footprint(pcb, ref="J2", x=47, y=50, net="NET1")
-        pcb.add_trace((30, 46), (40, 50), width=5.5, layer="F.Cu", net="NET1")
+        source = position(*feed_offset)
+        sink = position(7)
+        _add_pad_footprint(pcb, ref="J1", x=source[0], y=source[1], net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=sink[0], y=sink[1], net="NET1")
+        pcb.add_trace(source, position(0), width=5.5, layer="F.Cu", net="NET1")
         for layer in ("F.Cu", "B.Cu"):
-            pcb.add_trace((40, 50), (47, 50), width=3.75, layer=layer, net="NET1")
-        for x in (40, 41.53, 43.06, 44.59):
-            pcb.add_via(x, 50, size=1.65, drill=0.95, net="NET1")
+            pcb.add_trace(position(0), sink, width=3.75, layer=layer, net="NET1")
+        for along in (0, 1.53, 3.06, 4.59):
+            pcb.add_via(*position(along), size=1.65, drill=0.95, net="NET1")
         if reverse:
             for seg in pcb.segments:
                 seg.start, seg.end = seg.end, seg.start

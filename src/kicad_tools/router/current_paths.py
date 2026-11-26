@@ -1224,7 +1224,11 @@ def _layer_changes(
             # Two pieces meeting at the barrel can continue through a bend.
             # Duplicate tracks leaving in the same direction still end here.
             dx, dy = far[0] - near[0], far[1] - near[1]
-            if any(dx * ex + dy * ey < -(_PAD_EPS**2) for ex, ey in exits):
+            length = math.hypot(dx, dy)
+            if length <= _PAD_EPS:
+                continue
+            dx, dy = dx / length, dy / length
+            if any(math.dist((dx, dy), previous) > _PAD_EPS for previous in exits):
                 passing.add(seg.layer)
             exits.append((dx, dy))
         return len(directions) == 2 and len(passing) == 1
@@ -1283,25 +1287,23 @@ def _layer_changes(
             for layer in (a[2], a[3])
         )
 
-    singles = [
-        (n, item) for n, item in enumerate(found) if _node_key(item[1].position) not in array_of
-    ]
-    rows: list[list[tuple[int, tuple[int, Via, str, str]]]] = []
+    singles = {
+        n: item for n, item in enumerate(found) if _node_key(item[1].position) not in array_of
+    }
     row_of: dict[int, int] = {}
-    run: list[tuple[int, tuple[int, Via, str, str]]] = []
-    ordered = sorted(singles, key=lambda kv: (kv[1][0], kv[1][1].position))
-    for entry in ordered:
-        if run and _row_link(run[-1][1], entry[1]):
-            run.append(entry)
+    # Grow only from a proved branch terminus. Path order can put the entry
+    # next to the far end of the row even when its nearest neighbour links.
+    for root, item in singles.items():
+        if root in row_of or not _row_terminus(item):
             continue
-        if len(run) >= 2 and any(_row_terminus(item) for _, item in run):
-            rows.append(run)
-        run = [entry]
-    if len(run) >= 2 and any(_row_terminus(item) for _, item in run):
-        rows.append(run)
-    for rid, row in enumerate(rows):
-        for n, _ in row:
-            row_of[n] = rid
+        row_of[root] = root
+        frontier = [item]
+        while frontier:
+            anchor = frontier.pop()
+            for n, candidate in singles.items():
+                if n not in row_of and _row_link(anchor, candidate):
+                    row_of[n] = root
+                    frontier.append(candidate)
     groups: dict[object, list[tuple[int, Via, str, str]]] = {}
     for n, item in enumerate(found):
         idx = array_of.get(_node_key(item[1].position))
