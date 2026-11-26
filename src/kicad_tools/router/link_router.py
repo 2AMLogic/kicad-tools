@@ -110,6 +110,7 @@ class LinkRouteRules:
     attach_zones: Sequence[Any] = ()
     attach_relax_nets: frozenset[int] = frozenset()
     net_names: Mapping[int, str] | None = None
+    #: Project clearance rules for this board, evaluated on each copper layer.
     board_rules: BoardClearanceRules | None = None
 
     def clearance_for(self, net_number: int) -> float:
@@ -123,9 +124,8 @@ class LinkRouteRules:
     ) -> list[tuple[Any, float]]:
         """``geom`` (foreign copper of ``net_number`` on ``layer``) split by clearance.
 
-        Normally ``[(geom, clearance_for(net))]``.  The part of the copper that
-        lies inside an attach zone shared by the link net and ``net_number``
-        gets only the base ``clearance`` when the net's floor is map-derived.
+        Inside a shared attach zone, a map-derived floor may relax to the
+        larger of the base clearance and the applicable KiCad copper rule.
         """
         floor = self.clearance
         if self.board_rules is not None and self.net_names is not None:
