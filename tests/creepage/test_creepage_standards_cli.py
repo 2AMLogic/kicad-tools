@@ -17,7 +17,15 @@ from kicad_tools._shapely import has_shapely
 from kicad_tools.cli.commands.creepage import run_creepage_command
 from kicad_tools.cli.parser import create_parser
 
-from .fixtures import board_cross_face_edge_wrap_source, board_source, board_two_pad_gap_source
+from .fixtures import (
+    board_close_hv_source,
+    board_cross_face_edge_wrap_source,
+    board_no_hv_source,
+    board_same_footprint_only_source,
+    board_selected_pairs_source,
+    board_source,
+    board_two_pad_gap_source,
+)
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
 
@@ -738,3 +746,311 @@ def test_voltage_map_mode_honours_insulation(tmp_path, capsys):
         pair = next(p for p in payload["pairs"] if {p["net_a"], p["net_b"]} == {"HV_LINE", "SELV"})
         results[ins] = pair["required_clearance_mm"]
     assert results == {"basic": 1.5, "reinforced": 3.0}
+
+
+# ---------------------------------------------------------------------------
+# Selected-pair diagnostic (--pair, #10342)
+# ---------------------------------------------------------------------------
+
+_STD = ["--standard", "iec60664", "--pollution-degree", "2"]
+
+
+def _state(tmp_path, potentials, name="state.json"):
+    p = tmp_path / name
+    p.write_text(json.dumps(potentials))
+    return str(p)
+
+
+def _json_run(argv, capsys):
+    rc = _run(argv)
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def _row(report, net_a, net_b):
+    return next(r for r in report["pairs"] if (r["net_a"], r["net_b"]) == (net_a, net_b))
+
+
+def test_pair_matches_full_row_and_is_marked_limited(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=True))
+    state = _state(tmp_path, {"L_MAINS": 307, "GND": 0})
+    base = ["creepage", str(pcb), *_STD, "--voltage-map", state, "--format", "json"]
+
+    full_rc, full = _json_run(base, capsys)
+    assert full_rc == 0 and any(r["kind"] == "edge" for r in full["pairs"])
+    assert "diagnostic" not in full and "unresolved_pairs" not in full  # schema unchanged
+
+    rc, sel = _json_run([*base, "--pair", "L_MAINS", "GND"], capsys)
+    assert rc == 0
+    assert sel["pair_count"] == 1 and sel["pairs"][0]["kind"] == "conductor"
+    assert sel["diagnostic"]["limited"] is True
+    assert sel["diagnostic"]["complete_census"] is False
+    assert sel["diagnostic"]["requested_pairs"] == [["L_MAINS", "GND"]]
+    assert sel["unresolved_pairs"] == []
+
+    row = dict(sel["pairs"][0])
+    assert row.pop("governing_voltage_v") == pytest.approx(307.0)
+    assert row == _row(full, "L_MAINS", "GND")  # distances, layer, witness, rule provenance
+    assert row["layer"] == "F.Cu"
+    assert row["clearance_mm"] == pytest.approx(18.0)
+    assert row["creepage_mm"] == pytest.approx(21.8472, abs=1e-3)
+    assert row["witness"]["item_a"] == "pad" and row["witness"]["item_b"] == "pad"
+
+
+def test_pair_table_marks_scope_and_witness(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=True))
+    state = _state(tmp_path, {"L_MAINS": 307, "GND": 0})
+    argv = ["creepage", str(pcb), *_STD, "--voltage-map", state, "--pair", "L_MAINS", "GND"]
+    assert _run([*argv, "--witness"]) == 0
+    out = capsys.readouterr().out
+    assert "LIMITED DIAGNOSTIC" in out and "NOT a full-board result" in out
+    assert "<board edge>" not in out
+    assert "Witness" in out and "pad -> pad" in out
+    assert "rule ->" in out
+
+
+def test_pairs_only_requested_contribute_and_state_drives_requirement(tmp_path, capsys):
+    pcb = _write(tmp_path, board_selected_pairs_source())
+    # SIG is unrelated to the requested pairs and carries an out-of-range potential.
+    bad = {"L_MAINS": 307, "GND": 0, "AUX": 50, "SIG": 1_000_000}
+    state = _state(tmp_path, bad)
+    base = ["creepage", str(pcb), *_STD, "--voltage-map", state, "--format", "json"]
+    # A whole-census lookup (then filtering) would have to evaluate SIG and fail loudly.
+    assert _run([*base, "--net-class-map", str(_hv_map_file(tmp_path))]) == 1
+    capsys.readouterr()
+
+    pairs = ["--pair", "L_MAINS", "GND", "--pair", "AUX", "GND", "--pair", "GND", "AUX"]
+    rc, rep = _json_run([*base, *pairs], capsys)
+    assert rc == 0
+    assert rep["pair_count"] == 2  # reversed duplicate measured once
+    assert {(r["net_a"], r["net_b"]) for r in rep["pairs"]} == {("L_MAINS", "GND"), ("AUX", "GND")}
+    assert not any("SIG" in (r["net_a"], r["net_b"]) for r in rep["pairs"])
+    first = _row(rep, "AUX", "GND")
+    assert first["governing_voltage_v"] == pytest.approx(50.0)
+
+    # Second operating state with an interval: requirement follows it, geometry does not.
+    state2 = _state(
+        tmp_path, {"L_MAINS": 307, "GND": 0, "AUX": {"min": -100, "max": 50}}, "s2.json"
+    )
+    argv2 = ["creepage", str(pcb), *_STD, "--voltage-map", state2, "--format", "json", *pairs]
+    rc2, rep2 = _json_run(argv2, capsys)
+    assert rc2 == 0
+    second = _row(rep2, "AUX", "GND")
+    assert second["governing_voltage_v"] == pytest.approx(100.0)
+    assert second["required_creepage_mm"] > first["required_creepage_mm"]
+    assert second["provenance"]["voltage"]["net_a_endpoint"] == "lo"
+    for key in ("clearance_mm", "creepage_mm", "layer", "witness"):
+        assert second[key] == first[key]
+
+
+def test_pair_low_voltage_without_hv_and_explicit_zero(tmp_path, capsys):
+    pcb = _write(tmp_path, board_no_hv_source())
+    state = _state(tmp_path, {"SIG": 3.3, "GND": 0})
+    base = ["creepage", str(pcb), *_STD, "--voltage-map", state, "--format", "json"]
+    rc, census = _json_run(base, capsys)  # the whole-board default sees nothing
+    assert census["hv_nets"] == [] and census["pair_count"] == 0
+
+    rc, rep = _json_run([*base, "--pair", "SIG", "GND"], capsys)
+    assert rc == 0 and rep["pair_count"] == 1 and rep["unresolved_pairs"] == []
+    assert rep["pairs"][0]["governing_voltage_v"] == pytest.approx(3.3)
+    assert rep["pairs"][0]["clearance_mm"] == pytest.approx(18.0)
+
+    zero = _state(tmp_path, {"SIG": 0, "GND": 0}, "zero.json")
+    argv = ["creepage", str(pcb), *_STD, "--voltage-map", zero, "--format", "json"]
+    rc, rep = _json_run([*argv, "--pair", "SIG", "GND"], capsys)
+    assert rc == 0 and rep["pair_count"] == 1  # an explicit 0 V is a valid potential
+    assert rep["pairs"][0]["provenance"]["voltage"]["same_potential"] is True
+
+
+@pytest.mark.parametrize(
+    "pair, potentials, reason",
+    [
+        (("SIG", "GND"), {"SIG": 3.3}, "no_potential"),  # omitted, never an implicit 0 V
+        (("SIG", "GDN"), {"SIG": 3.3, "GND": 0}, "unknown_net"),
+        (("SIG", "NOCU"), {"SIG": 3.3, "NOCU": 0}, "no_copper"),
+    ],
+)
+def test_pair_unmeasurable_is_named_and_fails(tmp_path, capsys, pair, potentials, reason):
+    pcb = _write(tmp_path, board_selected_pairs_source())
+    state = _state(tmp_path, potentials)
+    argv = ["creepage", str(pcb), *_STD, "--voltage-map", state, "--pair", *pair]
+    rc, rep = _json_run([*argv, "--format", "json"], capsys)
+    assert rc == 1
+    assert rep["pair_count"] == 0 and not rep["passed"] and not rep["gate_passed"]
+    assert [u["reason"] for u in rep["unresolved_pairs"]] == [reason]
+    assert rep["diagnostic"]["limited"] is True
+
+    assert _run(argv) == 1
+    out = capsys.readouterr().out
+    assert "UNMEASURED: " in out and reason in out and "LIMITED DIAGNOSTIC" in out
+
+
+def test_pair_measured_violation_exits_nonzero(tmp_path, capsys):
+    pcb = _write(tmp_path, board_close_hv_source())
+    state = _state(tmp_path, {"L_MAINS": 307, "GND": 0})
+    argv = ["creepage", str(pcb), *_STD, "--voltage-map", state, "--pair", "L_MAINS", "GND"]
+    rc, rep = _json_run([*argv, "--format", "json"], capsys)
+    assert rc == 1 and rep["unresolved_pairs"] == []
+    assert rep["pairs"][0]["pass"] is False and rep["diagnostic"]["limited"] is True
+
+
+def test_pair_passing_opposite_face_matches_full_engine(tmp_path, capsys):
+    pcb = _write(tmp_path, board_cross_face_edge_wrap_source())
+    state = _state(tmp_path, {"L_MAINS": 50, "GND": 0})
+    base = [
+        "creepage",
+        str(pcb),
+        *_STD,
+        "--voltage-map",
+        state,
+        "--format",
+        "json",
+        "--order-thickness-mm",
+        "1.60",
+    ]
+    _, full = _json_run([*base, "--net-class-map", str(_hv_map_file(tmp_path))], capsys)
+    rc, sel = _json_run([*base, "--pair", "L_MAINS", "GND"], capsys)
+    assert rc == 0 and sel["pair_count"] == 1
+    row = dict(sel["pairs"][0])
+    assert row["layer"] == "F.Cu/B.Cu" and row["pass"] is True
+    assert row["creepage_mm"] == pytest.approx(4.6)
+    row.pop("governing_voltage_v")
+    assert row == _row(full, "L_MAINS", "GND")  # witness + distances agree
+    assert sel["board_thickness_mm"] == full["board_thickness_mm"]
+
+    # Without an explicit order the board's own thickness still measures it.
+    rc, rep = _json_run([*base[:-2], "--pair", "L_MAINS", "GND"], capsys)
+    assert rc == 0 and rep["pair_count"] == 1 and rep["pairs"][0]["layer"] == "F.Cu/B.Cu"
+
+
+def test_pair_works_with_manual_minimum(tmp_path, capsys):
+    pcb = _write(tmp_path, board_selected_pairs_source())
+    argv = ["creepage", str(pcb), "--min", "5", "--format", "json"]
+    rc, rep = _json_run([*argv, "--pair", "SIG", "GND", "--pair", "AUX", "GND"], capsys)
+    assert rc == 1  # AUX-GND is 3 mm
+    assert _row(rep, "SIG", "GND")["pass"] and not _row(rep, "AUX", "GND")["pass"]
+    assert "governing_voltage_v" not in _row(rep, "SIG", "GND")
+
+
+@pytest.mark.parametrize("missing", [None, "/AUX", "AUX"])
+def test_pair_distinct_slash_nets(tmp_path, capsys, missing):
+    pcb = _write(tmp_path, board_selected_pairs_source().replace('"SIG"', '"/AUX"'))
+    potentials = {"/AUX": 307, "AUX": 0}
+    if missing:
+        del potentials[missing]
+    argv = [
+        "creepage",
+        str(pcb),
+        *_STD,
+        "--voltage-map",
+        _state(tmp_path, potentials),
+        "--format",
+        "json",
+        "--pair",
+        "/AUX",
+        "AUX",
+    ]
+    rc, rep = _json_run(argv, capsys)
+    assert rc == 1
+    if missing:
+        assert rep["unresolved_pairs"][0]["reason"] == "no_potential"
+        assert f"net(s) {missing} absent" in rep["unresolved_pairs"][0]["detail"]
+    else:
+        assert _row(rep, "/AUX", "AUX")["governing_voltage_v"] == 307
+
+
+def test_pair_bound_resolves_board_names(tmp_path, capsys):
+    pcb = _write(tmp_path, board_selected_pairs_source().replace('"SIG"', '"/AUX"'))
+    state = _state(
+        tmp_path,
+        {
+            "/AUX": 307,
+            "AUX": 300,
+            "/GND": 0,
+            "_pair_bounds": [{"nets": ["AUX", "/GND"], "max_dv": 5, "why": "device rating"}],
+        },
+    )
+    rc, rep = _json_run(
+        [
+            "creepage",
+            str(pcb),
+            *_STD,
+            "--voltage-map",
+            state,
+            "--format",
+            "json",
+            "--pair",
+            "/AUX",
+            "GND",
+            "--pair",
+            "AUX",
+            "GND",
+        ],
+        capsys,
+    )
+    assert rc == 0
+    assert _row(rep, "/AUX", "GND")["governing_voltage_v"] == 307
+    assert _row(rep, "AUX", "GND")["governing_voltage_v"] == 5
+
+
+@pytest.mark.parametrize("problem", ["standard_lookup", "board_thickness"])
+def test_pair_failure_preserves_independent_row(tmp_path, capsys, problem):
+    if problem == "standard_lookup":
+        pcb = _write(tmp_path, board_selected_pairs_source())
+        state = _state(tmp_path, {"L_MAINS": 0, "GND": 1_000_000, "SIG": 5})
+        threshold = [*_STD, "--voltage-map", state]
+    else:
+        source = (
+            board_cross_face_edge_wrap_source()
+            .replace(
+                "(setup (pad_to_mask_clearance 0))",
+                '(setup (stackup (layer "dielectric 1" (type "core") (thickness 0.8))))',
+            )
+            .replace('(net 2 "GND")\n', '(net 2 "GND")\n  (net 3 "SIG")\n', 1)
+        )
+        source = source.rstrip()[:-1] + (
+            '(segment (start 120 110) (end 126 110) (width 1) (layer "F.Cu") (net 3 "SIG")))'
+        )
+        pcb = _write(tmp_path, source)
+        threshold = ["--min", "1"]
+    argv = [
+        "creepage",
+        str(pcb),
+        *threshold,
+        "--pair",
+        "L_MAINS",
+        "GND",
+        "--pair",
+        "L_MAINS",
+        "SIG",
+    ]
+    rc, rep = _json_run([*argv, "--format", "json"], capsys)
+    assert rc == 1 and not rep["gate_passed"] and rep["diagnostic"]["limited"]
+    assert _row(rep, "L_MAINS", "SIG")["pass"]
+    assert [(p["nets"], p["reason"]) for p in rep["unresolved_pairs"]] == [
+        (["L_MAINS", "GND"], problem)
+    ]
+    assert _run(argv) == 1
+    table = capsys.readouterr().out
+    assert "UNMEASURED: L_MAINS -- GND" in table and "1 measured row(s) clear" in table
+
+
+@pytest.mark.parametrize("extra,rc", [([], 0), (["--pair", "missing", "SRC_NEG"], 1)])
+def test_pair_waiver_summary(tmp_path, capsys, extra, rc):
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    assert (
+        _run(
+            [
+                "creepage",
+                str(pcb),
+                "--pair",
+                "L_MAINS",
+                "SRC_NEG",
+                "--min",
+                "1",
+                "--waive-same-footprint",
+                *extra,
+            ]
+        )
+        == rc
+    )
+    assert "1 measured row(s) clear their bound, 1 failing row(s) waived" in capsys.readouterr().out

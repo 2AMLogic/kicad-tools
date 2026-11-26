@@ -138,15 +138,8 @@ BOARD07_MASK_NETS: tuple[str, ...] = ()
 # #9019 cleared the MIPI_CLK+ taper and #9846 cleared the GND stitch stubs.
 BOARD06_GAP_NETS: tuple[str, ...] = ()
 
-# The seed-42 fixture originally measured 22 mask error nets (#8858).
-# The sideband, PCIe and MIPI clock repairs retired nine of those net
-# identities; the data repair (#10113) retired the MIPI_D0 pair as well, and
-# the U1.32 ground repair (#9891) retired the GND identity. J1/B2 (#10294)
-# clears the USB3_TX2+ identity.
-BOARD06_MASK_NETS = (
-    "USB2_D+",
-    "USB2_D-",
-)
+# The seed-42 recipe clears all 22 former mask identities (#8858).
+BOARD06_MASK_NETS: tuple[str, ...] = ()
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
@@ -499,6 +492,8 @@ def test_board06_measured_mask_population_passes_and_drains():
         "PCIE_TX-",
         "PCIE_RX+",
         "PCIE_RX-",
+        "USB2_D+",
+        "USB2_D-",
         "USB3_TX2+",
         "USB3_RX1+",
         "USB3_RX1-",

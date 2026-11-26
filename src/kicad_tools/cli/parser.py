@@ -908,6 +908,26 @@ def _add_creepage_parser(subparsers) -> None:
             "audit manufacturing-readiness gate."
         ),
     )
+    # Selected-pair diagnostic (#10342): measure only the named pairs.
+    creepage_parser.add_argument(
+        "--pair",
+        dest="pairs",
+        nargs=2,
+        action="append",
+        metavar=("NET_A", "NET_B"),
+        default=None,
+        help=(
+            "Limited diagnostic: measure ONLY this exact, unordered conductor pair "
+            "(repeatable; a reversed duplicate is measured once).  Neither net needs "
+            "to be HV, and no census, board-edge row or implicit 0 V comparison is "
+            "made.  Combine with --voltage-map for one operating state: a selected "
+            "net absent from the map is reported as unmeasurable (an explicit 0 is "
+            "valid).  Unknown nets and pairs with no measurable path are named and "
+            "exit non-zero, as does a measured violation.  Table and JSON output are "
+            "marked as a limited diagnostic -- not a complete census and not release "
+            "evidence; omit --pair for the full board (as kct audit / readiness do)."
+        ),
+    )
     creepage_parser.add_argument(
         "--format",
         choices=["table", "json"],
@@ -7840,9 +7860,9 @@ def _add_readiness_parser(subparsers) -> None:
         default=None,
         help=(
             "Directory containing the board directory and every project dependency "
-            "(schematic hierarchy, sibling symbol/footprint libraries). Referenced "
-            "files outside the board directory but inside this root are collected "
-            "into the staged package and hashed; nothing outside it is ever read."
+            "(schematic hierarchy, sibling symbol/footprint libraries). With a declared "
+            "output root, dependencies must also be inside the declaring project. "
+            "Receipt paths are relative to that declaration."
         ),
     )
     rd_parser.add_argument(
@@ -8221,7 +8241,8 @@ def _add_render_parser(subparsers) -> None:
             "(boards/<id>/output/renders/{pcb-front,pcb-back}.svg and "
             "{3d-front,3d-back}.png). "
             "A bare .kicad_pcb file may also be given: it is rendered directly "
-            "to <pcb-dir>/renders/ (or -o/--output), skipping directory scanning. "
+            "to renders/ under the declared output root or PCB directory (or -o/--output), "
+            "skipping directory scanning. "
             "The routed PCB is preferred with graceful fallback to the unrouted "
             "PCB. 3D render requires KiCad 8.0.4+ and a display (xvfb on CI)."
         ),
@@ -8238,7 +8259,8 @@ def _add_render_parser(subparsers) -> None:
         default=None,
         help=(
             "Output directory for a single .kicad_pcb file "
-            "(default: <pcb-dir>/renders/). Ignored in directory/root scanning mode."
+            "(default: renders/ under the declared output root or the PCB directory). "
+            "Ignored in directory/root scanning mode."
         ),
     )
     render_parser.add_argument(

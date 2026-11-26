@@ -230,17 +230,19 @@ def extract_dimension_from_text(text: str) -> dict[str, float]:
         dimensions["D"] = float(body_match.group(1))
         dimensions["E"] = float(body_match.group(2))
 
-    # Pattern for pitch (e.g., "pitch: 0.5mm", "e = 0.5")
+    # Pattern for pitch (e.g., "pitch: 0.5mm", "e = 0.5"); a bare "P0.5mm" needs its unit
     pitch_match = re.search(
-        r"(?<![A-Za-z0-9])(?:(?i:pitch|p)\s*[=:]?|e\s*[=:])\s*"
-        r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))?\b",
+        r"(?<![A-Za-z0-9])(?:"
+        r"(?:(?i:pitch)\s*[=:]?|(?i:p)\s*[=:]|e\s*[=:])\s*(\d+(?:\.\d+)?)\s*((?i:mm|mils?))?\b"
+        r"|(?i:p)\s*(\d+(?:\.\d+)?)\s*((?i:mm|mils?))\b"
+        r")",
         text,
     )
     if not pitch_match:
         pitch_match = re.search(r"(\d+(?:\.\d+)?)\s*((?i:mm|mils?))\s+(?i:pitch)\b", text)
     if pitch_match:
-        value = float(pitch_match.group(1))
-        unit = (pitch_match.group(2) or "").lower()
+        value = float(pitch_match.group(1) or pitch_match.group(3))
+        unit = (pitch_match.group(2) or pitch_match.group(4) or "").lower()
         dimensions["PITCH"] = value * 0.0254 if unit in ("mil", "mils") else value
 
     return dimensions

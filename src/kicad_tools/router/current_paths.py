@@ -1209,22 +1209,29 @@ def _layer_changes(
         other layer's copper passes through it.
         """
         via, layers = item[1], (item[2], item[3])
-        all_end: dict[str, bool] = {}
-        passes: dict[str, bool] = {}
+        directions: dict[str, list[tuple[float, float]]] = {}
+        passing: set[str] = set()
         for seg in segments:
-            if point_to_segment_distance(*via.position, *seg.start, *seg.end) > 0.01:
-                continue
             if seg.layer not in layers or not via_spans_layer(via.layers, seg.layer):
                 continue
-            at_end = (
-                min(math.dist(via.position, seg.start), math.dist(via.position, seg.end)) <= 0.01
-            )
-            all_end[seg.layer] = all_end.get(seg.layer, True) and at_end
-            passes[seg.layer] = passes.get(seg.layer, False) or not at_end
-        ending = [layer for layer in layers if all_end.get(layer, False)]
-        return len(ending) == 1 and passes.get(
-            next(layer for layer in layers if layer not in ending), False
-        )
+            if point_to_segment_distance(*via.position, *seg.start, *seg.end) > 0.01:
+                continue
+            exits = directions.setdefault(seg.layer, [])
+            near, far = sorted((seg.start, seg.end), key=lambda end: math.dist(end, via.position))
+            if math.dist(near, via.position) > 0.01:
+                passing.add(seg.layer)
+                continue
+            # Two pieces meeting at the barrel can continue through a bend.
+            # Duplicate tracks leaving in the same direction still end here.
+            dx, dy = far[0] - near[0], far[1] - near[1]
+            length = math.hypot(dx, dy)
+            if length <= _PAD_EPS:
+                continue
+            dx, dy = dx / length, dy / length
+            if any(math.dist((dx, dy), previous) > _PAD_EPS for previous in exits):
+                passing.add(seg.layer)
+            exits.append((dx, dy))
+        return len(directions) == 2 and len(passing) == 1
 
     def _row_gap_bound(a: tuple[int, Via, str, str], b: tuple[int, Via, str, str]) -> float:
         """Max centre distance for vias ``a``/``b`` to share one packed row.
@@ -1280,25 +1287,23 @@ def _layer_changes(
             for layer in (a[2], a[3])
         )
 
-    singles = [
-        (n, item) for n, item in enumerate(found) if _node_key(item[1].position) not in array_of
-    ]
-    rows: list[list[tuple[int, tuple[int, Via, str, str]]]] = []
+    singles = {
+        n: item for n, item in enumerate(found) if _node_key(item[1].position) not in array_of
+    }
     row_of: dict[int, int] = {}
-    run: list[tuple[int, tuple[int, Via, str, str]]] = []
-    ordered = sorted(singles, key=lambda kv: (kv[1][0], kv[1][1].position))
-    for entry in ordered:
-        if run and _row_link(run[-1][1], entry[1]):
-            run.append(entry)
+    # Grow only from a proved branch terminus. Path order can put the entry
+    # next to the far end of the row even when its nearest neighbour links.
+    for root, item in singles.items():
+        if root in row_of or not _row_terminus(item):
             continue
-        if len(run) >= 2 and any(_row_terminus(item) for _, item in run):
-            rows.append(run)
-        run = [entry]
-    if len(run) >= 2 and any(_row_terminus(item) for _, item in run):
-        rows.append(run)
-    for rid, row in enumerate(rows):
-        for n, _ in row:
-            row_of[n] = rid
+        row_of[root] = root
+        frontier = [item]
+        while frontier:
+            anchor = frontier.pop()
+            for n, candidate in singles.items():
+                if n not in row_of and _row_link(anchor, candidate):
+                    row_of[n] = root
+                    frontier.append(candidate)
     groups: dict[object, list[tuple[int, Via, str, str]]] = {}
     for n, item in enumerate(found):
         idx = array_of.get(_node_key(item[1].position))
@@ -1664,6 +1669,9 @@ class _GraphEdge:
     # Authored centreline contacts, before pad hubs and via rows contract nodes.
     span: tuple[tuple[float, float], tuple[float, float]] | None = None
 
+    # This edge belongs to a physical via with contacts on two or more layers.
+    barrel_has_transfer: bool = False
+
     def tracks(self) -> tuple[Segment, ...]:
         return (self.segment, *self.overlaid) if self.segment is not None else ()
 
@@ -2024,14 +2032,20 @@ def _build_graph(
                 edge = _GraphEdge(seg, span=(a[:2], b[:2]))
                 track_spans[span_key] = edge
                 edges.append((a, b, edge))
+    track_nodes = {node for a, b, _ in edges for node in (a, b)}
+    barrels: list[tuple[list[_Node], list[_GraphEdge]]] = []
     for via in vias:
         nodes = [
             _copper_node(via.position, layer)
             for layer in COPPER_LAYER_ORDER
             if layer in layers and via_spans_layer(via.layers, layer)
         ]
+        barrel_edges = []
         for a, b in zip(nodes, nodes[1:], strict=False):
-            edges.append((a, b, _GraphEdge()))
+            edge = _GraphEdge()
+            barrel_edges.append(edge)
+            edges.append((a, b, edge))
+        barrels.append((nodes, barrel_edges))
 
     # Contract only contacts inside one physical convex pad. Adding a pad hub
     # plus the original internal track edges instead manufactures false cycles.
@@ -2112,6 +2126,14 @@ def _build_graph(
             graph.item_nodes[id(pad)] = set(nodes)
             pad_contacts[(component_id, pad.number, occurrence)] = nodes
             pad_nodes.update(nodes)
+
+    # Count contacts at the original via coordinates. A shared pad hub can
+    # connect several barrels, each with different layers carrying traces.
+    used_nodes = track_nodes | pad_nodes
+    for nodes, barrel_edges in barrels:
+        if sum(node in used_nodes for node in nodes) >= 2:
+            for edge in barrel_edges:
+                edge.barrel_has_transfer = True
 
     # A later overlapping pad can contract an earlier group's hub; re-key the
     # centres to the final roots the rest of the graph is keyed by.
@@ -2638,7 +2660,8 @@ def _proved_load_exits(
     """Every outgoing tree must end at pads, with no loops or return to the array."""
     if not exits:
         return False
-    terminals = set(graph.pads.values()) - array_nodes
+    pad_nodes = set(graph.pads.values())
+    terminals = pad_nodes - array_nodes
     visited: set[_Node] = set()
     for _, first, incoming in exits:
         pending = [(first, incoming)]
@@ -2648,7 +2671,7 @@ def _proved_load_exits(
                 return False
             visited.add(node)
             onward = [(n, e) for n, e in graph.adjacency[node] if e is not previous]
-            if not onward and node not in terminals:
+            if not onward and node not in terminals and not previous.barrel_has_transfer:
                 return False
             pending.extend(onward)
     return True

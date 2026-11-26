@@ -26,6 +26,9 @@ The MIPI data pair's three offending exits (J4.4, U4.3, U4.4, #10113) are staged
 the same way: each rebuilt as one straight axis piece whose corner sits inside the
 pad copper plus one 45-degree rejoin, with the trunk extended along its own line
 so both rails shorten equally and the pair keeps its measured skew.
+The A-side USB2 barrels launch on the pad axes. Their inner ties end at the
+reviewed mirrored barrels, and the negative front trunk joins the B7 pad
+centre before returning to its original transceiver approach (#10258).
 U1's USB2 pair uses two different straight exits to clear its mask openings
 while meeting the fixture's coupling, delay and impedance limits (#10235).
 
@@ -94,6 +97,7 @@ from kicad_tools.validate.mask_copper import (
 )
 from kicad_tools.validate.mask_geometry import board_mask_margin, pad_mask_margin, pad_mask_shapes
 from kicad_tools.validate.rules.diffpair_length_skew import measured_skew_verdict
+from kicad_tools.validate.rules.dimensions import DimensionRules
 from kicad_tools.validate.rules.impedance import ImpedanceRule
 from kicad_tools.validate.rules.physical_gap import StaircaseSlitOracle, fab_gap_policy_from_entry
 
@@ -1984,6 +1988,257 @@ def _clear_usb3_barrels(
     return len(vias)
 
 
+@dataclass(frozen=True)
+class _J1UsbEscape:
+    """Measured corners relative to the A pad, including the mirrored pad's inner tie."""
+
+    pad: str
+    mirror: str
+    mirror_offset: XY
+    net: str
+    layer: str
+    old_trunk: tuple[XY, ...]
+    old_via_branch: tuple[XY, ...]
+    old_inner_tie: tuple[XY, ...]
+    new_trunk: tuple[XY, ...]
+    new_inner_tie: tuple[XY, ...]
+
+
+_J1_USB_EXITS = (
+    _J1UsbEscape(
+        "A6",
+        "B6",
+        (1.0, 2.0),
+        "USB2_D+",
+        "In1.Cu",
+        ((0, 0), (0.2975, 0.2975), (0.2975, 0.8161), (-0.5025, 1.6161), (-0.5025, 8.8525)),
+        ((0, 0), (0, 0.15), (-0.3, 0.45), (-0.3, 0.50)),
+        ((-0.3, 0.50), (0.2, 0.50), (1.15, 1.45), (1.55, 1.45)),
+        # Stay outside B7's opening, then follow its outgoing rail to the trunk.
+        (
+            (0, 0),
+            (0, 0.70),
+            (0.12, 0.82),
+            (-0.5025, 1.4425),
+            (-0.5025, 2.40),
+            (-0.415, 2.4875),
+            (-0.415, 8.765),
+            (-0.5025, 8.8525),
+        ),
+        # Leave the positive barrel horizontally on In1 to clear the negative barrel.
+        ((0, 0.70), (0.80, 0.70), (1.55, 1.45)),
+    ),
+    _J1UsbEscape(
+        "A7",
+        "B7",
+        (-1.0, 2.0),
+        "USB2_D-",
+        "In2.Cu",
+        (
+            (0, 0),
+            (0, 0.3025),
+            (-0.2975, 0.60),
+            (-0.2975, 0.9839),
+            (-1.0975, 1.7839),
+            (-1.0975, 9.0225),
+        ),
+        ((0, 0), (0, 0.30), (0.25, 0.55)),
+        (
+            (0.25, 0.55),
+            (0.05, 0.75),
+            (-0.30, 0.75),
+            (-0.75, 1.20),
+            (-0.75, 2.45),
+            (-0.65, 2.55),
+            (-0.45, 2.55),
+        ),
+        # The diagonal lands at B7's centre, the existing branch to its barrel.
+        (
+            (0, 0),
+            (0, 0.83),
+            (-0.54, 1.37),
+            (-0.54, 1.54),
+            (-1, 2),
+            (-1, 8.925),
+            (-1.0975, 9.0225),
+        ),
+        ((-0.54, 1.37), (-0.45, 1.46), (-0.45, 2.55)),
+    ),
+)
+
+
+def _stage_j1_usb_escape(
+    pcb: PCB, escape: _J1UsbEscape, protected: set[str], rules: DesignRules
+) -> tuple[list[Segment], Via] | None:
+    """Move the A barrel onto the front escape while keeping every external contact."""
+    fp = pcb.get_footprint("J1")
+    if (
+        fp is None
+        or fp.name != "Connector_USB:USB_C_Receptacle_USB2.0"
+        or fp.rotation
+        or fp.layer != "F.Cu"
+    ):
+        return None
+    for number in (escape.pad, escape.mirror):
+        pad = next((p for p in fp.pads if p.number == number), None)
+        if (
+            pad is None
+            or pad.net_name != escape.net
+            or pad.type != "smd"
+            or pad.shape != "rect"
+            or pad.size != (0.3, 0.6)
+            or pad.rotation
+            or not {"F.Cu", "F.Mask"} <= set(pad.layers)
+        ):
+            return None
+        shapes = _departure_mask_shapes(pcb, fp, pad)
+        if shapes is None or not shapes[0].equals(shapes[1]):
+            return None
+    center = pcb.get_pad_position("J1", escape.pad)
+    mirror = pcb.get_pad_position("J1", escape.mirror)
+    if center is None or mirror is None:
+        return None
+
+    def at(offset: XY) -> XY:
+        return _xy((center[0] + offset[0], center[1] + offset[1]))
+
+    if _xy(mirror) != at(escape.mirror_offset):
+        return None
+
+    # Match undirected edges. A repeated edge, an altered width or a protected
+    # member makes the measured replacement ambiguous.
+    edges: dict[tuple[str, XY, XY], list[Segment]] = defaultdict(list)
+    original = list(pcb.segments)
+    for s in original:
+        if s.net_name == escape.net:
+            a, b = sorted((_xy(s.start), _xy(s.end)))
+            edges[s.layer, a, b].append(s)
+    edited: list[Segment] = []
+    for layer, corners in (
+        ("F.Cu", escape.old_trunk),
+        ("F.Cu", escape.old_via_branch),
+        (escape.layer, escape.old_inner_tie),
+    ):
+        for first, second in pairwise(corners):
+            a, b = sorted((at(first), at(second)))
+            found = edges[layer, a, b]
+            if len(found) != 1:
+                return None
+            s = found[0]
+            if s.locked or s.uuid.lower() in protected or abs(s.width - 0.25) > _EPS:
+                return None
+            edited.append(s)
+
+    old_seat, mirror_seat = at(escape.old_inner_tie[0]), at(escape.old_inner_tie[-1])
+    mirror_start, mirror_end = sorted((_xy(mirror), mirror_seat))
+    if len(edges["F.Cu", mirror_start, mirror_end]) != 1:
+        return None
+    seats = {old_seat, mirror_seat}
+    vias = [
+        (i, v)
+        for i, v in enumerate(pcb.vias)
+        if v.net_name == escape.net and _xy(v.position) in seats
+    ]
+    if len(vias) != 2 or {_xy(v.position) for _, v in vias} != seats:
+        return None
+    for _, v in vias:
+        expected_size = 0.60 if _xy(v.position) == old_seat else 0.45
+        if (
+            v.size != expected_size
+            or v.drill != 0.25
+            or v.via_type not in (None, "through")
+            or set(v.layers) != {"F.Cu", "B.Cu"}
+        ):
+            return None
+    via_index, via = next((i, v) for i, v in vias if _xy(v.position) == old_seat)
+    # A relocated exposed barrel would also move an opening in the mask artwork.
+    for setting, default in (
+        (via.tenting_front, pcb.setup.tenting_front),
+        (via.tenting_back, pcb.setup.tenting_back),
+    ):
+        if setting != "yes" and (setting not in (None, "none") or default is False):
+            return None
+    node = pcb.via_source_node(via)
+    size = node.find("size") if node is not None else None
+    if (
+        size is None
+        or via.locked
+        or via.uuid.lower() in protected
+        or via.drill + _EPS < rules.min_via_drill_mm
+        or max(rules.min_via_diameter_mm, via.drill + 2 * rules.min_annular_ring_mm) > 0.45 + _EPS
+    ):
+        return None
+
+    validator = ConnectivityValidator(pcb)
+    before = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
+    if len(before.components()) != 1:
+        return None
+    contacts, ends = _external_contacts(before, original, edited, via_index)
+    new_seat = at(escape.new_inner_tie[0])
+    if pcb.remove_segments(edited) != len(edited) or not pcb.relocate_via(via, new_seat):
+        return None
+    size.set_value(0, 0.45)
+    via.size = 0.45
+    added: list[Segment] = []
+    for layer, offsets in (
+        ("F.Cu", escape.new_trunk),
+        (escape.layer, escape.new_inner_tie),
+    ):
+        for a, b in pairwise(at(p) for p in offsets):
+            added.extend(pcb.add_trace(a, b, width=0.25, layer=layer, net=escape.net))
+    after = build_copper_contact_graph(validator, via.net_number, with_bonds=True)
+    current, current_ends = _external_contacts(after, pcb.segments, added, via_index)
+    if len(after.components()) != 1 or not contacts <= current or not ends <= current_ends:
+        return None
+    return added, via
+
+
+def _clear_j1_usb_pair(path: Path, rules: DesignRules, policy: MaskCopperPolicy) -> int:
+    """Publish the measured connector fanout atomically, upstream of the normal refill."""
+    pcb = PCB.load(path)
+    protected = _protected_ids(pcb)
+    tracks: list[Segment] = []
+    vias: list[Via] = []
+    for escape in _J1_USB_EXITS:
+        staged = _stage_j1_usb_escape(pcb, escape, protected, rules)
+        if staged is None:
+            return 0
+        new_tracks, via = staged
+        tracks.extend(new_tracks)
+        vias.append(via)
+    dimensions = DimensionRules().check(pcb, rules)
+    if any(
+        v.rule_id == "hole_to_hole_clearance" and set(v.nets or ()).intersection(_USB2_NETS)
+        for v in dimensions.errors
+    ):
+        return 0
+    if not _within_project_skew_budget(pcb, path, _USB2_NETS) or not _usb2_electrical_limits_ok(
+        pcb, path
+    ):
+        return 0
+    if not _copper_gap_ok(pcb, path, tracks, vias, rules) or not _authored_rules_ok(
+        pcb, path, tracks, vias, "J1 USB2 escapes"
+    ):
+        return 0
+    changed = {item.uuid for item in (*tracks, *vias)}
+    with TemporaryDirectory(prefix="board06-j1-mask-") as tmp:
+        candidate = Path(tmp) / path.name
+        pcb.save(candidate)
+        copy_project_sidecars(path, candidate)
+        mask = check_mask_to_copper(candidate, policy)
+    if mask.coverage != "complete":
+        print(f"   J1 USB2 kept: incomplete mask check: {mask.reasons}")
+        return 0
+    if any(
+        m.conductor_uuid in changed and m.disposition in {"uncertain", "violation"}
+        for m in mask.measurements
+    ):
+        return 0
+    pcb.save(path)
+    print("   J1 USB2: connected both A barrels and mirrored pads to measured escapes")
+    return 2
+
+
 def _center_u1_ground_entry(path: Path, rules: DesignRules, mask_clearance: float) -> int:
     """Reconnect the seed-42 U1.32 ground branch from the pad center to its original via."""
     pcb = PCB.load(path)
@@ -2349,6 +2604,7 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
     edits += _clear_clock_pair(path, rules)
     edits += _clear_data_pair(path, rules, _DATA_EXITS, _DATA_NETS, _DATA_WIDTH, "MIPI data")
     edits += _clear_data_pair(path, rules, _USB2_EXITS, _USB2_NETS, 0.25, "USB2")
+    edits += _clear_j1_usb_pair(path, rules, request.policy)
     edits += _clear_tx2_exit(path, rules, request.policy)
     edits += _center_u1_ground_entry(path, rules, request.policy.warning_clearance_mm)
     return edits + sum(
