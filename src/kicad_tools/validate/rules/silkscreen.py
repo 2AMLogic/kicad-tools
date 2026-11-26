@@ -2066,6 +2066,55 @@ def _painted_chords(
     return members
 
 
+def _positive_lead_mark(
+    footprint: Footprint, outline: FootprintGraphic, center: tuple[float, float], radius: float
+) -> Iterator[tuple[int, int]]:
+    """Find the two strokes of a plus beside pad 1 of a painted radial body."""
+    pads = sorted(footprint.pads, key=lambda pad: pad.number)
+    if (
+        len(pads) != 2
+        or [pad.number for pad in pads] != ["1", "2"]
+        or any(pad.type != "thru_hole" for pad in pads)
+        or pads[0].shape not in ("rect", "roundrect")
+        or pads[1].shape != "circle"
+    ):
+        return
+    positive, negative = (p.position for p in pads)
+    midpoint = tuple((a + b) / 2 for a, b in zip(positive, negative, strict=True))
+    if math.dist(midpoint, center) > 1e-5:
+        return
+
+    # The library draws the sign in footprint-local axes. Match only a
+    # single horizontal and vertical with the same center and length.
+    candidates = defaultdict(list)
+    for index, line in enumerate(footprint.graphics):
+        if (
+            line.graphic_type != "line"
+            or line.layer != outline.layer
+            or line.stroke_width != outline.stroke_width
+        ):
+            continue
+        x1, y1 = line.start
+        x2, y2 = line.end
+        horizontal = y1 == y2
+        if not horizontal and x1 != x2:
+            continue
+        length = math.dist(line.start, line.end)
+        middle = ((x1 + x2) / 2, (y1 + y2) / 2)
+        if (
+            length <= 2 * line.stroke_width
+            or not radius < math.dist(center, middle) <= radius + length
+            or min(math.dist(center, p) for p in (line.start, line.end)) <= radius
+            or math.dist(positive, middle) >= math.dist(negative, middle)
+        ):
+            continue
+        key = tuple(round(n, 6) for n in (*middle, length))
+        candidates[key].append((index, horizontal))
+    for pair in candidates.values():
+        if len(pair) == 2 and pair[0][1] != pair[1][1]:
+            yield pair[0][0], pair[1][0]
+
+
 def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
     """Map authored graphic indices to the painted runs they belong to."""
     from kicad_tools.core.arcs import arc_sweep
@@ -2149,6 +2198,12 @@ def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
                 for offset in run:
                     for index in members[offset]:
                         marks[index].add(mark)
+        if outline_index in marks:
+            for first, second in _positive_lead_mark(footprint, outline, center, radius):
+                # Its own mark: the plus can still collide with the body and other ink.
+                mark = object()
+                marks[first].add(mark)
+                marks[second].add(mark)
     return marks
 
 
