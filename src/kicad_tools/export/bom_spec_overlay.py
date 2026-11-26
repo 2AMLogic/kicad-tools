@@ -18,9 +18,43 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..schema.bom import BOMItem
-    from ..spec.schema import BOMEntry
+    from ..spec.schema import BOMEntry, ProjectSpec
 
 logger = logging.getLogger(__name__)
+
+
+def load_assembly_spec(path: Path) -> tuple[ProjectSpec, dict[tuple[int, str | None], str]]:
+    """Keep BOM assignments usable when individual lead profiles fail validation.
+
+    Errors are keyed by BOM row and pad (None for the part-level lead).
+    Other schema errors retain the regular spec loader's strict behavior.
+    """
+    from pydantic import ValidationError
+
+    from ..spec.parser import load_spec_data
+    from ..spec.schema import ProjectSpec
+
+    data = load_spec_data(path)
+    try:
+        return ProjectSpec.model_validate(data), {}
+    except ValidationError as exc:
+        errors: dict[tuple[int, str | None], str] = {}
+        for error in exc.errors():
+            loc = error["loc"]
+            if len(loc) < 3 or loc[0] != "bom_entries" or not isinstance(loc[1], int):
+                raise
+            row = loc[1]
+            if loc[2] == "lead":
+                pad = None
+                data["bom_entries"][row].pop("lead", None)
+            elif loc[2] == "pad_leads" and len(loc) >= 4 and isinstance(loc[3], str):
+                pad = loc[3]
+                data["bom_entries"][row]["pad_leads"].pop(pad, None)
+            else:
+                raise
+            field = ".".join(map(str, loc[2:]))
+            errors[row, pad] = f"invalid {field}: {error['msg']}"
+    return ProjectSpec.model_validate(data), errors
 
 
 # ---------------------------------------------------------------------------

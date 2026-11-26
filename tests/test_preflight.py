@@ -598,6 +598,106 @@ def _run_lead_fit(pcb_path: Path):
 class TestPreflightLeadFit:
     """Through-hole lead dimensions vs the finished plated hole (issue #10299)."""
 
+    @pytest.mark.parametrize("no_spec", [False, True])
+    def test_export_spec_selection(self, tmp_path, no_spec):
+        from kicad_tools.cli.export_cmd import build_manufacturing_config
+        from kicad_tools.export.manufacturing import ManufacturingPackage
+
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 1.5)]})
+        _write_lead_spec(
+            tmp_path,
+            _RECT_LEAD_YAML.replace("STW70N60DM2", "SMALL").replace("1.40", "0.4"),
+            _LEAD_FIT_TOLERANCE_YAML,
+        )
+        variant = tmp_path / "variant"
+        variant.mkdir()
+        selected = _write_lead_spec(variant, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+        config = build_manufacturing_config(
+            output_dir=tmp_path,
+            spec_path=selected,
+            no_spec=no_spec,
+            strict_preflight=True,
+            skip_drc=True,
+            skip_erc=True,
+        )
+        results = ManufacturingPackage(pcb_path=pcb, config=config)._run_preflight()
+        result = _find_result(results, "assembly_lead_fit")
+        (pad,) = result.data["pads"]
+        if no_spec:
+            assert result.status == "WARN"
+            assert pad["status"] == "unassessed" and pad["mpn"] is None
+        else:
+            assert result.status == "FAIL"
+            assert pad["mpn"] == "STW70N60DM2"
+
+    @pytest.mark.parametrize(
+        ("profile", "reason"),
+        [
+            ("{shape: rectangular, width_mm: 1.4, source: drawing}", "thickness_mm"),
+            ("{shape: oval, source: drawing}", "shape"),
+        ],
+    )
+    def test_invalid_profile_is_local(self, tmp_path, profile, reason):
+        pcb = _create_pcb_with_lead_pads(
+            tmp_path,
+            {
+                "Q1": [_tht_pad("1", 1.5), _tht_pad("2", 1.5)],
+                "Q2": [_tht_pad("1", 1.5)],
+            },
+        )
+        _write_lead_spec(
+            tmp_path,
+            _RECT_LEAD_YAML
+            + f'    pad_leads:\n      "2": {profile}\n'
+            + f"  - ref: Q2\n    part: SECOND\n    lead: {profile}\n",
+            _LEAD_FIT_TOLERANCE_YAML,
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "FAIL"
+        good, override, other = result.data["pads"]
+        assert good["status"] == "fail" and good["mpn"] == "STW70N60DM2"
+        assert override["mpn"] == good["mpn"] and other["mpn"] == "SECOND"
+        for finding in (override, other):
+            assert finding["status"] == "unassessed"
+            assert reason in finding["reason"]
+
+    @pytest.mark.parametrize(
+        ("fab", "status"), [("pcbway", "unassessed"), ("jlcpcb-tier1", "pass")]
+    )
+    def test_fabricator_tolerance(self, tmp_path, fab, status):
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 2.2)]})
+        _write_lead_spec(
+            tmp_path, _RECT_LEAD_YAML, "    target_fab: jlcpcb\n" + _LEAD_FIT_TOLERANCE_YAML
+        )
+        results = PreflightChecker(pcb, manufacturer=fab).run_all()
+        (pad,) = _find_result(results, "assembly_lead_fit").data["pads"]
+        assert pad["nominal_status"] == "pass"
+        assert pad["tolerance"]["status"] == status
+        if status == "unassessed":
+            assert fab in pad["tolerance"]["reason"]
+            assert "minimum_margin_mm" not in pad["tolerance"]
+
+    @pytest.mark.parametrize(("diameter", "status"), [(1.10, "pass"), (1.10001, "fail")])
+    def test_minimum_clearance_before_display_rounding(self, tmp_path, diameter, status):
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 1.2)]})
+        _write_lead_spec(
+            tmp_path,
+            f"  - ref: Q1\n    part: ROUND\n    lead: {{shape: round, diameter_mm: {diameter}, source: drawing}}\n",
+            _LEAD_FIT_TOLERANCE_YAML.replace("-0.08", "-0.10"),
+        )
+        (pad,) = _run_lead_fit(pcb).data["pads"]
+        assert pad["status"] == status
+        assert pad["tolerance"]["status"] == status
+        assert pad["tolerance"]["minimum_margin_mm"] == 0.0
+
+    def test_dnp_footprint_excluded(self, tmp_path):
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 1.5)]})
+        pcb.write_text(pcb.read_text().replace("(attr through_hole)", "(attr through_hole dnp)"))
+        _write_lead_spec(tmp_path, _RECT_LEAD_YAML, _LEAD_FIT_TOLERANCE_YAML)
+        result = _run_lead_fit(pcb)
+        assert result.status == "OK"
+        assert result.data["pads"] == []
+
     def test_rectangular_lead_fails_nominal_fit_on_1_50_mm_hole(self, tmp_path):
         """The original report's case: 1.61245 mm diagonal vs a 1.50 mm hole."""
         pcb = _create_pcb_with_lead_pads(tmp_path, {"Q1": [_tht_pad("1", 1.50)]})
@@ -1473,8 +1573,7 @@ class TestPreflightBomFieldsSpecOverlay:
             "    part: MPN3\n"
         )
         # No .git boundary in tmp_path, so find_spec_file finds project.kct.
-        checker = PreflightChecker.__new__(PreflightChecker)
-        checker.pcb_path = tmp_path / "board.kicad_pcb"
+        checker = PreflightChecker(pcb_path=tmp_path / "board.kicad_pcb")
 
         refs = checker._spec_lcsc_refs()
 
@@ -1484,8 +1583,7 @@ class TestPreflightBomFieldsSpecOverlay:
     def test_spec_lcsc_refs_no_spec_returns_empty(self, monkeypatch, tmp_path):
         """No .kct file present -> empty set, preserving legacy warn behaviour."""
         # tmp_path has no .kct and no .git; find_spec_file walks up harmlessly.
-        checker = PreflightChecker.__new__(PreflightChecker)
-        checker.pcb_path = tmp_path / "board.kicad_pcb"
+        checker = PreflightChecker(pcb_path=tmp_path / "board.kicad_pcb")
 
         assert checker._spec_lcsc_refs() == set()
 

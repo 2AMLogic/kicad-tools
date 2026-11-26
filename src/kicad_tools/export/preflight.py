@@ -27,6 +27,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -223,6 +224,8 @@ def _lead_fit_finding(
     profile: LeadProfile | None,
     tolerance_mm: float | None,
     tolerance_source: str | None,
+    tolerance_reason: str,
+    profile_error: str | None,
 ) -> dict:
     """Build one per-pad lead-fit record (Issue #10299).
 
@@ -268,7 +271,9 @@ def _lead_fit_finding(
         }
 
     if profile is None:
-        if entry is None:
+        if profile_error:
+            reason = profile_error
+        elif entry is None:
             reason = (
                 f"no verified lead dimensions: reference {reference} has no "
                 "bom_entries assignment in the project spec"
@@ -285,16 +290,18 @@ def _lead_fit_finding(
             "reason": reason,
         }
 
-    required_mm = profile.required_diameter_mm()
-    nominal_margin = hole_mm - required_mm
+    # Preserve decimal fabrication dimensions through the tolerance addition.
+    diameter = Decimal(str(hole_mm))
+    required_mm = profile.required_diameter_decimal_mm()
+    nominal_margin = diameter - required_mm
     finding: dict = {
         "reference": reference,
         "pad": pad.number,
         "mpn": mpn,
         "hole": hole,
         "lead": _lead_record(profile),
-        "required_diameter_mm": round(required_mm, _LEAD_MARGIN_DECIMALS),
-        "nominal_margin_mm": round(nominal_margin, _LEAD_MARGIN_DECIMALS),
+        "required_diameter_mm": round(float(required_mm), _LEAD_MARGIN_DECIMALS),
+        "nominal_margin_mm": round(float(nominal_margin), _LEAD_MARGIN_DECIMALS),
         "nominal_status": "fail" if nominal_margin < 0 else "pass",
     }
 
@@ -303,19 +310,19 @@ def _lead_fit_finding(
         # and mark the tolerance result unassessed.
         finding["tolerance"] = {
             "status": "unassessed",
-            "reason": ("no finished-hole tolerance declared in requirements.manufacturing"),
+            "reason": tolerance_reason,
         }
         finding["status"] = "fail" if nominal_margin < 0 else "pass"
         return finding
 
-    minimum_hole_mm = hole_mm + tolerance_mm
+    minimum_hole_mm = diameter + Decimal(str(tolerance_mm))
     minimum_margin = minimum_hole_mm - required_mm
     finding["tolerance"] = {
         "status": "fail" if minimum_margin < 0 else "pass",
         "tolerance_mm": tolerance_mm,
         "source": tolerance_source,
-        "minimum_hole_mm": round(minimum_hole_mm, _LEAD_MARGIN_DECIMALS),
-        "minimum_margin_mm": round(minimum_margin, _LEAD_MARGIN_DECIMALS),
+        "minimum_hole_mm": round(float(minimum_hole_mm), _LEAD_MARGIN_DECIMALS),
+        "minimum_margin_mm": round(float(minimum_margin), _LEAD_MARGIN_DECIMALS),
     }
     finding["status"] = "fail" if (nominal_margin < 0 or minimum_margin < 0) else "pass"
     return finding
@@ -728,7 +735,11 @@ class PreflightChecker:
         parts_catalog=None,
         merge_lcsc: bool = True,
         merge_lcsc_from: str | Path | None = None,
+        spec_path: Path | None = None,
+        no_spec: bool = False,
     ):
+        self.spec_path = spec_path
+        self.no_spec = no_spec
         self.pcb_path = Path(pcb_path)
         # LCSC merge source, mirroring AssemblyConfig (issue #8260).
         self._merge_lcsc = merge_lcsc
@@ -1259,25 +1270,19 @@ class PreflightChecker:
     # Through-hole lead fit (Issue #10299)
     # ------------------------------------------------------------------
 
-    def _load_project_spec(self) -> ProjectSpec | None:
-        """Best-effort load of the project ``.kct`` spec (Issue #10299).
+    def _load_project_spec(self) -> tuple[ProjectSpec | None, dict[tuple[int, str | None], str]]:
+        """Use the BOM export's spec selection and retain per-profile errors."""
+        from .bom_spec_overlay import find_spec_file, load_assembly_spec
 
-        Mirrors the other spec lookups (``_spec_lcsc_refs``): no spec file
-        means ``None``.  A spec that fails validation is logged and also
-        returns ``None``, so every plated pad reports *unassessed* instead
-        of silently passing on declarations the schema rejected.
-        """
+        if self.no_spec:
+            return None, {}
         try:
-            from ..spec.parser import load_spec
-            from .bom_spec_overlay import find_spec_file
-
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is None:
-                return None
-            return load_spec(spec_file)
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning("Project spec load failed for lead fit (continuing without): %s", e)
-            return None
+            path = self.spec_path or find_spec_file(self.pcb_path.parent)
+            if path is not None:
+                return load_assembly_spec(path)
+        except (ImportError, OSError, ValueError) as exc:
+            logger.warning("Project spec load failed: %s", exc)
+        return None, {}
 
     def _check_assembly_lead_fit(self) -> PreflightResult:
         """Compare declared maximum lead dimensions with the finished hole.
@@ -1309,35 +1314,56 @@ class PreflightChecker:
                 data={"pads": [], "summary": {"pads": 0}},
             )
 
-        spec = self._load_project_spec()
+        spec, profile_errors = self._load_project_spec()
+        tolerance_reason = "no finished-hole tolerance declared in requirements.manufacturing"
         tolerance_mm: float | None = None
         tolerance_source: str | None = None
-        entries: dict[str, BOMEntry] = {}
+        entries: dict[str, tuple[int, BOMEntry]] = {}
         if spec is not None:
             mfg = spec.requirements.manufacturing if spec.requirements else None
             if mfg is not None:
-                tolerance_mm = mfg.finished_hole_tolerance_mm
-                tolerance_source = mfg.finished_hole_tolerance_source
+                from ..manufacturers import get_fab_family
+
+                if mfg.target_fab and get_fab_family(mfg.target_fab) != self._fab_family:
+                    tolerance_reason = f"no applicable tolerance for {self.manufacturer} (spec targets {mfg.target_fab})"
+                else:
+                    tolerance_mm = mfg.finished_hole_tolerance_mm
+                    tolerance_source = mfg.finished_hole_tolerance_source
             from .bom_spec_overlay import expand_ref_range
 
-            for entry in spec.bom_entries or []:
-                for ref in expand_ref_range(entry.ref):
-                    entries[ref] = entry
+            for row, assignment in enumerate(spec.bom_entries or []):
+                for ref in expand_ref_range(assignment.ref):
+                    entries[ref] = (row, assignment)
 
         findings: list[dict] = []
         for fp in self._pcb.footprints:
+            if fp.dnp:
+                continue
             for pad in fp.pads:
                 # Excludes vias (not pads), SMD pads and np_thru_hole
                 # (non-plated) pads by type.
                 if pad.type not in ("thru_hole", "through_hole"):
                     continue
-                entry = entries.get(fp.reference)
+                entry = None
+                profile_error = None
                 profile: LeadProfile | None = None
-                if entry is not None:
-                    profile = (entry.pad_leads or {}).get(pad.number) or entry.lead
+                if fp.reference in entries:
+                    row, entry = entries[fp.reference]
+                    profile_error = profile_errors.get((row, pad.number))
+                    if profile_error is None:
+                        profile = (entry.pad_leads or {}).get(pad.number) or entry.lead
+                        if profile is None:
+                            profile_error = profile_errors.get((row, None))
                 findings.append(
                     _lead_fit_finding(
-                        fp.reference, pad, entry, profile, tolerance_mm, tolerance_source
+                        fp.reference,
+                        pad,
+                        entry,
+                        profile,
+                        tolerance_mm,
+                        tolerance_source,
+                        tolerance_reason,
+                        profile_error,
                     )
                 )
 
@@ -2708,16 +2734,10 @@ class PreflightChecker:
         original (warn-on-missing) behaviour.
         """
         try:
-            from .bom_spec_overlay import expand_ref_range, find_spec_file
+            from .bom_spec_overlay import expand_ref_range
 
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is None:
-                return set()
-
-            from ..spec.parser import load_spec
-
-            spec = load_spec(spec_file)
-            if not spec.bom_entries:
+            spec, _ = self._load_project_spec()
+            if spec is None or not spec.bom_entries:
                 return set()
 
             refs: set[str] = set()
@@ -2737,14 +2757,11 @@ class PreflightChecker:
         Best-effort like the overlay: no/invalid spec means no exemptions.
         """
         try:
-            from .bom_spec_overlay import declared_exemptions, find_spec_file
+            from .bom_spec_overlay import declared_exemptions
 
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is None:
+            spec, _ = self._load_project_spec()
+            if spec is None:
                 return {}
-            from ..spec.parser import load_spec
-
-            spec = load_spec(spec_file)
             return declared_exemptions(spec.bom_entries) if spec.bom_entries else {}
         except Exception as e:
             logger.debug("Spec exemption lookup failed (ignoring): %s", e)
@@ -2795,18 +2812,13 @@ class PreflightChecker:
             from .bom_spec_overlay import (
                 apply_spec_overlay,
                 declared_exemptions,
-                find_spec_file,
                 resolved_refs,
             )
 
-            spec_file = find_spec_file(self.pcb_path.parent)
-            if spec_file is not None:
-                from ..spec.parser import load_spec
-
-                spec = load_spec(spec_file)
-                if spec.bom_entries:
-                    spec_refs = resolved_refs(apply_spec_overlay(items, spec.bom_entries))
-                    exempt_refs = set(declared_exemptions(spec.bom_entries))
+            spec, _ = self._load_project_spec()
+            if spec and spec.bom_entries:
+                spec_refs = resolved_refs(apply_spec_overlay(items, spec.bom_entries))
+                exempt_refs = set(declared_exemptions(spec.bom_entries))
         except Exception as e:
             logger.warning("Spec overlay failed in preflight (continuing without): %s", e)
 

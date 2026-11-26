@@ -13,8 +13,8 @@ Defines the schema for PCB project specifications including:
 from __future__ import annotations
 
 import datetime
-import math
 import re
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal
 
@@ -929,9 +929,15 @@ class LeadProfile(SpecModel):
         diagonal of its maximum width and thickness -- a centred rectangle
         only fits a round hole whose diameter clears that diagonal.
         """
+        return float(self.required_diameter_decimal_mm())
+
+    def required_diameter_decimal_mm(self) -> Decimal:
+        """Calculate clearance against decimal hole and tolerance dimensions."""
+        dimensions = [Decimal(str(x)) for x in self.max_dimensions_mm()]
         if self.shape == "round":
-            return float(self.diameter_mm or 0.0)
-        return math.hypot(self.width_mm or 0.0, self.thickness_mm or 0.0)
+            return dimensions[0]
+        width, thickness = dimensions
+        return (width**2 + thickness**2).sqrt()
 
     def max_dimensions_mm(self) -> tuple[float, ...]:
         """The declared maximum dimensions, in declaration order."""

@@ -2008,6 +2008,8 @@ class ManufacturingPackage:
             manufacturer=self.manufacturer,
             output_dir=self.config.output_dir,
             config=preflight_cfg,
+            spec_path=self.config.spec_path,
+            no_spec=self.config.no_spec,
             exclude_tht=exclude_tht,
             bom_source=self.config.bom_source,
             merge_lcsc=self.config.merge_lcsc,
