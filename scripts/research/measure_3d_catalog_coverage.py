@@ -84,21 +84,16 @@ def build_body_check() -> HasBody:
 
 def classify(rows: Iterable[sqlite3.Row], match: Matcher, has_body: HasBody) -> dict[str, Any]:
     """Count rows by ``(library_type, category) -> {stock_body, needs_lcsc, no_footprint}``."""
+    from kicad_tools.parts.jlcparts_catalog import CatalogTier, catalog_tier
+
     keys = None
     counts: dict[str, Counter[str]] = defaultdict(Counter)
     total: Counter[str] = Counter()
     for row in rows:
         if keys is None:
             keys = set(row.keys())
-        library_type = (
-            "basic"
-            if str(row["library_type"] or "").lower()
-            in {
-                "basic",
-                "preferred",
-            }
-            else "extended"
-        )
+        tier = catalog_tier(row["library_type"], row["preferred"] if "preferred" in keys else None)
+        library_type = "extended" if tier == CatalogTier.EXTENDED else "basic"
         category = str(row["category"] if "category" in keys else "") or "(uncategorised)"
         lib_id = match(str(row["package"] or ""))
         if lib_id is None:
