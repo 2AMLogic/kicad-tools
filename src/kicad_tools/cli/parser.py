@@ -5391,6 +5391,11 @@ def _add_fix_vias_parser(subparsers) -> None:
     )
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_vias_parser.add_argument(
+        "--even-if-supported",
+        action="store_true",
+        help="With --relocate-in-pad, move vias off pads even when the selected profile offers via-in-pad.",
+    )
+    fix_vias_parser.add_argument(
         "--search-alternatives",
         action="store_true",
         help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",

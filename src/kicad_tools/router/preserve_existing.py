@@ -48,7 +48,29 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
-__all__ = ["fully_connected_nets"]
+__all__ = ["detached_off_width_arc_nets", "fully_connected_nets"]
+
+
+def detached_off_width_arc_nets(pcb: PCB, widths: dict[str, float]) -> set[str]:
+    """Find stale curves disconnected from pads and filled copper on otherwise sized nets."""
+    arc_keys: dict[int, set[tuple[str, int]]] = {}
+    for index, arc in enumerate(pcb.arcs):
+        target = widths.get(arc.net_name)
+        if target is not None and abs(arc.width - target) > 1e-4:
+            arc_keys.setdefault(arc.net_number, set()).add(("arc", index))
+    if not arc_keys:
+        return set()
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+    from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+    validator = ConnectivityValidator(pcb)
+    stale = set()
+    for number, keys in arc_keys.items():
+        graph = build_copper_contact_graph(validator, number)
+        if any(graph.items[i].key in keys for group in graph.orphan_components() for i in group):
+            stale.add(pcb.nets[number].name)
+    return stale
 
 
 def fully_connected_nets(

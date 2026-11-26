@@ -100,6 +100,8 @@ def run_fix_vias_command(args) -> int:
         sub_argv.append("--skip-if-clearance-violation")
     if getattr(args, "relocate_in_pad", False):
         sub_argv.append("--relocate-in-pad")
+    if getattr(args, "even_if_supported", False):
+        sub_argv.append("--even-if-supported")
     if getattr(args, "search_alternatives", False):
         sub_argv.append("--search-alternatives")
     for net in getattr(args, "nets", None) or []:
