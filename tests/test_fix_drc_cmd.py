@@ -4199,7 +4199,6 @@ class TestInvalidatedWaiverReport:
 def test_bonded_via_repair_rolls_back_on_failed_verification(
     tmp_path, monkeypatch, capsys, failure
 ):
-    from collections import Counter
 
     from kicad_tools.cli import fix_drc_cmd
     from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer
@@ -4230,7 +4229,9 @@ def test_bonded_via_repair_rolls_back_on_failed_verification(
         assert not MaskCopperRepairer(candidate)._segment_nodes()
         return [frozenset({"pad"}), frozenset({"return"})]
 
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", native_groups)
     _run(
         monkeypatch,
@@ -4247,7 +4248,6 @@ def test_bonded_via_repair_rolls_back_on_failed_verification(
 
 
 def test_bonded_via_is_graded_on_refilled_copper(tmp_path, monkeypatch, capsys):
-    from collections import Counter
     from types import SimpleNamespace
 
     from kicad_tools.cli import fix_drc_cmd, runner
@@ -4278,7 +4278,9 @@ def test_bonded_via_is_graded_on_refilled_copper(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(runner, "run_refill_zones", refill)
     monkeypatch.setattr(fix_drc_cmd, "_verify_mask_actions", grade_saved)
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda path: [frozenset({"pad"})])
     _run(
         monkeypatch,

@@ -14,6 +14,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-26
+
+- **Issue #10241** (closed): detect-mistakes --format json builds a second DecouplingCountCheck, parsing the schematic twice
+- **PR #10245**: perf(detect-mistakes): share one decoupling check run between findings and inventory
+- **Issue #10291** (closed): path_ampacity judges one layer of a doubled copper link when its first bend sits inside the plated terminal
+- **PR #10292**: Credit matched front/back entries at plated current-path terminals
+
 ### 2026-11-25
 
 - **Issue #10249** (closed): board04: repair_bypass_mask_escapes silently skips when the reviewed path is absent
