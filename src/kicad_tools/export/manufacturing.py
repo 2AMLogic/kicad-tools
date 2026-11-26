@@ -62,7 +62,12 @@ PURCHASING_FILENAME = "purchasing.json"
 
 @dataclass
 class ManufacturingConfig(AssemblyConfig):
-    """Configuration for manufacturing package generation."""
+    """Configuration for manufacturing package generation.
+
+    ``via_land_overlap`` opts the export into the ``via_land_overlap`` preflight
+    measurement of the shipped archive (``kct export --via-land-overlap``, Issue
+    #10357); it is off by default.
+    """
 
     # Report settings
     include_report: bool = True
@@ -134,6 +139,8 @@ class ManufacturingConfig(AssemblyConfig):
     silk_fix: bool = True
     # Readiness resolves the source boundary before it stages the editable project.
     project_root: Path | None = None
+
+    via_land_overlap: bool = False
 
 
 @dataclass
@@ -1583,6 +1590,9 @@ class ManufacturingPackage:
         # an earlier one withdrawn, without touching the fabricator files.
         self._write_purchasing(out_dir, result)
 
+        if self.config.via_land_overlap:
+            self._measure_via_land_overlap(result)
+
         # Step 2: Report (optional)
         if self.config.include_report:
             self._generate_report(out_dir, result)
@@ -1967,6 +1977,53 @@ class ManufacturingPackage:
             entry.message = "All BOM items have required fields (LCSC resolved by enrichment)"
 
         entry.details = "; ".join(remaining_issues + notes)
+
+    def _measure_via_land_overlap(self, result: ManufacturingResult) -> None:
+        """Measure the shipped archive's plated via drills against same-face SMD lands.
+
+        Opt-in through ``ManufacturingConfig.via_land_overlap`` (Issue #10357).
+        Runs once the archive exists and before the report and the manifest
+        read ``preflight_results``. A missing or unreadable archive, or a
+        failure of the measurement itself, is recorded as partial coverage and
+        never blocks the export.
+        """
+        from ..manufacturers import get_fab_family
+        from ..schema.pcb import PCB
+        from .assembly import plot_use_aux_origin
+        from .via_land_overlap import measure_via_land_overlap, unmeasured_via_land_overlap
+
+        assembly = result.assembly_result
+        archive = Path(assembly.gerber_path) if assembly and assembly.gerber_path else None
+        name = result.bundle_relpath(archive) if archive is not None else None
+        use_aux_origin = plot_use_aux_origin(get_fab_family(self.manufacturer), self.config)
+        sha256: str | None = None
+
+        def unmeasured(reason: str) -> PreflightResult:
+            return unmeasured_via_land_overlap(
+                [reason], archive=name, archive_sha256=sha256, use_aux_origin=use_aux_origin
+            )
+
+        if archive is None or not archive.is_file():
+            result.preflight_results.append(unmeasured("archive_missing"))
+            return
+        try:
+            sha256 = _sha256_file(archive)
+            with zipfile.ZipFile(archive) as opened:
+                measurement = measure_via_land_overlap(
+                    PCB.load(str(self.pcb_path)),
+                    opened,
+                    use_aux_origin=use_aux_origin,
+                    fabrication_process=result.fabrication_process,
+                    archive_name=name,
+                    archive_sha256=sha256,
+                )
+        except (zipfile.BadZipFile, OSError) as exc:
+            logger.warning("Via land overlap: archive %s is unreadable: %s", archive, exc)
+            measurement = unmeasured("archive_unreadable")
+        except Exception as exc:
+            logger.exception("Via land overlap measurement failed")
+            measurement = unmeasured(f"measurement_failed:{type(exc).__name__}")
+        result.preflight_results.append(measurement)
 
     def _check_drc_safety_floor(self, result: ManufacturingResult) -> None:
         """Hard-abort export on net shorts / connectivity errors.
