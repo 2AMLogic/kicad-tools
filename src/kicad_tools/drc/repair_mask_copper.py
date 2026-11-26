@@ -1822,9 +1822,14 @@ class MaskCopperRepairer(CopperGapRepairer):
                 legs, copper, {opening, owners[0]}, layer, width, pads, required, margin_mm
             ):
                 continue
-            old = LineString([anchor, corner, far]).buffer(width / 2, quad_segs=16)
-            new = unary_union(copper)
-            moves = [(old, new, layer)]
+            # Both pieces of the split diagonal inherit its original clearance.
+            # The shorter tail can already lie closer to the same obstacle.
+            diagonal = LineString([anchor, corner]).buffer(width / 2, quad_segs=16)
+            tail_copper = LineString([corner, far]).buffer(width / 2, quad_segs=16)
+            moves = [
+                (diagonal, unary_union(copper[:2]), layer),
+                (tail_copper, copper[2], layer),
+            ]
             if self._loses_same_net_contact(
                 moves, layer, net, {uid, tail_id}, pads, protect_ends=True
             ):
@@ -1832,7 +1837,9 @@ class MaskCopperRepairer(CopperGapRepairer):
             floor = max(clearance_mm or 0, self._board_rules.net_requirement(net, self.net_names))
             if self._copper_floor_reason(
                 moves, layer, net, uid, pads, floor
-            ) or self._pull_in_crowds_pad(PCB(self.doc), layer, net, pads, [(old, new)]):
+            ) or self._pull_in_crowds_pad(
+                PCB(self.doc), layer, net, pads, [(old, new) for old, new, _ in moves]
+            ):
                 continue
             bend = MaskTraceBend(uid, str(uuid4()), fixed_tag, anchor, lead)
             action = MaskNudgeAction(

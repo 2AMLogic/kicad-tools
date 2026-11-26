@@ -274,7 +274,6 @@ def test_fix_drc_only_mask_copper_repairs_and_verifies(tmp_path, monkeypatch, ca
 
 
 def test_verified_mask_move_keeps_collateral_traces_aligned(tmp_path, monkeypatch):
-    from collections import Counter
 
     from kicad_tools.router.quantize import is_45_aligned
 
@@ -284,7 +283,9 @@ def test_verified_mask_move_keeps_collateral_traces_aligned(tmp_path, monkeypatc
     other = _seg("other", (110, 110), (113, 111), net=2)
     joined = _seg("joined", (100.7, 100.3), (100.7, 105), width=0.3)
     board = _board(tmp_path, "\n".join([ENTRY, joined, other]))
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     _run(monkeypatch, board, [_report(_finding("trk-a")), _report()])
     tracks = MaskCopperRepairer(board)
     off_angle = set()
@@ -307,11 +308,12 @@ def test_verified_mask_move_keeps_collateral_traces_aligned(tmp_path, monkeypatc
 
 
 def test_finding_on_new_leg_rolls_back_whole_junction(tmp_path, monkeypatch, capsys):
-    from collections import Counter
 
     board = _board(tmp_path, ENTRY + "\n" + _seg("joined", (100.7, 100.3), (100.7, 105)))
     original = board.read_bytes()
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     found_leg = []
 
     def check(path, **kwargs):
@@ -390,7 +392,6 @@ def test_bend_refuses_a_collateral_track_in_a_generator_subgroup(tmp_path, monke
 def test_off_angle_track_introduced_during_refill_is_never_published(
     tmp_path, monkeypatch, capsys, identity
 ):
-    from collections import Counter
 
     from kicad_tools.cli import runner
 
@@ -413,7 +414,9 @@ def test_off_angle_track_introduced_during_refill_is_never_published(
         edited.save()
         return runner.KiCadCLIResult(success=True)
 
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     monkeypatch.setattr(runner, "run_refill_zones", refill)
     _run(monkeypatch, board, [_report(_pt_finding("trk-p")), _report()], extra=("-o", str(output)))
     out = capsys.readouterr()
@@ -686,7 +689,12 @@ def test_native_pull_in_check_preserves_prior_output_on_new_error(
     output = tmp_path / "other.kicad_pcb"
     output.write_bytes(b"previous output")
     native = iter(
-        [(Counter(), 0), (Counter({("clearance", "board rule", ("pad", "track")): 1}), 0)]
+        [
+            fix_drc_cmd._MaskNativeState(),
+            fix_drc_cmd._MaskNativeState(
+                Counter({("clearance", "board rule", ("pad", "track")): 1})
+            ),
+        ]
     )
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: next(native))
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda candidate: [])
@@ -1694,9 +1702,11 @@ def test_public_via_repair_with_reported_approach_restores_input_on_native_veto(
 
     def native_state(candidate):
         if _saved_copper(candidate, "via-p")[1] == centre:
-            return Counter(), 0
+            return fix_drc_cmd._MaskNativeState()
         assert _end(candidate, "approach")[1][0] == 101.05
-        return Counter({("items_not_allowed", "via rule", ("via-p",)): 1}), 0
+        return fix_drc_cmd._MaskNativeState(
+            Counter({("items_not_allowed", "via rule", ("via-p",)): 1})
+        )
 
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", native_state)
     _run(
@@ -2167,7 +2177,6 @@ def test_mask_nudges_cannot_trade_pad_connections_on_the_same_partial_net(tmp_pa
 def test_unavailable_native_pad_groups_preserve_prior_output(
     tmp_path, monkeypatch, capsys, fail_on_read
 ):
-    from collections import Counter
 
     board = _board(tmp_path, PASS)
     original = board.read_bytes()
@@ -2183,7 +2192,9 @@ def test_unavailable_native_pad_groups_preserve_prior_output(
         return [frozenset({"left", "right"})]
 
     monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", read_groups)
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda candidate: (Counter(), 1))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda candidate: fix_drc_cmd._MaskNativeState(opens=1)
+    )
     _run(
         monkeypatch,
         board,
@@ -2219,7 +2230,9 @@ def test_mask_refill_publishes_only_verified_saved_copper(tmp_path, monkeypatch,
         assert candidate.name == board.name
         assert candidate.with_suffix(".kicad_dru").read_text() == "(version 1)"
         saved = "priority 3" in candidate.read_text()
-        return (Counter({"clearance": 1}) if saved and outcome == "saved_error" else Counter(), 0)
+        return fix_drc_cmd._MaskNativeState(
+            Counter({"clearance": 1}) if saved and outcome == "saved_error" else Counter()
+        )
 
     def refill(candidate, *, require_save):
         assert require_save
@@ -2805,7 +2818,6 @@ def test_elbow_flip_moves_the_corner_into_the_pad_keeping_every_angle_and_undoes
 def test_elbow_selective_undo_preserves_both_authored_ends_when_other_action_is_saved(
     tmp_path, monkeypatch, capsys
 ):
-    from collections import Counter
 
     board = _board2(
         tmp_path,
@@ -2821,7 +2833,9 @@ def test_elbow_selective_undo_preserves_both_authored_ends_when_other_action_is_
     original = {uid: _end(board, uid) for uid in ("hug", "turn")}
     elbow = _overlap_pass_through("hug")
     entry = _own_finding("entry", "pad-r2-1", "R2/1")
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     _run(
         monkeypatch,
         board,
@@ -3473,6 +3487,81 @@ def test_pad_chain_shares_the_straight_length_and_restores_the_authored_tracks(t
     assert saved.doc.to_string() == before
 
 
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize(
+    ("floor", "expected_gaps", "permitted", "native_only"),
+    [
+        (0.65, [0.4131, 0.6107], False, False),
+        (0.55, [0.4131], False, False),
+        (0.40, [], True, False),
+        (0.65, [0.4131, 0.6107], False, True),
+    ],
+)
+def test_pad_chain_preserves_individual_native_clearances(
+    tmp_path, capsys, monkeypatch, floor, expected_gaps, permitted, native_only
+):
+    from kicad_tools.cli.kicad_toolchain import evidence_toolchain
+    from kicad_tools.drc.geometric import run_geometric_drc
+
+    # Exercise the saved-board backstop independently of the local pad model.
+    if native_only:
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+        monkeypatch.setattr(BoardClearanceRules, "net_requirement", lambda *args: 0.1016)
+        monkeypatch.setattr(MaskCopperRepairer, "_pull_in_crowds_pad", lambda *args: False)
+
+    fixture = Path(__file__).parent / "fixtures" / "mask_pad_chain_clearance.kicad_pcb"
+    board = tmp_path / fixture.name
+    original = fixture.read_bytes()
+    board.write_bytes(original)
+    board.with_suffix(".kicad_pro").write_text("{}")
+    board.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "board minimum" (constraint clearance (min 0.1016mm)))\n'
+        '(rule "A7 rail clearance" (layer "F.Cu") '
+        "(condition \"A.Type == 'Pad' && A.Reference == 'J1' && A.Pad_Number == 'A7' "
+        "&& B.Type == 'Track' && B.NetName == 'USB_D+'\") "
+        f"(constraint clearance (min {floor}mm)))\n"
+    )
+
+    def measured_gaps():
+        native = run_geometric_drc(board, refill_zones=False, all_track_errors=True)
+        assert native.ran and native.unconnected_count == 0
+        return sorted(
+            v.actual_value_mm for v in native.error_violations if v.type_str == "clearance"
+        )
+
+    with evidence_toolchain(mounts=[tmp_path]):
+        assert measured_gaps() == pytest.approx(expected_gaps)
+        fix_drc_cmd.main(
+            [
+                str(board),
+                "--only",
+                "mask-copper",
+                "--mfr",
+                "jlcpcb-tier1",
+                "--verify",
+                "--format",
+                "json",
+            ]
+        )
+        report = json.loads(capsys.readouterr().out)["mask_copper"]
+        assert measured_gaps() == pytest.approx(expected_gaps)
+    assert report["repaired"] == int(permitted)
+    assert (board.read_bytes() != original) == permitted
+    if native_only:
+        assert any("0.6107 to 0.4339 mm" in row["detail"] for row in report["unrepaired"]), report
+
+
+def test_native_clearance_comparison_allows_improved_and_removed_witnesses():
+    pair = ("clearance", "rule", ("pad", "track"), 0.65)
+    before = fix_drc_cmd._MaskNativeState(clearance_gaps={pair: [0.61, 0.41]})
+    for improved in ([0.42, 0.62], [0.42], []):
+        after = fix_drc_cmd._MaskNativeState(clearance_gaps={pair: improved})
+        assert after.worsened_clearance(before) is None
+    after = fix_drc_cmd._MaskNativeState(clearance_gaps={pair: [0.55, 0.42]})
+    assert after.worsened_clearance(before) == (0.61, 0.55)
+
+
 @pytest.mark.parametrize(("floor", "accepted"), [(0.1016, False), (0.08, True)])
 def test_pad_chain_checks_project_clearance_on_the_saved_diagonal(tmp_path, floor, accepted):
     # The replacement clears this foreign trace by 0.09 mm.
@@ -3515,7 +3604,6 @@ def test_pad_chain_refusals_preserve_original_copper(tmp_path, extra, locked):
 def test_pad_chain_added_leg_verification_failure_preserves_prior_output(
     tmp_path, monkeypatch, capsys
 ):
-    from collections import Counter
 
     board, finding = _pad_chain(tmp_path)
     original = board.read_bytes()
@@ -3533,7 +3621,9 @@ def test_pad_chain_added_leg_verification_failure_preserves_prior_output(
         return _report(_pt_finding(added, "unrelated-opening"))
 
     monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", check)
-    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
     fix_drc_cmd.main(
         [
             str(board),
