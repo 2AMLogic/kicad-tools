@@ -13,7 +13,15 @@ from tests.test_current_paths import _add_pad_footprint
 from tests.test_current_paths_via_array import fixture, spec
 
 
-def tap_board(*, tap_width=0.2, tap_pad=True, rejoin=False, same_layer=False):
+def tap_board(
+    *,
+    tap_width=0.2,
+    tap_pad=True,
+    rejoin=False,
+    same_layer=False,
+    receive_layer="B.Cu",
+    receive=True,
+):
     pcb = fixture()
     pcb._segments = []
     pcb._vias = []
@@ -21,13 +29,14 @@ def tap_board(*, tap_width=0.2, tap_pad=True, rejoin=False, same_layer=False):
     pcb.add_trace((20, 50), (20, 53), width=2.0, layer="F.Cu", net="NET1")
     pcb.add_via(20, 53, net="NET1", dedupe=False)
     pcb.add_trace((20, 53), (120, 50), width=3.0, layer="B.Cu", net="NET1")
-    # Sense tap: pad -> stub -> via -> opposite layer -> sense-IC pad.
+    # Sense tap: pad -> stub -> via -> receive_layer -> sense-IC pad.
     if same_layer:
         pcb.add_trace((21, 50), (60, 40), width=tap_width, layer="F.Cu", net="NET1")
     else:
         pcb.add_trace((21, 50), (21, 52), width=tap_width, layer="F.Cu", net="NET1")
         pcb.add_via(21, 52, net="NET1", dedupe=False)
-        pcb.add_trace((21, 52), (60, 40), width=tap_width, layer="B.Cu", net="NET1")
+        if receive:
+            pcb.add_trace((21, 52), (60, 40), width=tap_width, layer=receive_layer, net="NET1")
     if tap_pad:
         _add_pad_footprint(pcb, ref="SENSE", x=60, y=40, net="NET1")
     if rejoin:
@@ -59,6 +68,21 @@ def test_tap_segments_are_listed_but_never_force_evidence():
     assert not audit_current_paths(pcb, [spec()]).fully_covered
 
 
+@pytest.mark.parametrize("declaration", [spec, reversed_spec])
+@pytest.mark.parametrize("layer", ["In1.Cu", "In2.Cu"])
+def test_tap_leaving_its_via_on_an_inner_layer_resolves(declaration, layer):
+    pcb = tap_board(receive_layer=layer)
+    result = resolve_current_path(pcb, declaration())
+    assert result.ok, result.reason
+    tap_ids = {id(s) for s in pcb.segments if s.width == 0.2}
+    wide_ids = {id(s) for s in pcb.segments if s.width != 0.2}
+    assert len(tap_ids) == 2 and len(wide_ids) == 2
+    assert {id(s) for s in result.sense_taps} == tap_ids
+    assert {id(s) for s in result.segments} == wide_ids
+    assert reinforcement_eligible_segment_ids(pcb, [declaration()]) == wide_ids
+    assert not audit_current_paths(pcb, [declaration()]).fully_covered
+
+
 def test_tap_on_both_endpoint_pads_resolves():
     pcb = tap_board()
     pcb.add_trace((120, 50), (121, 50), width=0.2, layer="B.Cu", net="NET1")
@@ -81,6 +105,24 @@ def test_non_tap_shapes_stay_ambiguous(kwargs):
     result = resolve_current_path(pcb, spec())
     assert result.status == "ambiguous"
     assert not result.sense_taps
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"receive_layer": "In1.Cu", "tap_pad": False},
+        {"receive_layer": "In2.Cu", "tap_pad": False},
+        {"receive": False},
+    ],
+    ids=["inner1_open_copper", "inner2_open_copper", "no_receiving_trace"],
+)
+def test_unterminated_via_tap_stays_ambiguous(kwargs):
+    pcb = tap_board(**kwargs)
+    result = resolve_current_path(pcb, spec())
+    assert result.status == "ambiguous"
+    assert not result.sense_taps
+    assert not result.segments
+    assert not reinforcement_eligible_segment_ids(pcb, [spec()])
 
 
 def test_two_thin_taps_on_one_pad_stay_ambiguous():

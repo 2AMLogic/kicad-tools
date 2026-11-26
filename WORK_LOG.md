@@ -16,6 +16,28 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-26
 
+- **Issue #10297** (closed): Board 06: clear three USB3_RX1 mask errors at J1/B10 and U2/B5
+- **PR #10305**: fix(board06): clear the USB3 RX1 connector and BGA mask openings
+- **Issue #10353** (closed): fix-vias: allow off-pad relocation on a via-in-pad capable fabrication profile
+- **PR #10354**: Allow off-pad via relocation with a via-in-pad capable profile
+- **Issue #10326** (closed): silk_pad_clearance misses or misreports gaps when a pad inherits its footprint mask margin
+- **PR #10330**: fix: resolve silk-pad aperture mask margin through pad/footprint/board precedence
+- **Issue #10277** (closed): Router-generated netclasses disappear from a fresh KiCad schematic netlist
+- **PR #10278**: Preserve router netclasses in KiCad schematic exports
+- **Issue #10189** (closed): router/optimize-traces: honour project netclass track widths on re-route
+- **PR #10193**: fix: honour project netclass widths in route and optimize-traces
+- **Issue #10290** (closed): Clear the USB3 transmitter mask errors at J1/A3 and U2/B3 on Board 06
+- **PR #10293**: fix(board06): clear the USB3 transmitter mask errors at both ends
+- **Issue #10301** (closed): Public kct datasheet CLI rejects extract-package and suggest-footprint
+- **PR #10302**: Expose the datasheet package commands in kct
+- **Issue #10310** (closed): kct sync loses or leaves stale purchasing fields when adding, swapping or changing a part
+- **PR #10311**: fix(sync): reconcile schematic purchasing fields on board footprints
+- **Issue #10240** (closed): schematic: get_net_for_pin and extract_netlist disagree with KiCad (and each other) when a rail carries two names
+- **PR #10252**: fix: resolve one net identity across schematic netlist APIs
+- **Issue #10267** (closed): Board 06 clear the six remaining power-net mask findings at U2 and U3
+- **PR #10273**: fix: clear Board 06 power-net mask errors at U2 and U3
+- **Issue #10303** (closed): Datasheet package extraction interprets the P48 in LQFP48 as a 48 mm lead pitch
+- **PR #10304**: Keep pin count and pitch separate in datasheet footprint suggestions
 - **Issue #10285** (closed): Clear the USB3 receive-pair mask openings at BGA pads U2/F5 and F6 on Board 06
 - **PR #10288**: fix(board06): clear both USB3 receiver BGA mask openings
 - **Issue #10281** (closed): fix-silkscreen --all cannot resolve the advertised jlcpcb-tier1 order profile
