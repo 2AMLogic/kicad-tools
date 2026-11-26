@@ -584,7 +584,7 @@ def _staged_repair(
     from kicad_tools.creepage.output_audit import publish_board, staged_board
 
     try:
-        with staged_board(pcb_path, output_path) as candidate:
+        with staged_board(pcb_path, output_path, in_destination_dir=not args.dry_run) as candidate:
             code = _execute_repair(args, pcb_path, candidate, report)
             # A later no-progress pass (exit 1) can follow earlier verified
             # edits. Preserve the command's ordinary partial-repair behaviour.
@@ -609,6 +609,17 @@ def _staged_repair(
                 audit.print_findings()
                 print(f"Repair discarded: {error}", file=sys.stderr)
         return 1
+
+
+def _run_result_board(pass_results: list[PassResult], output_path: Path, pcb_path: Path) -> Path:
+    """The PCB holding this run's result.
+
+    An ``--output`` file left by an earlier run is not this run's result: it only
+    counts once a pass of this run repaired (and so saved) something.
+    """
+    if output_path != pcb_path and not any(p.repaired for p in pass_results):
+        return pcb_path
+    return output_path if output_path.exists() else pcb_path
 
 
 def _refill_mixed_candidate(candidate: Path, pcb_path: Path) -> None:
@@ -1150,7 +1161,7 @@ def _execute_repair(
     # there is nothing to re-check; its counts are labelled as predictions.
     recheck: Recheck | None = None
     if not args.dry_run and pass_results:
-        board_after = output_path if output_path.exists() else pcb_path
+        board_after = _run_result_board(pass_results, output_path, pcb_path)
         if audit:
             last_edit = next((p for p in reversed(pass_results) if p.repaired), None)
             if output_path.exists() and last_edit and not last_edit.mask_result.repaired:
@@ -1175,7 +1186,7 @@ def _execute_repair(
     # a before/after delta.  Same rule set as the re-check above.
     if args.verify and not args.dry_run:
         verify_after = _run_python_drc(
-            output_path if output_path.exists() else pcb_path,
+            _run_result_board(pass_results, output_path, pcb_path),
             manufacturer=args.mfr,
             layers=args.layers,
             project_pcb_path=pcb_path,

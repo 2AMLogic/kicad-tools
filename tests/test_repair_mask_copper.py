@@ -676,6 +676,67 @@ def test_guard_reverts_new_covered_segment(tmp_path, monkeypatch, capsys, old_co
     assert board.read_bytes() == original
 
 
+def test_rejected_repair_ignores_prior_output(tmp_path, monkeypatch, capsys):
+    """A leftover --output file is not this run's result: preview and apply agree."""
+    from kicad_tools.drc.compat import drc_results_to_report
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+    board = _board(tmp_path, "\n".join([ENTRY, _seg("new", (99.76, 100.24), (99.86, 100.14))]))
+
+    def assess(path, **kwargs):
+        pcb = PCB.load(path)
+        results = RedundantCopperRule().check(pcb, get_profile("jlcpcb").get_design_rules(2))
+        report = drc_results_to_report(results, path)
+        report.mask_copper_assessments = [MaskCopperAssessment(coverage="complete")]
+        if _end(path, "trk-a")[1] == (100.7, 100.3):
+            report.violations.append(_finding("trk-a"))
+        return report
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    prior = tmp_path / "prior.kicad_pcb"
+    prior.write_bytes(b"unreadable prior output")
+    argv = [
+        str(board),
+        "--only",
+        "mask-copper",
+        "--no-new-warnings",
+        "--max-displacement",
+        "1",
+        "--no-connectivity-check",
+        "--format",
+        "json",
+        "--output",
+        str(prior),
+    ]
+    preview_code = fix_drc_cmd.main([*argv, "--dry-run"])
+    preview = json.loads(capsys.readouterr().out)
+    apply_code = fix_drc_cmd.main(argv)
+    captured = capsys.readouterr()
+    assert "final mask assessment" not in captured.err
+    applied = json.loads(captured.out)
+    assert apply_code == preview_code
+    assert applied["total_repaired"] == preview["total_repaired"] == 0
+    assert applied["mask_copper"]["unrepaired"] == preview["mask_copper"]["unrepaired"]
+
+
+def test_staged_board_preview_needs_no_destination_write_access(tmp_path):
+    from kicad_tools.creepage.output_audit import staged_board
+
+    source = tmp_path / "src.kicad_pcb"
+    source.write_text("x")
+    destination = tmp_path / "board" / "out.kicad_pcb"
+    destination.parent.mkdir()
+    with staged_board(source, destination, in_destination_dir=False) as candidate:
+        assert destination.parent not in candidate.parents
+    with staged_board(source, destination) as candidate:
+        assert candidate.parent.parent == destination.parent
+
+
 def test_guard_preview_keeps_verified_move_private(tmp_path, monkeypatch, capsys):
     board = _board(tmp_path, ENTRY)
     original = board.read_bytes()
