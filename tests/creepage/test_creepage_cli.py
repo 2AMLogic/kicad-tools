@@ -913,6 +913,23 @@ def test_scoped_exception_covering_only_failing_metric(tmp_path, capsys):
     assert r1["gate_pass"] is True
 
 
+@pytest.mark.parametrize("missing_pair", [False, True])
+def test_selected_pair_with_scoped_exception(tmp_path, capsys, missing_pair):
+    extra = ["--pair", "L_MAINS", "DIV_MID"]
+    if missing_pair:
+        extra += ["--pair", "L_MAINS", "MISSING_NET"]
+    rc, payload, _ = _scoped_run(
+        tmp_path, capsys, board_scoped_exception_source(), [_exc_entry()], *extra
+    )
+    reviewed = next(row for row in payload["pairs"] if row.get("footprint") == "R1")
+    assert reviewed["exception"] == {"creepage": _EXC_REASON}
+    assert reviewed["gate_pass"] is True
+    assert reviewed["governing_voltage_v"] == 170
+    assert bool(payload["unresolved_pairs"]) == missing_pair
+    assert payload["gate_passed"] == (not missing_pair)
+    assert rc == int(missing_pair)
+
+
 def test_scoped_exception_does_not_waive_board_track(tmp_path, capsys):
     # All package failures covered (R1) or clear (R2); a failing DIV_MID track
     # under R1's L_MAINS pad keeps a board finding and exit 1.

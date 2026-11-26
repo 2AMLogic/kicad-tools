@@ -934,6 +934,26 @@ def _add_creepage_parser(subparsers) -> None:
             "--waive-same-footprint; does NOT affect the kct audit gate."
         ),
     )
+    # Selected-pair diagnostic (#10342): measure only the named pairs.
+    creepage_parser.add_argument(
+        "--pair",
+        dest="pairs",
+        nargs=2,
+        action="append",
+        metavar=("NET_A", "NET_B"),
+        default=None,
+        help=(
+            "Limited diagnostic: measure ONLY this exact, unordered conductor pair "
+            "(repeatable; a reversed duplicate is measured once).  Neither net needs "
+            "to be HV, and no census, board-edge row or implicit 0 V comparison is "
+            "made.  Combine with --voltage-map for one operating state: a selected "
+            "net absent from the map is reported as unmeasurable (an explicit 0 is "
+            "valid).  Unknown nets and pairs with no measurable path are named and "
+            "exit non-zero, as does a measured violation.  Table and JSON output are "
+            "marked as a limited diagnostic -- not a complete census and not release "
+            "evidence; omit --pair for the full board (as kct audit / readiness do)."
+        ),
+    )
     creepage_parser.add_argument(
         "--format",
         choices=["table", "json"],
@@ -5417,6 +5437,11 @@ def _add_fix_vias_parser(subparsers) -> None:
     )
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_vias_parser.add_argument(
+        "--even-if-supported",
+        action="store_true",
+        help="With --relocate-in-pad, move vias off pads even when the selected profile offers via-in-pad.",
+    )
+    fix_vias_parser.add_argument(
         "--search-alternatives",
         action="store_true",
         help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",
@@ -6060,6 +6085,8 @@ def _add_parts_parser(subparsers) -> None:
 
 def _add_datasheet_parser(subparsers) -> None:
     """Add datasheet subcommand parser with its subcommands."""
+    from .commands.datasheet import add_package_parsers
+
     datasheet_parser = subparsers.add_parser(
         "datasheet", help="Datasheet search, download, and PDF parsing"
     )
@@ -6128,6 +6155,8 @@ def _add_datasheet_parser(subparsers) -> None:
     ds_info = datasheet_subparsers.add_parser("info", help="Show PDF information")
     ds_info.add_argument("pdf", help="Path to PDF file")
     ds_info.add_argument("--format", choices=["text", "json"], default="text")
+
+    add_package_parsers(datasheet_subparsers)
 
 
 def _add_decisions_parser(subparsers) -> None:

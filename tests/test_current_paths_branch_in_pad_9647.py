@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from kicad_tools.manufacturers import DesignRules
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     PathEndpoint,
@@ -23,6 +24,7 @@ from kicad_tools.router.current_paths import (
     resolve_current_path,
 )
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.validate.rules.path_ampacity import PathAmpacityRule
 
 from .test_current_paths import _add_pad_footprint, _seg_len
 
@@ -290,9 +292,37 @@ def test_ending_off_centre_seed_keeps_documented_fallback(tap_layer):
     assert audit.fully_covered
 
 
-@pytest.mark.parametrize("back_width", [None, 0.30, 2.75])
-@pytest.mark.parametrize("reverse", [True, False])
-def test_matched_entries_inside_plated_terminal(back_width, reverse):
+def _plated_spec(*, reverse: bool = False, current_a: float = 13.42) -> CurrentPathSpec:
+    """The #10291 two-pad declaration, at its full 13.42 A load."""
+    endpoints = (("J2", "1"), ("J1", "1")) if reverse else (("J1", "1"), ("J2", "1"))
+    return CurrentPathSpec(
+        name="TRUNK",
+        net_name="NET1",
+        source=PathEndpoint(*endpoints[0]),
+        sink=PathEndpoint(*endpoints[1]),
+        continuous_a=current_a,
+    )
+
+
+def _plated_terminal_board(
+    *,
+    split_fcu: bool = False,
+    split_bcu: bool = False,
+    back_width: float | None = 2.75,
+    sense_stub: bool = False,
+) -> PCB:
+    """The public two-pad fixture of #10291, with subdividable entries.
+
+    J1 is the 3.15 x 3.15 mm roundrect plated terminal at (20, 20) and J2
+    the 2.5 x 4.5 mm oval terminal at (20.65, 32.2); each layer runs a
+    2.75 mm track from J1's centre through the shared arm landing
+    (20.65, 21.5) to J2. Each layer's straight entry from the pad centre
+    to the landing can be split at its exact collinear midpoint
+    (20.325, 20.75), independently per layer (#10300) -- both copper
+    films stay identical, only the vertex count changes. ``sense_stub``
+    hangs a 0.3 mm Kelvin tap off the split F.Cu vertex, wholly inside
+    the pad before it exits to a third pad.
+    """
     pcb = PCB.create(width=60, height=60, center=False)
     centre, bend, end = (20, 20), (20.65, 21.5), (20.65, 32.2)
     for ref, pos, shape, size in [
@@ -302,11 +332,41 @@ def test_matched_entries_inside_plated_terminal(back_width, reverse):
         _add_pad_footprint(pcb, ref=ref, x=pos[0], y=pos[1], net="NET1")
         pad = pcb.footprints[-1].pads[0]
         pad.size, pad.shape = size, shape
+    if sense_stub:
+        _add_pad_footprint(pcb, ref="R1", x=25, y=15, net="NET1")
     for layer in ("F.Cu", "B.Cu"):
         entry_width = 2.75 if layer == "F.Cu" else back_width
+        split = split_fcu if layer == "F.Cu" else split_bcu
         if entry_width is not None:
-            pcb.add_trace(centre, bend, width=entry_width, layer=layer, net="NET1")
+            if split:
+                pcb.add_trace(centre, (20.325, 20.75), width=entry_width, layer=layer, net="NET1")
+                pcb.add_trace((20.325, 20.75), bend, width=entry_width, layer=layer, net="NET1")
+            else:
+                pcb.add_trace(centre, bend, width=entry_width, layer=layer, net="NET1")
         pcb.add_trace(bend, end, width=2.75, layer=layer, net="NET1")
+    if sense_stub:
+        pcb.add_trace((20.325, 20.75), (20.9, 20.2), width=0.3, layer="F.Cu", net="NET1")
+        pcb.add_trace((20.9, 20.2), ("R1", "1"), width=0.3, layer="F.Cu", net="NET1")
+    return pcb
+
+
+def _plated_design_rules() -> DesignRules:
+    return DesignRules(
+        min_trace_width_mm=0.127,
+        min_clearance_mm=0.127,
+        min_via_drill_mm=0.2,
+        min_via_diameter_mm=0.45,
+        min_annular_ring_mm=0.13,
+        outer_copper_oz=2.0,
+        inner_copper_oz=2.0,
+    )
+
+
+@pytest.mark.parametrize("back_width", [None, 0.30, 2.75])
+@pytest.mark.parametrize("reverse", [True, False])
+def test_matched_entries_inside_plated_terminal(back_width, reverse):
+    pcb = _plated_terminal_board(back_width=back_width)
+    centre = (20, 20)
     spec = _branch_spec(source=("J2", "1"), sink=("J1", "1")) if reverse else _branch_spec()
     resolution = resolve_current_path(pcb, spec)
     assert resolution.status == "resolved"
@@ -321,3 +381,85 @@ def test_matched_entries_inside_plated_terminal(back_width, reverse):
         assert groups[0].layer_widths() == {"F.Cu": 2.75, "B.Cu": back_width}
     else:
         assert not groups
+
+
+@pytest.mark.parametrize(
+    "split_fcu,split_bcu",
+    [(False, False), (True, False), (False, True), (True, True)],
+    ids=["unsplit", "fcu-split", "bcu-split", "both-split"],
+)
+@pytest.mark.parametrize("reverse", [True, False])
+def test_split_entry_keeps_plated_terminal_ampacity(split_fcu, split_bcu, reverse):
+    # #10300: subdividing a straight in-pad entry at a collinear vertex
+    # changes nothing electrically -- both copper films stay identical --
+    # so the paired terminal entries must stay one two-layer group: each
+    # layer's branch is its chained pieces from the pad centre to the
+    # shared landing, and every piece stays covered power-path evidence.
+    # Before the fix the split layer's pieces dropped out (3/5 or 4/6
+    # segments, 2.75 mm minimum, uncovered-segment warnings, one
+    # ampacity error per split entry).
+    pcb = _plated_terminal_board(split_fcu=split_fcu, split_bcu=split_bcu)
+    spec = _plated_spec(reverse=reverse)
+    resolution = resolve_current_path(pcb, spec)
+    assert resolution.status == "resolved", resolution.reason
+    assert {id(s) for s in resolution.segments} == {id(s) for s in pcb.segments}
+    assert resolution.min_width is not None
+    assert resolution.min_width.width_mm == pytest.approx(5.50)
+    entries = [
+        group
+        for group in resolution.parallel_groups
+        if any(s.start == (20, 20) for s in group.segments)
+    ]
+    assert len(entries) == 1
+    assert entries[0].layer_widths() == {"F.Cu": 2.75, "B.Cu": 2.75}
+    audit = audit_current_paths(pcb, [spec])
+    assert audit.all_resolved
+    assert audit.fully_covered
+    report = PathAmpacityRule(specs=[spec]).check(pcb, _plated_design_rules())
+    assert report.errors == []
+    assert report.warnings == []
+
+
+@pytest.mark.parametrize("back_width", [None, 0.30], ids=["back-missing", "back-narrow"])
+@pytest.mark.parametrize("reverse", [True, False])
+def test_split_entry_keeps_terminal_controls(back_width, reverse):
+    # The #10292 controls keep their verdicts with the front entry split:
+    # removing the back entry still reports the single-layer 2.75 mm, and
+    # narrowing it to 0.30 mm still reports 3.05 mm -- both must fail the
+    # full-load check, and the split front pieces must stay covered.
+    pcb = _plated_terminal_board(split_fcu=True, back_width=back_width)
+    spec = _plated_spec(reverse=reverse)
+    resolution = resolve_current_path(pcb, spec)
+    assert resolution.status == "resolved", resolution.reason
+    assert {id(s) for s in resolution.segments} == {id(s) for s in pcb.segments}
+    assert resolution.min_width is not None
+    expected = 2.75 if back_width is None else 3.05
+    assert resolution.min_width.width_mm == pytest.approx(expected)
+    audit = audit_current_paths(pcb, [spec])
+    assert audit.all_resolved
+    assert audit.fully_covered
+    assert PathAmpacityRule(specs=[spec]).check(pcb, _plated_design_rules()).errors
+
+
+@pytest.mark.parametrize("reverse", [True, False])
+def test_split_entry_sense_stub_contributes_no_power_path_width(reverse):
+    # A separate Kelvin tap hanging off the split entry's own vertex
+    # inside the pad is a branch: it stays out of the entry branches (its
+    # 0.3 mm must not become the terminal's reported width) and out of
+    # the power-path evidence, in both path directions.
+    pcb = _plated_terminal_board(split_fcu=True, sense_stub=True)
+    spec = _plated_spec(reverse=reverse)
+    resolution = resolve_current_path(pcb, spec)
+    assert resolution.status == "resolved", resolution.reason
+    stub_ids = {id(s) for s in pcb.segments if s.width == 0.3}
+    assert stub_ids
+    assert not stub_ids & {id(s) for s in resolution.segments}
+    assert resolution.min_width is not None
+    assert resolution.min_width.width_mm == pytest.approx(5.50)
+    entries = [
+        group
+        for group in resolution.parallel_groups
+        if any(s.start == (20, 20) for s in group.segments)
+    ]
+    assert len(entries) == 1
+    assert entries[0].layer_widths() == {"F.Cu": 2.75, "B.Cu": 2.75}

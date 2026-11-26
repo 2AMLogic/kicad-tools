@@ -1439,6 +1439,7 @@ class PathResolution:
     #: proves the cycle, as ``{"kind": "segment"|"via", "layer", "start",
     #: "end"}`` / ``{"kind": "via", "position"}``, board-relative, plus
     #: ``"blocking_branches"`` when a doubled group failed to qualify.
+    #: An unproved endpoint fanout reports its pad centre (kind "pad").
     #: Rendered by :func:`describe_witness`. Empty otherwise.
     witness: dict[str, object] = field(default_factory=dict)
     #: Doubled-copper groups the resolution relied on to clear a cycle
@@ -1899,19 +1900,57 @@ def _via_row_ports(
     return ports, [joint for joint in joints if id(joint.first) in row_tracks]
 
 
+def _single_barrel_contact(
+    pad: Pad, pad_key: tuple[int, int], physical_contacts: Callable[[], CopperContactGraph]
+) -> _Node | None:
+    """Bind a round PTH to the single track end that surrounds its entire barrel."""
+    from kicad_tools.validate.copper_contact import PAD, TRACK
+
+    if (
+        pad.type != "thru_hole"
+        or pad.shape != "circle"
+        or not 0 < pad.drill < min(pad.size)
+        or pad.drill_offset != (0.0, 0.0)
+        or pad.drill_size not in (None, (pad.drill, pad.drill))
+    ):
+        return None
+
+    contacts = physical_contacts()
+    for index, item in enumerate(contacts.items):
+        if item.kind != PAD or item.key != pad_key or item.center is None:
+            continue
+        neighbours = [b if a == index else a for a, b in contacts.bonds if index in (a, b)]
+        if len(neighbours) != 1:
+            return None
+        track = contacts.items[neighbours[0]]
+        if track.kind != TRACK or not track.straight or track.key[0] != "segment":
+            return None
+        ends = [
+            point
+            for point in track.endpoints
+            if math.dist(point, item.center) + pad.drill / 2 < track.half_width
+        ]
+        if len(ends) == 1:
+            return _copper_node(ends[0], next(iter(track.layers)))
+    return None
+
+
 def _build_graph(
     segments: list[Segment],
     pcb: PCB,
     net_name: str,
     row_ports: set[tuple[_Node, _Node]] | None = None,
     cap_joints: Sequence[_CapJoint] = (),
+    *,
+    physical_contacts: Callable[[], CopperContactGraph],
 ) -> _CopperGraph:
     """Build centerline contacts, physical via-row ports and convex pad hubs.
 
     Supported contacts are same-layer track endpoints (including a T landing
-    in a segment interior), via centers on a track, and nodes inside supported
-    pad copper. A packed pair of vias physically bonded to two common bars
-    may also attach at the nearest track stations on those bars. Collinear
+    in a segment interior), via centers on a track, nodes inside supported
+    pad copper, and a single bonded end cap covering a round terminal barrel.
+    A packed pair of vias physically bonded to two common bars may also
+    attach at the nearest track stations on those bars. Collinear
     end caps on a bonded run join at their measured copper neck. Other
     width-only overlaps, zone/arc connectivity and arbitrary pad primitives
     are outside this graph. The via-centre snap is limited to 1 µm (#7210).
@@ -2026,9 +2065,11 @@ def _build_graph(
         # belong to an exiting track. It is internal to this same-layer bond.
         internal_edges.update(edge for a, b, edge in edges if a != b and root(a) == root(b))
     wholly_internal_ids: set[int] = set()
-    for component_id, fp in zip(footprint_keys(pcb.footprints), pcb.footprints, strict=True):
+    for fp_index, (component_id, fp) in enumerate(
+        zip(footprint_keys(pcb.footprints), pcb.footprints, strict=True)
+    ):
         occurrences: dict[str, int] = {}
-        for pad in fp.pads:
+        for pad_index, pad in enumerate(fp.pads):
             occurrence = occurrences.get(pad.number, 0)
             occurrences[pad.number] = occurrence + 1
             if pad.net_name != net_name or pad.type == "np_thru_hole":
@@ -2039,6 +2080,10 @@ def _build_graph(
                 if (node[2] in pad.layers or "*.Cu" in pad.layers)
                 and _physical_pad_covers(fp, pad, node[:2])
             ]
+            if not nodes:
+                terminal = _single_barrel_contact(pad, (fp_index, pad_index), physical_contacts)
+                if terminal is not None and terminal in parents:
+                    nodes.append(terminal)
             # Only a plated through-hole pad establishes interlayer copper.
             groups = (
                 [nodes]
@@ -2260,44 +2305,112 @@ def _hub_continuation_segments(
     return _pad_continuation_chains(internal, centres, entries, branch_exits)
 
 
+def _pad_entry_branch(
+    internal: Sequence[Segment],
+    centre: tuple[float, float],
+    landing: tuple[float, float],
+    layer: str,
+) -> tuple[Segment, ...]:
+    """One layer's chained pad copper from the terminal centre to a landing.
+
+    A straight entry subdivided at collinear vertices is still one branch:
+    the original pieces chain from the centre to the landing (#10300), so
+    :meth:`ParallelGroup.layer_widths` judges the layer on its narrowest
+    piece. Copper hanging off the chain -- a sense tap sharing a split
+    vertex -- is a dead end the shortest chain never rides.
+    """
+    candidates = [seg for seg in internal if seg.layer == layer]
+    if not candidates:
+        return ()
+
+    def _touches_point(seg: Segment, point: tuple[float, float]) -> bool:
+        return point_to_segment_distance(*point, *seg.start, *seg.end) <= _PAD_EPS
+
+    seeds = {i for i, seg in enumerate(candidates) if _touches_point(seg, centre)}
+    if not seeds or not any(_touches_point(seg, landing) for seg in candidates):
+        return ()
+    # Dijkstra over the segment-touching graph, as in
+    # :func:`_pad_continuation_chains`; the pad hub carries a handful of
+    # internal segments, so a plain scan is plenty.
+    dist: dict[int, float] = dict.fromkeys(range(len(candidates)), math.inf)
+    for i in seeds:
+        dist[i] = 0.0
+    prev: dict[int, int] = {}
+    chain: list[int] | None = None
+    unvisited = set(dist)
+    while unvisited:
+        i = min(unvisited, key=lambda k: dist[k])
+        if dist[i] == math.inf:
+            break
+        unvisited.remove(i)
+        if _touches_point(candidates[i], landing):
+            chain = []
+            while i in prev:
+                chain.append(i)
+                i = prev[i]
+            chain.append(i)
+            break
+        for j in unvisited:
+            if dist[i] + _seg_length(candidates[j]) < dist[j] and _pad_segments_touch(
+                candidates[i], candidates[j]
+            ):
+                dist[j] = dist[i] + _seg_length(candidates[j])
+                prev[j] = i
+    if chain is None:
+        return ()
+    return tuple(candidates[i] for i in reversed(chain))
+
+
 def _parallel_pad_entries(
     graph: _CopperGraph,
     hub: _Node,
-    continuations: Sequence[Segment],
     groups: Sequence[ParallelGroup],
 ) -> list[ParallelGroup]:
-    """Credit matching terminal entries on both arms of a proved two-layer link."""
+    """Credit matching terminal entries on both arms of a proved two-layer link.
+
+    Each proved front/back arm lands inside the plated terminal at the
+    same off-centre point, and the copper from that shared landing to the
+    pad centre -- the current's terminal -- is in series with both arms,
+    so the two layers' entries pair into one parallel group judged at each
+    layer's narrowest chained piece. A straight entry subdivided at
+    collinear vertices keeps its original segments as that layer's branch
+    (#10300); the pair fires only when both layers carry a chained entry
+    to the same landing, so removing or narrowing one layer's entry
+    leaves the other layer's width standing alone.
+    """
     centres = graph.pad_centres.get(hub, set())
     if len(centres) != 1:
         return []
     centre = next(iter(centres))
+    internal = graph.internal.get(hub, [])
+    if not internal:
+        return []
     pairs = []
     seen = set()
-    for seg in continuations:
-        ends = frozenset((_node_key(seg.start), _node_key(seg.end)))
-        if centre not in ends or len(ends) != 2 or ends in seen:
+    for group in groups:
+        if len(group.branches) != 2 or {arm[0].layer for arm in group.branches} != {
+            "F.Cu",
+            "B.Cu",
+        }:
             continue
-        seen.add(ends)
-        landing = next(point for point in ends if point != centre)
-        copies = [
-            item
-            for item in graph.internal[hub]
-            if frozenset((_node_key(item.start), _node_key(item.end))) == ends
+        arm_ends = [
+            {_node_key(point) for seg in arm for point in (seg.start, seg.end)}
+            for arm in group.branches
         ]
-        if len(copies) != 2 or {item.layer for item in copies} != {"F.Cu", "B.Cu"}:
-            continue
-        for group in groups:
-            if len(group.branches) != 2 or {arm[0].layer for arm in group.branches} != {
-                "F.Cu",
-                "B.Cu",
-            }:
+        for landing in sorted(set.intersection(*arm_ends)):
+            if landing in seen or math.dist(landing, centre) <= _PAD_EPS:
                 continue
-            if all(
-                any(landing in (_node_key(item.start), _node_key(item.end)) for item in arm)
-                for arm in group.branches
-            ):
-                pairs.append(ParallelGroup(tuple((item,) for item in copies)))
-                break
+            branches = [
+                branch
+                for branch in (
+                    _pad_entry_branch(internal, centre, landing, layer)
+                    for layer in ("F.Cu", "B.Cu")
+                )
+                if branch
+            ]
+            if len(branches) == 2:
+                seen.add(landing)
+                pairs.append(ParallelGroup(tuple(branches)))
     return pairs
 
 
@@ -3720,6 +3833,8 @@ def witness_text(witness: dict[str, object], origin: tuple[float, float] = (0.0,
     """
     if not witness:
         return ""
+    if witness.get("kind") == "pad":
+        return f"pad centre at {_witness_point(witness['position'], origin)}"
     if witness.get("kind") == "segment":
         start = _witness_point(witness["start"], origin)
         end = _witness_point(witness["end"], origin)
@@ -4015,7 +4130,9 @@ def resolve_current_path(
         return build_copper_contact_graph(ConnectivityValidator(pcb), net_number, with_bonds=True)
 
     row_ports, cap_joints = _via_row_ports(pcb, net_number, physical_contacts)
-    adjacency = _build_graph(net_segments, pcb, spec.net_name, row_ports, cap_joints)
+    adjacency = _build_graph(
+        net_segments, pcb, spec.net_name, row_ports, cap_joints, physical_contacts=physical_contacts
+    )
     # Attach each endpoint by its pad's own extent, not by an exact center
     # hit: a trace terminating anywhere inside the pad is electrically on it,
     # and several traces landing on one pad are shorted by it. Without this,
@@ -4056,7 +4173,7 @@ def resolve_current_path(
     path_segments, route_edges = route
     arrays: list[_ViaArray] = []
     sense_taps: list[Segment] = []
-    for endpoint in (spec.source, spec.sink):
+    for endpoint, terminal in ((spec.source, source), (spec.sink, sink)):
         array = _endpoint_via_array(adjacency, pcb, endpoint, spec.net_name)
         if array is not None and not any(array.nodes & previous.nodes for previous in arrays):
             arrays.append(array)
@@ -4114,7 +4231,11 @@ def resolve_current_path(
                     status=STATUS_AMBIGUOUS,
                     source=source,
                     sink=sink,
-                    reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
+                    reason=(
+                        f"endpoint via fanout at {endpoint.label()} is outside the proved "
+                        "local pad-to-trunk motif"
+                    ),
+                    witness={"kind": "pad", "position": list(terminal.position)},
                 )
     source_pin, sink_pin = (source.ref, source.pad), (sink.ref, sink.pad)
 
@@ -4270,7 +4391,7 @@ def resolve_current_path(
         for hub in arm_hubs:
             entries = _hub_continuation_segments(adjacency, hub, arm_edges)
             path_segments.extend(entries)
-            entry_groups.extend(_parallel_pad_entries(adjacency, hub, entries, parallel_groups))
+            entry_groups.extend(_parallel_pad_entries(adjacency, hub, parallel_groups))
         parallel_groups.extend(entry_groups)
 
     on_path_groups = [
