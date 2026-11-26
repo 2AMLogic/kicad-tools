@@ -86,7 +86,8 @@ these item properties:
 decided when the caller supplies the track's measured geometry against each
 named rule area (#10121); otherwise they are unknown.
 
-Everything else -- ``A.insideArea(...)``, numeric properties -- evaluates to **unknown**.  A track's
+``A.Width`` is the track width in millimetres when supplied by the caller.
+Other unsupported properties and functions evaluate to **unknown**. A track's
 or via's ``Pad_Type``, and a via's ``Layer``, is KiCad's null, which
 compares false under both ``==`` and ``!=``.  The evaluator is
 three-valued, and an unknown rule is handled **conservatively**: it is
@@ -253,6 +254,7 @@ class ItemProps:
             the area's layers do not include the track's (undecided).  ``None``
             (the default) means the geometry is unknown, so every area
             condition evaluates to unknown (#10121).
+        width_mm: A track's measured copper width in millimetres, when known.
     """
 
     type: str | None
@@ -264,6 +266,7 @@ class ItemProps:
     footprint_lib_id: str | None = None
     areas: tuple[tuple[str, bool | None], ...] | None = None
     enclosed: tuple[tuple[str, bool | None], ...] | None = None
+    width_mm: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +317,16 @@ class RuleResolution:
             definite defect).
         unknown_rules: Names of the rules that could have won but could not
             be decided.  Empty when the resolution is KiCad-exact.
+        possible_requirements: Distinct possible winners when a single
+            constraint has more than one value. Both bounds and any
+            intermediate winners matter for nonmonotonic checks such as
+            a pour strip's fillable width.
     """
 
     requirement: float
     lower_bound: float
     unknown_rules: tuple[str, ...] = ()
+    possible_requirements: tuple[float, ...] = ()
 
 
 def _parse_length_mm(raw: object) -> float | None:
@@ -739,6 +747,8 @@ class _PairContext:
             return classes[0] if classes is not None and len(classes) == 1 else _UNKNOWN
         if name == "type":
             return _UNKNOWN if item.type is None else item.type
+        if name == "width" and item.type == "Track" and item.width_mm is not None:
+            return item.width_mm
         if name == "padtype":
             if item.type in ("Track", "Via"):
                 return _NULL
@@ -1093,7 +1103,13 @@ class BoardClearanceRules:
         # them and the lower bound the smallest (#9588 review: an
         # undecided exemption must pull the bound down, never be dropped
         # from it as the old decided-only ``provable`` maximum did).
-        resolution = RuleResolution(max(conservative), min(conservative), tuple(unknown_rules))
+        upper, lower = max(conservative), min(conservative)
+        resolution = RuleResolution(
+            upper,
+            lower,
+            tuple(unknown_rules),
+            tuple(sorted(set(conservative))) if upper != lower else (),
+        )
         self._cache[key] = resolution
         return resolution
 

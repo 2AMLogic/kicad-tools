@@ -48,6 +48,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
+from itertools import product
 from typing import TYPE_CHECKING, Any
 
 from shapely import get_parts  # type: ignore[import-untyped]
@@ -133,6 +134,7 @@ class PourSlotPair:
     thickness: float
     overlap: float
     location: tuple[float, float]
+    unresolved_rules: tuple[str, ...] = ()  #: alternative clearance readings, advisory only
 
     @property
     def clearance(self) -> float:
@@ -179,18 +181,11 @@ class PourSlotRule(DRCRule):
 
     def _segment_clearance(
         self, seg: Any, zone: _Pour, layer: str, areas: tuple[tuple[str, bool | None], ...]
-    ) -> tuple[float, float]:
-        """``(upper, lower)`` track-to-zone clearance for one segment (Issue #10121).
-
-        Rule conditions are evaluated at the segment's own geometry (the named
-        rule areas it touches) and the zone's own layer.  A condition that
-        still cannot be decided keeps both readings -- the largest and the
-        smallest requirement it allows -- so the caller never lets an
-        unresolved rule decide a warning in either direction.
-        """
+    ) -> tuple[tuple[float, ...], tuple[str, ...]]:
+        """Possible track-to-zone clearances and the rules that leave them undecided."""
         if not isinstance(self.clearances, BoardClearanceRules):
             value = self._track_clearance(seg.net_name, zone.net_name, layer)
-            return value, value
+            return (max(zone.clearance, value),), ()
         track = ItemProps(
             "Track",
             seg.net_name,
@@ -199,6 +194,7 @@ class PourSlotRule(DRCRule):
             footprint_lib_id="",
             areas=areas,
             enclosed=self._segment_enclosed(seg, layer),
+            width_mm=seg.width,
         )
         pour = ItemProps(
             "Zone",
@@ -208,7 +204,10 @@ class PourSlotRule(DRCRule):
             footprint_lib_id="",
         )
         res = self.clearances.explain_required(CLEARANCE, track, pour, layer)
-        return res.requirement, res.lower_bound
+        if not res.possible_requirements:
+            return (max(zone.clearance, res.requirement),), ()
+        values = tuple(sorted({max(zone.clearance, c) for c in res.possible_requirements}))
+        return values, res.unknown_rules if len(values) > 1 else ()
 
     def _segment_areas(self, seg: Any, layer: str) -> tuple[tuple[str, bool | None], ...]:
         """Per named rule area: does ``seg``'s copper touch it (``None``: other layer)."""
@@ -311,20 +310,28 @@ class PourSlotRule(DRCRule):
         a, b = pair.first, pair.second
         na = a.net_name or f"net {a.net_number}"
         nb = b.net_name or f"net {b.net_number}"
-        return DRCViolation(
-            rule_id=RULE_ID,
-            severity="warning",
-            message=(
+        if pair.unresolved_rules:
+            message = (
+                f"Possible pour slot between [{na}] and [{nb}] on {pair.layer} "
+                f"at a {pair.gap:.3f} mm gap. The track-to-zone clearance depends on "
+                f"unresolved rules ({', '.join(pair.unresolved_rules)})."
+            )
+        else:
+            message = (
                 f"Pour slot: [{na}] and [{nb}] run parallel on {pair.layer} for "
                 f"{pair.overlap:.2f} mm with {pair.gap:.3f} mm gap; the pour between them "
                 f"(< {pair.threshold:.3f} mm = {pair.first_clearance:.3f} + "
                 f"{pair.second_clearance:.3f} clearances + "
                 f"{pair.thickness:.3f} min_thickness) cannot fill, leaving a slot"
-            ),
+            )
+        return DRCViolation(
+            rule_id=RULE_ID,
+            severity="warning",
+            message=message,
             location=pair.location,
             layer=pair.layer,
             actual_value=pair.gap,
-            required_value=pair.threshold,
+            required_value=None if pair.unresolved_rules else pair.threshold,
             nets=(na, nb),
         )
 
@@ -366,34 +373,9 @@ class PourSlotRule(DRCRule):
                     if key in seen:
                         continue
                     seen.add(key)
-                    pair = self._check_pair(layer, items[key[0]], items[key[1]], zlist, clearances)
+                    pair = self._check_pair(layer, items[key[0]], items[key[1]], zlist)
                     if pair is not None:
                         yield pair
-
-    def _candidates(
-        self,
-        a: Any,
-        b: Any,
-        zlist: list[_Pour],
-        layer: str,
-        areas_a: tuple[tuple[str, bool | None], ...],
-        areas_b: tuple[tuple[str, bool | None], ...],
-    ) -> Iterator[tuple[_Pour, float, float]]:
-        """Each zone with the clearance readings its undecided rules allow.
-
-        One reading when every rule resolved; two (all-largest, all-smallest)
-        when one could not. The caller confirms a slot on the last (smallest)
-        reading only, so an unresolvable rule neither hides a genuine slot nor
-        invents one that exists only if the rule applied (Issue #10121).
-        """
-        for zone in zlist:
-            up_a, lo_a = self._segment_clearance(a, zone, layer, areas_a)
-            up_b, lo_b = self._segment_clearance(b, zone, layer, areas_b)
-            readings = [(up_a, up_b)]
-            if (lo_a, lo_b) != (up_a, up_b):
-                readings.append((lo_a, lo_b))
-            for ca, cb in readings:
-                yield zone, max(zone.clearance, ca), max(zone.clearance, cb)
 
     def _check_pair(
         self,
@@ -401,7 +383,6 @@ class PourSlotRule(DRCRule):
         first: tuple[Any, tuple[float, float, float]],
         second: tuple[Any, tuple[float, float, float]],
         zlist: list[_Pour],
-        clearances: dict[tuple[str, str], float],
     ) -> PourSlotPair | None:
         # Use the same projection axis for either serialization of the pair.
         if first[0].net_number > second[0].net_number:
@@ -433,11 +414,6 @@ class PourSlotRule(DRCRule):
 
         areas_a = self._segment_areas(a, layer)
         areas_b = self._segment_areas(b, layer)
-        zone_readings: dict[int, list[tuple[_Pour, float, float]]] = {}
-        for zone, clearance_a, clearance_b in self._candidates(
-            a, b, zlist, layer, areas_a, areas_b
-        ):
-            zone_readings.setdefault(id(zone), []).append((zone, clearance_a, clearance_b))
 
         def slot(zone: _Pour, clearance_a: float, clearance_b: float) -> PourSlotPair | None:
             packed_gap = clearance_a + clearance_b
@@ -487,11 +463,21 @@ class PourSlotRule(DRCRule):
                 location=(point.x, point.y),
             )
 
-        for readings in zone_readings.values():
-            # The last reading is the one where no undecided rule applies. A
-            # slot that exists only if such a rule applies is unconfirmed and
-            # is neither reported nor handed to cleanup to move.
-            pair = slot(*readings[-1])
-            if pair is not None:
-                return pair
-        return None
+        possible = None
+        for zone in zlist:
+            values_a, unknown_a = self._segment_clearance(a, zone, layer, areas_a)
+            values_b, unknown_b = self._segment_clearance(b, zone, layer, areas_b)
+            for ca, cb in product(values_a, values_b):
+                pair = slot(zone, ca, cb)
+                if pair is None:
+                    continue
+                if not unknown_a and not unknown_b:
+                    return pair
+                # This clearance could leave a slot. Keep looking for a
+                # definite finding in another governing zone before reporting it.
+                if possible is None:
+                    possible = replace(
+                        pair, unresolved_rules=tuple(dict.fromkeys(unknown_a + unknown_b))
+                    )
+                break
+        return possible

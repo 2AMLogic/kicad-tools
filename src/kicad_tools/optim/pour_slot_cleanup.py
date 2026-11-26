@@ -288,6 +288,14 @@ def _pair_key(pair: PourSlotPair) -> tuple:
     return tuple(sorted((k(pair.first), k(pair.second))))
 
 
+def _reduces_slots(before: list[PourSlotPair], after: list[PourSlotPair]) -> bool:
+    if len(after) >= len(before):
+        return False
+    # A smaller total can hide a newly ambiguous slot in a re-pitched bus.
+    uncertain_before = {_pair_key(p) for p in before if p.unresolved_rules}
+    return all(_pair_key(p) in uncertain_before for p in after if p.unresolved_rules)
+
+
 #: Max |sin(angle)| between two runs for them to count as parallel.
 _PARALLEL_TOL = 0.02
 
@@ -470,7 +478,7 @@ def cleanup_pour_slots(
     if not pairs:
         return result
 
-    baseline = referee(pcb)
+    baseline = referee(pcb) if any(not p.unresolved_rules for p in pairs) else {}
     if baseline is None:
         result.refused_reason = "referee unavailable (kicad-cli could not run); no edits applied"
         return result
@@ -480,8 +488,15 @@ def cleanup_pour_slots(
     dead_buses: set[frozenset] = set()
 
     while True:
-        pairs = [p for p in _slots(pcb, netclass_clearances) if _pair_key(p) not in dead]
+        current = _slots(pcb, netclass_clearances)
+        pairs = [p for p in current if not p.unresolved_rules and _pair_key(p) not in dead]
         if not pairs:
+            for p in current:
+                if p.unresolved_rules:
+                    result.left_alone += 1
+                    result.left_alone_reasons.append(
+                        f"unresolved clearance rules ({', '.join(p.unresolved_rules)})"
+                    )
             break
         bus_step = False
         for runs, bus_pairs in _find_buses(pairs):
@@ -489,11 +504,10 @@ def cleanup_pour_slots(
             if bkey in dead_buses:
                 continue
             bus_step = True
-            before_n = len(_slots(pcb, netclass_clearances))
             done, why = _repitch_bus(pcb, runs, bus_pairs, pads)
             if done is not None:
-                after_n = len(_slots(pcb, netclass_clearances))
-                score = referee(pcb) if after_n < before_n else None
+                after = _slots(pcb, netclass_clearances)
+                score = referee(pcb) if _reduces_slots(current, after) else None
                 if score is not None and _no_worse(score, baseline):
                     baseline = dict(score)
                     result.buses_repitched += 1
@@ -519,7 +533,11 @@ def cleanup_pour_slots(
                 # An undone attempt re-adds fresh segment objects, so look the
                 # pair up again rather than holding stale references.
                 cur = next(
-                    (p for p in _slots(pcb, netclass_clearances) if _pair_key(p) == key),
+                    (
+                        p
+                        for p in _slots(pcb, netclass_clearances)
+                        if not p.unresolved_rules and _pair_key(p) == key
+                    ),
                     None,
                 )
                 if cur is None:
@@ -547,10 +565,9 @@ def cleanup_pour_slots(
                 if not _clear_of_others(pcb, plan, cur.clearance):
                     last_why = "no clear room for the shifted run"
                     continue
-                before_n = len(_slots(pcb, netclass_clearances))
                 done = _apply(pcb, plan)
-                after_n = len(_slots(pcb, netclass_clearances))
-                score = referee(pcb) if after_n < before_n else None
+                after = _slots(pcb, netclass_clearances)
+                score = referee(pcb) if _reduces_slots(current, after) else None
                 if score is not None and _no_worse(score, baseline):
                     baseline = dict(score)
                     if kind == "spread":
@@ -567,5 +584,5 @@ def cleanup_pour_slots(
             result.left_alone += 1
             result.left_alone_reasons.append(last_why)
 
-    result.pairs_after = len(_slots(pcb, netclass_clearances))
+    result.pairs_after = len(current)
     return result

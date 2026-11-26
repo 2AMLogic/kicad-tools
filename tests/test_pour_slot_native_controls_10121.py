@@ -308,14 +308,50 @@ def test_explicit_project_filename_does_not_change_cleanup(tmp_path, capsys, mon
     assert results["control_p"] == results["elsewhere"]
 
 
+def _write_connected_board(board: Path, gap: float, zones: tuple[str, ...]) -> None:
+    pcb = PCB.create(width=50, height=40, center=False)
+    pads = [(7, 7, "GND")]
+    for net, y, pad_y in (("NET1", 15, 12), ("NET2", 15.4 + gap, 19)):
+        pcb.add_trace((11, y), (19, y), width=0.4, layer="F.Cu", net=net)
+        for x in (11, 19):
+            pcb.add_trace((x, y), (x, pad_y), width=0.4, layer="F.Cu", net=net)
+            pads.append((x, pad_y, net))
+    for i, (x, y, net) in enumerate(pads):
+        number = pcb.add_net(net).number
+        pcb._sexp.append(
+            parse_string(
+                f'(footprint "Test:Pad" (layer "F.Cu") (at {x} {y}) '
+                f'(property "Reference" "TP{i}" (at 0 0) (layer "F.Fab")) '
+                f'(pad "1" smd circle (at 0 0) (size 1 1) (layers "F.Cu") (net {number} "{net}")))'
+            )
+        )
+    for zone in zones:
+        pcb._sexp.append(parse_string(zone))
+    pcb.save(board)
+
+
+def _saved_gap_and_film(board: Path):
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+
+    saved = PCB.load(board)
+    lower, upper = sorted(
+        (s for s in saved.segments if s.start[1] == s.end[1]), key=lambda seg: seg.start[1]
+    )
+    bottom = lower.start[1] + lower.width / 2
+    top = upper.start[1] - upper.width / 2
+    pour = next(zone for zone in saved.zones if zone.net_name == "GND")
+    film = unary_union([Polygon(ring).buffer(0) for ring in pour.filled_polygons])
+    assert film.area > 0
+    sections = [film.intersection(LineString([(x, bottom), (x, top)])).length for x in (13, 15, 17)]
+    return top - bottom, film, sections
+
+
 @pytest.mark.parametrize(("gap", "expected_gap", "warnings"), [(0.55, 0.55, 0), (0.705, 0.905, 1)])
 def test_clearance_precedence_in_check_cleanup_and_fill(
     tmp_path, capsys, gap, expected_gap, warnings
 ):
     import shutil
-
-    from shapely.geometry import LineString, Polygon
-    from shapely.ops import unary_union
 
     from kicad_tools.cli import main
 
@@ -340,24 +376,7 @@ def test_clearance_precedence_in_check_cleanup_and_fill(
         directory.mkdir()
         board = directory / "control_p.kicad_pcb"
         zone = ZONE.replace("clearance 0.2", f"clearance {zone_clearance}")
-        pcb = PCB.create(width=50, height=40, center=False)
-        pads = [(7, 7, "GND")]
-        for net, y, pad_y in (("NET1", 15, 12), ("NET2", 15.4 + gap, 19)):
-            pcb.add_trace((11, y), (19, y), width=0.4, layer="F.Cu", net=net)
-            for x in (11, 19):
-                pcb.add_trace((x, y), (x, pad_y), width=0.4, layer="F.Cu", net=net)
-                pads.append((x, pad_y, net))
-        for i, (x, y, net) in enumerate(pads):
-            number = pcb.add_net(net).number
-            pcb._sexp.append(
-                parse_string(
-                    f'(footprint "Test:Pad" (layer "F.Cu") (at {x} {y}) '
-                    f'(property "Reference" "TP{i}" (at 0 0) (layer "F.Fab")) '
-                    f'(pad "1" smd circle (at 0 0) (size 1 1) (layers "F.Cu") (net {number} "{net}")))'
-                )
-            )
-        pcb._sexp.append(parse_string(zone))
-        pcb.save(board)
+        _write_connected_board(board, gap, (zone,))
         if rules:
             board.with_suffix(".kicad_dru").write_text("\n".join(["(version 1)", *rules, ""]))
         board_min = 0.3 if floor_source == "board" else 0.0
@@ -379,18 +398,10 @@ def test_clearance_precedence_in_check_cleanup_and_fill(
         report = json.loads(capsys.readouterr().out)
         assert report["pour_slots"]["spread"] == expected_warnings
         assert report["pour_slots"]["pairs_after"] == 0
-        saved = PCB.load(board)
-        lower, upper = sorted(
-            (s for s in saved.segments if s.start[1] == s.end[1]), key=lambda seg: seg.start[1]
-        )
-        bottom = lower.start[1] + lower.width / 2
-        top = upper.start[1] - upper.width / 2
-        assert top - bottom == pytest.approx(0.705 if reversed_order else expected_gap)
-        film = unary_union([Polygon(ring).buffer(0) for ring in saved.zones[0].filled_polygons])
-        assert film.area > 0
-        section = film.intersection(LineString([(15, bottom), (15, top)]))
-        assert section.length == pytest.approx(
-            0.304 if warnings or reversed_order else 0.0, abs=0.002
+        saved_gap, film, sections = _saved_gap_and_film(board)
+        assert saved_gap == pytest.approx(0.705 if reversed_order else expected_gap)
+        assert sections == pytest.approx(
+            [0.304 if warnings or reversed_order else 0.0] * 3, abs=0.002
         )
         if not reversed_order:
             films.append(film)
@@ -519,3 +530,79 @@ def test_same_named_rule_areas_ignore_serialization_order(tmp_path, local_first)
     )
     rules = BoardClearanceRules.from_board(board)
     assert len(list(iter_pour_slot_pairs(pcb, rules))) == 1
+
+
+@pytest.mark.parametrize("gap", [0.55, 0.705])
+@pytest.mark.parametrize(
+    ("predicate", "area_x", "applies"),
+    [
+        ("A.Width > 0.5mm", None, False),
+        ("A.Width < 0.5mm", None, True),
+        ("A.enclosedByArea('WideSpacing')", (32, 42), False),
+        ("A.enclosedByArea('WideSpacing')", (5, 25), True),
+    ],
+)
+def test_conditional_exemption_in_check_cleanup_and_fill(
+    tmp_path, capsys, gap, predicate, area_x, applies
+):
+    import shutil
+
+    from kicad_tools.cli import main
+
+    if not shutil.which("kicad-cli"):
+        pytest.skip("native refill requires kicad-cli")
+    board = tmp_path / "conditional.kicad_pcb"
+    zones = (ZONE,) if area_x is None else (ZONE, _RULE_AREA.format(x0=area_x[0], x1=area_x[1]))
+    _write_connected_board(board, gap, zones)
+    settings = {
+        "meta": {"version": 5},
+        "classes": [{"name": name, "clearance": 0.3} for name in ("Default", "Signal")],
+        "netclass_patterns": [{"netclass": "Signal", "pattern": "NET*"}],
+    }
+    board.with_suffix(".kicad_pro").write_text(json.dumps({"net_settings": settings}))
+    board.with_suffix(".kicad_dru").write_text(
+        f"""(version 1)
+(rule "Exemption" (condition "A.Type == 'Track' && {predicate}") (constraint clearance (min 0.2mm)))
+"""
+    )
+    expected_spread = int(gap == (0.55 if applies else 0.705))
+    assert _public_pour_slot_count(board, capsys) == expected_spread
+    assert (
+        main(["optimize-traces", str(board), "--net", "GND", "--pour-slots", "--format", "json"])
+        == 0
+    )
+    cleanup = json.loads(capsys.readouterr().out)["pour_slots"]
+    assert cleanup["pairs_before"] == cleanup["spread"] == expected_spread
+    assert cleanup["pairs_after"] == 0
+    saved_gap, _, sections = _saved_gap_and_film(board)
+    assert saved_gap == pytest.approx(0.705 if applies else (0.905 if expected_spread else gap))
+    assert sections == pytest.approx([0.304 if applies or expected_spread else 0.0] * 3, abs=0.002)
+
+
+@pytest.mark.parametrize("gap", [0.55, 0.705, 0.84])
+def test_unresolved_clearance_is_advisory_only(tmp_path, gap):
+    from kicad_tools.optim.pour_slot_cleanup import cleanup_pour_slots
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+    from kicad_tools.validate.rules.pour_slot import PourSlotRule
+
+    pcb = _control_p(tmp_path, gap=gap)
+    board = tmp_path / "control_p.kicad_pcb"
+    # At 0.84 mm only the middle NET1 clearance (0.50) can leave a slot.
+    board.with_suffix(".kicad_dru").write_text(
+        """(version 1)
+(rule "Long" (condition "A.NetName == 'NET1' && A.Length > 9mm") (constraint clearance (min 0.5mm)))
+(rule "Longer" (condition "A.NetName == 'NET1' && A.Length > 10mm") (constraint clearance (min 0.8mm)))
+"""
+    )
+    rules = BoardClearanceRules.from_board(board)
+    rule = PourSlotRule(rules)
+    (pair,) = rule.iter_pairs(pcb)
+    finding = rule._violation(pair)
+    assert "possible" in finding.message.lower()
+    assert "Long" in finding.message and finding.required_value is None
+    before = [(s.start, s.end, s.width) for s in pcb.segments]
+    result = cleanup_pour_slots(pcb, rules, referee=lambda _: {}, pack=True)
+    assert result.pairs_before == result.pairs_after == result.left_alone == 1
+    assert not result.changed
+    assert "Long" in result.left_alone_reasons[0]
+    assert [(s.start, s.end, s.width) for s in pcb.segments] == before
