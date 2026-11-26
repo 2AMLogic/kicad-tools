@@ -473,7 +473,13 @@ it finds every recorded copy segment on the board. Re-running replaces a wire wi
 keeps other nets' wires and never duplicates; output is sorted and has no
 timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
 embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
-[--format json]` prints it read-only from the sidecar.
+[--format json]` prints it read-only from the sidecar. An entry of `wires` that
+is not a JSON object (a hand-edited `null`, number, string, array or boolean)
+makes every pass that reads the list as records -- one that records wires,
+`--clear`, `--replace`, `--adopt`, and `--list-wires` in text or with `--net`
+-- exit 1 with `<sidecar>: wires[<i>] is <type>, not a JSON object` and write
+nothing, the `-o` output board included; `--list-wires --format json` without
+`--net` still prints the file as it stands (#10401).
 
 `kct pcb reinforce BOARD --adopt [--net NET] [--dry-run]` records wires that are
 already on the board (e.g. hand-adjusted after a Gerber review) without moving
@@ -1803,6 +1809,136 @@ Declaring `duty_cycle` or `pulse_duration_s` without `pulsed_a`, or a
 half-declared waveform reads like modeled intent while leaving the checker
 to guess. Omitting all three leaves a purely continuous declaration whose
 results are unchanged.
+
+##### Operating cases: paths active at the same time (`cases`)
+
+Each path above is checked against its **own** declared current. That is not
+enough when two of them carry current at the same time and share copper: a
+feed wide enough for either branch alone can be too narrow for both. The
+sidecar's object form therefore takes an optional top-level `cases` list
+(issue #10361). A case is a named operating state: the paths that are active
+**together**, and the signed current each one carries.
+
+```json
+{
+  "paths": [
+    {"name": "VOUT_LOAD", "net": "/VOUT",
+     "source": {"ref": "J1", "pad": "1"}, "sink": {"ref": "J2", "pad": "1"},
+     "continuous_a": 2.0},
+    {"name": "VOUT_HOLDUP", "net": "/VOUT",
+     "source": {"ref": "J1", "pad": "1"}, "sink": {"ref": "U3", "pad": "1"},
+     "continuous_a": 2.0}
+  ],
+  "cases": [
+    {"name": "load+holdup", "notes": "input present, holdup branch charging",
+     "contributions": [
+       {"path": "VOUT_LOAD", "current_a": 2.0},
+       {"path": "VOUT_HOLDUP", "current_a": 2.0}]},
+    {"name": "holdup-only",
+     "contributions": [{"path": "VOUT_HOLDUP", "current_a": 2.0}]},
+    {"name": "holdup-discharge", "notes": "input lost, holdup branch powers the load",
+     "contributions": [
+       {"path": "VOUT_LOAD", "current_a": 2.0},
+       {"path": "VOUT_HOLDUP", "current_a": -2.0}]}
+  ]
+}
+```
+
+Both paths start at `J1.1`, so the copper from `J1.1` up to the junction
+where they separate is shared. `path_ampacity` judges each piece of shared
+copper (a track interval, a doubled-copper group or a layer change's vias)
+at the **signed sum** of the contributions that cross it:
+
+| Case | Current on the shared feed | Why |
+|------|----------------------------|-----|
+| `load+holdup` | **4 A** | `+2.0` and `+2.0` add: both paths cross the feed toward the junction. |
+| `holdup-only` | 2 A | `VOUT_LOAD` is omitted from the case, so it contributes zero. |
+| `holdup-discharge` | 0 A | `+2.0` and `-2.0` cancel on the feed. From the junction to `J2.1` only `VOUT_LOAD` contributes, and its 2 A stands. |
+
+A contribution is signed relative to its path's **declared** direction:
+positive `current_a` flows from that path's `source` to its `sink`, negative
+from `sink` to `source`. In `holdup-discharge` the holdup branch delivers
+current from `U3.1` toward the junction, against the way `VOUT_HOLDUP` is
+declared, so it is listed as `-2.0`. Which endpoint is the `source` is the
+author's choice: swapping a path's endpoints and negating every `current_a`
+that refers to it describes the same physical case.
+
+- **The per-path checks still run.** Every path is still judged at its own
+  declared `continuous_a` / `pulsed_a`, exactly as without `cases`. A case
+  reports only copper whose combined current exceeds what those checks
+  already judged it at, so `holdup-only` and `holdup-discharge` add nothing
+  here. With 1.0 mm copper on 1 oz on an external layer (the checker's
+  default 10 °C rise), 2 A needs 0.781 mm and 4 A needs 2.033 mm: each path
+  passes alone, and only `load+holdup` fails. On an inner layer the same
+  currents need 2.033 mm and 5.288 mm, so 1.0 mm would already fail the
+  independent 2 A check.
+- **Nothing is summed unless a case says so.** A path omitted from a case
+  contributes zero to it; omit it rather than listing it with `0.0`: a zero
+  contribution keeps the whole case from being evaluated. Currents from
+  separate cases are never added together: mutually exclusive loads belong
+  in separate cases, and each case is judged on its own. Two declared paths
+  that overlap are never summed unless one case lists both.
+- **A sidecar without `cases` is unchanged.** A bare list of paths, or an
+  object with only `paths`, keeps every path checked independently.
+- **A bad reference blocks a verdict.** A case that names an unknown path or
+  one shared by several declarations, lists a path twice, or includes a path
+  that is `unresolved` or `ambiguous` is an `error` (`Operating case ...
+  cannot be evaluated`) and yields no finding from a partial total. A
+  malformed case (a contribution without a numeric `current_a`, a repeated
+  case name, an unknown `pulse_overlap`) is rejected when the sidecar loads,
+  like any other malformed path.
+- **What a case reports.** Shared copper that cannot carry the combined
+  current is an `error` naming the case, the contributing paths with their
+  signed currents, the combined current and the location. A shared layer
+  change is an `error` only when a contributing path is
+  `reinforcement_eligible`, otherwise a `warning`. Where the resolver did
+  not record which way a path crosses the copper, the total is a range: the
+  `error` is kept when the copper fails at the lowest total of that range
+  as well as the highest **and** that lowest total exceeds the current the
+  per-path checks already judged the copper at. A `warning` reports the range
+  otherwise, including when a per-path check already covered the lower bound
+  (for example two paths rated 2 A with case contributions of +3 A and +1 A
+  give per-path errors at 2 A and a case warning for 2 A to 4 A).
+- **Where cases are judged.** `kct route` (post-route DRC) and `kct check`
+  evaluate them, and `kct route` re-emits them next to the paths.
+  `kct pcb reinforce` and `kct pcb prune` read only `paths`.
+
+When the paths of a case include two or more **pulsed** ones (each declaring
+`pulsed_a`, see "Pulsed and duty-cycled branches"), the case states how their
+pulses relate in time, because the peaks may or may not coincide. With
+`VOUT_LOAD` and `VOUT_HOLDUP` declared pulsed, a case that peaks them
+together is:
+
+```json
+{"name": "burst", "pulse_overlap": "coincident",
+ "notes": "one event peaks the load while it charges the holdup branch",
+ "contributions": [{"path": "VOUT_LOAD", "current_a": 0.5},
+                   {"path": "VOUT_HOLDUP", "current_a": 0.5}]}
+```
+
+For a pulsed path, a case's `current_a` is its **between-pulse** current;
+during a pulse the path carries its declared `pulsed_a`, with the sign of
+`current_a` (here each path goes from +0.5 A to +6 A or +4 A).
+With `VOUT_LOAD` declaring `"pulsed_a": 6.0` and `VOUT_HOLDUP`
+`"pulsed_a": 4.0`, both at `"duty_cycle": 0.1`, the `burst` case puts 1.0 A
+on the shared feed between pulses and 10 A at the coincident peak, and
+sizes the feed for their 3.30 A RMS (`sqrt(0.1*10² + 0.9*1²)`).
+
+`pulse_overlap` is read only where two or more pulsed members share copper.
+A lone pulsed member needs none: that copper is judged at its RMS when the
+path declares `duty_cycle`, and at its peak as if continuous otherwise.
+With two or more pulsed members on shared copper:
+
+| `pulse_overlap` | Meaning | Combined RMS requires |
+|-----------------|---------|-----------------------|
+| omitted | Not stated. The combined RMS **and** peak are undetermined: only the steady sum is checked, and a `warning` names the case and the paths. | — |
+| `"coincident"` | The pulses overlap, so the peaks add. | The same `duty_cycle` on every pulsed path. |
+| `"disjoint"` | At most one pulse is up at a time. | A `duty_cycle` on every pulsed path, summing to at most 1. |
+
+When the duty-cycle requirement is not met, only the steady sum is checked
+and a `warning` reports what is missing. Fusing is never combined: the
+Onderdonk check (`pulse_duration_s`) stays a per-path check at each path's
+own `pulsed_a`.
 
 | Option | Description |
 |--------|-------------|
