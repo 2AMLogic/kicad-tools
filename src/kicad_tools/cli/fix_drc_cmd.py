@@ -585,6 +585,8 @@ def _staged_repair(
 
     try:
         with staged_board(pcb_path, output_path, in_destination_dir=not args.dry_run) as candidate:
+            if _guard_mask(args):
+                _stage_reinforcement_record(output_path, candidate)
             code = _execute_repair(args, pcb_path, candidate, report)
             # A later no-progress pass (exit 1) can follow earlier verified
             # edits. Preserve the command's ordinary partial-repair behaviour.
@@ -677,9 +679,22 @@ def _detection_engine(drc_report_path: str | None) -> str:
     return ENGINE_KICAD_CLI if _kicad_cli_path() is not None else ENGINE_KCT_CHECK
 
 
+def _stage_reinforcement_record(board: Path, candidate: Path) -> None:
+    """Mirror the record the mask checker will find beside the result board."""
+    from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+
+    record = sidecar_path(board)
+    if record.is_file():
+        shutil.copyfile(record, sidecar_path(candidate))
+
+
 @contextmanager
 def _with_project_rules(
-    board: Path, project_pcb_path: Path, *, private: bool = False
+    board: Path,
+    project_pcb_path: Path,
+    *,
+    private: bool = False,
+    reinforcement_board: Path | None = None,
 ) -> Iterator[Path]:
     """Yield a path to ``board``'s copper that sits next to the project's rules.
 
@@ -703,9 +718,14 @@ def _with_project_rules(
             # Native DRC also resolves project libraries and included rules relative
             # to the PCB. Keep writable board/project state private to this pass.
             from kicad_tools.cli.runner import _link_or_copy
+            from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
 
+            if reinforcement_board is not None:
+                _stage_reinforcement_record(reinforcement_board, staged)
             for sibling in project_pcb_path.resolve().parent.iterdir():
                 target = staged.parent / sibling.name
+                if reinforcement_board is not None and target == sidecar_path(staged):
+                    continue
                 if sibling.name.startswith(".") or target.exists() or target.is_symlink():
                     continue
                 if sibling.suffix not in {".kicad_pcb", ".kicad_pro", ".kicad_prl"}:
@@ -1864,7 +1884,12 @@ def _run_mask_pass(
         )
         if args.dry_run or not result.actions:
             return result
-        with _with_project_rules(load_path, pcb_path, private=True) as candidate:
+        with _with_project_rules(
+            load_path,
+            pcb_path,
+            private=True,
+            reinforcement_board=output_path if _guard_mask(args) else None,
+        ) as candidate:
             before = MaskCopperRepairer(candidate)
             repairer.align_moved_tracks(
                 before, result, design_rules.min_clearance_mm if design_rules is not None else None
@@ -1906,7 +1931,7 @@ def _run_mask_pass(
                 guard_baseline = report
                 if args.only != "mask-copper" or args.drc_report or earlier_saved:
                     guard_baseline = _run_python_drc(
-                        candidate,
+                        load_path,
                         manufacturer=args.mfr,
                         layers=args.layers,
                         project_pcb_path=pcb_path,
@@ -2051,7 +2076,12 @@ def _run_mask_pass(
                         f"saved repair introduced off-angle tracks {', '.join(sorted(skewed))}"
                     )
                 atomic_write_text(output_path, candidate.read_text())
-            elif not audit and output_path != load_path and not output_path.exists():
+            elif (
+                not audit
+                and not _guard_mask(args)
+                and output_path != load_path
+                and not output_path.exists()
+            ):
                 atomic_write_text(output_path, load_path.read_text())
     except (_MaskAssessmentFailed, CreepageVerificationError):
         raise

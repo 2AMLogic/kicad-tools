@@ -13,6 +13,7 @@ both of which shift with the copper.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from inspect import signature
@@ -722,6 +723,98 @@ def test_rejected_repair_ignores_prior_output(tmp_path, monkeypatch, capsys):
     assert apply_code == preview_code
     assert applied["total_repaired"] == preview["total_repaired"] == 0
     assert applied["mask_copper"]["unrepaired"] == preview["mask_copper"]["unrepaired"]
+
+
+@pytest.mark.parametrize("destination", ["in_place", "renamed_with_record", "renamed_no_record"])
+def test_guard_grades_reinforcement_at_result_path(tmp_path, monkeypatch, capsys, destination):
+    from kicad_tools.pcb.reinforcement_sidecar import sidecar_path
+    from kicad_tools.validate import mask_copper_geometry
+    from tests.test_mask_copper_reinforce_9315 import reinforce_record, straight_geometry
+
+    board = _board(tmp_path, ENTRY)
+    original = board.read_bytes()
+    record = json.dumps({"version": 1, "wires": [reinforce_record()]})
+    sidecar_path(board).write_text(record)
+    output = board if destination == "in_place" else tmp_path / "renamed.kicad_pcb"
+    if destination == "renamed_with_record":
+        sidecar_path(output).write_text(record)
+
+    def capture(path, **kwargs):
+        geometry = straight_geometry()
+        geometry.exported.source_sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        return geometry
+
+    monkeypatch.setattr(mask_copper_geometry, "inspect_attributed_mask_geometry", capture)
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda path: fix_drc_cmd._MaskNativeState()
+    )
+    run_drc = fix_drc_cmd._run_python_drc
+
+    def assess(path, **kwargs):
+        report = run_drc(path, **kwargs)
+        if _end(path, "trk-a")[1] == (100.7, 100.3):
+            report.violations.append(_finding("trk-a"))
+        return report
+
+    monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", assess)
+    argv = [
+        str(board),
+        "--only",
+        "mask-copper",
+        "--no-new-warnings",
+        "--max-displacement",
+        "1",
+        "--no-connectivity-check",
+        "--format",
+        "json",
+        "--output",
+        str(output),
+    ]
+    # A supplied report selects the repair but the guard must establish its own
+    # baseline on the input, including when the output has no matching record.
+    finding = _finding("trk-a")
+    report_path = tmp_path / "check.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "manufacturer": "jlcpcb",
+                "violations": [
+                    {
+                        "rule_id": finding.type_str,
+                        "severity": "error",
+                        "message": finding.message,
+                        "items": finding.items,
+                        "location": [100.0, 100.3],
+                        "layer": "F.Cu",
+                    }
+                ],
+                "mask_copper_assessments": [MaskCopperAssessment(coverage="complete").to_dict()],
+            }
+        )
+    )
+    argv.extend(["--drc-report", str(report_path)])
+    preview_code = fix_drc_cmd.main([*argv, "--dry-run"])
+    captured = capsys.readouterr()
+    assert captured.out, captured.err
+    preview = json.loads(captured.out)
+    assert board.read_bytes() == original
+    if output != board:
+        assert not output.exists()
+
+    assert fix_drc_cmd.main(argv) == preview_code
+    applied = json.loads(capsys.readouterr().out)
+    rejected = destination == "renamed_no_record"
+    assert applied["total_repaired"] == preview["total_repaired"] == int(not rejected)
+    assert applied["recheck"] == preview["recheck"]
+    assert applied["recheck"]["errors_after"] == int(rejected)
+    if rejected:
+        assert applied["mask_copper"]["unrepaired"][-1]["reason"] == "new_mask_finding"
+        assert not output.exists()
+        assert not sidecar_path(output).exists()
+    else:
+        assert _end(output, "trk-a")[1] == (100.0, 100.0)
+    if output != board:
+        assert board.read_bytes() == original
 
 
 def test_staged_board_preview_needs_no_destination_write_access(tmp_path):
