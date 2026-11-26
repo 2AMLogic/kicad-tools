@@ -32,6 +32,7 @@ import fnmatch
 import math
 import re
 import sys
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -1325,7 +1326,11 @@ def _iter_silk_elements(
             label = f"{footprint.reference} ({fp_text.text_type})"
             yield side, geom, label, center, fp_text.layer, fp_text.uuid, label
 
-        marks = _radial_polarity_strokes(footprint) if radial_marks is not None else {}
+        marks = (
+            _radial_polarity_strokes(footprint, _pad_margin_for(pcb, footprint))
+            if radial_marks is not None
+            else {}
+        )
         for index, graphic in enumerate(footprint.graphics):
             side = _silk_side(graphic.layer)
             if side is None:
@@ -2072,9 +2077,12 @@ def _painted_chords(
     radius: float,
     width: float,
     pads: Sequence[tuple[float, float, float]],
+    round_pads: Sequence[tuple[float, float, float, float]],
 ) -> dict[int, list[int]]:
     """Keep rim-to-rim chords and pieces ending at a common pad cutout."""
     members: dict[int, list[int]] = {}
+    # For each round pad, collect (tip radius, chord offset, graphic index).
+    round_tips: dict[int, list[tuple[float, int, int]]] = defaultdict(list)
     ordered = sorted(offsets)
     for i, offset in enumerate(ordered):
         intervals = offsets[offset]
@@ -2088,12 +2096,27 @@ def _painted_chords(
         # Reaching the inner edge of the outline suffices on both sides.
         reach = math.sqrt(max(0, (radius - width / 2) ** 2 - lateral**2))
         for start, end, index in intervals:
+            # Overdraw is ambiguous, even when one line is a full chord.
+            overdrawn = any(
+                (a, b) != (start, end) and max(a, start) < min(b, end) for a, b, _ in intervals
+            )
             if start > -reach or end < reach:
                 if start > -reach and end < reach:
                     continue
                 cut_start = start > -reach
                 tip = start if cut_start else end
                 if not any(abs(tip - (a if cut_start else b)) <= 3e-6 for a, b, _ in neighbours):
+                    if overdrawn:
+                        continue
+                    for pad_index, (along, across, pad_radius, pad_reach) in enumerate(round_pads):
+                        toward_cut = tip - along if cut_start else along - tip
+                        distance = math.hypot(toward_cut, lateral - across)
+                        # Repair clearances above the cap fall outside this window.
+                        if (
+                            toward_cut > 0
+                            and pad_radius <= distance <= pad_radius + pad_reach + width / 2
+                        ):
+                            round_tips[pad_index].append((distance, offset, index))
                     continue
                 if not any(
                     abs(across - lateral) <= extent
@@ -2101,12 +2124,26 @@ def _painted_chords(
                     for along, across, extent in pads
                 ):
                     continue
-            # Overdraw is ambiguous, even when one line is a full chord.
+            # A qualifying offset still establishes hatch pitch when its ink is ambiguous.
             chord = members.setdefault(offset, [])
-            if not any(
-                (a, b) != (start, end) and max(a, start) < min(b, end) for a, b, _ in intervals
-            ):
+            if not overdrawn:
                 chord.append(index)
+
+    for tips in round_tips.values():
+        tips.sort()
+        radii = [r for r, _, _ in tips]
+        for r, offset, index in tips:
+            # The clipper approximates round outlines with 16 edges per
+            # quadrant. Allow the chord sagitta plus coordinate rounding.
+            tolerance = r * (1 - math.cos(math.pi / 64)) + 3e-6
+            lo = bisect_left(radii, r - tolerance)
+            hi = bisect_right(radii, r + tolerance)
+            distinct_offsets: set[int] = set()
+            for i in range(lo, hi):
+                distinct_offsets.add(tips[i][1])
+                if len(distinct_offsets) >= 4:
+                    members.setdefault(offset, []).append(index)
+                    break
     return members
 
 
@@ -2163,9 +2200,33 @@ def _positive_lead_mark(
             yield pair[0][0], pair[1][0]
 
 
-def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
+# Largest silk-to-pad repair clearance (mm) a clipped round cutout may reflect.
+_MAX_REPAIR_CLEARANCE_MM = 0.25
+
+
+def _pad_margin_for(pcb: PCB, footprint: Footprint) -> Callable[[Any], float]:
+    """Return a function giving a pad's effective mask expansion (never negative)."""
+    from ..mask_geometry import board_mask_margin, pad_mask_margin
+
+    board_margin, declared = board_mask_margin(pcb)
+    board_margin = _board_mask_margin_or(board_margin, declared, 0.0)
+    version = pcb._file_version()
+
+    def margin_of(pad: Any) -> float:
+        margin, _ = pad_mask_margin(pad, footprint, board_margin, declared, board_version=version)
+        if margin is None or not math.isfinite(margin):
+            margin = board_margin
+        return max(0.0, margin)
+
+    return margin_of
+
+
+def _radial_polarity_strokes(
+    footprint: Footprint, mask_margin: Callable[[Any], float] | None = None
+) -> dict[int, set[object]]:
     """Map authored graphic indices to the painted runs they belong to."""
     from kicad_tools.core.arcs import arc_sweep
+    from kicad_tools.validate.mask_geometry import pad_mask_sides
 
     marks: dict[int, set[object]] = defaultdict(set)
     for outline_index, outline in enumerate(footprint.graphics):
@@ -2230,6 +2291,7 @@ def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
             # A pad can clip a chord at either end, including right through
             # the opposite rim. Look for a repeated cut edge facing the pad.
             pads = []
+            round_pads = []
             for pad in footprint.pads:
                 x, y = pad.position[0] - center[0], pad.position[1] - center[1]
                 pads.append(
@@ -2239,7 +2301,13 @@ def _radial_polarity_strokes(footprint: Footprint) -> dict[int, set[object]]:
                         math.hypot(*pad.size) / 2 + 2 * outline.stroke_width,
                     )
                 )
-            members = _painted_chords(offsets, radius, outline.stroke_width, pads)
+                if pad.shape == "circle" and _silk_side(outline.layer) in pad_mask_sides(pad):
+                    along, across, _ = pads[-1]
+                    # Cutout reach: mask aperture plus the repair clearance and
+                    # half the stroke that the clipper keeps clear of it.
+                    reach = (mask_margin(pad) if mask_margin else 0.0) + _MAX_REPAIR_CLEARANCE_MM
+                    round_pads.append((along, across, pad.size[0] / 2, reach))
+            members = _painted_chords(offsets, radius, outline.stroke_width, pads, round_pads)
             for run in _hatch_runs(sorted(members), outline.stroke_width * 1e6):
                 mark = object()
                 marks[outline_index].add(mark)
