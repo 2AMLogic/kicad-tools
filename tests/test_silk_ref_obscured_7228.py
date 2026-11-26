@@ -112,7 +112,8 @@ def test_single_attr_flag_still_flagged(rules, tmp_path, attr):
 
 
 @pytest.mark.parametrize(
-    "case", ["hole", "placed", "purchased", "plated", "connector", "netted", "numbered"]
+    "case",
+    ["hole", "renamed", "placed", "purchased", "plated", "connector", "netted", "numbered"],
 )
 def test_hidden_reference_on_unpopulated_mechanical_hole(rules, tmp_path, case):
     attributes = "exclude_from_bom exclude_from_pos_files"
@@ -131,14 +132,19 @@ def test_hidden_reference_on_unpopulated_mechanical_hole(rules, tmp_path, case):
         hole = hole.replace('pad ""', 'pad "1"')
     elif case == "connector":
         hole += '(pad "1" smd rect (at 3 0) (size 1 1) (layers "F.Cu"))'
+    footprint_name = (
+        "Mechanical:M3_Clearance" if case == "renamed" else ("MountingHole:MountingHole_3.2mm_M3")
+    )
     path = tmp_path / "mount.kicad_pcb"
     path.write_text(f"""(kicad_pcb (version 20240108) (generator "test") (net 1 "GND")
-        (footprint "MountingHole:MountingHole_3.2mm_M3" (layer "F.Cu") (at 10 10)
+        (footprint "{footprint_name}" (layer "F.Cu") (at 10 10)
         (attr {attributes})
         (property "Reference" "H1" (at 0 0) (layer "F.SilkS") (hide yes))
         {hole}))""")
     found = check_silk_ref_obscured(PCB.load(path), rules).violations
-    assert [v.items for v in found] == ([] if case == "hole" else [("H1 (reference)", "hidden")])
+    assert [v.items for v in found] == (
+        [] if case in ("hole", "renamed") else [("H1 (reference)", "hidden")]
+    )
 
 
 # --- hidden reference replaced by a function label (#9435) -------------------

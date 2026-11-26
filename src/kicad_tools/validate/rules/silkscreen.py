@@ -2439,8 +2439,7 @@ def check_silk_ref_obscured(
             if is_fiducial_footprint(footprint):
                 continue  # hiding fiducial references is the convention (#8540)
             if (
-                footprint.name.rsplit(":", 1)[-1].startswith("MountingHole_")
-                and footprint.exclude_from_bom
+                footprint.exclude_from_bom
                 and footprint.exclude_from_pos_files
                 and footprint.pads
                 and all(
