@@ -98,7 +98,8 @@
     "is_pour_net": true,
     "route_via": "pour",
     "zone_connection": "solid",
-    "zone_priority": 10
+    "zone_priority": 10,
+    "cost_multiplier": 0.8
   },
   "V3P3": {
     "name": "Power",
@@ -110,35 +111,44 @@
     "is_pour_net": true,
     "route_via": "pour",
     "zone_connection": "solid",
-    "zone_priority": 10
+    "zone_priority": 10,
+    "cost_multiplier": 0.8
   },
   "DRIVER_SLEEP": {
     "name": "Differential",
     "priority": 2,
     "trace_width": 0.15,
     "clearance": 0.15,
-    "via_size": 0.6
+    "via_size": 0.6,
+    "cost_multiplier": 0.85,
+    "length_critical": true
   },
   "RUN": {
     "name": "Differential",
     "priority": 2,
     "trace_width": 0.15,
     "clearance": 0.15,
-    "via_size": 0.6
+    "via_size": 0.6,
+    "cost_multiplier": 0.85,
+    "length_critical": true
   },
   "VCP": {
     "name": "Differential",
     "priority": 2,
     "trace_width": 0.15,
     "clearance": 0.15,
-    "via_size": 0.6
+    "via_size": 0.6,
+    "cost_multiplier": 0.85,
+    "length_critical": true
   },
   "nTRIP": {
     "name": "Differential",
     "priority": 2,
     "trace_width": 0.15,
     "clearance": 0.15,
-    "via_size": 0.6
+    "via_size": 0.6,
+    "cost_multiplier": 0.85,
+    "length_critical": true
   },
   "SCK": {
     "name": "Clock",
@@ -146,7 +156,9 @@
     "trace_width": 0.2,
     "neck_trace_width": 0.15,
     "clearance": 0.2,
-    "via_size": 0.6
+    "via_size": 0.6,
+    "cost_multiplier": 0.9,
+    "length_critical": true
   },
   "SENSE_IN": {
     "name": "Audio",
@@ -154,7 +166,8 @@
     "trace_width": 0.2,
     "neck_trace_width": 0.15,
     "clearance": 0.15,
-    "via_size": 0.6
+    "via_size": 0.6,
+    "noise_sensitive": true
   },
   "RESET": {
     "name": "Debug",
@@ -162,7 +175,8 @@
     "trace_width": 0.2,
     "neck_trace_width": 0.15,
     "clearance": 0.15,
-    "via_size": 0.6
+    "via_size": 0.6,
+    "cost_multiplier": 1.2
   },
   "AREF": {
     "name": "Digital",

@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -367,6 +368,42 @@ def test_recipe_declares_reviewed_classes_widths_and_necks(staged):
     (run,) = [s for s in reset if s.layer == "In1.Cu" and math.dist(s.start, (44.6, 15.325)) < 1e-3]
     assert run.width == pytest.approx(0.2)
     assert math.dist(run.end, (44.6, 32.6375)) < 1e-3
+
+
+def test_incomplete_map_refused_before_writing_sidecars(staged, tmp_path):
+    board = _copy_stage(staged, tmp_path / "partial-map")
+    map_file = board.parent / "net_class_map.json"
+    entries = json.loads(map_file.read_bytes())
+    del entries["FUSED"]
+    map_file.write_text(json.dumps(entries))
+    sidecars = [board.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru")]
+    original = [path.read_bytes() for path in sidecars]
+
+    with pytest.raises(RuntimeError, match=r"missing.*FUSED"):
+        _load_build().declare_router_netclasses(board)
+    assert [path.read_bytes() for path in sidecars] == original
+
+
+def test_loaded_board_map_preserves_routing_policy(staged):
+    from kicad_tools.cli.route_cmd import _apply_net_class_map_sidecar
+    from kicad_tools.router.io import load_pcb_for_routing
+
+    router, _ = load_pcb_for_routing(
+        str(staged.parent / "bldc_controller.kicad_pcb"), auto_adjust_grid=True
+    )
+    _apply_net_class_map_sidecar(
+        router, SimpleNamespace(_loaded_net_class_map=_sidecar(staged)), quiet=True
+    )
+    differential = {"DRIVER_SLEEP", "RUN", "VCP", "nTRIP"}
+    costs = {"+5V": 0.8, "V3P3": 0.8, "SCK": 0.9, "RESET": 1.2}
+    costs.update(dict.fromkeys(differential, 0.85))
+    for net in router.net_names.values():
+        if net:
+            settings = router.net_class_map[net]
+            assert settings.cost_multiplier == costs.get(net, 1.0), net
+            assert settings.length_critical == (net == "SCK" or net in differential), net
+            assert settings.noise_sensitive == (net == "SENSE_IN"), net
+            assert not settings.coupled_routing, net
 
 
 def test_retained_motor_neck_is_the_u2_pad_escape(staged):

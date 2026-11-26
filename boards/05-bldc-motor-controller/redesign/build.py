@@ -228,8 +228,15 @@ def reviewed_net_class_map(routed):
     from kicad_tools.manufacturers.project_generator import board_net_names
     from kicad_tools.router.rules import net_class_map_from_path
 
-    nets = set(board_net_names(routed) or ())
+    nets = {name for name in (board_net_names(routed) or ()) if name}
+    if not nets:
+        raise RuntimeError(f"No named board nets found in {routed}")
     staged = net_class_map_from_path(routed.parent / "net_class_map.json", pcb_path=routed)
+    missing = nets.difference(staged)
+    if missing:
+        raise RuntimeError(
+            f"Reviewed net-class map is missing board nets: {', '.join(sorted(missing))}"
+        )
     return {net: routing for net, routing in staged.items() if net in nets}
 
 
@@ -246,9 +253,9 @@ def declare_router_netclasses(routed):
     regeneration silently dropped the ``Reviewed clearance - <class>`` rules,
     loosening those nets to the 0.1016 mm fab floor.
 
-    The map is the router's effective one (``DEFAULT_NET_CLASS_MAP`` plus its
-    name classifier) overlaid with the board's reviewed ``net_class_map.json``,
-    the same overlay ``kct route`` applies to a loaded ``--net-class-map``.  It
+    Every named board net must have its own reviewed entry before any
+    sidecar is written. These entries override the router defaults just as
+    ``kct route`` applies a loaded ``--net-class-map``. The board map
     names the motor and ground nets ``Motor power`` and ``Ground plane`` where
     the classifier alone called FUSED and VM ``Digital``, GND_SENSE ``Audio``
     and GND ``Power`` (#10430).  The sidecar writer declares the classes and
@@ -264,16 +271,10 @@ def declare_router_netclasses(routed):
         _write_drc_constraint_sidecars,
         _write_netclasses_to_project,
     )
-    from kicad_tools.manufacturers.project_generator import board_net_names
-    from kicad_tools.router.net_class import classify_and_apply_rules
     from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP
 
-    nets = sorted(name for name in (board_net_names(routed) or ()) if name)
-    effective = dict(DEFAULT_NET_CLASS_MAP)
-    for name, routing in classify_and_apply_rules(dict(enumerate(nets, 1))).items():
-        effective.setdefault(name, routing)
     reviewed = reviewed_net_class_map(routed)
-    effective.update(reviewed)
+    effective = {**DEFAULT_NET_CLASS_MAP, **reviewed}
     _write_drc_constraint_sidecars(routed, "jlcpcb", 4, quiet=True, net_class_map=effective)
     _write_netclasses_to_project(routed, effective, quiet=True)
     _write_reviewed_class_widths(routed, effective)
