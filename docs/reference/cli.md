@@ -837,6 +837,31 @@ top-level `verdict` (`pass`|`fail`) and `exit_code` (#7230). See
 kct validate --sync project.kicad_sch board.kicad_pcb
 ```
 
+#### Repeated circuit channels
+
+Use `--channel-intent` when a project specifies what each repeated circuit must contain.
+It checks a native schematic or KiCad S-expression netlist and the PCB independently.
+Run sync and copper LVS separately to check agreement and physical connectivity.
+
+```bash
+kct validate --channel-intent intent.json bank.kicad_sch bank.kicad_pcb
+kct validate --channel-intent intent.json --netlist bank.net --pcb bank.kicad_pcb --format json
+```
+
+In the declaration, each role specifies a `value`, a `pins` map from pin numbers
+to net aliases, and optional `fields` such as `{"LCSC": "C106248"}`. Each instance
+binds every role to a unique component reference and every alias to a board net
+name. List channel-local aliases in `private_nets` to require a distinct net for
+each binding. Other aliases may share a board net, as adjacent series taps do.
+Use exact KiCad strings, including units and sheet paths. See the
+[two-channel declaration](../../tests/fixtures/channel_intent/intent.json).
+
+Exit code 0 means all declared pins and fields matched, 1 means mismatches,
+and 2 means an input or declaration error. Each finding identifies the source,
+instance, reference, pin or field, and expected and observed values. A missing
+component produces one `Reference` finding per affected source. JSON represents
+a missing observation as `null`.
+
 ---
 
 ### `audit`
