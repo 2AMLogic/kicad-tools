@@ -47,12 +47,13 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from shapely import get_parts  # type: ignore[import-untyped]
 from shapely.geometry import LineString, Polygon  # type: ignore[import-untyped]
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
+from shapely.ops import unary_union  # type: ignore[import-untyped]
 
 from kicad_tools.core.project_clearance import DEFAULT_NETCLASS_CLEARANCE_MM
 from kicad_tools.router.board_clearance_rules import BoardClearanceRules, ItemProps
@@ -91,6 +92,26 @@ class _Pour:
     net_name: str
     clearance: float
     min_thickness: float
+    priority: int = 0
+
+
+def _effective_pours(pours: list[_Pour]) -> list[_Pour]:
+    """Clip each pour to the area it governs on its layer (Issue #10121).
+
+    KiCad fills higher-priority zones first and removes their outlines from
+    lower-priority zones, so only the highest-priority zone covering a point
+    decides that point's clearance and ``min_thickness``.  Zones of equal
+    priority keep their full outlines.
+    """
+    result: list[_Pour] = []
+    for pour in pours:
+        higher = [p.outline for p in pours if p.priority > pour.priority]
+        outline = pour.outline
+        if higher:
+            outline = outline.difference(unary_union(higher))
+        if not outline.is_empty:
+            result.append(replace(pour, outline=outline))
+    return result
 
 
 @dataclass(frozen=True)
@@ -173,10 +194,14 @@ class PourSlotRule(DRCRule):
                 getattr(zone, "net_name", ""),
                 zone.clearance,
                 zone.min_thickness,
+                getattr(zone, "priority", 0) or 0,
             )
             for layer in {zone.layer, *getattr(zone, "layers", [])}:
                 if layer:
                     zones[layer].append(pour)
+        # Only the highest-priority zone governs each point (Issue #10121).
+        zones = {layer: _effective_pours(pours) for layer, pours in zones.items()}
+        zones = {layer: pours for layer, pours in zones.items() if pours}
         if not zones:
             return
 

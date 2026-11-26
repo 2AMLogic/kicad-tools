@@ -396,3 +396,29 @@ def test_clearance_precedence_in_check_cleanup_and_fill(
             films.append(film)
     for film in films[1:]:
         assert films[0].symmetric_difference(film).area == pytest.approx(0)
+
+
+def _priority_zone(net: str, priority: int, x_max: int, clearance: float) -> str:
+    return (
+        ZONE.replace('(net "GND")', f'(net "{net}")')
+        .replace('(net_name "GND")', f'(net_name "{net}")')
+        .replace("clearance 0.2", f"clearance {clearance}")
+        .replace("(hatch edge 0.5)", f"(priority {priority})\n\t(hatch edge 0.5)")
+        .replace("(xy 45 5) (xy 45 35)", f"(xy {x_max} 5) (xy {x_max} 35)")
+    )
+
+
+def test_higher_priority_zone_governs_overlapping_lower_zone(tmp_path: Path) -> None:
+    """A lower-priority outline cannot change the slot decision under a higher one."""
+    high = _priority_zone("GND", 3, 32, 0.4)
+    low = _priority_zone("LOW", 0, 45, 0.2)
+    high_only = _pair_gaps(_control_p(tmp_path, (high,)))
+    low_only = _pair_gaps(_control_p(tmp_path, (low,)))
+    both = _pair_gaps(_control_p(tmp_path, (high, low)))
+    both_reversed = _pair_gaps(_control_p(tmp_path, (low, high)))
+    assert high_only == []  # 0.55 mm is packed against the 0.4 mm clearances
+    assert low_only == [("NET1", "NET2", 0.55)]  # genuine slot still warns
+    assert both == both_reversed == high_only
+    # The same pair next to (outside) the high zone is governed by the low zone.
+    narrow = _priority_zone("GND", 3, 8, 0.4)
+    assert _pair_gaps(_control_p(tmp_path, (narrow, low))) == low_only
