@@ -469,6 +469,15 @@ def test_placed_wire_credit_across_bonded_track_ends(end_offset, covered):
         not covered
     )
 
+    from tests.test_reinforcement_courtyard import _body
+
+    _body(pcb, "MID_WIRE", 90, y, side="B", half=0.5)
+    _body(pcb, "END_STUB", 142, y, side="B", half=0.5)
+    hits = checker.check_wire_run_courtyard_overlap().errors
+    assert any("[run]" in v.message and "MID_WIRE" in v.message for v in hits)
+    if not covered:
+        assert not any("END_STUB" in v.message for v in hits)
+
 
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("large", [(0,), (1,), (2,), (), (0, 1, 2)])
