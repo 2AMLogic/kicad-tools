@@ -2674,6 +2674,9 @@ class Via:
             aliases = {"F.Cu": "F.Cu", "Top": "F.Cu", "B.Cu": "B.Cu", "Bottom": "B.Cu"}
             mode = padstack.find("mode")
             mode_name = mode.get_string(0) if mode else None
+            if mode_name in ("front_inner_back", "custom"):
+                # KiCad writes the front diameter in the via's top-level size.
+                via.padstack_sizes["F.Cu"] = via.size
             for layer in padstack.find_all("layer"):
                 name = aliases.get(layer.get_string(0) or "")
                 lsize = layer.find("size")

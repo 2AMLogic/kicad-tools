@@ -223,18 +223,29 @@ def test_bracketed_net_name_survives_report_parsing():
     assert _bracketed_tokens("Via [<no net>] on F.Cu") == ["<no net>"]
 
 
-@pytest.mark.parametrize(
-    "text, expected",
-    [
-        ("Via [BUS[0] on F.Cu - B.Cu", ["BUS[0"]),
-        ("Via [BUS]0] on F.Cu - B.Cu", ["BUS]0"]),
-        ("Via [BUS[0]] on F.Cu - B.Cu", ["BUS[0]"]),
-    ],
-)
-def test_literal_unmatched_brackets_survive_parsing(text, expected):
-    from kicad_tools.drc.report import _bracketed_tokens
+@pytest.mark.parametrize("net", ["BUS[0", "BUS]0", "BUS[0]", "Net-(U1-D[0])"])
+def test_exact_net_filter_in_native_text_and_json(net, native_review, capsys):
+    board, report, _ = native_review
+    for path in (board, sidecar_path(board), board.parent / "current_paths.json", report):
+        path.write_text(path.read_text().replace("FUSED_LINE", net))
 
-    assert _bracketed_tokens(text) == expected
+    args = ["--net", net, "--format", "json", "--strict", "--allow-incomplete"]
+    assert drc_cmd.main([str(board), *args]) == 2
+    findings = json.loads(capsys.readouterr().out)["violations"]
+    assert [v.get("wire_end", {}).get("endpoint") for v in findings] == ["start", "end", None]
+
+    text_report = report.with_suffix(".rpt")
+    text_report.write_text(
+        "".join(
+            f"[via_dangling]: {v['description']}\n    Local override; warning\n"
+            f"    @(1 mm, 2 mm): {v['items'][0]['description']}\n"
+            for v in json.loads(report.read_text())["violations"]
+        )
+    )
+    for saved in (report, text_report):
+        assert drc_cmd.main([str(saved), *args]) == 2
+        findings = json.loads(capsys.readouterr().out)["violations"]
+        assert [v["nets"] for v in findings] == [[net]] * 3
 
 
 def test_isolated_stub_does_not_explain_wire_ends(native_review):
@@ -349,3 +360,41 @@ def test_wire_layer_via_diameter_decides_contact(native_review):
     assert not _has_wire_side_copper(pcb, leg)
     anchor.via.padstack_sizes.clear()  # uniform size: 0.3 mm gap now touches
     assert _has_wire_side_copper(pcb, leg)
+
+
+@pytest.mark.parametrize(
+    "padstack",
+    [
+        '(padstack (mode front_inner_back) (layer "Inner" (size 1.616)) (layer "B.Cu" (size 1.616)))',
+        '(padstack (mode custom) (layer "In1.Cu" (size 1.616)) (layer "In2.Cu" (size 1.616)) (layer "B.Cu" (size 1.616)))',
+    ],
+    ids=["front_inner_back", "custom"],
+)
+def test_front_wire_via_padstack(native_review, capsys, padstack):
+    from kicad_tools.sexp import parse_file, parse_string
+
+    board, _, _ = native_review
+    tree = parse_file(board)
+    tree.find("segment").find("layer").set_value(0, "F.Cu")
+    strip = next(
+        line for line in tree.find_all("gr_line") if line.find("layer").get_string(0) == "B.Mask"
+    )
+    strip.find("layer").set_value(0, "F.Mask")
+    # Padstacks saved by KiCad 10.0.8 for a 1.916 mm front / 1.616 mm back via.
+    via = tree.find("via")
+    via.append(parse_string(padstack))
+    board.write_text(tree.to_string())
+    path = sidecar_path(board)
+    records = json.loads(path.read_text())
+    records["wires"][0]["layer"] = "F.Cu"
+    path.write_text(json.dumps(records))
+
+    assert drc_cmd.main([str(board), "--format", "json", "--strict"]) == 2
+    findings = json.loads(capsys.readouterr().out)["violations"]
+    assert [v.get("wire_end", {}).get("layer") for v in findings] == [
+        "F.Cu",
+        "F.Cu",
+        "B.Cu",
+        "B.Cu",
+        None,
+    ]

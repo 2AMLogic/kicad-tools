@@ -279,6 +279,7 @@ class DRCReport:
             return parse_text_report(content, str(path))
 
 
+_ITEM_NET_RE = re.compile(r"^[^\[]*\[(.+)\] (?:on|of) ")
 _NET_TOKEN_RE = re.compile(r"\[(.+?)\](?=[\s,;:)]|$)")
 _LEGACY_TOKEN_RE = re.compile(r"\[([^\]]+)\]")
 
@@ -286,12 +287,13 @@ _LEGACY_TOKEN_RE = re.compile(r"\[([^\]]+)\]")
 def _bracketed_tokens(text: str) -> list[str]:
     """Return the ``[...]`` net tokens of a KiCad item description.
 
-    KiCad prints net names verbatim, so a name may hold brackets: balanced
-    (``Via [BUS[0]] on F.Cu``) or literally unmatched (``[BUS[0]``, ``[BUS]0]``).
-    A token therefore ends at the first ``]`` that is followed by whitespace,
-    punctuation or the end of the text. Text with no such closing bracket falls
-    back to the plain ``[^]]+`` match.
+    A native item's layer ("on F.Cu") or footprint ("of U1") follows
+    the closing bracket. Match that boundary so punctuation and literal
+    brackets inside the net name survive. Other description formats retain
+    the generic token extraction.
     """
+    if match := _ITEM_NET_RE.match(text):
+        return [match.group(1)]
     tokens = _NET_TOKEN_RE.findall(text)
     return tokens if tokens else _LEGACY_TOKEN_RE.findall(text)
 
