@@ -29,7 +29,8 @@ Result record, written by the producer::
      "unit": "mA", "value": 85.6, "deck_sha256": "<sha256 of the deck bytes>",
      "inputs": {"sim/models/opto.lib": "<sha256>"}}
 
-The producer's digests are compared with the *current* bytes before the limit
+The result's input paths must match the declaration. The producer's digests
+are compared with the *current* bytes before the limit
 is evaluated, so an obsolete measurement can never pass.  Verdicts, kept
 separate from native DRC:
 
@@ -320,6 +321,11 @@ def _evaluate_case(root: Path, case: Any, index: int) -> CaseVerdict:
         recorded_inputs = record.get("inputs", {})
         if not isinstance(recorded_inputs, dict):
             raise ValueError("result 'inputs' must map path to sha256")
+        undeclared = recorded_inputs.keys() - inputs.keys()
+        if undeclared:
+            raise ValueError(
+                "result lists undeclared simulation inputs: " + ", ".join(sorted(undeclared))
+            )
         for rel, _ in input_refs:
             tested[rel] = recorded_inputs.get(rel)
         for rel, digest in tested.items():

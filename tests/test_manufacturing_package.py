@@ -2721,6 +2721,18 @@ class TestSimulationEvidence:
         assert cases["installed"]["tested_sha256"] != cases["installed"]["current_sha256"]
         assert cases["proposed"]["status"] == "out_of_range"
 
+    def test_omitted_library_recorded_by_producer_invalidates_case(self, tmp_path, monkeypatch):
+        project, pcb = self._project(tmp_path, monkeypatch)
+        model = project / "sim" / "supply.lib"
+        model.write_text("Rsource in out 10")
+        self._write_result(
+            project, "installed", 85.6, inputs={"sim/supply.lib": self._digest(model.read_bytes())}
+        )
+        model.write_text("Rsource in out 25")
+        case = self._cases(self._export(pcb, tmp_path))["installed"]
+        assert case["status"] == "invalid"
+        assert "sim/supply.lib" in case["diagnostic"]
+
     def test_removed_result_is_missing(self, tmp_path, monkeypatch):
         project, pcb = self._project(tmp_path, monkeypatch)
         (project / "sim" / "installed.result.json").unlink()
