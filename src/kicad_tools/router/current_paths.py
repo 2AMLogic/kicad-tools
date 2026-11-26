@@ -2291,6 +2291,10 @@ def _build_graph(
             for end in (seg.start, seg.end):
                 if _via_covered_by_end(via, seg, end):
                     node = _copper_node(end, seg.layer)
+                    # A connected run already carries this end into the bore.
+                    # A second edge here would bypass its short routed entry.
+                    if any(run_root(j) in on_centre for j in at_node[node]):
+                        continue
                     candidate = ((i, node) in continuations, math.dist(end, via.position), node)
                     root_i = run_root(i)
                     if root_i not in best or candidate < best[root_i]:
