@@ -836,14 +836,14 @@ class TestFullyWiredLegs:
     """
 
     def test_complete_board_yields_the_leg(self):
-        legs = ReinforcementIncompleteRule(specs=[_spec()]).fully_wired_legs(
-            _reinforced(), _rules()
-        )
+        pcb = _reinforced()
+        legs = ReinforcementIncompleteRule(specs=[_spec()]).fully_wired_legs(pcb, _rules())
         assert len(legs) == 1
         (leg,) = legs
         assert leg.net == NET
         assert leg.layer == "F.Cu"
         assert leg.gauge == 16
+        assert [anchor.via for anchor in leg.anchors] == _anchors(pcb)
         assert leg.width == pytest.approx(2.0)
         assert leg.points[0] == pytest.approx((20.0, 50.0))
         assert leg.points[-1] == pytest.approx((120.0, 50.0))

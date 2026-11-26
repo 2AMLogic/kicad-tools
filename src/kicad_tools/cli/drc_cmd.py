@@ -265,6 +265,10 @@ def main(argv: list[str] | None = None) -> int:
         report = run_drc_on_pcb(input_path, args.output, args.keep_report, schematic=args.schematic)
         if report is None:
             return 1
+        if any(v.type_str == "via_dangling" for v in report.violations):
+            from ..drc.reinforcement import explain_wire_ends
+
+            explain_wire_ends(input_path, report.violations)
     elif input_path.suffix in (".json", ".rpt"):
         if args.schematic is not None:
             print(
@@ -862,6 +866,8 @@ def _print_single(
     symbol = "~" if v.is_waived else ("X" if v.is_error else "!")
     print(f"\n{indent}[{symbol}] {v.type_str}")
     print(f"{indent}    {v.message}")
+    if v.wire_end:
+        print(f"{indent}    {v.wire_end}")
 
     # Show measurement delta if available
     if v.required_value_mm is not None and v.actual_value_mm is not None:
@@ -1139,6 +1145,9 @@ def output_manufacturer_check(
                     "rule_name": c.rule_name,
                     "message": c.message,
                     "violation_message": c.violation.message,
+                    **(
+                        {"wire_end": c.violation.wire_end.to_dict()} if c.violation.wire_end else {}
+                    ),
                     "manufacturer_limit": c.manufacturer_limit,
                     "actual_value": c.actual_value,
                 }
@@ -1181,6 +1190,8 @@ def output_manufacturer_check(
             marker = "[!]" if check.violation.is_error else "[?]"
             print(f"\n  {marker} {check.violation.type_str} ({check.violation.severity.value})")
             print(f"      {check.violation.message}")
+            if check.violation.wire_end:
+                print(f"      {check.violation.wire_end}")
 
     if not incompatible:
         print(f"\n{'-' * 60}")
