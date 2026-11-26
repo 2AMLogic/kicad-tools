@@ -141,7 +141,8 @@ BOARD06_GAP_NETS: tuple[str, ...] = ()
 # The seed-42 fixture originally measured 22 mask error nets (#8858).
 # The sideband, PCIe and MIPI clock repairs retired nine of those net
 # identities; the data repair (#10113) retired the MIPI_D0 pair as well, and
-# the U1.32 ground repair (#9891) retired the GND identity.
+# the U1.32 ground repair (#9891) retired the GND identity. J1/B2 (#10294)
+# clears the USB3_TX2+ identity.
 BOARD06_MASK_NETS = (
     "+1V2",
     "+3V3",
@@ -152,7 +153,6 @@ BOARD06_MASK_NETS = (
     "USB3_RX2+",
     "USB3_RX2-",
     "USB3_TX1-",
-    "USB3_TX2+",
 )
 
 
@@ -506,6 +506,7 @@ def test_board06_measured_mask_population_passes_and_drains():
         "PCIE_TX-",
         "PCIE_RX+",
         "PCIE_RX-",
+        "USB3_TX2+",
     ):
         regressed = found + [mask_violation(net)]
         assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", net)]
