@@ -2200,7 +2200,6 @@ class ManufacturingPackage:
                 logger.info(note)
                 result.warnings.append(note)
 
-
     def _dry_run_write_drc_constraints(
         self,
         write_drc_constraints,
