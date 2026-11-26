@@ -506,6 +506,90 @@ def test_edge_contact_is_zero_gap_without_exposure(tmp_path: Path):
     assert span["exposed"]["exposed"] is False
 
 
+@pytest.mark.parametrize("strip", [(STRIP[0], STRIP[2]), STRIP[:1]])
+def test_cut_strip_keeps_registered_anchors(tmp_path, strip):
+    result = _package(tmp_path, members({"B.Mask": mask_back(strip)}), [wire()])
+    entry = _preflight_entry(result)
+    assert entry.status == "WARN"
+    report = entry.data
+    assert opening(report, "PGND_WIRE", "span", "B")["reason"] == "opening_not_plotted"
+    for face in ("F", "B"):
+        for number in (1, 2):
+            assert opening(report, "PGND_WIRE", "anchor", face, number)["status"] == "complete"
+
+
+def test_exposed_overlap_wins_over_earlier_tangent_pad(tmp_path):
+    copper = copper_back()
+    mask = mask_back(SHIFTED_STRIP)
+    original_copper = copper.body
+    copper.body = []
+    copper.attribute(net="TANGENT")
+    copper.flash(13.0, 8.3, "R,1X1")
+    copper.reset()
+    copper.body.extend(original_copper)
+    mask.flash(13.0, 8.3, "R,1X1")
+    path = write_archive(tmp_path / "tie.zip", members({"B.Cu": copper, "B.Mask": mask}))
+    report = measure_reinforcement_clearance(path, [wire()]).to_dict()
+    exposed = opening(report, "PGND_WIRE", "span", "B")["exposed"]
+    assert exposed["net"] == "RELAY_DRV"
+    assert exposed["exposed"] and exposed["overlap_mm2"] > 0
+
+
+def test_each_mask_owns_its_stroke_indices(tmp_path):
+    layers = {layer: Gerber(layer) for layer in FILE_FUNCTION}
+    wires = []
+    for face, net, start, end in (
+        ("B", "BACK", (10, 10), (20, 10)),
+        ("F", "FRONT", (40, 40), (50, 40)),
+    ):
+        for side in ("B", "F"):
+            copper = layers[f"{side}.Cu"]
+            copper.attribute(net=net)
+            for point in (start, end):
+                copper.flash(*point, "C,1.9")
+            copper.reset()
+        layers[f"{face}.Mask"].stroke(start, end, 2.4)
+        wires.append(wire(net, (start, end), net, (start, end), f"{face}.Cu"))
+    for side in ("B", "F"):
+        for w in wires:
+            for anchor in w["anchors"]:
+                layers[f"{side}.Mask"].flash(anchor["x"], anchor["y"], "C,2")
+    path = write_archive(tmp_path / "two.zip", members(layers))
+    assert measure_reinforcement_clearance(path, wires).coverage == "complete"
+
+
+def test_same_net_tracks_do_not_register_missing_anchor_flashes(tmp_path):
+    copper = copper_back()
+    for point in (A1, A2):
+        copper.body.remove(f"{copper.aperture('C,1.900000')}\n{_at(*point)}D03*")
+    path = write_archive(
+        tmp_path / "tracks.zip", members({"B.Cu": copper, "B.Mask": mask_back(shift_x=0.4)})
+    )
+    report = measure_reinforcement_clearance(path, [wire()]).to_dict()
+    for number in (1, 2):
+        assert (
+            opening(report, "PGND_WIRE", "anchor", "B", number)["reason"]
+            == "unverified_registration"
+        )
+        assert opening(report, "PGND_WIRE", "anchor", "F", number)["status"] == "complete"
+
+
+def test_bad_member_crc_keeps_readable_layers(tmp_path):
+    texts = members()
+    path = tmp_path / "crc.zip"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
+        for name, payload in texts.items():
+            archive.writestr(name, payload)
+    mask = texts[member_name("B.Mask")].encode()
+    path.write_bytes(path.read_bytes().replace(mask, b"!" + mask[1:]))
+    report = measure_reinforcement_clearance(path, [wire()]).to_dict()
+    assert "CRC" in report["members"]["B.Mask"]["detail"]
+    for layer in ("F.Mask", "F.Cu", "B.Cu"):
+        assert report["members"][layer]["status"] == "read"
+    for number in (1, 2):
+        assert opening(report, "PGND_WIRE", "anchor", "F", number)["status"] == "complete"
+
+
 def test_cleared_copper_is_no_candidate(tmp_path: Path):
     g = copper_back()
     # A clear-polarity region plotted after the via erases it.
@@ -638,10 +722,9 @@ def test_anchor_opening_smaller_than_its_copper_is_still_registered(tmp_path: Pa
         assert opening(report, "PGND_WIRE", kind, face, anchor)["status"] == "complete"
 
 
-def test_mismatched_plot_origin_is_unverified(archive):
-    report = measure_reinforcement_clearance(
-        archive, [wire()], plot_origin_mm=(100.0, 50.0)
-    ).to_dict()
+@pytest.mark.parametrize("origin", [(100.0, 50.0), (0.4, 0.0)])
+def test_mismatched_plot_origin_is_unverified(archive, origin):
+    report = measure_reinforcement_clearance(archive, [wire()], plot_origin_mm=origin).to_dict()
 
     assert report["coverage"] == "incomplete"
     openings = [o for run in report["runs"] for o in run["openings"]]
@@ -694,7 +777,7 @@ def test_ambiguous_member_is_missing_artwork(archive):
         with zipfile.ZipFile(archive) as source:
             for name in source.namelist():
                 zf.writestr(name, source.read(name))
-        zf.writestr("copy-B_Mask.gbs", mask_back(shift_x=0.4).text())
+        zf.writestr("copy/board-B_Mask.gbs", mask_back(shift_x=0.4).text())
     report = measure_reinforcement_clearance(twin, [wire()]).to_dict()
 
     assert report["members"]["B.Mask"]["status"] == "missing_artwork"

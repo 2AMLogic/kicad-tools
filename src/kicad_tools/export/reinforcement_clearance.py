@@ -59,9 +59,11 @@ import hashlib
 import math
 import re
 import zipfile
+import zlib
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -314,34 +316,26 @@ class _Layer:
         }
 
 
-def _member_payloads(source: Path) -> dict[str, bytes]:
-    """Each member's bytes by file name, from a Gerber ZIP or a directory of loose layers."""
-    if source.is_dir():
-        return {p.name: p.read_bytes() for p in sorted(source.iterdir()) if p.is_file()}
-    with zipfile.ZipFile(source) as archive:
-        return {
-            PurePosixPath(name).name: archive.read(name)
-            for name in sorted(archive.namelist())
-            if not name.endswith("/")
-        }
-
-
-def _load_layers(payloads: dict[str, bytes], problem: str | None) -> dict[str, _Layer]:
-    layers: dict[str, _Layer] = {}
+def _load_layers(names: Iterable[str], read: Callable[[str], bytes]) -> dict[str, _Layer]:
+    """Select each layer by its full member name before reading any payloads."""
+    names = sorted(names)
+    layers = {}
     for layer in LAYERS:
-        entry = _Layer(layer, problem=problem)
-        matches = sorted(name for name in payloads if _MEMBER_RE[layer].search(name))
-        if not matches and not problem:
+        entry = layers[layer] = _Layer(layer)
+        matches = [name for name in names if _MEMBER_RE[layer].search(name)]
+        if not matches:
             entry.problem = "no archive member for this layer"
-        elif matches:
-            data = payloads[matches[0]]
+        elif len(matches) > 1:
+            entry.problem = "ambiguous archive members: " + ", ".join(matches)
+        else:
             entry.member = matches[0]
-            entry.sha256 = hashlib.sha256(data).hexdigest()
-            if len(matches) > 1:
-                entry.problem = "ambiguous archive members: " + ", ".join(matches)
+            try:
+                data = read(matches[0])
+            except (OSError, EOFError, zipfile.BadZipFile, RuntimeError, zlib.error) as exc:
+                entry.problem = f"archive member unreadable: {exc}"
             else:
+                entry.sha256 = hashlib.sha256(data).hexdigest()
                 entry.problem = _read_layer(entry, data)
-        layers[layer] = entry
     return layers
 
 
@@ -451,17 +445,16 @@ class _Face:
             )
         centres = [feature.geometry.centroid for feature in opening]
         for flash in self.by_net.get(net, ()):
-            if flash.operation != "flash" or flash.geometry.distance(point) > tolerance:
-                continue
-            centre = flash.geometry.centroid
-            offset = min(centre.distance(other) for other in centres)
-            if offset > tolerance:
-                return (
-                    f"the plotted {self.mask.layer} opening at the anchor is {offset:.3f} mm "
-                    f"from the centre of the anchor's {net!r} copper (tolerance "
-                    f"{tolerance:.2f} mm)"
-                )
-        return None
+            if flash.operation == "flash":
+                centre = flash.geometry.centroid
+                if centre.distance(point) <= tolerance and all(
+                    centre.distance(other) <= tolerance for other in centres
+                ):
+                    return None
+        return (
+            f"no {net!r} copper flash registers to both the sidecar point "
+            f"and the {self.mask.layer} opening within {tolerance:.3f} mm"
+        )
 
     def exposed(self, feature: GerberFeature) -> Any | None:
         """The feature's material inside a plotted mask opening; ``None`` when there is none."""
@@ -522,7 +515,8 @@ class _Face:
     def nearest(self, opening: Any, net: str | None, exposed_only: bool):
         """``(feature, geometry, distance)`` of the nearest candidate copper.
 
-        Equally near copper resolves to the earliest plotted, so the report is
+        At zero exposed distance, positive exposure takes priority over contact.
+        Remaining ties resolve to the earliest plotted, so the report is
         reproducible. ``None`` when the face has no such copper.
 
         A bounding-box distance is a lower bound on the true distance, so the
@@ -538,19 +532,30 @@ class _Face:
         gap_y = np.maximum(np.maximum(bounds[:, 1] - maxy, miny - bounds[:, 3]), 0.0)
         lower = np.hypot(gap_x, gap_y)
         best, distance = None, math.inf
+        best_rank = (True, math.inf)
         for index in np.argsort(lower, kind="stable"):
             if best is not None and lower[index] > distance + _TIE_MM:
                 break
             candidate = opening.distance(geometries[index])
+            if candidate > distance + _TIE_MM:
+                continue
+            overlap = (
+                exposed_only and candidate == 0 and _positive_exposure(opening, geometries[index])
+            )
+            rank = (not overlap, features[index].index)
             if candidate < distance - _TIE_MM or (
-                abs(candidate - distance) <= _TIE_MM
-                and features[index].index < features[best].index
+                abs(candidate - distance) <= _TIE_MM and rank < best_rank
             ):
-                best, distance = index, min(candidate, distance)
+                best, distance, best_rank = index, candidate, rank
         return features[best], geometries[best], distance
 
 
 # --------------------------------------------------------------------------- minima
+
+
+def _positive_exposure(opening: Any, geometry: Any) -> bool:
+    certain = opening.buffer(-_UNCERTAINTY_MM).intersection(geometry.buffer(-_UNCERTAINTY_MM))
+    return certain.area > _AREA_EPSILON_MM2
 
 
 def _measure(
@@ -587,8 +592,7 @@ def _measure(
     if exposed_only:
         # Exposure is positive area beyond the construction budget, so edge
         # contact stays a zero gap with nothing exposed.
-        certain = opening.buffer(-_UNCERTAINTY_MM).intersection(geometry.buffer(-_UNCERTAINTY_MM))
-        minimum.exposed = overlap > _AREA_EPSILON_MM2 and certain.area > _AREA_EPSILON_MM2
+        minimum.exposed = overlap > _AREA_EPSILON_MM2 and _positive_exposure(opening, geometry)
 
     point = nearest_points(opening, geometry)[0]
     minimum.location_mm = [round(point.x + origin[0], 6), round(point.y + origin[1], 6)]
@@ -679,11 +683,11 @@ def _plan_runs(
 
     # Unique ownership: a strip two records claim is neither run's, and an
     # anchor opening records of different nets claim is not measured for either.
-    stroke_claims: dict[int, list[_RunPlan]] = defaultdict(list)
+    stroke_claims: dict[tuple[str, int], list[_RunPlan]] = defaultdict(list)
     anchor_claims: dict[tuple[str, int], list[tuple[_RunPlan, int]]] = defaultdict(list)
     for plan in plans:
         for stroke in plan.strokes:
-            stroke_claims[stroke.index].append(plan)
+            stroke_claims[(plan.run.mask_side, stroke.index)].append(plan)
         for position, anchor in enumerate(plan.anchors):
             for side, features in anchor.openings.items():
                 for feature in features:
@@ -806,7 +810,15 @@ def _span(plan: _RunPlan, face: _Face, origin: list[float], tolerance: float) ->
         return fail("ambiguous_run_ownership", "another sidecar record claims the plotted strip")
     if not plan.strokes:
         return fail("opening_not_plotted", f"no plotted {face.mask.layer} stroke joins the anchors")
-    opening = unary_union([stroke.geometry for stroke in plan.strokes]).difference(
+    material = unary_union([stroke.geometry for stroke in plan.strokes])
+    joined = [
+        part
+        for part in shapely.get_parts(material)
+        if all(part.distance(anchor.point) <= tolerance for anchor in plan.anchors)
+    ]
+    if not joined:
+        return fail("opening_not_plotted", "no continuous plotted strip reaches both anchors")
+    opening = unary_union(joined).difference(
         unary_union([f.geometry for a in plan.anchors for f in a.openings[face.side]])
     )
     if opening.is_empty:
@@ -897,17 +909,26 @@ def measure_reinforcement_clearance(
             raise ValueError("plot_origin_mm must be finite")
         origin.append(value)
     runs = reinforcement_run_records(wires)
-    payloads: dict[str, bytes] = {}
-    problem: str | None = None
     source = Path(gerber_archive) if gerber_archive is not None else None
+    problem = None
+    archive_digest = None
     if source is None:
         problem = "the package has no Gerber archive"
     else:
         try:
-            payloads = _member_payloads(source)
+            if source.is_dir():
+                layers = _load_layers(
+                    (p.name for p in source.iterdir() if p.is_file()),
+                    lambda name: (source / name).read_bytes(),
+                )
+            else:
+                archive_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+                with zipfile.ZipFile(source) as archive_file:
+                    layers = _load_layers(archive_file.namelist(), archive_file.read)
         except (OSError, zipfile.BadZipFile) as exc:
             problem = f"Gerber archive unreadable: {exc}"
-    layers = _load_layers(payloads, problem)
+    if problem:
+        layers = {layer: _Layer(layer, problem=problem) for layer in LAYERS}
     faces = {side: _Face(side, layers) for side in SIDES}
     tolerance = MASK_TOLERANCE_MM + _UNCERTAINTY_MM
     plans = _plan_runs(runs, faces, origin, tolerance)
@@ -919,9 +940,7 @@ def measure_reinforcement_clearance(
         coverage = "complete"
     else:
         coverage = "incomplete"
-    archive = {"member": source.name if source is not None else None, "sha256": None}
-    if source is not None and source.is_file():
-        archive["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    archive = {"member": source.name if source is not None else None, "sha256": archive_digest}
     return ReinforcementClearanceReport(
         coverage,
         {layer: entry.record() for layer, entry in layers.items()},
