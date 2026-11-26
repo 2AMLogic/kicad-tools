@@ -237,26 +237,224 @@ def test_symmetric_u1_exits_fail_impedance_and_preserve_the_board(tmp_path, repa
     assert board.read_bytes() == before
 
 
-def test_u1_mask_errors_clear_on_both_transceiver_openings(tmp_path, repair):
+def _require_pinned_kicad():
     from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION, version_number
     from kicad_tools.cli.runner import find_kicad_cli, get_kicad_version
+
+    cli = find_kicad_cli()
+    if cli is None or version_number(get_kicad_version(cli)) != PINNED_KICAD_VERSION:
+        pytest.skip("The mask regression uses the pinned KiCad toolchain")
+
+
+def _native_mask_measurements(board):
     from kicad_tools.validate.mask_copper import (
         check_mask_to_copper,
         default_request_for_manufacturer,
     )
 
-    cli = find_kicad_cli()
-    if cli is None or version_number(get_kicad_version(cli)) != PINNED_KICAD_VERSION:
-        pytest.skip("The mask regression uses the pinned KiCad toolchain")
+    _require_pinned_kicad()
+    policy = default_request_for_manufacturer("jlcpcb").policy
+    report = check_mask_to_copper(board, policy)
+    assert report.coverage == "complete", report.reasons
+    return report.measurements
+
+
+def test_u1_mask_errors_clear_on_both_transceiver_openings(tmp_path, repair):
     board = tmp_path / "usb2.kicad_pcb"
     _transceiver_board(board)
-    policy = default_request_for_manufacturer("jlcpcb").policy
 
     def opening_errors():
-        report = check_mask_to_copper(board, policy)
-        assert report.coverage == "complete", report.reasons
-        return Counter(m.owner_ref for m in report.measurements if m.disposition == "violation")
+        return Counter(
+            m.owner_ref for m in _native_mask_measurements(board) if m.disposition == "violation"
+        )
 
     assert opening_errors() == {"U1/10": 2, "U1/11": 2}
     assert repair(board, get_profile("jlcpcb").get_design_rules(layers=4)) == 2
     assert not opening_errors()
+
+
+@pytest.fixture
+def mirrored_connector(tmp_path, repair):
+    """Both J1 orientations and the two routed rails from the measured seed-42 fixture."""
+    from generate_design import usb2_net_class
+
+    from kicad_tools.router.rules import net_class_map_to_dict
+
+    path = tmp_path / "connector.kicad_pcb"
+    shutil.copyfile(Path(__file__).parent / "fixtures/board06_j1_usb2.kicad_pcb", path)
+    shutil.copyfile(
+        BOARD06 / "regression-fixture/diffpair_test_routed.kicad_pro",
+        path.with_suffix(".kicad_pro"),
+    )
+    classes = dict.fromkeys(_U1_RUNS, usb2_net_class())
+    path.with_name("net_class_map.json").write_text(json.dumps(net_class_map_to_dict(classes)))
+    return path
+
+
+def test_j1_usb2_reroutes_both_orientations(mirrored_connector, repair):
+    _require_pinned_kicad()
+    path = mirrored_connector
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    assert repair(path, rules) == 2
+    pcb = PCB.load(path)
+    barrels = {(v.net_name, v.position, v.size, v.drill) for v in pcb.vias}
+    assert barrels == {
+        ("USB2_D+", (14.5, 8.7), 0.45, 0.25),
+        ("USB2_D-", (14.96, 9.37), 0.45, 0.25),
+        ("USB2_D+", (16.05, 9.45), 0.45, 0.25),
+        ("USB2_D-", (15.05, 10.55), 0.45, 0.25),
+    }
+    for net, x, y in (("USB2_D+", 14.5, 8.7), ("USB2_D-", 15.5, 8.83)):
+        launches = [
+            (s.start, s.end) for s in pcb.segments if s.net_name == net and s.layer == "F.Cu"
+        ]
+        assert ((x, 8.0), (x, y)) in launches
+    for net, seat, inner in (
+        ("USB2_D+", (14.5, 8.7), "In1.Cu"),
+        ("USB2_D-", (14.96, 9.37), "In2.Cu"),
+    ):
+        assert {
+            s.layer for s in pcb.segments if s.net_name == net and seat in (s.start, s.end)
+        } == {"F.Cu", inner}
+    # The incoming diagonal, the U1 trunk and the mirrored barrel branch all
+    # terminate at the B7 pad centre, the actual three-way copper junction.
+    b7 = pcb.get_pad_position("J1", "B7")
+    assert (
+        sum(
+            s.net_name == "USB2_D-" and s.layer == "F.Cu" and b7 in (s.start, s.end)
+            for s in pcb.segments
+        )
+        == 3
+    )
+    checker = _checker(path)
+    assert not checker.check_dimensions().errors
+    assert not checker.check_diffpair_routing_continuity().errors
+    assert not checker.check_impedance().errors
+    assert not checker.check_diffpair_length_skew().errors
+    once = path.read_bytes()
+    assert repair(path, rules) == 0
+    assert path.read_bytes() == once
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        "locked via",
+        "foreign copper",
+        "drill spacing",
+        "coupling",
+        "mask margin",
+        "inner tap",
+        "moved B7",
+        "exposed back barrel",
+    ],
+)
+def test_j1_usb2_rejects_a_changed_partner(mirrored_connector, repair, control, monkeypatch):
+    import pad_departures
+
+    def unexpected_mask_check(*args, **kwargs):
+        raise AssertionError(f"Control {control!r} unexpectedly reached native mask check")
+
+    monkeypatch.setattr(pad_departures, "check_mask_to_copper", unexpected_mask_check)
+    path = mirrored_connector
+    board = path.read_text()
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    if control == "locked via":
+        board = board.replace("(via (at 15.75 8.55)", "(via (locked yes) (at 15.75 8.55)")
+    elif control == "exposed back barrel":
+        board = board.replace(
+            "(via (at 15.75 8.55)", "(via (tenting (front yes) (back no)) (at 15.75 8.55)"
+        )
+    elif control == "foreign copper":
+        board = (
+            board.rstrip()[:-1]
+            + '(segment (start 14.96 9.37) (end 15.3 9.37) (width 0.2) (layer "In1.Cu") (net 3)))'
+        )
+    elif control == "drill spacing":
+        rules = replace(rules, min_hole_to_hole_mm=0.60)
+    elif control == "inner tap":
+        board = (
+            board.rstrip()[:-1]
+            + '(segment (start 15.55 8.75) (end 15.90 8.75) (width 0.15) (layer "In2.Cu") (net 2)))'
+        )
+    elif control == "moved B7":
+        board = board.replace('(pad "B7" smd rect (at 14.5 10)', '(pad "B7" smd rect (at 14.55 10)')
+        board = board.replace(
+            "(start 14.5 10) (end 15.05 10.55)", "(start 14.55 10) (end 15.05 10.55)"
+        )
+    elif control == "mask margin":
+        board = board.replace("pad_to_mask_clearance 0", "pad_to_mask_clearance 0.2")
+    else:
+        from generate_design import usb2_net_class
+
+        from kicad_tools.router.rules import net_class_map_to_dict
+
+        stricter = replace(usb2_net_class(), coupled_continuity_threshold=0.99)
+        classes = dict.fromkeys(_U1_RUNS, stricter)
+        path.with_name("net_class_map.json").write_text(json.dumps(net_class_map_to_dict(classes)))
+    path.write_text(board)
+    before = path.read_bytes()
+    assert repair(path, rules) == 0
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(("margin", "expected"), [(0.18, 0), (0.0, 2)])
+def test_j1_usb2_checks_back_mask_before_moving_vias(
+    mirrored_connector, repair, monkeypatch, margin, expected
+):
+    import pad_departures
+
+    _require_pinned_kicad()
+    path = mirrored_connector
+    pad = f"""(footprint "TestPoint" (layer "B.Cu") (at 15.05 8.55)
+      (uuid "acbc1c3c-4709-4616-ab96-d430564431bd")
+      (property "Reference" "TP1" (at 0 0) (layer "B.SilkS"))
+      (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "B.Cu" "B.Mask")
+        (net 3 "other") (solder_mask_margin {margin})
+        (uuid "abc87de4-fbd4-46d1-ad8b-43dbf9362a50")))"""
+    path.write_text(path.read_text().rstrip()[:-1] + pad + ")")
+    (moved_dp_via,) = (
+        v for v in PCB.load(path).vias if v.net_name == "USB2_D+" and v.position == (14.2, 8.5)
+    )
+    before = path.read_bytes()
+
+    real_check = pad_departures.check_mask_to_copper
+    assessments = []
+
+    def capture_assessment(candidate, policy, *args, **kwargs):
+        staged_via = next(v for v in PCB.load(candidate).vias if v.uuid == moved_dp_via.uuid)
+        assert staged_via.position == (14.5, 8.7)
+        report = real_check(candidate, policy, *args, **kwargs)
+        assessments.append(report)
+        return report
+
+    monkeypatch.setattr(pad_departures, "check_mask_to_copper", capture_assessment)
+    assert repair(path, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
+    (assessment,) = assessments
+    assert assessment.coverage == "complete", assessment.reasons
+    blocking = [m for m in assessment.measurements if m.disposition in {"uncertain", "violation"}]
+    if expected == 0:
+        (finding,) = blocking
+        assert finding.owner_ref == "TP1/1"
+        assert finding.mask_side == "B.Mask"
+        assert finding.conductor_kind == "via"
+        assert finding.conductor_net == "USB2_D+"
+        assert finding.conductor_uuid == moved_dp_via.uuid
+        assert finding.disposition == "violation"
+        assert path.read_bytes() == before
+    else:
+        assert not blocking
+
+
+def test_j1_usb2_clears_all_eight_measured_mask_findings(mirrored_connector, repair):
+    def failing_openings():
+        return Counter(
+            m.owner_ref
+            for m in _native_mask_measurements(mirrored_connector)
+            if m.owner_ref in {"J1/A6", "J1/A7", "J1/B6", "J1/B7"}
+            and m.disposition in {"uncertain", "violation"}
+        )
+
+    assert failing_openings() == {"J1/A6": 3, "J1/A7": 3, "J1/B7": 2}
+    assert repair(mirrored_connector, get_profile("jlcpcb").get_design_rules(layers=4)) == 2
+    assert not failing_openings()

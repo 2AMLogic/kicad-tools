@@ -344,6 +344,7 @@ def test_unbound_terminal_is_unresolved(manifest, tmp_path):
         rating_source="datasheet",
         roles=_FakeRoles(),
         pin_nets={"1": "GATE_A", "3": "SRC_POS"},  # pin 2 (drain) unbound
+        qualified_labels={},
         state_name="mains_negative",
         state=manifest.get("mains_negative"),
         check="vds",
