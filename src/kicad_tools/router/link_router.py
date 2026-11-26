@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 from kicad_tools.router.via_clearance import COORD_WRITE_GUARD_MM
 
 if TYPE_CHECKING:
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules
     from kicad_tools.schema.pcb import PCB
 
 __all__ = [
@@ -109,6 +110,8 @@ class LinkRouteRules:
     attach_zones: Sequence[Any] = ()
     attach_relax_nets: frozenset[int] = frozenset()
     net_names: Mapping[int, str] | None = None
+    #: Project clearance rules for this board, evaluated on each copper layer.
+    board_rules: BoardClearanceRules | None = None
 
     width_by_layer: Mapping[str, float] = field(default_factory=dict)
 
@@ -122,19 +125,72 @@ class LinkRouteRules:
         return max(self.clearance, self.clearance_by_net.get(net_number, self.clearance))
 
     def clearance_parts(
-        self, link_net_name: str, net_number: int, layer: str, geom: Any
+        self,
+        link_net_name: str,
+        net_number: int,
+        layer: str,
+        geom: Any,
+        item: _Item | None = None,
+        moving: str = "Track",
     ) -> list[tuple[Any, float]]:
         """``geom`` (foreign copper of ``net_number`` on ``layer``) split by clearance.
 
-        Normally ``[(geom, clearance_for(net))]``.  The part of the copper that
-        lies inside an attach zone shared by the link net and ``net_number``
-        gets only the base ``clearance`` when the net's floor is map-derived.
+        Inside a shared attach zone, a map-derived floor may relax to the
+        larger of the base clearance and the applicable KiCad copper rule.
         """
-        full = self.clearance_for(net_number)
+        floor = self.clearance
+        if self.board_rules is not None and self.net_names is not None:
+            from .board_clearance_rules import PAD_TYPE_NAMES, ItemProps
+
+            other_name = self.net_names.get(net_number, "")
+            if item is None:
+                other = ItemProps(None, other_name)
+            elif item.is_pad:
+                other = ItemProps(
+                    "Pad",
+                    other_name,
+                    plated=item.pad_type == "thru_hole" if item.pad_type else bool(item.drill),
+                    pad_type=PAD_TYPE_NAMES.get(item.pad_type or "")
+                    or ("Through-hole" if item.drill else "SMD"),
+                    layer=item.footprint_layer,
+                    footprint_ref=item.ref,
+                    footprint_lib_id=item.lib_id,
+                )
+            elif len(item.layers) > 1:
+                other = ItemProps(
+                    "Via", other_name, plated=True, footprint_ref="", footprint_lib_id=""
+                )
+            else:
+                other = ItemProps(
+                    "Track",
+                    other_name,
+                    plated=False,
+                    layer=layer,
+                    footprint_ref="",
+                    footprint_lib_id="",
+                )
+            # ``moving`` is the item being placed: a track mask and a via mask
+            # resolve separately, so a ``A.Type == 'Via'`` rule never leaks
+            # onto tracks (or the reverse).
+            if moving == "Via":
+                mover = ItemProps(
+                    "Via", link_net_name, plated=True, footprint_ref="", footprint_lib_id=""
+                )
+            else:
+                mover = ItemProps(
+                    "Track",
+                    link_net_name,
+                    plated=False,
+                    layer=layer,
+                    footprint_ref="",
+                    footprint_lib_id="",
+                )
+            floor = max(floor, self.board_rules.clearance(mover, other, layer))
+        full = max(floor, self.clearance_for(net_number))
         if (
             not self.attach_zones
             or net_number not in self.attach_relax_nets
-            or full <= self.clearance
+            or full <= floor
             or not self.net_names
             or net_number not in self.net_names
             or not link_net_name
@@ -155,7 +211,7 @@ class LinkRouteRules:
             zbox = box(z.min_x, z.min_y, z.max_x, z.max_y)
             inside = rest.intersection(zbox)
             if not inside.is_empty:
-                parts.append((inside, self.clearance))
+                parts.append((inside, floor))
                 rest = rest.difference(zbox)
         if not rest.is_empty:
             parts.append((rest, full))
@@ -265,6 +321,12 @@ class _Item:
     layers: dict[str, Any]
     is_pad: bool = False
     drill: float = 0.0
+    #: Pad identity for project rules (``B.Reference`` / ``memberOfFootprint``).
+    ref: str | None = None
+    lib_id: str | None = None
+    footprint_layer: str | None = None
+    #: Schema pad ``type`` (``smd`` / ``thru_hole`` / ``connect`` / ...).
+    pad_type: str | None = None
 
 
 @dataclass
@@ -305,6 +367,10 @@ def _build_model(pcb: PCB) -> _BoardModel:
                     dict.fromkeys(layers, geom),
                     True,
                     pad_drill,
+                    getattr(fp, "reference", None) or "",
+                    getattr(fp, "name", None) or "",
+                    fp.layer,
+                    getattr(pad, "type", None) or None,
                 )
             )
             drill = pad_drill
@@ -568,6 +634,10 @@ def route_link(
         clearance = max(rules.clearance, max((rules.clearance_by_net or {}).values(), default=0.0))
         reach = max(reach, radius + clearance + 0.05)
     window = box(xs[0] - reach, ys[0] - reach, xs[-1] + reach, ys[-1] + reach)
+    # Copper whose clearance (plus the moving item's radius) reaches the grid
+    # matters however far its raw shape lies from it (project rules can demand
+    # several mm), so foreign copper is selected by the search area itself.
+    search_box = box(xs[0], ys[0], xs[-1], ys[-1])
 
     def mask_of(geom: Any) -> Any:
         if geom is None or geom.is_empty:
@@ -579,6 +649,7 @@ def route_link(
     # #6374: ``rules.clearance_for(net)``).  Without a per-net map there is
     # exactly one group at ``rules.clearance`` -- the historical behaviour.
     foreign_by_layer: dict[str, list[tuple[Any, float]]] = {}
+    via_foreign_by_layer: dict[str, list[tuple[Any, float]]] = {}
     blocked = np.zeros((nl, nx, ny), dtype=bool)
     fill_cost = np.ones((nl, nx, ny), dtype=float)
     legal_areas = {
@@ -589,13 +660,23 @@ def route_link(
     inside = {width: mask_of(area) for width, area in legal_areas.items()}
     for li, layer in enumerate(copper):
         width = rules.width_for(layer)
+        copper_reach = max(width, rules.via_size) / 2 + 0.01
         by_clearance: dict[float, list[Any]] = {}
+        by_clearance_via: dict[float, list[Any]] = {}
         for it in model.items:
-            if it.net != net_number and layer in it.layers and it.layers[layer].intersects(window):
-                for part, c in rules.clearance_parts(net_name, it.net, layer, it.layers[layer]):
-                    by_clearance.setdefault(c, []).append(part)
+            if it.net == net_number or layer not in it.layers:
+                continue
+            for moving, sink in (("Track", by_clearance), ("Via", by_clearance_via)):
+                for part, c in rules.clearance_parts(
+                    net_name, it.net, layer, it.layers[layer], it, moving
+                ):
+                    if part.distance(search_box) <= c + copper_reach:
+                        sink.setdefault(c, []).append(part)
         groups = [(unary_union(geoms), c) for c, geoms in sorted(by_clearance.items())]
         foreign_by_layer[layer] = groups
+        via_foreign_by_layer[layer] = [
+            (unary_union(geoms), c) for c, geoms in sorted(by_clearance_via.items())
+        ]
         for foreign, c in groups:
             blocked[li] |= mask_of(foreign.buffer(c + width / 2 + 0.005))
         if inside:
@@ -613,7 +694,7 @@ def route_link(
     # Via legality: clear of foreign copper on every layer, of every pad
     # (no via-in-pad), of every drill by the hole-to-hole rule.
     via_bad = np.zeros((nx, ny), dtype=bool)
-    for groups in foreign_by_layer.values():
+    for groups in via_foreign_by_layer.values():
         for foreign, c in groups:
             via_bad |= mask_of(foreign.buffer(c + rules.via_size / 2 + 0.005))
     pads_here = [p for p in model.pad_geoms if p.intersects(window)]
@@ -765,7 +846,7 @@ def route_link(
             route.segments.append((x_a, y_a, x_b, y_b, copper[li]))
 
     # Exact check: grid quantisation must never leak a sub-clearance segment.
-    if _route_violates_foreign(route, foreign_by_layer):
+    if _route_violates_foreign(route, foreign_by_layer, via_by_layer=via_foreign_by_layer):
         return None
     return route
 
@@ -774,6 +855,7 @@ def _route_violates_foreign(
     route: LinkRoute,
     foreign_by_layer: dict[str, list[tuple[Any, float]]],
     half_w: float | None = None,
+    via_by_layer: dict[str, list[tuple[Any, float]]] | None = None,
 ) -> bool:
     """True if any segment or via of ``route`` is too close to foreign copper.
 
@@ -793,7 +875,7 @@ def _route_violates_foreign(
                 return True
     for vx, vy in route.vias:
         p = Point(vx, vy)
-        for groups in foreign_by_layer.values():
+        for groups in (via_by_layer if via_by_layer is not None else foreign_by_layer).values():
             for foreign, c in groups:
                 if p.distance(foreign) < c + route.via_size / 2 - 1e-4:
                     return True
@@ -810,16 +892,20 @@ def route_clears_floors(route: LinkRoute, model: _BoardModel, rules: LinkRouteRu
     from shapely.ops import unary_union
 
     by_layer: dict[str, list[tuple[Any, float]]] = {}
+    via_layer: dict[str, list[tuple[Any, float]]] = {}
     for layer in model.copper:
         by_c: dict[float, list[Any]] = {}
+        by_v: dict[float, list[Any]] = {}
         for it in model.items:
             if it.net != route.net_number and layer in it.layers:
-                for part, c in rules.clearance_parts(
-                    route.net_name, it.net, layer, it.layers[layer]
-                ):
-                    by_c.setdefault(c, []).append(part)
+                for moving, sink in (("Track", by_c), ("Via", by_v)):
+                    for part, c in rules.clearance_parts(
+                        route.net_name, it.net, layer, it.layers[layer], it, moving
+                    ):
+                        sink.setdefault(c, []).append(part)
         by_layer[layer] = [(unary_union(g), c) for c, g in sorted(by_c.items())]
-    return not _route_violates_foreign(route, by_layer)
+        via_layer[layer] = [(unary_union(g), c) for c, g in sorted(by_v.items())]
+    return not _route_violates_foreign(route, by_layer, via_by_layer=via_layer)
 
 
 def _via_site_blocker(
@@ -839,7 +925,7 @@ def _via_site_blocker(
             continue
         link_name = (rules.net_names or {}).get(net_number, "")
         for layer, geom in it.layers.items():
-            for part, c in rules.clearance_parts(link_name, it.net, layer, geom):
+            for part, c in rules.clearance_parts(link_name, it.net, layer, geom, it, "Via"):
                 need = c + rules.via_size / 2
                 if p.distance(part) < need - 1e-4:
                     return f"via site is {p.distance(part):.3f} mm from foreign copper on {layer} (needs {need:.3f} mm)"
@@ -972,28 +1058,30 @@ def explain_link_failure(
     line = LineString([a.point, b.point]) if a.point != b.point else Point(a.point)
     best: tuple[float, dict[str, Any]] | None = None
     near: list[tuple[float, str, int, Any, float]] = []  # corridor candidates
+    link_name = getattr(pcb.nets.get(net_number), "name", "") or ""
     for it in model.items:
         if it.net == net_number:
             continue
         for layer, geom in it.layers.items():
             if allowed_layers is not None and layer not in allowed_layers:
                 continue
-            need = rules.clearance_for(it.net) + rules.width_for(layer) / 2
-            d = line.distance(geom)
-            near.append((d, layer, it.net, geom, rules.clearance_for(it.net)))
-            slack = d - need
-            if best is None or slack < best[0]:
-                name = getattr(pcb.nets.get(it.net), "name", "") or f"net {it.net}"
-                best = (
-                    slack,
-                    {
-                        "net": name,
-                        "layer": layer,
-                        "kind": "pad" if it.is_pad else "copper",
-                        "distance_mm": round(d, 3),
-                        "required_mm": round(need, 3),
-                    },
-                )
+            for part, clearance in rules.clearance_parts(link_name, it.net, layer, geom, it):
+                d = line.distance(part)
+                need = clearance + rules.width_for(layer) / 2
+                near.append((d, layer, it.net, part, clearance))
+                slack = d - need
+                if best is None or slack < best[0]:
+                    name = getattr(pcb.nets.get(it.net), "name", "") or f"net {it.net}"
+                    best = (
+                        slack,
+                        {
+                            "net": name,
+                            "layer": layer,
+                            "kind": "pad" if it.is_pad else "copper",
+                            "distance_mm": round(d, 3),
+                            "required_mm": round(need, 3),
+                        },
+                    )
     out: dict[str, Any] = {"reason": "no clearance-legal route inside the search window"}
     if best is not None:
         out["blocker"] = best[1]
