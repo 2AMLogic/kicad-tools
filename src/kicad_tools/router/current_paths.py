@@ -598,11 +598,122 @@ class CurrentPathSpec:
         )
 
 
+#: Allowed ``pulse_overlap`` values of an :class:`OperatingCase` (Issue #10361).
+PULSE_OVERLAP_COINCIDENT = "coincident"
+PULSE_OVERLAP_DISJOINT = "disjoint"
+PULSE_OVERLAPS = (PULSE_OVERLAP_COINCIDENT, PULSE_OVERLAP_DISJOINT)
+
+
+@dataclass(frozen=True)
+class CaseContribution:
+    """One path's signed contribution to an :class:`OperatingCase`.
+
+    Attributes:
+        path: Name of the declared :class:`CurrentPathSpec` it refers to.
+            Never validated at parse time -- an unknown, repeated or
+            ambiguous reference is a visible finding of the check, not a
+            silent skip.
+        current_a: Signed steady current in amps, relative to the path's
+            declared source-to-sink direction: positive flows from source to
+            sink, negative the other way. A pulsed path's ``pulsed_a`` peak
+            takes the same sign.
+    """
+
+    path: str
+    current_a: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {"path": self.path, "current_a": self.current_a}
+
+
+@dataclass(frozen=True)
+class OperatingCase:
+    """A named operating state: which declared paths carry current at once.
+
+    A case lists the paths that are active **together** and their signed
+    contributions; a path omitted from a case contributes zero to it. Loads
+    that are mutually exclusive belong in separate cases, which are evaluated
+    independently. Nothing is ever summed implicitly across declarations:
+    overlapping endpoint declarations may describe one physical load.
+
+    Attributes:
+        name: Case identifier used in findings.
+        contributions: The active paths and their signed currents.
+        pulse_overlap: How the pulsed members' pulses relate in time --
+            :data:`PULSE_OVERLAP_COINCIDENT` (they overlap) or
+            :data:`PULSE_OVERLAP_DISJOINT` (never at the same time) -- or
+            ``None`` when the author did not say, which leaves the combined
+            RMS/peak of shared copper undetermined (and reported as such).
+        notes: Free-text rationale.
+    """
+
+    name: str
+    contributions: tuple[CaseContribution, ...]
+    pulse_overlap: str | None = None
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "name": self.name,
+            "contributions": [c.to_dict() for c in self.contributions],
+        }
+        if self.pulse_overlap is not None:
+            data["pulse_overlap"] = self.pulse_overlap
+        if self.notes:
+            data["notes"] = self.notes
+        return data
+
+    @classmethod
+    def from_dict(cls, data: object) -> OperatingCase:
+        if not isinstance(data, dict):
+            raise ValueError(f"current-paths case must be an object, got {data!r}")
+        name = data.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"current-paths case missing 'name': {data!r}")
+        raw = data.get("contributions")
+        if not isinstance(raw, list):
+            raise ValueError(f"current-paths case {name!r} needs a 'contributions' list")
+        contributions = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise ValueError(f"current-paths case {name!r} has a malformed contribution")
+            path = entry.get("path")
+            if not isinstance(path, str) or not path:
+                raise ValueError(f"current-paths case {name!r} contribution missing 'path'")
+            current = entry.get("current_a")
+            if isinstance(current, bool) or not isinstance(current, (int, float)):
+                raise ValueError(
+                    f"current-paths case {name!r} contribution {path!r} needs a numeric 'current_a'"
+                )
+            contributions.append(CaseContribution(path=path, current_a=float(current)))
+        overlap = data.get("pulse_overlap")
+        if overlap is not None and overlap not in PULSE_OVERLAPS:
+            raise ValueError(
+                f"current-paths case {name!r}: 'pulse_overlap' must be one of "
+                f"{', '.join(PULSE_OVERLAPS)}, got {overlap!r}"
+            )
+        return cls(
+            name=name,
+            contributions=tuple(contributions),
+            pulse_overlap=overlap,
+            notes=str(data.get("notes", "")),
+        )
+
+
+@dataclass(frozen=True)
+class CurrentPathSidecar:
+    """A parsed current-paths sidecar: declared paths plus operating cases."""
+
+    specs: list[CurrentPathSpec] = field(default_factory=list)
+    cases: list[OperatingCase] = field(default_factory=list)
+
+
 def parse_current_path_specs(data: object) -> list[CurrentPathSpec]:
     """Parse already-loaded JSON (a list or a ``{"paths": [...]}`` dict).
 
     Accepts a bare list of path objects, or the sidecar's ``{"paths": [...]}``
-    wrapper form.
+    wrapper form. Operating cases of the object form are ignored here; use
+    :func:`parse_current_path_sidecar` to read them.
     """
     if isinstance(data, dict):
         raw = data.get("paths", [])
@@ -618,15 +729,45 @@ def parse_current_path_specs(data: object) -> list[CurrentPathSpec]:
     return [CurrentPathSpec.from_dict(entry) for entry in raw]
 
 
+def parse_current_path_sidecar(data: object) -> CurrentPathSidecar:
+    """Parse already-loaded JSON into paths and optional operating cases.
+
+    Accepts a bare list of path objects (legacy; no cases) or the object
+    form ``{"paths": [...], "cases": [...]}`` where ``cases`` is optional
+    (Issue #10361). Duplicate case names are a declaration error.
+    """
+    specs = parse_current_path_specs(data)
+    cases: list[OperatingCase] = []
+    if isinstance(data, dict) and data.get("cases") is not None:
+        raw = data["cases"]
+        if not isinstance(raw, list):
+            raise ValueError("current-paths sidecar 'cases' key must be a list")
+        cases = [OperatingCase.from_dict(entry) for entry in raw]
+        names = [case.name for case in cases]
+        for name in sorted({n for n in names if names.count(n) > 1}):
+            raise ValueError(f"current-paths sidecar declares case {name!r} more than once")
+    return CurrentPathSidecar(specs=specs, cases=cases)
+
+
 def load_current_path_specs(path: str | Path) -> list[CurrentPathSpec]:
     """Load declared current-path specs from a JSON sidecar file."""
     text = Path(path).read_text()
     return parse_current_path_specs(json.loads(text))
 
 
-def dump_current_path_specs(specs: Sequence[CurrentPathSpec]) -> dict[str, object]:
-    """Serialize specs back to the sidecar's ``{"paths": [...]}`` form."""
-    return {"paths": [spec.to_dict() for spec in specs]}
+def load_current_path_sidecar(path: str | Path) -> CurrentPathSidecar:
+    """Load declared paths and operating cases from a JSON sidecar file."""
+    return parse_current_path_sidecar(json.loads(Path(path).read_text()))
+
+
+def dump_current_path_specs(
+    specs: Sequence[CurrentPathSpec], cases: Sequence[OperatingCase] = ()
+) -> dict[str, object]:
+    """Serialize specs (and any operating cases) back to the sidecar form."""
+    payload: dict[str, object] = {"paths": [spec.to_dict() for spec in specs]}
+    if cases:
+        payload["cases"] = [case.to_dict() for case in cases]
+    return payload
 
 
 # The bare, board-agnostic sidecar name. Mirrors
@@ -1390,6 +1531,83 @@ def _layer_changes(
 
 
 @dataclass(frozen=True)
+class TraversedSpan:
+    """One interval of an authored track the declared current traverses.
+
+    ``lo``/``hi`` are arc distances (mm) from ``segment.start`` along its
+    centreline. ``sign`` is ``+1`` when the path runs from the track's start
+    towards its end and ``-1`` for the reverse -- independent of which way
+    the board happens to store the track (Issue #10361).
+    """
+
+    segment: Segment
+    lo: float
+    hi: float
+    sign: int
+
+
+def _route_traversal(
+    steps: Sequence[tuple[_Node, _Node, _GraphEdge]],
+) -> tuple[tuple[TraversedSpan, ...], list[tuple[tuple[float, float], str, str]]]:
+    """Directed track intervals and via-barrel hops of the BFS route.
+
+    A step whose orientation cannot be recovered is left out; its copper then
+    reaches the case evaluator as copper of unknown direction rather than as
+    a guess.
+    """
+    spans: list[TraversedSpan] = []
+    barrels: list[tuple[tuple[float, float], str, str]] = []
+    for node_from, node_to, edge in steps:
+        if edge.ends is None or edge.roots is None:
+            continue
+        (a, b), (ra, rb) = edge.ends, edge.roots
+        if (node_from, node_to) == (ra, rb):
+            entered, left = a, b
+        elif (node_from, node_to) == (rb, ra):
+            entered, left = b, a
+        else:
+            continue
+        seg = edge.segment
+        if seg is None:
+            barrels.append((entered[:2], entered[2], left[2]))
+            continue
+        t_in = math.dist(seg.start, _track_station(seg, entered[:2]))
+        t_out = math.dist(seg.start, _track_station(seg, left[:2]))
+        if abs(t_out - t_in) <= _PAD_EPS:
+            continue
+        spans.append(
+            TraversedSpan(seg, min(t_in, t_out), max(t_in, t_out), 1 if t_out > t_in else -1)
+        )
+    return tuple(spans), barrels
+
+
+def _layer_change_directions(
+    changes: Sequence[LayerChange], barrels: Sequence[tuple[tuple[float, float], str, str]]
+) -> tuple[int, ...]:
+    """``+1`` when the route crosses a change ``from_layer -> to_layer``, ``-1``
+    for the reverse, ``0`` when the route's barrel hops do not establish it."""
+    directions: list[int] = []
+    for change in changes:
+        positions = [v[0] for v in (*change.vias, *change.tie_vias)]
+        hops = [
+            (frm, to)
+            for pos, frm, to in barrels
+            if any(math.dist(pos, p) <= 0.01 for p in positions)
+        ]
+        if not hops:
+            directions.append(0)
+            continue
+        net = (hops[0][0], hops[-1][1])
+        if net == (change.from_layer, change.to_layer):
+            directions.append(1)
+        elif net == (change.to_layer, change.from_layer):
+            directions.append(-1)
+        else:
+            directions.append(0)
+    return tuple(directions)
+
+
+@dataclass(frozen=True)
 class _CapJoint:
     first: Segment
     second: Segment
@@ -1471,6 +1689,12 @@ class PathResolution:
     # Offset parallel arms entirely buried in a wider arm. Accounted for by
     # the audit, but they add neither a wire lane nor any measured section.
     buried_segments: tuple[Segment, ...] = ()
+    # Directed intervals of the authored tracks the declared current rides
+    # along the routed spine, and the direction (+1 from_layer -> to_layer,
+    # -1 reverse, 0 not established) of each entry of ``layer_changes``.
+    # Operating cases sum signed currents on these (Issue #10361).
+    traversal: tuple[TraversedSpan, ...] = ()
+    layer_change_directions: tuple[int, ...] = ()
 
     @property
     def covered_segments(self) -> tuple[Segment, ...]:
@@ -1662,6 +1886,11 @@ class _GraphEdge:
     overlaid: tuple[Segment, ...] = ()
     # Authored centreline contacts, before pad hubs and via rows contract nodes.
     span: tuple[tuple[float, float], tuple[float, float]] | None = None
+    # Pre-contraction copper nodes at the two ends, and the contracted nodes
+    # they landed on. Together they say which end a traversal entered by,
+    # which the graph's adjacency alone does not (Issue #10361).
+    ends: tuple[_Node, _Node] | None = None
+    roots: tuple[_Node, _Node] | None = None
 
     def tracks(self) -> tuple[Segment, ...]:
         return (self.segment, *self.overlaid) if self.segment is not None else ()
@@ -2088,6 +2317,7 @@ def _build_graph(
             graph.pads[key] = hubs.pop()
     for a, b, edge in edges:
         ra, rb = root(a), root(b)
+        edge.ends, edge.roots = (a, b), (ra, rb)
         for track in edge.tracks():
             graph.item_nodes.setdefault(id(track), set()).update((ra, rb))
             if id(track) in graph.overlap_edges:
@@ -2371,8 +2601,13 @@ def _parallel_pad_entries(
 
 def _bfs_path(
     graph: _CopperGraph, start: _Node, goal: _Node
-) -> tuple[list[Segment], list[_GraphEdge]] | None:
-    """Find a route, reporting each original routed segment exactly once."""
+) -> tuple[list[Segment], list[_GraphEdge], list[tuple[_Node, _Node, _GraphEdge]]] | None:
+    """Find a route, reporting each original routed segment exactly once.
+
+    The third element is the route as ordered ``(from, to, edge)`` steps from
+    ``start`` to ``goal`` (Issue #10361), from which the direction the
+    current traverses each piece of copper is recovered.
+    """
     visited = {start}
     queue = deque([start])
     parent: dict[_Node, tuple[_Node, _GraphEdge]] = {}
@@ -2415,7 +2650,14 @@ def _bfs_path(
         node = prev
     # A via may split an original segment into several traversed graph edges.
     # Audit/ampacity/reinforcement still operate on whole original segments.
-    return list({id(seg): seg for seg in reversed(evidence)}.values()), route_edges
+    steps: list[tuple[_Node, _Node, _GraphEdge]] = []
+    node = goal
+    while node != start:
+        prev, edge = parent[node]
+        steps.append((prev, node, edge))
+        node = prev
+    steps.reverse()
+    return list({id(seg): seg for seg in reversed(evidence)}.values()), route_edges, steps
 
 
 @dataclass
@@ -4121,7 +4363,7 @@ def resolve_current_path(
             sink=sink,
         )
 
-    path_segments, route_edges = route
+    path_segments, route_edges, route_steps = route
     arrays: list[_ViaArray] = []
     sense_taps: list[Segment] = []
     for endpoint in (spec.source, spec.sink):
@@ -4460,6 +4702,10 @@ def resolve_current_path(
         joint for joint in cap_joints if id(joint.first) in on_path and id(joint.second) in on_path
     )
     path_segments = [piece for s in path_segments for piece in partial_spans.get(id(s), (s,))]
+    traversal, barrel_hops = _route_traversal(route_steps)
+    layer_changes = _layer_changes(
+        pcb, spec.net_name, path_segments, [*arrays, *on_path_groups], design_rules
+    )
     return PathResolution(
         spec=spec,
         status=STATUS_RESOLVED,
@@ -4473,11 +4719,11 @@ def resolve_current_path(
         off_path_loops=off_path_loops,
         buried_segments=buried,
         loop_free_spans=partial_spans,
-        layer_changes=_layer_changes(
-            pcb, spec.net_name, path_segments, [*arrays, *on_path_groups], design_rules
-        ),
+        layer_changes=layer_changes,
         sense_taps=tuple({id(seg): seg for seg in sense_taps}.values()),
         parallel_groups=tuple(measured_groups),
+        traversal=traversal,
+        layer_change_directions=_layer_change_directions(layer_changes, barrel_hops),
     )
 
 

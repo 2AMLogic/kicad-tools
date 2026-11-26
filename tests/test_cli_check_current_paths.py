@@ -794,3 +794,160 @@ def test_thin_sense_cycle_check(tmp_path, rejoin):
         assert reinforcement_eligible_segment_ids(pcb, [spec]) == {
             id(segment) for segment in pcb.segments if segment.width == 4
         }
+
+
+# --------------------------------------------------------------------------
+# Operating cases through the sidecar (Issue #10361)
+# --------------------------------------------------------------------------
+
+
+def _both_loads_sidecar(path: Path, *, cases: list[dict] | None) -> Path:
+    payload = dump_current_path_specs([_trunk_spec(2.0), _sense_spec(2.0)])
+    if cases is not None:
+        payload["cases"] = cases
+    path.write_text(json.dumps(payload))
+    return path
+
+
+_BOTH_LOADS = {
+    "name": "charge+support",
+    "contributions": [
+        {"path": "TRUNK", "current_a": 2.0},
+        {"path": "SENSE", "current_a": 2.0},
+    ],
+}
+_EACH_ALONE = [
+    {"name": "charge", "contributions": [{"path": "TRUNK", "current_a": 2.0}]},
+    {"name": "support", "contributions": [{"path": "SENSE", "current_a": 2.0}]},
+]
+
+
+@pytest.fixture
+def shared_feed_pcb(tmp_path: Path) -> Path:
+    # The CLI judges 1 oz copper: 1.0 mm clears 2 A (0.781 mm) but not 4 A (2.033 mm).
+    return _write_t_network_pcb(tmp_path / "board.kicad_pcb", trunk_width=1.0, sense_width=1.0)
+
+
+class TestOperatingCasesThroughCheck:
+    def test_explicit_sidecar_case_fails_only_on_the_common_feed(
+        self, shared_feed_pcb: Path, tmp_path: Path
+    ):
+        sidecar = _both_loads_sidecar(tmp_path / "cp.json", cases=[_BOTH_LOADS, *_EACH_ALONE])
+        report = tmp_path / "report.json"
+
+        result = _run_check(shared_feed_pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 2
+        errors = [v for v in _path_ampacity_violations(report) if v["severity"] == "error"]
+        assert len(errors) == 1
+        (error,) = errors
+        assert "charge+support" in error["items"]
+        assert "TRUNK +2A" in error["message"] and "SENSE +2A" in error["message"]
+        assert "combined 4A" in error["message"]
+        assert error["location"] == pytest.approx([40.0, 50.0])
+
+    def test_auto_discovered_sidecar_carries_cases(self, shared_feed_pcb: Path, tmp_path: Path):
+        _both_loads_sidecar(tmp_path / "current_paths.json", cases=[_BOTH_LOADS])
+        report = tmp_path / "report.json"
+
+        result = _run_check(shared_feed_pcb, report)
+
+        assert result == 2
+        errors = [v for v in _path_ampacity_violations(report) if v["severity"] == "error"]
+        assert [e["items"][0] for e in errors] == ["charge+support"]
+
+    def test_each_load_alone_passes(self, shared_feed_pcb: Path, tmp_path: Path):
+        sidecar = _both_loads_sidecar(tmp_path / "cp.json", cases=_EACH_ALONE)
+        report = tmp_path / "report.json"
+
+        result = _run_check(shared_feed_pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 0
+        assert _path_ampacity_violations(report) == []
+
+    @pytest.mark.parametrize("bare_list", [False, True])
+    def test_legacy_sidecar_without_cases_keeps_independent_checks(
+        self, shared_feed_pcb: Path, tmp_path: Path, bare_list: bool
+    ):
+        specs = [_trunk_spec(2.0), _sense_spec(2.0)]
+        sidecar = tmp_path / "cp.json"
+        if bare_list:
+            sidecar.write_text(json.dumps([s.to_dict() for s in specs]))
+        else:
+            _write_sidecar(sidecar, specs)
+        report = tmp_path / "report.json"
+
+        result = _run_check(shared_feed_pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 0
+        assert _path_ampacity_violations(report) == []
+
+    def test_malformed_case_in_explicit_sidecar_exits_1(
+        self, shared_feed_pcb: Path, tmp_path: Path, capsys
+    ):
+        bad = {**_BOTH_LOADS, "pulse_overlap": "sometimes"}
+        sidecar = _both_loads_sidecar(tmp_path / "cp.json", cases=[bad])
+
+        result = _run_check(
+            shared_feed_pcb, tmp_path / "report.json", extra=["--current-paths", str(sidecar)]
+        )
+
+        assert result == 1
+        assert "pulse_overlap" in capsys.readouterr().err
+
+    def test_unknown_path_in_a_case_is_an_error_finding(
+        self, shared_feed_pcb: Path, tmp_path: Path
+    ):
+        case = {"name": "typo", "contributions": [{"path": "TRUNKK", "current_a": 2.0}]}
+        sidecar = _both_loads_sidecar(tmp_path / "cp.json", cases=[case])
+        report = tmp_path / "report.json"
+
+        result = _run_check(shared_feed_pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 2
+        (error,) = [v for v in _path_ampacity_violations(report) if v["severity"] == "error"]
+        assert "unknown path 'TRUNKK'" in error["message"]
+
+
+class TestOperatingCaseSidecarModel:
+    def test_cases_round_trip_through_dump_and_parse(self):
+        from kicad_tools.router.current_paths import (
+            CaseContribution,
+            OperatingCase,
+            parse_current_path_sidecar,
+        )
+
+        case = OperatingCase(
+            name="n",
+            contributions=(CaseContribution("TRUNK", 2.0), CaseContribution("SENSE", -1.0)),
+            pulse_overlap="disjoint",
+            notes="x",
+        )
+        payload = dump_current_path_specs([_trunk_spec(2.0), _sense_spec(2.0)], [case])
+        parsed = parse_current_path_sidecar(json.loads(json.dumps(payload)))
+        assert parsed.cases == [case]
+        assert [s.name for s in parsed.specs] == ["TRUNK", "SENSE"]
+
+    def test_spec_loader_still_returns_a_list_and_ignores_cases(self, tmp_path: Path):
+        from kicad_tools.router.current_paths import load_current_path_specs
+
+        sidecar = _both_loads_sidecar(tmp_path / "cp.json", cases=[_BOTH_LOADS])
+        specs = load_current_path_specs(sidecar)
+        assert [s.name for s in specs] == ["TRUNK", "SENSE"]
+
+    @pytest.mark.parametrize(
+        "cases",
+        [
+            "nope",
+            [{"contributions": []}],
+            [{"name": "c"}],
+            [{"name": "c", "contributions": [{"path": "A"}]}],
+            [{"name": "c", "contributions": [{"path": "A", "current_a": True}]}],
+            [{"name": "c", "contributions": []}, {"name": "c", "contributions": []}],
+        ],
+    )
+    def test_malformed_cases_are_rejected(self, cases):
+        from kicad_tools.router.current_paths import parse_current_path_sidecar
+
+        with pytest.raises(ValueError):
+            parse_current_path_sidecar({"paths": [], "cases": cases})
