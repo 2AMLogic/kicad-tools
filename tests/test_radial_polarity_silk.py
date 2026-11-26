@@ -5,6 +5,8 @@ import uuid
 
 import pytest
 
+from kicad_tools.drc.repair_silkscreen import SilkscreenRepairer
+from kicad_tools.footprints.library_path import detect_kicad_library_path
 from kicad_tools.manufacturers import get_profile
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.silkscreen import (
@@ -251,3 +253,22 @@ def test_round_pad_cutout_with_repair_clearance_and_mask_margin(tmp_path, rules)
               (layers "F.Cu" "F.Mask"))
             {" ".join(graphics)}))""")
     assert not check_silk_overlap(PCB.load(path), rules).violations
+
+
+@pytest.mark.parametrize("name", ["CP_Radial_D16.0mm_P7.50mm", "CP_Radial_D30.0mm_P10.00mm_SnapIn"])
+def test_stock_radial_overlap_after_pad_clearance_repair(tmp_path, rules, name):
+    footprint = detect_kicad_library_path().get_footprint_file("Capacitor_THT", name)
+    if footprint is None:
+        pytest.skip(f"KiCad stock footprint {name} is unavailable")
+    path = tmp_path / "radial.kicad_pcb"
+    path.write_text(f"""(kicad_pcb (version 20260206) (generator "test")
+        (setup (pad_to_mask_clearance 0.045))
+        {footprint.read_text()})""")
+    baseline = check_silk_overlap(PCB.load(path), rules).violations
+    assert baseline == []
+
+    repairer = SilkscreenRepairer(path)
+    result = repairer.repair_pad_clearance(0.15)
+    assert result.total_fixed > 0
+    repairer.save()
+    assert check_silk_overlap(PCB.load(path), rules).violations == baseline
