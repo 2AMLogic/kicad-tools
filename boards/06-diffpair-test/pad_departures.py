@@ -82,7 +82,11 @@ from kicad_tools.validate.copper_contact import (
     collect_copper_items,
 )
 from kicad_tools.validate.diffpair_skew import derive_pair_skews
-from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+from kicad_tools.validate.mask_copper import (
+    MaskCopperPolicy,
+    check_mask_to_copper,
+    default_request_for_manufacturer,
+)
 from kicad_tools.validate.mask_geometry import board_mask_margin, pad_mask_margin, pad_mask_shapes
 from kicad_tools.validate.rules.diffpair_length_skew import measured_skew_verdict
 from kicad_tools.validate.rules.dimensions import DimensionRules
@@ -1729,7 +1733,7 @@ def _stage_j1_usb_escape(
     return added, via
 
 
-def _clear_j1_usb_pair(path: Path, rules: DesignRules) -> int:
+def _clear_j1_usb_pair(path: Path, rules: DesignRules, policy: MaskCopperPolicy) -> int:
     """Publish the measured connector fanout atomically, upstream of the normal refill."""
     pcb = PCB.load(path)
     protected = _protected_ids(pcb)
@@ -1754,6 +1758,20 @@ def _clear_j1_usb_pair(path: Path, rules: DesignRules) -> int:
         return 0
     if not _copper_gap_ok(pcb, path, tracks, vias, rules) or not _authored_rules_ok(
         pcb, path, tracks, vias, "J1 USB2 escapes"
+    ):
+        return 0
+    changed = {item.uuid for item in (*tracks, *vias)}
+    with TemporaryDirectory(prefix="board06-j1-mask-") as tmp:
+        candidate = Path(tmp) / path.name
+        pcb.save(candidate)
+        copy_project_sidecars(path, candidate)
+        mask = check_mask_to_copper(candidate, policy)
+    if mask.coverage != "complete":
+        print(f"   J1 USB2 kept: incomplete mask check: {mask.reasons}")
+        return 0
+    if any(
+        m.conductor_uuid in changed and m.disposition in {"uncertain", "violation"}
+        for m in mask.measurements
     ):
         return 0
     pcb.save(path)
@@ -1917,5 +1935,5 @@ def clear_pad_departures(path: Path, rules: DesignRules) -> int:
     edits += _clear_clock_pair(path, rules)
     edits += _clear_data_pair(path, rules, _DATA_EXITS, _DATA_NETS, _DATA_WIDTH, "MIPI data")
     edits += _clear_data_pair(path, rules, _USB2_EXITS, _USB2_NETS, 0.25, "USB2")
-    edits += _clear_j1_usb_pair(path, rules)
+    edits += _clear_j1_usb_pair(path, rules, request.policy)
     return edits + _center_u1_ground_entry(path, rules, request.policy.warning_clearance_mm)

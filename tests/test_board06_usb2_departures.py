@@ -386,6 +386,22 @@ def test_j1_usb2_rejects_a_changed_partner(mirrored_connector, repair, control):
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize(("margin", "expected"), [(0.18, 0), (0.0, 2)])
+def test_j1_usb2_checks_back_mask_before_moving_vias(mirrored_connector, repair, margin, expected):
+    path = mirrored_connector
+    pad = f"""(footprint "TestPoint" (layer "B.Cu") (at 15.05 8.55)
+      (uuid "acbc1c3c-4709-4616-ab96-d430564431bd")
+      (property "Reference" "TP1" (at 0 0) (layer "B.SilkS"))
+      (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "B.Cu" "B.Mask")
+        (net 3 "other") (solder_mask_margin {margin})
+        (uuid "abc87de4-fbd4-46d1-ad8b-43dbf9362a50")))"""
+    path.write_text(path.read_text().rstrip()[:-1] + pad + ")")
+    before = path.read_bytes()
+    assert repair(path, get_profile("jlcpcb").get_design_rules(layers=4)) == expected
+    if expected == 0:
+        assert path.read_bytes() == before
+
+
 def test_j1_usb2_clears_all_eight_measured_mask_findings(mirrored_connector, repair):
     def failing_openings():
         return Counter(
