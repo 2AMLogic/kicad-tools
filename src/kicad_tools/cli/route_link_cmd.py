@@ -1021,24 +1021,34 @@ def _commit_links(
     Returns ``(written path | None, refusal message | None)``.
     """
     created = out_path != pcb_path and not out_path.exists()
+    has_corridor = any(spec.plane_corridor is not None for spec in links)
     previous = (
         out_path.read_bytes()
-        if out_path != pcb_path and not created and any(link.branch for link in links)
+        if out_path != pcb_path
+        and not created
+        and not has_corridor
+        and any(link.branch for link in links)
         else None
     )
-    if out_path != pcb_path:
-        out_path.write_bytes(pcb_path.read_bytes())
     staged = _stage_project_files(pcb_path, out_path)
     with ExitStack() as stack:
         for f in staged:
             stack.callback(f.unlink, missing_ok=True)
         trial = None
-        if any(spec.plane_corridor is not None for spec in links):
+        baseline = out_path
+        if has_corridor:
             directory = stack.enter_context(
                 TemporaryDirectory(prefix=".kct-plane-", dir=out_path.parent)
             )
             trial = Path(directory) / pcb_path.name
             _stage_project_files(pcb_path, trial)
+            if out_path != pcb_path:
+                # Keep the destination intact until a link passes all gates.
+                baseline = Path(directory) / "baseline" / out_path.name
+                baseline.parent.mkdir()
+                _stage_project_files(out_path, baseline)
+        if baseline != pcb_path:
+            baseline.write_bytes(pcb_path.read_bytes())
         written, refusal = _commit_links_gated(
             args,
             links,
@@ -1050,7 +1060,8 @@ def _commit_links(
             pcb_path,
             out_path,
             entries,
-            created,
+            baseline,
+            created and baseline == out_path,
             trial,
         )
         if previous is not None and written is None:
@@ -1199,6 +1210,7 @@ def _commit_links_gated(
     pcb_path: Path,
     out_path: Path,
     entries: list[dict[str, Any]],
+    baseline: Path,
     created: bool,
     plane_trial: Path | None,
 ) -> tuple[str | None, str | None]:
@@ -1218,7 +1230,7 @@ def _commit_links_gated(
         return state[0], state[1], opens
 
     try:
-        base_drc, base_census, base_opens = read_state(out_path)
+        base_drc, base_census, base_opens = read_state(baseline)
     except Exception as exc:  # the gate cannot run: refuse, leave nothing behind
         if created:
             out_path.unlink(missing_ok=True)
@@ -1229,12 +1241,12 @@ def _commit_links_gated(
     accepted_branches: dict[str, _BranchSizing] = {}
     for spec in links:
         pcb, model, rules, origin, net_ids = accepted
-        path = out_path
+        path = baseline
         if spec.plane_corridor is not None:
             try:
                 assert plane_trial is not None
                 path = plane_trial
-                path.write_bytes(out_path.read_bytes())
+                path.write_bytes(baseline.read_bytes())
                 pcb = _native_refill(path)
                 model, rules, origin, net_ids = _refilled_routing_inputs(args, pcb)
             except Exception as exc:
@@ -1317,8 +1329,8 @@ def _commit_links_gated(
                 route = candidate
                 break
         if failed is not None:
-            if path == out_path:
-                out_path.write_bytes(snapshot)
+            if path == baseline:
+                path.write_bytes(snapshot)
             entry.update(routable=False, status="rolled-back", failed_check=failed, reason=reason)
             continue
         entry["status"] = "committed"
@@ -1328,11 +1340,13 @@ def _commit_links_gated(
         if spec.plane_corridor is not None:
             entry["min_plane_gap_mm"] = gap
             accepted = (refilled, *_refilled_routing_inputs(args, refilled))
+        else:
+            _commit_to_model(model, route, net_ids[spec.net])
+        if path != out_path:
             from kicad_tools.core.atomic_write import atomic_write_text
 
             atomic_write_text(out_path.resolve(), path.read_text(encoding="utf-8"))
-        else:
-            _commit_to_model(model, route, net_ids[spec.net])
+        baseline = out_path
         n_committed += 1
     if not n_committed and created:
         out_path.unlink(missing_ok=True)  # nothing committed: leave no unchanged copy

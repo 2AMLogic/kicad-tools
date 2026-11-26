@@ -176,11 +176,14 @@ class PlaneCorridor:
     def contains(self, x: Any, y: Any, radius: float) -> Any:
         # Works on both grid arrays and exact segment endpoints. The inset of
         # a rectangle is convex, so two legal endpoints contain the full stroke.
+        # Origin translation and insetting can shift coincident edges by a
+        # few float ulps. This allowance is 1/1000 of KiCad's 1 nm board unit.
+        epsilon = 1e-9
         return (
-            (x >= self.x0 + radius)
-            & (x <= self.x1 - radius)
-            & (y >= self.y0 + radius)
-            & (y <= self.y1 - radius)
+            (x >= self.x0 + radius - epsilon)
+            & (x <= self.x1 - radius + epsilon)
+            & (y >= self.y0 + radius - epsilon)
+            & (y <= self.y1 - radius + epsilon)
         )
 
     def covers_route(self, route: LinkRoute) -> bool:

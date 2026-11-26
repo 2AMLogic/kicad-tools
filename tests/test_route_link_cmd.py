@@ -131,6 +131,43 @@ class TestCommit:
         rc, _ = _run(capsys, str(board), "--link", LINK, "-o", str(out))
         assert rc == 0 and board.read_bytes() == before and out.exists()
 
+    @pytest.mark.parametrize(
+        ("lower_edge", "status"),
+        [("109.900001", "unroutable"), ("109.9", "rolled-back")],
+    )
+    def test_refused_corridor_preserves_existing_output(
+        self, plane_board, capsys, monkeypatch, lower_edge, status
+    ):
+        from kicad_tools.cli import route_link_cmd
+        from kicad_tools.router.plane_corridor import PlaneCheckError
+
+        out = plane_board.with_name("output.kicad_pcb")
+        original = plane_board.read_bytes() + b"\n"
+        out.write_bytes(original)
+
+        def veto(*args):
+            raise PlaneCheckError("stranded island")
+
+        monkeypatch.setattr(route_link_cmd, "_native_refill", PCB.load)
+        monkeypatch.setattr(route_link_cmd, "_verify_corridor_candidate", veto)
+        rc, doc = _run(
+            capsys,
+            str(plane_board),
+            "-o",
+            str(out),
+            "--link",
+            LINK,
+            "--link-layers",
+            "In1.Cu",
+            "--plane-corridor",
+            f"In1.Cu=109,{lower_edge},121,110.1",
+        )
+        assert rc == 1 and doc["written"] is None
+        assert doc["links"][0]["status"] == status
+        if status == "rolled-back":
+            assert doc["links"][0]["reason"] == "stranded island"
+        assert out.read_bytes() == original
+
     def test_via_at_forces_waypoint(self, board, capsys):
         rc, doc = _run(capsys, str(board), "--link", LINK, "--via-at", "112,114", "--probe")
         assert rc == 0, doc
@@ -193,10 +230,10 @@ def test_plane_corridor_probe_is_per_link_and_contains_full_track(plane_board, c
         "--probe",
         *args,
         "--plane-corridor",
-        "In1.Cu=109,109.85,121,110.15",
+        "In1.Cu=109,109.9,121,110.1",
         *args,
         "--plane-corridor",
-        "In1.Cu=109,109.95,121,110.05",
+        "In1.Cu=109,109.900001,121,110.1",
         *args,
     )
     assert rc == 1
@@ -222,7 +259,7 @@ def _native_plane_link(capsys, board, *args):
         "--link-layers",
         "In1.Cu",
         "--plane-corridor",
-        "In1.Cu=109,109.85,121,110.15",
+        "In1.Cu=109,109.9,121,110.1",
         *args,
     )
 
