@@ -4193,3 +4193,99 @@ class TestInvalidatedWaiverReport:
         captured = capsys.readouterr()
         assert "Waiver report" not in captured.out
         assert "Waiver report" not in captured.err
+
+
+@pytest.mark.parametrize("failure", ["missing bridge", "missing native check"])
+def test_bonded_via_repair_rolls_back_on_failed_verification(
+    tmp_path, monkeypatch, capsys, failure
+):
+    from collections import Counter
+
+    from kicad_tools.cli import fix_drc_cmd
+    from kicad_tools.drc.repair_mask_copper import MaskCopperRepairer
+    from tests.test_repair_mask_copper import (
+        _board,
+        _bonded_via_finding,
+        _report,
+        _run,
+        _saved_copper,
+        _via,
+    )
+
+    original_seat = (101.2, 100.35)
+    board = _board(tmp_path, _via("via-bond", original_seat))
+    before = board.read_bytes()
+    output = tmp_path / "previous.kicad_pcb"
+    output.write_bytes(b"previous output")
+    if failure == "missing bridge":
+        # Lose the connecting segment while writing the proposal. The count of
+        # native errors and opens is unchanged, but the pad group has split.
+        monkeypatch.setattr(MaskCopperRepairer, "_insert_segment_after_last", lambda *args: None)
+
+    def native_groups(candidate):
+        if failure == "missing native check":
+            raise RuntimeError("native pad groups unavailable")
+        if _saved_copper(candidate, "via-bond")[1] == original_seat:
+            return [frozenset({"pad", "return"})]
+        assert not MaskCopperRepairer(candidate)._segment_nodes()
+        return [frozenset({"pad"}), frozenset({"return"})]
+
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", native_groups)
+    _run(
+        monkeypatch,
+        board,
+        [_report(_bonded_via_finding()), _report()],
+        extra=("--mfr", "jlcpcb-tier1", "--format", "json", "--output", str(output)),
+        connectivity=True,
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == 0
+    expected = "pad_connection_lost" if failure == "missing bridge" else "recheck_unavailable"
+    assert result["unrepaired"][-1]["reason"] == expected
+    assert board.read_bytes() == before and output.read_bytes() == b"previous output"
+
+
+def test_bonded_via_is_graded_on_refilled_copper(tmp_path, monkeypatch, capsys):
+    from collections import Counter
+    from types import SimpleNamespace
+
+    from kicad_tools.cli import fix_drc_cmd, runner
+    from tests.test_repair_mask_copper import (
+        _board,
+        _bonded_via_finding,
+        _report,
+        _run,
+        _saved_copper,
+        _via,
+    )
+
+    start = (101.2, 100.35)
+    zone = '(zone (net 2) (net_name "N2") (layer "F.Cu") (uuid "zone-a"))'
+    board = _board(tmp_path, _via("via-bond", start) + zone)
+    filled = []
+    grade = fix_drc_cmd._verify_mask_actions
+
+    def refill(candidate, *, require_save):
+        assert require_save
+        filled.append(_saved_copper(candidate, "via-bond")[1])
+        return SimpleNamespace(success=True)
+
+    def grade_saved(result, report, args, pcb_path, candidate, *rest, **kwargs):
+        # An old antipad belongs to the original via's drill position.
+        assert filled == [_saved_copper(candidate, "via-bond")[1]]
+        return grade(result, report, args, pcb_path, candidate, *rest, **kwargs)
+
+    monkeypatch.setattr(runner, "run_refill_zones", refill)
+    monkeypatch.setattr(fix_drc_cmd, "_verify_mask_actions", grade_saved)
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_state", lambda path: (Counter(), 0))
+    monkeypatch.setattr(fix_drc_cmd, "_mask_native_pad_groups", lambda path: [frozenset({"pad"})])
+    _run(
+        monkeypatch,
+        board,
+        [_report(_bonded_via_finding()), _report()],
+        extra=("--mfr", "jlcpcb-tier1", "--format", "json"),
+        connectivity=True,
+    )
+    assert json.loads(capsys.readouterr().out)["mask_copper"]["repaired"] == 1
+    assert filled == [_saved_copper(board, "via-bond")[1]] and filled[0] != start
