@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -46,15 +47,30 @@ def saved_record_path(board: Path, will_save: bool) -> Path:
     return sidecar_path(board)
 
 
-def carry_record(seed: Path, dest: Path) -> None:
-    """Give ``dest`` the inventory ``seed`` held (no-op when they are the same file)."""
-    if dest == seed or not seed.is_file():
+def carry_record(seed: Path, dest: Path, detach: bool = False) -> None:
+    """Give ``dest`` the inventory ``seed`` held.
+
+    When they are the same file this is a no-op, except with ``detach`` (the
+    board was a symlink that a save has replaced) and ``dest`` is itself a
+    symlink into the original board's inventory: it is then replaced by an
+    independent copy so edits cannot reach the original board's wire list.
+    """
+    if dest == seed:
+        if detach and dest.is_symlink() and dest.is_file():
+            data = dest.read_bytes()
+            mode = dest.stat().st_mode & 0o7777
+            dest.unlink()
+            dest.write_bytes(data)
+            dest.chmod(mode)
+        return
+    if not seed.is_file():
         return
     if dest.is_symlink():
         dest.unlink()
     elif dest.exists():
         return  # an inventory already paired with the saved board wins
     dest.write_bytes(seed.read_bytes())
+    shutil.copymode(seed, dest)
 
 
 def _pt(x: float, y: float) -> dict[str, float]:

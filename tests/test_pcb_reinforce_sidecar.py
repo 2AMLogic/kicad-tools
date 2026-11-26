@@ -8,6 +8,8 @@ import math
 import shutil
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli.commands.pcb import run_pcb_command
 from kicad_tools.pcb.reinforcement_sidecar import (
     load_wires,
@@ -395,3 +397,35 @@ def test_replace_and_clear_through_symlink_keep_other_nets(tmp_path):
     assert run_pcb_command(_args(alias2, "NET_A", clear=True)) == 0
     assert sidecar_path(board).read_bytes() == main_record
     assert {w["net"] for w in load_wires(sidecar_path(alias2))} == {"NET_B"}
+
+
+def _centered_alias_pair(tmp_path):
+    """A board symlink whose record, after in-place centering, links to the original's."""
+    from kicad_tools.cli import main
+
+    board = _board(tmp_path)
+    for net in ("NET_A", "NET_B"):
+        assert run_pcb_command(_args(board, net=net)) == 0
+    canonical = sidecar_path(board)
+    legacy_bytes = canonical.read_bytes()
+    canonical.unlink()
+    alias = tmp_path / "review.kicad_pcb"
+    alias.symlink_to(board)
+    alias.with_name(alias.name + ".reinforcement.json").write_bytes(legacy_bytes)
+    assert main(["pcb", "center-on-sheet", str(alias), "--paper", "A3"]) == 0
+    assert sidecar_path(alias).is_symlink()  # linked to the original board's inventory
+    return board, alias
+
+
+@pytest.mark.parametrize("op", ["add", "replace", "clear"])
+def test_edit_through_centered_alias_detaches_its_inventory(tmp_path, op):
+    board, alias = _centered_alias_pair(tmp_path)
+    board_record = sidecar_path(board)
+    before_pcb, before_record = board.read_bytes(), board_record.read_bytes()
+    kw = {"replace": {"replace": True}, "clear": {"clear": True}}.get(op, {})
+    assert run_pcb_command(_args(alias, "NET_A", **kw)) == 0
+    assert not alias.is_symlink()
+    assert not sidecar_path(alias).is_symlink()
+    assert board.read_bytes() == before_pcb
+    assert board_record.read_bytes() == before_record
+    assert {w["net"] for w in load_wires(sidecar_path(alias))} >= {"NET_B"}

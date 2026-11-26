@@ -671,11 +671,15 @@ def _staged_path(stack: ExitStack, dest: Path) -> Path:
     return Path(directory) / "new"
 
 
-def _stage_centered_file(stack: ExitStack, dest: Path, content: bytes) -> Path:
+def _stage_centered_file(
+    stack: ExitStack, dest: Path, content: bytes, mode_from: Path | None = None
+) -> Path:
     """Prepare a sibling replacement.
 
     An existing destination keeps its permissions; a new one gets the creation
     mask's mode, never the source's (a private umask must not be widened).
+    ``mode_from`` names an existing file whose permissions a *new* destination
+    inherits: used only when an existing record moves to a new pathname.
     """
     replacing = dest.exists()
     if replacing:
@@ -689,6 +693,8 @@ def _stage_centered_file(stack: ExitStack, dest: Path, content: bytes) -> Path:
         os.fsync(stream.fileno())
     if replacing:
         shutil.copymode(dest, candidate)
+    elif mode_from is not None:
+        shutil.copymode(mode_from, candidate)
     return candidate
 
 
@@ -820,7 +826,12 @@ def center_on_sheet(
         if report.changed or copying:
             pcb_tmp = _stage_centered_file(files, board_target, new_text.encode())
         if record is not None:
-            record_tmp = _stage_centered_file(files, record_target, record)
+            # Migrating the input's own inventory to a new name keeps its mode
+            # (a private 0600 record stays private); a new export does not.
+            migrating = not copying and os.path.lexists(src_sidecar)
+            record_tmp = _stage_centered_file(
+                files, record_target, record, src_sidecar if migrating else None
+            )
             replacements = [(record_tmp, record_target)]
             if record_link is not None:
                 link_tmp = _stage_record_link(files, record_link, record_target)

@@ -1496,6 +1496,7 @@ def _finish_reinforce_clear(
         from kicad_tools.pcb.reinforcement_sidecar import carry_record, sidecar_path
 
         seed_record = sidecar_path(output_path)  # the inventory the unsaved name resolves to
+        was_alias = output_path.is_symlink()
         try:
             pcb.save(output_path)
             _carry_sidecars(pcb_path, output_path)
@@ -1507,7 +1508,7 @@ def _finish_reinforce_clear(
             return 1
         try:
             # A save through a board symlink detaches it: pair the record with the saved file.
-            carry_record(seed_record, sidecar_path(output_path))
+            carry_record(seed_record, sidecar_path(output_path), detach=was_alias)
             dropped = _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
         except (OSError, ValueError) as e:
             print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
@@ -2008,6 +2009,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         or (clear_outcome is not None and _cleared_anything(clear_outcome))
     )
     seed_record = sidecar_path(output_path)
+    was_alias = output_path.is_symlink()
     record = saved_record_path(output_path, will_save)
     if clear_outcome is not None:
         result["replace"] = True
@@ -2024,7 +2026,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         if not dry_run:
             try:
                 if will_save:
-                    carry_record(seed_record, record)
+                    carry_record(seed_record, record, detach=was_alias)
                 _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y, record)
             except (OSError, ValueError) as e:
                 print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
@@ -2039,7 +2041,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     if not dry_run and wire_records:
         try:
             if will_save:
-                carry_record(seed_record, record)
+                carry_record(seed_record, record, detach=was_alias)
             result["wire_sidecar"] = str(write_sidecar(output_path, wire_records, record))
         except (OSError, ValueError) as e:
             print(f"Error writing reinforcement sidecar: {e}", file=sys.stderr)

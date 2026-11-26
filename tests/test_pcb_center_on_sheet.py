@@ -886,3 +886,24 @@ def test_new_export_honors_private_umask(tmp_path):
         os.umask(old)
     assert out.stat().st_mode & 0o777 == 0o600
     assert sidecar_path(out).stat().st_mode & 0o777 == 0o600
+
+
+def test_in_place_alias_migration_keeps_private_record_mode(tmp_path):
+    import os
+
+    from kicad_tools.cli import main
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(make_pcb())
+    alias = tmp_path / "review.kicad_pcb"
+    alias.symlink_to(board)
+    legacy = alias.with_name(alias.name + ".reinforcement.json")
+    legacy.write_text(render_sidecar(_wires()))
+    legacy.chmod(0o600)
+    old = os.umask(0o022)
+    try:
+        assert main(["pcb", "center-on-sheet", str(alias), "--paper", "keep"]) == 0
+    finally:
+        os.umask(old)
+    assert sidecar_path(board).stat().st_mode & 0o777 == 0o600
+    assert alias.with_name(alias.name + ".reinforcement.json").stat().st_mode & 0o777 == 0o600
