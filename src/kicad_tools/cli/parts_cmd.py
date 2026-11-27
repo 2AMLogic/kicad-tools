@@ -201,7 +201,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Suggest Basic/Preferred JLCPCB alternatives for an LCSC part (offline)",
         description=(
             "Suggest in-stock substitutes from the offline jlcparts catalog "
-            "(same package and value). Candidates rank Basic, then Preferred, "
+            "(same manufacturer and MPN, or chip resistors/MLCCs with matching catalog "
+            "ratings and package). Candidates rank Basic, then Preferred, "
             "then Extended, then lowest unit price; only a strictly better "
             "library tier, or the same tier at a lower price, is shown. "
             "Requires 'kct parts sync-catalog'."
@@ -362,8 +363,8 @@ def _alternatives(args) -> int:
             "package": p.package,
             "library_type": library_tier_name(p),
             "stock": p.stock,
-            "unit_price": p.best_price,
             "inventory": p.inventory_provenance(),
+            "unit_price": p.best_price,
         }
 
     if as_json:
@@ -382,7 +383,7 @@ def _alternatives(args) -> int:
         f"({source.package}, {library_tier_name(source)})"
     )
     if not alts:
-        print("No better in-stock alternatives found.")
+        print("No better alternatives with matching catalog specifications and stock found.")
         return 0
     header = (
         f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Type':<10} "
