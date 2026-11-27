@@ -440,6 +440,358 @@ def test_normal_escape_is_never_preempted(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # ---------------------------------------------------------------------------
+# Issue #10623: unassigned (net == 0) pins preserve physical column pitch
+# ---------------------------------------------------------------------------
+
+
+def test_unassigned_middle_pin_preserves_physical_column_pitch() -> None:
+    """An unassigned middle pin (net == 0) still sets the column's physical pitch."""
+    pads = _column_pads()
+    # Left column: connect only pins 1 and 3; pins 2 and 4 are unassigned (net == 0).
+    for idx in (0, 2, 4, 6):
+        pin_num = int(pads[idx].pin)
+        if pin_num in (2, 4):
+            pads[idx] = Pad(**{**pads[idx].__dict__, "net": 0, "net_name": ""})
+    # Right column all unassigned (net == 0).
+    for idx in (1, 3, 5, 7):
+        pads[idx] = Pad(**{**pads[idx].__dict__, "net": 0, "net_name": ""})
+
+    lanes = collect_fence_lanes(pads, [_Region(pads)], lambda pad: 0)
+    assert [fl.lane.pad_key for fl in lanes] == [("U1", "1"), ("U1", "3")]
+    assert all(fl.lane.net != 0 for fl in lanes)
+    assert column_pitch(lanes) == pytest.approx(PITCH)
+
+    seen_nets: list[int] = []
+
+    def spy_via_diameter(net: int) -> float:
+        seen_nets.append(net)
+        return 0.6
+
+    fenced = tight_fence_lanes(lanes, spy_via_diameter, 0.15)
+    assert [fl.lane.pad_key for fl in fenced] == [("U1", "1"), ("U1", "3")]
+    assert set(seen_nets) == {1, 3}
+
+
+def test_vertical_column_unassigned_middle_pin_preserves_physical_pitch() -> None:
+    """Vertical (axis == 'y') columns also measure physical pitch across net == 0 pins."""
+    pads: list[Pad] = []
+    for i in range(4):
+        x = 5.0 + i * PITCH
+        net = (i + 1) if i in (0, 2) else 0
+        pads.append(
+            Pad(
+                x=x,
+                y=8.0,
+                width=0.3,
+                height=1.5,
+                net=net,
+                net_name=f"N{net}" if net else "",
+                ref="U2",
+                pin=str(i + 1),
+            )
+        )
+        pads.append(
+            Pad(
+                x=x,
+                y=12.0,
+                width=0.3,
+                height=1.5,
+                net=0,
+                net_name="",
+                ref="U2",
+                pin=str(8 - i),
+            )
+        )
+
+    lanes = collect_fence_lanes(pads, [_Region(pads)], lambda pad: 0)
+    assert [fl.lane.pad_key for fl in lanes] == [("U2", "1"), ("U2", "3")]
+    assert column_pitch(lanes) == pytest.approx(PITCH)
+    assert [fl.lane.pad_key for fl in tight_fence_lanes(lanes, lambda _n: 0.6, 0.15)] == [
+        ("U2", "1"),
+        ("U2", "3"),
+    ]
+
+
+def test_lone_connected_pin_with_unassigned_neighbours_emits_no_fences() -> None:
+    """A column with one connected pin and net == 0 neighbours never fences itself."""
+    pads = _column_pads()
+    for idx, pad in enumerate(pads):
+        if pad.key != ("U1", "1"):
+            pads[idx] = Pad(**{**pad.__dict__, "net": 0, "net_name": ""})
+
+    lanes = collect_fence_lanes(pads, [_Region(pads)], lambda pad: 0)
+    assert [fl.lane.pad_key for fl in lanes] == [("U1", "1")]
+    assert column_pitch(lanes) == pytest.approx(PITCH)
+
+    called: list[int] = []
+
+    def spy_via(net: int) -> float:
+        called.append(net)
+        return 0.8
+
+    assert tight_fence_lanes(lanes, spy_via, 0.15) == []
+    assert tight_fence_lanes(lanes, spy_via, 0.15, lane_owners={("U1", "1")}) == []
+    assert called == []
+
+
+def test_ineligible_unassigned_pads_do_not_corrupt_coarse_column_pitch() -> None:
+    """Exposed, square, through-hole, virtual, and rotated net == 0 pads are ignored."""
+    from kicad_tools.router.pad_lanes import pad_lane
+
+    coarse_pitch = 1.30
+    base_pads = [
+        Pad(x=8.0, y=9.00, width=1.5, height=0.3, net=1, net_name="N1", ref="U1", pin="1"),
+        Pad(
+            x=8.0,
+            y=9.00 + coarse_pitch,
+            width=1.5,
+            height=0.3,
+            net=2,
+            net_name="N2",
+            ref="U1",
+            pin="2",
+        ),
+        Pad(x=12.0, y=9.00, width=1.5, height=0.3, net=0, net_name="", ref="U1", pin="3"),
+        Pad(
+            x=12.0,
+            y=9.00 + coarse_pitch,
+            width=1.5,
+            height=0.3,
+            net=0,
+            net_name="",
+            ref="U1",
+            pin="4",
+        ),
+    ]
+    mid_y = 9.00 + coarse_pitch * 0.5
+    distractors = [
+        # Exposed pad straddling package centre (x=10.0, aspect >= 1.2)
+        Pad(x=10.0, y=mid_y, width=3.0, height=2.0, net=0, net_name="", ref="U1", pin="EP"),
+        # Square pad on the column x
+        Pad(x=8.0, y=mid_y, width=0.4, height=0.4, net=0, net_name="", ref="U1", pin="SQ"),
+        # Through-hole pad on the column x
+        Pad(
+            x=8.0,
+            y=mid_y,
+            width=1.5,
+            height=0.3,
+            net=0,
+            net_name="",
+            ref="U1",
+            pin="TH",
+            through_hole=True,
+        ),
+        # Virtual Steiner and escape-terminal pads on the column x
+        Pad(
+            x=8.0,
+            y=mid_y,
+            width=1.5,
+            height=0.3,
+            net=0,
+            net_name="",
+            ref="U1",
+            pin="ST",
+            steiner_point=True,
+        ),
+        Pad(
+            x=8.0,
+            y=mid_y,
+            width=1.5,
+            height=0.3,
+            net=0,
+            net_name="",
+            ref="U1",
+            pin="ET",
+            escape_terminal=True,
+        ),
+        # Non-cardinal pad on the column x
+        Pad(
+            x=8.0,
+            y=mid_y,
+            width=1.5,
+            height=0.3,
+            net=0,
+            net_name="",
+            ref="U1",
+            pin="ROT",
+            rotation=45.0,
+        ),
+        # Non-positive dimension pad on the column x
+        Pad(x=8.0, y=mid_y, width=0.0, height=0.3, net=0, net_name="", ref="U1", pin="ZERO"),
+    ]
+    for distractor in distractors:
+        assert pad_lane(distractor, body_center=(10.0, mid_y)) is None
+        cluster = [*base_pads, distractor]
+        lanes = collect_fence_lanes(cluster, [_Region(cluster)], lambda pad: 0)
+        assert column_pitch(lanes) == pytest.approx(coarse_pitch)
+        assert tight_fence_lanes(lanes, lambda _n: 0.6, 0.15) == []
+
+    # Contrast: a physically eligible net == 0 column pad at mid_y halves the
+    # physical pitch to 0.65 mm while still emitting no lane of its own.
+    valid_nc = Pad(x=8.0, y=mid_y, width=1.5, height=0.3, net=0, net_name="", ref="U1", pin="NC")
+    assert pad_lane(valid_nc, body_center=(10.0, mid_y)) is None
+    cluster_with_nc = [*base_pads, valid_nc]
+    lanes_with_nc = collect_fence_lanes(cluster_with_nc, [_Region(cluster_with_nc)], lambda pad: 0)
+    assert [fl.lane.pad_key for fl in lanes_with_nc] == [("U1", "1"), ("U1", "2")]
+    assert column_pitch(lanes_with_nc) == pytest.approx(coarse_pitch * 0.5)
+    assert len(tight_fence_lanes(lanes_with_nc, lambda _n: 0.6, 0.15)) == 2
+
+
+def test_fence_lane_manual_construction_backward_compatible() -> None:
+    """Callers constructing ``FenceLane(column, lane, layer)`` omit ``physical_pitch``."""
+    base = _fence_lanes()
+    left = [FenceLane(fl.column, fl.lane, fl.layer) for fl in base if fl.lane.direction < 0]
+    assert all(fl.physical_pitch is None for fl in left)
+    assert column_pitch(left[:1]) is None
+    assert column_pitch(left) == pytest.approx(PITCH)
+
+
+def _run_issue_10623_autorouter(
+    *,
+    middle_pin_named: bool,
+    pitch: float = 0.65,
+    connect_pin_3: bool = True,
+):
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.fine_pitch_escape import detect_fine_pitch_regions
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(
+        trace_width=0.20,
+        trace_clearance=0.15,
+        via_diameter=0.60,
+        via_drill=0.30,
+        via_clearance=0.15,
+        grid_resolution=0.05,
+    )
+    router = Autorouter(width=20, height=20, rules=rules)
+    rows = [9.00 + i * pitch for i in range(4)]
+    pins = []
+    for i, y in enumerate(rows):
+        pin_num = i + 1
+        if pin_num == 1:
+            net, net_name = 1, "SIG1"
+        elif pin_num == 2 and middle_pin_named:
+            net, net_name = 3, "unconnected-(U1-Pad2)"
+        elif pin_num == 3 and connect_pin_3:
+            net, net_name = 2, "SIG3"
+        else:
+            net, net_name = 0, ""
+        pins.append(
+            {
+                "number": str(pin_num),
+                "x": 8.0,
+                "y": y,
+                "width": 1.5,
+                "height": 0.30,
+                "net": net,
+                "net_name": net_name,
+            }
+        )
+        pins.append(
+            {
+                "number": str(8 - i),
+                "x": 12.0,
+                "y": y,
+                "width": 1.5,
+                "height": 0.30,
+                "net": 0,
+                "net_name": "",
+            }
+        )
+    router.add_component("U1", pins)
+    router.add_component(
+        "R1",
+        [
+            {
+                "number": "1",
+                "x": 4.0,
+                "y": rows[0],
+                "width": 0.6,
+                "height": 0.6,
+                "net": 1,
+                "net_name": "SIG1",
+            }
+        ],
+    )
+    if connect_pin_3:
+        router.add_component(
+            "R3",
+            [
+                {
+                    "number": "1",
+                    "x": 4.0,
+                    "y": rows[2],
+                    "width": 0.6,
+                    "height": 0.6,
+                    "net": 2,
+                    "net_name": "SIG3",
+                }
+            ],
+        )
+    regions = detect_fine_pitch_regions(list(router.pads.values()), router.rules)
+    assert regions, "U1 must be detected as a fine-pitch region"
+    router.grid.set_fine_pitch_regions(regions)
+    router.route_all_negotiated(max_iterations=1, timeout=45)
+    return router, rows
+
+
+@requires_cpp
+def test_autorouter_unassigned_middle_pin_matches_named_singleton_fences() -> None:
+    """Issue #10623 reproduction: net 0 middle pin matches named single-pad middle pin."""
+    router_zero, rows = _run_issue_10623_autorouter(middle_pin_named=False)
+    router_named, _ = _run_issue_10623_autorouter(middle_pin_named=True)
+
+    pf_zero = router_zero.router
+    pf_named = router_named.router
+    assert isinstance(pf_zero, CppPathfinder)
+    assert isinstance(pf_named, CppPathfinder)
+
+    assert {r.net for r in router_zero.routes} == {1, 2}
+    assert {r.net for r in router_named.routes} == {1, 2}
+
+    soft_zero = [
+        (b.gx1, b.gy1, b.gx2, b.gy2, b.layer, b.source_net) for b in pf_zero._pad_lane_budgets
+    ]
+    soft_named = [
+        (b.gx1, b.gy1, b.gx2, b.gy2, b.layer, b.source_net) for b in pf_named._pad_lane_budgets
+    ]
+    assert len(soft_zero) == 2
+    assert soft_zero == soft_named
+
+    fenced_zero = [fl.lane.pad_key for fl in pf_zero._pad_lane_fences]
+    fenced_named = [fl.lane.pad_key for fl in pf_named._pad_lane_fences]
+    assert fenced_zero == [("U1", "1"), ("U1", "3")]
+    assert fenced_named == [("U1", "1"), ("U1", "3")]
+    assert column_pitch(pf_zero._pad_lane_fences) == pytest.approx(0.65)
+    assert column_pitch(pf_named._pad_lane_fences) == pytest.approx(0.65)
+
+    for router in (router_zero, router_named):
+        gx, gy = router.grid.world_to_grid(8.0, rows[1])
+        assert router.grid.is_blocked_for_net(gx, gy, 0, 1)
+        assert router.grid.is_blocked_for_net(gx, gy, 0, 2)
+
+
+@requires_cpp
+def test_autorouter_lone_connected_pin_and_coarse_column_produce_no_hard_fences() -> None:
+    """Lone routing target and genuinely coarse (0.80 mm >= 0.75 mm) columns stay unfenced."""
+    router_lone, _ = _run_issue_10623_autorouter(middle_pin_named=False, connect_pin_3=False)
+    pf_lone = router_lone.router
+    assert isinstance(pf_lone, CppPathfinder)
+    assert len(pf_lone._pad_lane_budgets) == 1
+    assert pf_lone._pad_lane_fences == []
+
+    # 0.80 mm physical pitch with 0.30 mm pads still triggers fine-pitch escape
+    # (gap 0.50 < 2 * (0.20 + 0.15) = 0.70), while 0.80 >= 0.60 + 0.15 = 0.75
+    # leaves enough room for a via without hard escape fences.
+    router_coarse, _ = _run_issue_10623_autorouter(middle_pin_named=False, pitch=0.80)
+    pf_coarse = router_coarse.router
+    assert isinstance(pf_coarse, CppPathfinder)
+    assert len(pf_coarse._pad_lane_budgets) == 2
+    assert pf_coarse._pad_lane_fences == []
+
+
+# ---------------------------------------------------------------------------
 # Issue #8486: search-budget controls for the escape-fence pair
 #
 # The November 24 trace measured 43 unfenced retries after escape-fence
