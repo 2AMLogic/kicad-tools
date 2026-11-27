@@ -411,6 +411,14 @@ class MaskCopperAssessment:
         """
         if self.coverage == "complete":
             return None
+        if any(
+            "[Errno 28]" in reason or "no space left on device" in reason.lower()
+            for reason in self.reasons
+        ):
+            return (
+                "free space on the temporary filesystem or set TMPDIR to a writable "
+                "directory with enough space, then re-run the mask assessment"
+            )
         return (
             "run the mask assessment on a qualified KiCad build "
             "(native interpreter): set KCT_KICAD_DOCKER=1 to use the pinned "
