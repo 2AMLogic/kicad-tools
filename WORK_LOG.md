@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **PR #10551**: fix(boards): refresh STM32 and LVDS datasheets in manufacturing bundles
+- **Issue #10265** (closed): Board 03 tier-1 USB_D+ route exceeds its 16 mm branch length limit
+- **PR #10272**: fix(router): shorten aligned differential-pair pad hops
+- **Issue #10430** (closed): Reconcile 32 net-class findings blocking the Board 05 revision-B manufacturing package
+- **PR #10455**: fix(board05): declare reviewed net classes and widths in the routed project
 - **PR #10524**: Report missing order codes on partially verified stock reviews
 - **PR #10248**: fix(fix-drc): guard mask-copper repairs against new warnings
 - **Issue #10523** (closed): Keep unresolved BOM lines visible in a partially verified stock preflight
@@ -4429,12 +4434,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **PR #5731**: chore(deps): bump astral-sh/setup-uv from 10.1.0 to 10.2.0 in the github-actions group
 - **PR #5730**: chore(deps): bump astro from 7.3.2 to 7.3.3 in /site
 - **PR #5729**: chore(deps-dev): bump @types/node from 26.5.1 to 26.6.2 in /site in the site-minor-patch group
-
-### 2026-09-27
-
-- **PR #5742**: fix(merge-pr): route the #8248 freshness guard's stale-checks call through the #6074/#6752 credential ladder
-- **Issue #5741** (closed): merge-pr.sh: _check_required_check_freshness's stale-checks call bypasses the #6074/#6752 permission-escalation ladder
-- **PR #5740**: fix(router): keep late keep-outs hard against route-halo refinement
 
 ### 2026-07-20 (evening)
 

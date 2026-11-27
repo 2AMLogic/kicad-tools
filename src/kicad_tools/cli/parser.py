@@ -5944,6 +5944,10 @@ def _add_parts_parser(subparsers) -> None:
     parts_parser = subparsers.add_parser("parts", help="LCSC parts lookup and search")
     parts_subparsers = parts_parser.add_subparsers(dest="parts_command", help="Parts commands")
 
+    from .parts_cmd import add_stock_parser
+
+    add_stock_parser(parts_subparsers)
+
     # parts lookup
     parts_lookup = parts_subparsers.add_parser("lookup", help="Look up part by LCSC number")
     parts_lookup.add_argument("part", help="LCSC part number (e.g., C123456)")

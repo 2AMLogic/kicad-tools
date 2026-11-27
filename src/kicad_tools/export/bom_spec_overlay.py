@@ -29,6 +29,7 @@ class AssemblySpecErrors:
 
     profiles: dict[tuple[int, str | None], str] = field(default_factory=dict)
     pad_containers: dict[int, str] = field(default_factory=dict)
+    land_patterns: dict[int, str] = field(default_factory=dict)
     tolerance: str | None = None
     tolerance_upper: str | None = None
     mounting: dict[int, str] = field(default_factory=dict)
@@ -39,6 +40,7 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
     """Keep BOM assignments usable when an optional assembly declaration is invalid.
 
     Profile errors identify the BOM row and pad (None for the part-level lead).
+    Land-pattern errors identify the BOM row.
     A malformed mounting declaration, upper finished-hole tolerance or
     finished-hole guarantee (Issue #10476) is dropped alone, so the valid
     declarations beside it keep their effect.  Other schema errors retain
@@ -91,6 +93,15 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
             if loc[2] == "lead":
                 pad = None
                 data["bom_entries"][row].pop("lead", None)
+            elif loc[2] == "land_pattern":
+                data["bom_entries"][row].pop("land_pattern", None)
+                field_path = ".".join(map(str, loc[2:]))
+                msg = f"invalid {field_path}: {error['msg']}"
+                if row in errors.land_patterns:
+                    errors.land_patterns[row] += f"; {msg}"
+                else:
+                    errors.land_patterns[row] = msg
+                continue
             elif loc[2] == "pad_leads" and len(loc) >= 4 and isinstance(loc[3], str):
                 pad = loc[3]
                 overrides = data["bom_entries"][row]["pad_leads"]
@@ -108,8 +119,8 @@ def load_assembly_spec(path: Path) -> tuple[ProjectSpec, AssemblySpecErrors]:
                 continue
             else:
                 raise
-            field = ".".join(map(str, loc[2:]))
-            errors.profiles[row, pad] = f"invalid {field}: {error['msg']}"
+            field_path = ".".join(map(str, loc[2:]))
+            errors.profiles[row, pad] = f"invalid {field_path}: {error['msg']}"
         if dropped_guarantees:
             manufacturing = data["requirements"]["manufacturing"]
             kept = [
