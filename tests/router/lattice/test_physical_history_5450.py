@@ -220,6 +220,28 @@ def test_escape_conflict_negotiates_all_three_nets(footprint):
                         assert gap >= max(cls_a.clearance, cls_b.clearance) - 1e-6
 
 
+@pytest.mark.parametrize(
+    ("layer", "xs", "y"),
+    [
+        (Layer.F_CU, (91.7875, 94.4875), 127.8125),
+        (Layer.B_CU, (94.3875, 97.0875), 129.1125),
+    ],
+)
+def test_pair_hop_preserves_foreign_escape_landing(layer, xs, y):
+    base, connections = _escape_fixture()
+    start, end = [
+        Pad(x, y, 0.4, 0.4, net=4, net_name="D+", ref="U2", pin=str(i), layer=layer)
+        for i, x in enumerate(xs, 1)
+    ]
+    pf = LatticePathfinder(base.outline, [*base.pads, start, end], base.rules, base.layer_stack)
+    connections.append(((4, "hop", 0), start, end, None))
+
+    routes, stats = pf.route_netset(connections, max_iterations=2)
+
+    assert stats.converged and stats.routed == stats.total == 4
+    assert set(routes) == {key for key, *_ in connections}
+
+
 def test_escape_planning_respects_deadline_and_returns_real_local_choices():
     pf, connections = _escape_fixture()
     assert not plan_tapered_escapes(pf, connections, time.monotonic() - 1)
