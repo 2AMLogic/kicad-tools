@@ -1,0 +1,21 @@
+* Issue #10527 line-sense network, original 10k shunts.
+* The buffer is an ideal unity-gain source with a high-impedance input.
+* Neither input has protection clamps: the pin voltages are unclamped demand.
+.param VPK=187
+V1 LINE 0 SIN(0 {VPK} 60)
+R1 LINE MID 499k
+R2 MID SENSE 499k
+R3 SENSE 0 10k
+E1 BUF 0 SENSE 0 1
+C1 SENSE ADC 100n
+R4 ADC 0 10k
+.tran 10u 100m
+.measure tran sense_min MIN v(SENSE) from=50m to=100m
+.measure tran sense_max MAX v(SENSE) from=50m to=100m
+.measure tran adc_min MIN v(ADC) from=50m to=100m
+.measure tran adc_max MAX v(ADC) from=50m to=100m
+.control
+run
+wrdata line_sense_original.txt v(sense) v(adc)
+.endc
+.end
