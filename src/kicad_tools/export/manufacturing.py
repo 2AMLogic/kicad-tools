@@ -3042,9 +3042,10 @@ class ManufacturingPackage:
         """Check each mapped landing against the board being exported (Issue #10514).
 
         The terminal numbers are the project's declaration and are not checked
-        here; the board side of each assignment is. A reference or pad the
-        board does not have, or a pad on another net, is reported by row,
-        terminal and landing.
+        here; the board side of each assignment is. Every physical copper pad
+        matching the reference and pad number must carry the declared net; a
+        reference or pad the board does not have, a non-copper pad, or a pad on
+        another or mixed net is reported by row, terminal and landing.
         """
         from ..schema.pcb import PCB
 
@@ -3062,20 +3063,28 @@ class ManufacturingPackage:
                 where = (
                     f"purchasing row {index} ({row.description}) terminal '{assignment.terminal}'"
                 )
-                footprint = board.get_footprint(ref)
-                pad = (
-                    next((pad for pad in footprint.pads if pad.number == pad_number), None)
-                    if footprint is not None
-                    else None
-                )
-                if footprint is None:
+                footprints = [fp for fp in board.footprints if fp.reference == ref]
+                if not footprints:
                     faults.append(f"{where}: {ref} is not on the board")
-                elif pad is None:
+                    continue
+                pads = [pad for fp in footprints for pad in fp.pads if pad.number == pad_number]
+                if not pads:
                     faults.append(f"{where}: {ref} has no pad {pad_number}")
-                elif pad.net_name != net:
-                    board_net = pad.net_name or "no net"
+                    continue
+                copper_pads = [pad for pad in pads if pad.type != "np_thru_hole"]
+                if not copper_pads:
+                    faults.append(f"{where}: {ref} pad {pad_number} has no copper")
+                    continue
+                observed = list(dict.fromkeys((pad.net_name or "no net") for pad in copper_pads))
+                if len(observed) > 1:
+                    nets = ", ".join(observed[:-1]) + f" and {observed[-1]}"
                     faults.append(
-                        f"{where}: {ref} pad {pad_number} carries {board_net} "
+                        f"{where}: {ref} pad {pad_number} carries conflicting nets "
+                        f"on the board ({nets}); expected {net}"
+                    )
+                elif observed[0] != net:
+                    faults.append(
+                        f"{where}: {ref} pad {pad_number} carries {observed[0]} "
                         f"on the board, not {net}"
                     )
         return faults

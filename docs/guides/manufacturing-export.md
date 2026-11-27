@@ -579,8 +579,8 @@ of, and must not declare one.
 it is exporting, and refuses the export before anything is written when:
 
 - `ref` is not a footprint on the board;
-- `pad` is not a pad of that footprint;
-- the pad carries a net other than `net`.
+- `pad` is not a copper pad of that footprint;
+- any matching copper pad carries a net other than `net` (including when repeated pads of that number carry conflicting nets).
 
 The terminal numbers are not checked; they stay the project's declaration. A
 map that contradicts itself is refused the same way, whether one terminal is
