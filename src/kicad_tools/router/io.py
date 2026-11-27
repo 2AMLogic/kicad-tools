@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.geometry import rotate_pad_offset
-from kicad_tools.sexp.scan import find_unquoted, iter_unquoted
+from kicad_tools.sexp.scan import iter_unquoted
 
 logger = logging.getLogger(__name__)
 
@@ -2801,37 +2801,27 @@ def load_pads_for_analysis(
         pad_blocks = _extract_pad_blocks(section)
 
         for pad_block in pad_blocks:
-            # Extract pad number/pin
-            pin_match = re.search(r'\(pad\s+"?([^"\s)]+)"?', pad_block)
-            pin = pin_match.group(1) if pin_match else ""
-            pad_shape = _pad_shape_from_block(pad_block, ref, pin, placement_only=placement_only)
+            pad_node = parse_string(pad_block)
+            pin = _pad_number(pad_node) or ""
+            pad_shape = _pad_shape_from_block(pad_node, ref, pin, placement_only=placement_only)
 
-            # Extract pad type for through_hole detection
             is_thru = "thru_hole" in pad_block
 
-            # Extract at position
-            pad_at = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
-            if not pad_at:
+            at = _pad_at(pad_node)
+            if at is None:
                 continue
-
-            pad_x = float(pad_at.group(1))
-            pad_y = float(pad_at.group(2))
+            pad_x, pad_y, pad_rot = at
 
             # Transform to absolute position
             abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
             abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
 
-            # Extract pad size
-            size_match = re.search(r"\(size\s+([-\d.]+)\s+([-\d.]+)\)", pad_block)
-            width = float(size_match.group(1)) if size_match else 0.3
-            height = float(size_match.group(2)) if size_match else 0.3
+            width, height = _pad_size(pad_node) or (0.3, 0.3)
 
             # Rotate pad dimensions to PCB space. The pad angle is stored
             # ABSOLUTE in the file (KiCad already folds the footprint rotation
             # into it -- issue #3902), so it IS the board-frame orientation;
             # do NOT add fp_rot on top of it (same fix as load_pcb_for_routing).
-            pad_rot_match = re.search(r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block)
-            pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
             width, height, pad_rotation = _resolve_pad_dims_and_rotation(pad_rot, width, height)
 
             net_num, net_name = _resolve_pad_net(pad_block, net_name_to_num)
@@ -2841,7 +2831,6 @@ def load_pads_for_analysis(
             if "B.Cu" in pad_block and "F.Cu" not in pad_block:
                 layer = Layer.B_CU
 
-            pad_node = parse_string(pad_block)
             pads.append(
                 PadObj(
                     x=abs_x,
@@ -2855,6 +2844,7 @@ def load_pads_for_analysis(
                     pin=pin,
                     layer=layer,
                     through_hole=is_thru,
+                    drill=_pad_drill_size(pad_node),
                     side=fp_side,
                     footprint_name=footprint_name,
                     footprint_origin=(fp_x, fp_y),
@@ -5067,7 +5057,42 @@ def _routing_pad_shape(shape: str, *, ref: str, pin: str, has_padstack: bool = F
     return shape
 
 
-def _is_rectangular_trapezoid(pad_block: str) -> bool:
+def _pad_number(node: SExp) -> str | None:
+    value = node.get_value(0)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        # A bare numeric pin is an identifier: keep its spelling (e.g. 001).
+        return node.children[0].to_string()
+    return None
+
+
+def _pad_at(node: SExp) -> tuple[float, float, float] | None:
+    at = node.find_child("at")
+    if at is None:
+        return None
+    x, y = at.get_float(0), at.get_float(1)
+    if x is None or y is None:
+        return None
+    return x, y, at.get_float(2) or 0.0
+
+
+def _pad_size(node: SExp) -> tuple[float, float] | None:
+    size = node.find_child("size")
+    if size is None:
+        return None
+    width, height = size.get_float(0), size.get_float(1)
+    if width is None or height is None:
+        return None
+    return width, height
+
+
+def _pad_drill_size(node: SExp) -> float:
+    drill = node.find_child("drill")
+    return (drill.get_float(0) or 0.0) if drill is not None else 0.0
+
+
+def _is_rectangular_trapezoid(node: SExp) -> bool:
     """Is this ``trapezoid`` pad's copper exactly its nominal rectangle?
 
     KiCad's trapezoid is the nominal rectangle with each corner shifted by
@@ -5077,17 +5102,12 @@ def _is_rectangular_trapezoid(pad_block: str) -> bool:
     on the pinned dataset-srj18 OCULINK / USB-C boards, issue #5863), and
     reducing them to ``rect`` is exact, not an approximation.
     """
-    match = re.search(r"\(rect_delta\s+([^\s()]+)\s+([^\s()]+)\s*\)", pad_block)
-    if match is None:
-        return True
-    try:
-        return float(match.group(1)) == 0.0 and float(match.group(2)) == 0.0
-    except ValueError:
-        return False
+    delta = node.find_child("rect_delta")
+    return delta is None or (delta.get_float(0) == 0 and delta.get_float(1) == 0)
 
 
 def _pad_shape_from_block(
-    pad_block: str, ref: str, pin: str, *, placement_only: bool = False
+    pad_block: str | SExp, ref: str, pin: str, *, placement_only: bool = False
 ) -> str:
     """Read the physical shape token, including empty or unquoted pad numbers.
 
@@ -5095,21 +5115,17 @@ def _pad_shape_from_block(
     cannot represent instead of raising: the caller reads the pad's position,
     never its outline.
     """
-    match = re.match(r'\(pad\s+(?:"[^\"]*"|[^\s()]+)\s+\w+\s+([^\s()]+)', pad_block)
-    shape = match.group(1) if match else ""
-    if shape == "trapezoid" and _is_rectangular_trapezoid(pad_block):
+    from kicad_tools.sexp import parse_string
+
+    node = parse_string(pad_block) if isinstance(pad_block, str) else pad_block
+    token = node.get_value(2)
+    shape = token if isinstance(token, str) else ""
+    if shape == "trapezoid" and _is_rectangular_trapezoid(node):
         shape = "rect"
-    if placement_only and (
-        shape not in {"circle", "rect", "oval", "roundrect"}
-        or re.search(r"\(padstack(?:\s|\))", pad_block) is not None
-    ):
+    has_padstack = node.find_child("padstack") is not None
+    if placement_only and (has_padstack or shape not in {"circle", "rect", "oval", "roundrect"}):
         return "rect"
-    return _routing_pad_shape(
-        shape,
-        ref=ref,
-        pin=pin,
-        has_padstack=re.search(r"\(padstack(?:\s|\))", pad_block) is not None,
-    )
+    return _routing_pad_shape(shape, ref=ref, pin=pin, has_padstack=has_padstack)
 
 
 def _pad_radius_ratio(node: SExp, shape: str) -> float | None:
@@ -5271,16 +5287,11 @@ def _extract_pad_blocks(section: str) -> list[str]:
     """
     pad_blocks: list[str] = []
 
-    # Find all positions where "(pad " starts *outside* a quoted string.
-    # A plain ``str.find`` would also match text such as
-    # ``(descr "Heatsink pins (pad 4, net HS) ...")`` (Issues #6740, #6873).
-    # Each scan resumes just past a completed block, which is always outside
-    # a string, as :func:`find_unquoted` requires.
+    # Match the whole pad tag with the same whitespace the parser accepts.
+    # Start each search outside strings so pad-like text in a descr is ignored.
     start_pos = 0
-    while True:
-        pad_start = find_unquoted(section, "(pad ", start_pos)
-        if pad_start == -1:
-            break
+    while match := next(iter_unquoted(section, r"\([ \t\r\n]*pad[ \t\r\n]", start_pos), None):
+        pad_start = match.start()
 
         # Count parentheses to find the matching closing paren
         depth = 0
@@ -5855,16 +5866,11 @@ def load_pcb_for_routing(
         pad_blocks = _extract_pad_blocks(section)
 
         for pad_block in pad_blocks:
-            # Extract pad number and type
-            # Handle both quoted ("A1") and unquoted (1) pad numbers
-            # KiCad uses unquoted numbers for numeric pads, quoted for alphanumeric (BGA)
-            pad_start = re.match(r'\(pad\s+(?:"([^"]*)"|(\S+))\s+(\w+)', pad_block)
-            if not pad_start:
+            pad_node = parse_string(pad_block)
+            pad_num = _pad_number(pad_node)
+            pad_type = pad_node.get_value(1)
+            if pad_num is None or not isinstance(pad_type, str):
                 continue
-            # A matched empty quoted number is a mechanical pad, not a
-            # missing capture. Preserve the schema's empty-string identity.
-            pad_num = pad_start.group(1) if pad_start.group(1) is not None else pad_start.group(2)
-            pad_type = pad_start.group(3)  # smd or thru_hole
             # Issue #5357: a routable pad still must reduce to supported router
             # geometry, but placement-excluded copper is only ever an obstacle.
             # Defer the refusal until the pad's EFFECTIVE net is known, so the
@@ -5872,42 +5878,28 @@ def load_pcb_for_routing(
             pad_shape = ""
             pad_shape_error: ValueError | None = None
             try:
-                pad_shape = _pad_shape_from_block(pad_block, ref, pad_num)
+                pad_shape = _pad_shape_from_block(pad_node, ref, pad_num)
             except ValueError as exc:
                 pad_shape_error = exc
 
-            # Extract at position (now searches entire multi-line block)
-            at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
-            if not at_match:
+            at = _pad_at(pad_node)
+            size = _pad_size(pad_node)
+            if at is None or size is None:
                 if pad_shape_error is not None:
                     raise pad_shape_error
                 continue
-            pad_x = float(at_match.group(1))
-            pad_y = float(at_match.group(2))
-
-            # Extract size
-            size_match = re.search(r"\(size\s+([\d.]+)\s+([\d.]+)\)", pad_block)
-            if not size_match:
-                if pad_shape_error is not None:
-                    raise pad_shape_error
-                continue
-            pad_w = float(size_match.group(1))
-            pad_h = float(size_match.group(2))
+            pad_x, pad_y, pad_rot = at
+            pad_w, pad_h = size
 
             net_num, net_name = _resolve_pad_net(pad_block, net_map)
             authored_net_name = net_name
             authored_net_num = net_num
-
-            # Extract drill size if present
-            drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)
-            drill_size = float(drill_match.group(1)) if drill_match else 0.0
 
             # Extract copper layer from pad layers
             # KiCad pads have: (layers "F.Cu" "F.Paste" "F.Mask") or (layers "B.Cu" ...)
             # For thru-hole pads: (layers "*.Cu" "*.Paste" "*.Mask") - means all copper layers
             # We need to find the copper layer name (*.Cu pattern)
             pad_layer = Layer.F_CU  # Default to top layer
-            pad_node = parse_string(pad_block)
             authored_layers = _pad_authored_layers(pad_node)
             first_copper = next((name for name in authored_layers if name.endswith(".Cu")), None)
             if first_copper and first_copper != "*.Cu":
@@ -5942,10 +5934,6 @@ def load_pcb_for_routing(
             cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
             abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
             abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
-
-            # Also extract per-pad rotation if present
-            pad_rot_match = re.search(r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block)
-            pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
 
             if pad_shape_error is not None:
                 # Issue #5357: a pad whose EFFECTIVE net is placement-invalid
@@ -6023,7 +6011,7 @@ def load_pcb_for_routing(
                     "net": net_num,
                     "net_name": net_name,
                     "through_hole": pad_type == "thru_hole",
-                    "drill": drill_size,
+                    "drill": _pad_drill_size(pad_node),
                     "layer": pad_layer,
                     "side": fp_side,
                     "rotation": pad_rotation,

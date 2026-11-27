@@ -16,6 +16,27 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10499** (closed): parts alternatives offers a 30 Ω resistor for 4.7 kΩ and adjustable regulators for a fixed 3.3 V part
+- **PR #10502**: Check electrical compatibility and identify catalog inventory in parts alternatives
+- **Issue #10595** (closed): Editable manufacturing ZIP omits the net-class map used to regenerate ampacity rules
+- **PR #10597**: fix: ship the selected net-class map with editable KiCad projects
+- **Issue #10609** (closed): Router pad loader still reads at/size/drill/shape by regex, so equivalent S-expression spellings drop a pad from the grid
+- **PR #10610**: fix: read router pad geometry from parsed S-expressions
+- **Issue #9844** (closed): Router: route turns back past its own via inside the slit band (board 05 RESET V-turn)
+- **Issue #10594** (closed): Manufacturing design reports label a revision-B PCB as Rev 1
+- **PR #10598**: fix: use authored PCB revision in report and export headers
+- **Issue #10616** (closed): Router reserves entry lanes for explicit no-connect pads and leaves Board 05 nFAULT open
+- **PR #10620**: fix: reserve fine-pitch escape lanes for routing targets
+- **Issue #10622** (closed): Guide docs PRs can never use the docs-only fast path: installed Guide predates the WORK_PLAN check receipt (#14204) while Judge enforces #15220
+- **Issue #10614** (closed): Readiness checks the sibling net-class map and approves an explicit map with ampacity errors
+- **PR #10617**: fix(readiness): check the selected net-class map
+- **PR #10607**: fix: gate aligned-pad bridges on 45-degree angle tolerance
+- **PR #10606**: fix(submission): verify bundled renders through the release manifest
+- **Issue #10603** (closed): Tapeout sign-off refuses receipt-bound manufacturing render files
+- **Issue #10601** (closed): Mask-copper aligned-pad bridge admits a candidate the angle census rejects (_BRIDGE_AXIS_TOLERANCE_MM vs ANGLE_TOL_DEG)
+- **Issue #10486** (closed): Route-link option to join an existing same-net branch outside a component pad
+- **PR #10519**: feat: add route-link --join-track to tee into a pad's track
+- **PR #10563**: fix(router): decline optimizer shortcuts that park a bend beside their own pad's mask opening
 - **PR #10593**: fix(drc): bridge aligned same-net pads when an offset run grazes one of them
 - **Issue #10121** (closed): Verify the nine Board 05 pour-slot warnings against the native copper film
 - **Issue #10587** (closed): test flake: test_count_corners_serpentine_4000_under_budget exceeds its 1.0s wall-clock budget in the Test job

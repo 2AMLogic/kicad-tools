@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import html
+import json
 import logging
 import re
 import shutil
@@ -211,6 +213,7 @@ def render_pdf_pandoc(
         "-o",
         str(output_path),
         f"--pdf-engine={pdf_engine}",
+        "--standalone",
         "--from=markdown+yaml_metadata_block+pipe_tables+raw_tex",
         "--variable=geometry:margin=1in",
         "--variable=colorlinks:true",
@@ -218,6 +221,18 @@ def render_pdf_pandoc(
         # not the caller's cwd. This is the core fix for issue #4023.
         f"--resource-path={markdown_path.parent}",
     ]
+
+    # Pandoc parses YAML metadata as Markdown. Supply the decoded report
+    # date as literal metadata so markup in a PCB revision survives in TeX.
+    with markdown_path.open(encoding="utf-8") as source:
+        if source.readline().strip() == "---":
+            for line in source:
+                if line.rstrip() in {"---", "..."}:
+                    break
+                if line.startswith('date: "Rev '):
+                    with contextlib.suppress(json.JSONDecodeError):
+                        cmd.append(f"--metadata=date:{json.loads(line.partition(':')[2])}")
+                    break
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -334,7 +349,12 @@ def _strip_yaml_front_matter(content: str) -> tuple[str, dict]:
         line = line.strip()
         if ":" in line and not line.startswith("-") and not line.startswith("#"):
             key, _, value = line.partition(":")
-            value = value.strip().strip('"').strip("'")
+            scalar = value.strip()
+            value = scalar.strip('"').strip("'")
+            if key.strip() == "date" and scalar.startswith('"'):
+                # The generated revision/date line is a JSON-quoted YAML scalar.
+                with contextlib.suppress(json.JSONDecodeError):
+                    value = json.loads(scalar)
             if value:
                 metadata[key.strip()] = value
 
@@ -350,7 +370,7 @@ def _metadata_to_title_block(metadata: dict) -> str:
     if "subtitle" in metadata:
         parts.append(f'<p class="cover-meta">{metadata["subtitle"]}</p>')
     if "date" in metadata:
-        parts.append(f'<p class="cover-meta">{metadata["date"]}</p>')
+        parts.append(f'<p class="cover-meta">{html.escape(str(metadata["date"]))}</p>')
     if "author" in metadata:
         parts.append(f'<p class="cover-meta">{metadata["author"]}</p>')
     parts.append("</div>")

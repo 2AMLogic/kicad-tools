@@ -50,6 +50,7 @@ import sqlite3
 import struct
 import zipfile
 import zlib
+from collections.abc import Iterator
 from datetime import datetime
 from enum import IntEnum
 from pathlib import Path
@@ -320,48 +321,95 @@ class JlcpartsCatalog:
         if not terms:
             return []
 
-        # Each term must match the free-text ``description`` *or* the ``mfr``
-        # (manufacturer part number) column.  jlcparts' ``description`` is a
-        # spec string with no MPN, so an MPN query (the most common
-        # BOM-resolution shape, e.g. ``UCC27524``) only resolves via ``mfr``
-        # (issue #4296).  AND-across-terms semantics are preserved; the OR is
-        # per-term.  ``_escape_like`` wildcard escaping is applied to both.
-        conditions = [
-            "(description LIKE ? ESCAPE '\\' COLLATE NOCASE "
-            "OR mfr LIKE ? ESCAPE '\\' COLLATE NOCASE)"
-        ] * len(terms)
-        params: list[object] = []
-        for t in terms:
-            like = f"%{_escape_like(t)}%"
-            params.extend((like, like))
-
-        if package:
-            conditions.append("package = ? COLLATE NOCASE")
-            params.append(package)
-
-        if min_stock > 0:
-            conditions.append("stock >= ?")
-            params.append(min_stock)
-
-        where_clause = " AND ".join(conditions)
-        params.append(int(limit))
-
         try:
             with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
                 conn.row_factory = sqlite3.Row
                 columns = {r["name"] for r in conn.execute("PRAGMA table_info(jlc_components)")}
-                preferred = "preferred" if "preferred" in columns else "NULL"
-                conn.create_function("catalog_tier", 2, catalog_tier, deterministic=True)
-                sql = (
-                    f"SELECT * FROM jlc_components WHERE {where_clause} "
-                    f"ORDER BY catalog_tier(library_type, {preferred}), stock DESC LIMIT ?"
-                )
-                cursor = conn.execute(sql, params)
-                rows = cursor.fetchall()
+                conditions = []
+                params: list[object] = []
+                for term in terms:
+                    conditions.append(
+                        "(description LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                        "OR mfr LIKE ? ESCAPE '\\' COLLATE NOCASE)"
+                    )
+                    like = f"%{_escape_like(term)}%"
+                    params.extend((like, like))
+                return self._select(conn, columns, conditions, params, package, min_stock, limit)
         except sqlite3.Error as e:
             logger.warning(f"jlcparts catalog search failed for {query!r}: {e}")
             return []
 
+    def in_stock_package(self, package: str) -> Iterator[Part]:
+        """Stream in-stock rows in one package for electrical comparison."""
+        if not self.available or not package.strip():
+            return
+        try:
+            with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM jlc_components WHERE package = ? COLLATE NOCASE AND stock > 0",
+                    (package,),
+                )
+                for row in rows:
+                    yield self._part_from_row(row)
+        except sqlite3.Error as e:
+            logger.warning(f"jlcparts package lookup failed for {package!r}: {e}")
+
+    def find_device(
+        self,
+        mfr_part: str,
+        package: str,
+        *,
+        min_stock: int = 0,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Part]:
+        """Return rows whose manufacturer part number equals ``mfr_part`` exactly
+        (case-insensitive, no prefix or substring matching), in ``package``."""
+        if not self.available or not mfr_part.strip():
+            return []
+        try:
+            with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = {r["name"] for r in conn.execute("PRAGMA table_info(jlc_components)")}
+                return self._select(
+                    conn,
+                    columns,
+                    ["mfr = ? COLLATE NOCASE"],
+                    [mfr_part],
+                    package,
+                    min_stock,
+                    limit,
+                    offset,
+                )
+        except sqlite3.Error as e:
+            logger.warning(f"jlcparts catalog device lookup failed for {mfr_part!r}: {e}")
+            return []
+
+    def _select(
+        self,
+        conn: sqlite3.Connection,
+        columns: set[str],
+        conditions: list[str],
+        params: list[object],
+        package: str | None,
+        min_stock: int,
+        limit: int,
+        offset: int = 0,
+    ) -> list[Part]:
+        if package:
+            conditions.append("package = ? COLLATE NOCASE")
+            params.append(package)
+        if min_stock > 0:
+            conditions.append("stock >= ?")
+            params.append(min_stock)
+        preferred = "preferred" if "preferred" in columns else "NULL"
+        conn.create_function("catalog_tier", 2, catalog_tier, deterministic=True)
+        sql = (
+            f"SELECT * FROM jlc_components WHERE {' AND '.join(conditions)} "
+            f"ORDER BY catalog_tier(library_type, {preferred}), stock DESC, lcsc LIMIT ? OFFSET ?"
+        )
+        rows = conn.execute(sql, [*params, int(limit), int(offset)]).fetchall()
         return [self._part_from_row(row) for row in rows]
 
     def count(self) -> int:
@@ -409,6 +457,21 @@ def _normalize_lcsc_id(lcsc_part: str) -> int | None:
     return int(digits)
 
 
+def _catalog_specs(raw: str) -> dict[str, str]:
+    """Read flat electrical attributes from catalog versions that include them."""
+    try:
+        attrs = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    if not isinstance(attrs, dict):
+        return {}
+    return {
+        key: value.strip()
+        for key, value in attrs.items()
+        if isinstance(value, str) and value.strip().casefold() not in {"", "-", "n/a", "unknown"}
+    }
+
+
 def _row_to_part(row: sqlite3.Row) -> Part:
     """Translate a ``jlc_components`` row into a :class:`Part`.
 
@@ -452,6 +515,7 @@ def _row_to_part(row: sqlite3.Row) -> Part:
         manufacturer=col_str("manufacturer"),
         description=description,
         category=_categorize_part(description, package),
+        specs=_catalog_specs(col_str("attributes")),
         package=package,
         package_type=_guess_package_type(package),
         stock=col_int("stock", 0),
