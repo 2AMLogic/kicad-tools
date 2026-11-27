@@ -479,7 +479,19 @@ makes every pass that reads the list as records -- one that records wires,
 `--clear`, `--replace`, `--adopt`, and `--list-wires` in text or with `--net`
 -- exit 1 with `<sidecar>: wires[<i>] is <type>, not a JSON object` and write
 nothing, the `-o` output board included; `--list-wires --format json` without
-`--net` still prints the file as it stands (#10401).
+`--net` still prints the file as it stands (#10401). A record whose coordinate
+data is malformed -- an anchor, leg end, `polyline` point, stitching via or
+`copy_segments` endpoint that is not an object with numeric `x` and `y` (a
+boolean is not a number here), or a point list that is not an array -- is
+refused the same way by every pass that reads the coordinates: one that
+records wires, `--clear`, `--replace`, `--adopt`, `--list-wires` in text, and
+`kct pcb center-on-sheet` before a nonzero move. The
+message is `<sidecar>: wires[<i>].<field> is <type>, expected <shape>`, naming
+the entry's position in the file and the exact field or element, for example
+`wires[1].anchors[0] is a string, expected an object with numeric 'x' and 'y'`
+or `wires[0].leg_start has no 'y', expected a number` (#10559). Read-only
+consumers and `--list-wires --format json`, with or without `--net`, still pass
+such a record through unchanged.
 
 `kct pcb reinforce BOARD --adopt [--net NET] [--dry-run]` records wires that are
 already on the board (e.g. hand-adjusted after a Gerber review) without moving
@@ -858,6 +870,34 @@ top-level `verdict` (`pass`|`fail`) and `exit_code` (#7230). See
 ```bash
 kct validate --sync project.kicad_sch board.kicad_pcb
 ```
+
+#### Repeated circuit channels
+
+Use `--channel-intent` when a project specifies what each repeated circuit must contain.
+It checks a native schematic or KiCad S-expression netlist and the PCB independently.
+Schematic input requires `kicad-cli` to export the current design with resolved
+project variables, placement annotations and net names. An existing exported
+netlist can be checked without KiCad installed.
+Run sync and copper LVS separately to check agreement and physical connectivity.
+
+```bash
+kct validate --channel-intent intent.json bank.kicad_sch bank.kicad_pcb
+kct validate --channel-intent intent.json --netlist bank.net --pcb bank.kicad_pcb --format json
+```
+
+In the declaration, each role specifies a `value`, a `pins` map from pin numbers
+to net aliases, and optional `fields` such as `{"LCSC": "C106248"}`. Each instance
+binds every role to a unique component reference and every alias to a board net
+name. List channel-local aliases in `private_nets` to require a distinct net for
+each binding. Other aliases may share a board net, as adjacent series taps do.
+Use exact KiCad strings, including units and sheet paths. See the
+[two-channel declaration](../../tests/fixtures/channel_intent/intent.json).
+
+Exit code 0 means all declared pins and fields matched, 1 means mismatches,
+and 2 means an input or declaration error. Each finding identifies the source,
+instance, reference, pin or field, and expected and observed values. A missing
+component produces one `Reference` finding per affected source. JSON represents
+a missing observation as `null`.
 
 ---
 
@@ -1510,6 +1550,7 @@ kct parts <subcommand> [options]
 | `import` | Import a part's symbol/footprint from its datasheet into a library |
 | `suggest` | Suggest LCSC part numbers for components without them |
 | `alternatives` | Suggest in-stock Basic/Preferred JLCPCB substitutes for an LCSC part from the offline jlcparts catalog (`--limit N`, default 5) |
+| `stock` | Query distributor stock and pricing for a manufacturer part number (`-q N` quantity, `--format json`); requires network access to the distributor APIs |
 | `cache` | Cache management (`stats`, `clear`, `clear-expired`) |
 | `sync-catalog` | Download the jlcparts dataset (~620 MB) into the cache dir for fully-offline lookups (#4117) |
 
@@ -1518,6 +1559,7 @@ kct parts <subcommand> [options]
 kct parts search "STM32F103"
 kct parts lookup C8734
 kct parts alternatives C123456 --limit 3
+kct parts stock AP63203WU-7 -q 5 --format json
 kct parts availability project.kicad_sch --quantity 100
 kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
 ```

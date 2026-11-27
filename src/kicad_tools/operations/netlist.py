@@ -41,6 +41,7 @@ class NetlistComponent:
     sheet_path: str = ""
     properties: dict[str, str] = field(default_factory=dict)
     pins: list[ComponentPin] = field(default_factory=list)
+    symbol_path: str = ""
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> NetlistComponent:
@@ -50,6 +51,7 @@ class NetlistComponent:
         footprint = ""
         lib_id = ""
         sheet_path = ""
+        symbol_path = ""
         properties: dict[str, str] = {}
 
         if ref_node := sexp.find("ref"):
@@ -67,15 +69,36 @@ class NetlistComponent:
             elif lib_node.get_string(1):
                 lib_id = lib_node.get_string(1) or ""
 
-        if (sheet_node := sexp.find("sheetpath")) and (names := sheet_node.find("names")):
-            sheet_path = names.get_string(0) or ""
+        if sheet_node := sexp.find_child("sheetpath"):
+            if names := sheet_node.find_child("names"):
+                sheet_path = names.get_string(0) or ""
+            # The native export has already selected this project's annotation.
+            # A multi-unit part can supply several symbol timestamps.
+            sheet_stamps = sheet_node.find_child("tstamps")
+            unit_stamps = sexp.find_child("tstamps")
+            if sheet_stamps is not None and unit_stamps is not None:
+                prefix = sheet_stamps.get_string(0) or ""
+                units = (unit_stamps.get_string(0) or "").split()
+                if prefix.startswith("/") and units:
+                    symbol_path = f"{prefix.rstrip('/')}/{units[0]}"
 
         # Parse properties
         for prop in sexp.find_all("property"):
-            prop_name = prop.get_string(0)
-            prop_value = prop.get_string(1)
-            if prop_name and prop_value:
+            if name := prop.find("name"):
+                prop_name = name.get_string(0)
+                value_node = prop.find("value")
+                prop_value = value_node.get_string(0) if value_node else None
+            else:
+                prop_name = prop.get_string(0)
+                prop_value = prop.get_string(1)
+            if prop_name and prop_value is not None:
                 properties[prop_name] = prop_value
+
+        # KiCad serializes custom symbol fields as (field (name "LCSC") "C123").
+        if fields := sexp.find("fields"):
+            for item in fields.find_all("field"):
+                if (name := item.find("name")) and (field_name := name.get_string(0)):
+                    properties[field_name] = item.get_string(1) or ""
 
         return cls(
             reference=ref,
@@ -84,6 +107,7 @@ class NetlistComponent:
             lib_id=lib_id,
             sheet_path=sheet_path,
             properties=properties,
+            symbol_path=symbol_path,
         )
 
 
@@ -614,6 +638,7 @@ def _collect_hierarchy_components(
         net_scope=sheet_path,
         parent_nets_by_port={},
         aliases=aliases,
+        annotated_packages={},
     )
     by_identity: dict[_NetIdentity, list] = defaultdict(list)
     for identity, pins in nets.items():
@@ -651,6 +676,30 @@ def _collect_hierarchy_components(
     return components, {names[identity]: pins for identity, pins in by_identity.items()}
 
 
+def _placed_symbol_identity(
+    source: SExp | None, sheet_uuids: tuple[str, ...]
+) -> tuple[str, str, int | None]:
+    """Read the reference, schematic link and optional unit for this sheet placement."""
+    if source is None or not all(sheet_uuids):
+        return "", "", None
+    uuid = source.find_child("uuid")
+    symbol_uuid = uuid.get_string(0) if uuid is not None else None
+    link = "/" + "/".join((*sheet_uuids[1:], symbol_uuid)) if symbol_uuid else ""
+    instances = source.find_child("instances")
+    if instances is not None:
+        # On duplicate placement paths the native exporter uses the last
+        # matching annotation, including on renamed projects and repeated sheets.
+        wanted = "/" + "/".join(sheet_uuids)
+        for project in reversed(instances.find_children("project")):
+            for path in reversed(project.find_children("path")):
+                if (path.get_string(0) or "").rstrip("/") == wanted:
+                    placed = path.find_child("reference")
+                    if placed is not None and (ref := placed.get_string(0)):
+                        unit = path.find_child("unit")
+                        return ref, link, unit.get_int() if unit is not None else None
+    return "", link, None
+
+
 def _collect_sheet_nets(
     sch_path: Path,
     sheet_path: str,
@@ -660,6 +709,9 @@ def _collect_sheet_nets(
     net_scope: str,
     parent_nets_by_port: dict[str, _NetIdentity],
     aliases: _ParentNetAliases,
+    annotated_packages: dict[tuple[str, str], tuple[int, NetlistComponent]],
+    sheet_uuids: tuple[str, ...] = (),
+    ancestors: frozenset[Path] = frozenset(),
 ) -> tuple[list[NetlistComponent], dict[_NetIdentity, list], bool]:
     """Recursively collect components and nets from a schematic hierarchy.
 
@@ -698,10 +750,9 @@ def _collect_sheet_nets(
         visited = set()
 
     resolved = sch_path.resolve()
-    if resolved in visited:
+    if resolved in ancestors:
         logger.warning("Circular sheet reference detected, skipping: %s", sch_path)
         return [], {}, False
-    visited.add(resolved)
 
     if not sch_path.exists():
         logger.warning("Sub-sheet file not found, skipping: %s", sch_path)
@@ -709,10 +760,27 @@ def _collect_sheet_nets(
 
     # Load single sheet
     sch = Schematic.load(str(sch_path))
+    if not sheet_uuids:
+        sheet_uuids = (sch.sheet_uuid,)
+    identities_by_symbol = [
+        _placed_symbol_identity(getattr(sym, "_source_node", None), sheet_uuids)
+        for sym in sch.symbols
+    ]
+    # Old shared sheets with no annotations have only one set of references
+    # and net bindings. A second annotated placement has its own references.
+    if resolved in visited and sch.symbols and not any(ref for ref, _, _ in identities_by_symbol):
+        return [], {}, False
+    visited.add(resolved)
 
     # Collect components from this sheet
     components: list[NetlistComponent] = []
-    for sym in sch.symbols:
+    for sym, (ref, symbol_path, unit) in zip(sch.symbols, identities_by_symbol, strict=True):
+        # Apply this placement before selecting its pins. Two sheets may
+        # place different units of the same package from one shared file.
+        if ref:
+            sym.reference = ref
+        if unit is not None:
+            sym.unit = unit
         footprint = ""
         if hasattr(sym, "footprint") and sym.footprint:
             footprint = sym.footprint
@@ -723,20 +791,31 @@ def _collect_sheet_nets(
         if sym.symbol_def and hasattr(sym.symbol_def, "lib_id"):
             lib_id = sym.symbol_def.lib_id
 
-        components.append(
-            NetlistComponent(
-                reference=sym.reference,
-                value=sym.value,
-                footprint=footprint,
-                lib_id=lib_id,
-                sheet_path=sheet_path,
-                pins=[
-                    ComponentPin(pin.number, pin.name, pin.pin_type) for pin in sym.symbol_def.pins
-                ]
-                if include_symbol_pins
-                else [],
-            )
+        component = NetlistComponent(
+            reference=sym.reference,
+            value=sym.value,
+            footprint=footprint,
+            lib_id=lib_id,
+            sheet_path=sheet_path,
+            symbol_path=symbol_path,
+            properties=dict(sym.properties),
+            pins=[ComponentPin(pin.number, pin.name, pin.pin_type) for pin in sym.symbol_def.pins]
+            if include_symbol_pins
+            else [],
         )
+        if sym.reference and not sym.reference.endswith("?"):
+            first_unit, package = annotated_packages.setdefault(
+                (sym.reference, lib_id), (sym.unit, component)
+            )
+            # A placed graphical unit can share the package without contributing pins.
+            # Keep duplicate single-unit references visible to the completeness check.
+            if package is not component and (
+                sym.unit != first_unit or sym.symbol_def.unit_count() > 1
+            ):
+                if not package.footprint:
+                    package.footprint = footprint
+                continue
+        components.append(component)
 
     ranked_names: dict[tuple, list[tuple[int, str]]] = {}
     connectivity, names_by_root, _ = sch._build_connectivity_graph(
@@ -799,6 +878,9 @@ def _collect_sheet_nets(
             net_scope=f"{net_scope}{entry.sheetname or Path(entry.filename).stem}/",
             parent_nets_by_port=child_bindings,
             aliases=aliases,
+            annotated_packages=annotated_packages,
+            sheet_uuids=(*sheet_uuids, entry.uuid),
+            ancestors=ancestors | {resolved},
         )
         components.extend(sub_components)
         for identity, pins in sub_nets.items():

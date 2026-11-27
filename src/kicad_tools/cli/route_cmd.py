@@ -5655,7 +5655,21 @@ def _write_netclasses_to_project(
       classes, colours and diff-pair keys survive verbatim.  Note that
       ``keep_stricter=True`` is one-directional: if a user lowers a floor key
       on a kct-declared class below the router's value, a later route raises
-      it back to the router's floor;
+      it back to the router's floor.  One exception (Issue #10555):
+      ``track_width`` is written exactly, so it may go down, for a class
+      that the project's *pre-mutation* state proves kct created and nobody
+      edited since -- its :func:`~kicad_tools.manufacturers.project_generator.stamp_kct_project`
+      digest validates, and ``meta.kct_router_netclasses`` records its name
+      -- provided the router's aggregated width for it is positive.  The
+      DRC-constraint sidecar writer runs first and creates such a class as a
+      clone of ``Default`` (Issue #6390), so a ``Default`` wider than the
+      routed width would otherwise leave the project declaring a width the
+      copper does not use.  The exception covers width alone: clearance, via
+      diameter and via drill keep the floor merge.  A class that fails
+      either check -- a missing or stale stamp (a hand edit anywhere,
+      including a width raised in KiCad, is what stale means), or a
+      same-named class kct never recorded -- keeps the floor merge for
+      width too, so an authored width is never lowered here;
     * a net a hand-authored pattern or explicit assignment already
       classifies keeps its authored class (the #6390 rule).  Provenance under
       ``meta.kct_netclass_assignments`` records ``{net: class_name}`` so a
@@ -5879,6 +5893,15 @@ def _write_netclasses_to_project(
                     else (None if class_name in existing_class_names else default_via_drill)
                 )
                 clearance_val = max(agg["clearance"], min_clearance_floor)
+                if (
+                    restamp
+                    and class_name in r_classes
+                    and class_name in existing_class_names
+                    and agg["width"] > 0
+                ):
+                    add_netclass_definition(
+                        project, class_name, track_width=agg["width"], keep_stricter=False
+                    )
                 add_netclass_definition(
                     project,
                     class_name,

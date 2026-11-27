@@ -59,6 +59,8 @@ __all__ = [
     "BOMEntry",
     "PurchasingEntry",
     "LeadProfile",
+    "WireTermination",
+    "SmdLandPattern",
     "Decision",
     "Progress",
     "PhaseProgress",
@@ -948,6 +950,191 @@ class LeadProfile(SpecModel):
         return (float(self.width_mm or 0.0), float(self.thickness_mm or 0.0))
 
 
+class WireTermination(SpecModel):
+    """A soldered wire or ferrule landing on one plated through-hole pad (Issue #10473).
+
+    A wire land has no placed part, so there is no ``bom_entries`` MPN whose
+    lead could stand in for what enters the hole.  The designer names the pad
+    by its exact KiCad reference and pad number and declares the maximum
+    outside diameter of the prepared end that enters the hole: the widest
+    part of the tinned conductor, or the ferrule barrel when one is fitted.
+    Assembly preflight compares it with the finished hole like a round lead.
+    The conductor's cross-sectional area, the insulation (jacket) diameter
+    and a footprint's nominal wire description are not that dimension.
+
+    A landing may be declared before its end is measured: without
+    ``diameter_mm`` the pad stays unassessed.
+    """
+
+    ref: str = Field(
+        ...,
+        description=(
+            "Exact KiCad reference designator of the landing footprint (e.g. 'J1'); not a range"
+        ),
+    )
+    pad: str = Field(..., description="Exact KiCad pad number (e.g. '1' or 'A1')")
+    diameter_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Maximum outside diameter of the prepared end that enters the "
+            "hole, in millimetres: the tinned conductor at its widest, or the "
+            "ferrule barrel when one is fitted.  Unset until verified."
+        ),
+    )
+    source: str | None = Field(
+        default=None,
+        validate_default=True,
+        description=(
+            "Where the diameter was verified: a drawing/page reference or "
+            "measurement record.  Required when ``diameter_mm`` is set."
+        ),
+    )
+
+    @field_validator("ref")
+    @classmethod
+    def validate_reference(cls, ref: str) -> str:
+        if not ref.strip():
+            raise ValueError("a wire termination requires a reference designator")
+        return ref.strip()
+
+    @field_validator("pad", mode="before")
+    @classmethod
+    def normalize_pad(cls, value: Any) -> Any:
+        """Accept the pad number as a string or integer, like ``BOMEntry.pad_leads`` keys."""
+        if type(value) is int:
+            value = str(value)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("a wire termination requires a pad number (string or integer)")
+        return value.strip()
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, source: str | None, info: ValidationInfo) -> str | None:
+        if info.data.get("diameter_mm") is not None and not (source or "").strip():
+            raise ValueError(
+                "a declared prepared diameter requires a non-empty source "
+                "(drawing/page reference or measurement record)"
+            )
+        return source
+
+
+class SmdLandPattern(SpecModel):
+    """Source-attributed two-terminal SMD land pattern for an exact BOM MPN (Issue #10505).
+
+    Assembly preflight compares these target copper dimensions against the placed
+    two-terminal SMD footprint after undoing placement rotation and front-to-back
+    mirroring.  Either ``pitch_mm`` (center-to-center spacing), ``outer_span_mm``
+    (outer copper-to-copper extent along the terminal axis), or both may be
+    declared: for two equal pads along the terminal axis,
+    ``outer_span_mm = pitch_mm + pad_depth_mm``.  ``source`` must identify the
+    manufacturer drawing and page.
+    """
+
+    pad_shape: Literal["rect", "roundrect", "oval", "circle"] = Field(
+        ...,
+        description="Expected copper pad shape for both terminals (e.g. 'rect', 'roundrect').",
+    )
+    pad_depth_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Expected pad extent along the terminal axis, in millimetres.",
+    )
+    pad_width_mm: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description="Expected transverse pad width perpendicular to the terminal axis, in mm.",
+    )
+    pitch_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Expected center-to-center pad pitch along the terminal axis, in millimetres. "
+            "Derived as ``outer_span_mm - pad_depth_mm`` when omitted."
+        ),
+    )
+    outer_span_mm: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+        description=(
+            "Expected outer copper-to-copper span along the terminal axis, in millimetres. "
+            "Derived as ``pitch_mm + pad_depth_mm`` when omitted."
+        ),
+    )
+    source: str = Field(
+        ...,
+        description=(
+            "Manufacturer drawing and page reference where the land pattern was taken, "
+            "e.g. 'Stackpole RHC series, page 2'."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_land_pattern(self) -> SmdLandPattern:
+        """Require non-blank source, valid span/pitch geometry and non-overlapping pads."""
+        if not (self.source and self.source.strip()):
+            raise ValueError(
+                "SMD land pattern requires a non-empty source (manufacturer drawing and page)"
+            )
+        if self.pitch_mm is None and self.outer_span_mm is None:
+            raise ValueError("SMD land pattern requires pitch_mm, outer_span_mm, or both")
+
+        depth = Decimal(str(self.pad_depth_mm))
+        width = Decimal(str(self.pad_width_mm))
+        if self.pad_shape == "circle" and abs(depth - width) > Decimal("0.001"):
+            raise ValueError(
+                f"SMD land pattern with pad_shape 'circle' requires equal pad_depth_mm "
+                f"({self.pad_depth_mm}) and pad_width_mm ({self.pad_width_mm})"
+            )
+
+        if self.pitch_mm is not None and self.outer_span_mm is not None:
+            implied_outer = Decimal(str(self.pitch_mm)) + depth
+            declared_outer = Decimal(str(self.outer_span_mm))
+            if abs(declared_outer - implied_outer) > Decimal("0.001"):
+                raise ValueError(
+                    f"outer_span_mm ({self.outer_span_mm}) is inconsistent with "
+                    f"pitch_mm + pad_depth_mm ({float(implied_outer):.3f})"
+                )
+
+        pitch = self.resolved_pitch_decimal_mm()
+        if pitch <= depth:
+            raise ValueError(
+                "pitch_mm must exceed pad_depth_mm (outer_span_mm must exceed "
+                "2 * pad_depth_mm) so the two pads do not overlap"
+            )
+        return self
+
+    def resolved_pitch_decimal_mm(self) -> Decimal:
+        """Exact decimal center-to-center pad pitch along the terminal axis."""
+        if self.pitch_mm is not None:
+            return Decimal(str(self.pitch_mm))
+        return Decimal(str(self.outer_span_mm)) - Decimal(str(self.pad_depth_mm))
+
+    def resolved_outer_span_decimal_mm(self) -> Decimal:
+        """Exact decimal outer copper span along the terminal axis."""
+        if self.outer_span_mm is not None:
+            return Decimal(str(self.outer_span_mm))
+        return Decimal(str(self.pitch_mm)) + Decimal(str(self.pad_depth_mm))
+
+    def resolved_pitch_mm(self) -> float:
+        """Center-to-center pad pitch along the terminal axis, in millimetres."""
+        return float(self.resolved_pitch_decimal_mm())
+
+    def resolved_outer_span_mm(self) -> float:
+        """Outer copper span along the terminal axis, in millimetres."""
+        return float(self.resolved_outer_span_decimal_mm())
+
+
 class BOMEntry(SpecModel):
     """Per-reference BOM mapping for explicit part assignment.
 
@@ -987,6 +1174,14 @@ class BOMEntry(SpecModel):
             "Issue #10299: per-pad-number lead overrides for packages with "
             "mixed leads, keyed by KiCad pad number (e.g. '2').  Takes "
             "precedence over ``lead`` for that pad number only."
+        ),
+    )
+    land_pattern: SmdLandPattern | None = Field(
+        default=None,
+        description=(
+            "Issue #10505: source-attributed manufacturer SMD land pattern for "
+            "this exact BOM MPN, compared by assembly preflight against placed "
+            "two-terminal SMD copper pads."
         ),
     )
 
@@ -1208,6 +1403,13 @@ class ProjectSpec(SpecModel):
         description="Supplementary per-board procurement rows for accessories and off-board parts",
     )
     decisions: list[Decision] | None = Field(default=None, description="Design decisions")
+    wire_terminations: list[WireTermination] | None = Field(
+        default=None,
+        description=(
+            "Issue #10473: wire or ferrule landings that assembly preflight "
+            "assesses without a bom_entries part assignment, one per pad."
+        ),
+    )
     progress: Progress | None = Field(default=None, description="Progress tracking")
     validation: Validation | None = Field(default=None, description="Validation results")
 

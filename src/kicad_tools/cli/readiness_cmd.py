@@ -2818,13 +2818,14 @@ def _project_dependencies(
 
 def _project_libraries(real_root: Path, boundary: Path, explicit_root: bool) -> set[Path]:
     """Project-local library tables and their members, shared by snapshots and packaging."""
-    from kicad_tools.export.manufacturing import project_library_members
+    from kicad_tools.export.manufacturing import (
+        is_project_library_directory,
+        project_library_members,
+    )
 
     files: set[Path] = set()
     for directory in real_root.iterdir():
-        if directory.is_dir() and (
-            directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
-        ):
+        if directory.is_dir() and is_project_library_directory(directory.name):
             files.update(project_library_members(directory, real_root))
     for table in (real_root / "fp-lib-table", real_root / "sym-lib-table"):
         if not table.is_file():
@@ -2904,6 +2905,20 @@ def _kiprjmod_model_bodies(
     return bodies
 
 
+def _library_aliases(options: ReadinessOptions) -> list[Path]:
+    """In-project symlinked library members, by the library path they are found under.
+
+    Their archive name is that path, not their target's, so two notices sharing
+    one target are each delivered (and verified) at their own library path.
+    """
+    if not options.pcb.is_file():
+        return []
+    real_root = options.pcb.parent.resolve()
+    boundary = options.root.resolve()
+    libraries = _project_libraries(real_root, boundary, options.project_root is not None)
+    return sorted(member for member in libraries if member != member.resolve())
+
+
 def _required_sources(options: ReadinessOptions) -> list[Path]:
     """Every (resolved) file the archived project must contain to be the checked design.
 
@@ -2918,8 +2933,11 @@ def _required_sources(options: ReadinessOptions) -> list[Path]:
     sources: set[Path] = set()
     if options.pcb.is_file():
         sources.add(options.pcb.resolve())
+        aliases = set(_library_aliases(options))
         sources.update(
-            p.resolve() for p in _project_dependencies(options.pcb, options.root, explicit)
+            p.resolve()
+            for p in _project_dependencies(options.pcb, options.root, explicit)
+            if p not in aliases
         )
         version = options.pcb.parent / VERSION_FILE
         if version.is_file():
@@ -2965,7 +2983,7 @@ def _archive_layout(options: ReadinessOptions, sources: Sequence[Path]) -> Archi
         if all(source.resolve().is_relative_to(base) for source in sources)
         else in_project_root
     )
-    return archive_layout(identity, sources, directory_of)
+    return archive_layout(identity, sources, directory_of, _library_aliases(options))
 
 
 def _normalize_project_archive(options: ReadinessOptions) -> None:
@@ -3073,11 +3091,13 @@ _PROJECT_LIB_REEXPORT_HINT = (
 
 
 def _is_project_local_library_member(relative: str) -> bool:
-    """True for ``fp-lib-table``/``sym-lib-table``, ``*.pretty/**``, ``footprints/**``, ``symbols/**``."""
+    """Whether the archive member belongs to a project-local KiCad library."""
+    from kicad_tools.export.manufacturing import is_project_library_directory
+
     parts = relative.split("/")
     if parts[-1] in ("fp-lib-table", "sym-lib-table"):
         return True
-    return any(part.endswith(".pretty") or part in ("footprints", "symbols") for part in parts[:-1])
+    return any(is_project_library_directory(part) for part in parts[:-1])
 
 
 def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
@@ -3099,6 +3119,7 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
         sources = set(_required_sources(options)) | {options.pcb.resolve()}
         if options.schematic is not None:
             sources.add(options.schematic.resolve())
+        sources.update(_library_aliases(options))
         layout = _archive_layout(options, sorted(sources))
         with zipfile.ZipFile(archive) as zf:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
@@ -5050,9 +5071,10 @@ def _run_readiness_candidate(
     if options.operation == "generate" and options.silk_fix:
         from .silk_default_pass import run_default_silk_pass
 
-        metrics["silk_fix"] = run_default_silk_pass(
-            options.pcb, mfr=options.manufacturer, quiet=True
-        )
+        silk_fix = run_default_silk_pass(options.pcb, mfr=options.manufacturer, quiet=True)
+        if silk_fix and silk_fix.get("board"):
+            silk_fix["board"] = _rel(options, options.pcb)
+        metrics["silk_fix"] = silk_fix
 
     checked_sources = {
         path: _sha256_file(path)
