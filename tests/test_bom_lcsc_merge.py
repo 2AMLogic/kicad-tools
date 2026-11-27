@@ -492,7 +492,7 @@ class TestMergeLcscFrom:
     """Explicit LCSC merge source (issue #8260)."""
 
     @staticmethod
-    def _export(tmp_path, manufacturer="jlcpcb-tier1", **cfg):
+    def _export(tmp_path, manufacturer="jlcpcb-tier1", parts_cache=None, **cfg):
         from unittest.mock import MagicMock, patch
 
         from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
@@ -503,7 +503,7 @@ class TestMergeLcscFrom:
         mock._get_client.return_value = None
         with (
             patch("kicad_tools.export.bom_enrich.PartSuggester", return_value=mock),
-            patch("kicad_tools.parts.cache.PartsCache", return_value=None),
+            patch("kicad_tools.parts.cache.PartsCache", return_value=parts_cache),
         ):
             config = AssemblyConfig(
                 include_bom=True, include_pnp=False, include_gerbers=False, auto_lcsc=False, **cfg
@@ -541,22 +541,27 @@ class TestMergeLcscFrom:
         """
         import csv
 
-        src = self._write_source(tmp_path / "prev" / "bom_jlcpcb.csv", "C25744")
+        from kicad_tools.parts.cache import PartsCache
+        from kicad_tools.parts.models import Part
+
+        cache = PartsCache(db_path=tmp_path / "parts.db")
+        cache.put(Part(lcsc_part="C22775", value="100Ω", package="0603"))
+        src = self._write_source(tmp_path / "prev" / "bom_jlcpcb.csv", "C22775")
         baseline = self._export(tmp_path / "base", no_spec=True)
         with baseline.bom_path.open(newline="") as f:
             assert not any(r["LCSC Part #"] for r in csv.DictReader(f))
-        assert "C25744" not in baseline.bom_path.read_text()
+        assert "C22775" not in baseline.bom_path.read_text()
 
-        result = self._export(tmp_path, no_spec=True, merge_lcsc_from=src)
+        result = self._export(tmp_path, no_spec=True, merge_lcsc_from=src, parts_cache=cache)
         assert result.lcsc_merge_count >= 1
         assert str(src) in result.lcsc_merge_source
         assert result.lcsc_merge_source.endswith(f"({result.lcsc_merge_count} parts merged)")
         with result.bom_path.open(newline="") as f:
             rows = list(csv.DictReader(f))
         r1 = next(r for r in rows if "R1" in r["Designator"].split(","))
-        assert r1["LCSC Part #"] == "C25744"
+        assert r1["LCSC Part #"] == "C22775"
         # Only the matching (value, footprint) group picked it up.
-        assert sum(1 for r in rows if r["LCSC Part #"] == "C25744") == 1
+        assert sum(1 for r in rows if r["LCSC Part #"] == "C22775") == 1
         assert not result.lcsc_merge_conflicts
 
     def test_merge_disabled_ignores_explicit_source(self, tmp_path):
