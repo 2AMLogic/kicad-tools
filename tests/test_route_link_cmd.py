@@ -147,8 +147,8 @@ def _file_segments(path: Path) -> list[tuple]:
     ox, oy = pcb.board_origin
     return [
         (
-            (round(s.start[0] + ox, 2), round(s.start[1] + oy, 2)),
-            (round(s.end[0] + ox, 2), round(s.end[1] + oy, 2)),
+            (round(s.start[0] + ox, 6), round(s.start[1] + oy, 6)),
+            (round(s.end[0] + ox, 6), round(s.end[1] + oy, 6)),
             s.width,
             s.layer,
             s.uuid,
@@ -722,7 +722,7 @@ class TestJoinTrackReview:
         via = LinkRoute(
             via_net, "SENSE" if connected else "FOE", 0.25, 0.6, 0.3, vias=[(4 - ox, 12 - oy)]
         )
-        _commit_to_model(model, via, via_net)
+        _commit_to_model(model, via, via_net, (ox, oy))
         island = _join_island(pcb, model, 1, terminal_for_pad(pcb, "P2", "1"))
         assert ("B.Cu" in island) == connected
 

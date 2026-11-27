@@ -722,36 +722,35 @@ def _route_length(route: Any) -> float:
     return sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _ in route.segments)
 
 
-def _commit_to_model(model: Any, route: Any, net_number: int) -> None:
-    """Make later links see ``route``'s copper (mirrors the oracle's commit)."""
+def _commit_to_model(model: Any, route: Any, net_number: int, origin: tuple[float, float]) -> None:
+    """Make later links see the same copper they would reload from the file."""
     from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
-    from kicad_tools.router.link_router import _Item
+    from kicad_tools.router.link_router import _Item, _written_point
     from kicad_tools.schema.pcb import Segment
+    from kicad_tools.sexp.builders import fmt
 
     for x1, y1, x2, y2, layer in route.segments:
-        # Issue #10486: a later --join-track link may join this track.
-        model.extra_segments.append(
-            Segment((x1, y1), (x2, y2), route.width_for(layer), layer, net_number)
-        )
-        line = LineString([(x1, y1), (x2, y2)]) if (x1, y1) != (x2, y2) else Point(x1, y1)
-        model.items.append(_Item(net_number, {layer: line.buffer(route.width_for(layer) / 2)}))
+        start = _written_point(x1, y1, origin, route.coordinate_digits)
+        end = _written_point(x2, y2, origin, route.coordinate_digits)
+        if start == end:
+            continue
+        width = fmt(route.width_for(layer))
+        model.extra_segments.append(Segment(start, end, width, layer, net_number))
+        model.items.append(_Item(net_number, {layer: LineString([start, end]).buffer(width / 2)}))
     for vx, vy in route.vias:
-        disk = Point(vx, vy).buffer(route.via_size / 2)
+        vx, vy = _written_point(vx, vy, origin, route.coordinate_digits)
+        size = fmt(route.via_size)
+        disk = Point(vx, vy).buffer(size / 2)
         model.items.append(_Item(net_number, dict.fromkeys(model.copper, disk)))
-        model.drills.append((vx, vy, route.via_drill))
-        model.extra_vias.append((vx, vy, route.via_size, net_number))
+        model.drills.append((vx, vy, fmt(route.via_drill)))
+        model.extra_vias.append((vx, vy, size, net_number))
 
 
 def _junction_report(junction: Any, origin: tuple[float, float]) -> dict[str, Any]:
     """The junction in the board file's millimetres, as the writer will keep them."""
-    from kicad_tools.sexp.builders import fmt
-
-    return {
-        "x": float(fmt(junction.point[0] + origin[0])),
-        "y": float(fmt(junction.point[1] + origin[1])),
-        "layer": junction.layer,
-    }
+    x, y = junction.file_point(origin)
+    return {"x": x, "y": y, "layer": junction.layer}
 
 
 def _route_one(
@@ -1498,7 +1497,7 @@ def _commit_links_gated(
             entry["min_plane_gap_mm"] = gap
             accepted = (refilled, *_refilled_routing_inputs(args, refilled))
         else:
-            _commit_to_model(model, route, net_ids[spec.net])
+            _commit_to_model(model, route, net_ids[spec.net], origin)
         if path != out_path:
             destination = out_path.resolve()
             # Stage beside the resolved destination: a symlink may cross filesystems.
@@ -1575,7 +1574,7 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                 entries.append(entry)
                 if route is not None:
                     # Later probes must see this copper.
-                    _commit_to_model(model, route, net_ids[spec.net])
+                    _commit_to_model(model, route, net_ids[spec.net], origin)
         else:
             from .kicad_toolchain import KiCadEnvironmentError, evidence_toolchain
 

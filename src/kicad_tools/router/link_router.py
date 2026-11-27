@@ -84,11 +84,10 @@ _TERMINAL_INSET = 0.03
 #: link search, so the opt-in stays bounded on a net with thousands of tracks.
 _JUNCTION_CANDIDATES = 8
 
-#: Issue #10486: a junction is written to 0.01 mm, so one that was rounded
-#: off a track's own endpoint lands this far from it (half the increment,
-#: diagonally).  The branch then lands on that existing endpoint and the
-#: track is not split (mm).
+#: Join an existing endpoint instead of making a sub-grid sliver (mm).
 _JUNCTION_END_TOL = 0.0075
+#: A KiCad board stores coordinates in integer nanometres.
+_JUNCTION_DIGITS = 6
 
 #: Issue #10486: one candidate junction -- its straight-line distance from the
 #: source, the track, and the point on that track's centreline.
@@ -311,6 +310,13 @@ class LinkJunction:
     end: tuple[float, float]
     width: float
     uuid: str = ""
+    coordinate_digits: int = 2
+
+    def file_point(self, origin: tuple[float, float]) -> tuple[float, float]:
+        """The common absolute endpoint of both host halves and the branch."""
+        return round(self.point[0] + origin[0], self.coordinate_digits), round(
+            self.point[1] + origin[1], self.coordinate_digits
+        )
 
 
 @dataclass
@@ -328,6 +334,10 @@ class LinkRoute:
     width_by_layer: Mapping[str, float] = field(default_factory=dict)
     #: Issue #10486: the existing track this route branches off, when it does.
     junction: LinkJunction | None = None
+
+    @property
+    def coordinate_digits(self) -> int:
+        return self.junction.coordinate_digits if self.junction is not None else 2
 
     def width_for(self, layer: str) -> float:
         return self.width_by_layer.get(layer, self.width)
@@ -879,6 +889,7 @@ def route_link(
     allowed_layers: Collection[str] | None = None,
     plane_corridor: PlaneCorridor | None = None,
     grid_anchor: tuple[float, float] | None = None,
+    grid_digits: int = 2,
 ) -> LinkRoute | None:
     """Route copper from terminal ``a`` to terminal ``b`` on net ``net_number``.
 
@@ -906,10 +917,9 @@ def route_link(
     if model.outline is not None:
         ob = model.outline.bounds
         x0, y0, x1, y1 = max(x0, ob[0]), max(y0, ob[1]), min(x1, ob[2]), min(y1, ob[3])
-    # Align the grid on A's anchor (snapped to 0.01 mm, the precision the PCB
-    # writer keeps) so the written copper is exactly the copper checked here.
+    # Align the grid on the anchor at the precision its route writer uses.
     anchor_x, anchor_y = grid_anchor or a.point
-    gx0, gy0 = round(anchor_x, 2), round(anchor_y, 2)
+    gx0, gy0 = round(anchor_x, grid_digits), round(anchor_y, grid_digits)
     ix0 = math.floor((x0 - gx0) / g)
     iy0 = math.floor((y0 - gy0) / g)
     nx = int(math.ceil((x1 - gx0) / g)) - ix0 + 1
@@ -917,8 +927,8 @@ def route_link(
     nl = len(copper)
     if nx <= 1 or ny <= 1 or nx * ny * nl > rules.max_cells:
         return None
-    xs = np.round(gx0 + (ix0 + np.arange(nx)) * g, 2)
-    ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, 2)
+    xs = np.round(gx0 + (ix0 + np.arange(nx)) * g, grid_digits)
+    ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, grid_digits)
     gx, gy = np.meshgrid(xs, ys, indexing="ij")
     flat_x, flat_y = gx.ravel(), gy.ravel()
     reach = 1.0
@@ -1497,7 +1507,11 @@ def junction_sites(
             continue
         junction = nearest_points(outside, from_here)[0].coords[0]
         # Consecutive pieces of one drawn track can offer the same point.
-        key = (round(junction[0], 2), round(junction[1], 2), seg.layer)
+        key = (
+            round(junction[0], _JUNCTION_DIGITS),
+            round(junction[1], _JUNCTION_DIGITS),
+            seg.layer,
+        )
         if key in taken:
             continue
         taken.add(key)
@@ -1507,12 +1521,39 @@ def junction_sites(
     return sites
 
 
-def _written_point(x: float, y: float, origin: tuple[float, float]) -> tuple[float, float]:
+def _written_point(
+    x: float, y: float, origin: tuple[float, float], digits: int = 2
+) -> tuple[float, float]:
     """Board-relative point after the writer rounds absolute coordinates."""
     from kicad_tools.sexp.builders import fmt
 
     ox, oy = origin
-    return fmt(x + ox) - ox, fmt(y + oy) - oy
+    return fmt(x + ox, digits) - ox, fmt(y + oy, digits) - oy
+
+
+def _file_nm(point: tuple[float, float], origin: tuple[float, float]) -> tuple[int, int]:
+    """Absolute integer coordinates as stored in a KiCad PCB."""
+    return round((point[0] + origin[0]) * 1_000_000), round((point[1] + origin[1]) * 1_000_000)
+
+
+def _native_junction(
+    point: tuple[float, float], seg: Segment, origin: tuple[float, float]
+) -> tuple[float, float]:
+    """Nearest file-representable point on the straight host, without bending it."""
+    ax, ay = _file_nm(seg.start, origin)
+    bx, by = _file_nm(seg.end, origin)
+    steps = math.gcd(bx - ax, by - ay)
+    if not steps:
+        return seg.start
+    # All collinear integer points lie on multiples of this primitive step.
+    dx, dy = (bx - ax) // steps, (by - ay) // steps
+    px = (point[0] - seg.start[0]) * 1_000_000
+    py = (point[1] - seg.start[1]) * 1_000_000
+    step = max(0, min(steps, round((px * dx + py * dy) / (dx * dx + dy * dy))))
+    return (
+        round((ax + step * dx) / 1_000_000 - origin[0], _JUNCTION_DIGITS),
+        round((ay + step * dy) / 1_000_000 - origin[1], _JUNCTION_DIGITS),
+    )
 
 
 def _branch_clears_pad(
@@ -1534,13 +1575,14 @@ def _branch_clears_pad(
         geom = pad.layers[layer]
         if geom is None:  # the destination has an unmodelled land on this layer
             return False
-        a, b = _written_point(x1, y1, origin), _written_point(x2, y2, origin)
+        a = _written_point(x1, y1, origin, route.coordinate_digits)
+        b = _written_point(x2, y2, origin, route.coordinate_digits)
         line = LineString([a, b]) if a != b else Point(a)
         if line.distance(geom) < fmt(route.width_for(layer)) / 2 - 1e-9:
             return False
     # The link writer emits through vias, whose lands occupy both faces.
     for x, y in route.vias:
-        center = Point(_written_point(x, y, origin))
+        center = Point(_written_point(x, y, origin, route.coordinate_digits))
         if any(
             geom is None or center.distance(geom) < fmt(route.via_size) / 2 - 1e-9
             for geom in pad.layers.values()
@@ -1615,8 +1657,18 @@ def route_link_junction(
             if math.dist(site, end) <= _JUNCTION_END_TOL:
                 site = end
                 break
+        digits = 2
         written = _written_point(*site, origin)
-        if site in (seg.start, seg.end) and math.dist(site, written) > 1e-9:
+        if site in (seg.start, seg.end):
+            if math.dist(site, written) > 1e-9:
+                continue
+        elif not _holds(written, seg.start, seg.end, origin):
+            # Rounding the projection to the usual route grid would bend the
+            # host. Try its actual centreline at the board's native precision.
+            digits = _JUNCTION_DIGITS
+            site = _native_junction(raw, seg, origin)
+            written = _written_point(*site, origin, digits)
+        if not _holds(written, seg.start, seg.end, origin):
             continue
         cap = Point(written)
         if cap.distance(pad_areas[seg.layer]) < fmt(rules.width_for(seg.layer)) / 2 - 1e-9:
@@ -1632,15 +1684,18 @@ def route_link_junction(
             model=model,
             allowed_layers=allowed_layers,
             grid_anchor=site,
+            grid_digits=digits,
             plane_corridor=plane_corridor,
         )
         if route is None or not route.segments or route.segments[-1][2:] != (*site, seg.layer):
             continue
+        route.junction = LinkJunction(
+            site, seg.layer, seg.start, seg.end, seg.width, seg.uuid, digits
+        )
         if not _branch_clears_pad(route, destination, origin) or not _branch_clears_pad(
             collapse_link_route(route), destination, origin
         ):
             continue
-        route.junction = LinkJunction(site, seg.layer, seg.start, seg.end, seg.width, seg.uuid)
         length = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _ in route.segments)
         if best is None or (len(route.vias), length) < best[0]:
             best = (len(route.vias), length), route
@@ -1972,11 +2027,6 @@ def collapse_link_route(route: LinkRoute) -> LinkRoute:
 #: the board origin, a float subtraction that is not bit-exact.
 _HOST_MATCH_TOL = 1e-6
 
-#: Tolerance for the junction lying on a track (mm): it is written to 0.01 mm,
-#: so it can be that far off a diagonal track's centreline.
-_ON_TRACK_TOL = 0.01
-
-
 #: ``(node, start, end, layer, width)`` of one ``(segment ...)`` board-file node.
 _FileTrack = tuple[Any, tuple[float, float], tuple[float, float], str, float]
 
@@ -1996,16 +2046,18 @@ def _file_track(node: Any) -> _FileTrack | None:
 
 
 def _holds(
-    point: tuple[float, float], start: tuple[float, float], end: tuple[float, float]
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+    origin: tuple[float, float] = (0.0, 0.0),
 ) -> bool:
-    """True when ``point`` lies on the segment ``start`` -> ``end``."""
-    dx, dy = end[0] - start[0], end[1] - start[1]
-    length = math.hypot(dx, dy)
-    if length == 0:
-        return math.dist(point, start) <= _ON_TRACK_TOL
-    along = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length
-    across = abs((point[0] - start[0]) * dy - (point[1] - start[1]) * dx) / length
-    return -_ON_TRACK_TOL <= along <= length + _ON_TRACK_TOL and across <= _ON_TRACK_TOL
+    """True when the point is on the segment at KiCad's nanometre precision."""
+    (x, y), (ax, ay), (bx, by) = (_file_nm(p, origin) for p in (point, start, end))
+    return (
+        (x - ax) * (by - ay) == (y - ay) * (bx - ax)
+        and min(ax, bx) <= x <= max(ax, bx)
+        and min(ay, by) <= y <= max(ay, by)
+    )
 
 
 def _split_track(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> None:
@@ -2020,12 +2072,11 @@ def _split_track(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> Non
     """
     from kicad_tools.cli.stitch_cmd import _stitch_uuid
     from kicad_tools.sexp import SExp, parse_string
-    from kicad_tools.sexp.builders import fmt
 
     junction = route.junction
     assert junction is not None  # the caller only splits a route that carries one
     ox, oy = origin
-    at = (junction.point[0] + ox, junction.point[1] + oy)
+    at = junction.file_point(origin)
     tracks: list[_FileTrack] = []
     for node in doc.children:
         if node.name != "segment":
@@ -2035,6 +2086,7 @@ def _split_track(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> Non
             track is not None
             and track[3] == junction.layer
             and abs(track[4] - junction.width) <= _HOST_MATCH_TOL
+            and _holds(at, track[1], track[2])
         ):
             tracks.append(track)
     seen = (
@@ -2052,22 +2104,21 @@ def _split_track(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> Non
         None,
     )
     if host is None:
-        host = next((t for t in tracks if _holds(at, t[1], t[2])), None)
+        host = next((t for t in tracks if _holds(t[1], *seen) and _holds(t[2], *seen)), None)
     if host is None:
         raise ValueError(
             f"no track on {junction.layer} holds the junction at {at[0]:g},{at[1]:g} to split"
         )
     node, start, end, _layer, _width = host
-    if min(math.dist(at, start), math.dist(at, end)) <= _JUNCTION_END_TOL:
+    if at in (start, end):
         return
-    written = (fmt(at[0]), fmt(at[1]))
     first, second = parse_string(node.to_string()), parse_string(node.to_string())
 
     def put(target: SExp, name: str, value: SExp) -> None:
         target.children[[child.name for child in target.children].index(name)] = value
 
-    put(first, "end", SExp.list("end", *written))
-    put(second, "start", SExp.list("start", *written))
+    put(first, "end", SExp.list("end", *at))
+    put(second, "start", SExp.list("start", *at))
     # The identity lives in ``uuid`` (KiCad 7+) or ``tstamp`` (older dialects).
     for identity in ("uuid", "tstamp"):
         if second.get(identity) is not None:
@@ -2095,7 +2146,7 @@ def _append_route_nodes(
     doc: Any, route: LinkRoute, origin: tuple[float, float], name_only: bool = False
 ) -> None:
     from kicad_tools.cli.stitch_cmd import _stitch_uuid
-    from kicad_tools.sexp.builders import fmt, segment_node, via_node
+    from kicad_tools.sexp.builders import segment_node, via_node
 
     ox, oy = origin
     if route.junction is not None:
@@ -2104,7 +2155,9 @@ def _append_route_nodes(
     for x_a, y_a, x_b, y_b, layer in route.segments:
         # Issue #8495: compare after the rounding ``segment_node`` applies, so a
         # sub-resolution sliver is not serialized as a zero-length segment.
-        if (fmt(x_a + ox), fmt(y_a + oy)) == (fmt(x_b + ox), fmt(y_b + oy)):
+        if _written_point(x_a, y_a, origin, route.coordinate_digits) == _written_point(
+            x_b, y_b, origin, route.coordinate_digits
+        ):
             continue
         doc.append(
             segment_node(
@@ -2117,6 +2170,7 @@ def _append_route_nodes(
                 net=route.net_number,
                 net_name=net_name,
                 uuid_str=_stitch_uuid("oracle-seg", x_a, y_a, x_b, y_b, layer, route.net_number),
+                coordinate_digits=route.coordinate_digits,
             )
         )
     for vx, vy in route.vias:
@@ -2130,5 +2184,6 @@ def _append_route_nodes(
                 net=route.net_number,
                 net_name=net_name,
                 uuid_str=_stitch_uuid("oracle-via", vx, vy, route.net_number),
+                coordinate_digits=route.coordinate_digits,
             )
         )
