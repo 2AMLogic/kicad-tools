@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10130** (closed): route: GND pads inside a same-net pour still get a stub trace and via (60 of 64 pads on a consumer board)
+- **Issue #10261** (closed): Fill the routed board before optional power-plane stitching on mixed-signal layouts
+- **PR #10262**: fix(route): stitch power planes after the routed copper is refilled
+- **Issue #10556** (closed): tests: board05 staged fixture is module-scoped under xdist --dist load, so it rebuilds per worker and its cost lands on a 60s-capped test
+- **PR #10560**: ci: group Board 05 recipe staging on one worker
+- **Issue #10514** (closed): Manufacturing handoff: map PCB wire landings to the purchased panel part’s terminals
+- **PR #10537**: feat: carry purchasing-row terminal maps into the assembly handoff
 - **Issue #10527** (closed): Check simulated analog pin ranges across the driven waveform and supply states
 - **PR #10536**: feat: check simulated analog pin voltages against supply-state limits
 - **Issue #10564** (closed): Cover the untested branches of assembly_smd_land_pattern
