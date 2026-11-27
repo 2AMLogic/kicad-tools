@@ -1076,7 +1076,7 @@ def _commit_links(
         baseline = out_path
         if has_corridor:
             directory = stack.enter_context(
-                TemporaryDirectory(prefix=".kct-plane-", dir=out_path.parent)
+                TemporaryDirectory(prefix=".kct-plane-", dir=out_path.resolve().parent)
             )
             trial = Path(directory) / pcb_path.name
             _stage_project_files(pcb_path, trial)
@@ -1406,14 +1406,12 @@ def _commit_links_gated(
         if path != out_path:
             destination = out_path.resolve()
             # Stage beside the resolved destination: a symlink may cross filesystems.
-            staging = destination.parent / f".publish-{destination.name}"
-            try:
+            with TemporaryDirectory(prefix=".publish-", dir=destination.parent) as directory:
+                staging = Path(directory) / destination.name
                 shutil.copyfile(path, staging)
                 if out_mode is not None:
                     staging.chmod(out_mode)
                 os.replace(staging, destination)
-            finally:
-                staging.unlink(missing_ok=True)
             if baseline != out_path and path != baseline:
                 # The next link must start from the accepted board; sidecars stay.
                 baseline.write_bytes(destination.read_bytes())

@@ -487,25 +487,64 @@ class TestCorridorPublish:
     def test_publish_stages_beside_resolved_destination(self, plane_board, capsys, monkeypatch):
         import os
 
-        real = tmp = plane_board.parent / "elsewhere"
+        real = plane_board.parent / "elsewhere"
         real.mkdir()
         dest = real / "target.kicad_pcb"
         dest.write_bytes(plane_board.read_bytes())
         link = plane_board.with_name("out.kicad_pcb")
         link.symlink_to(dest)
+        sibling = dest.with_name(f".publish-{dest.name}")
+        sibling.write_bytes(b"independent sibling")
         seen = []
         orig = os.replace
         monkeypatch.setattr(
             os,
             "replace",
             lambda a, b: (
-                seen.append((Path(a).parent, Path(b).parent)) if ".publish-" in str(a) else None,
+                seen.append(Path(a).parent) if Path(b) == dest else None,
                 orig(a, b),
             )[1],
         )
         rc, doc = self._link(capsys, plane_board, "-o", str(link))
         assert rc == 0, doc
-        assert seen and all(a == b == tmp.resolve() for a, b in seen)
+        assert seen and all(directory.parent == real.resolve() for directory in seen)
+        assert sibling.read_bytes() == b"independent sibling"
+        assert link.is_symlink()
+        assert dest.read_bytes() != plane_board.read_bytes()
+
+    def test_symlink_output_mounts_cover_native_boards(self, plane_board, capsys, monkeypatch):
+        from collections import Counter
+        from contextlib import contextmanager
+
+        from kicad_tools.cli import kicad_toolchain, route_link_cmd
+
+        link = plane_board.parent / "links" / "out.kicad_pcb"
+        dest = plane_board.parent / "targets" / "target.kicad_pcb"
+        source = plane_board.parent / "project" / plane_board.name
+        for path in (source, link, dest):
+            path.parent.mkdir()
+        plane_board.rename(source)
+        dest.write_bytes(source.read_bytes())
+        link.symlink_to(dest)
+
+        active_mounts = []
+        boards = []
+
+        @contextmanager
+        def toolchain(*, mounts):
+            active_mounts.extend(mounts)
+            yield
+
+        def gate(path, args):
+            boards.append(path)
+            return Counter(), None
+
+        monkeypatch.setattr(kicad_toolchain, "evidence_toolchain", toolchain)
+        monkeypatch.setattr(route_link_cmd, "_gate_state", gate)
+        rc, doc = self._link(capsys, source, "-o", str(link))
+        assert rc == 0, doc
+        assert len(set(boards)) == 2  # baseline and routed candidate
+        assert all(any(path.is_relative_to(root) for root in active_mounts) for path in boards)
 
     def test_baseline_uses_input_rules_not_output_sidecars(self, plane_board, capsys, monkeypatch):
         from kicad_tools.cli import route_link_cmd
