@@ -3973,25 +3973,30 @@ _EDGE_PAD = "pad-u1-17"
 _EDGE_OPTS = {"max_displacement": 2.0, "clearance_mm": 0.127}
 
 
-def _edge_escape_fixture(tmp_path, *, width=0.2, extra="", lock=""):
-    """A 45-degree escape that ends in the middle of its pin's end edge.
+def _edge_escape_fixture(tmp_path, *, width=0.2, horizontal=False, extra="", lock=""):
+    """An escape that ends in the middle of its pin's end edge.
 
-    ``diag`` ends on a via, ``lead`` ends at the same edge point and
-    ``through`` crosses it on its way to a second via.  The recentre would aim
-    ``diag`` at the pad centre, a line that clears pin 18 by 0.073 mm (floor
-    0.127 mm), so it is declined; the repairer counts the edge end as inside,
-    so the pull-in does not apply either.
+    By default ``diag`` is the 45-degree escape ending on a via, ``lead`` ends
+    at the same edge point and ``through`` crosses it on its way to a second
+    via.  With ``horizontal=True`` only the escape, its remote via and its
+    back-layer continuation are present along y = 100.5.
     """
-    diag = _seg("diag", (100.1, 100.5), (99.3, 101.3), width=width)
+    far = (99.3, 100.5) if horizontal else (99.3, 101.3)
+    diag = _seg("diag", (100.1, 100.5), far, width=width)
     shapes = [
         diag.replace("(segment ", f"(segment {lock} " if lock else "(segment "),
-        _seg("lead", (100.5, 100.5), (100.1, 100.5)),
-        _seg("through", (100.5, 100.5), (99.685, 100.5)),
-        _seg("diag-b", (99.3, 101.3), (93.3, 101.3), layer="B.Cu"),
-        _seg("through-b", (99.685, 100.5), (96.5, 100.5), layer="B.Cu"),
-        _via("v-diag", (99.3, 101.3)),
-        _via("v-through", (99.685, 100.5)),
+        _seg("diag-b", far, (93.3, far[1]), layer="B.Cu"),
+        _via("v-diag", far),
     ]
+    if not horizontal:
+        shapes.extend(
+            [
+                _seg("lead", (100.5, 100.5), (100.1, 100.5)),
+                _seg("through", (100.5, 100.5), (99.685, 100.5)),
+                _seg("through-b", (99.685, 100.5), (96.5, 100.5), layer="B.Cu"),
+                _via("v-through", (99.685, 100.5)),
+            ]
+        )
     path = tmp_path / "b.kicad_pcb"
     path.write_text(_EDGE_BOARD % "\n".join([*shapes, extra]))
     return path
@@ -4103,18 +4108,98 @@ def test_edge_escape_is_not_carried_past_the_displacement_limit(tmp_path):
     assert not repairer.modified and repairer.doc.to_string() == before
 
 
-@pytest.mark.parametrize(("limit", "moves"), [(0.135, False), (0.1351, True)])
-def test_edge_escape_limit_applies_to_saved_coordinates(tmp_path, limit, moves):
-    board = _edge_escape_fixture(tmp_path, width=0.19)
+@pytest.mark.parametrize(
+    ("horizontal", "width", "limit", "moves", "target"),
+    [
+        (False, 0.19, 0.135, False, (100.1955, 100.4045)),
+        (False, 0.19, 0.1351, True, (100.1955, 100.4045)),
+        (True, 0.2, 0.099999, False, (100.2, 100.5)),
+        (True, 0.2, 0.1, True, (100.2, 100.5)),
+        (True, 0.2, 0.100001, True, (100.2, 100.5)),
+    ],
+    ids=[
+        "diagonal-overshoot-vetoed",
+        "diagonal-overshoot-accepted",
+        "horizontal-just-under",
+        "horizontal-exact-equality",
+        "horizontal-just-over",
+    ],
+)
+def test_edge_escape_limit_applies_to_saved_coordinates(
+    tmp_path, horizontal, width, limit, moves, target
+):
+    from decimal import Decimal
+
+    board = _edge_escape_fixture(tmp_path, width=width, horizontal=horizontal)
     original = _end(board, "diag")
     repairer = MaskCopperRepairer(board)
     result = repairer.repair([_edge_finding()], max_displacement=limit, clearance_mm=0.127)
     assert result.repaired == int(moves)
+    if moves:
+        assert result.actions[0].displacement_mm <= limit
+    else:
+        assert [(u.uuid, u.reason) for u in result.unrepaired] == [
+            ("diag", "exceeds_max_displacement")
+        ]
     repairer.save(board)
     saved = _end(board, "diag")
     assert saved[1] == original[1]
-    assert math.dist(original[0], saved[0]) <= limit
-    assert saved[0] == ((100.1955, 100.4045) if moves else original[0])
+    dx = Decimal(str(saved[0][0])) - Decimal(str(original[0][0]))
+    dy = Decimal(str(saved[0][1])) - Decimal(str(original[0][1]))
+    assert dx * dx + dy * dy <= Decimal(str(limit)) ** 2
+    assert saved[0] == (target if moves else original[0])
+
+
+@pytest.mark.parametrize("limit", [0.5, 2.0])
+@pytest.mark.parametrize(
+    ("groups", "expected"),
+    [
+        ('(generated (type "track_length_tuning_single") (uuid tuning) (members diag))', 0),
+        (
+            '(group "escapes" (uuid child) (members diag)) (generated (uuid tuning) (members CHILD))',
+            0,
+        ),
+        ('(group "escapes" (uuid child) (members diag))', 1),
+    ],
+    ids=["direct-generated", "nested-generated", "ordinary-group"],
+)
+def test_edge_escape_extension_respects_generator_ownership(
+    tmp_path, monkeypatch, capsys, groups, expected, limit
+):
+    board = _edge_escape_fixture(tmp_path, extra=groups)
+    original = board.read_bytes()
+    probe = MaskCopperRepairer(board)
+    seg = probe._segment_nodes()["diag"]
+    assert not probe._locks.is_locked(seg)
+    assert probe._locks.is_generator_owned(seg) is (not bool(expected))
+    assert (
+        probe.repair([_edge_finding()], max_displacement=limit, clearance_mm=0.127).repaired
+        == expected
+    )
+
+    monkeypatch.setattr(
+        fix_drc_cmd, "_mask_native_state", lambda candidate: fix_drc_cmd._MaskNativeState()
+    )
+    _run(
+        monkeypatch,
+        board,
+        [_report(_edge_finding()), _report()],
+        extra=(
+            "--max-displacement",
+            str(limit),
+            "--max-passes",
+            "1",
+            "--verify",
+            "--format",
+            "json",
+        ),
+    )
+    result = json.loads(capsys.readouterr().out)["mask_copper"]
+    assert result["repaired"] == expected
+    if expected:
+        assert _end(board, "diag")[0] == (100.2025, 100.3975)
+    else:
+        assert board.read_bytes() == original
 
 
 @pytest.mark.parametrize("limit", [0.5, 2.0])

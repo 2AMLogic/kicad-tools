@@ -49,6 +49,7 @@ import re
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from decimal import Decimal, localcontext
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -319,6 +320,24 @@ def _num(node: SExp | None) -> float:
 
 def _bare(value: object) -> str:
     return str(value).strip().strip('"')
+
+
+def _coord_displacement_within(
+    a: tuple[float, float], b: tuple[float, float], limit: float
+) -> tuple[bool, float]:
+    """Compare and measure board-coordinate Euclidean distance without binary64 drift."""
+    if limit < 0 or math.isnan(limit):
+        return False, math.dist(a, b)
+    with localcontext() as ctx:
+        ctx.prec = 50
+        dx = Decimal(str(b[0])) - Decimal(str(a[0]))
+        dy = Decimal(str(b[1])) - Decimal(str(a[1]))
+        dist_sq = dx * dx + dy * dy
+        dist = float(dist_sq.sqrt())
+        if math.isinf(limit):
+            return True, dist
+        lim = Decimal(str(limit))
+        return dist_sq <= lim * lim, dist
 
 
 def mask_copper_violations(violations: list[DRCViolation]) -> list[DRCViolation]:
@@ -1436,6 +1455,7 @@ class MaskCopperRepairer(CopperGapRepairer):
             or not net_name
             or net_name != pad_net
             or self._locks.is_locked(seg)
+            or self._locks.is_generator_owned(seg)
             or self._board_rules.dru_error
         ):
             return declined
@@ -1468,10 +1488,13 @@ class MaskCopperRepairer(CopperGapRepairer):
         old_shape = LineString([outside, inside]).buffer(width / 2, quad_segs=16)
         new = None
         new_shape = old_shape
+        moved_dist = 0.0
         # An end that merely stops on the edge needs at most about one track
         # width (0.7 of it at 45 degrees) to put its whole cap on the pad; a
         # longer slide is a different repair (a chamfer, a lead) not this one.
         limit = min(max_displacement, width)
+        if not (limit > 0):
+            return declined
         steps = int(limit / _EXTEND_STEP_MM + 1e-9)
         for index in range(1, steps + 1):
             step = index * _EXTEND_STEP_MM
@@ -1479,7 +1502,8 @@ class MaskCopperRepairer(CopperGapRepairer):
                 round(inside[0] + unit[0] * step, 4),
                 round(inside[1] + unit[1] * step, 4),
             )
-            if math.dist(inside, candidate) > limit:
+            within_limit, candidate_dist = _coord_displacement_within(inside, candidate, limit)
+            if not within_limit:
                 break
             if not grown.contains(Point(candidate)):
                 break
@@ -1499,7 +1523,7 @@ class MaskCopperRepairer(CopperGapRepairer):
                 uncertainty_mm=_MASK_UNCERTAINTY_MM,
                 margin_mm=aperture.margin_mm,
             ):
-                new, new_shape = candidate, copper
+                new, new_shape, moved_dist = candidate, copper, candidate_dist
                 break
         if new is None:
             return declined
@@ -1527,9 +1551,9 @@ class MaskCopperRepairer(CopperGapRepairer):
             old_y=inside[1],
             new_x=new[0],
             new_y=new[1],
-            displacement_mm=math.dist(inside, new),
+            displacement_mm=moved_dist,
             detail=(
-                f"carried track end {math.dist(inside, new):.4f}mm on along its own "
+                f"carried track end {moved_dist:.4f}mm on along its own "
                 "line until its width ends on the pad"
             ),
             end_tag="start" if inside_node is start_node else "end",
