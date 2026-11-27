@@ -846,3 +846,88 @@ def test_a_board_saved_during_the_export_is_not_published(tmp_path, monkeypatch,
 
     assert not (out / "manifest.json").exists()
     assert "changed during manufacturing export" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: complete layer table, copper inventory, mirrored layout, links
+# ---------------------------------------------------------------------------
+
+
+@needs_kicad_cli
+def test_unquoted_inner_layer_names_are_still_verified(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    board = _four_layer_board(tmp_path / "probe.kicad_pcb")
+    board.write_text(
+        board.read_text()
+        .replace('(1 "In1.Cu" signal)', "(1 In1.Cu signal)")
+        .replace('(2 "In2.Cu" signal)', "(2 In2.Cu signal)")
+    )
+    out = tmp_path / "mfg"
+
+    assert _export(board, out, preflight=True) == 0
+
+    reviewed = json.loads((out / "manifest.json").read_text())["reviewed_copper"]
+    assert [entry["layer"] for entry in reviewed["layers"]] == list(_LAYERS)
+    with zipfile.ZipFile(out / "gerbers" / "gerbers.zip") as archive:
+        coppers = [n for n in archive.namelist() if re.search(r"-(F|B|In\d)_Cu\.", n)]
+    assert len(coppers) == 4
+
+
+def test_copper_outside_the_board_layers_is_not_identical(tmp_path):
+    candidate = _baseline()
+    candidate["old-In3_Cu.g3"] = _gerber("Copper,L5,Inr", [_SQUARE])
+    record = _record(tmp_path, _baseline(), candidate, zipped=False)
+    assert record["status"] == "unreadable"
+    assert any(entry["layer"].startswith("unexpected copper:") for entry in record["layers"])
+
+
+@pytest.mark.parametrize("function", ["Copper,L9,Inr", "Copper"])
+def test_misdeclared_copper_metadata_is_refused_not_raised(tmp_path, function):
+    candidate = _baseline()
+    candidate[_MEMBERS[2]] = _gerber(function, [_SQUARE])
+    record = _record(tmp_path, _baseline(), candidate)
+    assert record["status"] == "unreadable"
+    assert {e["layer"]: e["status"] for e in record["layers"]}["In2.Cu"] != "identical"
+
+
+@needs_kicad_cli
+def test_split_project_layout_keeps_archive_relative_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    (tmp_path / "pcb").mkdir()
+    (tmp_path / "schematics").mkdir()
+    board = _four_layer_board(tmp_path / "pcb" / "probe.kicad_pcb")
+    (tmp_path / "schematics" / "probe.kicad_sch").write_text(
+        '(kicad_sch (version 20240108) (generator eeschema) (paper "A4"))\n'
+    )
+    args = (
+        "--sch",
+        str(tmp_path / "schematics" / "probe.kicad_sch"),
+        "--project-root",
+        str(tmp_path),
+    )
+    plain = tmp_path / "plain"
+    reviewed = tmp_path / "reviewed"
+    assert cli_main(["export", str(board), *_EXPORT_ARGS, "-o", str(plain), *args]) == 0
+    assert _export(board, reviewed, *args) == 0
+
+    def members(out: Path) -> set[str]:
+        with zipfile.ZipFile(out / "kicad_project.zip") as archive:
+            return set(archive.namelist())
+
+    assert members(reviewed) == members(plain)
+    assert not any(".reviewed-" in name for name in members(reviewed))
+
+
+def test_working_copy_resolves_external_relative_links(tmp_path):
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared" / "power.kicad_sch").write_text("(kicad_sch)")
+    project = tmp_path / "pcb"
+    project.mkdir()
+    board = project / "board.kicad_pcb"
+    board.write_bytes(b"(kicad_pcb)")
+    (project / "probe.kicad_sch").symlink_to("../shared/power.kicad_sch")
+    workspace = ReviewedCopperExport(board, project_root=None, output_dir=tmp_path / "mfg")
+    try:
+        assert (workspace.dir / "probe.kicad_sch").read_text() == "(kicad_sch)"
+    finally:
+        workspace.close()

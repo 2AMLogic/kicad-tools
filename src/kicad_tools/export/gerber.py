@@ -79,7 +79,7 @@ def _pcb_has_filled_zones(pcb_path: Path) -> bool:
 # ordinal distinguishes these from per-pad/per-via ``(layers "F.Cu" ...)``
 # lists, and the type token guards against ``(net 4 "...")`` entries.
 _COPPER_LAYER_DEF_RE = re.compile(
-    r'\(\s*\d+\s+"((?:F|B|In\d+)\.Cu)"\s+(?:signal|power|mixed|jumper)\b'
+    r'\(\s*\d+\s+(?:"((?:F|B|In\d+)\.Cu)"|((?:F|B|In\d+)\.Cu))\s+(?:signal|power|mixed|jumper)\b'
 )
 
 
@@ -153,7 +153,7 @@ def _pcb_copper_layers(pcb_path: Path) -> list[str]:
         )
         return fallback
 
-    found = set(_COPPER_LAYER_DEF_RE.findall(text))
+    found = {m[1] or m[2] for m in _COPPER_LAYER_DEF_RE.finditer(text)}
     if not found:
         logger.warning(
             "No copper layer definitions found in %s; assuming 2-layer (F.Cu, B.Cu)",

@@ -2028,7 +2028,7 @@ class ManufacturingPackage:
                 workspace.reference_dir,
             )
             config = copy(self.config)
-            config.project_root = workspace.root
+            config.project_root = workspace.dir
             # Always staged: with --no-project-zip the ordinary path writes the
             # destination directly, which a verification must never do first.
             layout = _PackageOutputs(

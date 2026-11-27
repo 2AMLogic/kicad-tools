@@ -85,6 +85,10 @@ class CopperLayer:
         return {"member": self.member, "sha256": self.sha256}
 
 
+_UNEXPECTED = "unexpected copper:"
+_COPPER_NAME_RE = re.compile(r"-(?:F|B|In\d+)_Cu\.[A-Za-z0-9]+$")
+
+
 def _layer_member_re(layer: str) -> re.Pattern[str]:
     """Match kicad-cli's member name for ``layer``, e.g. ``board-In1_Cu.g1``."""
     return re.compile(rf"-{re.escape(layer.replace('.', '_'))}\.[A-Za-z0-9]+$")
@@ -122,6 +126,7 @@ def _select_and_read(
     # name only decides for artwork that carries no X2 attributes at all.
     tagged = any(functions.values())
     entries: dict[str, CopperLayer] = {}
+    considered: set[str] = set()
     for index, layer in enumerate(layers):
         entry = entries[layer] = CopperLayer(layer)
         member_re = _layer_member_re(layer)
@@ -131,11 +136,13 @@ def _select_and_read(
             for name in names
             if (function := functions[name])
             and function[1][0] == "copper"
+            and len(function[1]) > 1
             and function[1][1] == f"l{index + 1}"
         ]
         matches = by_function if tagged else by_name
         if tagged and set(by_name) - set(by_function):
             matches = sorted(set(by_function) | set(by_name))
+        considered.update(matches)
         if not matches:
             entry.status, entry.detail = "missing", "no archive member for this layer"
             continue
@@ -147,7 +154,9 @@ def _select_and_read(
         function = functions[entry.member]
         if function is not None and (
             function[1][0] != "copper"
-            or (len(function[1]) > 2 and function[1][2] != _copper_position(index, len(layers)))
+            or len(function[1]) < 3
+            or function[1][1] != f"l{index + 1}"
+            or function[1][2] != _copper_position(index, len(layers))
         ):
             entry.status = "unreadable"
             entry.detail = f"FileFunction is {function[0]}, not the copper layer it was taken for"
@@ -167,6 +176,21 @@ def _select_and_read(
             entry.geometry = parse_gerber_geometry(text).geometry
         except Exception as exc:  # noqa: BLE001 - unrenderable artwork fails closed, never the export
             entry.status, entry.detail = "unreadable", f"unreadable Gerber: {exc}"
+
+    # Every copper member of the plot must belong to a board layer: copper the
+    # comparison never looks at would ship unreviewed.
+    for name in names:
+        if name in considered:
+            continue
+        function = functions[name]
+        tagged_copper = function is not None and function[1][0] == "copper"
+        if tagged_copper or _COPPER_NAME_RE.search(Path(name).name):
+            entries[f"{_UNEXPECTED} {name}"] = CopperLayer(
+                f"{_UNEXPECTED} {name}",
+                member=name,
+                status="unexpected",
+                detail="copper archive member matches no copper layer of the saved board",
+            )
     return entries
 
 
@@ -201,8 +225,13 @@ def compare_copper(
 ) -> list[dict[str, Any]]:
     """One record per layer, in plot order: its members, digests and two differences."""
     records: list[dict[str, Any]] = []
-    for layer, ref in reference.items():
-        cand = candidate[layer]
+    for layer in dict.fromkeys([*reference, *candidate]):
+        ref = reference.get(layer) or CopperLayer(
+            layer, status="unexpected", detail="copper in the reference plot matches no board layer"
+        )
+        cand = candidate.get(layer) or CopperLayer(
+            layer, status="missing", detail="no archive member for this layer"
+        )
         record: dict[str, Any] = {
             "layer": layer,
             "reference": ref.identity(),
@@ -505,8 +534,13 @@ class ReviewedCopperExport:
             else:
                 os.symlink(os.readlink(link), target)
         else:
-            # Outside the project, or dangling: the same link reads the same.
-            os.symlink(os.readlink(link), target)
+            # Outside the project, or dangling. A relative target resolves from
+            # the deeper working directory, so point at the resolved target
+            # when it exists; a dangling link reads the same either way.
+            literal = os.readlink(link)
+            if resolved is not None and not os.path.isabs(literal) and resolved.exists():
+                literal = str(resolved)
+            os.symlink(literal, target)
 
     def rebase(self, path: Path | None) -> Path | None:
         """The working-copy path of a live file inside the project, else the path itself."""
