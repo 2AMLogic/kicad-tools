@@ -1,5 +1,6 @@
 """Opt-in wiring preserves the existing CI workload rather than replacing it."""
 
+import inspect
 import json
 import os
 import re
@@ -70,7 +71,63 @@ def test_opt_in_and_resources_and_artifact_retention():
     assert artifact["with"]["path"] == "${{ runner.temp }}/native-observer/"
 
 
-@pytest.mark.parametrize("group", GROUPS)
+def test_board05_recipe_staging_group_and_timeout():
+    from tests import test_board05_recipe_dru_reproduces_8357 as recipe
+
+    for name, case in inspect.getmembers(recipe, inspect.isfunction):
+        if not name.startswith("test_"):
+            continue
+        marks = {mark.name: mark.args for mark in getattr(case, "pytestmark", ())}
+        if "staged" in inspect.signature(case).parameters:
+            assert marks.get("xdist_group") == ("board05_recipe_staged",), name
+            assert marks.get("timeout") == (180,), name
+        elif name in {
+            "test_committed_dru_carries_the_attach_zone_block",
+            "test_export_replays_committed_rules_and_respects_a_designer_clearance",
+            "test_mask_standoff_preserves_fiducial_geometry",
+        }:
+            assert "xdist_group" not in marks and "timeout" not in marks, name
+
+
+def test_board05_staged_cases_reach_one_worker(tmp_path):
+    # Exercise the installed scheduler. pytest 9.2.0 and xdist 3.8 can collect
+    # the right marks while sending the seven cases to four separate workers.
+    (tmp_path / "record_staged_worker.py").write_text(
+        "from pathlib import Path\n"
+        "def pytest_runtest_setup(item):\n"
+        "    if 'staged' in item.fixturenames:\n"
+        "        worker = item.config.workerinput['workerid']\n"
+        "        Path(__file__).with_suffix('.' + worker).touch()\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-n",
+            "2",
+            "--dist",
+            "loadgroup",
+            "--setup-plan",
+            "-o",
+            "addopts=",
+            "-p",
+            "record_staged_worker",
+            "tests/test_board05_recipe_dru_reproduces_8357.py",
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join([str(tmp_path), os.environ.get("PYTHONPATH", "")]),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(list(tmp_path.glob("record_staged_worker.gw*"))) == 1
+
+
+@pytest.mark.parametrize("group", [*GROUPS, "extended"])
 @pytest.mark.parametrize("board07", ["true", "false"])
 def test_existing_workflow_command_and_failure_propagation(tmp_path, group, board07):
     # Execute the actual YAML bash body, substituting ONLY the uv executable.
@@ -94,7 +151,11 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
         "raise SystemExit(0 if 'build-native' in args else 7)\n"
     )
     uv.chmod(0o755)
-    step = next(s for s in JOB["steps"] if s.get("name") == GROUPS[group])
+    if group == "extended":
+        steps, step_name = WORKFLOW["jobs"]["test-extended"]["steps"], "Run ci_extended tests"
+    else:
+        steps, step_name = JOB["steps"], GROUPS[group]
+    step = next(s for s in steps if s.get("name") == step_name)
     env = dict(
         os.environ,
         PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
@@ -169,6 +230,8 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             "pytest",
             "-n",
             "auto",
+            "--dist",
+            "loadgroup",
             # Issue #7214: list skip/xfail reasons in the short summary.
             "-rfEsx",
             # Issue #6013: the ci_extended slow tail runs in "Test (extended)",
@@ -208,6 +271,23 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             # step forwards the artifact path, which lands last.
             "--junitxml",
             str(tmp_path / "junit/bulk.xml"),
+        ],
+        "extended": [
+            "run",
+            "pytest",
+            "-n",
+            "auto",
+            "--dist",
+            "loadgroup",
+            "-rfEsx",
+            "-o",
+            "addopts=",
+            "--benchmark-disable",
+            "--timeout=60",
+            "-m",
+            "ci_extended and not slow",
+            "--junitxml",
+            str(tmp_path / "junit/extended.xml"),
         ],
     }[group]
     if group == "bulk" and board07 != "true":
