@@ -39,6 +39,10 @@ HEADER = """\
 
 def node_id(classname: str, name: str) -> str | None:
     """Map a JUnit (classname, name) pair back to a pytest node id."""
+    # xdist 3.8 reports test[param@host]@group on grouped workers. Only the
+    # suffix after the parameter brackets is scheduling metadata.
+    if name.rfind("@") > name.rfind("]"):
+        name = name.rsplit("@", 1)[0]
     parts = classname.split(".")
     for i in range(len(parts), 0, -1):
         path = "/".join(parts[:i]) + ".py"

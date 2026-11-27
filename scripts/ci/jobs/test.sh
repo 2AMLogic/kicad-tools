@@ -70,10 +70,13 @@ run_mask_copper() {
 }
 
 run_stitch() {
-  # Issue #5417: four concurrent KiCad refills exhausted CI's 12 GiB cgroup;
-  # keep every physical assertion and the timeout, but no xdist pool.
+  # Both modules run native zone refills. Four concurrent refills exhausted
+  # the CI container (#5417), and the public plane-stitch case timed out in
+  # the bulk pool before it could check the saved copper (#10261).
   step "Run native physical-stitch acceptance"
-  uv run pytest tests/test_stitch_physical_completion.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" "$@"
+  uv run pytest tests/test_stitch_physical_completion.py \
+    tests/test_stitch_plane_bonded_pads_10136.py \
+    -o addopts= --benchmark-disable --timeout=60 -m "not slow" "$@"
 }
 
 run_zones() {
@@ -97,6 +100,7 @@ run_bulk() {
     --ignore=tests/test_board06_pad_departures.py
     --ignore=tests/test_mask_copper_native.py
     --ignore=tests/test_stitch_physical_completion.py
+    --ignore=tests/test_stitch_plane_bonded_pads_10136.py
     --ignore=tests/test_zones_cmd.py
     --ignore=tests/test_zones_hv_keepout.py
     --ignore=tests/test_zones_fill_probe_timeout_9938.py
@@ -111,7 +115,7 @@ run_bulk() {
   if [[ "${BOARD_07_CI_ENABLED:-}" != "true" ]]; then
     test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
   fi
-  uv run pytest -n auto -rfEsx -o addopts= --benchmark-disable --timeout=60 \
+  uv run pytest -n auto --dist loadgroup -rfEsx -o addopts= --benchmark-disable --timeout=60 \
     -m "not slow and not ci_extended" --durations=30 "${test_args[@]}" "$@"
 }
 

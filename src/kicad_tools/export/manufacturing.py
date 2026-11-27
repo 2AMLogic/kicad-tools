@@ -988,6 +988,30 @@ def _build_manifest(
     return manifest
 
 
+def _frozen_terminals(entry: PurchasingEntry) -> list[dict[str, Any]]:
+    """Freeze a row's terminal map as the handoff reads it back (Issue #10514).
+
+    Each entry keeps the external terminal the project declared and either the
+    landing it was checked against or its disposition as unused. The submission
+    handoff rebuilds the map from these exact keys (``submission_plan``'s
+    ``_purchasing_terminals``); the two change together.
+    """
+    assignments: list[dict[str, Any]] = []
+    for assignment in entry.terminals or ():
+        if assignment.unused:
+            assignments.append({"terminal": assignment.terminal, "unused": True})
+        else:
+            assignments.append(
+                {
+                    "terminal": assignment.terminal,
+                    "ref": assignment.ref,
+                    "pad": assignment.pad,
+                    "net": assignment.net,
+                }
+            )
+    return assignments
+
+
 def _purchasing_document(entries: list[PurchasingEntry]) -> dict[str, Any]:
     """Freeze validated purchasing rows as the per-board list (Issue #10431).
 
@@ -1010,6 +1034,8 @@ def _purchasing_document(entries: list[PurchasingEntry]) -> dict[str, Any]:
         else:
             row["manufacturer"] = entry.manufacturer
             row["mpn"] = entry.mpn
+        if entry.terminals is not None:
+            row["terminals"] = _frozen_terminals(entry)
         items.append(row)
     document = {"schema_version": 1, "items": items}
     return {**document, "kct_export_sha256": purchasing_export_digest(document)}
@@ -3010,8 +3036,86 @@ class ManufacturingPackage:
             )
             return
         rows = spec.purchasing or []
+        if any(row.terminals for row in rows):
+            map_faults = self._terminal_map_faults(rows)
+            if map_faults:
+                message = "; ".join(map_faults)
+                result.errors.append(
+                    f"Invalid project spec; the purchasing list cannot be read from "
+                    f"{spec_path}: {message}"
+                )
+                logger.error("Purchasing list could not be read from %s: %s", spec_path, message)
+                return
         self._purchasing = rows or None
         result.purchasing_pending = [row.description for row in rows if row.pending is not None]
+
+    def _terminal_map_faults(self, rows: list[PurchasingEntry]) -> list[str]:
+        """Check each mapped landing against the board being exported (Issue #10514).
+
+        The terminal numbers are the project's declaration and are not checked
+        here; the board side of each assignment is. Every physical copper pad
+        matching the reference and pad number must carry the declared net; a
+        reference or pad the board does not have, a non-copper pad, or a pad on
+        another or mixed net is reported by row, terminal and landing.
+        """
+        from ..core.layers import is_declared_copper_layer
+        from ..schema.pcb import PCB
+
+        try:
+            board = PCB.load(str(self.pcb_path))
+        except (OSError, KiCadToolsError) as exc:
+            return [f"terminal maps cannot be checked: {self.pcb_path} could not be read ({exc})"]
+        copper_layers = {
+            layer.name
+            for layer in board.layers.values()
+            if is_declared_copper_layer(layer.name, layer.type)
+        }
+        if copper_layers & {"F.Cu", "B.Cu"}:
+            copper_layers.add("F&B.Cu")
+        if copper_layers:
+            copper_layers.add("*.Cu")
+        faults: list[str] = []
+        for index, row in enumerate(rows, 1):
+            for assignment in row.terminals or ():
+                landing = assignment.landing
+                if landing is None:
+                    continue
+                ref, pad_number, net = landing
+                where = (
+                    f"purchasing row {index} ({row.description}) terminal '{assignment.terminal}'"
+                )
+                footprints = [fp for fp in board.footprints if fp.reference == ref]
+                if not footprints:
+                    faults.append(f"{where}: {ref} is not on the board")
+                    continue
+                pads = [pad for fp in footprints for pad in fp.pads if pad.number == pad_number]
+                if not pads:
+                    faults.append(f"{where}: {ref} has no pad {pad_number}")
+                    continue
+                copper_pads = [
+                    pad
+                    for pad in pads
+                    if pad.type != "np_thru_hole" and not copper_layers.isdisjoint(pad.layers)
+                ]
+                if not copper_pads:
+                    faults.append(f"{where}: {ref} pad {pad_number} has no copper")
+                    continue
+                observed = list(dict.fromkeys(pad.net_name for pad in copper_pads))
+                if len(observed) > 1:
+                    labels = [name or "(unconnected)" for name in observed]
+                    nets = ", ".join(labels[:-1]) + f" and {labels[-1]}"
+                    faults.append(
+                        f"{where}: {ref} pad {pad_number} carries conflicting nets "
+                        f"on the board ({nets}); expected {net}"
+                    )
+                elif not observed[0]:
+                    faults.append(f"{where}: {ref} pad {pad_number} is unconnected; expected {net}")
+                elif observed[0] != net:
+                    faults.append(
+                        f"{where}: {ref} pad {pad_number} carries {observed[0]} "
+                        f"on the board, not {net}"
+                    )
+        return faults
 
     def _write_purchasing(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Stage the per-board purchasing list, or withdraw an earlier one."""
