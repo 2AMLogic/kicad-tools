@@ -191,9 +191,11 @@ def _run_generate(args: argparse.Namespace) -> int:
                 skip_erc=getattr(args, "skip_erc", False),
             )
 
+    from kicad_tools.report.utils import resolve_report_revision
+
     data = ReportData(
         project_name=project_name,
-        revision=data_kwargs.pop("revision", "1"),
+        revision=resolve_report_revision(input_path, data_kwargs.pop("revision", None)),
         date=data_kwargs.pop(
             "date",
             __import__("datetime").date.today().isoformat(),
