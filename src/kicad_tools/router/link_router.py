@@ -32,6 +32,13 @@ https://github.com/drandyhaas/KiCadRoutingTools, MIT).  This module follows the
 same idea -- a small dedicated A* for a single missing link -- on our own PCB
 model; no KRT code is copied.
 
+:func:`route_link_junction` is the ``kct route-link --join-track`` opt-in
+(Issue #10486).  Instead of entering the destination pad it joins a track that
+is already electrically connected to that pad, at a junction outside every
+pad, so the new copper never meets the pad's mask opening.  The route carries
+the junction (:attr:`LinkRoute.junction`) and :func:`append_link_routes`
+splits the track there as it writes the branch.
+
 All coordinates here are the :class:`~kicad_tools.schema.pcb.PCB` model's
 board-relative millimetres.  :func:`append_link_route` adds the board origin
 back when it writes the copper into the file.
@@ -43,7 +50,7 @@ import heapq
 import math
 import re
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -51,9 +58,10 @@ from kicad_tools.router.via_clearance import COORD_WRITE_GUARD_MM
 
 if TYPE_CHECKING:
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.pcb import PCB, Segment
 
 __all__ = [
+    "LinkJunction",
     "LinkRoute",
     "LinkRouteRules",
     "LinkTerminal",
@@ -62,13 +70,28 @@ __all__ = [
     "append_link_routes",
     "collapse_link_route",
     "explain_link_failure",
+    "junction_sites",
     "padless_components",
     "route_link",
+    "route_link_junction",
     "route_link_via",
 ]
 
 #: Route endpoints land at least this far inside the terminal copper (mm).
 _TERMINAL_INSET = 0.03
+
+#: Issue #10486: tracks tried as junction hosts, nearest first.  Each costs one
+#: link search, so the opt-in stays bounded on a net with thousands of tracks.
+_JUNCTION_CANDIDATES = 8
+
+#: Join an existing endpoint instead of making a sub-grid sliver (mm).
+_JUNCTION_END_TOL = 0.0075
+#: A KiCad board stores coordinates in integer nanometres.
+_JUNCTION_DIGITS = 6
+
+#: Issue #10486: one candidate junction -- its straight-line distance from the
+#: source, the track, and the point on that track's centreline.
+_JunctionSite = tuple[float, "Segment", tuple[float, float]]
 
 _DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
 
@@ -270,6 +293,32 @@ class LinkTerminal:
     label: str
     point: tuple[float, float]
     layers: dict[str, Any]
+    # Named-pad tees require a known copper land on the starting layer.
+    exact_pad_lands: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class LinkJunction:
+    """Where a :class:`LinkRoute` branches off an existing track (Issue #10486).
+
+    ``point`` lies on the centreline of the straight track ``start`` -> ``end``
+    (``width``, ``layer`` and ``uuid`` as the board file has it) that the
+    router chose.  All coordinates are board-relative, like the route's.
+    """
+
+    point: tuple[float, float]
+    layer: str
+    start: tuple[float, float]
+    end: tuple[float, float]
+    width: float
+    uuid: str = ""
+    coordinate_digits: int = 2
+
+    def file_point(self, origin: tuple[float, float]) -> tuple[float, float]:
+        """The common absolute endpoint of both host halves and the branch."""
+        return round(self.point[0] + origin[0], self.coordinate_digits), round(
+            self.point[1] + origin[1], self.coordinate_digits
+        )
 
 
 @dataclass
@@ -285,6 +334,12 @@ class LinkRoute:
     vias: list[tuple[float, float]] = field(default_factory=list)
 
     width_by_layer: Mapping[str, float] = field(default_factory=dict)
+    #: Issue #10486: the existing track this route branches off, when it does.
+    junction: LinkJunction | None = None
+
+    @property
+    def coordinate_digits(self) -> int:
+        return self.junction.coordinate_digits if self.junction is not None else 2
 
     def width_for(self, layer: str) -> float:
         return self.width_by_layer.get(layer, self.width)
@@ -304,8 +359,14 @@ class LinkRoute:
 
 
 def _copper_layer_names(pcb: PCB) -> list[str]:
-    layers = pcb.copper_layers
-    names = [getattr(layer, "name", str(layer)) for layer in layers]
+    from kicad_tools.core.layers import COPPER_LAYER_ORDER, is_declared_copper_layer
+
+    declared = {
+        layer.name
+        for layer in pcb.layers.values()
+        if is_declared_copper_layer(layer.name, layer.type)
+    }
+    names = [name for name in COPPER_LAYER_ORDER if name in declared]
     return names or ["F.Cu", "B.Cu"]
 
 
@@ -317,6 +378,71 @@ def _pad_layers(pad_layers: list[str], copper: list[str]) -> list[str]:
                 out.append(layer)
                 break
     return out
+
+
+def _padstack_lands(fp: Any, pad: Any, layers: Collection[str]) -> dict[str, Any] | None:
+    """Standard copper outlines per layer, or None when the pad has uniform geometry.
+
+    KiCad keeps the front definition on the pad and the other definitions under
+    its padstack. An unmodelled or missing layer cannot establish contact.
+    """
+    node = getattr(pad, "_sexp_node", None)
+    stack = node.find_child("padstack") if node is not None else None
+    if stack is None:
+        return None
+    mode = stack.find_child("mode")
+    name = mode.get_string(0) if mode is not None else None
+    if name == "normal" and not stack.find_children("layer"):
+        return None
+    if name not in ("front_inner_back", "custom"):
+        return {}
+
+    from kicad_tools.geometry.copper import (
+        EXACT_PAD_SHAPES,
+        pad_copper_outline,
+        pad_outline_is_exact,
+    )
+
+    by_name: dict[str, Any] = {}
+    if pad_outline_is_exact(pad):
+        by_name["F.Cu"] = pad_copper_outline(pad, fp.position, fp.rotation)
+    for entry in stack.find_children("layer"):
+        layer = entry.get_string(0)
+        size, shape = entry.find_child("size"), entry.find_child("shape")
+        if layer is None or size is None or shape is None:
+            continue
+        kind = shape.get_string(0)
+        w, h = size.get_float(0), size.get_float(1)
+        if kind not in EXACT_PAD_SHAPES or entry.find_child("chamfer") is not None:
+            continue
+        if (
+            w is None
+            or h is None
+            or not (math.isfinite(w) and math.isfinite(h) and w > 0 and h > 0)
+        ):
+            continue
+        offset = entry.find_child("offset")
+        dx, dy = (offset.get_float(0), offset.get_float(1)) if offset is not None else (0.0, 0.0)
+        rounding = entry.find_child("roundrect_rratio")
+        ratio = rounding.get_float(0) if rounding is not None else 0.25
+        if any(value is None or not math.isfinite(value) for value in (dx, dy, ratio)):
+            continue
+        # Detach the view: mutation of a linked Pad writes through to the board.
+        land = replace(
+            pad,
+            _sexp_node=None,
+            shape=kind,
+            size=(w, h),
+            drill_offset=(dx, dy),
+            roundrect_rratio=ratio,
+        )
+        by_name[layer] = pad_copper_outline(land, fp.position, fp.rotation)
+    result = {}
+    for layer in layers:
+        key = "Inner" if name == "front_inner_back" and layer.startswith("In") else layer
+        if (outline := by_name.get(key)) is not None:
+            result[layer] = outline
+    return result
 
 
 def _pad_geometry(fp: Any, pad: Any) -> Any:
@@ -381,6 +507,10 @@ class _BoardModel:
     pad_geoms: list[Any]
     fills: dict[str, list[tuple[int, Any]]]
     outline: Any
+    #: Issue #10486: copper accepted earlier in this invocation, as the track and
+    #: via objects a later ``--join-track`` link may join (see ``_commit_to_model``).
+    extra_segments: list[Any] = field(default_factory=list)
+    extra_vias: list[tuple[float, float, float, int]] = field(default_factory=list)
 
 
 def _build_model(pcb: PCB) -> _BoardModel:
@@ -434,11 +564,15 @@ def _build_model(pcb: PCB) -> _BoardModel:
                 continue
             geom = _pad_geometry(fp, pad)
             pad_drill = float(getattr(pad, "drill", 0.0) or 0.0)
-            pad_geoms.append(geom)
+            lands = dict.fromkeys(layers, geom)
+            stack = _padstack_lands(fp, pad, layers)
+            if stack is not None:
+                lands.update(stack)
+            pad_geoms.extend(lands.values() if stack is not None else (geom,))
             items.append(
                 _Item(
                     int(getattr(pad, "net_number", 0) or 0),
-                    dict.fromkeys(layers, geom),
+                    lands,
                     True,
                     pad_drill,
                     getattr(fp, "reference", None) or "",
@@ -502,6 +636,15 @@ def _build_model(pcb: PCB) -> _BoardModel:
     return _BoardModel(copper, items, drills, pad_geoms, fills, outline)
 
 
+def _uniform_pad_lands(fp: Any, pad: Any, layers: Collection[str]) -> dict[str, Any]:
+    from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
+
+    if not pad_outline_is_exact(pad):
+        return {}
+    outline = pad_copper_outline(pad, fp.position, fp.rotation)
+    return dict.fromkeys(layers, outline) if outline is not None else {}
+
+
 def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None:
     """The copper of footprint pad ``ref.pad_number`` as a :class:`LinkTerminal`."""
     copper = _copper_layer_names(pcb)
@@ -515,7 +658,14 @@ def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None
                 return None
             geom = _pad_geometry(fp, pad)
             c = geom.centroid
-            return LinkTerminal(f"{ref}.{pad_number}", (c.x, c.y), dict.fromkeys(layers, geom))
+            stack = _padstack_lands(fp, pad, layers)
+            # The ordinary named-pad route retains its existing approximation
+            # for unmodelled shapes. Junctions separately require exact lands.
+            lands = dict.fromkeys(layers, geom)
+            if stack is not None:
+                lands.update(stack)
+            exact = stack if stack is not None else _uniform_pad_lands(fp, pad, layers)
+            return LinkTerminal(f"{ref}.{pad_number}", (c.x, c.y), lands, exact)
     return None
 
 
@@ -557,12 +707,17 @@ def net_components(model: _BoardModel, net_number: int) -> list[dict[str, Any]]:
     join when their copper intersects on a layer they share.  Sorted largest
     first by total copper area, so ``[0]`` is the main body of the net.
     """
-    from shapely import STRtree  # type: ignore[import-untyped]
-    from shapely.ops import unary_union  # type: ignore[import-untyped]
-
     nodes: list[dict[str, Any]] = [dict(it.layers) for it in model.items if it.net == net_number]
     for layer, fills in model.fills.items():
         nodes.extend({layer: poly} for net, poly in fills if net == net_number)
+    return _merge_nodes(nodes, model.copper)
+
+
+def _merge_nodes(nodes: list[dict[str, Any]], copper: list[str]) -> list[dict[str, Any]]:
+    """Union ``{layer: geometry}`` nodes that touch on a shared layer, largest first."""
+    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
+
     parent = list(range(len(nodes)))
 
     def find(x: int) -> int:
@@ -571,7 +726,7 @@ def net_components(model: _BoardModel, net_number: int) -> list[dict[str, Any]]:
             x = parent[x]
         return x
 
-    for layer in model.copper:
+    for layer in copper:
         idx = [i for i, n in enumerate(nodes) if layer in n]
         if len(idx) < 2:
             continue
@@ -594,6 +749,84 @@ def net_components(model: _BoardModel, net_number: int) -> list[dict[str, Any]]:
         comps.append({layer: unary_union(gs) for layer, gs in per_layer.items()})
     comps.sort(key=lambda c: -sum(g.area for g in c.values()))
     return comps
+
+
+def _via_span(layers: list[str], copper: list[str]) -> list[str]:
+    """Copper layers a via with these end layers actually touches (blind/buried aware)."""
+    idx = [copper.index(layer) for layer in layers if layer in copper]
+    if len(idx) != 2 or len(layers) != 2:
+        return []
+    return copper[min(idx) : max(idx) + 1]
+
+
+def _join_island(pcb: PCB, model: _BoardModel, net_number: int, pad: LinkTerminal) -> Any:
+    """The copper island holding ``pad``, with true via spans and arc geometry.
+
+    Issue #10486.  :func:`net_components` models a via on every layer and an
+    arc as its chords, which can call a blind via's far side or a chord's
+    neighbour "connected".  Here a via covers only the layers it spans, an arc
+    follows its circle, and copper accepted earlier in this run is included.
+    """
+    from shapely.geometry import LineString, Point
+
+    copper = model.copper
+    nodes: list[dict[str, Any]] = []
+    destination = None
+    for fp in pcb.footprints:
+        for pin in fp.pads:
+            if pin.net_number != net_number:
+                continue
+            layers = _pad_layers(pin.layers, copper)
+            lands = _padstack_lands(fp, pin, layers)
+            if lands is None:
+                lands = _uniform_pad_lands(fp, pin, layers)
+            if not lands:
+                continue
+            nodes.append(lands)
+            if f"{fp.reference}.{pin.number}" == pad.label and destination is None:
+                destination = nodes[-1]
+    if not destination:
+        return None
+    for seg in [*pcb.segments, *model.extra_segments]:
+        if seg.net_number != net_number or seg.layer not in copper:
+            continue
+        line = LineString([seg.start, seg.end]) if seg.start != seg.end else Point(seg.start)
+        nodes.append({seg.layer: line.buffer(seg.width / 2)})
+    for arc in getattr(pcb, "arcs", []) or []:
+        if int(getattr(arc, "net_number", 0) or 0) != net_number or arc.layer not in copper:
+            continue
+        try:
+            pts = arc.centerline_points(0.005)
+        except ValueError:
+            pts = [arc.start, arc.mid, arc.end]
+        nodes.append({arc.layer: LineString(pts).buffer(float(arc.width or 0.2) / 2)})
+    for via in pcb.vias:
+        if via.net_number == net_number:
+            center = Point(via.position)
+            lands = {
+                layer: center.buffer(diameter / 2)
+                for layer in _via_span(list(via.layers or []), copper)
+                if (diameter := via.copper_diameter(layer)) is not None and diameter > 0
+            }
+            if lands:
+                nodes.append(lands)
+    for vx, vy, size, via_net in model.extra_vias:
+        if via_net != net_number:
+            continue
+        nodes.append(dict.fromkeys(copper, Point(vx, vy).buffer(size / 2)))
+    for layer, fills in model.fills.items():
+        nodes.extend({layer: poly} for net, poly in fills if net == net_number)
+    return next(
+        (
+            comp
+            for comp in _merge_nodes(nodes, copper)
+            if any(
+                layer in comp and comp[layer].intersects(geom)
+                for layer, geom in destination.items()
+            )
+        ),
+        None,
+    )
 
 
 def padless_components(
@@ -663,6 +896,7 @@ def route_link(
     allowed_layers: Collection[str] | None = None,
     plane_corridor: PlaneCorridor | None = None,
     grid_anchor: tuple[float, float] | None = None,
+    grid_digits: int = 2,
 ) -> LinkRoute | None:
     """Route copper from terminal ``a`` to terminal ``b`` on net ``net_number``.
 
@@ -690,10 +924,9 @@ def route_link(
     if model.outline is not None:
         ob = model.outline.bounds
         x0, y0, x1, y1 = max(x0, ob[0]), max(y0, ob[1]), min(x1, ob[2]), min(y1, ob[3])
-    # Align the grid on A's anchor (snapped to 0.01 mm, the precision the PCB
-    # writer keeps) so the written copper is exactly the copper checked here.
+    # Align the grid on the anchor at the precision its route writer uses.
     anchor_x, anchor_y = grid_anchor or a.point
-    gx0, gy0 = round(anchor_x, 2), round(anchor_y, 2)
+    gx0, gy0 = round(anchor_x, grid_digits), round(anchor_y, grid_digits)
     ix0 = math.floor((x0 - gx0) / g)
     iy0 = math.floor((y0 - gy0) / g)
     nx = int(math.ceil((x1 - gx0) / g)) - ix0 + 1
@@ -701,8 +934,8 @@ def route_link(
     nl = len(copper)
     if nx <= 1 or ny <= 1 or nx * ny * nl > rules.max_cells:
         return None
-    xs = np.round(gx0 + (ix0 + np.arange(nx)) * g, 2)
-    ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, 2)
+    xs = np.round(gx0 + (ix0 + np.arange(nx)) * g, grid_digits)
+    ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, grid_digits)
     gx, gy = np.meshgrid(xs, ys, indexing="ij")
     flat_x, flat_y = gx.ravel(), gy.ravel()
     reach = 1.0
@@ -1137,6 +1370,366 @@ def route_link_via(
     )
 
 
+def _junction_pad_areas(
+    pcb: PCB, model: _BoardModel, destination: LinkTerminal
+) -> tuple[dict[str, Any], LinkTerminal]:
+    """Pad areas a written junction and its branch must clear on each layer."""
+    from shapely.ops import unary_union
+
+    from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
+    from kicad_tools.validate.mask_geometry import (
+        board_mask_margin,
+        pad_mask_margin,
+        pad_mask_sides,
+    )
+
+    board_margin, declared = board_mask_margin(pcb)
+    default_margin = board_margin if board_margin is not None else math.nan
+    board_version = pcb._file_version()
+    uniform = []
+    per_layer: dict[str, list[Any]] = {}
+    unknown_sites: set[str] = set()
+    unknown_target: set[str] = set()
+    target: dict[str, list[Any]] = {}
+    for fp in pcb.footprints:
+        for pin in fp.pads:
+            mask_layers = {f"{side}.Cu" for side in pad_mask_sides(pin)}
+            layers = set(_pad_layers(pin.layers, model.copper)) | mask_layers
+            is_target = f"{fp.reference}.{pin.number}" == destination.label
+            stack = _padstack_lands(fp, pin, layers)
+            if stack is None:
+                outline = pad_copper_outline(pin, fp.position, fp.rotation)
+                if outline is None:
+                    continue
+                if not pad_outline_is_exact(pin):
+                    outline = outline.union(_pad_geometry(fp, pin))
+                uniform.append(outline)
+                lands = dict.fromkeys(layers, outline)
+            else:
+                lands = stack
+                unknown_sites.update(layers - lands.keys())
+                if is_target:
+                    unknown_target.update(layers - lands.keys())
+            if mask_layers:
+                margin, _ = pad_mask_margin(
+                    pin, fp, default_margin, declared, board_version=board_version
+                )
+            else:
+                margin = 0.0
+            if margin is None or not math.isfinite(margin):
+                return {}, destination
+            for layer, land in lands.items():
+                # A contracted opening still leaves the copper to avoid.
+                expanded = layer in mask_layers and margin > 0
+                area = land.buffer(margin, join_style="mitre") if expanded else land
+                if stack is not None or expanded:
+                    per_layer.setdefault(layer, []).append(area)
+                if is_target:
+                    target.setdefault(layer, []).append(area)
+
+    projections = unary_union(uniform)
+    sites = {
+        layer: unary_union([projections, *per_layer[layer]]) if layer in per_layer else projections
+        for layer in model.copper
+        if layer not in unknown_sites
+    }
+    target_areas = {layer: unary_union(shapes) for layer, shapes in target.items()}
+    target_areas.update(dict.fromkeys(unknown_target))
+    return sites, LinkTerminal(destination.label, destination.point, target_areas)
+
+
+def junction_sites(
+    pcb: PCB,
+    model: _BoardModel,
+    net_number: int,
+    pad: LinkTerminal,
+    near: tuple[float, float],
+    rules: LinkRouteRules,
+    *,
+    endpoint_layer: str | None = None,
+    allowed_layers: Collection[str] | None = None,
+    pad_areas: dict[str, Any] | None = None,
+) -> list[_JunctionSite]:
+    """The straight tracks a branch from ``near`` can join, nearest first.
+
+    Issue #10486.  A track qualifies when it is on ``net_number``, belongs to
+    the copper island holding ``pad`` -- so it is electrically connected to the
+    pad, which a same-net island that merely carries the name is not -- lies on
+    ``endpoint_layer``, and on one of ``allowed_layers`` when that is given.
+    Its junction is the point of its centreline nearest to ``near`` that keeps
+    half the new track's width from every pad, so the branch's end cap stays
+    out of each pad opening.  Returns at most ``_JUNCTION_CANDIDATES`` entries
+    of ``(distance to ``near``, track, junction)``.
+
+    Keeping clear of the pads can only move a junction farther from ``near``,
+    so a track is only measured against the pads while it can still be among the
+    nearest: on a net with thousands of tracks that is a few dozen of them.
+    Consecutive pieces of one drawn track share endpoints, so a junction point
+    is offered once, for the nearest track that has it.
+    """
+    import shapely
+    from shapely.geometry import LineString, Point
+    from shapely.ops import nearest_points
+
+    if pad_areas is None:
+        pad_areas, _ = _junction_pad_areas(pcb, model, pad)
+    if not pad_areas:
+        return []
+    island = _join_island(pcb, model, net_number, pad)
+    if island is None:
+        return []
+    for geom in island.values():
+        shapely.prepare(geom)
+    from_here = Point(near)
+    tracks: list[tuple[float, Segment, Any]] = []
+    for seg in [*pcb.segments, *model.extra_segments]:
+        if (
+            seg.net_number != net_number
+            or seg.start == seg.end
+            or seg.layer not in island
+            or seg.layer not in pad_areas
+        ):
+            continue
+        if endpoint_layer is not None and seg.layer != endpoint_layer:
+            continue
+        if allowed_layers is not None and seg.layer not in allowed_layers:
+            continue
+        line = LineString([seg.start, seg.end])
+        if not line.buffer(seg.width / 2).intersects(island[seg.layer]):
+            continue
+        tracks.append((line.distance(from_here), seg, line))
+    tracks.sort(key=lambda track: track[0])
+    keep_out: dict[tuple[str, float], Any] = {}
+    taken: set[tuple[float, float, str]] = set()
+    sites: list[_JunctionSite] = []
+    for unkept, seg, line in tracks:
+        if len(sites) == _JUNCTION_CANDIDATES and unkept > sites[-1][0]:
+            break  # every track from here on is farther than the nearest kept
+        margin = rules.width_for(seg.layer) / 2
+        clearance_key = (seg.layer, margin)
+        if clearance_key not in keep_out:
+            keep_out[clearance_key] = pad_areas[seg.layer].buffer(margin)
+        outside = line.difference(keep_out[clearance_key])
+        if outside.is_empty:
+            continue
+        junction = nearest_points(outside, from_here)[0].coords[0]
+        # Consecutive pieces of one drawn track can offer the same point.
+        key = (
+            round(junction[0], _JUNCTION_DIGITS),
+            round(junction[1], _JUNCTION_DIGITS),
+            seg.layer,
+        )
+        if key in taken:
+            continue
+        taken.add(key)
+        sites.append((math.dist(junction, near), seg, junction))
+        sites.sort(key=lambda site: site[0])
+        del sites[_JUNCTION_CANDIDATES:]
+    return sites
+
+
+def _written_point(
+    x: float, y: float, origin: tuple[float, float], digits: int = 2
+) -> tuple[float, float]:
+    """Board-relative point after the writer rounds absolute coordinates."""
+    from kicad_tools.sexp.builders import fmt
+
+    ox, oy = origin
+    return fmt(x + ox, digits) - ox, fmt(y + oy, digits) - oy
+
+
+def _file_nm(point: tuple[float, float], origin: tuple[float, float]) -> tuple[int, int]:
+    """Absolute integer coordinates as stored in a KiCad PCB."""
+    return round((point[0] + origin[0]) * 1_000_000), round((point[1] + origin[1]) * 1_000_000)
+
+
+def _native_junction(
+    point: tuple[float, float], seg: Segment, origin: tuple[float, float]
+) -> tuple[float, float]:
+    """Nearest file-representable point on the straight host, without bending it."""
+    ax, ay = _file_nm(seg.start, origin)
+    bx, by = _file_nm(seg.end, origin)
+    steps = math.gcd(bx - ax, by - ay)
+    if not steps:
+        return seg.start
+    # All collinear integer points lie on multiples of this primitive step.
+    dx, dy = (bx - ax) // steps, (by - ay) // steps
+    px = (point[0] - seg.start[0]) * 1_000_000
+    py = (point[1] - seg.start[1]) * 1_000_000
+    step = max(0, min(steps, round((px * dx + py * dy) / (dx * dx + dy * dy))))
+    return (
+        round((ax + step * dx) / 1_000_000 - origin[0], _JUNCTION_DIGITS),
+        round((ay + step * dy) / 1_000_000 - origin[1], _JUNCTION_DIGITS),
+    )
+
+
+def _branch_clears_pad(
+    route: LinkRoute, pad: LinkTerminal, origin: tuple[float, float] = (0.0, 0.0)
+) -> bool:
+    """True when the written branch copper clears the destination pad and mask.
+
+    Issue #10486: a branch that ends on a track but crosses the destination
+    pad on the way defeats the join.  Segments are measured as written
+    (coordinates rounded as the writer rounds them).
+    """
+    from shapely.geometry import LineString, Point
+
+    from kicad_tools.sexp.builders import fmt
+
+    for x1, y1, x2, y2, layer in route.segments:
+        if layer not in pad.layers:
+            continue
+        geom = pad.layers[layer]
+        if geom is None:  # the destination has an unmodelled land on this layer
+            return False
+        a = _written_point(x1, y1, origin, route.coordinate_digits)
+        b = _written_point(x2, y2, origin, route.coordinate_digits)
+        line = LineString([a, b]) if a != b else Point(a)
+        if line.distance(geom) < fmt(route.width_for(layer)) / 2 - 1e-9:
+            return False
+    # The link writer emits through vias, whose lands occupy both faces.
+    for x, y in route.vias:
+        center = Point(_written_point(x, y, origin, route.coordinate_digits))
+        if any(
+            geom is None or center.distance(geom) < fmt(route.via_size) / 2 - 1e-9
+            for geom in pad.layers.values()
+        ):
+            return False
+    return True
+
+
+def route_link_junction(
+    pcb: PCB,
+    net_number: int,
+    net_name: str,
+    source: LinkTerminal,
+    pad: LinkTerminal,
+    rules: LinkRouteRules,
+    *,
+    model: _BoardModel | None = None,
+    endpoint_layer: str | None = None,
+    allowed_layers: Collection[str] | None = None,
+    plane_corridor: PlaneCorridor | None = None,
+    failure: dict[str, Any] | None = None,
+) -> LinkRoute | None:
+    """Route from ``source`` onto a track electrically connected to ``pad``.
+
+    Issue #10486: the ``kct route-link --join-track`` opt-in.  Each track from
+    :func:`junction_sites` is routed to, nearest first, by :func:`route_link`
+    against a point terminal on its centreline, so every routing rule still
+    validates the branch and it ends exactly where the track is split.  A route
+    counts only when its last segment lies on the track's layer and ends on
+    that point: one that reaches the junction on another layer through a via
+    parked on the track is not a track joining a track, and is passed over.
+    The best route wins (fewest vias, then shortest).  The search stops once a
+    via-free route is shorter than the straight-line distance to every
+    remaining track, measured from inside the source's own copper.  ``None``
+    when no track qualifies or no branch that ends on one routes;
+    ``failure["reason"]`` then says which.
+    """
+    from shapely.geometry import Point
+
+    model = model or _build_model(pcb)
+    pad_areas, destination = _junction_pad_areas(pcb, model, pad)
+    sites = junction_sites(
+        pcb,
+        model,
+        net_number,
+        pad,
+        source.point,
+        rules,
+        endpoint_layer=endpoint_layer,
+        allowed_layers=allowed_layers,
+        pad_areas=pad_areas,
+    )
+    if not sites:
+        if failure is not None:
+            failure["reason"] = (
+                "no straight track outside every pad is electrically connected to "
+                "the destination pad on the allowed layers"
+            )
+        return None
+    if source.exact_pad_lands is not None:
+        lands = {
+            layer: land for layer, land in source.exact_pad_lands.items() if layer in source.layers
+        }
+        if not lands:
+            if failure is not None:
+                failure["reason"] = "no known source pad land on the starting layers"
+            return None
+        source = replace(source, layers=lands)
+    source_reach = max(g.hausdorff_distance(Point(source.point)) for g in source.layers.values())
+    best: tuple[tuple[int, float], LinkRoute] | None = None
+    from kicad_tools.sexp.builders import fmt
+
+    origin = pcb.board_origin
+    for dist, seg, raw in sites:
+        if best is not None and not best[1].vias and dist - source_reach > best[0][1]:
+            break
+        site = (round(raw[0], 2), round(raw[1], 2))
+        # A junction the writer treats as the host's own end is that end exactly,
+        # so the host, the branch and the report share one coordinate.
+        for end in (seg.start, seg.end):
+            if math.dist(site, end) <= _JUNCTION_END_TOL:
+                site = end
+                break
+        digits = 2
+        written = _written_point(*site, origin)
+        if site in (seg.start, seg.end):
+            if math.dist(site, written) > 1e-9:
+                continue
+        elif not _holds(written, seg.start, seg.end, origin):
+            # Rounding the projection to the usual route grid would bend the
+            # host. Try its actual centreline at the board's native precision.
+            digits = _JUNCTION_DIGITS
+            site = _native_junction(raw, seg, origin)
+            written = _written_point(*site, origin, digits)
+        if not _holds(written, seg.start, seg.end, origin):
+            continue
+        cap = Point(written)
+        if cap.distance(pad_areas[seg.layer]) < fmt(rules.width_for(seg.layer)) / 2 - 1e-9:
+            continue
+        target = LinkTerminal(f"junction {seg.layer}", site, {seg.layer: Point(site)})
+        route = route_link(
+            pcb,
+            net_number,
+            net_name,
+            source,
+            target,
+            rules,
+            model=model,
+            allowed_layers=allowed_layers,
+            grid_anchor=site,
+            grid_digits=digits,
+            plane_corridor=plane_corridor,
+        )
+        if route is None or not route.segments or route.segments[-1][2:] != (*site, seg.layer):
+            continue
+        if source.exact_pad_lands is not None:
+            # A small pad can lose its inset entirely. Check the serialized
+            # endpoint too, since adding the board origin can round it again.
+            x, y, _, _, layer = route.segments[0]
+            land = source.layers.get(layer)
+            if land is None or not land.covers(Point(_written_point(x, y, origin, digits))):
+                continue
+        route.junction = LinkJunction(
+            site, seg.layer, seg.start, seg.end, seg.width, seg.uuid, digits
+        )
+        if not _branch_clears_pad(route, destination, origin) or not _branch_clears_pad(
+            collapse_link_route(route), destination, origin
+        ):
+            continue
+        length = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _ in route.segments)
+        if best is None or (len(route.vias), length) < best[0]:
+            best = (len(route.vias), length), route
+    if best is None and failure is not None:
+        failure["reason"] = (
+            "no routable branch ends on a track connected to the destination pad "
+            f"({len(sites)} tried)"
+        )
+    return best[1] if best is not None else None
+
+
 def explain_link_failure(
     pcb: PCB,
     net_number: int,
@@ -1369,7 +1962,9 @@ def append_link_routes(
     route in the same order: each call only appends nodes to the document
     tail, and the serializer is a fixed point of load/save.  A board-03
     oracle attempt commits ~20 routes, and each separate load+save of the
-    ~750 KB file cost ~0.4 s (Issue #5911).
+    ~750 KB file cost ~0.4 s (Issue #5911).  A route that carries a junction
+    (``LinkRoute.junction``, Issue #10486) also splits its host track, in
+    place, before the branch is appended.
     """
     if not routes:
         return
@@ -1450,18 +2045,142 @@ def collapse_link_route(route: LinkRoute) -> LinkRoute:
     return replace(route, segments=out, vias=list(route.vias))
 
 
+#: Tolerance matching a junction's host track to its board-file node by its
+#: endpoints (mm): the model's board-relative coordinates are the file's less
+#: the board origin, a float subtraction that is not bit-exact.
+_HOST_MATCH_TOL = 1e-6
+
+#: ``(node, start, end, layer, width)`` of one ``(segment ...)`` board-file node.
+_FileTrack = tuple[Any, tuple[float, float], tuple[float, float], str, float]
+
+
+def _file_track(node: Any) -> _FileTrack | None:
+    """The ``_FileTrack`` of a ``(segment ...)`` node, or ``None``."""
+    start, end, layer, width = (node.get(name) for name in ("start", "end", "layer", "width"))
+    if start is None or end is None or layer is None or width is None:
+        return None
+    return (
+        node,
+        (start.get_float(0) or 0.0, start.get_float(1) or 0.0),
+        (end.get_float(0) or 0.0, end.get_float(1) or 0.0),
+        layer.get_string(0) or "",
+        width.get_float(0) or 0.0,
+    )
+
+
+def _holds(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+    origin: tuple[float, float] = (0.0, 0.0),
+) -> bool:
+    """True when the point is on the segment at KiCad's nanometre precision."""
+    (x, y), (ax, ay), (bx, by) = (_file_nm(p, origin) for p in (point, start, end))
+    return (
+        (x - ax) * (by - ay) == (y - ay) * (bx - ax)
+        and min(ax, bx) <= x <= max(ax, bx)
+        and min(ay, by) <= y <= max(ay, by)
+    )
+
+
+def _split_track(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> None:
+    """Split the track carrying ``route.junction`` at the junction (Issue #10486).
+
+    The track is the one with the endpoints the router saw, else whichever piece
+    of it holds the junction: an earlier link in the same run may already have
+    split it.  Each half is a copy of the node with one endpoint moved, so width,
+    layer, the net reference in the board's own dialect and any lock flag
+    survive verbatim; the half toward the original end takes a fresh uuid.  A
+    junction on an endpoint that already exists leaves the node alone.
+    """
+    from kicad_tools.cli.stitch_cmd import _stitch_uuid
+    from kicad_tools.sexp import SExp, parse_string
+
+    junction = route.junction
+    assert junction is not None  # the caller only splits a route that carries one
+    ox, oy = origin
+    at = junction.file_point(origin)
+    tracks: list[_FileTrack] = []
+    for node in doc.children:
+        if node.name != "segment":
+            continue
+        track = _file_track(node)
+        if (
+            track is not None
+            and track[3] == junction.layer
+            and abs(track[4] - junction.width) <= _HOST_MATCH_TOL
+            and _holds(at, track[1], track[2])
+        ):
+            tracks.append(track)
+    seen = (
+        (junction.start[0] + ox, junction.start[1] + oy),
+        (junction.end[0] + ox, junction.end[1] + oy),
+    )
+    host = next(
+        (
+            t
+            for t in tracks
+            if all(
+                math.dist(a, b) <= _HOST_MATCH_TOL for a, b in zip((t[1], t[2]), seen, strict=True)
+            )
+        ),
+        None,
+    )
+    if host is None:
+        host = next((t for t in tracks if _holds(t[1], *seen) and _holds(t[2], *seen)), None)
+    if host is None:
+        raise ValueError(
+            f"no track on {junction.layer} holds the junction at {at[0]:g},{at[1]:g} to split"
+        )
+    node, start, end, _layer, _width = host
+    if at in (start, end):
+        return
+    first, second = parse_string(node.to_string()), parse_string(node.to_string())
+
+    def put(target: SExp, name: str, value: SExp) -> None:
+        target.children[[child.name for child in target.children].index(name)] = value
+
+    put(first, "end", SExp.list("end", *at))
+    put(second, "start", SExp.list("start", *at))
+    # The identity lives in ``uuid`` (KiCad 7+) or ``tstamp`` (older dialects).
+    for identity in ("uuid", "tstamp"):
+        if second.get(identity) is not None:
+            put(
+                second,
+                identity,
+                SExp.list(
+                    identity,
+                    _stitch_uuid(
+                        "junction-seg",
+                        junction.point[0],
+                        junction.point[1],
+                        end[0] - ox,
+                        end[1] - oy,
+                        junction.layer,
+                        route.net_number,
+                    ),
+                ),
+            )
+    at_node = doc.children.index(node)
+    doc.children[at_node : at_node + 1] = [first, second]
+
+
 def _append_route_nodes(
     doc: Any, route: LinkRoute, origin: tuple[float, float], name_only: bool = False
 ) -> None:
     from kicad_tools.cli.stitch_cmd import _stitch_uuid
-    from kicad_tools.sexp.builders import fmt, segment_node, via_node
+    from kicad_tools.sexp.builders import segment_node, via_node
 
     ox, oy = origin
+    if route.junction is not None:
+        _split_track(doc, route, origin)
     net_name = route.net_name if name_only and route.net_name else None
     for x_a, y_a, x_b, y_b, layer in route.segments:
         # Issue #8495: compare after the rounding ``segment_node`` applies, so a
         # sub-resolution sliver is not serialized as a zero-length segment.
-        if (fmt(x_a + ox), fmt(y_a + oy)) == (fmt(x_b + ox), fmt(y_b + oy)):
+        if _written_point(x_a, y_a, origin, route.coordinate_digits) == _written_point(
+            x_b, y_b, origin, route.coordinate_digits
+        ):
             continue
         doc.append(
             segment_node(
@@ -1474,6 +2193,7 @@ def _append_route_nodes(
                 net=route.net_number,
                 net_name=net_name,
                 uuid_str=_stitch_uuid("oracle-seg", x_a, y_a, x_b, y_b, layer, route.net_number),
+                coordinate_digits=route.coordinate_digits,
             )
         )
     for vx, vy in route.vias:
@@ -1487,5 +2207,6 @@ def _append_route_nodes(
                 net=route.net_number,
                 net_name=net_name,
                 uuid_str=_stitch_uuid("oracle-via", vx, vy, route.net_number),
+                coordinate_digits=route.coordinate_digits,
             )
         )
