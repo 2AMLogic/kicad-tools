@@ -478,6 +478,15 @@ def cleanup_pour_slots(
     if not pairs:
         return result
 
+    # An unclipped zone can support a checker advisory on an incomplete
+    # board, but cannot prove that changing copper would restore a pour.
+    from kicad_tools.analysis.layout_quality import board_material_geometry
+
+    if board_material_geometry(pcb) is None:
+        result.left_alone = len(pairs)
+        result.left_alone_reasons.append("could not establish board material from Edge.Cuts")
+        return result
+
     baseline = referee(pcb) if any(not p.unresolved_rules for p in pairs) else {}
     if baseline is None:
         result.refused_reason = "referee unavailable (kicad-cli could not run); no edits applied"

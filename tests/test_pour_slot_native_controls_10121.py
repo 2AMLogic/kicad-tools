@@ -330,6 +330,39 @@ def _write_connected_board(board: Path, gap: float, zones: tuple[str, ...]) -> N
     pcb.save(board)
 
 
+@pytest.mark.parametrize("right_edge", [48, 49])
+def test_remote_cutout_preserves_public_slot_and_spread(tmp_path, capsys, monkeypatch, right_edge):
+    from kicad_tools.cli import main, optimize_cmd
+
+    board = tmp_path / "control.kicad_pcb"
+    _write_connected_board(board, 2.15, (ZONE,))
+    board.with_suffix(".kicad_dru").write_text(
+        """(version 1)
+(rule "track to pour" (condition "A.Type == 'Track' && B.Type == 'Zone'")
+    (constraint clearance (min 1mm)))
+"""
+    )
+    pcb = PCB.load(board)
+    pcb._sexp.append(
+        parse_string(
+            f"(gr_rect (start 22 1) (end {right_edge} 39) (stroke (width 0.05) (type default)) "
+            '(fill none) (layer "Edge.Cuts"))'
+        )
+    )
+    pcb.save(board)
+    # The strips at X=11..19 see the same copper on either side of the point
+    # where the distant hole becomes larger than the remaining laminate.
+    assert _public_pour_slot_count(board, capsys) == 1
+    monkeypatch.setattr(optimize_cmd, "_kicad_cli_drc_counts", lambda *a, **kw: {})
+    monkeypatch.setattr(optimize_cmd, "_refill_written_board", lambda *a, **kw: (True, None))
+    assert (
+        main(["optimize-traces", str(board), "--net", "GND", "--pour-slots", "--format", "json"])
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["pour_slots"]["spread"] == 1
+    assert _public_pour_slot_count(board, capsys) == 0
+
+
 def _saved_gap_and_film(board: Path, pour_net: str = "GND"):
     from shapely.geometry import LineString, Polygon
     from shapely.ops import unary_union

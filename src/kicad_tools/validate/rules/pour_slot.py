@@ -155,18 +155,10 @@ def iter_pour_slot_pairs(
 
 
 def _board_material(pcb: PCB) -> BaseGeometry | None:
-    """Return the board-relative material polygon, or None if unavailable."""
-    from kicad_tools.pcb.board_geometry import BoardGeometry
+    """Every certifiable board-relative material component, with cutouts removed."""
+    from kicad_tools.analysis.layout_quality import board_material_geometry
 
-    if getattr(pcb, "_sexp", None) is None:
-        return None  # not a parsed board: no Edge.Cuts to clip against
-    try:
-        polygon = BoardGeometry.from_pcb(pcb).polygon
-    except (ImportError, ValueError):
-        return None
-    if polygon is None or polygon.is_empty:
-        return None
-    return polygon if polygon.is_valid else polygon.buffer(0)
+    return board_material_geometry(pcb)
 
 
 class PourSlotRule(DRCRule):
