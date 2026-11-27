@@ -441,6 +441,9 @@ def run_check_command(args) -> int:
 
 def run_validate_command(args) -> int:
     """Handle validate command."""
+    if getattr(args, "channel_intent", None) or getattr(args, "validate_netlist", None):
+        return _run_channel_intent(args)
+
     # Route to connectivity validation if --connectivity flag is set
     if getattr(args, "connectivity", False):
         return run_validate_connectivity_command(args)
@@ -459,7 +462,10 @@ def run_validate_command(args) -> int:
 
     # Default to sync validation
     if not args.sync:
-        print("Usage: kicad-tools validate --sync [options] <project>")
+        print(
+            "Usage: kicad-tools validate --channel-intent <intent.json> <schematic|netlist> <pcb>"
+        )
+        print("       kicad-tools validate --sync [options] <project>")
         print("       kicad-tools validate --sync [options] <schematic> <pcb>")
         print("       kicad-tools validate --connectivity [options] <pcb>")
         print("       kicad-tools validate --consistency [options] <project>")
@@ -498,6 +504,52 @@ def run_validate_command(args) -> int:
     if getattr(args, "validate_verbose", False):
         sub_argv.append("--verbose")
     return validate_sync_main(sub_argv)
+
+
+def _run_channel_intent(args) -> int:
+    import json
+    import sys
+    from dataclasses import asdict
+    from pathlib import Path
+
+    from kicad_tools.exceptions import KiCadToolsError
+    from kicad_tools.validate.channel_intent import check_channel_intent
+
+    if not args.channel_intent or any(
+        (args.sync, args.connectivity, args.consistency, args.lvs, args.placement)
+    ):
+        print("Select --channel-intent as the sole validation mode", file=sys.stderr)
+        return 2
+    designs = [path for path in (args.validate_schematic, args.validate_netlist) if path]
+    boards = [args.validate_pcb] if args.validate_pcb else []
+    for path in args.validate_files:
+        if Path(path).suffix == ".kicad_pcb":
+            boards.append(path)
+        else:
+            designs.append(path)
+    if len(designs) != 1 or len(boards) != 1:
+        print("Provide one .kicad_sch or exported netlist and one .kicad_pcb", file=sys.stderr)
+        return 2
+
+    try:
+        findings = check_channel_intent(
+            Path(args.channel_intent), Path(designs[0]), Path(boards[0])
+        )
+    except (ValueError, OSError, RuntimeError, KiCadToolsError) as exc:
+        print(f"Channel intent check failed: {exc}", file=sys.stderr)
+        return 2
+    if args.validate_format == "json":
+        print(json.dumps({"findings": [asdict(f) for f in findings]}, indent=2, ensure_ascii=False))
+    else:
+        if args.validate_format != "summary":
+            for f in findings:
+                target = f"pin {f.pin}" if f.pin is not None else f.field
+                observed = "missing" if f.observed is None else repr(f.observed)
+                print(
+                    f"{f.source} {f.instance} {f.reference} {target}: expected {f.expected!r}, observed {observed}"
+                )
+        print(f"Channel intent: {len(findings)} mismatches")
+    return int(bool(findings))
 
 
 def run_validate_connectivity_command(args) -> int:

@@ -77,10 +77,9 @@ def run_center_on_sheet(
             print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    dest = output_path if output_path is not None else pcb_path
     result = {
         "input": str(pcb_path),
-        "output": str(dest) if (report.changed and not dry_run) else None,
+        "output": str(report.output) if report.output is not None else None,
         "dry_run": dry_run,
         "changed": report.changed,
         "paper_before": report.paper_before,
@@ -91,6 +90,7 @@ def run_center_on_sheet(
         "dx_mm": report.dx_mm,
         "dy_mm": report.dy_mm,
         "translated_items": report.translated_items,
+        "sidecar": str(report.sidecar) if report.sidecar is not None else None,
     }
 
     if output_format == "json":
@@ -119,8 +119,11 @@ def run_center_on_sheet(
             print(f"  New bbox: ({ba[0]:g}, {ba[1]:g}) - ({ba[2]:g}, {ba[3]:g})")
             if report.translated_items:
                 print(f"  Items translated: {report.translated_items}")
-            if not dry_run:
-                print()
-                print(f"  Saved to: {dest}")
+        if report.sidecar is not None:
+            sverb = "Would update" if dry_run else "Updated"
+            print(f"  {sverb} reinforcement sidecar: {report.sidecar}")
+        if report.output is not None:
+            print()
+            print(f"  Saved to: {report.output}")
 
     return 0

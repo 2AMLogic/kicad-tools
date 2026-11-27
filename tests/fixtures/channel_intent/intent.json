@@ -1,0 +1,18 @@
+{
+  "roles": {
+    "compensation": {"value": "1 µF", "fields": {"LCSC": "C106248"}, "pins": {"1": "cathode", "2": "ref"}},
+    "upper": {"value": "10k", "pins": {"1": "high", "2": "ref"}},
+    "lower": {"value": "4k7", "pins": {"1": "ref", "2": "low"}}
+  },
+  "private_nets": ["cathode", "ref"],
+  "instances": {
+    "27": {
+      "references": {"compensation": "C127", "upper": "R327", "lower": "R427"},
+      "nets": {"high": "T28", "low": "T27", "cathode": "/K27", "ref": "/REF27"}
+    },
+    "28": {
+      "references": {"compensation": "C128", "upper": "R328", "lower": "R428"},
+      "nets": {"high": "T29", "low": "T28", "cathode": "/K28", "ref": "/REF28"}
+    }
+  }
+}
