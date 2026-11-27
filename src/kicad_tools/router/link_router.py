@@ -705,8 +705,14 @@ def _join_island(pcb: PCB, model: _BoardModel, net_number: int, pad: LinkTermina
         nodes.append({arc.layer: LineString(pts).buffer(float(arc.width or 0.2) / 2)})
     for via in pcb.vias:
         if via.net_number == net_number:
-            disk = Point(via.position).buffer((via.size or 0.0) / 2)
-            nodes.append(dict.fromkeys(_via_span(list(via.layers or []), copper), disk))
+            center = Point(via.position)
+            lands = {
+                layer: center.buffer(diameter / 2)
+                for layer in _via_span(list(via.layers or []), copper)
+                if (diameter := via.copper_diameter(layer)) is not None and diameter > 0
+            }
+            if lands:
+                nodes.append(lands)
     for vx, vy, size, via_net in model.extra_vias:
         if via_net != net_number:
             continue
@@ -1267,6 +1273,66 @@ def route_link_via(
     )
 
 
+def _junction_pad_areas(
+    pcb: PCB, model: _BoardModel, destination: LinkTerminal
+) -> tuple[dict[str, Any], LinkTerminal]:
+    """Pad areas a written junction and its branch must clear on each layer."""
+    from shapely.ops import unary_union
+
+    from kicad_tools.geometry.copper import pad_copper_outline, pad_outline_is_exact
+    from kicad_tools.validate.mask_geometry import (
+        board_mask_margin,
+        pad_mask_margin,
+        pad_mask_sides,
+    )
+
+    board_margin, declared = board_mask_margin(pcb)
+    default_margin = board_margin if board_margin is not None else math.nan
+    board_version = pcb._file_version()
+    copper = []
+    expanded: dict[str, list[Any]] = {}
+    target: dict[str, list[Any]] = {}
+    for fp in pcb.footprints:
+        for pin in fp.pads:
+            outline = pad_copper_outline(pin, fp.position, fp.rotation)
+            if outline is None:
+                continue
+            if not pad_outline_is_exact(pin):
+                # The connectivity fallback can erode an unsupported pad shape.
+                # Retain at least the router's existing pad exclusion there.
+                outline = outline.union(_pad_geometry(fp, pin))
+            copper.append(outline)
+            pad_layers = _pad_layers(pin.layers, model.copper)
+            mask_layers = {f"{side}.Cu" for side in pad_mask_sides(pin)}
+            opening = outline
+            if mask_layers:
+                margin, _ = pad_mask_margin(
+                    pin, fp, default_margin, declared, board_version=board_version
+                )
+                if margin is None or not math.isfinite(margin):
+                    return {}, destination
+                # A contracted mask still leaves pad copper to avoid. Square
+                # corners bound the positive expansion of a rectangular land.
+                if margin > 0:
+                    opening = outline.buffer(margin, join_style="mitre")
+                    for layer in mask_layers:
+                        expanded.setdefault(layer, []).append(opening)
+            if f"{fp.reference}.{pin.number}" == destination.label:
+                for layer in set(pad_layers) | mask_layers:
+                    target.setdefault(layer, []).append(
+                        opening if layer in mask_layers else outline
+                    )
+
+    # Junctions already stay outside every pad projection. Add physical mask
+    # expansions only on the face containing the opening.
+    projections = unary_union(copper)
+    sites = dict.fromkeys(model.copper, projections)
+    for layer, shapes in expanded.items():
+        sites[layer] = unary_union([projections, *shapes])
+    layers = {layer: unary_union(shapes) for layer, shapes in target.items()}
+    return sites, LinkTerminal(destination.label, destination.point, layers)
+
+
 def junction_sites(
     pcb: PCB,
     model: _BoardModel,
@@ -1277,6 +1343,7 @@ def junction_sites(
     *,
     endpoint_layer: str | None = None,
     allowed_layers: Collection[str] | None = None,
+    pad_areas: dict[str, Any] | None = None,
 ) -> list[_JunctionSite]:
     """The straight tracks a branch from ``near`` can join, nearest first.
 
@@ -1297,8 +1364,12 @@ def junction_sites(
     """
     import shapely
     from shapely.geometry import LineString, Point
-    from shapely.ops import nearest_points, unary_union
+    from shapely.ops import nearest_points
 
+    if pad_areas is None:
+        pad_areas, _ = _junction_pad_areas(pcb, model, pad)
+    if not pad_areas:
+        return []
     island = _join_island(pcb, model, net_number, pad)
     if island is None:
         return []
@@ -1318,17 +1389,17 @@ def junction_sites(
             continue
         tracks.append((line.distance(from_here), seg, line))
     tracks.sort(key=lambda track: track[0])
-    pads = unary_union(model.pad_geoms)
-    keep_out: dict[float, Any] = {}
+    keep_out: dict[tuple[str, float], Any] = {}
     taken: set[tuple[float, float, str]] = set()
     sites: list[_JunctionSite] = []
     for unkept, seg, line in tracks:
         if len(sites) == _JUNCTION_CANDIDATES and unkept > sites[-1][0]:
             break  # every track from here on is farther than the nearest kept
         margin = rules.width_for(seg.layer) / 2
-        if margin not in keep_out:
-            keep_out[margin] = pads.buffer(margin)
-        outside = line.difference(keep_out[margin])
+        clearance_key = (seg.layer, margin)
+        if clearance_key not in keep_out:
+            keep_out[clearance_key] = pad_areas[seg.layer].buffer(margin)
+        outside = line.difference(keep_out[clearance_key])
         if outside.is_empty:
             continue
         junction = nearest_points(outside, from_here)[0].coords[0]
@@ -1354,7 +1425,7 @@ def _written_point(x: float, y: float, origin: tuple[float, float]) -> tuple[flo
 def _branch_clears_pad(
     route: LinkRoute, pad: LinkTerminal, origin: tuple[float, float] = (0.0, 0.0)
 ) -> bool:
-    """True when no branch segment, at its written width, runs through ``pad``.
+    """True when the written branch copper clears the destination pad and mask.
 
     Issue #10486: a branch that ends on a track but crosses the destination
     pad on the way defeats the join.  Segments are measured as written
@@ -1371,6 +1442,13 @@ def _branch_clears_pad(
         a, b = _written_point(x1, y1, origin), _written_point(x2, y2, origin)
         line = LineString([a, b]) if a != b else Point(a)
         if line.distance(geom) < fmt(route.width_for(layer)) / 2 - 1e-9:
+            return False
+    # The link writer emits through vias, whose lands occupy both faces.
+    for x, y in route.vias:
+        center = Point(_written_point(x, y, origin))
+        if any(
+            center.distance(geom) < fmt(route.via_size) / 2 - 1e-9 for geom in pad.layers.values()
+        ):
             return False
     return True
 
@@ -1407,6 +1485,7 @@ def route_link_junction(
     from shapely.geometry import Point
 
     model = model or _build_model(pcb)
+    pad_areas, destination = _junction_pad_areas(pcb, model, pad)
     sites = junction_sites(
         pcb,
         model,
@@ -1416,6 +1495,7 @@ def route_link_junction(
         rules,
         endpoint_layer=endpoint_layer,
         allowed_layers=allowed_layers,
+        pad_areas=pad_areas,
     )
     if not sites:
         if failure is not None:
@@ -1443,9 +1523,7 @@ def route_link_junction(
         if site in (seg.start, seg.end) and math.dist(site, written) > 1e-9:
             continue
         cap = Point(written)
-        if any(
-            cap.distance(g) < fmt(rules.width_for(seg.layer)) / 2 - 1e-9 for g in model.pad_geoms
-        ):
+        if cap.distance(pad_areas[seg.layer]) < fmt(rules.width_for(seg.layer)) / 2 - 1e-9:
             continue
         target = LinkTerminal(f"junction {seg.layer}", site, {seg.layer: Point(site)})
         route = route_link(
@@ -1462,8 +1540,8 @@ def route_link_junction(
         )
         if route is None or not route.segments or route.segments[-1][2:] != (*site, seg.layer):
             continue
-        if not _branch_clears_pad(route, pad, origin) or not _branch_clears_pad(
-            collapse_link_route(route), pad, origin
+        if not _branch_clears_pad(route, destination, origin) or not _branch_clears_pad(
+            collapse_link_route(route), destination, origin
         ):
             continue
         route.junction = LinkJunction(site, seg.layer, seg.start, seg.end, seg.width, seg.uuid)

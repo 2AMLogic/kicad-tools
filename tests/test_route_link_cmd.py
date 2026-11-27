@@ -511,6 +511,75 @@ def _joined(capsys, board: Path, *extra: str) -> dict:
 
 
 class TestJoinTrackReview:
+    @pytest.mark.parametrize("diameter,connected", [(0.5, False), (1.5, True)])
+    @pytest.mark.parametrize(
+        "layer,mode",
+        [("B.Cu", "front_inner_back"), ("In1.Cu", "front_inner_back"), ("In1.Cu", "custom")],
+    )
+    def test_host_contacts_the_via_land_on_its_own_layer(
+        self, tmp_path, capsys, diameter, connected, layer, mode
+    ):
+        inner = "Inner" if mode == "front_inner_back" else "In1.Cu"
+        inner_size = diameter if layer == "In1.Cu" else 0.5
+        back_size = diameter if layer == "B.Cu" else 0.5
+        via = (
+            _via('"F.Cu" "B.Cu"')
+            .replace("(size 0.6)", "(size 1.5)")
+            .replace(
+                "(net 1)",
+                f'(padstack (mode {mode}) (layer "{inner}" (size {inner_size})) '
+                f'(layer "B.Cu" (size {back_size}))) (net 1)',
+            )
+        )
+        host = (
+            TEE_TRACK.replace("start 5 4", "start 5.68 14")
+            .replace("end 5 14", "end 11 9")
+            .replace('"F.Cu"', f'"{layer}"')
+        )
+        board = _tee(tmp_path, via, host)
+        board.write_text(
+            board.read_text().replace(
+                '(31 "B.Cu" signal)', '(1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)'
+            )
+        )
+        _p3_through_hole(board)
+        link = _joined(capsys, board, "--join-track", "--probe")
+        assert ("junction" in link) is connected
+        if connected:
+            assert link["junction"]["layer"] == layer
+
+    @pytest.mark.parametrize("source", ["zero", "pad", "footprint", "board", "offset"])
+    def test_join_site_stays_outside_the_effective_pad_opening(self, tmp_path, capsys, source):
+        board = _tee(tmp_path, TEE_TRACK)
+        text = board.read_text().replace(
+            "(at 12 9)", "(at 12 12.65)" if source == "offset" else "(at 12 13.35)"
+        )
+        text = text.replace(
+            '(44 "Edge.Cuts" user)', '(38 "B.Mask" user) (39 "F.Mask" user) (44 "Edge.Cuts" user)'
+        )
+        before, target = text.split('(fp_text reference "P2"')
+        if source == "pad":
+            target = target.replace("(size 1 1)", "(size 1 1) (solder_mask_margin 0.25)", 1)
+        elif source == "footprint":
+            before += "(solder_mask_margin 0.25) "
+        elif source == "board":
+            before = before.replace("pad_to_mask_clearance 0", "pad_to_mask_clearance 0.25")
+        elif source == "offset":
+            target = target.replace(
+                TEE_SMD,
+                '(pad "1" thru_hole rect (at 0 0) (size 2 2) (drill 0.4 (offset 0 -0.7)) (layers "*.Cu" "*.Mask")',
+                1,
+            )
+        board.write_text(before + '(fp_text reference "P2"' + target)
+        link = _joined(capsys, board, "--join-track", "--probe", "--link-layers", "F.Cu")
+        assert link["routable"]
+        if source == "zero":
+            assert link["junction"]["y"] == 13.35
+        elif "junction" in link:
+            # The lower edge is 12.3 for the offset copper and 13.25 for the expanded opening.
+            lower_edge = 12.3 if source == "offset" else 13.25
+            assert link["junction"]["y"] + 0.125 <= lower_edge
+
     @pytest.mark.parametrize("layer_type", ["signal", "power", "mixed", "jumper"])
     def test_blind_via_does_not_connect_the_far_layer(self, tmp_path, capsys, layer_type):
         board = _tee(
@@ -604,6 +673,17 @@ class TestJoinTrackReview:
         through = LinkRoute(1, "S", 0.25, 0.6, 0.3, segments=[(5, 16, 5, 11, "F.Cu")])
         beside = LinkRoute(1, "S", 0.25, 0.6, 0.3, segments=[(7, 16, 7, 11, "F.Cu")])
         assert not _branch_clears_pad(through, pad) and _branch_clears_pad(beside, pad)
+
+    def test_branch_via_clears_the_destination_on_the_opposite_face(self):
+        from shapely.geometry import box
+
+        from kicad_tools.router.link_router import LinkTerminal, _branch_clears_pad
+
+        pad = LinkTerminal("P2.1", (5, 13), {"B.Cu": box(4.5, 12.5, 5.5, 13.5)})
+        route = LinkRoute(1, "S", 0.25, 0.6, 0.3, segments=[(5, 16, 5, 13.75, "F.Cu")])
+        assert _branch_clears_pad(route, pad)
+        route.vias.append((5, 13.75))
+        assert not _branch_clears_pad(route, pad)
 
     def test_link_below_the_pad_never_crosses_it(self, tmp_path, capsys):
         board = _tee(tmp_path, TEE_TRACK)

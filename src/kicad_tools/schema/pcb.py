@@ -34,7 +34,7 @@ from ..core.board_outline import (
     outline_polygon_points,
     outline_rect_points,
 )
-from ..core.layers import is_declared_copper_layer
+from ..core.layers import COPPER_LAYER_ORDER, is_declared_copper_layer
 from ..core.outline_tessellation import DegenerateArcError, tessellate_arc, tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
@@ -2604,8 +2604,8 @@ class Via:
     layers_read_as_through: bool = field(default=False, compare=False, repr=False)
     locked: bool = field(default=False, compare=False)
     # Issue #10364: read-only evidence for verifying wire ends. Per-layer copper
-    # diameters from a ``(padstack (layer "B.Cu" (size D)) ...)`` block (outer
-    # layers only, keyed ``F.Cu``/``B.Cu``; empty when the via has no padstack
+    # diameters from a ``(padstack (layer "B.Cu" (size D)) ...)`` block (keyed
+    # by copper layer or the shared ``Inner`` group; empty when the via has no padstack
     # block) and whether the bore is closed by per-via ``(filling yes)``,
     # ``(capping yes)`` or ``(plugging (front|back yes))``. Not re-serialized.
     padstack_sizes: dict[str, float] = field(default_factory=dict, compare=False, repr=False)
@@ -2615,6 +2615,8 @@ class Via:
         """Copper diameter on ``layer``; ``None`` if a padstack hides that layer."""
         if not self.padstack_sizes:
             return self.size
+        if layer in COPPER_LAYER_ORDER[1:-1]:
+            return self.padstack_sizes.get(layer, self.padstack_sizes.get("Inner"))
         return self.padstack_sizes.get(layer)
 
     @classmethod
@@ -2671,16 +2673,21 @@ class Via:
                 via.tenting_back = back.get_string(0)
         # Issue #10364: per-layer padstack diameters and closed-bore flags.
         if padstack := sexp.find("padstack"):
-            aliases = {"F.Cu": "F.Cu", "Top": "F.Cu", "B.Cu": "B.Cu", "Bottom": "B.Cu"}
+            aliases = {"Top": "F.Cu", "Bottom": "B.Cu"}
             mode = padstack.find("mode")
             mode_name = mode.get_string(0) if mode else None
             if mode_name in ("front_inner_back", "custom"):
                 # KiCad writes the front diameter in the via's top-level size.
                 via.padstack_sizes["F.Cu"] = via.size
             for layer in padstack.find_all("layer"):
-                name = aliases.get(layer.get_string(0) or "")
+                name = layer.get_string(0) or ""
+                name = aliases.get(name, name)
                 lsize = layer.find("size")
-                if name and lsize and (d := lsize.get_float(0)):
+                if (
+                    (name in COPPER_LAYER_ORDER or name == "Inner")
+                    and lsize
+                    and (d := lsize.get_float(0)) is not None
+                ):
                     via.padstack_sizes[name] = d
             if mode_name == "normal" and not via.padstack_sizes:
                 pass  # uniform diameter: the top-level size applies everywhere
