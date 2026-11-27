@@ -700,6 +700,8 @@ class Pad:
     """Copper boundary of an authored chamfered pad, in board-axis offsets from its centre."""
 
     authored_layers: tuple[str, ...] = field(default=(), kw_only=True)
+    """Layers the pad authors in its footprint (copper, mask, paste), as written in the file."""
+
     terminal_layers: tuple[Layer, ...] | None = field(default=None, kw_only=True)
     copper_offset: tuple[float, float] = field(default=(0.0, 0.0), kw_only=True)
     """Board-axis displacement from the pad anchor to its copper centre, in mm."""

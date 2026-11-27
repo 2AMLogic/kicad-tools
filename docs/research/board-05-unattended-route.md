@@ -585,6 +585,16 @@ with it. The three seeds were routed again on the merged head (`0a3c4eb6c`
 plus this change): the same board bytes and counts, walls 384.7, 293.3 and
 270.8 s.
 
+Those runs predate the review fix that keys the guard's openings off each
+pad's authored mask layers (59 of 229 modelled openings, all on the GND
+thermal pads U2/29 and U3/9, left the model). Seed 42 was routed again
+through `board_05_unattended.py` at `65db53069` (the head with that fix):
+wall 265.4 s, 37/37 nets, 143/143 connections, 124 vias, kicad-cli DRC
+0 / 0 / 0, ERC 0, both LVS checks clean, 0 errors / 98 warnings in the
+`kct check` pass, and the same SHA-256 (`6c50088c...`) for the saved board.
+The seeds were byte-identical, so the table above carries over to this head.
+Only seed 42 was re-run at `65db53069`.
+
 Against the seed-42 baseline four errors are gone: HALL_A at J3/3, nFAULT
 at U1/14, EN_C at U1/12 (an off-centre exit hugging the pad's side) and
 DRIVER_SLEEP at R8/1. Two warnings are new: nFAULT at U1/14 now measures
