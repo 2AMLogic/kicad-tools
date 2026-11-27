@@ -677,7 +677,10 @@ def evaluate_lcsc_stock(
         suffix = f" (and {len(entries) - 5} more)" if len(entries) > 5 else ""
         return "; ".join(entries[:5]) + suffix
 
+    uncovered_unresolved = [u for u in unresolved if u not in covered]
     notes: list[str] = []
+    if uncovered_unresolved and (live_short or soft_short):
+        notes.append("stock also unresolved: " + ", ".join(uncovered_unresolved))
     if held:
         notes.append("held in operator inventory, not stock-verified: " + ", ".join(sorted(held)))
     if not_short:
@@ -716,13 +719,13 @@ def evaluate_lcsc_stock(
             _fmt(soft_short),
         )
     checked = len(parts)
-    uncovered_unresolved = [u for u in unresolved if u not in covered]
-    if checked == 0 and uncovered_unresolved:
+    if uncovered_unresolved:
         looked = describe_lookup_sources(data.get("sources"))
         return _result(
             "FAIL" if strict else "WARN",
             f"Stock not verified: {len(uncovered_unresolved)} assigned LCSC number(s) found in "
             f"neither the parts cache nor the offline catalog"
+            + (f"; {checked} other part(s) have recorded stock" if checked else "")
             + (f"; {looked}" if looked else "")
             + (" (strict preflight)" if strict else ""),
             ", ".join(uncovered_unresolved[:10]),

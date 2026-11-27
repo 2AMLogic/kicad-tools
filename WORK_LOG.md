@@ -14,8 +14,23 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-27
+
+- **PR #10538**: test: return ManufacturingResult from export CLI dry-run stub
+- **PR #10469**: fix(board04): finalize silkscreen before binding manufacturing DRC
+- **Issue #10535** (closed): test_export_cmd::test_project_root_reaches_manufacturing_package fails on main: dry-run stub has no errors attribute
+- **Issue #10449** (closed): Finalize Board 04 silkscreen before binding the manufacturing DRC report
+- **PR #10508**: Report temporary disk exhaustion in native mask remediation
+- **PR #10456**: chore(boards): refresh datasheets on four maintained schematics
+- **PR #10426**: Recognize native root-relative footprint links in editable project handoffs
+- **Issue #10506** (closed): Report temporary disk exhaustion in native mask remediation
+- **Issue #10425** (closed): Editable project audit expects an extra schematic root UUID in native PCB footprint links
+
 ### 2026-11-26
 
+- **PR #10509**: fix: report offline catalog stock provenance in parts alternatives
+- **Issue #10500** (closed): parts alternatives loses offline provenance for catalog stock counts
+- **Issue #10490** (closed): test flake: grid hole-clearance test times out again in the Test job
 - **Issue #10358** (closed): kct creepage --exceptions: docs say an unmatched selector is an error (it warns), and the gate summary double-counts a partially waived row
 - **PR #10462**: fix: count creepage exception rows by their final verdict
 - **Issue #10477** (closed): Reinforcement clearance: a second mask opening on an anchor makes a registered anchor read unverified_registration
