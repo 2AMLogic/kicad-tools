@@ -50,7 +50,7 @@ import sqlite3
 import struct
 import zipfile
 import zlib
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from enum import IntEnum
 from pathlib import Path
@@ -367,6 +367,22 @@ class JlcpartsCatalog:
         except sqlite3.Error as e:
             logger.warning(f"jlcparts catalog search failed for {query!r}: {e}")
             return []
+
+    def in_stock_package(self, package: str) -> Iterator[Part]:
+        """Stream in-stock rows in one package for electrical comparison."""
+        if not self.available or not package.strip():
+            return
+        try:
+            with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM jlc_components WHERE package = ? COLLATE NOCASE AND stock > 0",
+                    (package,),
+                )
+                for row in rows:
+                    yield self._part_from_row(row)
+        except sqlite3.Error as e:
+            logger.warning(f"jlcparts package lookup failed for {package!r}: {e}")
 
     def find_device(
         self,

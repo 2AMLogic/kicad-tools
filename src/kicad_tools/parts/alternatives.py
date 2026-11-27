@@ -14,7 +14,7 @@ source, or the same tier at a lower unit price, are suggested.
 from __future__ import annotations
 
 import re
-from decimal import Decimal
+from collections.abc import Iterable, Iterator
 from fractions import Fraction
 
 from .jlcparts_catalog import JlcpartsCatalog
@@ -50,7 +50,7 @@ def _price_key(part: Part) -> float:
     return price if price is not None else float("inf")
 
 
-def rank_alternatives(source: Part, candidates: list[Part], limit: int = 5) -> list[Part]:
+def rank_alternatives(source: Part, candidates: Iterable[Part], limit: int = 5) -> list[Part]:
     """Filter and rank *candidates* as substitutes for *source*.
 
     Excludes the source itself and out-of-stock parts, keeps only candidates
@@ -76,20 +76,8 @@ def rank_alternatives(source: Part, candidates: list[Part], limit: int = 5) -> l
 # jlcparts uses these description and attribute names for individual chip
 # resistors and multilayer ceramic capacitors. Arrays and active parts need
 # pinout/application evidence that the catalog cannot provide.
-_PASSIVE_FAMILIES = (
-    ("Chip Resistor - Surface Mount", ("Resistance", "Type", "Tolerance", "Power(Watts)")),
-    (
-        "Multilayer Ceramic Capacitors MLCC - SMD/SMT",
-        ("Capacitance", "Temperature Coefficient", "Tolerance", "Voltage Rating"),
-    ),
-)
-
-
-def _family(part: Part) -> tuple[str, ...]:
-    for family, required in _PASSIVE_FAMILIES:
-        if family in part.description:
-            return required
-    return ()
+_CAP_FAMILY = "multilayer ceramic capacitors mlcc"
+_RES_FAMILY = "chip resistor - surface mount"
 
 
 def _identified(value: str) -> bool:
@@ -175,14 +163,6 @@ _NOMINALS = {
             "n": Fraction(1, 10**9),
             "p": Fraction(1, 10**12),
         },
-        (
-            ("pF", Fraction(1, 10**12)),
-            ("nF", Fraction(1, 10**9)),
-            ("µF", Fraction(1, 10**6)),
-            ("uF", Fraction(1, 10**6)),
-            ("mF", Fraction(1, 10**3)),
-            ("F", Fraction(1)),
-        ),
     ),
     "res": (
         "Resistance",
@@ -194,68 +174,43 @@ _NOMINALS = {
             "K": Fraction(10**3),
             "M": Fraction(10**6),
         },
-        (
-            ("mΩ", Fraction(1, 10**3)),
-            ("Ω", Fraction(1)),
-            ("kΩ", Fraction(10**3)),
-            ("MΩ", Fraction(10**6)),
-        ),
     ),
 }
 _DIELECTRIC = re.compile(r"(?<!\w)(C0G|NP0|X5R|X6S|X7R|X7S|X7T|X8R|X8L|Y5V|Z5U)(?!\w)", re.I)
 
 
+_OTHER_FAMILY = re.compile(
+    r"\b(?:networks?|arrays?|filters?|feed[- ]?through|(?:three|3)[- ]terminal)\b", re.I
+)
+
+
 def _kind(part: Part) -> str | None:
     """``"cap"`` or ``"res"`` when the part is recognisably one chip passive."""
-    kinds = set()
-    if (
-        "Multilayer Ceramic Capacitors MLCC" in part.description
-        or "Capacitance" in part.specs
-        or _NOMINALS["cap"][1].search(part.description)
-        and _DIELECTRIC.search(part.description)
-    ):
-        kinds.add("cap")
-    if "Chip Resistor - Surface Mount" in part.description or "Resistance" in part.specs:
-        kinds.add("res")
-    return kinds.pop() if len(kinds) == 1 else None
+    if _OTHER_FAMILY.search(part.description) or _OTHER_FAMILY.search(part.specs.get("Type", "")):
+        return None
+    description = part.description.casefold()
+    if _RES_FAMILY in description:
+        return "res"
+    if _CAP_FAMILY in description:
+        return "cap"
+    # Legacy rows can consist solely of capacitor ratings and the package.
+    if _DIELECTRIC.search(part.description) and _NOMINALS["cap"][1].search(part.description):
+        remainder = part.description
+        for pattern in (_RANGE, _NOMINALS["cap"][1], _DIELECTRIC, *_RATINGS.values()):
+            remainder = pattern.sub(" ", remainder)
+        if remainder.strip().casefold() in ("", part.package.casefold()):
+            return "cap"
+    return None
 
 
-def _nominal(part: Part, kind: str) -> Fraction | None:
-    """The one nominal value (F or Ω) the description and attribute agree on."""
-    key, pattern, factors, _ = _NOMINALS[kind]
+def _nominals(part: Part, kind: str) -> set[Fraction]:
+    key, pattern, factors = _NOMINALS[kind]
     found = {Fraction(n) * factors[prefix] for n, prefix in pattern.findall(part.description)}
     if key in part.specs:
         structured = pattern.fullmatch(part.specs[key].strip())
-        if not structured:
-            return None
-        found.add(Fraction(structured[1]) * factors[structured[2]])
-    return found.pop() if len(found) == 1 else None
-
-
-def _spellings(kind: str, value: Fraction) -> list[str]:
-    """Plausible catalog spellings of a nominal, e.g. ``100nF`` and ``0.1µF``."""
-    out = []
-    for unit, size in _NOMINALS[kind][3]:
-        quotient = value / size
-        if not Fraction(1, 1000) <= quotient < 10**6:
-            continue
-        if _prime_factors(quotient.denominator) - {2, 5}:
-            continue
-        number = Decimal(quotient.numerator) / Decimal(quotient.denominator)
-        out.append(f"{format(number.normalize(), 'f')}{unit}")
-    return out
-
-
-def _prime_factors(n: int) -> set[int]:
-    factors, p = set(), 2
-    while n > 1 and p * p <= n:
-        while n % p == 0:
-            factors.add(p)
-            n //= p
-        p += 1
-    if n > 1:
-        factors.add(n)
-    return factors
+        if structured:
+            found.add(Fraction(structured[1]) * factors[structured[2]])
+    return found
 
 
 def _dielectrics(part: Part) -> set[str]:
@@ -263,6 +218,20 @@ def _dielectrics(part: Part) -> set[str]:
     if "Temperature Coefficient" in part.specs:
         found.add(part.specs["Temperature Coefficient"].strip().casefold())
     return found
+
+
+_PPM = _quantity(r"ppm\s*/\s*(?:°\s*C|℃|K)")
+
+
+def _covers_coefficient(source: Part, candidate: Part) -> bool:
+    try:
+        required = _rating_values(source, "Temperature Coefficient", _PPM)
+        if not required:
+            return True
+        offered = _rating_values(candidate, "Temperature Coefficient", _PPM)
+        return len(required) == len(offered) == 1 and offered.pop() <= required.pop()
+    except ValueError:
+        return False
 
 
 def _covers_ratings(source: Part, candidate: Part, mandatory: tuple[str, ...] = ()) -> bool:
@@ -299,56 +268,84 @@ def _covers_ratings(source: Part, candidate: Part, mandatory: tuple[str, ...] = 
 def _compatible(source: Part, candidate: Part) -> bool:
     if not _identified(source.package) or candidate.package.casefold() != source.package.casefold():
         return False
-    family = _family(source)
-    other_family = _family(candidate)
-    if family and other_family and family != other_family:
-        return False
     same_device = (
         _has_identity(source)
         and source.manufacturer.casefold() == candidate.manufacturer.casefold()
-        and source.mfr_part == candidate.mfr_part
+        and source.mfr_part.casefold() == candidate.mfr_part.casefold()
     )
     skip = {*_RATINGS, "Operating Temperature", "Operating Temperature Range", "Notes"}
     mandatory: tuple[str, ...] = ()
-    if not same_device:
-        # Anything else must be the same kind of passive with the same nominal
-        # value, read with units, that source and candidate descriptions and
-        # attributes agree on.
-        kind = _kind(source)
-        if kind is None or kind != _kind(candidate):
+    kind = _kind(source)
+    other_kind = _kind(candidate)
+    if kind and other_kind and kind != other_kind:
+        return False
+    if not same_device and (kind is None or kind != other_kind):
+        return False
+    passive = kind or other_kind
+    if passive and (kind is None or other_kind is None):
+        unclassified = candidate if kind else source
+        if _OTHER_FAMILY.search(unclassified.description) or _OTHER_FAMILY.search(
+            unclassified.specs.get("Type", "")
+        ):
             return False
-        if family:
-            if not all(_identified(source.specs.get(key, "")) for key in family):
+    if same_device and passive is None:
+        # Incomplete descriptions still carry evidence against an identity match.
+        for possible in _NOMINALS:
+            values = _nominals(source, possible) | _nominals(candidate, possible)
+            if len(values) > 1:
                 return False
-        elif source.specs or kind != "cap":
+            if (
+                possible == "cap"
+                and values
+                and len(_dielectrics(source) | _dielectrics(candidate)) > 1
+            ):
+                return False
+    if passive:
+        key, pattern, _ = _NOMINALS[passive]
+        required = _nominals(source, passive)
+        offered = _nominals(candidate, passive)
+        if len(required | offered) > 1:
             return False
-        else:
-            mandatory = ("Voltage Rating",)
-        nominal = _nominal(source, kind)
-        if nominal is None or nominal != _nominal(candidate, kind):
+        if not same_device and (not required or not offered):
             return False
-        skip.add(_NOMINALS[kind][0])
-        if kind == "cap":
+        for part in (source, candidate):
+            if key in part.specs and not pattern.fullmatch(part.specs[key].strip()):
+                if not same_device or source.specs.get(key) != candidate.specs.get(key):
+                    return False
+        skip.add(key)
+        if passive == "cap":
             dielectric = _dielectrics(source)
-            if len(dielectric) != 1 or dielectric != _dielectrics(candidate):
+            other_dielectric = _dielectrics(candidate)
+            if len(dielectric | other_dielectric) > 1:
+                return False
+            if not same_device:
+                if not dielectric or not other_dielectric:
+                    return False
+                mandatory = ("Voltage Rating",)
+                if _CAP_FAMILY in source.description.casefold():
+                    mandatory += ("Tolerance",)
+            skip.add("Temperature Coefficient")
+        else:
+            if not same_device:
+                if not _identified(source.specs.get("Type", "")):
+                    return False
+                mandatory = ("Power(Watts)", "Tolerance")
+            if not _covers_coefficient(source, candidate):
                 return False
             skip.add("Temperature Coefficient")
-    # For additional catalog attributes with no comparison rule (e.g. a
-    # resistor temperature coefficient), only identical evidence suffices.
     for key, value in source.specs.items():
         if key not in skip and candidate.specs.get(key) != value:
             return False
     return _covers_ratings(source, candidate, mandatory)
 
 
-def _collect(source: Part, fetch, found: dict[str, Part]) -> None:
-    """Page through every row *fetch* yields, keeping the compatible ones."""
+def _device_rows(catalog: JlcpartsCatalog, source: Part) -> Iterator[Part]:
     offset = 0
     while True:
-        rows = fetch(_PAGE_SIZE, offset)
-        for candidate in rows:
-            if candidate.stock > 0 and _compatible(source, candidate):
-                found[candidate.lcsc_part] = candidate
+        rows = catalog.find_device(
+            source.mfr_part, source.package, min_stock=1, limit=_PAGE_SIZE, offset=offset
+        )
+        yield from rows
         if len(rows) < _PAGE_SIZE:
             return
         offset += _PAGE_SIZE
@@ -362,32 +359,10 @@ def suggest_alternatives(catalog: JlcpartsCatalog, source: Part, limit: int = 5)
     """
     if not _identified(source.package):
         return []
-    found: dict[str, Part] = {}
     kind = _kind(source)
-    nominal = _nominal(source, kind) if kind else None
-    if kind and nominal is not None:
-        key = _NOMINALS[kind][0]
-        spellings = _spellings(kind, nominal)
-        if spellings:
-            _collect(
-                source,
-                lambda size, offset: catalog.search(
-                    source.specs.get(key) or spellings[0],
-                    attribute=key,
-                    values=spellings,
-                    package=source.package,
-                    min_stock=1,
-                    limit=size,
-                    offset=offset,
-                ),
-                found,
-            )
+    if kind and len(_nominals(source, kind)) == 1:
+        # Use the ranking parser for every spelling, including zero ohms.
+        return rank_alternatives(source, catalog.in_stock_package(source.package), limit)
     if _has_identity(source):
-        _collect(
-            source,
-            lambda size, offset: catalog.find_device(
-                source.mfr_part, source.package, min_stock=1, limit=size, offset=offset
-            ),
-            found,
-        )
-    return rank_alternatives(source, list(found.values()), limit)
+        return rank_alternatives(source, _device_rows(catalog, source), limit)
+    return []

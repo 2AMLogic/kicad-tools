@@ -214,7 +214,7 @@ def test_incomplete_source_and_adjustable_buck(catalog_db, capsys):
                 ),
                 (212, "AP63203WU-7B", "TSOT-23-6", "Diodes", "basic", "-40℃~+85℃ Fixed", "{}"),
                 (213, "AP63203WU-7", "TSOT-23-6", "Other", "basic", "Fixed", "{}"),
-                (214, "AP63203WU-7", "TSOT-23-6", "Diodes", "basic", "-40℃~+85℃ Fixed", "{}"),
+                (214, "ap63203wu-7", "TSOT-23-6", "Diodes", "basic", "-40℃~+85℃ Fixed", "{}"),
                 (215, "AP63203WU-7", "SOT563", "Diodes", "basic", "-40℃~+85℃ Fixed", "{}"),
             ],
         )
@@ -406,3 +406,70 @@ def test_exact_device_not_displaced_by_prefix_matches(catalog_db, capsys):
         for i in range(600):
             _insert(db, 3000 + i, f"Q950-{i}", "0603", "basic", f"{RES_FAMILY}", attrs, stock=9000)
     assert _alternatives(capsys, "C950") == ["C951"]
+
+
+@pytest.mark.parametrize(
+    ("family", "attributes", "other"),
+    [
+        (CAP_FAMILY, _cap(), "100nF 50V X7R Three-Terminal Feedthrough EMI Filter"),
+        (RES_FAMILY, _attributes("10kΩ 1% 0603")[1], "10kΩ Four-Resistor Network"),
+    ],
+)
+def test_numeric_attributes_do_not_establish_family(catalog_db, capsys, family, attributes, other):
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 800, "SRC", "0805", "extended", family, attributes)
+        _insert(db, 801, "OTHER", "0805", "basic", other, attributes)
+        _insert(db, 802, "GOOD", "0805", "basic", family, attributes)
+    assert _alternatives(capsys, "C800") == ["C802"]
+
+
+@pytest.mark.parametrize(
+    ("family", "attributes", "bad_description"),
+    [
+        (CAP_FAMILY, _cap(), "1nF 50V X7R"),
+        (CAP_FAMILY, _cap(), "100nF 50V Y5V"),
+        (RES_FAMILY, _attributes("10kΩ 1% 0603")[1], "30Ω"),
+    ],
+)
+def test_exact_mpn_rejects_contradictions(catalog_db, capsys, family, attributes, bad_description):
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 800, "SAME", "0805", "extended", family, attributes)
+        _insert(db, 801, "SAME", "0805", "basic", bad_description, attributes)
+        _insert(db, 802, "SAME", "0805", "basic", family, attributes)
+    assert _alternatives(capsys, "C800") == ["C802"]
+
+
+def test_resistor_coefficient_in_description(catalog_db, capsys):
+    attrs = _attributes("10kΩ 1% 0603")[1]
+    with sqlite3.connect(catalog_db) as db:
+        for code, coefficient in [
+            (800, "±25ppm/°C"),
+            (801, "±200ppm/°C"),
+            (802, ""),
+            (803, "±25ppm/°C"),
+            (804, "10 ppm/℃"),
+        ]:
+            tier = "extended" if code == 800 else "basic"
+            _insert(db, code, str(code), "0805", tier, f"{RES_FAMILY} {coefficient}", attrs)
+    assert _alternatives(capsys, "C800") == ["C803", "C804"]
+
+
+@pytest.mark.parametrize(("source", "alternative"), [("10kΩ", "10 kOhm"), ("0Ω", "0 Ohms")])
+def test_equivalent_resistance_spellings(catalog_db, capsys, source, alternative):
+    attrs = _attributes("10kΩ 1% 0603")[1]
+    with sqlite3.connect(catalog_db) as db:
+        for code, nominal, tier in [(800, source, "extended"), (801, alternative, "basic")]:
+            _insert(db, code, str(code), "0805", tier, RES_FAMILY, {**attrs, "Resistance": nominal})
+    assert _alternatives(capsys, "C800") == ["C801"]
+
+
+def test_legacy_mlcc_description_and_equivalent_spellings(catalog_db, capsys):
+    with sqlite3.connect(catalog_db) as db:
+        for code, nominal, tier in [
+            (800, "100nF", "extended"),
+            (801, "100 nF", "basic"),
+            (802, "0.10µF", "basic"),
+        ]:
+            _insert(db, code, str(code), "0805", tier, f"{nominal} 50V ±10% X7R {CAP_FAMILY}", {})
+        db.execute("ALTER TABLE jlc_components DROP COLUMN attributes")
+    assert _alternatives(capsys, "C800") == ["C801", "C802"]
