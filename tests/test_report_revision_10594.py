@@ -21,7 +21,11 @@ import pytest
 import yaml
 
 from kicad_tools.cli import main as cli_main
-from kicad_tools.report.renderers import _weasyprint_available, render_pdf_pandoc
+from kicad_tools.report.renderers import (
+    _weasyprint_available,
+    render_html,
+    render_pdf_pandoc,
+)
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schema.schematic import Schematic
 
@@ -216,6 +220,45 @@ class TestReportRevisionCLIAndExport:
         render_pdf_pandoc(reports_dir / "v1" / "report.md", tex_path)
         tex = tex_path.read_text(encoding="utf-8")
         assert re.search(r"\\date\{Rev C\.2 \\textless(?: |\{\})bench\\textgreater\{\} 🧪", tex)
+
+    def test_report_generate_quoted_filename_title(self, tmp_path: Path) -> None:
+        """A ``"`` in the PCB stem keeps strict YAML and the cover intact (Issue #10624)."""
+        name = 'ctl "bench"'
+        pcb_path = _write_one_pad_board(tmp_path / "board", stem=name, rev="B")
+        reports_dir = tmp_path / "reports"
+
+        rc = cli_main(
+            [
+                "report",
+                "generate",
+                str(pcb_path),
+                "--mfr",
+                "jlcpcb",
+                "--no-figures",
+                "--skip-erc",
+                "-o",
+                str(reports_dir),
+            ]
+        )
+        assert rc == 0
+
+        md_text = (reports_dir / "v1" / "report.md").read_text(encoding="utf-8")
+        header = yaml.safe_load(md_text.split("---", 2)[1])
+        assert header["title"] == name
+        assert header["subtitle"] == "Design Report"
+        assert header["author"].startswith("kicad-tools ")
+        assert header["date"].startswith("Rev B | ")
+
+        pytest.importorskip("markdown")
+        html_text = render_html(md_text)
+        assert f"<title>{name}</title>" in html_text
+        assert f"<h1>{name}</h1>" in html_text
+        assert '\\"' not in html_text
+
+        if _weasyprint_available():
+            page1 = _extract_pdf_page1_text(reports_dir / "v1" / "report.pdf")
+            assert name in page1
+            assert "Rev B |" in page1
 
     def test_report_generate_data_dir_without_revision_uses_pcb_revision(
         self, tmp_path: Path

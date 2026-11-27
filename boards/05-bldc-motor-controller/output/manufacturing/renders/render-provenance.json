@@ -1,0 +1,11 @@
+{
+  "generator": "kct render",
+  "outputs": {
+    "3d-back.png": "c60510ae984e45ee07e6693862b3a7e38f98a33ec82dc7fe7ca10cb852ee96bb",
+    "3d-front.png": "ee62afa1873e17bf63a9daecf0852cfc3462220f2cc059eea7d42f4fc8ed66c5",
+    "pcb-back.svg": "a4a8996b049056dfe2c4c36b212826acbda0331af37271cc40263cc026474dac",
+    "pcb-front.svg": "f3253ed4559d7fc08bed8009fa684962dbe31436a7dab51f83421b9ef8c082f8"
+  },
+  "pcb": "bldc_controller_routed.kicad_pcb",
+  "pcb_sha256": "cb4d0c99c0f441be115cba597072a7082993a4d914a5a3519d6d7ad244156a2c"
+}

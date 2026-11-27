@@ -326,6 +326,9 @@ def pdf_renderer_available() -> str | None:
     return None
 
 
+_JSON_QUOTED_FRONT_MATTER_KEYS = frozenset({"title", "subtitle", "author", "date"})
+
+
 def _strip_yaml_front_matter(content: str) -> tuple[str, dict]:
     """Strip YAML front matter from Markdown content.
 
@@ -351,8 +354,9 @@ def _strip_yaml_front_matter(content: str) -> tuple[str, dict]:
             key, _, value = line.partition(":")
             scalar = value.strip()
             value = scalar.strip('"').strip("'")
-            if key.strip() == "date" and scalar.startswith('"'):
-                # The generated revision/date line is a JSON-quoted YAML scalar.
+            if key.strip() in _JSON_QUOTED_FRONT_MATTER_KEYS and scalar.startswith('"'):
+                # Generated cover scalars are JSON-quoted YAML. Older or custom
+                # templates may not be, so keep the stripped value on failure.
                 with contextlib.suppress(json.JSONDecodeError):
                     value = json.loads(scalar)
             if value:

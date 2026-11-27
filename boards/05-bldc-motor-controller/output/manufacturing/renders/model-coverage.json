@@ -1,0 +1,18 @@
+{
+  "env": "pinned",
+  "covered": 42,
+  "total": 42,
+  "percent": 100.0,
+  "counts": {
+    "resolved": 42,
+    "embedded": 0,
+    "dangling": 0,
+    "no_ref": 0,
+    "unresolved_var": 0,
+    "hidden_only": 0,
+    "lcsc_cache_miss": 0,
+    "lcsc_content_changed": 0,
+    "placeholder": 0,
+    "exempt": 3
+  }
+}
