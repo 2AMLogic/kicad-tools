@@ -11,7 +11,8 @@ everything already on the board.
 self-contained, because a link is short and the board is otherwise finished:
 
 * a uniform multi-layer grid over the link's bounding box plus a margin,
-  aligned on the link's first endpoint so a pad's own axis is a grid line;
+  aligned on the first endpoint, or on a narrow destination pad when the
+  initial grid misses its copper;
 * every other net's copper (pads, tracks, vias, arcs and unnetted copper
   pads), inflated by ``clearance + trace_width / 2``, blocks a cell; the
   board outline (inset by the edge clearance) bounds the grid;
@@ -928,20 +929,52 @@ def route_link(
     if model.outline is not None:
         ob = model.outline.bounds
         x0, y0, x1, y1 = max(x0, ob[0]), max(y0, ob[1]), min(x1, ob[2]), min(y1, ob[3])
-    # Align the grid on the anchor at the precision its route writer uses.
-    anchor_x, anchor_y = grid_anchor or a.point
-    gx0, gy0 = round(anchor_x, grid_digits), round(anchor_y, grid_digits)
-    ix0 = math.floor((x0 - gx0) / g)
-    iy0 = math.floor((y0 - gy0) / g)
-    nx = int(math.ceil((x1 - gx0) / g)) - ix0 + 1
-    ny = int(math.ceil((y1 - gy0) / g)) - iy0 + 1
     nl = len(copper)
-    if nx <= 1 or ny <= 1 or nx * ny * nl > rules.max_cells:
+
+    def mask_of(geom: Any) -> Any:
+        if geom is None or geom.is_empty:
+            return np.zeros((nx, ny), dtype=bool)
+        shapely.prepare(geom)
+        return shapely.intersects_xy(geom, flat_x, flat_y).reshape(nx, ny)
+
+    def terminal_mask(terminal: LinkTerminal) -> Any:
+        cells = np.zeros((nl, nx, ny), dtype=bool)
+        for li, layer in enumerate(copper):
+            if layer in terminal.layers and (allowed_layers is None or layer in allowed_layers):
+                land = terminal.layers[layer]
+                # KiCad connects the track when its endpoint lies inside the pad.
+                inset = land.buffer(-_TERMINAL_INSET)
+                cells[li] = mask_of(land if inset.is_empty else inset)
+        return cells
+
+    # Preserve explicit anchors and prefer the ordinary source-aligned grid.
+    # A narrow, conservatively modelled destination may fall between columns.
+    # Try its own alignment before building obstacles or starting a search.
+    anchors = [grid_anchor or a.point]
+    if (
+        grid_anchor is None
+        and b.exact_pad_lands is not None
+        and b.layers.keys() - b.exact_pad_lands.keys()
+    ):
+        anchors.append(b.point)
+    for anchor_x, anchor_y in anchors:
+        gx0, gy0 = round(anchor_x, grid_digits), round(anchor_y, grid_digits)
+        ix0 = math.floor((x0 - gx0) / g)
+        iy0 = math.floor((y0 - gy0) / g)
+        nx = int(math.ceil((x1 - gx0) / g)) - ix0 + 1
+        ny = int(math.ceil((y1 - gy0) / g)) - iy0 + 1
+        if nx <= 1 or ny <= 1 or nx * ny * nl > rules.max_cells:
+            return None
+        xs = np.round(gx0 + (ix0 + np.arange(nx)) * g, grid_digits)
+        ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, grid_digits)
+        gx, gy = np.meshgrid(xs, ys, indexing="ij")
+        flat_x, flat_y = gx.ravel(), gy.ravel()
+        start, goal = terminal_mask(a), terminal_mask(b)
+        if start.any() and goal.any():
+            break
+    else:
         return None
-    xs = np.round(gx0 + (ix0 + np.arange(nx)) * g, grid_digits)
-    ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, grid_digits)
-    gx, gy = np.meshgrid(xs, ys, indexing="ij")
-    flat_x, flat_y = gx.ravel(), gy.ravel()
+
     reach = 1.0
     if rules.width_by_layer:
         radius = max(max(rules.width_by_layer.values()), rules.via_size) / 2
@@ -952,12 +985,6 @@ def route_link(
     # matters however far its raw shape lies from it (project rules can demand
     # several mm), so foreign copper is selected by the search area itself.
     search_box = box(xs[0], ys[0], xs[-1], ys[-1])
-
-    def mask_of(geom: Any) -> Any:
-        if geom is None or geom.is_empty:
-            return np.zeros((nx, ny), dtype=bool)
-        shapely.prepare(geom)
-        return shapely.intersects_xy(geom, flat_x, flat_y).reshape(nx, ny)
 
     # Foreign copper per layer, grouped by the clearance it demands (Issue
     # #6374: ``rules.clearance_for(net)``).  Without a per-net map there is
@@ -1053,17 +1080,6 @@ def route_link(
     if model.outline is not None:
         via_bad |= ~mask_of(model.outline.buffer(-(rules.edge_clearance + rules.via_size / 2)))
 
-    def terminal_mask(t: LinkTerminal) -> Any:
-        m = np.zeros((nl, nx, ny), dtype=bool)
-        for li, layer in enumerate(copper):
-            if layer in t.layers:
-                geom = t.layers[layer]
-                # Keep endpoints strictly inside the copper they bond to (KiCad
-                # joins a track to a pad by its END POINT, not by overlap).
-                inset = geom.buffer(-_TERMINAL_INSET)
-                m[li] = mask_of(geom if inset.is_empty else inset) & ~blocked[li]
-        return m
-
     # Plane layers accept vias by default. Only lateral moves on the
     # explicitly authorized layer use the inset rectangle.
     corridor_li = -1
@@ -1078,8 +1094,8 @@ def route_link(
         for li, layer in enumerate(copper)
     ]
 
-    start = terminal_mask(a)
-    goal = terminal_mask(b)
+    start &= ~blocked
+    goal &= ~blocked
     if not start.any() or not goal.any():
         return None
 
