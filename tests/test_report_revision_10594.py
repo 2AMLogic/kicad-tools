@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pdfplumber
 import pytest
+import yaml
 
 from kicad_tools.cli import main as cli_main
 from kicad_tools.report.renderers import _weasyprint_available
@@ -116,6 +117,7 @@ class TestReportRevisionCLIAndExport:
         [
             ("B", "B"),
             ("C.2", "C.2"),
+            ('C.2 "bench" & B', 'C.2 "bench" & B'),
             (None, "1"),
         ],
     )
@@ -146,9 +148,8 @@ class TestReportRevisionCLIAndExport:
         md_path = reports_dir / "v1" / "report.md"
         assert md_path.is_file()
         md_text = md_path.read_text(encoding="utf-8")
-        assert f'date: "Rev {expected_rev} | ' in md_text
-        if expected_rev != "1":
-            assert 'date: "Rev 1 | ' not in md_text
+        header = yaml.safe_load(md_text.split("---", 2)[1])
+        assert header["date"].startswith(f"Rev {expected_rev} | ")
 
         if _weasyprint_available():
             pdf_path = reports_dir / "v1" / "report.pdf"

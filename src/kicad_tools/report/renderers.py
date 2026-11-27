@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import html
+import json
 import logging
 import re
 import shutil
@@ -334,7 +336,12 @@ def _strip_yaml_front_matter(content: str) -> tuple[str, dict]:
         line = line.strip()
         if ":" in line and not line.startswith("-") and not line.startswith("#"):
             key, _, value = line.partition(":")
-            value = value.strip().strip('"').strip("'")
+            scalar = value.strip()
+            value = scalar.strip('"').strip("'")
+            if key.strip() == "date" and scalar.startswith('"'):
+                # The generated revision/date line is a JSON-quoted YAML scalar.
+                with contextlib.suppress(json.JSONDecodeError):
+                    value = json.loads(scalar)
             if value:
                 metadata[key.strip()] = value
 
@@ -350,7 +357,7 @@ def _metadata_to_title_block(metadata: dict) -> str:
     if "subtitle" in metadata:
         parts.append(f'<p class="cover-meta">{metadata["subtitle"]}</p>')
     if "date" in metadata:
-        parts.append(f'<p class="cover-meta">{metadata["date"]}</p>')
+        parts.append(f'<p class="cover-meta">{html.escape(str(metadata["date"]))}</p>')
     if "author" in metadata:
         parts.append(f'<p class="cover-meta">{metadata["author"]}</p>')
     parts.append("</div>")

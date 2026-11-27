@@ -2,7 +2,7 @@
 title: "{{ project_name }}"
 subtitle: "Design Report"
 author: "kicad-tools {{ tool_version }}"
-date: "Rev {{ revision }} | {{ date }} | {{ manufacturer }}"
+date: {{ ("Rev " ~ revision ~ " | " ~ date ~ " | " ~ manufacturer) | tojson }}
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
