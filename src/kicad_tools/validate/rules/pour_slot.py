@@ -468,6 +468,10 @@ class PourSlotRule(DRCRule):
 
         possible = None
         for zone in zlist:
+            # A track on the pour net joins the fill along its edge. Only a
+            # third-net pour has a clearance boundary on both sides of the strip.
+            if zone.net_name and zone.net_name in (a.net_name, b.net_name):
+                continue
             values_a, unknown_a = self._segment_clearance(a, zone, layer, areas_a)
             values_b, unknown_b = self._segment_clearance(b, zone, layer, areas_b)
             for ca, cb in product(values_a, values_b):

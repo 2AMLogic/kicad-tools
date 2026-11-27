@@ -330,7 +330,7 @@ def _write_connected_board(board: Path, gap: float, zones: tuple[str, ...]) -> N
     pcb.save(board)
 
 
-def _saved_gap_and_film(board: Path):
+def _saved_gap_and_film(board: Path, pour_net: str = "GND"):
     from shapely.geometry import LineString, Polygon
     from shapely.ops import unary_union
 
@@ -340,11 +340,47 @@ def _saved_gap_and_film(board: Path):
     )
     bottom = lower.start[1] + lower.width / 2
     top = upper.start[1] - upper.width / 2
-    pour = next(zone for zone in saved.zones if zone.net_name == "GND")
+    pour = next(zone for zone in saved.zones if zone.net_name == pour_net)
     film = unary_union([Polygon(ring).buffer(0) for ring in pour.filled_polygons])
     assert film.area > 0
     sections = [film.intersection(LineString([(x, bottom), (x, top)])).length for x in (13, 15, 17)]
     return top - bottom, film, sections
+
+
+@pytest.mark.parametrize(
+    ("pour_net", "moves", "expected_gap", "strip"),
+    [("NET1", 0, 0.750, 0.3494), ("NET2", 0, 0.750, 0.5494), ("GND", 1, 0.905, 0.3040)],
+)
+def test_track_connected_to_pour_in_check_cleanup_and_fill(
+    tmp_path, capsys, pour_net, moves, expected_gap, strip
+):
+    import shutil
+
+    from kicad_tools.cli import main
+
+    if not shutil.which("kicad-cli"):
+        pytest.skip("native refill requires kicad-cli")
+    board = tmp_path / "connected.kicad_pcb"
+    _write_connected_board(board, 0.750, (ZONE.replace('"GND"', f'"{pour_net}"'),))
+    project = {"net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]}}
+    board.with_suffix(".kicad_pro").write_text(json.dumps(project))
+    board.with_suffix(".kicad_dru").write_text(
+        """(version 1)
+(rule "NET2 zone clearance" (condition "A.NetName == 'NET2' && B.Type == 'Zone'")
+    (constraint clearance (min 0.4mm)))
+"""
+    )
+    assert _public_pour_slot_count(board, capsys) == moves
+    assert (
+        main(["optimize-traces", str(board), "--net", "GND", "--pour-slots", "--format", "json"])
+        == 0
+    )
+    cleanup = json.loads(capsys.readouterr().out)["pour_slots"]
+    assert cleanup["pairs_before"] == cleanup["spread"] == moves
+    assert cleanup["pairs_after"] == 0
+    saved_gap, _, sections = _saved_gap_and_film(board, pour_net)
+    assert saved_gap == pytest.approx(expected_gap)
+    assert sections == pytest.approx([strip] * 3, abs=0.002)
 
 
 @pytest.mark.parametrize(("gap", "expected_gap", "warnings"), [(0.55, 0.55, 0), (0.705, 0.905, 1)])
