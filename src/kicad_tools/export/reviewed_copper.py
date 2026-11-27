@@ -464,7 +464,13 @@ class ReviewedCopperExport:
         excluded = set()
         for path in (self.output_dir, self.diagnostics_root):
             with contextlib.suppress(OSError, RuntimeError):
-                excluded.add(path.resolve())
+                resolved = path.resolve()
+                # A destination that is the board's own directory (or holds the
+                # project) is also where the inputs live: excluding it would
+                # drop them. Only a destination apart from the inputs is a
+                # package, not a source.
+                if not self.board_dir.is_relative_to(resolved):
+                    excluded.add(resolved)
 
         def skip(path: Path) -> bool:
             if (

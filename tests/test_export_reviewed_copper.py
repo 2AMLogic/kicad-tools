@@ -931,3 +931,53 @@ def test_working_copy_resolves_external_relative_links(tmp_path):
         assert (workspace.dir / "probe.kicad_sch").read_text() == "(kicad_sch)"
     finally:
         workspace.close()
+
+
+def test_destination_that_is_the_board_directory_keeps_the_project_inputs(tmp_path):
+    project = tmp_path / "project"
+    board_dir = project / "pcb"
+    board_dir.mkdir(parents=True)
+    board = board_dir / "board.kicad_pcb"
+    board.write_bytes(b"(kicad_pcb (version 1))\n")
+    (board_dir / "board.kicad_sch").write_text("(kicad_sch)")
+    (board_dir / "sym-lib-table").write_text("(sym_lib_table)")
+    (project / "VERSION.md").write_text("v1\n")
+    workspace = ReviewedCopperExport(board, project_root=project, output_dir=board_dir)
+    try:
+        assert (workspace.dir / "pcb" / "board.kicad_sch").is_file()
+        assert (workspace.dir / "pcb" / "sym-lib-table").is_file()
+        assert (workspace.dir / "VERSION.md").is_file()
+        assert not (workspace.dir / "pcb" / workspace.dir.name).exists()
+    finally:
+        workspace.close()
+
+
+@needs_kicad_cli
+@pytest.mark.parametrize("bom_source", ["pcb", "schematic"])
+def test_destination_that_is_the_board_directory_keeps_archive_inputs(
+    tmp_path, monkeypatch, bom_source
+):
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    project = tmp_path / "project"
+    (project / "pcb").mkdir(parents=True)
+    board = _four_layer_board(project / "pcb" / "probe.kicad_pcb")
+    sch = project / "pcb" / "probe.kicad_sch"
+    sch.write_text('(kicad_sch (version 20240108) (generator eeschema) (paper "A4"))\n')
+    (project / "VERSION.md").write_text("v1\n")
+    args = ["--bom-source", bom_source, "--sch", str(sch), "--project-root", str(project)]
+    base = [arg for arg in _EXPORT_ARGS if arg not in ("--bom-source", "pcb")]
+    out = project / "pcb"
+    assert cli_main(["export", str(board), *base, "-o", str(tmp_path / "plain"), *args]) == 0
+    code = cli_main(
+        ["export", str(board), *base, "--verify-reviewed-copper", "-o", str(out), *args]
+    )
+    assert code == 0
+
+    def members(path: Path) -> set[str]:
+        with zipfile.ZipFile(path / "kicad_project.zip") as archive:
+            return set(archive.namelist())
+
+    assert "probe.kicad_sch" in members(out) or any(
+        n.endswith("probe.kicad_sch") for n in members(out)
+    )
+    assert members(out) >= members(tmp_path / "plain")
