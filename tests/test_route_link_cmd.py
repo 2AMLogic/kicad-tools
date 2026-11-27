@@ -87,8 +87,8 @@ TEE_TUNE = ("--trace-width", ".25", "--clearance", ".2")
 TEE_OPTS = ("--link-layers", "F.Cu", *TEE_TUNE)
 TEE_ARGS = ("--link", "SENSE P3.1 P2.1", *TEE_OPTS)
 TEE_HOST_UUID = "00000000-0000-0000-0000-000000000010"
-#: A fourth stranded pad, above P3.1, for a second link onto the same track.
-TEE_PAD4 = """  (footprint "P" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000004") (at 12 12)
+#: A fourth stranded pad, west of the track, for a second link onto the same track.
+TEE_PAD4 = """  (footprint "P" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000004") (at 2 12)
     (fp_text reference "P4" (at 0 -1.5) (layer "F.SilkS"))
     (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SENSE")))
 """
@@ -350,13 +350,15 @@ class TestCommit:
         pieces = _file_segments(board)
         # The first link already halved the track: the second must split the
         # half it lands on, leaving three pieces that only touch end to end.
-        assert [p[:2] for p in pieces] == [
-            ((5, 4), (5, 9)),
-            ((5, 9), (5, 12)),
-            ((5, 12), (5, 14)),
-            ((11.55, 9), (5, 9)),
-            ((11.55, 12), (5, 12)),
-        ]
+        assert sorted(p[:2] for p in pieces) == sorted(
+            [
+                ((5, 4), (5, 9)),
+                ((5, 9), (5, 12)),
+                ((5, 12), (5, 14)),
+                ((11.55, 9), (5, 9)),
+                ((2.45, 12), (5, 12)),
+            ]
+        )
         assert len({p[4] for p in pieces}) == 5
 
     def test_output_file_leaves_input_alone(self, board, tmp_path, capsys):
@@ -434,3 +436,115 @@ class TestJoinTrackWrite:
         assert all('(net "SENSE")' in s and "(net 1)" not in s for s in written)
         uuids = re.findall(r'\(uuid "([^"]+)"\)', "".join(written))
         assert len(set(uuids)) == 3 and TEE_HOST_UUID in uuids
+
+
+# Issue #10486 review: electrical membership, pad avoidance, chained links.
+FOUR_LAYERS = '(layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))'
+_TWO_LAYERS = '(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))'
+
+
+def _via(layers: str, *, at: str = "5 14", kind: str = "") -> str:
+    return (
+        f"(via {kind} (at {at}) (size 0.6) (drill 0.3) (layers {layers}) (net 1) "
+        '(uuid "00000000-0000-0000-0000-0000000000a0"))'
+    )
+
+
+def _p3_through_hole(path: Path) -> None:
+    text = path.read_text()
+    i = text.index("(at 12 9)")
+    j = text.index(TEE_SMD, i)
+    path.write_text(text[:j] + TEE_THH + text[j + len(TEE_SMD) :])
+
+
+def _joined(capsys, board: Path, *extra: str) -> dict:
+    _rc, doc = _run(capsys, str(board), "--link", "SENSE P3.1 P2.1", *TEE_TUNE, *extra)
+    return doc["links"][0]
+
+
+class TestJoinTrackReview:
+    def test_blind_via_does_not_connect_the_far_layer(self, tmp_path, capsys):
+        board = _tee(
+            tmp_path,
+            _via('"F.Cu" "In1.Cu"', kind="blind"),
+            '(segment (start 5 14) (end 11 9) (width 0.25) (layer "B.Cu") (net 1) '
+            '(uuid "00000000-0000-0000-0000-000000000050"))',
+        )
+        board.write_text(board.read_text().replace(_TWO_LAYERS, FOUR_LAYERS))
+        _p3_through_hole(board)
+        link = _joined(capsys, board, "--join-track", "--probe")
+        assert "junction" not in link and link["join_track_skipped"]
+
+    def test_arc_is_followed_not_its_chords(self, tmp_path, capsys):
+        board = _tee(
+            tmp_path,
+            '(arc (start 5 14) (mid 10 9) (end 5 4) (width 0.25) (layer "F.Cu") (net 1) '
+            '(uuid "00000000-0000-0000-0000-000000000060"))',
+            '(segment (start 7.5 11.5) (end 8 11.5) (width 0.25) (layer "F.Cu") (net 1) '
+            '(uuid "00000000-0000-0000-0000-000000000061"))',
+        )
+        link = _joined(capsys, board, "--join-track", "--probe")
+        assert "junction" not in link
+
+    def test_branch_through_the_destination_pad_is_refused(self):
+        from shapely.geometry import box
+
+        from kicad_tools.router.link_router import LinkTerminal, _branch_clears_pad
+
+        pad = LinkTerminal("P2.1", (5, 13), {"F.Cu": box(4.5, 12.5, 5.5, 13.5)})
+        through = LinkRoute(1, "S", 0.25, 0.6, 0.3, segments=[(5, 16, 5, 11, "F.Cu")])
+        beside = LinkRoute(1, "S", 0.25, 0.6, 0.3, segments=[(7, 16, 7, 11, "F.Cu")])
+        assert not _branch_clears_pad(through, pad) and _branch_clears_pad(beside, pad)
+
+    def test_link_below_the_pad_never_crosses_it(self, tmp_path, capsys):
+        board = _tee(tmp_path, TEE_TRACK)
+        board.write_text(board.read_text().replace("(at 12 9)", "(at 5 17)"))
+        link = _joined(capsys, board, "--join-track", "--probe", "--link-layers", "F.Cu")
+        junction = link.get("junction")
+        assert junction is None or junction["y"] < 13.5 - 0.125 or junction["y"] > 14.5
+
+    def test_later_link_joins_an_earlier_route(self, tmp_path, capsys):
+        board = _tee(tmp_path)
+        rc, doc = _run(
+            capsys,
+            str(board),
+            "--link", "SENSE P1.1 P2.1", *TEE_OPTS, "--join-track",
+            "--link", "SENSE P3.1 P2.1", *TEE_OPTS, "--join-track",
+            "--probe",
+        )  # fmt: skip
+        first, second = doc["links"]
+        assert "junction" not in first and "junction" in second
+        assert "join_track_skipped" not in second
+
+    def test_junction_snaps_to_the_host_endpoint_it_is_next_to(self, tmp_path, capsys):
+        board = _tee(
+            tmp_path,
+            '(segment (start 5.003 9.004) (end 5 14) (width 0.25) (layer "F.Cu") (net 1) '
+            f'(uuid "{TEE_HOST_UUID}"))',
+            '(segment (start 5 4) (end 5.003 9.004) (width 0.25) (layer "F.Cu") (net 1) '
+            '(uuid "00000000-0000-0000-0000-000000000011"))',
+        )
+        board.write_text(board.read_text().replace("(at 12 9)", "(at 12 8)"))
+        link = _joined(capsys, board, "--join-track", "--probe", "--link-layers", "F.Cu")
+        j = link.get("junction")
+        assert j is None or (j["x"], j["y"]) != (5.0, 9.0)
+
+    def test_allowed_layers_apply_to_the_junction_not_the_pad(self, tmp_path, capsys):
+        board = _tee(
+            tmp_path,
+            _via('"F.Cu" "B.Cu"'),
+            '(segment (start 5 14) (end 5 4) (width 0.25) (layer "B.Cu") (net 1) '
+            '(uuid "00000000-0000-0000-0000-000000000070"))',
+        )
+        _p3_through_hole(board)
+        link = _joined(capsys, board, "--join-track", "--probe", "--link-layers", "B.Cu")
+        assert link["routable"] and link["junction"]["layer"] == "B.Cu"
+
+    def test_split_of_a_legacy_tstamp_segment_has_unique_ids(self, tmp_path):
+        board = _tee(tmp_path, TEE_TRACK.replace("(uuid ", "(tstamp "))
+        board.write_text(board.read_text().replace("(version 20240108)", "(version 20221018)"))
+        out = TestJoinTrackWrite._write(board)
+        ids = re.findall(
+            r'\((?:uuid|tstamp) "([^"]+)"\)', "".join(re.split(r"\(segment\b", out)[1:])
+        )
+        assert len(ids) == 3 and len(set(ids)) == 3

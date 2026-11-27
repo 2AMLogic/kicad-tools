@@ -391,6 +391,10 @@ class _BoardModel:
     pad_geoms: list[Any]
     fills: dict[str, list[tuple[int, Any]]]
     outline: Any
+    #: Issue #10486: copper accepted earlier in this invocation, as the track and
+    #: via objects a later ``--join-track`` link may join (see ``_commit_to_model``).
+    extra_segments: list[Any] = field(default_factory=list)
+    extra_vias: list[tuple[float, float, float]] = field(default_factory=list)
 
 
 def _build_model(pcb: PCB) -> _BoardModel:
@@ -567,12 +571,17 @@ def net_components(model: _BoardModel, net_number: int) -> list[dict[str, Any]]:
     join when their copper intersects on a layer they share.  Sorted largest
     first by total copper area, so ``[0]`` is the main body of the net.
     """
-    from shapely import STRtree  # type: ignore[import-untyped]
-    from shapely.ops import unary_union  # type: ignore[import-untyped]
-
     nodes: list[dict[str, Any]] = [dict(it.layers) for it in model.items if it.net == net_number]
     for layer, fills in model.fills.items():
         nodes.extend({layer: poly} for net, poly in fills if net == net_number)
+    return _merge_nodes(nodes, model.copper)
+
+
+def _merge_nodes(nodes: list[dict[str, Any]], copper: list[str]) -> list[dict[str, Any]]:
+    """Union ``{layer: geometry}`` nodes that touch on a shared layer, largest first."""
+    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
+
     parent = list(range(len(nodes)))
 
     def find(x: int) -> int:
@@ -581,7 +590,7 @@ def net_components(model: _BoardModel, net_number: int) -> list[dict[str, Any]]:
             x = parent[x]
         return x
 
-    for layer in model.copper:
+    for layer in copper:
         idx = [i for i, n in enumerate(nodes) if layer in n]
         if len(idx) < 2:
             continue
@@ -604,6 +613,61 @@ def net_components(model: _BoardModel, net_number: int) -> list[dict[str, Any]]:
         comps.append({layer: unary_union(gs) for layer, gs in per_layer.items()})
     comps.sort(key=lambda c: -sum(g.area for g in c.values()))
     return comps
+
+
+def _via_span(layers: list[str], copper: list[str]) -> list[str]:
+    """Copper layers a via with these end layers actually touches (blind/buried aware)."""
+    idx = [copper.index(layer) for layer in layers if layer in copper]
+    if len(idx) < 2:
+        return list(copper)
+    return copper[min(idx) : max(idx) + 1]
+
+
+def _join_island(pcb: PCB, model: _BoardModel, net_number: int, pad: LinkTerminal) -> Any:
+    """The copper island holding ``pad``, with true via spans and arc geometry.
+
+    Issue #10486.  :func:`net_components` models a via on every layer and an
+    arc as its chords, which can call a blind via's far side or a chord's
+    neighbour "connected".  Here a via covers only the layers it spans, an arc
+    follows its circle, and copper accepted earlier in this run is included.
+    """
+    from shapely.geometry import LineString, Point
+
+    copper = model.copper
+    nodes: list[dict[str, Any]] = [
+        dict(it.layers) for it in model.items if it.net == net_number and it.is_pad
+    ]
+    for seg in [*pcb.segments, *model.extra_segments]:
+        if seg.net_number != net_number or seg.layer not in copper:
+            continue
+        line = LineString([seg.start, seg.end]) if seg.start != seg.end else Point(seg.start)
+        nodes.append({seg.layer: line.buffer(seg.width / 2)})
+    for arc in getattr(pcb, "arcs", []) or []:
+        if int(getattr(arc, "net_number", 0) or 0) != net_number or arc.layer not in copper:
+            continue
+        try:
+            pts = arc.centerline_points(0.005)
+        except ValueError:
+            pts = [arc.start, arc.mid, arc.end]
+        nodes.append({arc.layer: LineString(pts).buffer(float(arc.width or 0.2) / 2)})
+    for via in pcb.vias:
+        if via.net_number == net_number:
+            disk = Point(via.position).buffer((via.size or 0.0) / 2)
+            nodes.append(dict.fromkeys(_via_span(list(via.layers or []), copper), disk))
+    for vx, vy, size in model.extra_vias:
+        nodes.append(dict.fromkeys(copper, Point(vx, vy).buffer(size / 2)))
+    for layer, fills in model.fills.items():
+        nodes.extend({layer: poly} for net, poly in fills if net == net_number)
+    return next(
+        (
+            comp
+            for comp in _merge_nodes(nodes, copper)
+            if any(
+                layer in comp and comp[layer].intersects(geom) for layer, geom in pad.layers.items()
+            )
+        ),
+        None,
+    )
 
 
 def padless_components(
@@ -1147,23 +1211,14 @@ def junction_sites(
     from shapely.geometry import LineString, Point
     from shapely.ops import nearest_points, unary_union
 
-    island = next(
-        (
-            comp
-            for comp in net_components(model, net_number)
-            if any(
-                layer in comp and comp[layer].intersects(geom) for layer, geom in pad.layers.items()
-            )
-        ),
-        None,
-    )
+    island = _join_island(pcb, model, net_number, pad)
     if island is None:
         return []
     for geom in island.values():
         shapely.prepare(geom)
     from_here = Point(near)
     tracks: list[tuple[float, Segment, Any]] = []
-    for seg in pcb.segments:
+    for seg in [*pcb.segments, *model.extra_segments]:
         if seg.net_number != net_number or seg.start == seg.end or seg.layer not in island:
             continue
         if endpoint_layer is not None and seg.layer != endpoint_layer:
@@ -1198,6 +1253,26 @@ def junction_sites(
         sites.sort(key=lambda site: site[0])
         del sites[_JUNCTION_CANDIDATES:]
     return sites
+
+
+def _branch_clears_pad(route: LinkRoute, pad: LinkTerminal) -> bool:
+    """True when no branch segment, at its written width, runs through ``pad``.
+
+    Issue #10486: a branch that ends on a track but crosses the destination
+    pad on the way defeats the join.  Segments are measured as written
+    (coordinates rounded as the writer rounds them).
+    """
+    from shapely.geometry import LineString, Point
+
+    for x1, y1, x2, y2, layer in route.segments:
+        geom = pad.layers.get(layer)
+        if geom is None:
+            continue
+        a, b = (round(x1, 4), round(y1, 4)), (round(x2, 4), round(y2, 4))
+        line = LineString([a, b]) if a != b else Point(a)
+        if line.distance(geom) < route.width_for(layer) / 2 - 1e-6:
+            return False
+    return True
 
 
 def route_link_junction(
@@ -1254,6 +1329,12 @@ def route_link_junction(
         if best is not None and not best[1].vias and dist - source_reach > best[0][1]:
             break
         site = (round(raw[0], 2), round(raw[1], 2))
+        # A junction the writer treats as the host's own end is that end exactly,
+        # so the host, the branch and the report share one coordinate.
+        for end in (seg.start, seg.end):
+            if math.dist(site, end) <= _JUNCTION_END_TOL:
+                site = end
+                break
         target = LinkTerminal(f"junction {seg.layer}", site, {seg.layer: Point(site)})
         route = route_link(
             pcb,
@@ -1267,6 +1348,10 @@ def route_link_junction(
             grid_anchor=site,
         )
         if route is None or not route.segments or route.segments[-1][2:] != (*site, seg.layer):
+            continue
+        if not _branch_clears_pad(route, pad) or not _branch_clears_pad(
+            collapse_link_route(route), pad
+        ):
             continue
         route.junction = LinkJunction(site, seg.layer, seg.start, seg.end, seg.width, seg.uuid)
         length = sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2, _ in route.segments)
@@ -1643,7 +1728,7 @@ def _split_track(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> Non
     """
     from kicad_tools.cli.stitch_cmd import _stitch_uuid
     from kicad_tools.sexp import SExp, parse_string
-    from kicad_tools.sexp.builders import fmt, uuid_node
+    from kicad_tools.sexp.builders import fmt
 
     junction = route.junction
     assert junction is not None  # the caller only splits a route that carries one
@@ -1691,22 +1776,25 @@ def _split_track(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> Non
 
     put(first, "end", SExp.list("end", *written))
     put(second, "start", SExp.list("start", *written))
-    if second.get("uuid") is not None:
-        put(
-            second,
-            "uuid",
-            uuid_node(
-                _stitch_uuid(
-                    "junction-seg",
-                    junction.point[0],
-                    junction.point[1],
-                    end[0] - ox,
-                    end[1] - oy,
-                    junction.layer,
-                    route.net_number,
-                )
-            ),
-        )
+    # The identity lives in ``uuid`` (KiCad 7+) or ``tstamp`` (older dialects).
+    for identity in ("uuid", "tstamp"):
+        if second.get(identity) is not None:
+            put(
+                second,
+                identity,
+                SExp.list(
+                    identity,
+                    _stitch_uuid(
+                        "junction-seg",
+                        junction.point[0],
+                        junction.point[1],
+                        end[0] - ox,
+                        end[1] - oy,
+                        junction.layer,
+                        route.net_number,
+                    ),
+                ),
+            )
     at_node = doc.children.index(node)
     doc.children[at_node : at_node + 1] = [first, second]
 

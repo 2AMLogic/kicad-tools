@@ -678,14 +678,20 @@ def _commit_to_model(model: Any, route: Any, net_number: int) -> None:
     from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
     from kicad_tools.router.link_router import _Item
+    from kicad_tools.schema.pcb import Segment
 
     for x1, y1, x2, y2, layer in route.segments:
+        # Issue #10486: a later --join-track link may join this track.
+        model.extra_segments.append(
+            Segment((x1, y1), (x2, y2), route.width_for(layer), layer, net_number)
+        )
         line = LineString([(x1, y1), (x2, y2)]) if (x1, y1) != (x2, y2) else Point(x1, y1)
         model.items.append(_Item(net_number, {layer: line.buffer(route.width_for(layer) / 2)}))
     for vx, vy in route.vias:
         disk = Point(vx, vy).buffer(route.via_size / 2)
         model.items.append(_Item(net_number, dict.fromkeys(model.copper, disk)))
         model.drills.append((vx, vy, route.via_drill))
+        model.extra_vias.append((vx, vy, route.via_size))
 
 
 def _junction_report(junction: Any, origin: tuple[float, float]) -> dict[str, Any]:
@@ -750,13 +756,22 @@ def _route_one(
     if ta is None or tb is None:
         entry["reason"] = why or why_b
         return entry, None
-    if allowed is not None:
-        for label, term in (("A", ta), ("B", tb)):
+
+    def _no_allowed_copper(ends: tuple[tuple[str, Any], ...]) -> str | None:
+        if allowed is None:
+            return None
+        for label, term in ends:
             if not any(layer in allowed for layer in term.layers):
-                entry["reason"] = (
-                    f"endpoint {label} has no copper on the allowed layers {','.join(allowed)}"
-                )
-                return entry, None
+                return f"endpoint {label} has no copper on the allowed layers {','.join(allowed)}"
+        return None
+
+    # Issue #10486: a joined track may reach the destination pad on a layer
+    # the pad itself lacks, so its own layers are checked only if the pad
+    # route is what is left.
+    why_layers = _no_allowed_copper((("A", ta),) if spec.join_track else (("A", ta), ("B", tb)))
+    if why_layers is not None:
+        entry["reason"] = why_layers
+        return entry, None
     route = None
     if spec.join_track:
         # Issue #10486: join a track connected to the destination pad.  Without
@@ -777,6 +792,10 @@ def _route_one(
         )
         if route is None:
             entry["join_track_skipped"] = skipped["reason"]
+            why_layers = _no_allowed_copper((("B", tb),))
+            if why_layers is not None:
+                entry["reason"] = why_layers
+                return entry, None
         else:
             entry["junction"] = _junction_report(route.junction, origin)
     if route is None and spec.via_at is not None:
