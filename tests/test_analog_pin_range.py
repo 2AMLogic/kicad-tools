@@ -807,3 +807,61 @@ def test_cli_reports_unreadable_or_invalid_input_as_unassessed(tmp_path, capsys)
     assert json.loads(capsys.readouterr().out)["status"] == "unassessed"
     assert main([str(schematic), str(tmp_path / "missing.json")]) == 2
     assert json.loads(capsys.readouterr().out)["status"] == "unassessed"
+
+
+@pytest.mark.parametrize("state", ["powered", "unpowered"])
+def test_missing_device_supply_leaves_pins_unassessed(board, state):
+    board.policy["cases"] = [powered("p", ORIGINAL) if state == "powered" else unpowered()]
+    del board.policy["cases"][0]["rails"]["VDD"]
+    report = board.report()
+    assert report["status"] == "unassessed"
+    for entry in report["pins"]:
+        assert entry["outcome"] == "unassessed"
+        assert "no rail evidence for a supply net" in " ".join(entry["reasons"])
+
+
+def test_supply_voltage_must_match_the_declared_state(board):
+    live = unpowered()
+    live["rails"]["VDD"]["voltage_v"] = 3.3
+    dead = powered("dead", ORIGINAL)
+    dead["rails"]["VDD"]["voltage_v"] = 0.0
+    board.policy["cases"] = [live, dead]
+    report = board.report()
+    assert {e["outcome"] for e in report["pins"]} == {"unassessed"}
+
+
+def test_duplicate_sample_keys_are_unassessed(tmp_path):
+    board = synthetic_board(tmp_path, [0.0, 0.06, 0.1, 0.2], [0, 1, 1, 0])
+    path = tmp_path / "synthetic.json"
+    path.write_text(
+        '{"schema_version": 1, "time_s": [0, 0.06, 0.1, 0.2], "traces": '
+        '{"v(pin)": [-1, -1, -1, -1], "v(pin)": [0.1, 0.1, 0.1, 0.1]}}'
+    )
+    board.policy["samples"]["synthetic"]["sha256"] = sha256(path)
+    entry = synthetic_row(board)
+    assert entry["outcome"] == "unassessed"
+    assert "duplicate object key 'v(pin)'" in " ".join(entry["reasons"])
+
+
+def test_duplicate_sidecar_keys_are_unassessed(tmp_path):
+    board = synthetic_board(tmp_path, [0.0, 0.06, 0.1, 0.2], [1.5] * 4)
+    board.write()
+    text = board.sidecar.read_text().replace('"upper_v": 3.3', '"upper_v": 1.0, "upper_v": 3.3')
+    board.sidecar.write_text(text)
+    report = analyze_pin_ranges(board.schematic, board.sidecar)
+    assert report["status"] == "unassessed" and report["pins"] == []
+    assert "duplicate object key 'upper_v'" in " ".join(report["issues"])
+
+
+def test_unrepresentable_numbers_keep_a_json_result(tmp_path, capsys):
+    board = synthetic_board(tmp_path, [0.0, 0.06, 0.1, 0.2], [0, 10**400, 1, 0])
+    assert synthetic_row(board)["outcome"] == "unassessed"
+    board = synthetic_board(
+        tmp_path,
+        [0.0, 0.06, 0.1, 0.2],
+        [0, -1e308, -1e308, 0],
+        {"lower_v": 1e308, "upper_v": 1e308},
+    )
+    code, report = board.run(capsys)
+    assert code == 2 and report["pins"][0]["outcome"] == "unassessed"
+    assert "not representable" in " ".join(report["pins"][0]["reasons"])

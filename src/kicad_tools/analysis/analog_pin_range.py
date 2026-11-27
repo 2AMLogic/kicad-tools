@@ -100,22 +100,49 @@ def _fields(record: Any, allowed: frozenset[str], name: str, problems: list[str]
     return True
 
 
-def _number(value: Any, name: str, problems: list[str]) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        problems.append(f"{name}: finite number required")
+class _DuplicateKeyError(ValueError):
+    """A JSON object repeated a key, so its meaning is ambiguous."""
+
+
+def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateKeyError(f"duplicate object key {key!r}")
+        result[key] = value
+    return result
+
+
+def _finite(value: Any) -> float | None:
+    """Return ``value`` as a finite float, or None if absent, non-numeric or unrepresentable."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _number(value: Any, name: str, problems: list[str]) -> float | None:
+    number = _finite(value)
+    if number is None:
+        problems.append(f"{name}: finite number required")
+    return number
 
 
 def _series(value: Any, name: str, problems: list[str]) -> list[float] | None:
     if not isinstance(value, list):
         problems.append(f"{name}: array of numbers required")
         return None
+    result: list[float] = []
     for index, item in enumerate(value):
-        if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item):
+        number = _finite(item)
+        if number is None:
             problems.append(f"{name}: sample {index} is not a finite number")
             return None
-    return [float(item) for item in value]
+        result.append(number)
+    return result
 
 
 def _load_samples(
@@ -147,7 +174,9 @@ def _load_samples(
     if expected != digest:
         problems.append(f"{name}: digest mismatch for {path_text}")
     try:
-        parsed = json.loads(data)
+        parsed = json.loads(data, object_pairs_hook=_no_duplicates)
+    except _DuplicateKeyError as exc:
+        return fail(f"{name}: {path_text} is ambiguous: {exc}")
     except ValueError:
         return fail(f"{name}: {path_text} is not valid JSON")
     label = f"{name}: {path_text}"
@@ -278,6 +307,33 @@ def _bound(
             return True
         problems.append(f"{who}: expected net {net!r}, schematic has {', '.join(actual)!r}")
     return False
+
+
+def _supply(
+    scope: _Scope, reference: Any, binding: _Binding, who: str, problems: list[str]
+) -> None:
+    """Require evidence for the device's own supply, not only the shared reference."""
+    if scope.rails is None or scope.state is None:
+        return
+    device_nets = {
+        net for (ref, _pin), nets in binding.pin_nets.items() if ref == reference for net in nets
+    }
+    supplies = [
+        rail
+        for rail in scope.rails.values()
+        if rail["net"] in device_nets and rail["net"] != scope.reference_net
+    ]
+    if not supplies:
+        problems.append(
+            f"{who}: no rail evidence for a supply net of {reference} other than the "
+            f"reference net, so the {scope.state} state is not established"
+        )
+        return
+    volts = [rail["voltage_v"] for rail in supplies]
+    if scope.state == "powered" and not any(v != 0.0 for v in volts):
+        problems.append(f"{who}: every supply rail of {reference} is 0 V in a powered case")
+    elif scope.state == "unpowered" and any(v != 0.0 for v in volts):
+        problems.append(f"{who}: a supply rail of {reference} is nonzero in an unpowered case")
 
 
 def _trace(
@@ -429,6 +485,8 @@ def _pin_row(
     who = f"{scope.id}: {reference}.{pin}"
     bound = _bound(reference, pin, net, scope, binding, problems)
     traceable = bound and scope.reference_net is not None
+    if bound:
+        _supply(scope, reference, binding, who, problems)
     samples, series = _trace(scope, trace, who, binding, row, problems)
     lower, upper = _limits(assertion.get("limits"), scope, who, row, problems)
     minimum, maximum = (
@@ -437,6 +495,9 @@ def _pin_row(
     if problems or lower is None or upper is None or minimum is None or maximum is None:
         return row
     violations = _violations(minimum, maximum, lower, upper)
+    if not all(math.isfinite(item["excursion_v"]) for item in violations):
+        problems.append(f"{who}: excursion is not representable as a finite number")
+        return row
     row["violations"] = violations
     row["outcome"] = "fail" if violations else "pass"
     row["reasons"] = []
@@ -451,7 +512,6 @@ def analyze_pin_ranges(schematic: str | Path, sidecar: str | Path) -> dict[str, 
     path, assertions = Path(schematic), Path(sidecar)
     source = path.read_bytes()
     raw = assertions.read_bytes()
-    policy = json.loads(raw)
     report: dict[str, Any] = {
         "schema_version": 1,
         "schematic_sha256": hashlib.sha256(source).hexdigest(),
@@ -463,6 +523,11 @@ def analyze_pin_ranges(schematic: str | Path, sidecar: str | Path) -> dict[str, 
         "issues": [],
     }
     issues: list[str] = report["issues"]
+    try:
+        policy = json.loads(raw, object_pairs_hook=_no_duplicates)
+    except _DuplicateKeyError as exc:
+        issues.append(f"Sidecar is ambiguous: {exc}")
+        return report
     if not _fields(policy, _SIDECAR_FIELDS, "sidecar", issues):
         return report
     if policy.get("schema_version") != 1:
