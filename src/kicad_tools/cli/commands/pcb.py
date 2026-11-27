@@ -1336,10 +1336,11 @@ def _print_clear_lines(clear_outcome, origin_x: float, origin_y: float, dry_run:
 def _load_sidecar_wires(pcb_path: Path) -> list | None:
     """The board's wire-list sidecar records, or None when absent/unreadable (#8747).
 
-    An entry that is not a JSON object is not passed over with that warning:
-    it raises ``ValueError`` for the caller to refuse the command (Issue
-    #10401). Falling back to the size rule would edit the board without the
-    anchors the list names.
+    An entry that is not a JSON object (Issue #10401), or a record whose
+    coordinate data is malformed (Issue #10559), is not passed over with that
+    warning: it raises ``ValueError`` for the caller to refuse the command.
+    Falling back to the size rule would edit the board without the anchors
+    the list names.
     """
     from kicad_tools.pcb.reinforcement_sidecar import check_wire_records, load_wires, sidecar_path
 
@@ -1566,12 +1567,16 @@ def _finish_reinforce_clear(
 def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int:
     """``pcb reinforce --list-wires``: print the sidecar's wires (#8744).
 
-    Only an unfiltered JSON dump prints the file as it stands. Every other
-    listing reads the entries as records, so one that is not a JSON object is
-    refused with :func:`~kicad_tools.pcb.reinforcement_sidecar.load_wire_records`
-    (Issue #10401).
+    Only an unfiltered JSON dump prints the file as it stands. A JSON listing
+    with ``--net`` only filters the entries, so it refuses no more than an
+    entry that is not a JSON object (Issue #10401). The text listing formats
+    the points, so it reads the entries as records and a non-object entry or
+    a malformed coordinate is refused with
+    :func:`~kicad_tools.pcb.reinforcement_sidecar.load_wire_records`
+    (Issues #10401, #10559).
     """
     from kicad_tools.pcb.reinforcement_sidecar import (
+        check_wire_objects,
         format_wire_list,
         load_wire_records,
         load_wires,
@@ -1582,15 +1587,21 @@ def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int
     if not path.is_file():
         print(f"Error: no reinforcement sidecar at {path}", file=sys.stderr)
         return 1
-    raw_dump = getattr(args, "format", "text") == "json" and not net_name
+    as_json = getattr(args, "format", "text") == "json"
     try:
-        wires = load_wires(path) if raw_dump else load_wire_records(path)
+        if not as_json:
+            wires = load_wire_records(path)
+        else:
+            wires = load_wires(path)
+            if net_name:
+                check_wire_objects(path, wires)
     except (OSError, ValueError) as e:
-        print(f"Error reading {path}: {e}", file=sys.stderr)
+        reason = str(e).removeprefix(f"{path}: ")
+        print(f"Error reading {path}: {reason}", file=sys.stderr)
         return 1
     if net_name:
         wires = [w for w in wires if w.get("net") == net_name]
-    if getattr(args, "format", "text") == "json":
+    if as_json:
         print(json.dumps({"sidecar": str(path), "wires": wires}, indent=2))
     else:
         print(format_wire_list(wires))
@@ -1605,8 +1616,9 @@ def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
     not written; wires the sidecar already records are kept as they are, so a
     re-run is a no-op.
 
-    An existing sidecar is read as records: an entry that is not a JSON object
-    refuses the adoption before anything is written (Issue #10401).
+    An existing sidecar is read as records: an entry that is not a JSON
+    object (Issue #10401), or a record whose coordinate data is malformed
+    (Issue #10559), refuses the adoption before anything is written.
     """
     from kicad_tools.pcb.reinforcement_sidecar import (
         adopt_wire_records,
@@ -1629,7 +1641,8 @@ def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
     try:
         existing = load_wire_records(path) if path.is_file() else []
     except (OSError, ValueError) as e:
-        print(f"Error reading {path}: {e}", file=sys.stderr)
+        reason = str(e).removeprefix(f"{path}: ")
+        print(f"Error reading {path}: {reason}", file=sys.stderr)
         return 1
     adopted = adopt_wire_records(pcb, net_name)
     fresh = [r for r in adopted.records if not already_recorded(existing, r)]
