@@ -49,11 +49,11 @@
     "manufacturer-check": {
       "returncode": 2,
       "summary": {
-        "errors": 124,
-        "warnings": 182,
-        "infos": 179,
+        "errors": 265,
+        "warnings": 45,
+        "infos": 190,
         "waived": 0,
-        "rules_checked": 86,
+        "rules_checked": 91,
         "rules_checked_by_rule": {
           "connectivity": 1,
           "copper_sliver": 1,
@@ -67,10 +67,13 @@
           "redundant_copper_via_offcentre": 1,
           "redundant_copper_covered": 1,
           "redundant_copper_staircase": 1,
+          "redundant_copper_pour_stub": 0,
           "diffpair_clearance_intra": 2,
           "doc_drift_stale_pin": 1,
           "doc_drift_unresolvable_pin": 1,
           "isolated_copper": 1,
+          "netclass_sidecar_mismatch": 1,
+          "netclass_track_width_mismatch": 1,
           "netclass_clearance_copper": 1,
           "netclass_clearance_unsupported": 1,
           "netclass_track_width": 1,
@@ -94,7 +97,7 @@
         "passed": false,
         "stale_waivers": 0,
         "orphan_waivers": 0,
-        "coverage_checked": 48,
+        "coverage_checked": 50,
         "coverage_skipped": 6,
         "coverage_unknown": [
           "model_coverage"
@@ -150,7 +153,7 @@
     "Manufacturing export and independent refill identity"
   ],
   "sha256": {
-    "usbc_pd_power.kicad_sch": "025ed270feacb0d33557cdfcbb5e14cb8f6b7c814d76579a7ee170ae65b338a7",
+    "usbc_pd_power.kicad_sch": "ee75410b67c2c3c6e89da6390f335d1c0e5d49e4faec6ccd991262a3f041b07a",
     "usbc_pd_power.kicad_pcb": "2d82bb1bb9df65cf373bb9c62aa41ea64acba686f44abc4aede7e16d74842f45",
     "circuit.json": "182d7d272070008e6dd79b4e478a8624a9c540930e3493299daf7eb49f228878",
     "net_class_map.json": "080bfbd951526b2171bac077b61cc28330f5371a60f39d1cbfcb748d746d6a54",

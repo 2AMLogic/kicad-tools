@@ -9,9 +9,14 @@ def run_analyze_command(args) -> int:
         print("Usage: kicad-tools analyze <command> [options] <file>")
         print(
             "Commands: complexity, congestion, trace-lengths, signal-integrity, "
-            "thermal, current-sense, electrical-rating, component-stress"
+            "thermal, current-sense, electrical-rating, component-stress, reference-coverage"
         )
         return 1
+
+    if args.analyze_command == "reference-coverage":
+        from ..reference_coverage import run
+
+        return run(args)
 
     if args.analyze_command == "complexity":
         return _run_complexity_command(args)
