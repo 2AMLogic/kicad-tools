@@ -568,18 +568,22 @@ def _write_lead_spec(
     directory: Path,
     entries: str = "",
     manufacturing: str = "",
+    wires: str = "",
 ) -> Path:
     """Write ``project.kct`` with optional ``bom_entries`` and manufacturing block.
 
     *entries* is the (already 2-space indented) ``bom_entries`` list YAML;
     *manufacturing* is the (already 4-space indented) content of
-    ``requirements.manufacturing``.
+    ``requirements.manufacturing``; *wires* is the (already 2-space
+    indented) ``wire_terminations`` list YAML.
     """
     text = "kct_version: '1.0'\nproject:\n  name: T\n"
     if manufacturing:
         text += "requirements:\n  manufacturing:\n" + manufacturing
     if entries:
         text += "bom_entries:\n" + entries
+    if wires:
+        text += "wire_terminations:\n" + wires
     spec_file = directory / "project.kct"
     spec_file.write_text(text)
     return spec_file
@@ -594,6 +598,61 @@ def _run_lead_fit(pcb_path: Path):
     result = _find_result(results, "assembly_lead_fit")
     assert result is not None, "assembly_lead_fit result missing from run_all()"
     return result
+
+
+# Issue #10473: a wire landing on a 3.00 mm finished hole at -0.08 mm
+# tolerance (2.92 mm minimum).  A 2.40 mm prepared end clears by +0.52 mm;
+# a 3.10 mm ferrule barrel interferes by -0.18 mm.
+_WIRE_HOLE_MM = 3.00
+_WIRE_SOURCE = "harness drawing H-101, tinned 18 AWG tip measured with calipers"
+_FERRULE_SOURCE = "ferrule datasheet, maximum barrel outside diameter"
+
+# The populated through-hole component on the wire fixture: its own MPN,
+# LCSC part number and lead profile.
+_CONTROL_YAML = (
+    "  - ref: Q1\n"
+    "    part: CONTROL\n"
+    "    lcsc: C12345\n"
+    "    lead: {shape: round, diameter_mm: 1.0, source: drawing}\n"
+)
+
+
+def _wire_yaml(pad, diameter: str = "2.40", source: str = _WIRE_SOURCE, ref: str = "J1") -> str:
+    """One 2-space indented wire_terminations declaration for ref / pad."""
+    return f"  - ref: {ref}\n    pad: {pad}\n    diameter_mm: {diameter}\n    source: {source}\n"
+
+
+# Three wires on J1 and two on R5, every prepared end 2.40 mm.
+_LANDING_YAML = "".join(
+    [_wire_yaml(n) for n in (1, 2, 3)] + [_wire_yaml(n, ref="R5") for n in (1, 2)]
+)
+
+# The same landing with J1 pad 2 changed to a 3.10 mm ferrule.
+_FERRULE_LANDING_YAML = (
+    _wire_yaml(1)
+    + _wire_yaml(2, "3.10", _FERRULE_SOURCE)
+    + _wire_yaml(3)
+    + _wire_yaml(1, ref="R5")
+    + _wire_yaml(2, ref="R5")
+)
+
+
+def _wire_board(directory: Path) -> Path:
+    """J1 takes three wires, R5 lands a remote chassis resistor on two wire pads
+    and Q1 is the populated through-hole component (the control)."""
+    return _create_pcb_with_lead_pads(
+        directory,
+        {
+            "J1": [_tht_pad(str(n), _WIRE_HOLE_MM) for n in (1, 2, 3)],
+            "R5": [_tht_pad(str(n), _WIRE_HOLE_MM) for n in (1, 2)],
+            "Q1": [_tht_pad("1", 2.20)],
+        },
+    )
+
+
+def _by_pad(result: PreflightResult) -> dict:
+    """Index a lead-fit result's per-pad findings by reference and pad."""
+    return {(f["reference"], f["pad"]): f for f in result.data["pads"]}
 
 
 class TestPreflightLeadFit:
@@ -1113,6 +1172,1120 @@ class TestPreflightLeadFit:
         assert any("assembly_lead_fit" in e for e in result.errors)
         lead = [pr for pr in result.preflight_results if pr.name == "assembly_lead_fit"]
         assert lead and lead[0].status == "FAIL"
+
+    # -- Issue #10473: wire and ferrule landings without a component MPN -----
+
+    def test_wire_landing_assessed_without_bom_assignment(self, tmp_path):
+        """Three wires on J1 and two on the remote resistor R5, plus a populated control."""
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(tmp_path, _CONTROL_YAML, _LEAD_FIT_TOLERANCE_YAML, wires=_LANDING_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "OK"
+        by_pad = _by_pad(result)
+        assert set(by_pad) == {
+            ("J1", "1"),
+            ("J1", "2"),
+            ("J1", "3"),
+            ("R5", "1"),
+            ("R5", "2"),
+            ("Q1", "1"),
+        }
+        for key in (("J1", "1"), ("J1", "2"), ("J1", "3"), ("R5", "1"), ("R5", "2")):
+            f = by_pad[key]
+            assert f["status"] == "pass"
+            assert f["mpn"] is None
+            assert f["lead"] is None
+            assert f["wire"] == {"diameter_mm": pytest.approx(2.4), "source": _WIRE_SOURCE}
+            assert f["required_diameter_mm"] == pytest.approx(2.4)
+            assert f["nominal_status"] == "pass"
+            assert f["nominal_margin_mm"] == pytest.approx(0.6)
+            assert f["tolerance"]["status"] == "pass"
+            assert f["tolerance"]["minimum_hole_mm"] == pytest.approx(2.92)
+            assert f["tolerance"]["minimum_margin_mm"] == pytest.approx(0.52)
+        control = by_pad[("Q1", "1")]
+        assert control["status"] == "pass"
+        assert control["mpn"] == "CONTROL"
+        assert control["wire"] is None
+        assert control["lead"]["shape"] == "round"
+        assert control["lead"]["diameter_mm"] == pytest.approx(1.0)
+        assert (
+            "J1 pad 2: hole 3.000 mm round vs wire termination dia 2.400 mm "
+            "(needs 2.400 mm dia) per '" + _WIRE_SOURCE + "'"
+        ) in result.details
+        assert "R5 pad 1: hole 3.000 mm round vs wire termination" in result.details
+        assert (
+            "Q1 pad 1 [CONTROL]: hole 2.200 mm round vs round lead dia 1.000 mm" in result.details
+        )
+
+    def test_ferrule_interference_fails_only_its_pad(self, tmp_path):
+        """Changing J1 pad 2 to a 3.10 mm ferrule fails that pad alone."""
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(
+            tmp_path,
+            _CONTROL_YAML,
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=_FERRULE_LANDING_YAML,
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "FAIL"
+        assert result.message == "Through-hole lead fit fails on 1 pad(s): J1 pad 2"
+        assert result.data["summary"]["failed"] == 1
+        by_pad = _by_pad(result)
+        ferrule = by_pad[("J1", "2")]
+        assert ferrule["status"] == "fail"
+        assert ferrule["mpn"] is None
+        assert ferrule["lead"] is None
+        assert ferrule["wire"] == {
+            "diameter_mm": pytest.approx(3.1),
+            "source": _FERRULE_SOURCE,
+        }
+        assert ferrule["required_diameter_mm"] == pytest.approx(3.1)
+        assert ferrule["nominal_status"] == "fail"
+        assert ferrule["nominal_margin_mm"] == pytest.approx(-0.1)
+        assert ferrule["tolerance"]["status"] == "fail"
+        assert ferrule["tolerance"]["minimum_hole_mm"] == pytest.approx(2.92)
+        assert ferrule["tolerance"]["minimum_margin_mm"] == pytest.approx(-0.18)
+        for key in (("J1", "1"), ("J1", "3"), ("R5", "1"), ("R5", "2"), ("Q1", "1")):
+            assert by_pad[key]["status"] == "pass"
+        assert (
+            "J1 pad 2: hole 3.000 mm round vs wire termination dia 3.100 mm "
+            "(needs 3.100 mm dia) per '" + _FERRULE_SOURCE + "'; "
+            "nominal margin -0.100 mm (fail); tolerance -0.080 mm per "
+            "'JLCPCB capabilities, through-hole tolerances' -> min hole 2.920 mm, "
+            "min margin -0.180 mm (fail)"
+        ) in result.details
+
+    def test_strict_export_reports_failing_wire_pad_and_blocks(self, tmp_path, monkeypatch):
+        """A ferrule interference fails the export through strict preflight."""
+        from kicad_tools.export import assembly
+        from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = _wire_board(project_dir)
+        _write_lead_spec(
+            project_dir,
+            _CONTROL_YAML,
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=_FERRULE_LANDING_YAML,
+        )
+        (project_dir / "board.kicad_sch").write_text(
+            '(kicad_sch (version 20231120) (generator "eeschema"))'
+        )
+        (project_dir / "board.kicad_pro").write_text("{}")
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            strict_preflight=True,
+            preflight=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "output")
+
+        assert not result.success
+        failure = "\n".join(e for e in result.errors if "assembly_lead_fit" in e)
+        assert "Through-hole lead fit fails on 1 pad(s): J1 pad 2" in failure
+        assert "J1 pad 2: hole 3.000 mm round vs wire termination dia 3.100 mm" in failure
+        lead = [pr for pr in result.preflight_results if pr.name == "assembly_lead_fit"]
+        assert lead and lead[0].status == "FAIL"
+
+    @pytest.mark.parametrize(
+        ("declaration", "missing"),
+        [
+            ("  - ref: J1\n    pad: 3\n", "without a prepared diameter"),
+            ("  - ref: J1\n    pad: 3\n    diameter_mm: 2.40\n", "source"),
+        ],
+    )
+    def test_wire_without_diameter_or_source_stays_unassessed(self, tmp_path, declaration, missing):
+        """An unverified wire on one pad never hides a confirmed failure on another."""
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(
+            tmp_path,
+            _CONTROL_YAML,
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=(
+                _wire_yaml(1)
+                + _wire_yaml(2, "3.10", _FERRULE_SOURCE)
+                + declaration
+                + _wire_yaml(1, ref="R5")
+                + _wire_yaml(2, ref="R5")
+            ),
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "FAIL"
+        by_pad = _by_pad(result)
+        unverified = by_pad[("J1", "3")]
+        assert unverified["status"] == "unassessed"
+        assert missing in unverified["reason"]
+        assert "J1 pad 3: unassessed:" in result.details
+        assert by_pad[("J1", "2")]["status"] == "fail"
+        assert by_pad[("R5", "1")]["status"] == "pass"
+
+    @pytest.mark.parametrize("diameter", ["0", "-1", "thick"])
+    def test_invalid_wire_dimension_is_local(self, tmp_path, diameter):
+        """A bad dimension drops out its own pad only; nothing else is discarded."""
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(
+            tmp_path,
+            _CONTROL_YAML,
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=(
+                _wire_yaml(1)
+                + _wire_yaml(2, "3.10", _FERRULE_SOURCE)
+                + _wire_yaml(3, diameter)
+                + _wire_yaml(1, ref="R5")
+                + _wire_yaml(2, ref="R5")
+            ),
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "FAIL"
+        by_pad = _by_pad(result)
+        bad = by_pad[("J1", "3")]
+        assert bad["status"] == "unassessed"
+        assert "invalid diameter_mm" in bad["reason"]
+        assert bad["wire"] == {"diameter_mm": None, "source": None}
+        # Sibling wires and the component's own profile are still assessed.
+        assert by_pad[("J1", "1")]["status"] == "pass"
+        assert by_pad[("J1", "2")]["status"] == "fail"
+        assert by_pad[("R5", "1")]["status"] == "pass"
+        control = by_pad[("Q1", "1")]
+        assert control["mpn"] == "CONTROL"
+        assert control["lead"]["diameter_mm"] == pytest.approx(1.0)
+
+        package = AssemblyPackage(
+            pcb_path=pcb,
+            schematic_path=None,
+            config=AssemblyConfig(
+                bom_source="pcb",
+                auto_lcsc=False,
+                merge_lcsc=False,
+                include_gerbers=False,
+            ),
+        )
+        exported = package.export(tmp_path / "assembly")
+        with exported.bom_path.open(newline="", encoding="utf-8-sig") as bom:
+            assignments = {row["Designator"]: row["LCSC Part #"] for row in csv.DictReader(bom)}
+        assert assignments["Q1"] == "C12345"
+
+    @pytest.mark.parametrize(
+        ("landing", "status"),
+        [(_LANDING_YAML, "WARN"), (_FERRULE_LANDING_YAML, "FAIL")],
+    )
+    def test_unattached_wire_declaration_keeps_other_evidence(self, tmp_path, landing, status):
+        """A declaration with no ref/pad is reported and never hides the rest."""
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(
+            tmp_path,
+            _CONTROL_YAML,
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires="  - diameter_mm: 2.40\n    source: ref and pad forgotten\n" + landing,
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == status
+        by_pad = _by_pad(result)
+        failed = {key for key, f in by_pad.items() if f["status"] == "fail"}
+        assert failed == (set() if status == "WARN" else {("J1", "2")})
+        assert by_pad[("Q1", "1")]["mpn"] == "CONTROL"
+        (note,) = result.data["wire_terminations_not_applied"]
+        assert note.startswith("wire_terminations[0]: ") and "Field required" in note
+        assert f"Wire termination declaration not applied: {note}" in result.details
+        if status == "WARN":
+            assert "1 wire termination declaration(s) not applied" in result.message
+
+    @pytest.mark.parametrize(
+        ("wires", "note", "status"),
+        [
+            (
+                "  ref: J1\n  pad: 2\n  diameter_mm: 3.10\n  source: drawing\n",
+                "wire_terminations: ",
+                "WARN",
+            ),
+            ("  - drawing\n", "wire_terminations[0]: ", "FAIL"),
+        ],
+    )
+    def test_malformed_wire_list_keeps_component_evidence(self, tmp_path, wires, note, status):
+        """A wire_terminations list of the wrong shape never fails the whole spec."""
+        pcb = _wire_board(tmp_path)
+        landing = "" if status == "WARN" else _FERRULE_LANDING_YAML
+        _write_lead_spec(tmp_path, _CONTROL_YAML, _LEAD_FIT_TOLERANCE_YAML, wires=wires + landing)
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == status
+        (reported,) = result.data["wire_terminations_not_applied"]
+        assert reported.startswith(note)
+        assert (
+            "Q1 pad 1 [CONTROL]: hole 2.200 mm round vs round lead dia 1.000 mm" in result.details
+        )
+        if landing:
+            assert _by_pad(result)[("J1", "2")]["status"] == "fail"
+
+    @pytest.mark.parametrize(
+        ("invalid_j1_pad3", "expected_error"),
+        [
+            (_wire_yaml(3, "-1"), "invalid diameter_mm"),
+            ("  - ref: J1\n    pad: 3\n    diameter_mm: 2.40\n", "invalid source"),
+        ],
+    )
+    def test_dropped_wire_row_before_invalid_row_keeps_error_indices_aligned(
+        self, tmp_path, invalid_j1_pad3, expected_error
+    ):
+        """Dropping an unattached row must renumber wire errors so later valid rows still fail."""
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(
+            tmp_path,
+            _CONTROL_YAML,
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=(
+                "  - diameter_mm: 2.40\n    source: forgot ref and pad\n"  # row 0 -> dropped
+                + invalid_j1_pad3  # row 1 -> errors.wires
+                + _wire_yaml(2, "3.10", _FERRULE_SOURCE)  # row 2 -> valid, must FAIL
+                + "  - ref: J1\n    diameter_mm: 2.40\n    source: forgot pad\n"  # row 3 -> dropped
+                + _wire_yaml(2, "0", ref="R5")  # row 4 -> errors.wires
+                + _wire_yaml(1, ref="R5")  # row 5 -> valid, must PASS
+            ),
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "FAIL"
+        assert "J1 pad 2" in result.message
+        by_pad = _by_pad(result)
+        ferrule = by_pad[("J1", "2")]
+        assert ferrule["status"] == "fail"
+        assert ferrule["wire"] == {
+            "diameter_mm": pytest.approx(3.1),
+            "source": _FERRULE_SOURCE,
+        }
+        assert ferrule["nominal_margin_mm"] == pytest.approx(-0.1)
+        assert ferrule["tolerance"]["minimum_margin_mm"] == pytest.approx(-0.18)
+
+        bad_j1 = by_pad[("J1", "3")]
+        assert bad_j1["status"] == "unassessed"
+        assert expected_error in bad_j1["reason"]
+
+        bad_r5 = by_pad[("R5", "2")]
+        assert bad_r5["status"] == "unassessed"
+        assert "invalid diameter_mm" in bad_r5["reason"]
+
+        assert by_pad[("R5", "1")]["status"] == "pass"
+
+        not_applied = result.data["wire_terminations_not_applied"]
+        assert len(not_applied) == 2
+        assert not_applied[0].startswith("wire_terminations[0]: ")
+        assert not_applied[1].startswith("wire_terminations[3]: ")
+
+    def test_unmatched_wire_declaration_reported_as_not_applied(self, tmp_path):
+        """A wire declaration targeting a nonexistent or non-plated pad is reported."""
+        pcb = _create_pcb_with_lead_pads(
+            tmp_path,
+            {"J1": [_tht_pad("1", _WIRE_HOLE_MM), _tht_pad("2", _WIRE_HOLE_MM)]},
+        )
+        # Only a typo'd reference declared: both real pads stay unassessed, and the typo is listed.
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=_wire_yaml(2, "3.10", _FERRULE_SOURCE, ref="J11"),
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "WARN"
+        assert result.data["wire_terminations_not_applied"] == [
+            "J11 pad 2: no matching plated through-hole pad on PCB"
+        ]
+        assert "1 wire termination declaration(s) not applied" in result.message
+        assert (
+            "Wire termination declaration not applied: "
+            "J11 pad 2: no matching plated through-hole pad on PCB"
+        ) in result.details
+
+        # All real pads pass, plus an extra typo'd declaration -> WARN (not OK).
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=(_wire_yaml(1) + _wire_yaml(2) + _wire_yaml(9, "2.40", _WIRE_SOURCE, ref="J1")),
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "WARN"
+        assert result.data["wire_terminations_not_applied"] == [
+            "J1 pad 9: no matching plated through-hole pad on PCB"
+        ]
+
+        # A real failure still fails while also reporting the unmatched declaration.
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=(
+                _wire_yaml(1)
+                + _wire_yaml(2, "3.10", _FERRULE_SOURCE)
+                + _wire_yaml(2, "2.40", _WIRE_SOURCE, ref="J11")
+            ),
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "FAIL"
+        assert result.data["wire_terminations_not_applied"] == [
+            "J11 pad 2: no matching plated through-hole pad on PCB"
+        ]
+
+    def test_unmatched_wire_declaration_on_smd_only_board_warns(self, tmp_path):
+        """An all-SMD board with a wire declaration warns instead of silently reporting OK."""
+        pcb = _create_pcb_with_lead_pads(tmp_path, {"R1": [_smd_pad("1"), _smd_pad("2")]})
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=_wire_yaml(1, "2.40", _WIRE_SOURCE, ref="J1"),
+        )
+        result = _run_lead_fit(pcb)
+        assert result.status == "WARN"
+        assert result.data["pads"] == []
+        assert result.data["wire_terminations_not_applied"] == [
+            "J1 pad 1: no matching plated through-hole pad on PCB"
+        ]
+        assert "1 wire termination declaration(s) not applied" in result.message
+
+    def test_wire_pad_without_tolerance_reports_nominal_only(self, tmp_path):
+        """An unknown hole tolerance leaves a wire pad a nominal result only."""
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(tmp_path, _CONTROL_YAML, wires=_LANDING_YAML)
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "WARN"
+        by_pad = _by_pad(result)
+        for key in (("J1", "1"), ("J1", "2"), ("J1", "3"), ("R5", "1"), ("R5", "2")):
+            f = by_pad[key]
+            assert f["status"] == "pass"
+            assert f["nominal_margin_mm"] == pytest.approx(0.6)
+            assert f["tolerance"]["status"] == "unassessed"
+            assert "minimum_margin_mm" not in f["tolerance"]
+        assert result.data["summary"]["tolerance_unassessed"] == 6
+
+    def test_wire_pad_keeps_slot_and_plating_rules(self, tmp_path):
+        """A declared wire never turns a slot into a fit or a non-plated hole into a pad."""
+        pcb = _create_pcb_with_lead_pads(
+            tmp_path,
+            {"J1": [_slot_pad("1", 3.00, 4.00), _np_pad("2", 3.00), _tht_pad("3", 3.00)]},
+        )
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires="".join(_wire_yaml(n) for n in (1, 2, 3)),
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "WARN"
+        slot, wired = result.data["pads"]
+        assert (slot["pad"], wired["pad"]) == ("1", "3")
+        assert slot["status"] == "unassessed"
+        assert "slot hole 3.000 x 4.000 mm" in slot["reason"]
+        assert slot["wire"]["diameter_mm"] == pytest.approx(2.4)
+        assert wired["status"] == "pass"
+
+    def test_declared_wire_replaces_component_lead_on_that_pad(self, tmp_path):
+        """A declared pad is assessed by its wire; sibling pads keep the part lead."""
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: J1\n"
+            "    part: LANDING\n"
+            "    lead: {shape: round, diameter_mm: 1.0, source: drawing}\n" + _CONTROL_YAML,
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=_wire_yaml(2, "3.10", _FERRULE_SOURCE),
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "FAIL"
+        by_pad = _by_pad(result)
+        wire = by_pad[("J1", "2")]
+        assert wire["status"] == "fail"
+        assert wire["mpn"] is None
+        assert wire["lead"] is None
+        assert wire["wire"]["diameter_mm"] == pytest.approx(3.1)
+        for pad in ("1", "3"):
+            lead = by_pad[("J1", pad)]
+            assert lead["status"] == "pass"
+            assert lead["mpn"] == "LANDING"
+            assert lead["wire"] is None
+            assert lead["lead"]["diameter_mm"] == pytest.approx(1.0)
+
+    def test_duplicate_wire_declarations_are_unassessed(self, tmp_path):
+        """Two declarations for one pad contradict; neither is silently chosen."""
+        pcb = _wire_board(tmp_path)
+        _write_lead_spec(
+            tmp_path,
+            "",
+            _LEAD_FIT_TOLERANCE_YAML,
+            wires=_wire_yaml(2) + _wire_yaml(2, "3.10", _FERRULE_SOURCE),
+        )
+
+        result = _run_lead_fit(pcb)
+
+        assert result.status == "WARN"
+        by_pad = _by_pad(result)
+        assert "2 wire terminations declared for J1 pad 2" in by_pad[("J1", "2")]["reason"]
+        assert by_pad[("J1", "1")]["status"] == "unassessed"
+
+    def test_wire_declarations_preserve_bom_and_placement_records(self, tmp_path):
+        """Declarations add no fictitious component; Q1 keeps its own assignment."""
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        pcb = _wire_board(tmp_path)
+        records = []
+        for variant, wires in (("plain", ""), ("wired", _LANDING_YAML)):
+            directory = tmp_path / variant
+            directory.mkdir()
+            spec = _write_lead_spec(directory, _CONTROL_YAML, _LEAD_FIT_TOLERANCE_YAML, wires=wires)
+            package = AssemblyPackage(
+                pcb_path=pcb,
+                schematic_path=None,
+                config=AssemblyConfig(
+                    bom_source="pcb",
+                    auto_lcsc=False,
+                    merge_lcsc=False,
+                    include_gerbers=False,
+                    spec_path=spec,
+                ),
+            )
+            exported = package.export(directory / "out")
+            assert exported.success
+            with exported.bom_path.open(newline="", encoding="utf-8-sig") as bom:
+                bom_rows = list(csv.DictReader(bom))
+            with exported.pnp_path.open(newline="", encoding="utf-8-sig") as cpl:
+                cpl_rows = list(csv.DictReader(cpl))
+            records.append((bom_rows, cpl_rows))
+        plain, wired = records
+
+        assert wired == plain
+        bom, cpl = wired
+        assert [row for row in bom if "J1" in row["Designator"]] == [
+            {
+                "Comment": "PART",
+                "Designator": "J1,R5",
+                "Footprint": "Package_TO_SOT_THT:TO-247-3_Vertical",
+                "LCSC Part #": "",
+            }
+        ]
+        control = [row for row in bom if row["Designator"] == "Q1"]
+        assert [row["LCSC Part #"] for row in control] == ["C12345"]
+        assert sorted(row["Designator"] for row in cpl) == ["J1", "Q1", "R5"]
+
+
+# ---------------------------------------------------------------------------
+# PreflightChecker -- SMD land-pattern check (Issue #10505)
+# ---------------------------------------------------------------------------
+
+_STACKPOLE_RHC2512_YAML = (
+    "  - ref: R40-R41\n"
+    "    part: RHC2512FT4K70\n"
+    "    land_pattern:\n"
+    "      pad_shape: rect\n"
+    "      pad_depth_mm: 3.00\n"
+    "      pad_width_mm: 3.50\n"
+    "      outer_span_mm: 8.00\n"
+    '      source: "Stackpole RHC series, page 2"\n'
+)
+
+
+def _smd_chip_pad(
+    number: str,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    *,
+    shape: str = "rect",
+    rotation: float = 0.0,
+    side: str = "F",
+) -> str:
+    """Format one copper SMD pad S-expression."""
+    at = f"{x} {y} {rotation}" if rotation else f"{x} {y}"
+    rratio = " (roundrect_rratio 0.204082)" if shape == "roundrect" else ""
+    layers = f'"{side}.Cu" "{side}.Paste" "{side}.Mask"'
+    return (
+        f'(pad "{number}" smd {shape} (at {at}) (size {w} {h})'
+        f'{rratio} (layers {layers}) (net 0 ""))'
+    )
+
+
+def _stock_2512_pads(*, rotation: float = 0.0, side: str = "F") -> list[str]:
+    """KiCad stock R_2512_6332Metric copper pads (1.225 x 3.35 mm, ±2.9625 mm)."""
+    return [
+        _smd_chip_pad(
+            "1", -2.9625, 0.0, 1.225, 3.35, shape="roundrect", rotation=rotation, side=side
+        ),
+        _smd_chip_pad(
+            "2", 2.9625, 0.0, 1.225, 3.35, shape="roundrect", rotation=rotation, side=side
+        ),
+    ]
+
+
+def _stackpole_rhc2512_pads(
+    *,
+    rotation: float = 0.0,
+    side: str = "F",
+    pad1_shape: str = "rect",
+    pad2_shape: str = "rect",
+    pad_depth: float = 3.00,
+    pad_width: float = 3.50,
+    pitch: float = 5.00,
+) -> list[str]:
+    """Stackpole RHC2512 drawing copper pads (3.00 x 3.50 mm, 5.00 mm pitch, 8.00 mm outer)."""
+    half = pitch / 2.0
+    return [
+        _smd_chip_pad(
+            "1", -half, 0.0, pad_depth, pad_width, shape=pad1_shape, rotation=rotation, side=side
+        ),
+        _smd_chip_pad(
+            "2", half, 0.0, pad_depth, pad_width, shape=pad2_shape, rotation=rotation, side=side
+        ),
+    ]
+
+
+def _create_pcb_with_smd_footprints(
+    directory: Path,
+    footprints: list[dict],
+    *,
+    filename: str = "board.kicad_pcb",
+) -> Path:
+    """Write a minimal valid PCB containing the specified SMD footprints.
+
+    Each entry in *footprints* is a dict with keys:
+    ``ref``, ``pads`` (list of pad s-expr strings), and optional
+    ``lib_id`` (default ``Resistor_SMD:R_2512_6332Metric``),
+    ``layer`` (default ``F.Cu``), ``rotation`` (default ``0``),
+    ``attr`` (default ``smd``).
+    """
+    fp_blocks = []
+    for idx, spec in enumerate(footprints):
+        ref = spec["ref"]
+        lib_id = spec.get("lib_id", "Resistor_SMD:R_2512_6332Metric")
+        layer = spec.get("layer", "F.Cu")
+        rot = spec.get("rotation", 0.0)
+        attr = spec.get("attr", "smd")
+        at = f"{10 + idx * 15} 20 {rot}" if rot else f"{10 + idx * 15} 20"
+        pad_lines = "\n    ".join(spec["pads"])
+        fp_blocks.append(
+            f'  (footprint "{lib_id}" (layer "{layer}")\n'
+            f"    (at {at})\n"
+            f'    (property "Reference" "{ref}" (at 0 0) (layer "{layer[0]}.SilkS"))\n'
+            f'    (property "Value" "4k7" (at 0 2) (layer "{layer[0]}.Fab"))\n'
+            f"    (attr {attr})\n"
+            f"    {pad_lines}\n"
+            f"  )"
+        )
+    fp_block = "\n".join(fp_blocks)
+    content = f"""(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (gr_line (start 0 0) (end 80 0) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 80 0) (end 80 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 80 50) (end 0 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 0 50) (end 0 0) (layer "Edge.Cuts") (width 0.1))
+{fp_block}
+)
+"""
+    pcb_path = directory / filename
+    pcb_path.write_text(content)
+    return pcb_path
+
+
+def _run_smd_land_pattern(pcb_path: Path):
+    checker = PreflightChecker(
+        pcb_path=pcb_path,
+        config=PreflightConfig(skip_drc=True, skip_erc=True),
+    )
+    results = checker.run_all()
+    result = _find_result(results, "assembly_smd_land_pattern")
+    assert result is not None, "assembly_smd_land_pattern result missing from run_all()"
+    return result
+
+
+class TestPreflightSmdLandPattern:
+    """MPN-specific two-terminal SMD land-pattern checks (Issue #10505)."""
+
+    def test_stock_2512_fails_and_is_invariant_to_rotation_and_back_flip(self, tmp_path):
+        """Stock KiCad R_2512_6332Metric fails Stackpole RHC2512FT4K70 at 0, 90 and B.Cu."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "layer": "F.Cu",
+                    "rotation": 0,
+                    "pads": _stock_2512_pads(rotation=0, side="F"),
+                },
+                {
+                    "ref": "R41",
+                    "layer": "B.Cu",
+                    "rotation": 90,
+                    "pads": _stock_2512_pads(rotation=90, side="B"),
+                },
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+        before_bytes = pcb.read_bytes()
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert pcb.read_bytes() == before_bytes
+        assert result.status == "FAIL"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+        assert set(by_ref) == {"R40", "R41"}
+        for ref in ("R40", "R41"):
+            finding = by_ref[ref]
+            assert finding["mpn"] == "RHC2512FT4K70"
+            assert finding["source"] == "Stackpole RHC series, page 2"
+            assert finding["status"] == "fail"
+            assert finding["expected"] == {
+                "pad_shape": "rect",
+                "pad_depth_mm": pytest.approx(3.0),
+                "pad_width_mm": pytest.approx(3.5),
+                "pitch_mm": pytest.approx(5.0),
+                "outer_span_mm": pytest.approx(8.0),
+                "source": "Stackpole RHC series, page 2",
+            }
+            assert finding["measured"] == {
+                "pads": [
+                    {
+                        "pad": "1",
+                        "shape": "roundrect",
+                        "depth_mm": pytest.approx(1.225),
+                        "width_mm": pytest.approx(3.35),
+                    },
+                    {
+                        "pad": "2",
+                        "shape": "roundrect",
+                        "depth_mm": pytest.approx(1.225),
+                        "width_mm": pytest.approx(3.35),
+                    },
+                ],
+                "pitch_mm": pytest.approx(5.925),
+                "outer_span_mm": pytest.approx(7.150),
+            }
+            assert set(finding["mismatched_fields"]) == {
+                "pad 1 shape",
+                "pad 1 depth_mm",
+                "pad 1 width_mm",
+                "pad 2 shape",
+                "pad 2 depth_mm",
+                "pad 2 width_mm",
+                "pitch_mm",
+                "outer_span_mm",
+            }
+        # Same physical pattern yields identical measurements after rotation and flip
+        assert by_ref["R40"]["measured"] == by_ref["R41"]["measured"]
+        assert by_ref["R40"]["mismatched_fields"] == by_ref["R41"]["mismatched_fields"]
+        assert "R40 [RHC2512FT4K70]" in result.details
+        assert "Stackpole RHC series, page 2" in result.details
+
+    @pytest.mark.parametrize(
+        ("layer", "rotation"),
+        [("F.Cu", 0), ("F.Cu", 90), ("B.Cu", 0), ("B.Cu", 90)],
+    )
+    def test_stackpole_drawing_passes_across_orientations_and_sides(
+        self, tmp_path, layer, rotation
+    ):
+        """Stackpole drawing pads pass identically at 0/90 deg on F.Cu and B.Cu."""
+        side = layer[0]
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "layer": layer,
+                    "rotation": rotation,
+                    "pads": _stackpole_rhc2512_pads(rotation=rotation, side=side),
+                },
+                {
+                    "ref": "R41",
+                    "layer": "F.Cu",
+                    "rotation": 0,
+                    "pads": _stackpole_rhc2512_pads(rotation=0, side="F"),
+                },
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "OK"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+        assert by_ref["R40"]["status"] == "pass"
+        assert by_ref["R41"]["status"] == "pass"
+        assert by_ref["R40"]["mismatched_fields"] == []
+        assert by_ref["R40"]["measured"] == by_ref["R41"]["measured"]
+        assert by_ref["R40"]["measured"]["pitch_mm"] == pytest.approx(5.0)
+        assert by_ref["R40"]["measured"]["outer_span_mm"] == pytest.approx(8.0)
+
+    def test_vertical_local_pads_with_pad_angle_invariant_after_back_flip(self, tmp_path):
+        """Vertically-authored pads with non-zero local angles match after B.Cu flip + rotation."""
+        # Front at 0 deg: pads along Y at (0, -2.5) and (0, +2.5), each pad rotated 90 deg
+        # so its size[0]=3.00 aligns with Y (terminal axis) and size[1]=3.50 with X.
+        front_pads = [
+            _smd_chip_pad("1", 0.0, -2.5, 3.00, 3.50, shape="rect", rotation=90.0, side="F"),
+            _smd_chip_pad("2", 0.0, 2.5, 3.00, 3.50, shape="rect", rotation=90.0, side="F"),
+        ]
+        # Flipped to B.Cu (y negated, local angle -> -90) and footprint rotated +90 deg
+        # (board-absolute pad angle = -90 + 90 = 0 deg).
+        back_rot90_pads = [
+            _smd_chip_pad("1", 0.0, 2.5, 3.00, 3.50, shape="rect", rotation=0.0, side="B"),
+            _smd_chip_pad("2", 0.0, -2.5, 3.00, 3.50, shape="rect", rotation=0.0, side="B"),
+        ]
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {"ref": "R40", "layer": "F.Cu", "rotation": 0, "pads": front_pads},
+                {"ref": "R41", "layer": "B.Cu", "rotation": 90, "pads": back_rot90_pads},
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "OK"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+        assert by_ref["R40"]["measured"] == by_ref["R41"]["measured"]
+        assert by_ref["R40"]["status"] == "pass"
+        assert by_ref["R41"]["status"] == "pass"
+
+    def test_single_pad_shape_mismatch_and_unassessed_siblings(self, tmp_path):
+        """One rounded pad flags only that pad's shape; sibling unassessed parts preserve findings."""
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "pads": _stackpole_rhc2512_pads(pad1_shape="rect", pad2_shape="roundrect"),
+                },
+                {
+                    # Another 2512 MPN in the same family, no drawing declared.
+                    "ref": "R42",
+                    "pads": _stock_2512_pads(),
+                },
+                {
+                    # Source-less land_pattern declaration.
+                    "ref": "R43",
+                    "pads": _stock_2512_pads(),
+                },
+                {
+                    # Missing MPN (no bom_entries row at all).
+                    "ref": "R44",
+                    "pads": _stock_2512_pads(),
+                },
+            ],
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: R40\n"
+            "    part: RHC2512FT4K70\n"
+            "    land_pattern:\n"
+            "      pad_shape: rect\n"
+            "      pad_depth_mm: 3.00\n"
+            "      pad_width_mm: 3.50\n"
+            "      outer_span_mm: 8.00\n"
+            '      source: "Stackpole RHC series, page 2"\n'
+            "  - ref: R42\n"
+            "    part: RHC2512FT10K0\n"
+            "  - ref: R43\n"
+            "    part: CRCW25124K70FKEG\n"
+            "    lcsc: C54321\n"
+            "    land_pattern:\n"
+            "      pad_shape: rect\n"
+            "      pad_depth_mm: 3.00\n"
+            "      pad_width_mm: 3.50\n"
+            "      outer_span_mm: 8.00\n",
+        )
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "FAIL"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+
+        # R40: only pad 2 shape mismatches; dimensions and pad 1 match
+        r40 = by_ref["R40"]
+        assert r40["status"] == "fail"
+        assert r40["mismatched_fields"] == ["pad 2 shape"]
+
+        # R42: same 2512 footprint and RHC2512 family name, different exact MPN -> unassessed
+        r42 = by_ref["R42"]
+        assert r42["status"] == "unassessed"
+        assert r42["mpn"] == "RHC2512FT10K0"
+        assert "RHC2512FT10K0" in r42["reason"]
+        assert r42["measured"] is not None
+
+        # R43: source-less declaration -> unassessed with source reason, MPN retained
+        r43 = by_ref["R43"]
+        assert r43["status"] == "unassessed"
+        assert r43["mpn"] == "CRCW25124K70FKEG"
+        assert "source" in r43["reason"].lower()
+
+        # R44: no BOM assignment -> unassessed with missing MPN reason
+        r44 = by_ref["R44"]
+        assert r44["status"] == "unassessed"
+        assert r44["mpn"] is None
+        assert "bom_entries" in r44["reason"]
+
+        # Invalid land_pattern on R43 must not break BOM export assignment
+        package = AssemblyPackage(
+            pcb_path=pcb,
+            schematic_path=None,
+            config=AssemblyConfig(bom_source="pcb", auto_lcsc=False),
+        )
+        exported = package.export(tmp_path / "assembly")
+        with exported.bom_path.open(newline="", encoding="utf-8-sig") as bom:
+            assignments = {row["Designator"]: row["LCSC Part #"] for row in csv.DictReader(bom)}
+        assert assignments["R43"] == "C54321"
+
+    def test_blank_mpn_unassessed(self, tmp_path):
+        """A BOM entry with a blank MPN cannot claim verification even with a pattern."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [{"ref": "R40", "pads": _stackpole_rhc2512_pads()}],
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: R40\n"
+            '    part: ""\n'
+            "    land_pattern:\n"
+            "      pad_shape: rect\n"
+            "      pad_depth_mm: 3.00\n"
+            "      pad_width_mm: 3.50\n"
+            "      outer_span_mm: 8.00\n"
+            '      source: "Stackpole RHC series, page 2"\n',
+        )
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "WARN"
+        (finding,) = result.data["components"]
+        assert finding["status"] == "unassessed"
+        assert finding["mpn"] is None
+        assert "MPN" in finding["reason"]
+
+    def test_unusable_geometry_reports_specific_unassessed_reason(self, tmp_path):
+        """Skewed pads, unsupported shapes and coincident centers report unassessed."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "pads": [
+                        _smd_chip_pad("1", -2.5, 0.0, 3.0, 3.5, shape="custom"),
+                        _smd_chip_pad("2", 2.5, 0.0, 3.0, 3.5, shape="rect"),
+                    ],
+                },
+                {
+                    "ref": "R41",
+                    "pads": [
+                        _smd_chip_pad("1", -2.5, 0.0, 3.0, 3.5, shape="rect", rotation=30.0),
+                        _smd_chip_pad("2", 2.5, 0.0, 3.0, 3.5, shape="rect", rotation=0.0),
+                    ],
+                },
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "WARN"
+        by_ref = {c["reference"]: c for c in result.data["components"]}
+        assert by_ref["R40"]["status"] == "unassessed"
+        assert "custom" in by_ref["R40"]["reason"]
+        assert by_ref["R41"]["status"] == "unassessed"
+        assert "axis-aligned" in by_ref["R41"]["reason"]
+
+    def test_dnp_tht_and_multi_terminal_footprints_excluded(self, tmp_path):
+        """DNP, through-hole and >2-terminal SMD parts do not create chip findings."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {"ref": "R40", "attr": "smd dnp", "pads": _stock_2512_pads()},
+                {
+                    "ref": "Q1",
+                    "lib_id": "Package_TO_SOT_SMD:SOT-23",
+                    "pads": [
+                        _smd_chip_pad("1", -0.95, 1.1, 0.6, 0.7),
+                        _smd_chip_pad("2", 0.95, 1.1, 0.6, 0.7),
+                        _smd_chip_pad("3", 0.0, -1.1, 0.6, 0.7),
+                    ],
+                },
+                {
+                    "ref": "J1",
+                    "lib_id": "Connector_PinHeader:PinHeader_1x02",
+                    "attr": "through_hole",
+                    "pads": [_tht_pad("1", 1.0), _tht_pad("2", 1.0)],
+                },
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "OK"
+        assert result.data["components"] == []
+
+    @pytest.mark.parametrize(("delta", "expected_status"), [(0.001, "pass"), (0.002, "fail")])
+    def test_numerical_comparison_precision_boundary(self, tmp_path, delta, expected_status):
+        """Comparison tolerance is +/-0.001 mm: 1 um passes, 2 um fails."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "pads": _stackpole_rhc2512_pads(pad_width=3.50 + delta),
+                }
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.data["tolerance_mm"] == pytest.approx(0.001)
+        (finding,) = result.data["components"]
+        assert finding["status"] == expected_status
+
+    def test_strict_export_blocked_and_pcb_stays_byte_identical(self, tmp_path, monkeypatch):
+        """A confirmed SMD land-pattern mismatch blocks strict export without modifying the PCB."""
+        from kicad_tools.export import assembly
+        from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = _create_pcb_with_smd_footprints(
+            project_dir,
+            [
+                {"ref": "R40", "pads": _stock_2512_pads()},
+                {"ref": "R41", "rotation": 90, "pads": _stock_2512_pads(rotation=90)},
+            ],
+        )
+        _write_lead_spec(project_dir, _STACKPOLE_RHC2512_YAML)
+        (project_dir / "board.kicad_sch").write_text(
+            '(kicad_sch (version 20231120) (generator "eeschema"))'
+        )
+        (project_dir / "board.kicad_pro").write_text("{}")
+
+        original_bytes = pcb.read_bytes()
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            strict_preflight=True,
+            preflight=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "output")
+
+        assert not result.success
+        assert any("assembly_smd_land_pattern" in e for e in result.errors)
+        smd = [pr for pr in result.preflight_results if pr.name == "assembly_smd_land_pattern"]
+        assert smd and smd[0].status == "FAIL"
+        json.dumps(smd[0].to_dict())
+        assert pcb.read_bytes() == original_bytes
+
+    @pytest.mark.parametrize("no_spec", [False, True])
+    def test_export_spec_selection(self, tmp_path, no_spec):
+        """SMD land-pattern check honors explicit --spec and --no-spec selection."""
+        from kicad_tools.cli.export_cmd import build_manufacturing_config
+        from kicad_tools.export.manufacturing import ManufacturingPackage
+
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path, [{"ref": "R40", "pads": _stock_2512_pads()}]
+        )
+        _write_lead_spec(
+            tmp_path,
+            "  - ref: R40\n    part: OTHER\n",
+        )
+        variant = tmp_path / "variant"
+        variant.mkdir()
+        selected = _write_lead_spec(variant, _STACKPOLE_RHC2512_YAML)
+        config = build_manufacturing_config(
+            output_dir=tmp_path,
+            spec_path=selected,
+            no_spec=no_spec,
+            strict_preflight=True,
+            skip_drc=True,
+            skip_erc=True,
+        )
+        results = ManufacturingPackage(pcb_path=pcb, config=config)._run_preflight()
+        result = _find_result(results, "assembly_smd_land_pattern")
+        assert result is not None
+        (comp,) = result.data["components"]
+        if no_spec:
+            assert result.status == "WARN"
+            assert comp["status"] == "unassessed" and comp["mpn"] is None
+        else:
+            assert result.status == "FAIL"
+            assert comp["mpn"] == "RHC2512FT4K70"
+
+    def test_asymmetric_single_pad_depth_flags_only_offending_pad_and_outer_span(self, tmp_path):
+        """Changing only pad 1 depth flags pad 1 depth_mm and outer_span_mm, not pad 2 or pitch."""
+        pcb = _create_pcb_with_smd_footprints(
+            tmp_path,
+            [
+                {
+                    "ref": "R40",
+                    "pads": [
+                        _smd_chip_pad("1", -2.5, 0.0, 2.00, 3.50, shape="rect"),
+                        _smd_chip_pad("2", 2.5, 0.0, 3.00, 3.50, shape="rect"),
+                    ],
+                }
+            ],
+        )
+        _write_lead_spec(tmp_path, _STACKPOLE_RHC2512_YAML)
+
+        result = _run_smd_land_pattern(pcb)
+
+        assert result.status == "FAIL"
+        (finding,) = result.data["components"]
+        assert finding["mismatched_fields"] == ["pad 1 depth_mm", "outer_span_mm"]
+        assert finding["measured"]["pitch_mm"] == pytest.approx(5.0)
+        assert finding["measured"]["outer_span_mm"] == pytest.approx(7.5)
 
 
 # ---------------------------------------------------------------------------

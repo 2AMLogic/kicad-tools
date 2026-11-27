@@ -1,8 +1,9 @@
 {
   "LED_ANODE": {
-    "name": "Power",
-    "priority": 1,
-    "trace_width": 0.25,
+    "name": "Digital",
+    "priority": 4,
+    "trace_width": 0.127,
+    "clearance": 0.15,
     "target_ampacity": 0.01
   }
 }

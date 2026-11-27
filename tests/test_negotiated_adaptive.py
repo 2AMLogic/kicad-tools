@@ -1010,9 +1010,8 @@ class TestShouldTerminateEarlyLowOverflow:
 class TestEscapeBudgetEnforcement:
     """Tests for escape strategy timeout enforcement (Issue #2415)."""
 
-    def test_escape_budget_expires_returns_early(self):
-        """escape_local_minimum with a tiny budget should return quickly."""
-        import time
+    def test_escape_budget_expires_returns_early(self, monkeypatch):
+        """Stop before the next strategy when shuffle exhausts the budget."""
         from unittest.mock import MagicMock
 
         from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
@@ -1021,18 +1020,20 @@ class TestEscapeBudgetEnforcement:
         mock_router = MagicMock()
         neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
 
-        # Each strategy sleeps 0.1s to simulate work, budget is 0.001s
-        def slow_strategy(**kwargs):
-            time.sleep(0.1)
+        clock = MagicMock()
+        clock.time.return_value = 0.0
+        monkeypatch.setattr("kicad_tools.router.algorithms.negotiated.time", clock)
+
+        def exhaust_budget(**kwargs):
+            clock.time.return_value = 2.0
             return False, 10
 
-        neg._escape_shuffle_order = MagicMock(side_effect=slow_strategy)
-        neg._escape_reverse_order = MagicMock(side_effect=slow_strategy)
-        neg._escape_random_subset = MagicMock(side_effect=slow_strategy)
-        neg._escape_full_reorder = MagicMock(side_effect=slow_strategy)
+        neg._escape_shuffle_order = MagicMock(side_effect=exhaust_budget)
+        neg._escape_reverse_order = MagicMock(return_value=(False, 10))
+        neg._escape_random_subset = MagicMock(return_value=(False, 10))
+        neg._escape_full_reorder = MagicMock(return_value=(False, 10))
 
-        start = time.time()
-        success, overflow, tried = neg.escape_local_minimum(
+        success, _, tried = neg.escape_local_minimum(
             overflow_history=[10, 10, 10, 10],
             net_routes={},
             routes_list=[],
@@ -1042,16 +1043,15 @@ class TestEscapeBudgetEnforcement:
             mark_route_callback=lambda r: None,
             strategy_index=0,
             per_net_timeout=1.0,
-            escape_budget=0.001,
+            escape_budget=1.0,
         )
-        elapsed = time.time() - start
 
         assert success is False
-        # Should have tried at most 2 strategies (first runs, then budget
-        # check fires before second or shortly after)
-        assert tried <= 2
-        # Total wall time should be well under 1 second
-        assert elapsed < 1.0
+        assert tried == 1
+        neg._escape_shuffle_order.assert_called_once()
+        neg._escape_reverse_order.assert_not_called()
+        neg._escape_random_subset.assert_not_called()
+        neg._escape_full_reorder.assert_not_called()
 
     def test_per_net_timeout_propagated_to_route_net_negotiated(self):
         """per_net_timeout should be passed through to route_net_negotiated."""
