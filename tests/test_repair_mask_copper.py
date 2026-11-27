@@ -3954,7 +3954,7 @@ _EDGE_BOARD = """\
   (net 1 "N1")
   (net 2 "N2")
   (net 3 "N3")
-  (footprint "test:U1" (layer "F.Cu") (at 100.8375 100.5)
+  (footprint "test:U1" (layer "F.Cu") (at 100.8375 %s)
     (property "Reference" "U1" (at 0 -3 0) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15))))
     (property "Value" "U" (at 0 3 0) (layer "F.Fab")
@@ -3973,16 +3973,16 @@ _EDGE_PAD = "pad-u1-17"
 _EDGE_OPTS = {"max_displacement": 2.0, "clearance_mm": 0.127}
 
 
-def _edge_escape_fixture(tmp_path, *, width=0.2, horizontal=False, extra="", lock=""):
+def _edge_escape_fixture(tmp_path, *, width=0.2, horizontal=False, y=100.5, extra="", lock=""):
     """An escape that ends in the middle of its pin's end edge.
 
     By default ``diag`` is the 45-degree escape ending on a via, ``lead`` ends
     at the same edge point and ``through`` crosses it on its way to a second
     via.  With ``horizontal=True`` only the escape, its remote via and its
-    back-layer continuation are present along y = 100.5.
+    back-layer continuation are present along the specified y coordinate.
     """
-    far = (99.3, 100.5) if horizontal else (99.3, 101.3)
-    diag = _seg("diag", (100.1, 100.5), far, width=width)
+    far = (99.3, y if horizontal else y + 0.8)
+    diag = _seg("diag", (100.1, y), far, width=width)
     shapes = [
         diag.replace("(segment ", f"(segment {lock} " if lock else "(segment "),
         _seg("diag-b", far, (93.3, far[1]), layer="B.Cu"),
@@ -3991,14 +3991,14 @@ def _edge_escape_fixture(tmp_path, *, width=0.2, horizontal=False, extra="", loc
     if not horizontal:
         shapes.extend(
             [
-                _seg("lead", (100.5, 100.5), (100.1, 100.5)),
-                _seg("through", (100.5, 100.5), (99.685, 100.5)),
-                _seg("through-b", (99.685, 100.5), (96.5, 100.5), layer="B.Cu"),
-                _via("v-through", (99.685, 100.5)),
+                _seg("lead", (100.5, y), (100.1, y)),
+                _seg("through", (100.5, y), (99.685, y)),
+                _seg("through-b", (99.685, y), (96.5, y), layer="B.Cu"),
+                _via("v-through", (99.685, y)),
             ]
         )
     path = tmp_path / "b.kicad_pcb"
-    path.write_text(_EDGE_BOARD % "\n".join([*shapes, extra]))
+    path.write_text(_EDGE_BOARD % (y, "\n".join([*shapes, extra])))
     return path
 
 
@@ -4109,13 +4109,15 @@ def test_edge_escape_is_not_carried_past_the_displacement_limit(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("horizontal", "width", "limit", "moves", "target"),
+    ("horizontal", "width", "y", "limit", "moves", "target"),
     [
-        (False, 0.19, 0.135, False, (100.1955, 100.4045)),
-        (False, 0.19, 0.1351, True, (100.1955, 100.4045)),
-        (True, 0.2, 0.099999, False, (100.2, 100.5)),
-        (True, 0.2, 0.1, True, (100.2, 100.5)),
-        (True, 0.2, 0.100001, True, (100.2, 100.5)),
+        (False, 0.19, 100.5, 0.135, False, (100.1955, 100.4045)),
+        (False, 0.19, 100.5, 0.1351, True, (100.1955, 100.4045)),
+        (True, 0.2, 100.5, 0.099999, False, (100.2, 100.5)),
+        (True, 0.2, 100.5, 0.1, True, (100.2, 100.5)),
+        (True, 0.2, 100.5, 0.100001, True, (100.2, 100.5)),
+        (True, 0.2, 100.53125, 0.099999, False, (100.2, 100.53125)),
+        (True, 0.2, 100.53125, 0.1, True, (100.2, 100.53125)),
     ],
     ids=[
         "diagonal-overshoot-vetoed",
@@ -4123,14 +4125,16 @@ def test_edge_escape_is_not_carried_past_the_displacement_limit(tmp_path):
         "horizontal-just-under",
         "horizontal-exact-equality",
         "horizontal-just-over",
+        "translated-horizontal-just-under",
+        "translated-horizontal-exact-equality",
     ],
 )
 def test_edge_escape_limit_applies_to_saved_coordinates(
-    tmp_path, horizontal, width, limit, moves, target
+    tmp_path, horizontal, width, y, limit, moves, target
 ):
     from decimal import Decimal
 
-    board = _edge_escape_fixture(tmp_path, width=width, horizontal=horizontal)
+    board = _edge_escape_fixture(tmp_path, width=width, horizontal=horizontal, y=y)
     original = _end(board, "diag")
     repairer = MaskCopperRepairer(board)
     result = repairer.repair([_edge_finding()], max_displacement=limit, clearance_mm=0.127)

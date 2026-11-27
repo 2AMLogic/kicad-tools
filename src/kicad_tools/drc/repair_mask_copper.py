@@ -1498,9 +1498,11 @@ class MaskCopperRepairer(CopperGapRepairer):
         steps = int(limit / _EXTEND_STEP_MM + 1e-9)
         for index in range(1, steps + 1):
             step = index * _EXTEND_STEP_MM
+            # Quantize the extension relative to the endpoint, preserving
+            # its original offset at KiCad's nanometre coordinate precision.
             candidate = (
-                round(inside[0] + unit[0] * step, 4),
-                round(inside[1] + unit[1] * step, 4),
+                round(inside[0] + round(unit[0] * step, 4), 6),
+                round(inside[1] + round(unit[1] * step, 4), 6),
             )
             within_limit, candidate_dist = _coord_displacement_within(inside, candidate, limit)
             if not within_limit:
