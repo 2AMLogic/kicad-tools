@@ -266,7 +266,7 @@ class PourSlotRule(DRCRule):
                             area if area.is_valid else area.buffer(0),
                         )
                     )
-                if not zone.keepout.copperpour_allowed:
+                if not getattr(zone.keepout, "copperpour_allowed", True):
                     ko_contours = getattr(zone, "rule_area_contours", None) or [zone.polygon]
                     if all(len(ring) >= 3 for ring in ko_contours):
                         ko = Polygon(ko_contours[0], holes=ko_contours[1:])
