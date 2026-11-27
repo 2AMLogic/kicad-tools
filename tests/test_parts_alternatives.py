@@ -298,3 +298,111 @@ def test_conflicting_description_and_attribute_excluded(catalog_db, capsys):
         )
     assert parts_cmd.main(["alternatives", "C100", "--format", "json"]) == 0
     assert json.loads(capsys.readouterr().out)["alternatives"] == []
+
+
+def _insert(db, code, mpn, package, tier, desc, attrs, stock=50, manufacturer="M"):
+    db.execute(
+        "INSERT INTO jlc_components VALUES (?,?,?,?,?,?,'',?,'1-:0.01',?)",
+        (code, mpn, package, manufacturer, tier, desc, stock, json.dumps(attrs)),
+    )
+
+
+def _cap(nominal="100nF", voltage="50V", tolerance="±10%"):
+    return {
+        "Capacitance": nominal,
+        "Voltage Rating": voltage,
+        "Temperature Coefficient": "X7R",
+        "Tolerance": tolerance,
+    }
+
+
+def _alternatives(capsys, code):
+    assert parts_cmd.main(["alternatives", code, "--format", "json"]) == 0
+    return [p["lcsc"] for p in json.loads(capsys.readouterr().out)["alternatives"]]
+
+
+def test_description_contradicting_nominal_is_excluded(catalog_db, capsys):
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 700, "A700", "0603", "extended", f"220nF 50V X7R {CAP_FAMILY}", _cap("220nF"))
+        _insert(db, 701, "A701", "0603", "basic", f"2.2nF 50V X7R {CAP_FAMILY}", _cap("220nF"))
+        _insert(db, 702, "A702", "0603", "basic", f"0.22µF 50V X7R {CAP_FAMILY}", _cap("0.22µF"))
+        _insert(db, 703, "A703", "0603", "preferred", f"220nF 50V X7R {CAP_FAMILY}", _cap("220nF"))
+    assert _alternatives(capsys, "C700") == ["C702", "C703"]
+
+
+def test_unparseable_nominal_requires_exact_device(catalog_db, capsys):
+    attrs = {
+        "Resistance": "See datasheet",
+        "Type": "Thick Film Resistor",
+        "Tolerance": "1%",
+        "Power(Watts)": "1W",
+    }
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 710, "R710", "0603", "extended", f"1% {RES_FAMILY}", attrs)
+        _insert(db, 711, "R711", "0603", "basic", f"1% {RES_FAMILY}", attrs)
+        _insert(db, 712, "R710", "0603", "basic", f"1% {RES_FAMILY}", attrs)
+    assert _alternatives(capsys, "C710") == ["C712"]
+
+
+def test_unreadable_source_temperature_range_rejects_substitutes(catalog_db, capsys):
+    with sqlite3.connect(catalog_db) as db:
+        _insert(
+            db,
+            720,
+            "T720",
+            "0603",
+            "extended",
+            f"100nF 50V X7R -55°C ... +125°C {CAP_FAMILY}",
+            _cap(),
+        )
+        _insert(
+            db, 721, "T721", "0603", "basic", f"100nF 50V X7R -40°C ~ +85°C {CAP_FAMILY}", _cap()
+        )
+        _insert(db, 722, "T722", "0603", "basic", f"100nF 50V X7R {CAP_FAMILY}", _cap())
+        _insert(
+            db, 723, "T723", "0603", "basic", f"100nF 50V X7R -55°C ~ +150°C {CAP_FAMILY}", _cap()
+        )
+    assert _alternatives(capsys, "C720") == ["C723"]
+
+
+def test_original_schema_without_attributes_still_finds_c102(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "old.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE jlc_components (lcsc INTEGER PRIMARY KEY, mfr TEXT, package TEXT,"
+            " manufacturer TEXT, library_type TEXT, description TEXT, datasheet TEXT,"
+            " stock INTEGER, price TEXT)"
+        )
+        conn.executemany("INSERT INTO jlc_components VALUES (?,?,?,'M',?,?,'',?,?)", ROWS)
+    monkeypatch.setattr("kicad_tools.parts.jlcparts_catalog.get_catalog_path", lambda: path)
+    assert _alternatives(capsys, "C100") == ["C102"]
+    assert parts_cmd.main(["alternatives", "C100", "--limit", "1"]) == 0
+    assert "C102" in capsys.readouterr().out
+
+
+def test_incompatible_rows_cannot_displace_valid_matches(catalog_db, capsys):
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 900, "B900", "0603", "extended", f"220nF 50V X7R {CAP_FAMILY}", _cap("220nF"))
+        _insert(db, 901, "B901", "0603", "basic", f"220nF 50V X7R {CAP_FAMILY}", _cap("220nF"), 1)
+        for i in range(600):
+            _insert(
+                db,
+                1000 + i,
+                f"B900X{i}",
+                "0603",
+                "basic",
+                f"220nF 16V X7R {CAP_FAMILY}",
+                _cap("220nF", "16V"),
+                stock=5000,
+            )
+    assert _alternatives(capsys, "C900") == ["C901"]
+
+
+def test_exact_device_not_displaced_by_prefix_matches(catalog_db, capsys):
+    attrs = {"Resistance": "See datasheet", "Type": "Thick Film Resistor"}
+    with sqlite3.connect(catalog_db) as db:
+        _insert(db, 950, "Q950", "0603", "extended", f"{RES_FAMILY}", attrs)
+        _insert(db, 951, "Q950", "0603", "basic", f"{RES_FAMILY}", attrs, stock=1)
+        for i in range(600):
+            _insert(db, 3000 + i, f"Q950-{i}", "0603", "basic", f"{RES_FAMILY}", attrs, stock=9000)
+    assert _alternatives(capsys, "C950") == ["C951"]

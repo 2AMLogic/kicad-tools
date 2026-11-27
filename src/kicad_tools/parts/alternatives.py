@@ -14,6 +14,7 @@ source, or the same tier at a lower unit price, are suggested.
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from fractions import Fraction
 
 from .jlcparts_catalog import JlcpartsCatalog
@@ -25,8 +26,9 @@ _TIER_EXTENDED = 2
 
 _TIER_NAMES = {_TIER_BASIC: "basic", _TIER_PREFERRED: "preferred", _TIER_EXTENDED: "extended"}
 
-# Candidate pool size pulled from the catalog before ranking in Python.
-_POOL_LIMIT = 500
+# Catalog rows read per query page. Every matching row is examined, so the page
+# size bounds memory, never which substitutes are found.
+_PAGE_SIZE = 500
 
 
 def library_tier(part: Part) -> int:
@@ -128,7 +130,10 @@ _FACTORS = {
 }
 _CELSIUS = r"(?:℃|°?\s*C)"
 _TEMP = r"([+-]?\d+(?:\.\d+)?)"
-_RANGE = re.compile(rf"{_TEMP}\s*{_CELSIUS}?\s*(?:~|～|to|–|-)\s*{_TEMP}\s*{_CELSIUS}", re.I)
+_RANGE = re.compile(
+    rf"{_TEMP}\s*{_CELSIUS}?\s*(?:~|～|to|–|-|\.\.\.?|…)\s*{_TEMP}\s*{_CELSIUS}", re.I
+)
+_CELSIUS_MENTION = re.compile(r"\d\s*(?:℃|°\s*C)", re.I)
 
 
 def _rating_values(part: Part, key: str, pattern: re.Pattern[str]) -> set[Fraction]:
@@ -142,7 +147,11 @@ def _rating_values(part: Part, key: str, pattern: re.Pattern[str]) -> set[Fracti
 
 
 def _temperature_ranges(part: Part) -> set[tuple[Fraction, Fraction]]:
-    ranges = _RANGE.findall(part.description.replace("−", "-"))
+    text = part.description.replace("−", "-")
+    ranges = _RANGE.findall(text)
+    if not ranges and _CELSIUS_MENTION.search(text):
+        # A temperature is stated in a notation we cannot read as a range.
+        raise ValueError("Unrecognized operating range")
     for key in ("Operating Temperature", "Operating Temperature Range"):
         if key in part.specs:
             match = _RANGE.fullmatch(part.specs[key].replace("−", "-"))
@@ -152,11 +161,117 @@ def _temperature_ranges(part: Part) -> set[tuple[Fraction, Fraction]]:
     return {(Fraction(low), Fraction(high)) for low, high in ranges}
 
 
-def _covers_ratings(source: Part, candidate: Part) -> bool:
+_DEC = r"(?:\d+(?:\.\d+)?|\.\d+)"
+_NOMINALS = {
+    "cap": (
+        "Capacitance",
+        re.compile(rf"(?<![\w./+-])({_DEC})\s*([pnuµμm]?)[Ff](?!\w)"),
+        {
+            "": Fraction(1),
+            "m": Fraction(1, 10**3),
+            "u": Fraction(1, 10**6),
+            "µ": Fraction(1, 10**6),
+            "μ": Fraction(1, 10**6),
+            "n": Fraction(1, 10**9),
+            "p": Fraction(1, 10**12),
+        },
+        (
+            ("pF", Fraction(1, 10**12)),
+            ("nF", Fraction(1, 10**9)),
+            ("µF", Fraction(1, 10**6)),
+            ("uF", Fraction(1, 10**6)),
+            ("mF", Fraction(1, 10**3)),
+            ("F", Fraction(1)),
+        ),
+    ),
+    "res": (
+        "Resistance",
+        re.compile(rf"(?<![\w./+-])({_DEC})\s*([mkKM]?)\s*(?:Ω|\u2126|[Oo]hms?)(?!\w)"),
+        {
+            "": Fraction(1),
+            "m": Fraction(1, 10**3),
+            "k": Fraction(10**3),
+            "K": Fraction(10**3),
+            "M": Fraction(10**6),
+        },
+        (
+            ("mΩ", Fraction(1, 10**3)),
+            ("Ω", Fraction(1)),
+            ("kΩ", Fraction(10**3)),
+            ("MΩ", Fraction(10**6)),
+        ),
+    ),
+}
+_DIELECTRIC = re.compile(r"(?<!\w)(C0G|NP0|X5R|X6S|X7R|X7S|X7T|X8R|X8L|Y5V|Z5U)(?!\w)", re.I)
+
+
+def _kind(part: Part) -> str | None:
+    """``"cap"`` or ``"res"`` when the part is recognisably one chip passive."""
+    kinds = set()
+    if (
+        "Multilayer Ceramic Capacitors MLCC" in part.description
+        or "Capacitance" in part.specs
+        or _NOMINALS["cap"][1].search(part.description)
+        and _DIELECTRIC.search(part.description)
+    ):
+        kinds.add("cap")
+    if "Chip Resistor - Surface Mount" in part.description or "Resistance" in part.specs:
+        kinds.add("res")
+    return kinds.pop() if len(kinds) == 1 else None
+
+
+def _nominal(part: Part, kind: str) -> Fraction | None:
+    """The one nominal value (F or Ω) the description and attribute agree on."""
+    key, pattern, factors, _ = _NOMINALS[kind]
+    found = {Fraction(n) * factors[prefix] for n, prefix in pattern.findall(part.description)}
+    if key in part.specs:
+        structured = pattern.fullmatch(part.specs[key].strip())
+        if not structured:
+            return None
+        found.add(Fraction(structured[1]) * factors[structured[2]])
+    return found.pop() if len(found) == 1 else None
+
+
+def _spellings(kind: str, value: Fraction) -> list[str]:
+    """Plausible catalog spellings of a nominal, e.g. ``100nF`` and ``0.1µF``."""
+    out = []
+    for unit, size in _NOMINALS[kind][3]:
+        quotient = value / size
+        if not Fraction(1, 1000) <= quotient < 10**6:
+            continue
+        if _prime_factors(quotient.denominator) - {2, 5}:
+            continue
+        number = Decimal(quotient.numerator) / Decimal(quotient.denominator)
+        out.append(f"{format(number.normalize(), 'f')}{unit}")
+    return out
+
+
+def _prime_factors(n: int) -> set[int]:
+    factors, p = set(), 2
+    while n > 1 and p * p <= n:
+        while n % p == 0:
+            factors.add(p)
+            n //= p
+        p += 1
+    if n > 1:
+        factors.add(n)
+    return factors
+
+
+def _dielectrics(part: Part) -> set[str]:
+    found = {code.casefold() for code in _DIELECTRIC.findall(part.description)}
+    if "Temperature Coefficient" in part.specs:
+        found.add(part.specs["Temperature Coefficient"].strip().casefold())
+    return found
+
+
+def _covers_ratings(source: Part, candidate: Part, mandatory: tuple[str, ...] = ()) -> bool:
     try:
         for key, pattern in _RATINGS.items():
             required = _rating_values(source, key, pattern)
             if not required:
+                if key in mandatory:
+                    return False
                 continue
             offered = _rating_values(candidate, key, pattern)
             if len(required) != 1 or len(offered) != 1:
@@ -193,45 +308,86 @@ def _compatible(source: Part, candidate: Part) -> bool:
         and source.manufacturer.casefold() == candidate.manufacturer.casefold()
         and source.mfr_part == candidate.mfr_part
     )
-    if not same_device and not (
-        family
-        and family == other_family
-        and all(_identified(source.specs.get(key, "")) for key in family)
-    ):
-        return False
+    skip = {*_RATINGS, "Operating Temperature", "Operating Temperature Range", "Notes"}
+    mandatory: tuple[str, ...] = ()
+    if not same_device:
+        # Anything else must be the same kind of passive with the same nominal
+        # value, read with units, that source and candidate descriptions and
+        # attributes agree on.
+        kind = _kind(source)
+        if kind is None or kind != _kind(candidate):
+            return False
+        if family:
+            if not all(_identified(source.specs.get(key, "")) for key in family):
+                return False
+        elif source.specs or kind != "cap":
+            return False
+        else:
+            mandatory = ("Voltage Rating",)
+        nominal = _nominal(source, kind)
+        if nominal is None or nominal != _nominal(candidate, kind):
+            return False
+        skip.add(_NOMINALS[kind][0])
+        if kind == "cap":
+            dielectric = _dielectrics(source)
+            if len(dielectric) != 1 or dielectric != _dielectrics(candidate):
+                return False
+            skip.add("Temperature Coefficient")
     # For additional catalog attributes with no comparison rule (e.g. a
     # resistor temperature coefficient), only identical evidence suffices.
     for key, value in source.specs.items():
-        if key in _RATINGS or key in (
-            "Operating Temperature",
-            "Operating Temperature Range",
-            "Notes",
-        ):
-            continue
-        if candidate.specs.get(key) != value:
+        if key not in skip and candidate.specs.get(key) != value:
             return False
-    return _covers_ratings(source, candidate)
+    return _covers_ratings(source, candidate, mandatory)
+
+
+def _collect(source: Part, fetch, found: dict[str, Part]) -> None:
+    """Page through every row *fetch* yields, keeping the compatible ones."""
+    offset = 0
+    while True:
+        rows = fetch(_PAGE_SIZE, offset)
+        for candidate in rows:
+            if candidate.stock > 0 and _compatible(source, candidate):
+                found[candidate.lcsc_part] = candidate
+        if len(rows) < _PAGE_SIZE:
+            return
+        offset += _PAGE_SIZE
 
 
 def suggest_alternatives(catalog: JlcpartsCatalog, source: Part, limit: int = 5) -> list[Part]:
-    """Collect comparable passives by nominal attribute and exact-device candidates by MPN."""
+    """Find substitutes with the same nominal value, or the same manufacturer part.
+
+    Every catalog row matching either query is examined before ranking, so
+    incompatible rows can never displace an eligible substitute.
+    """
     if not _identified(source.package):
         return []
-    candidates = []
-    family = _family(source)
-    if family and all(_identified(source.specs.get(key, "")) for key in family):
-        candidates.extend(
-            catalog.search(
-                source.specs[family[0]],
-                attribute=family[0],
-                package=source.package,
-                min_stock=1,
-                limit=_POOL_LIMIT,
+    found: dict[str, Part] = {}
+    kind = _kind(source)
+    nominal = _nominal(source, kind) if kind else None
+    if kind and nominal is not None:
+        key = _NOMINALS[kind][0]
+        spellings = _spellings(kind, nominal)
+        if spellings:
+            _collect(
+                source,
+                lambda size, offset: catalog.search(
+                    source.specs.get(key) or spellings[0],
+                    attribute=key,
+                    values=spellings,
+                    package=source.package,
+                    min_stock=1,
+                    limit=size,
+                    offset=offset,
+                ),
+                found,
             )
-        )
     if _has_identity(source):
-        candidates.extend(
-            catalog.search(source.mfr_part, package=source.package, min_stock=1, limit=_POOL_LIMIT)
+        _collect(
+            source,
+            lambda size, offset: catalog.find_device(
+                source.mfr_part, source.package, min_stock=1, limit=size, offset=offset
+            ),
+            found,
         )
-    unique = {candidate.lcsc_part: candidate for candidate in candidates}
-    return rank_alternatives(source, list(unique.values()), limit)
+    return rank_alternatives(source, list(found.values()), limit)
