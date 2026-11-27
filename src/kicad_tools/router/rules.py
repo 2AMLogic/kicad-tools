@@ -2507,6 +2507,7 @@ def net_class_map_from_dict(
 def net_class_map_from_path(
     path: "str | Path",
     *,
+    source_bytes: bytes | None = None,
     pcb_text: str | None = None,
     pcb_path: "str | Path | None" = None,
     layer_stack: LayerStack | None = None,
@@ -2543,6 +2544,7 @@ def net_class_map_from_path(
 
     Args:
         path: Path to the sidecar JSON file.
+        source_bytes: Use this snapshot when packaging the same bytes for re-export.
         pcb_text: Optional raw ``.kicad_pcb`` contents for stack detection.
         pcb_path: Optional path to the board file for stack detection
             (read best-effort; ignored when ``pcb_text`` is given).
@@ -2563,9 +2565,9 @@ def net_class_map_from_path(
     from pathlib import Path as _Path
 
     sidecar_path = _Path(path)
-    if not sidecar_path.exists():
+    if source_bytes is None and not sidecar_path.exists():
         raise FileNotFoundError(f"net-class-map file not found: {sidecar_path}")
-    data = json.loads(sidecar_path.read_text())
+    data = json.loads(sidecar_path.read_text() if source_bytes is None else source_bytes.decode())
 
     stack = layer_stack
     if stack is None:

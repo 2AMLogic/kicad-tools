@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-27
 
+- **Issue #10499** (closed): parts alternatives offers a 30 Ω resistor for 4.7 kΩ and adjustable regulators for a fixed 3.3 V part
+- **PR #10502**: Check electrical compatibility and identify catalog inventory in parts alternatives
+- **Issue #10595** (closed): Editable manufacturing ZIP omits the net-class map used to regenerate ampacity rules
+- **PR #10597**: fix: ship the selected net-class map with editable KiCad projects
+- **Issue #10609** (closed): Router pad loader still reads at/size/drill/shape by regex, so equivalent S-expression spellings drop a pad from the grid
+- **PR #10610**: fix: read router pad geometry from parsed S-expressions
 - **Issue #9844** (closed): Router: route turns back past its own via inside the slit band (board 05 RESET V-turn)
 - **Issue #10594** (closed): Manufacturing design reports label a revision-B PCB as Rev 1
 - **PR #10598**: fix: use authored PCB revision in report and export headers

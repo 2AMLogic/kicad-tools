@@ -6064,7 +6064,8 @@ def _add_parts_parser(subparsers) -> None:
         "alternatives",
         help="Suggest Basic/Preferred JLCPCB alternatives for an LCSC part (offline)",
         description=(
-            "Suggest in-stock substitutes from the offline jlcparts catalog. "
+            "Match manufacturer and MPN, or chip resistors/MLCCs with matching catalog "
+            "ratings and package. Stock comes from the offline jlcparts catalog. "
             "Ranks Basic, then Preferred, then Extended, then lowest unit price; "
             "only a strictly better library tier, or the same tier at a lower "
             "price, is shown."
