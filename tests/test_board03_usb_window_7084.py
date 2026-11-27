@@ -32,6 +32,9 @@ from kicad_tools.geometry.copper import pad_size_box
 from kicad_tools.schema.pcb import PCB
 
 BOARD = Path(__file__).resolve().parents[1] / "boards" / "03-usb-joystick"
+# Issue #10561: staged under engineering/ until the producer-run reissue (#8900)
+# moves it into the live recipe, which must stay equal to the archived copy.
+STAGED_ROUTING_PLAN = BOARD / "engineering" / "routing_plan_10561.py"
 ROUTED = BOARD / "output" / "usb_joystick_routed.kicad_pcb"
 
 # Measured launch-via positions (board-relative y, mm), seed 42, lattice.
@@ -86,9 +89,7 @@ TIER1_CORRIDOR = {
 
 @pytest.fixture
 def routing_plan():
-    spec = importlib.util.spec_from_file_location(
-        "b03_routing_plan_7084w", BOARD / "routing_plan.py"
-    )
+    spec = importlib.util.spec_from_file_location("b03_routing_plan_7084w", STAGED_ROUTING_PLAN)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
@@ -476,3 +477,43 @@ def test_collinear_join_keeps_bends_breaks_and_width_changes(routing_plan):
     assert join(break_) == break_
     doubles_back = [((2, 0), (1, 0), 0.2, track), ((1, 0), (1.5, 0), 0.2, track)]
     assert join(doubles_back) == doubles_back
+
+
+# Review of #10571: a split that leaves a sliver (8 nm) of a track inside the
+# window must not change the measurement.  A sliver is real copper, not a
+# point contact.
+SLIVER_RUN = {
+    "USB_D+": (0.1, [(38.0, 12.0), (38.0, 16.0), (38.70711, 16.70711)]),
+    "USB_D-": (0.1, [(38.15, 12.0), (38.15, 16.0), (38.85711, 16.70711)]),
+}
+
+
+def test_a_sliver_split_at_the_window_edge_does_not_flip_the_gate(routing_plan, tmp_path):
+    """Saved-board threshold case: 4.000004552 mm stays above the 4.0 mm gate."""
+    base = routing_plan.usb_geometry(_saved_run(tmp_path, SLIVER_RUN, name="whole"))
+    assert base["common_coupled_mm"] == pytest.approx(4.000004552, abs=1e-6)
+    split = {
+        "USB_D+": (
+            0.1,
+            [(38.0, 12.0), (38.0, 13.000008), (38.0, 16.0), (38.70711, 16.70711)],
+        ),
+        "USB_D-": SLIVER_RUN["USB_D-"],
+    }
+    geometry = routing_plan.usb_geometry(_saved_run(tmp_path, split, name="sliver"))
+    assert geometry["common_coupled_mm"] == pytest.approx(base["common_coupled_mm"], abs=1e-6)
+    assert geometry["branch_skew_mm"] == pytest.approx(base["branch_skew_mm"], abs=1e-6)
+
+
+def test_sliver_pieces_inside_the_window_stay_connected(routing_plan, tmp_path):
+    """Three 8 nm splits on one vertical are continuous copper, not a break."""
+    runs = dict(USB_RUN)
+    width, points = runs["USB_D+"]
+    # Points 1 and 2 are the ends of the x = 39.5886 vertical.
+    runs["USB_D+"] = (
+        width,
+        [points[0], points[1], (39.5886, 16.0), (39.5886, 16.000008), (39.5886, 16.000016)]
+        + points[2:],
+    )
+    geometry = routing_plan.usb_geometry(_saved_run(tmp_path, runs, name="slivers"))
+    six = routing_plan.usb_geometry(_saved_run(tmp_path, USB_RUN, name="six2"))
+    assert geometry["common_coupled_mm"] == pytest.approx(six["common_coupled_mm"], abs=1e-6)
